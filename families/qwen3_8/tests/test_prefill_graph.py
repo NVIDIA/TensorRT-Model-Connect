@@ -267,3 +267,98 @@ def test_attention_prefill_matches_single_token(precision, tolerance) -> None:
     _assert_close(got["hidden"], torch.cat(rows), tolerance, "hidden")
     _assert_close(got["present_k"], torch.cat(ks), tolerance, "present_k")
     _assert_close(got["present_v"], torch.cat(vs), tolerance, "present_v")
+
+
+@pytest.mark.gpu
+@pytest.mark.parametrize("precision,tolerance", [("fp32", 1e-5), ("fp16", 3e-2)])
+@pytest.mark.parametrize("cached", [0, 5, 13])
+def test_attention_prefill_dynamic_cache_matches_full_cache(precision, tolerance, cached) -> None:
+    """Attention over only the filled cache rows (dynamic past length) = attention over the whole
+    cache buffer with the unfilled rows masked."""
+    _need_gpu()
+    from families.qwen3_8 import graph_ops, prefill_graph
+
+    rows, max_cache = 16, 24
+    rng = np.random.default_rng(2)
+    weights = _attention_weights(rng, "L")
+    cos = graph_ops.make_rope_table_half_dim(
+        max_cache + rows, ATT_D, 10000.0, cosine=True, partial_rotary_factor=ROT / ATT_D)
+    sin = graph_ops.make_rope_table_half_dim(
+        max_cache + rows, ATT_D, 10000.0, cosine=False, partial_rotary_factor=ROT / ATT_D)
+
+    def build(dynamic: bool) -> bytes:
+        net = _Net(precision)
+        n = net.network
+        row_dim = -1 if dynamic else rows
+        x = n.add_input("x", net.trt_dtype, (row_dim, HID))
+        pos = n.add_input("pos", trt.int32, (row_dim,))
+        mask = n.add_input("mask", trt.float32, (-1, -1) if dynamic else (rows, max_cache + rows))
+        past = -1 if dynamic else max_cache
+        cache_k = n.add_input("cache_k", net.trt_dtype, (past, KV_SIZE))
+        cache_v = n.add_input("cache_v", net.trt_dtype, (past, KV_SIZE))
+        if dynamic:
+            profile = net.builder.create_optimization_profile()
+            profile.set_shape("x", (1, HID), (rows, HID), (rows, HID))
+            profile.set_shape("pos", (1,), (rows,), (rows,))
+            profile.set_shape("mask", (1, 1), (rows, 5 + rows), (rows, max_cache + rows))
+            for name in ("cache_k", "cache_v"):
+                profile.set_shape(name, (0, KV_SIZE), (5, KV_SIZE), (max_cache, KV_SIZE))
+            net.config.add_optimization_profile(profile)
+        eps = graph_ops.add_constant(n, (1, 1), np.array([1e-6]), dtype=net.np_dtype)
+        cos_t = graph_ops.add_constant(n, cos.shape, cos, dtype=net.np_dtype)
+        sin_t = graph_ops.add_constant(n, sin.shape, sin, dtype=net.np_dtype)
+        out = prefill_graph.add_full_attention_layer_prefill(
+            network=n, hidden=x, cache_k=cache_k, cache_v=cache_v, attention_mask=net.cast_in(mask),
+            position_ids=pos, chunk_len=None if dynamic else rows, eps_tensor=eps,
+            cos_half_tensor=cos_t, sin_half_tensor=sin_t, weights=weights, prefix="L",
+            hidden_size=HID, attn_size=ATT_SIZE, kv_attention_size=KV_SIZE, num_heads=ATT_HEADS,
+            num_kv_heads=KV_HEADS, head_dim=ATT_D, rotary_embedding_dim=ROT,
+            max_cache_length=max_cache, mlp_size=MLP, dtype=net.np_dtype)
+        net.mark(hidden=out["hidden"], present_k=out["present_k"], present_v=out["present_v"])
+        return net.build()
+
+    def run_dynamic(plan: bytes, feeds: dict) -> dict:
+        engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
+        ctx = engine.create_execution_context()
+        shapes = {"x": (rows, HID), "pos": (rows,), "mask": (rows, cached + rows),
+                  "cache_k": (cached, KV_SIZE), "cache_v": (cached, KV_SIZE)}
+        for name, shape in shapes.items():
+            assert ctx.set_input_shape(name, shape)
+        keep, result = [], {}
+        for i in range(engine.num_io_tensors):
+            name = engine.get_tensor_name(i)
+            if engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT:
+                tensor = feeds[name].contiguous().cuda()  # caches: the full buffer, first rows bound
+            else:
+                dtype = {trt.float32: torch.float32, trt.float16: torch.float16}[
+                    engine.get_tensor_dtype(name)]
+                tensor = torch.zeros(tuple(ctx.get_tensor_shape(name)), dtype=dtype, device="cuda")
+                result[name] = tensor
+            keep.append(tensor)
+            ctx.set_tensor_address(name, tensor.data_ptr())
+        ctx.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+        torch.cuda.synchronize()
+        return {name: tensor.float().cpu() for name, tensor in result.items()}
+
+    dtype = torch.float32 if precision == "fp32" else torch.float16
+    xs = torch.from_numpy(_rnd(rng, rows, HID, scale=1.0)).to(dtype)
+    base_k = torch.from_numpy(_rnd(rng, max_cache, KV_SIZE, scale=1.0)).to(dtype)
+    base_v = torch.from_numpy(_rnd(rng, max_cache, KV_SIZE, scale=1.0)).to(dtype)
+    pos = torch.arange(cached, cached + rows, dtype=torch.int32)
+
+    full_mask = torch.full((rows, max_cache + rows), -1e4)
+    full_mask[:, :cached] = 0
+    for i in range(rows):
+        full_mask[i, max_cache:max_cache + i + 1] = 0
+    names = ["hidden", "present_k", "present_v"]
+    full = _run(build(False), {"x": xs, "pos": pos, "mask": full_mask,
+                               "cache_k": base_k, "cache_v": base_v}, names)
+
+    dyn_mask = torch.full((rows, cached + rows), -1e4)
+    dyn_mask[:, :cached] = 0
+    for i in range(rows):
+        dyn_mask[i, cached:cached + i + 1] = 0
+    got = run_dynamic(build(True), {"x": xs, "pos": pos, "mask": dyn_mask,
+                                    "cache_k": base_k, "cache_v": base_v})
+    for name in names:
+        _assert_close(got[name], full[name], tolerance, f"{name} (cached={cached})")

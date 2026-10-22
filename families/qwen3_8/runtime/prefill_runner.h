@@ -20,6 +20,11 @@
 // takes valid_len=n and keeps padding rows from touching the recurrent state,
 // so no special handling is needed here beyond passing n.
 //
+// A dynamic engine whose cache_k/cache_v inputs are dynamic too takes only the filled rows of
+// the cache: each call binds them with shape (position, kv_dim) on the same buffers, and the
+// attention mask is (rows, position + rows), so attention covers the filled positions plus the
+// new rows, not the whole cache capacity.
+//
 // A dynamic engine (`dynamic` constructor flag) takes any row count
 // 1 <= n <= chunk_len() directly: token_ids/position_id/attention_mask are
 // shaped for n rows, there are no padding rows, and chunk_len() is only the
@@ -67,6 +72,7 @@ class Qwen38PrefillRunner {
     int32_t hidden_size_;
     int32_t vocab_size_;
     bool dynamic_;
+    bool dynamic_cache_{false}; // cache_k/cache_v are bound with the filled length each call
 
     std::vector<DeviceTensor> present_k_;
     std::vector<DeviceTensor> present_v_;

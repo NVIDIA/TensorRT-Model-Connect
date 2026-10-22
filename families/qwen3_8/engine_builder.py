@@ -1755,7 +1755,7 @@ class Qwen38Model:
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, chunk_len: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False, dynamic: bool = False,
-        opt_len: int = 0,
+        opt_len: int = 0, past_opt_len: int = 0,
     ) -> bytes:
         """Build the multi-token prefill engine: `chunk_len` prompt tokens per call.
 
@@ -1763,6 +1763,12 @@ class Qwen38Model:
         1 <= T <= `chunk_len` (optimization profile opt = `opt_len`, default `chunk_len` / 2);
         it needs the cuTile GDN prefill plugin (TRTMC_QWEN3_8_GDN_CUTILE_PREFILL=1). Set
         `valid_len` to T, the number of rows; every `(chunk_len, ...)` shape below is `(T, ...)`.
+
+        A dynamic engine also takes the cache by its filled length: `cache_k_{i}` and `cache_v_{i}`
+        are `(P, kv_attention_size)` with P (0 .. `max_cache_length`) the rows already filled,
+        bound on the first P rows of the cache buffers, and `attention_mask` is `(T, P + T)`. So
+        attention covers P + T keys, not the whole cache capacity. `past_opt_len` is the P the
+        optimization profile is tuned for.
 
         Unlike `build_engine_multi_token` (which chains `chunk_len` single-token
         sub-steps and so still streams every weight `chunk_len` times), every
@@ -1865,10 +1871,11 @@ class Qwen38Model:
             profile = builder.create_optimization_profile()
             profile.set_shape("token_ids", (1,), (opt,), (chunk_len,))
             profile.set_shape("position_id", (1,), (opt,), (chunk_len,))
-            profile.set_shape("attention_mask", (1, max_cache_length + 1),
-                              (opt, max_cache_length + opt),
+            # The cache inputs carry only the P rows already filled, so attention covers P + T
+            # keys, not the whole cache; the mask is [T, P + T].
+            past_opt = min(max(past_opt_len, 0), max_cache_length)
+            profile.set_shape("attention_mask", (1, 1), (opt, past_opt + opt),
                               (chunk_len, max_cache_length + chunk_len))
-            trt_config.add_optimization_profile(profile)
 
         conv_state_inputs = []
         ssm_state_inputs = []
@@ -1882,13 +1889,16 @@ class Qwen38Model:
 
         cache_k_inputs = []
         cache_v_inputs = []
+        past_dim = -1 if dynamic else max_cache_length
         for ai in range(num_attn):
-            cache_k_inputs.append(network.add_input(
-                graph_ops.layer_tensor_name("cache_k", ai),
-                work_trt_dtype, (max_cache_length, kv_attention_size)))
-            cache_v_inputs.append(network.add_input(
-                graph_ops.layer_tensor_name("cache_v", ai),
-                work_trt_dtype, (max_cache_length, kv_attention_size)))
+            for kind, inputs in (("cache_k", cache_k_inputs), ("cache_v", cache_v_inputs)):
+                name = graph_ops.layer_tensor_name(kind, ai)
+                inputs.append(network.add_input(name, work_trt_dtype, (past_dim, kv_attention_size)))
+                if dynamic:
+                    profile.set_shape(name, (0, kv_attention_size), (past_opt, kv_attention_size),
+                                      (max_cache_length, kv_attention_size))
+        if dynamic:
+            trt_config.add_optimization_profile(profile)
 
         (
             attention_mask,

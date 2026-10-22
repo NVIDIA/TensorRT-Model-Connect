@@ -41,6 +41,7 @@ Qwen38PrefillRunner::Qwen38PrefillRunner(std::unique_ptr<ITrtModule> module,
         if (!present_k_.back().ok() || !present_v_.back().ok())
             throw std::runtime_error("Qwen38PrefillRunner: failed to allocate present K/V scratch");
     }
+    dynamic_cache_ = dynamic_ && module_->has_input("cache_k_0") && module_->input_is_dynamic("cache_k_0");
     tokens_buf_.resize(static_cast<std::size_t>(chunk_len_));
     positions_buf_.resize(static_cast<std::size_t>(chunk_len_));
 }
@@ -86,7 +87,10 @@ void Qwen38PrefillRunner::run_chunk(const int32_t* tokens, int32_t n, std::vecto
     const int32_t max_len = kv.max_length();
     // A static engine always takes chunk_len_ rows; a dynamic one takes exactly n.
     const int32_t rows = dynamic_ ? n : chunk_len_;
-    const int32_t kv_len = max_len + rows;
+    // Columns of the mask: the cache part (all of it for a static cache, the filled rows
+    // for a dynamic one) followed by the chunk's own rows.
+    const int32_t cache_cols = dynamic_cache_ ? pos0 : max_len;
+    const int32_t kv_len = cache_cols + rows;
 
     // Rows >= n are padding (static engine only): any token id / position works
     // because the engine keeps them out of the recurrent state and the runtime
@@ -97,7 +101,7 @@ void Qwen38PrefillRunner::run_chunk(const int32_t* tokens, int32_t n, std::vecto
         positions_buf_[static_cast<std::size_t>(i)] = pos0 + i;
     }
 
-    // Additive mask (rows, max_len + rows): visible cache prefix [0, pos0),
+    // Additive mask (rows, cache_cols + rows): visible cache prefix [0, pos0),
     // then causal over the chunk's own rows.
     mask_buf_.assign(static_cast<std::size_t>(rows) * static_cast<std::size_t>(kv_len),
                      kMaskedScore);
@@ -105,7 +109,7 @@ void Qwen38PrefillRunner::run_chunk(const int32_t* tokens, int32_t n, std::vecto
         float* row =
             mask_buf_.data() + static_cast<std::size_t>(i) * static_cast<std::size_t>(kv_len);
         std::fill(row, row + pos0, 0.0F);
-        std::fill(row + max_len, row + max_len + i + 1, 0.0F);
+        std::fill(row + cache_cols, row + cache_cols + i + 1, 0.0F);
     }
 
     int32_t valid_len = n;
@@ -127,6 +131,15 @@ void Qwen38PrefillRunner::run_chunk(const int32_t* tokens, int32_t n, std::vecto
         inputs["attention_mask"] = t;
     }
 
+    if (dynamic_cache_) {
+        // Same buffers, only the first pos0 rows: the cache is row-major, so they are contiguous.
+        const std::vector<int64_t> cache_shape{pos0, static_cast<int64_t>(kv.kv_dim())};
+        for (int32_t i = 0; i < kv.num_layers(); ++i) {
+            const auto suffix = "_" + std::to_string(i);
+            module_->bind_external("cache_k" + suffix, kv.cache_k(i).data(), cache_shape);
+            module_->bind_external("cache_v" + suffix, kv.cache_v(i).data(), cache_shape);
+        }
+    }
     module_->forward_async(inputs);
     module_->sync();
 
