@@ -545,9 +545,17 @@ def add_native_kv_attention(
     if update_k is None or update_v is None:
         raise RuntimeError("TensorRT failed to create the KV cache update layers")
     q_4d = reshape_rows_to_heads_4d(network, q, num_heads, head_dim, q_seq, None if tag is None else tag + ".q")
+    key, value = update_k.get_output(0), update_v.get_output(0)
+    if q_seq != 1:
+        # With several query rows, TensorRT expands the whole cache once per head group before
+        # attention (cost grows with the cache capacity). Reading the caches through a "+ 0"
+        # (exact) avoids that: the attention kernel then reads the cache in place. A single
+        # query row does not need it.
+        zero = _cast_back_to_trt_dtype(network, add_constant(network, (1, 1, 1, 1), np.zeros((1, 1, 1, 1))), cache_k.dtype)
+        key = network.add_elementwise(key, zero, trt.ElementWiseOperation.SUM).get_output(0)
+        value = network.add_elementwise(value, zero, trt.ElementWiseOperation.SUM).get_output(0)
     attn = network.add_attention(
-        _prescale_query(network, q_4d, None), update_k.get_output(0), update_v.get_output(0),
-        trt.AttentionNormalizationOp.SOFTMAX, False)
+        _prescale_query(network, q_4d, None), key, value, trt.AttentionNormalizationOp.SOFTMAX, False)
     if attn is None:
         raise RuntimeError("TensorRT failed to create the attention layer")
     attn.decomposable = True
