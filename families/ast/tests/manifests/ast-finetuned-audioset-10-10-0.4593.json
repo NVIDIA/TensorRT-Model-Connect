@@ -1,0 +1,19 @@
+{
+  "name": "ast-finetuned-audioset-10-10-0.4593",
+  "hf_id": "MIT/ast-finetuned-audioset-10-10-0.4593",
+  "hf_revision": "f826b80d28226b62986cc218e5cec390b1096902",
+  "bundle": "ast-finetuned-audioset-10-10-0.4593.bundle",
+  "family": "ast",
+  "task": "audio_to_class_scores",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "ast-finetuned-audioset-10-10-0.4593",
+      "premerge": true,
+      "test_input_audio": "data/speech_16k_mono.wav",
+      "top_k": 3,
+      "logit_tolerance": 0.005
+    }
+  ],
+  "tensor_parallel_size": 1
+}

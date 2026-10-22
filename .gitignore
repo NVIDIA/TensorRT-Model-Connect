@@ -131,4 +131,5 @@ engines
 results.json
 !**/Recording.wav
 !families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav
+!families/ast/tests/data/speech_16k_mono.wav
 worktrees/
