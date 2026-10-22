@@ -1,0 +1,17 @@
+{
+  "name": "wav2vec2-base-960h",
+  "hf_id": "facebook/wav2vec2-base-960h",
+  "hf_revision": "22aad52d435eb6dbaf354bdad9b0da84ce7d6156",
+  "bundle": "wav2vec2-base-960h.bundle",
+  "family": "wav2vec2",
+  "task": "speech_transcription",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "wav2vec2-base-960h",
+      "premerge": true,
+      "test_input_audio": "data/speech_16k_mono.wav"
+    }
+  ],
+  "tensor_parallel_size": 1
+}
