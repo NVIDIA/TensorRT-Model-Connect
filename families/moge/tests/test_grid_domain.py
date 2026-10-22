@@ -12,7 +12,7 @@ from families.moge import model
 
 
 class _ArrayGraph(model._NativeMogeGraph):
-    def __init__(self):
+    def __init__(self, *, fast_path=False):
         operations = SimpleNamespace(
             MIN=np.minimum, MAX=np.maximum, DIV=np.divide, PROD=np.multiply
         )
@@ -23,7 +23,7 @@ class _ArrayGraph(model._NativeMogeGraph):
             float32=np.float32,
             int64=np.int64,
         )
-        super().__init__(trt, None, {})
+        super().__init__(trt, None, {}, fast_path=fast_path)
         self.bounds = []
 
     def shape(self, image_shape, name):
@@ -63,18 +63,19 @@ class _AtImageResize(Exception):
 
 
 @pytest.mark.parametrize(
-    "height_range,width_range",
+    "fast_path,height_range,width_range",
     [
-        ((model._MIN_IMAGE_SIZE, model._MAX_IMAGE_SIZE),) * 2,
+        (False, *((model._MIN_IMAGE_SIZE, model._MAX_IMAGE_SIZE),) * 2),
         (
+            True,
             (model._FAST_MIN_IMAGE_HEIGHT, model._FAST_MAX_IMAGE_HEIGHT),
             (model._FAST_MIN_IMAGE_WIDTH, model._FAST_MAX_IMAGE_WIDTH),
         ),
     ],
     ids=["fp32-profile", "fp16-profile"],
 )
-def test_grid_bounds_preserve_all_supported_image_sizes(height_range, width_range):
-    graph = _ArrayGraph()
+def test_grid_bounds_preserve_all_supported_image_sizes(fast_path, height_range, width_range):
+    graph = _ArrayGraph(fast_path=fast_path)
     widths = np.arange(width_range[0], width_range[1] + 1, dtype=np.float32)
     checked = 0
     # Work a row at a time to cover both profiles without a large allocation.
@@ -94,8 +95,8 @@ def test_grid_bounds_preserve_all_supported_image_sizes(height_range, width_rang
         assert dimensions[:2] == [1, 3]
         np.testing.assert_array_equal(dimensions[2], base_h * model._PATCH)
         np.testing.assert_array_equal(dimensions[3], base_w * model._PATCH)
-        assert graph.bounds.count(np.minimum) == 2
-        assert graph.bounds.count(np.maximum) == 2
+        assert graph.bounds.count(np.minimum) == (0 if fast_path else 2)
+        assert graph.bounds.count(np.maximum) == (0 if fast_path else 2)
         checked += len(aspect)
     expected = sum(
         max(0, min(width_range[1], 2 * height) - max(width_range[0], (height + 1) // 2) + 1)

@@ -847,12 +847,14 @@ class _NativeMogeGraph:
             self.trt.int64,
             "input.base_w",
         )
-        # Independent H/W profiles cannot express the accepted aspect range.
-        # Expose its exact grid bounds to nonlinear shape inference; every
-        # accepted Native grid is unchanged. MogePipeline rejects other
-        # aspect ratios before executing the engine.
-        base_h = self.bounded_grid_dimension(base_h, "input.bounded_base_h")
-        base_w = self.bounded_grid_dimension(base_w, "input.bounded_base_w")
+        if not self.fast_path:
+            # Independent H/W profiles cannot express the accepted aspect range.
+            # Expose its exact grid bounds for unfused FP32 attention; every
+            # accepted Native grid is unchanged. MogePipeline rejects other
+            # aspect ratios before executing the engine. Keep the fused FP16
+            # path's original shape expressions and numerical behavior.
+            base_h = self.bounded_grid_dimension(base_h, "input.bounded_base_h")
+            base_w = self.bounded_grid_dimension(base_w, "input.bounded_base_w")
         fourteen = self.shape_value(_PATCH, "input.patch_size")
         resized_h = self.binary(
             base_h, fourteen, self.trt.ElementWiseOperation.PROD, "input.resized_h"
