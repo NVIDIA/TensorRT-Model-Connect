@@ -1,0 +1,18 @@
+{
+  "name": "dinov2-with-registers-small",
+  "hf_id": "facebook/dinov2-with-registers-small",
+  "hf_revision": "0d9846e56b43a21fa46d7f3f5070f0506a5795a9",
+  "bundle": "dinov2-with-registers-small.bundle",
+  "family": "dinov2",
+  "task": "image_to_token_and_pooled_features",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "dinov2-with-registers-small",
+      "premerge": true,
+      "test_image": "data/test_img.png",
+      "num_register_tokens": 4
+    }
+  ],
+  "tensor_parallel_size": 1
+}
