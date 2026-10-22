@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# The reference path is transformers' own Wav2Vec2ForCTC plus its tokenizer.
+# No torchaudio: this family reads the waveform directly and its only frontend
+# is a mean/variance normalisation, so there is no filter bank to agree with.
+transformers
