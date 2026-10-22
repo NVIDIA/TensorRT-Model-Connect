@@ -26,7 +26,7 @@ class Adapter:
         self.spec = spec
         source = Path(sys.prefix) / "trtmc-reference/MoGe"
         checkpoint = hf_hub_download(spec.model, CHECKPOINT, revision=spec.revision)
-        self.reference = OfficialReference(source, Path(checkpoint))
+        self.reference = OfficialReference(source, Path(checkpoint), precision=spec.precision)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         # Decoded before the timed call (preloaded), as the official read_image does: RGB in [0, 1].
