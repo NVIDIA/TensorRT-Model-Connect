@@ -1,0 +1,25 @@
+{
+  "name": "phi4-multimodal-fp8",
+  "hf_id": "nvidia/Phi-4-multimodal-instruct-FP8",
+  "hf_revision": "d822efce23f65f86c165aeed435cc27092e21d60",
+  "bundle": "phi4-multimodal-fp8.bundle",
+  "family": "phi4_multimodal",
+  "task": "vision_language_generation",
+  "precision": "fp16",
+  "quantization": "fp8",
+  "testcases": [
+    {
+      "name": "phi4-multimodal-fp8",
+      "premerge": true,
+      "reference_backend": "golden_snapshot",
+      "prompt": "What color is the vehicle in this image? Answer in one word.",
+      "max_new_tokens": 2,
+      "test_image": "data/test_img.jpeg",
+      "metadata": {
+        "golden_text": "White"
+      }
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 10368
+}
