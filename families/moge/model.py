@@ -24,6 +24,10 @@ _HEAD_DIM = 64
 _PATCH = 14
 _POSITION_GRID = 37
 _NUM_TOKENS = 1800
+# Match MogePipeline's supported image aspect ratio [1/2, 2].
+_MAX_IMAGE_ASPECT_RATIO = 2.0
+_MIN_BASE_GRID = round(np.sqrt(_NUM_TOKENS / _MAX_IMAGE_ASPECT_RATIO))
+_MAX_BASE_GRID = round(np.sqrt(_NUM_TOKENS * _MAX_IMAGE_ASPECT_RATIO))
 _FOCAL_RECOVERY_SIZE = 64
 _MIN_IMAGE_SIZE = 64
 _OPT_IMAGE_SIZE = 518
@@ -791,6 +795,12 @@ class _NativeMogeGraph:
         )
         return projected, class_token
 
+    def bounded_grid_dimension(self, value: Any, name: str) -> Any:
+        lower = self.shape_value(_MIN_BASE_GRID, f"{name}.minimum")
+        upper = self.shape_value(_MAX_BASE_GRID, f"{name}.maximum")
+        bounded = self.binary(value, upper, self.trt.ElementWiseOperation.MIN, f"{name}.upper")
+        return self.binary(bounded, lower, self.trt.ElementWiseOperation.MAX, name)
+
     def encoder(self, image: Any) -> tuple[Any, Any, Any, Any, Any]:
         input_shape = self.shape(image, "input.shape")
         input_h = self.shape_index(input_shape, 2, "input.height")
@@ -837,6 +847,12 @@ class _NativeMogeGraph:
             self.trt.int64,
             "input.base_w",
         )
+        # Independent H/W profiles cannot express the accepted aspect range.
+        # Expose its exact grid bounds to nonlinear shape inference; every
+        # accepted Native grid is unchanged. MogePipeline rejects other
+        # aspect ratios before executing the engine.
+        base_h = self.bounded_grid_dimension(base_h, "input.bounded_base_h")
+        base_w = self.bounded_grid_dimension(base_w, "input.bounded_base_w")
         fourteen = self.shape_value(_PATCH, "input.patch_size")
         resized_h = self.binary(
             base_h, fourteen, self.trt.ElementWiseOperation.PROD, "input.resized_h"
