@@ -70,7 +70,8 @@
           "flags": [
             "--max-sequence-length"
           ],
-          "type": "int"
+          "type": "int",
+          "help": "KV cache length in tokens, the longest prompt plus generation (default: the smaller of the checkpoint context and 4096; with --prefill-dynamic at least --prefill-chunk-len)"
         },
         {
           "name": "tensor_parallel_size",

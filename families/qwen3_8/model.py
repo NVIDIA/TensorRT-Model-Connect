@@ -23,10 +23,44 @@ _BUNDLE_FILES = (
 )
 
 
+# KV cache length when --max-sequence-length is not given (capped by the checkpoint's context).
+_DEFAULT_MAX_SEQUENCE_LENGTH = 4096
 _DEFAULT_PREFILL_SEQ_LEN = 128
 # --prefill-dynamic: largest call and the token count the engine is tuned for.
 _DEFAULT_DYNAMIC_PREFILL_MAX_LEN = 1024
 _DEFAULT_DYNAMIC_PREFILL_OPT_LEN = 256
+
+
+def _resolve_lengths(
+    max_position_embeddings: int,
+    max_sequence_length: int | None,
+    prefill_chunk_len: int | None,
+    prefill_dynamic: bool,
+) -> tuple[int, int]:
+    """KV cache length and prefill call size (tokens) for one build.
+
+    Without --max-sequence-length the cache is min(checkpoint context, 4096); a dynamic
+    prefill engine takes up to prefill_chunk_len tokens in one call, so then the default
+    cache is raised to at least that. An explicit cache that cannot hold one dynamic call
+    is an error, not a silent clamp.
+    """
+    if prefill_chunk_len is None:
+        prefill_chunk_len = (
+            _DEFAULT_DYNAMIC_PREFILL_MAX_LEN if prefill_dynamic else _DEFAULT_PREFILL_SEQ_LEN)
+    if max_sequence_length:
+        cache_len = _positive_int(max_sequence_length, "max_sequence_length")
+    else:
+        cache_len = min(
+            max_position_embeddings,
+            max(_DEFAULT_MAX_SEQUENCE_LENGTH, prefill_chunk_len if prefill_dynamic else 0))
+    if cache_len > max_position_embeddings:
+        raise ValueError("qwen3_8 max_sequence_length exceeds checkpoint context capacity")
+    if prefill_dynamic and prefill_chunk_len > cache_len:
+        raise ValueError(
+            f"--prefill-dynamic takes up to --prefill-chunk-len = {prefill_chunk_len} tokens in "
+            f"one call, but the KV cache holds {cache_len} tokens; raise --max-sequence-length "
+            f"(at most {max_position_embeddings}) or lower --prefill-chunk-len")
+    return cache_len, prefill_chunk_len
 
 
 def _positive_int(value: object, name: str) -> int:
@@ -148,12 +182,10 @@ def _build_native(request, writer) -> None:
     precision = str(request.precision).lower()
     if precision not in {"fp16", "fp32", "bf16"}:
         raise ValueError("qwen3_8 precision must be fp16, bf16, or fp32")
-    max_sequence_length = _positive_int(
-        request.max_sequence_length or min(config.max_position_embeddings, 256),
-        "max_sequence_length",
-    )
-    if max_sequence_length > config.max_position_embeddings:
-        raise ValueError("qwen3_8 max_sequence_length exceeds checkpoint context capacity")
+    prefill_dynamic = bool(request.prefill_dynamic)
+    max_sequence_length, prefill_chunk_len = _resolve_lengths(
+        config.max_position_embeddings, request.max_sequence_length,
+        request.prefill_chunk_len, prefill_dynamic)
 
     model = Qwen38Model()
     config.raw["_model_dir"] = str(model_dir)
@@ -192,15 +224,8 @@ def _build_native(request, writer) -> None:
 
     # Prompt tokens per multi-token prefill call. 0 keeps the old
     # one-decode-step-per-prompt-token prefill (no prefill_engine.plan).
-    prefill_dynamic = bool(request.prefill_dynamic)
-    if request.prefill_chunk_len is not None:
-        prefill_chunk_len = int(request.prefill_chunk_len)
-    elif prefill_dynamic:
-        prefill_chunk_len = _DEFAULT_DYNAMIC_PREFILL_MAX_LEN
-    else:
-        prefill_chunk_len = _DEFAULT_PREFILL_SEQ_LEN
     if prefill_chunk_len > max_sequence_length:
-        # Largest valid chunk that still fits the cache.
+        # Static engine: largest valid chunk that still fits the cache.
         prefill_chunk_len = (
             (max_sequence_length // 64) * 64 if max_sequence_length >= 64
             else 1 << (max_sequence_length.bit_length() - 1))
