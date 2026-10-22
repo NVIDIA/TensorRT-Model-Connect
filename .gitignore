@@ -125,6 +125,7 @@ engines
 *.png
 !website/static/img/readme/*.png
 !website/static/img/blog/ai-native-by-design/*.png
+!families/siglip/tests/data/test_img.png
 *.wav
 *.bundle
 *.ttrtb
