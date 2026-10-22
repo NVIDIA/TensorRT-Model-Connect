@@ -26,6 +26,7 @@ from .checkpoint_mapper import (
     _has_tensor,
     _transpose_2d,
 )
+from .quantization import calibrate_phi4_multimodal, is_quantized_checkpoint
 
 
 def _load_vision_adapted_weight(
@@ -69,8 +70,13 @@ class _Phi4MultimodalModel:
         self,
         model_dir: str,
         config: ModelConfig,
+        quant_ctx=None,
     ) -> WeightDict:
-        """Load Phi-4-multimodal weights with the vision LoRA merged."""
+        """Load Phi-4-multimodal weights with the vision LoRA merged.
+
+        Quantized projections (``quant_ctx``) get shape-only placeholders: the engine
+        reads their FP8 / FP4 bytes from the checkpoint, and the vision LoRA is not merged.
+        """
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
 
@@ -96,6 +102,16 @@ class _Phi4MultimodalModel:
         mlp_size = 0
         attention_size = 0
 
+        def _quantized(layer_prefix, *stems):
+            """True when every named projection is read from the checkpoint's FP8 / FP4 bytes."""
+            return quant_ctx is not None and all(
+                quant_ctx.should_quantize(f"{layer_prefix}.{stem}") for stem in stems
+            )
+
+        def _placeholder(rows, cols):
+            """Shape-only stand-in for a quantized projection (never read by the engine)."""
+            return np.broadcast_to(np.zeros((), dtype=np.float16), (rows, cols))
+
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
             hf_prefix = f"model.layers.{layer_idx}"
@@ -108,64 +124,74 @@ class _Phi4MultimodalModel:
 
             # ---- Fused QKV projection (base_layer) ----
             # Shape: [q_dim + 2*kv_dim, hidden]
-            qkv_raw = _load_vision_adapted_weight(
-                readers, f"{hf_prefix}.self_attn.qkv_proj.base_layer.weight", config
-            )
-            total_qkv = qkv_raw.shape[0]
-            expected_qkv = q_dim + 2 * kv_dim
-            assert total_qkv == expected_qkv, (
-                f"Layer {layer_idx} qkv_proj rows {total_qkv} != "
-                f"expected {expected_qkv} (q={q_dim}, kv={kv_dim})"
-            )
-
-            q_raw = qkv_raw[:q_dim, :]
-            k_raw = qkv_raw[q_dim : q_dim + kv_dim, :]
-            v_raw = qkv_raw[q_dim + kv_dim :, :]
-            del qkv_raw
-
             if attention_size == 0:
                 attention_size = q_dim
+            if _quantized(prefix, "w_q", "w_k", "w_v"):
+                weights[f"{prefix}.w_q"] = _placeholder(hidden, q_dim)
+                weights[f"{prefix}.w_k"] = _placeholder(hidden, kv_dim)
+                weights[f"{prefix}.w_v"] = _placeholder(hidden, kv_dim)
+            else:
+                qkv_raw = _load_vision_adapted_weight(
+                    readers, f"{hf_prefix}.self_attn.qkv_proj.base_layer.weight", config
+                )
+                total_qkv = qkv_raw.shape[0]
+                expected_qkv = q_dim + 2 * kv_dim
+                assert total_qkv == expected_qkv, (
+                    f"Layer {layer_idx} qkv_proj rows {total_qkv} != "
+                    f"expected {expected_qkv} (q={q_dim}, kv={kv_dim})"
+                )
 
-            # Transpose [out, in] -> [in, out]
-            q_t = _transpose_2d(q_raw, "q_proj")
-            k_t = _transpose_2d(k_raw, "k_proj")
-            v_t = _transpose_2d(v_raw, "v_proj")
-            del q_raw, k_raw, v_raw
+                q_raw = qkv_raw[:q_dim, :]
+                k_raw = qkv_raw[q_dim : q_dim + kv_dim, :]
+                v_raw = qkv_raw[q_dim + kv_dim :, :]
+                del qkv_raw
 
-            weights[f"{prefix}.w_q"] = q_t
-            weights[f"{prefix}.w_k"] = k_t
-            weights[f"{prefix}.w_v"] = v_t
+                # Transpose [out, in] -> [in, out]
+                weights[f"{prefix}.w_q"] = _transpose_2d(q_raw, "q_proj")
+                weights[f"{prefix}.w_k"] = _transpose_2d(k_raw, "k_proj")
+                weights[f"{prefix}.w_v"] = _transpose_2d(v_raw, "v_proj")
+                del q_raw, k_raw, v_raw
 
             # Output projection (base_layer)
-            o_raw = _load_vision_adapted_weight(
-                readers, f"{hf_prefix}.self_attn.o_proj.base_layer.weight", config
-            )
-            weights[f"{prefix}.w_o"] = _transpose_2d(o_raw, "o_proj")
-            del o_raw
+            if _quantized(prefix, "w_o"):
+                weights[f"{prefix}.w_o"] = _placeholder(q_dim, hidden)
+            else:
+                o_raw = _load_vision_adapted_weight(
+                    readers, f"{hf_prefix}.self_attn.o_proj.base_layer.weight", config
+                )
+                weights[f"{prefix}.w_o"] = _transpose_2d(o_raw, "o_proj")
+                del o_raw
 
             # ---- Fused gate_up projection (base_layer) ----
             # Shape: [2 * intermediate_size, hidden]
-            gate_up_raw = _load_vision_adapted_weight(
-                readers, f"{hf_prefix}.mlp.gate_up_proj.base_layer.weight", config
-            )
-            intermediate = gate_up_raw.shape[0] // 2
+            if _quantized(prefix, "w_gate", "w_up"):
+                intermediate = config.intermediate_size
+                weights[f"{prefix}.w_gate"] = _placeholder(hidden, intermediate)
+                weights[f"{prefix}.w_up"] = _placeholder(hidden, intermediate)
+            else:
+                gate_up_raw = _load_vision_adapted_weight(
+                    readers, f"{hf_prefix}.mlp.gate_up_proj.base_layer.weight", config
+                )
+                intermediate = gate_up_raw.shape[0] // 2
+                gate_raw = gate_up_raw[:intermediate, :]
+                up_raw = gate_up_raw[intermediate:, :]
+                del gate_up_raw
+
+                weights[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate_proj")
+                weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj")
+                del gate_raw, up_raw
             if mlp_size == 0:
                 mlp_size = intermediate
 
-            gate_raw = gate_up_raw[:intermediate, :]
-            up_raw = gate_up_raw[intermediate:, :]
-            del gate_up_raw
-
-            weights[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate_proj")
-            weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj")
-            del gate_raw, up_raw
-
             # Down projection (base_layer)
-            down_raw = _load_vision_adapted_weight(
-                readers, f"{hf_prefix}.mlp.down_proj.base_layer.weight", config
-            )
-            weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj")
-            del down_raw
+            if _quantized(prefix, "w_down"):
+                weights[f"{prefix}.w_down"] = _placeholder(intermediate, hidden)
+            else:
+                down_raw = _load_vision_adapted_weight(
+                    readers, f"{hf_prefix}.mlp.down_proj.base_layer.weight", config
+                )
+                weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj")
+                del down_raw
 
         # Final norm
         final_norm_key = "model.norm.weight"
@@ -334,26 +360,35 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
         if request.task != "vision_language_generation":
             raise ValueError("phi4_multimodal supports only task=vision_language_generation")
-        if (
-            request.tensor_parallel_size != 1
-            or request.quantization not in {None, "none"}
-            or request.fp32_layers
-        ):
+        if request.quantization not in {None, "none", "fp8", "nvfp4"}:
             raise NotImplementedError(
-                "Phi-4 Multimodal supports only single-device non-quantized builds"
+                f"phi4_multimodal does not support quantization={request.quantization!r}"
+            )
+        quantized = request.quantization in {"fp8", "nvfp4"}
+        if request.tensor_parallel_size != 1 or request.fp32_layers:
+            raise NotImplementedError(
+                "Phi-4 Multimodal supports only single-device builds without fp32_layers"
             )
         model_dir = Path(request.model_dir)
         config = ModelConfig.from_dir(model_dir)
         if str(config.model_type).lower() not in {"phi4mm", "phi4_multimodal"}:
             raise ValueError(f"Phi-4 Multimodal does not support model_type={config.model_type!r}")
         precision = str(request.precision).lower()
+        if quantized:
+            if precision != "fp16":
+                raise NotImplementedError("quantized phi4_multimodal builds require fp16 precision")
+        elif is_quantized_checkpoint(model_dir):
+            raise ValueError("this checkpoint is quantized; build it with --quantization fp8 or nvfp4")
         max_length = int(
             request.max_sequence_length
             or min(config.max_position_embeddings, DEFAULT_MAX_SEQUENCE_LENGTH)
         )
         config.raw["_model_dir"] = str(model_dir)
         model = _Phi4MultimodalModel()
-        weights = model.load_weights(str(model_dir), config)
+        quant_ctx = None
+        if quantized:
+            quant_ctx = calibrate_phi4_multimodal(model_dir, config, graph_ops, request.quantization)
+        weights = model.load_weights(str(model_dir), config, quant_ctx=quant_ctx)
         writer.set_header(family="phi4_multimodal", task=request.task, backend=request.backend)
         # Stage each serialized plan before building the next network. The
         # bundle writer keeps sections on disk and publishes only at finish.
@@ -363,7 +398,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=request.verbose,
         )
         writer.add_bytes("prefill.plan", prefill)
@@ -374,7 +409,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=request.verbose,
         )
         writer.add_bytes("engine.plan", decode)

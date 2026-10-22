@@ -21,7 +21,7 @@ from families.phi4_multimodal.tests.vision_oracle import (
 
 
 def test_phi4_multimodal_case_requires_the_vision_oracle() -> None:
-    assert set(CASES) == {"phi4-multimodal"}
+    assert set(CASES) == {"phi4-multimodal", "phi4-multimodal-fp8", "phi4-multimodal-nvfp4"}
 
 
 def test_checkpoint_reference_declares_scipy() -> None:

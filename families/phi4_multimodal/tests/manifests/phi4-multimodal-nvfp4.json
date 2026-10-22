@@ -1,0 +1,25 @@
+{
+  "name": "phi4-multimodal-nvfp4",
+  "hf_id": "nvidia/Phi-4-multimodal-instruct-NVFP4",
+  "hf_revision": "617cfabb9ad6c2c6e318fd21c1961536b84f65a1",
+  "bundle": "phi4-multimodal-nvfp4.bundle",
+  "family": "phi4_multimodal",
+  "task": "vision_language_generation",
+  "precision": "fp16",
+  "quantization": "nvfp4",
+  "testcases": [
+    {
+      "name": "phi4-multimodal-nvfp4",
+      "premerge": true,
+      "reference_backend": "golden_snapshot",
+      "prompt": "What color is the vehicle in this image? Answer in one word.",
+      "max_new_tokens": 2,
+      "test_image": "data/test_img.jpeg",
+      "metadata": {
+        "golden_text": "White"
+      }
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 10368
+}
