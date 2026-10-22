@@ -1311,9 +1311,9 @@ def _build_native_engine(
         network.mark_output(tensor)
 
     config = builder.create_builder_config()
-    # Level 3 enables the FP16 fused-attention fast path. Level 0 keeps the
-    # broad dynamic FP32 attention graph decomposed for reliable builds.
-    config.builder_optimization_level = 3 if fast_path else 0
+    # The bounded FP32 patch grid supports tactic search at level 3,
+    # matching the existing FP16 setting without changing either precision.
+    config.builder_optimization_level = 3
     tf32 = getattr(trt.BuilderFlag, "TF32", None)
     if tf32 is not None:
         if fast_path:
