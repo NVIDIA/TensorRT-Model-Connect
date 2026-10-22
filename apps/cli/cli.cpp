@@ -97,7 +97,7 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
          {CommandKind::kEmbed,
           {"--text", "--token-ids", "--image", "--title", "--body", "--role"}}},
         {"rerank", {CommandKind::kRerank, {"--query", "--document", "--image", "--documents"}}},
-        {"classify", {CommandKind::kClassify, {"--image"}}},
+        {"classify", {CommandKind::kClassify, {"--image", "--audio"}}},
         {"detect", {CommandKind::kDetect, {"--image", "--prompt"}}},
         {"extract-features", {CommandKind::kExtractFeatures, {"--image"}}},
         {"predict-structure",
@@ -1636,6 +1636,9 @@ void print_usage(std::ostream& output) {
               "  predict-structure BUNDLE --input REQUEST [--input-encoding ENCODING]\n"
               "  .yaml/.yml, .json and .b2rq select their declared encodings.\n"
               "  SDK output defaults to prediction.cif or prediction.pdb.\n\n"
+              "Audio classification input:\n"
+              "  classify BUNDLE --audio WAV scores an audio model's own classes;\n"
+              "  classify BUNDLE --image FILE stays the image path.\n\n"
               "BYOK options:\n"
               "  --byok-library DSO --byok-function FUNCTION --byok-name KERNEL\n\n"
               "Runtime-sized KV cache:\n"

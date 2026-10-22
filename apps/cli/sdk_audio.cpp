@@ -419,6 +419,10 @@ std::string_view audio_task_for_command(const Command& command, const Model& mod
             return TextToSpeech::kTask;
         return TextToAudio::kTask;
     }
+    // classify stays one verb: the supplied input decides whether the image or
+    // the audio Task runs, and --audio never reaches the image path.
+    if (command.kind == CommandKind::kClassify && has_option(command, "--audio"))
+        return AudioToClassScores::kTask;
     if (command.kind == CommandKind::kSpeak)
         return SpeechToSpeechResponse::kTask;
     if (command.kind == CommandKind::kTranscribeStreaming)
@@ -449,6 +453,15 @@ bool dispatch_sdk_audio(const Command& command, const Model& model, std::string_
     if (command.kind == CommandKind::kTranscribeStreaming &&
         id == StreamingSpeechTranscription::kTask) {
         transcribe_stream(command, model, output);
+        return true;
+    }
+    if (command.kind == CommandKind::kClassify && id == AudioToClassScores::kTask) {
+        const auto audio = read_audio(require_option(command, "--audio"));
+        const auto task = model.task<AudioToClassScores>();
+        const auto config = detail::task_config(command, task.config_fields(), {"--audio"});
+        auto payload = detail::label_scores_json(task.run({audio_view(audio)}, config));
+        payload["task"] = std::string(id);
+        detail::write_json(output, payload);
         return true;
     }
     if (command.kind == CommandKind::kSpeak && id == SpeechToSpeechResponse::kTask) {
