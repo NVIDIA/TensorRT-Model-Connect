@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Toy example: the pattern ``a * b + c`` is replaced by a user kernel at engine build.
+"""Toy examples: the pattern ``a * b + c`` is replaced by a user kernel at engine build.
 
-The graph is exactly the pattern. The user kernel computes ``a * b + c + 1``, so its output cannot
-be mistaken for the output of the original ops. A TensorRT build that ignores the build option
-returns the original result, and the test skips.
+The user kernel computes ``a * b + c + 1``, so its output cannot be mistaken for the output of the
+original ops. In the first test the graph is exactly the pattern. In the second test the pattern is
+one sub structure of a larger graph, and only that part is replaced. A TensorRT build that ignores
+the build option returns the original result, and the tests skip.
 """
 
 from __future__ import annotations
@@ -81,3 +82,64 @@ def test_pattern_replaced_by_user_kernel():
     if np.allclose(replaced, baseline, rtol=1e-5, atol=1e-6):
         pytest.skip("this TensorRT build ignores the user kernel option")
     np.testing.assert_allclose(replaced, original + 1.0, rtol=1e-5, atol=1e-6)
+
+
+R, C = 8, 64
+
+
+def _build_larger_engine(weights):
+    """matmul, relu, (p * s + r), relu, reduce_sum; only ``p * s + r`` matches the pattern."""
+    logger = trt.Logger(trt.Logger.ERROR)
+    builder = trt.Builder(logger)
+    network = builder.create_network(0)
+    x, s, r = (network.add_input(name, trt.float32, (R, C)) for name in ("x", "s", "r"))
+    w = network.add_constant((C, C), trt.Weights(weights)).get_output(0)
+    m = network.add_matrix_multiply(
+        x, trt.MatrixOperation.NONE, w, trt.MatrixOperation.NONE
+    ).get_output(0)
+    p = network.add_activation(m, trt.ActivationType.RELU).get_output(0)
+    prod = network.add_elementwise(p, s, trt.ElementWiseOperation.PROD).get_output(0)
+    u = network.add_elementwise(prod, r, trt.ElementWiseOperation.SUM).get_output(0)
+    v = network.add_activation(u, trt.ActivationType.RELU).get_output(0)
+    out = network.add_reduce(v, trt.ReduceOperation.SUM, 1 << 1, False).get_output(0)
+    out.name = "out"
+    network.mark_output(out)
+    blob = builder.build_serialized_network(network, builder.create_builder_config())
+    assert blob is not None, "engine build failed"
+    return trt.Runtime(logger).deserialize_cuda_engine(blob)
+
+
+def _run_larger(engine, host):
+    context = engine.create_execution_context()
+    tensors = [torch.from_numpy(h).cuda() for h in host]
+    out = torch.empty(R, dtype=torch.float32, device="cuda")
+    for name, tensor in zip(("x", "s", "r"), tensors):
+        context.set_tensor_address(name, tensor.data_ptr())
+    context.set_tensor_address("out", out.data_ptr())
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        assert context.execute_async_v3(stream.cuda_stream)
+    stream.synchronize()
+    return out.cpu().numpy()
+
+
+def test_pattern_replaced_inside_larger_graph():
+    """Only the matched ``mul + add`` is replaced; the other ops stay as they are."""
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU")
+    rng = np.random.default_rng(0)
+    weights = (rng.standard_normal((C, C)) / 8).astype(np.float32)
+    host = [rng.standard_normal((R, C)).astype(np.float32) for _ in range(3)]
+    p = np.maximum(host[0].astype(np.float64) @ weights.astype(np.float64), 0)
+    original = np.maximum(p * host[1] + host[2], 0).sum(1)
+    expected = np.maximum(p * host[1] + host[2] + 1.0, 0).sum(1)
+
+    baseline = _run_larger(_build_larger_engine(weights), host)
+    np.testing.assert_allclose(baseline, original, rtol=1e-3, atol=1e-3)
+
+    with user_kernels([UserKernel("user_fma", PATTERN, SOURCE, block=128)]):
+        replaced = _run_larger(_build_larger_engine(weights), host)
+
+    if np.allclose(replaced, baseline, rtol=1e-3, atol=1e-3):
+        pytest.skip("this TensorRT build ignores the user kernel option")
+    np.testing.assert_allclose(replaced, expected, rtol=1e-3, atol=1e-3)
