@@ -313,18 +313,19 @@ def compile_prefill_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, 
 
     Static: shapes are constants for `seq_len` tokens. Dynamic: the token count is a runtime
     extent (any 1 <= T <= seq_len; the kernels read it from the array shapes)."""
-    conv_block = block_sizes()[0]
+    from ..cutile import gdn_prefill as K
+
+    conv_block, conv_rows = K.CONV_BLOCK, K.CONV_ROWS
     block_v = prefill_block_v()
     chunk = prefill_chunk()
-    key = (num_heads, num_kv_heads, head_dim, seq_len, bf16, gpu_code, conv_block, block_v, chunk, dynamic)
+    key = (num_heads, num_kv_heads, head_dim, seq_len, bf16, gpu_code, conv_block, conv_rows,
+           block_v, chunk, dynamic)
     if key in _PREFILL_CUBIN_CACHE:
         return _PREFILL_CUBIN_CACHE[key]
 
     import cuda.tile as ct
     from cuda.tile.compilation import (ArrayConstraint, CallingConvention, KernelSignature,
                                        export_kernel)
-
-    from ..cutile import gdn_prefill as K
 
     H, D, NK, T = num_heads, head_dim, num_kv_heads, seq_len
     CD = 2 * NK * D + H * D
@@ -346,7 +347,7 @@ def compile_prefill_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, 
     stages = {
         "conv": (K.conv_kernel, [
             arr(act, (T, CD)), arr(act, (CD, _CONV_KERNEL)), arr(f32, (CD, _CONV_KERNEL)),
-            arr(f32, (CD,)), arr(act, (T, CD)), conv_block]),
+            arr(f32, (CD,)), arr(act, (T, CD)), conv_block, conv_rows]),
         "conv_state": (K.conv_state_kernel, [
             arr(act, (T, CD)), arr(act, (CD, _CONV_KERNEL)), arr(i32, (1,)),
             arr(act, (CD, _CONV_KERNEL)), conv_block]),
@@ -399,7 +400,9 @@ def add_gdn_prefill_plugin(network, trt, *, inputs, num_heads: int, num_kv_heads
     creator = trt.get_plugin_registry().get_creator(PREFILL_PLUGIN_NAME, "1", "")
     if creator is None:
         raise RuntimeError(f"TensorRT plugin creator {PREFILL_PLUGIN_NAME} is not registered")
-    conv_block, block_v, chunk = block_sizes()[0], prefill_block_v(), prefill_chunk()
+    from ..cutile import gdn_prefill as K
+
+    conv_block, block_v, chunk = K.CONV_BLOCK, prefill_block_v(), prefill_chunk()
 
     def int_field(name, value):
         return trt.PluginField(name, np.array([value], dtype=np.int32), trt.PluginFieldType.INT32)
@@ -408,7 +411,8 @@ def add_gdn_prefill_plugin(network, trt, *, inputs, num_heads: int, num_kv_heads
               int_field("head_dim", head_dim), int_field("conv_dim", conv_dim),
               int_field("seq_len", seq_len), int_field("act_bytes", 2),
               int_field("conv_block", conv_block), int_field("block_v", block_v),
-              int_field("chunk", chunk), int_field("dynamic", int(dynamic))]
+              int_field("chunk", chunk), int_field("dynamic", int(dynamic)),
+              int_field("conv_rows", K.CONV_ROWS)]
     fields.append(trt.PluginField(
         "threads", np.array([_block_threads(blob) for blob in cubins.values()], dtype=np.int32),
         trt.PluginFieldType.INT32))

@@ -77,6 +77,7 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
                 else if (name == "block_v") block_v_ = as_int();
                 else if (name == "chunk") chunk_ = as_int();
                 else if (name == "dynamic") dynamic_ = as_int();
+                else if (name == "conv_rows") conv_rows_ = as_int();
             } else if (f.type == nvinfer1::PluginFieldType::kINT8) {
                 for (int32_t s = 0; s < kNumStages; ++s)
                     if (name == kStageField[s])
@@ -86,7 +87,7 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
         }
         valid_ = num_heads_ > 0 && num_kv_heads_ > 0 && head_dim_ > 0 && conv_dim_ > 0 &&
                  seq_len_ > 0 && (act_bytes_ == 2) && conv_block_ > 0 && block_v_ > 0 &&
-                 head_dim_ % block_v_ == 0 && chunk_ > 0 &&
+                 head_dim_ % block_v_ == 0 && chunk_ > 0 && conv_rows_ > 0 &&
                  (dynamic_ != 0 || seq_len_ % chunk_ == 0);
         for (int32_t s = 0; s < kNumStages; ++s)
             valid_ = valid_ && !cubins_[s].empty() && threads_[s] > 0;
@@ -224,7 +225,7 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
             {cast(inputs[6]), 1, {CD, 0, 0, 0}},           // bias
             {y, 2, {T, CD, 0, 0}},                         // y
         }};
-        if (!launch(kernels[0], {conv_tiles, static_cast<unsigned>(T), 1}, static_cast<unsigned>(threads_[0]), conv.data(), 5, stream))
+        if (!launch(kernels[0], {conv_tiles, static_cast<unsigned>((T + conv_rows_ - 1) / conv_rows_), 1}, static_cast<unsigned>(threads_[0]), conv.data(), 5, stream))
             return -1;
 
         // 2. new conv state = last 4 real inputs
@@ -308,6 +309,7 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
         fields_.push_back({"block_v", &block_v_, nvinfer1::PluginFieldType::kINT32, 1});
         fields_.push_back({"chunk", &chunk_, nvinfer1::PluginFieldType::kINT32, 1});
         fields_.push_back({"dynamic", &dynamic_, nvinfer1::PluginFieldType::kINT32, 1});
+        fields_.push_back({"conv_rows", &conv_rows_, nvinfer1::PluginFieldType::kINT32, 1});
         fields_.push_back({"threads", threads_.data(), nvinfer1::PluginFieldType::kINT32,
                            kNumStages});
         for (int32_t s = 0; s < kNumStages; ++s)
@@ -336,6 +338,7 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
     int32_t block_v_{0};
     int32_t chunk_{0};
     int32_t dynamic_{0};
+    int32_t conv_rows_{0};
     std::array<std::vector<char>, kNumStages> cubins_;
     std::array<int32_t, kNumStages> threads_{};
     bool valid_{false};

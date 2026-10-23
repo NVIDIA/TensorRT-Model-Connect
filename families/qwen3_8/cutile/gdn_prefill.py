@@ -75,6 +75,12 @@ def _solve_unit_lower(A, CS):
     return X
 
 
+# Tile of the conv stage: one program walks CONV_ROWS tokens of CONV_BLOCK channels, so the
+# per-program setup is shared and every load is a whole row.
+CONV_BLOCK = 128
+CONV_ROWS = 8
+
+
 @ct.kernel
 def conv_kernel(
     x,  # (T, D)
@@ -83,26 +89,36 @@ def conv_kernel(
     bias,  # (D,)
     output,  # (T, D)
     BLOCK_D: ConstInt,
+    TT: ConstInt,
 ):
-    """Grid: (cdiv(D, BLOCK_D), T). The input sequence is xs = [state[:, 1:4], x[0..T-1]]."""
-    bid_d = ct.bid(0)
-    t = ct.bid(1)
-    offs = ct.arange(BLOCK_D, dtype=ct.int32)
-    d_idx = bid_d * BLOCK_D + offs
-
-    acc = ct.astype(ct.gather(bias, (d_idx,), check_bounds=True), ct.float32)
-    for k in range(4):
-        j = t + k
-        src_state = min(j + 1, 3)
-        src_x = max(j - 3, 0)
-        from_x = ct.astype(min(max(j - 2, 0), 1), ct.float32)
-        sv = ct.astype(ct.gather(state_in, (d_idx, src_state), check_bounds=True), ct.float32)
-        xv = ct.astype(ct.gather(x, (src_x, d_idx), check_bounds=True), ct.float32)
-        wk = ct.astype(ct.gather(weight, (d_idx, k), check_bounds=True), ct.float32)
-        acc = acc + wk * (from_x * xv + (1.0 - from_x) * sv)
-
-    sig = ct.truediv(1.0, ct.add(1.0, ct.exp(ct.negative(acc))))
-    ct.scatter(output, (t, d_idx), ct.astype(acc * sig, output.dtype), check_bounds=True)
+    """Grid: (cdiv(D, BLOCK_D), cdiv(T, TT)). One program walks TT consecutive tokens of BLOCK_D
+    channels. The input sequence is xs = [state[:, 1:4], x[0..T-1]]; rows past T are not stored."""
+    bd = ct.bid(0)
+    bt = ct.bid(1)
+    zero = ct.PaddingMode.ZERO
+    d_idx = bd * BLOCK_D + ct.arange(BLOCK_D, dtype=ct.int32)
+    bias_v = ct.astype(ct.gather(bias, (d_idx,), check_bounds=True), ct.float32)
+    w0 = ct.astype(ct.gather(weight, (d_idx, 0), check_bounds=True), ct.float32)
+    w1 = ct.astype(ct.gather(weight, (d_idx, 1), check_bounds=True), ct.float32)
+    w2 = ct.astype(ct.gather(weight, (d_idx, 2), check_bounds=True), ct.float32)
+    w3 = ct.astype(ct.gather(weight, (d_idx, 3), check_bounds=True), ct.float32)
+    s1 = ct.astype(ct.gather(state_in, (d_idx, 1), check_bounds=True), ct.float32)
+    s2 = ct.astype(ct.gather(state_in, (d_idx, 2), check_bounds=True), ct.float32)
+    s3 = ct.astype(ct.gather(state_in, (d_idx, 3), check_bounds=True), ct.float32)
+    for i in range(TT):
+        t = bt * TT + i
+        acc = bias_v
+        for k in range(4):
+            j = t + k
+            row = j - 3
+            xr = ct.astype(ct.load(x, index=(max(row, 0), bd), shape=(1, BLOCK_D),
+                                   padding_mode=zero).reshape((BLOCK_D,)), ct.float32)
+            sv = ct.where(j == 0, s1, ct.where(j == 1, s2, s3))
+            val = ct.where(row >= 0, xr, sv)
+            wk = w0 if k == 0 else (w1 if k == 1 else (w2 if k == 2 else w3))
+            acc = acc + wk * val
+        sig = ct.truediv(1.0, ct.add(1.0, ct.exp(ct.negative(acc))))
+        ct.store(output, index=(t, bd), tile=ct.reshape(ct.astype(acc * sig, output.dtype), (1, BLOCK_D)))
 
 
 @ct.kernel
