@@ -1,0 +1,25 @@
+{
+  "name": "nomic-embed-text-v1_5",
+  "hf_id": "nomic-ai/nomic-embed-text-v1.5",
+  "hf_revision": "e9b6763023c676ca8431644204f50c2b100d9aab",
+  "hf_dependencies": [
+    {
+      "repo_id": "nomic-ai/nomic-bert-2048"
+    }
+  ],
+  "bundle": "nomic-embed-text-v1_5.bundle",
+  "family": "nomic_bert",
+  "task": "text_to_embedding",
+  "precision": "fp32",
+  "max_sequence_length": 512,
+  "testcases": [
+    {
+      "name": "nomic-embed-text-v1_5",
+      "premerge": true,
+      "query": "What is the capital of France?",
+      "document": "The capital of France is Paris.",
+      "negative_document": "Photosynthesis converts light into chemical energy."
+    }
+  ],
+  "tensor_parallel_size": 1
+}
