@@ -53,32 +53,30 @@ def _require_weights(weights: dict, prefix: str) -> None:
         raise KeyError("vit checkpoint is missing expected tensors: " + ", ".join(missing))
 
 
-def _builder(precision, verbose):
+def _builder(verbose):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.builder_optimization_level = 3
-    if precision == "fp32":
-        # TF32 caps a conv-and-matmul graph near 0.99998 cosine by default,
-        # which hides real graph error behind a plausible-looking number.
-        config.clear_flag(trt.BuilderFlag.TF32)
+    # TF32 caps a conv-and-matmul graph near 0.99998 cosine by default,
+    # which hides real graph error behind a plausible-looking number.
+    config.clear_flag(trt.BuilderFlag.TF32)
     return builder, network, config
 
 
-def build_engine(weights, cfg, *, precision, verbose=False) -> bytes:
-    builder, network, config = _builder(precision, verbose)
-    work_np, work_trt = ((np.float16, trt.float16) if precision == "fp16"
-                         else (np.float32, trt.float32))
+def build_engine(weights, cfg, *, verbose=False) -> bytes:
+    builder, network, config = _builder(verbose)
+    # fp32 throughout. build() refuses every other precision and records the
+    # measurement behind that refusal.
+    work_np = np.float32
     prefix = cfg["prefix"]
     width = cfg["hidden_size"]
     patch = cfg["patch_size"]
     grid = cfg["grid"]
     size = cfg["image_size"]
 
-    pixels = network.add_input("pixel_values", trt.float32, (1, 3, size, size))
-    source = (pixels if pixels.dtype == work_trt
-              else network.add_cast(pixels, work_trt).get_output(0))
+    source = network.add_input("pixel_values", trt.float32, (1, 3, size, size))
 
     patches = g.add_conv2d(network, source,
                            weights[f"{prefix}embeddings.patch_embeddings.projection.weight"],
@@ -114,10 +112,8 @@ def build_engine(weights, cfg, *, precision, verbose=False) -> bytes:
     logits = g.add_linear(network, class_row.get_output(0), weights["classifier.weight"],
                           weights["classifier.bias"], dtype=work_np)
 
-    out = (logits if logits.dtype == trt.float32
-           else network.add_cast(logits, trt.float32).get_output(0))
-    out.name = "logits"
-    network.mark_output(out)
+    logits.name = "logits"
+    network.mark_output(logits)
 
     plan = builder.build_serialized_network(network, config)
     if plan is None:
@@ -152,9 +148,18 @@ def build(request, writer) -> None:
         # the image size and is not a free parameter.
         raise NotImplementedError("vit derives its sequence length from the image size")
 
+    # fp32 only. fp16 is refused rather than built unqualified, because
+    # measured on this checkpoint it cannot be gated. Against the reference a
+    # correct fp32 engine is 1.0e-05 off, an all-fp16 one is 6.9e-03, and the
+    # weakest defect the E2E gate catches - the tanh GELU - is 1.9e-02. An
+    # fp16 tolerance would have to sit above its own noise and below that
+    # break, which leaves under 3x of room. Taking the attention softmax in
+    # fp32 does not recover it: measured, 6.9e-03 either way, so the loss is
+    # in the matmuls themselves and not in a reduction done too narrowly.
     precision = str(request.precision).lower()
-    if precision not in {"fp16", "fp32"}:
-        raise ValueError(f"Unsupported vit precision: {precision}")
+    if precision != "fp32":
+        raise NotImplementedError(
+            f"vit builds fp32 only; {precision} is not qualified for this family")
 
     model_dir = Path(request.model_dir)
     weights = _open_checkpoint(model_dir)
@@ -173,7 +178,7 @@ def build(request, writer) -> None:
 
     writer.set_header(family="vit", task=request.task, backend=request.backend)
     writer.add_bytes("model.plan", build_engine(
-        weights, cfg, precision=precision, verbose=bool(request.verbose)))
+        weights, cfg, verbose=bool(request.verbose)))
     writer.add_json(
         "runtime.json",
         {

@@ -92,16 +92,15 @@ def _pad_token_id(model_dir: Path) -> int:
     raise ValueError(f"siglip pad token {pad_token!r} is not in the vocabulary")
 
 
-def _builder(precision, verbose):
+def _builder(verbose):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.builder_optimization_level = 3
-    if precision == "fp32":
-        # TF32 caps a conv-and-matmul graph near 0.99998 cosine by default,
-        # which hides real graph error behind a plausible-looking number.
-        config.clear_flag(trt.BuilderFlag.TF32)
+    # TF32 caps a conv-and-matmul graph near 0.99998 cosine by default,
+    # which hides real graph error behind a plausible-looking number.
+    config.clear_flag(trt.BuilderFlag.TF32)
     return builder, network, config
 
 
@@ -112,34 +111,29 @@ def _serialize(builder, network, config, what):
     return bytes(plan)
 
 
-def build_vision_engine(weights, cfg, *, precision, verbose=False) -> bytes:
-    builder, network, config = _builder(precision, verbose)
-    work_np, work_trt = ((np.float16, trt.float16) if precision == "fp16"
-                         else (np.float32, trt.float32))
+def build_vision_engine(weights, cfg, *, verbose=False) -> bytes:
+    builder, network, config = _builder(verbose)
+    # fp32 throughout. build() refuses every other precision and records the
+    # measurement behind that refusal.
+    work_np = np.float32
     size = cfg["vision"]["image_size"]
-    pixels = network.add_input("pixel_values", trt.float32, (1, 3, size, size))
-    source = (pixels if pixels.dtype == work_trt
-              else network.add_cast(pixels, work_trt).get_output(0))
+    source = network.add_input("pixel_values", trt.float32, (1, 3, size, size))
     embeds = vision_builder.build_vision_tower(network, source, weights, cfg["vision"],
                                                dtype=work_np)
-    out = (embeds if embeds.dtype == trt.float32
-           else network.add_cast(embeds, trt.float32).get_output(0))
-    out.name = "image_embeds"
-    network.mark_output(out)
+    embeds.name = "image_embeds"
+    network.mark_output(embeds)
     return _serialize(builder, network, config, "vision")
 
 
-def build_text_engine(weights, cfg, *, precision, verbose=False) -> bytes:
-    builder, network, config = _builder(precision, verbose)
-    work_np = np.float16 if precision == "fp16" else np.float32
+def build_text_engine(weights, cfg, *, verbose=False) -> bytes:
+    builder, network, config = _builder(verbose)
+    work_np = np.float32
     max_text_len = cfg["text"]["max_text_len"]
     input_ids = network.add_input("input_ids", trt.int32, (max_text_len,))
     embeds = text_builder.build_text_tower(network, input_ids, weights, cfg["text"],
                                            dtype=work_np)
-    out = (embeds if embeds.dtype == trt.float32
-           else network.add_cast(embeds, trt.float32).get_output(0))
-    out.name = "text_embeds"
-    network.mark_output(out)
+    embeds.name = "text_embeds"
+    network.mark_output(embeds)
     return _serialize(builder, network, config, "text")
 
 
@@ -166,9 +160,17 @@ def build(request, writer) -> None:
     if request.mtp_seq_len is not None:
         raise NotImplementedError("siglip does not support MTP speculative decoding")
 
+    # fp32 only. Measured on this checkpoint against the reference, a
+    # correct fp32 engine is 2.1e-07 off on the embeddings and an all-fp16
+    # one is 3.6e-04, against the 1e-04 the E2E gate allows and the 8.4e-04
+    # the weakest defect it catches - the exact GELU - is worth. The
+    # relevance logit moves the same way, 3.6e-06 to 9.9e-03 against a
+    # 2e-03 tolerance. Under 3x separates fp16's own noise from the break,
+    # so fp16 is refused rather than admitted under a loosened gate.
     precision = str(request.precision).lower()
-    if precision not in {"fp16", "fp32"}:
-        raise ValueError(f"Unsupported siglip precision: {precision}")
+    if precision != "fp32":
+        raise NotImplementedError(
+            f"siglip builds fp32 only; {precision} is not qualified for this family")
 
     model_dir = Path(request.model_dir)
     weights = _open_checkpoint(model_dir)
@@ -204,9 +206,9 @@ def build(request, writer) -> None:
 
     writer.set_header(family="siglip", task=request.task, backend=request.backend)
     writer.add_bytes("vision.plan", build_vision_engine(
-        weights, cfg, precision=precision, verbose=bool(request.verbose)))
+        weights, cfg, verbose=bool(request.verbose)))
     writer.add_bytes("text.plan", build_text_engine(
-        weights, cfg, precision=precision, verbose=bool(request.verbose)))
+        weights, cfg, verbose=bool(request.verbose)))
     writer.add_bytes("tokenizer.json", tokenizer.read_bytes())
     writer.add_json(
         "runtime.json",

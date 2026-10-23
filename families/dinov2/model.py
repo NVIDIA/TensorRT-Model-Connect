@@ -54,31 +54,29 @@ def _require_weights(weights: dict) -> None:
         raise KeyError("dinov2 checkpoint is missing expected tensors: " + ", ".join(missing))
 
 
-def _builder(precision, verbose):
+def _builder(verbose):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.builder_optimization_level = 3
-    if precision == "fp32":
-        # TF32 caps a conv-and-matmul graph near 0.99998 cosine by default,
-        # which hides real graph error behind a plausible-looking number.
-        config.clear_flag(trt.BuilderFlag.TF32)
+    # TF32 caps a conv-and-matmul graph near 0.99998 cosine by default,
+    # which hides real graph error behind a plausible-looking number.
+    config.clear_flag(trt.BuilderFlag.TF32)
     return builder, network, config
 
 
-def build_engine(weights, cfg, *, precision, verbose=False) -> bytes:
-    builder, network, config = _builder(precision, verbose)
-    work_np, work_trt = ((np.float16, trt.float16) if precision == "fp16"
-                         else (np.float32, trt.float32))
+def build_engine(weights, cfg, *, verbose=False) -> bytes:
+    builder, network, config = _builder(verbose)
+    # fp32 throughout. build() refuses every other precision and records the
+    # measurement behind that refusal.
+    work_np = np.float32
     width = cfg["hidden_size"]
     patch = cfg["patch_size"]
     grid = cfg["grid"]
     size = cfg["image_size"]
 
-    pixels = network.add_input("pixel_values", trt.float32, (1, 3, size, size))
-    source = (pixels if pixels.dtype == work_trt
-              else network.add_cast(pixels, work_trt).get_output(0))
+    source = network.add_input("pixel_values", trt.float32, (1, 3, size, size))
 
     patches = g.add_conv2d(network, source,
                            weights["embeddings.patch_embeddings.projection.weight"],
@@ -108,10 +106,8 @@ def build_engine(weights, cfg, *, precision, verbose=False) -> bytes:
     hidden = g.add_layer_norm(network, hidden, weights["layernorm.weight"],
                               weights["layernorm.bias"], cfg["eps"])
 
-    out = (hidden if hidden.dtype == trt.float32
-           else network.add_cast(hidden, trt.float32).get_output(0))
-    out.name = "last_hidden_state"
-    network.mark_output(out)
+    hidden.name = "last_hidden_state"
+    network.mark_output(hidden)
 
     plan = builder.build_serialized_network(network, config)
     if plan is None:
@@ -147,9 +143,18 @@ def build(request, writer) -> None:
         raise NotImplementedError(
             "dinov2 derives its sequence length from the image size")
 
+    # fp32 only, and this family is the clearest case for refusing fp16.
+    # Against the reference a correct fp32 engine is 4.5e-04 off; an all-fp16
+    # one is about 1.0, on features whose own peak is 25.6. The weakest
+    # defect the E2E gate catches - the tanh GELU - is 6.2e-02, so fp16's
+    # error is sixteen times larger than the break it would have to catch: an
+    # fp16 gate would pass a broken build. Cosine stays above 0.9999 through
+    # all of it, which is exactly why cosine is not the gate. Taking the
+    # attention softmax in fp32 was measured and moves nothing.
     precision = str(request.precision).lower()
-    if precision not in {"fp16", "fp32"}:
-        raise ValueError(f"Unsupported dinov2 precision: {precision}")
+    if precision != "fp32":
+        raise NotImplementedError(
+            f"dinov2 builds fp32 only; {precision} is not qualified for this family")
 
     model_dir = Path(request.model_dir)
     weights = _open_checkpoint(model_dir)
@@ -168,7 +173,7 @@ def build(request, writer) -> None:
 
     writer.set_header(family="dinov2", task=request.task, backend=request.backend)
     writer.add_bytes("model.plan", build_engine(
-        weights, cfg, precision=precision, verbose=bool(request.verbose)))
+        weights, cfg, verbose=bool(request.verbose)))
     writer.add_json(
         "runtime.json",
         {

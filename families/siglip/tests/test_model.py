@@ -17,7 +17,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from families.siglip import config as config_module
+from families.siglip import config as config_module, model as model_module
+from tensorrt_model_connect import BuildRequest
 
 _HIDDEN = 128
 _INTERMEDIATE = 256
@@ -149,3 +150,21 @@ def test_non_contiguous_layer_indices_are_refused(tmp_path: Path) -> None:
         (_INTERMEDIATE, _HIDDEN), np.float32)
     with pytest.raises(ValueError, match="contiguous"):
         config_module.resolve(_model_dir(tmp_path), weights)
+
+
+def test_fp16_is_refused(tmp_path: Path) -> None:
+    """fp16 is refused at build time, not merely left out of the manifests.
+
+    Measured against the reference, an all-fp16 engine is 3.6e-04 off on the
+    embeddings where a correct fp32 one is 2.1e-07, against a 1e-04 gate and
+    an 8.4e-04 break. model.build carries the numbers.
+    """
+    request = BuildRequest(
+        model_dir=tmp_path,
+        output_path=tmp_path / "siglip.bundle",
+        family="siglip",
+        task="text_image_to_relevance",
+        precision="fp16",
+    )
+    with pytest.raises(NotImplementedError, match="fp32 only"):
+        model_module.build(request, writer=None)

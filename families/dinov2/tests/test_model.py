@@ -17,7 +17,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from families.dinov2 import config as config_module, position
+from families.dinov2 import config as config_module, model as model_module, position
+from tensorrt_model_connect import BuildRequest
 
 _HIDDEN = 128
 _INTERMEDIATE = 512
@@ -147,3 +148,23 @@ def test_the_position_table_is_left_alone_when_the_grid_already_matches() -> Non
 def test_a_table_of_the_wrong_length_is_refused() -> None:
     with pytest.raises(ValueError, match="rows"):
         position.interpolate_position_table(np.zeros((10, 4), np.float32), _TRAINED_GRID, 16)
+
+
+def test_fp16_is_refused(tmp_path: Path) -> None:
+    """fp16 is refused at build time, not merely left out of the manifests.
+
+    Measured against the reference, an all-fp16 engine is about 1.0 off on
+    features whose peak is 25.6, where a correct fp32 one is 4.5e-04 and the
+    weakest defect the E2E gate catches is 6.2e-02. fp16's error is the
+    larger of the two, so an fp16 gate would pass a broken build.
+    model.build carries the numbers.
+    """
+    request = BuildRequest(
+        model_dir=tmp_path,
+        output_path=tmp_path / "dinov2.bundle",
+        family="dinov2",
+        task="image_to_token_and_pooled_features",
+        precision="fp16",
+    )
+    with pytest.raises(NotImplementedError, match="fp32 only"):
+        model_module.build(request, writer=None)
