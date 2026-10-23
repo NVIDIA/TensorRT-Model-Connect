@@ -42,20 +42,37 @@ def _mm(a, b):
     return ct.astype(ct.matmul(a, b), ct.float32)
 
 
-def _solve_unit_lower(A, CS):
-    """(I - A)^-1 style solve used by the WY form: rows of strict-lower `A` folded in order.
+_SOLVE_BLOCK = 8
+# Doubling steps that merge the diagonal blocks: log2(chunk / block).
+_SOLVE_MERGES = max(1, (int(os.environ.get("TRTMC_GDN_PREFILL_CHUNK", "32")) // _SOLVE_BLOCK).bit_length() - 1)
 
-    The serial order is kept on purpose: a Neumann/doubling product is unstable in fp32 on the
-    nearly collinear keys of real models (see prefill_graph.py).
+
+def _solve_unit_lower(A, CS):
+    """T = (I - A)^-1 for strict-lower `A`, the triangular solve of the WY form.
+
+    The diagonal blocks of _SOLVE_BLOCK rows are solved row by row (all blocks at once, one
+    matmul per row index), then the blocks are merged with the nilpotent series of the
+    off-diagonal part, (I + N)^-1 = (I - N)(I + N^2)(I + N^4)... With 8-row blocks the series
+    stays accurate on the nearly collinear keys of real models, where a plain Neumann product
+    over the whole chunk is not.
     """
     offs = ct.arange(CS, dtype=ct.int32)
-    for i in range(1, CS):
-        is_row = ct.expand_dims(offs == i, axis=1)
-        row = ct.sum(ct.where(is_row, A, 0.0), axis=0)
-        correction = ct.sum(ct.expand_dims(row, axis=1) * A, axis=0)
-        A = A + ct.where(is_row, ct.expand_dims(correction, axis=0), 0.0)
-    eye = ct.where(ct.expand_dims(offs, axis=1) == ct.expand_dims(offs, axis=0), 1.0, 0.0)
-    return A + eye
+    rows = ct.expand_dims(offs, axis=1)
+    cols = ct.expand_dims(offs, axis=0)
+    in_block = (rows // _SOLVE_BLOCK) == (cols // _SOLVE_BLOCK)
+    diag = ct.where(in_block, A, 0.0)
+    off_diag = ct.where(in_block, 0.0, A)
+    for i in range(1, _SOLVE_BLOCK):
+        is_row = ct.expand_dims((offs % _SOLVE_BLOCK) == i, axis=1)
+        correction = _mm(ct.where(is_row, diag, 0.0), diag)
+        diag = diag + ct.where(is_row, correction, 0.0)
+    inv_diag = diag + ct.where(rows == cols, 1.0, 0.0)
+    N = -_mm(inv_diag, off_diag)
+    X = inv_diag - _mm(N, inv_diag)
+    for _ in range(_SOLVE_MERGES - 1):
+        N = _mm(N, N)
+        X = X + _mm(N, X)
+    return X
 
 
 @ct.kernel
