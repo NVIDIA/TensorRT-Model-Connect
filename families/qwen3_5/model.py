@@ -550,6 +550,10 @@ class _Qwen35Model:
         if quant_ctx is not None:
             # The plan inspector reads kernel names from the engine.
             trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+            if quant_ctx.has_fp8_weights:
+                # TensorRT's fused gate/up (dual GEMM) kernel fails to compile with
+                # scalar-scale FP8 inputs, so the fusion is turned off for FP8 builds.
+                trt_config.build_route = "-peep:match_dual_gemm=off"
 
         # --- Inputs ---
         token_id = network.add_input("token_id", trt.int32, (1,))
@@ -1479,11 +1483,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         if request.tensor_parallel_size != 1:
             raise NotImplementedError("Qwen3.5 does not expose a tensor-parallel builder")
         quant_ctx = None
-        if request.quantization == "nvfp4":
+        if request.quantization in {"nvfp4", "fp8"}:
             if precision != "fp16":
-                raise ValueError("Qwen3.5 nvfp4 builds require precision fp16")
+                raise ValueError(f"Qwen3.5 {request.quantization} builds require precision fp16")
             if request.fp32_layers:
-                raise ValueError("Qwen3.5 nvfp4 builds do not support fp32_layers")
+                raise ValueError(f"Qwen3.5 {request.quantization} builds do not support fp32_layers")
             text_cfg = config.raw.get("text_config", config.raw)
             layer_types = _parse_layer_types(
                 text_cfg.get("layer_types", ["linear"] * config.num_hidden_layers)
@@ -1491,10 +1495,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             quant_ctx = calibrate_qwen35(
                 model_dir,
                 graph_ops,
-                "nvfp4",
+                request.quantization,
                 layer_types=layer_types,
                 num_heads=config.num_attention_heads,
                 head_dim=config.head_dim,
+                config=config,
             )
         elif request.quantization not in {None, "none"}:
             raise NotImplementedError(

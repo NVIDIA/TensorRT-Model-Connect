@@ -110,9 +110,10 @@
           "type": "string",
           "choices": [
             "none",
-            "nvfp4"
+            "nvfp4",
+            "fp8"
           ],
-          "help": "Build from an already quantized ModelOpt NVFP4 checkpoint (for example AxionML/Qwen3.5-9B-NVFP4, fp16 only); its packed weights and scales are used as-is"
+          "help": "nvfp4: build from an already quantized ModelOpt NVFP4 checkpoint (for example AxionML/Qwen3.5-9B-NVFP4); its packed weights and scales are used as-is. fp8: quantize the original BF16 checkpoint to FP8 at build time with committed activation scales (Qwen3.5-0.8B, 2B, 4B, 9B). Both are fp16 only"
         },
         {
           "name": "execution_variant",
