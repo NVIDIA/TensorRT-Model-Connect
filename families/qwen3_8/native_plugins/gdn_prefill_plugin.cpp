@@ -22,7 +22,7 @@
 // Outputs: out[T,d_inner], conv_state'[conv_dim,4]  (same type as qkv)
 //          ssm_state'[H,D,D]                                      (fp32)
 // Workspace: y[T,conv_dim] (act), g[T,H] (fp32), beta[T,H] (act), o[T,H,D] (act),
-//            q, k, v_corr, k_cumdecay [H,T,D] (fp32), g_cum [H,T] (fp32).
+//            kq [H,2T,D], k_w, v_corr [H,T,D], qk_mask [H,T,chunk], g_cum [H,T] (fp32).
 
 #include <NvInferRuntime.h>
 #include <array>
@@ -202,13 +202,14 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
         void* const o = static_cast<char*>(beta) + align_up(Tm * H * act_bytes_);
         std::size_t const hd_bytes = align_up(static_cast<std::size_t>(H) * Tm * D * 4);
         int32_t const CS = chunk_;
+        std::size_t const CS_ = chunk_;
         int32_t const NC = (T + CS - 1) / CS;
         char* const wq = static_cast<char*>(o) + align_up(Tm * H * D * act_bytes_);
-        void* const qn = wq;
-        void* const kn = wq + hd_bytes;
-        void* const vc = wq + 2 * hd_bytes;
-        void* const kc = wq + 3 * hd_bytes;
-        void* const gc = wq + 4 * hd_bytes;
+        void* const kq = wq;                    // [H, NC, 2 CS, D]: k_cumdecay, then q * exp(g_cum)
+        void* const kw = wq + 2 * hd_bytes;     // [H, NC, CS, D]
+        void* const vc = wq + 3 * hd_bytes;     // [H, NC, CS, D]
+        void* const qm = wq + 4 * hd_bytes;     // [H, NC, CS, CS]
+        void* const gc = wq + 4 * hd_bytes + align_up(static_cast<std::size_t>(H) * Tm * CS_ * 4);
         auto* const yb = static_cast<char*>(y);
         std::size_t const qk_bytes = static_cast<std::size_t>(NK) * D * act_bytes_;
         auto cast = [](void const* p) { return const_cast<void*>(p); };
@@ -257,10 +258,10 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
             {yb + 2 * qk_bytes, 4, {1, T, H, D}, row_strides},
             {g, 3, {1, T, H, 0}},
             {beta, 3, {1, T, H, 0}},
-            {qn, 4, {H, NC, CS, D}},
-            {kn, 4, {H, NC, CS, D}},
+            {kq, 4, {H, NC, 2 * CS, D}},
+            {kw, 4, {H, NC, CS, D}},
+            {qm, 4, {H, NC, CS, CS}},
             {vc, 4, {H, NC, CS, D}},
-            {kc, 4, {H, NC, CS, D}},
             {gc, 3, {H, NC, CS, 0}},
         }};
         if (!launch(kernels[3], {static_cast<unsigned>(H), static_cast<unsigned>(NC), 1}, static_cast<unsigned>(threads_[3]),
@@ -269,10 +270,10 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
 
         // 4b. state passing over the chunks and the chunk outputs
         std::array<Arr, 8> inter{{
-            {qn, 4, {H, NC, CS, D}},
-            {kn, 4, {H, NC, CS, D}},
+            {kq, 4, {H, NC, 2 * CS, D}},
+            {kw, 4, {H, NC, CS, D}},
+            {qm, 4, {H, NC, CS, CS}},
             {vc, 4, {H, NC, CS, D}},
-            {kc, 4, {H, NC, CS, D}},
             {gc, 3, {H, NC, CS, 0}},
             {o, 4, {1, T, H, D}},
             {cast(inputs[10]), 4, {1, H, D, D}},
@@ -321,7 +322,8 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
     std::size_t workspace_bytes() const noexcept {
         std::size_t const T = seq_len_, H = num_heads_, D = head_dim_, CD = conv_dim_;
         return align_up(T * CD * act_bytes_) + align_up(T * H * 4) + align_up(T * H * act_bytes_) +
-               align_up(T * H * D * act_bytes_) + 4 * align_up(H * T * D * 4) + align_up(H * T * 4);
+               align_up(T * H * D * act_bytes_) + 4 * align_up(H * T * D * 4) +
+               align_up(H * T * static_cast<std::size_t>(chunk_) * 4) + align_up(H * T * 4);
     }
 
     int32_t num_heads_{0};

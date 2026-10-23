@@ -151,8 +151,8 @@ def block_sizes() -> tuple[int, int, int]:
 
 
 def prefill_block_v() -> int:
-    """V tile of the prefill inter-chunk kernel (32 was fastest on RTX 5090)."""
-    return int(os.environ.get("TRTMC_GDN_PREFILL_BLOCK_V", "32"))
+    """V tile of the prefill inter-chunk kernel (64 was fastest on RTX 5090)."""
+    return int(os.environ.get("TRTMC_GDN_PREFILL_BLOCK_V", "64"))
 
 
 def prefill_chunk() -> int:
@@ -356,13 +356,14 @@ def compile_prefill_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, 
         "intra": (K.intra_kernel, [
             arr(act, (1, T, NK, D), qkv_rows), arr(act, (1, T, NK, D), qkv_rows),
             arr(act, (1, T, H, D), qkv_rows), arr(f32, (1, T, H)), arr(act, (1, T, H)),
-            arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk, D)),
-            arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk)),
+            arr(f32, (H, NC, 2 * chunk, D)), arr(f32, (H, NC, chunk, D)),
+            arr(f32, (H, NC, chunk, chunk)), arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk)),
             float(D) ** -0.5, chunk, pow2(D)]),
         "inter": (K.inter_kernel, [
-            arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk, D)),
-            arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk)), arr(act, (1, T, H, D)),
-            arr(f32, (1, H, D, D)), arr(f32, (1, H, D, D)), chunk, pow2(D), block_v]),
+            arr(f32, (H, NC, 2 * chunk, D)), arr(f32, (H, NC, chunk, D)),
+            arr(f32, (H, NC, chunk, chunk)), arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk)),
+            arr(act, (1, T, H, D)), arr(f32, (1, H, D, D)), arr(f32, (1, H, D, D)),
+            chunk, pow2(D), block_v]),
         "norm": (K.norm_kernel, [
             arr(act, (TH, D)), arr(act, (TH, D)), arr(f32, (H, D)), arr(i32, (1,)),
             arr(act, (TH, D)), _NORM_EPS, D, pow2(D), H]),
