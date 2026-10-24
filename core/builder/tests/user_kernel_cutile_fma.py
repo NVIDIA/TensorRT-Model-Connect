@@ -4,7 +4,8 @@
 """cuTile kernels for the toy user kernel tests: ``out = a * b + c + 1``.
 
 ``fma_tile`` works on flat arrays. ``fma_2d_tile`` works on 2-D arrays. ``fma_bcast_tile`` has the
-second input broadcast along rows and the third along columns.
+second input broadcast along rows and the third along columns. ``fma_3d_tile`` works on 3-D arrays
+with any strides, for example channel-last inputs.
 
 This module needs ``cuda.tile``. The tests import it only after checking that it is installed.
 It has no ``from __future__ import annotations`` because cuTile reads the annotations.
@@ -43,3 +44,14 @@ def fma_bcast_tile(x, s, r, out, TR: ConstInt, TC: ConstInt):
     ts = ct.load(s, index=(0, j), shape=(1, TC), padding_mode=ct.PaddingMode.ZERO)
     tr = ct.load(r, index=(i, 0), shape=(TR, 1), padding_mode=ct.PaddingMode.ZERO)
     ct.store(out, index=(i, j), tile=tx * ts + tr + 1.0)
+
+
+@ct.kernel
+def fma_3d_tile(a, b, c, out, TA: ConstInt, TB: ConstInt, TC: ConstInt):
+    i = ct.bid(0)
+    j = ct.bid(1)
+    k = ct.bid(2)
+    ta = ct.load(a, index=(i, j, k), shape=(TA, TB, TC), padding_mode=ct.PaddingMode.ZERO)
+    tb = ct.load(b, index=(i, j, k), shape=(TA, TB, TC), padding_mode=ct.PaddingMode.ZERO)
+    tc = ct.load(c, index=(i, j, k), shape=(TA, TB, TC), padding_mode=ct.PaddingMode.ZERO)
+    ct.store(out, index=(i, j, k), tile=ta * tb + tc + 1.0)

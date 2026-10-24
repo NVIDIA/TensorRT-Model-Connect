@@ -23,7 +23,9 @@ contiguous tensors with int64 shape and stride. Thread block count is ``ceil(n /
 
 Kernel contract (cuTile, N-D): each array keeps its own rank and shape (give ``ranks``), so an
 input can be smaller than the output, for example the operand of a broadcast that the pattern
-names. The last stride of every array is 1. ``tiles`` has one entry per output dimension (at most
+names. The last stride of every array is 1, unless the kernel is built with ``strided=True``: then
+the arrays can have any element strides, for example a channel-last input, and the kernel indexes
+them through their strides. ``tiles`` has one entry per output dimension (at most
 3) and is passed to the kernel as constexpr parameters after the arrays. ``ct.bid(d)`` is the block
 index along output dimension ``d``, and the grid is ``ceil(dim / tile)`` per dimension.
 
@@ -69,6 +71,7 @@ class UserKernel:
     # check in ``user_kernels`` is skipped.
     arch: str = ""
     tiles: tuple[int, ...] = ()
+    strided: bool = False
 
     @classmethod
     def from_cutile(
@@ -82,6 +85,7 @@ class UserKernel:
         num_arrays: int | None = None,
         ranks: Sequence[int] | None = None,
         dtype: str | Sequence[str] = "float32",
+        strided: bool = False,
         gpu_code: str | None = None,
     ) -> UserKernel:
         """Build a cuTile kernel into a cubin.
@@ -94,7 +98,9 @@ class UserKernel:
         inputs, then the output), and ``tiles`` has one entry per output dimension. The kernel is
         ``(arr_0, ..., arr_k, TILE_0, ..., TILE_{rank-1})``.
 
-        ``dtype`` is one cuTile dtype name for all arrays or one per array.
+        ``dtype`` is one cuTile dtype name for all arrays or one per array. With ``strided`` the
+        cubin makes no assumption about the strides (N-D mode only), so inputs with another layout
+        than row-major work. Without it the compiler rejects such inputs.
         """
         if (tile is None) == (tiles is None):
             raise ValueError("give exactly one of tile (flat mode) and tiles (N-D mode)")
@@ -109,6 +115,8 @@ class UserKernel:
             tile_args = tuple(tiles)
             if not 1 <= len(tile_args) <= 3 or ranks[-1] != len(tile_args):
                 raise ValueError("tiles needs one entry (at most 3) per output dimension")
+        if strided and tiles is None:
+            raise ValueError("strided needs the N-D mode (tiles and ranks)")
         entry = f"{name}_tile"
         gpu_code = gpu_code or device_arch()
         if gpu_code is None:
@@ -119,6 +127,7 @@ class UserKernel:
             dtype=dtype,
             tiles=tile_args,
             entry=entry,
+            strided=strided,
             gpu_code=gpu_code,
         )
         return cls(
@@ -129,6 +138,7 @@ class UserKernel:
             entry=entry,
             tile=tile or 0,
             tiles=tuple(tiles) if tiles is not None else (),
+            strided=strided,
             arch=gpu_code,
         )
 
@@ -140,6 +150,7 @@ def cutile_cubin(
     dtype: str | Sequence[str],
     tiles: Sequence[int],
     entry: str,
+    strided: bool = False,
     gpu_code: str | None = None,
 ) -> bytes:
     """Compile ``kernel`` for arrays of the given ranks (int64 shape and stride) into a cubin."""
@@ -163,7 +174,7 @@ def cutile_cubin(
             getattr(ct, element_name),
             rank,
             index_dtype=ct.int64,
-            stride_constant=(None,) * (rank - 1) + (1,),
+            stride_constant=None if strided else (None,) * (rank - 1) + (1,),
             alias_groups=[],
             stride_lower_bound_incl=0,
             may_alias_internally=False,
@@ -258,6 +269,8 @@ def _tag_pattern(kernel: UserKernel, directory: str | None) -> str:
             f", nvm.user_kernel_cubin = {_mlir_string(path)}"
             f", nvm.user_kernel_entry = {_mlir_string(kernel.entry)}"
         )
+        if kernel.strided:
+            attrs += ", nvm.user_kernel_strided = true"
         if kernel.tiles:
             attrs += f", nvm.user_kernel_tiles = array<i64: {', '.join(map(str, kernel.tiles))}>"
         else:

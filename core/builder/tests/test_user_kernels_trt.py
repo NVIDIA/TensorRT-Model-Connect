@@ -250,3 +250,89 @@ def test_cutile_nd_kernel_with_non_flat_and_broadcast_inputs(broadcast):
     if np.allclose(replaced, baseline, rtol=1e-5, atol=1e-6):
         pytest.skip("this TensorRT build ignores the user kernel option")
     np.testing.assert_allclose(replaced, original + 1.0, rtol=1e-5, atol=1e-6)
+
+
+C3, H3, W3 = 8, 4, 16
+_T3 = "!nvg.tensor<f32, {[8, 4, 16], stride_order = [2, 1, 0]}>"
+PATTERN_3D = f"""  nvg.graph @fma_3d_pattern(%a: {_T3}, %b: {_T3}, %c: {_T3}) -> {_T3}
+      attributes {{}} {{
+    %m = nvg.mul(%a, %b) : ({_T3}, {_T3}) -> {_T3}
+    %s = nvg.add(%m, %c) : ({_T3}, {_T3}) -> {_T3}
+    nvg.graph_return %s : {_T3}
+  }}"""
+
+
+def _build_channel_last_engine():
+    """Inputs are channel-last (HWC): the last dimension has stride C, not 1. Output is linear."""
+    logger = trt.Logger(trt.Logger.ERROR)
+    builder = trt.Builder(logger)
+    network = builder.create_network(0)
+    inputs = []
+    for name in "abc":
+        tensor = network.add_input(name, trt.float32, (C3, H3, W3))
+        tensor.allowed_formats = 1 << int(trt.TensorFormat.HWC)
+        inputs.append(tensor)
+    prod = network.add_elementwise(inputs[0], inputs[1], trt.ElementWiseOperation.PROD)
+    total = network.add_elementwise(prod.get_output(0), inputs[2], trt.ElementWiseOperation.SUM)
+    out = total.get_output(0)
+    out.name = "out"
+    out.allowed_formats = 1 << int(trt.TensorFormat.LINEAR)
+    network.mark_output(out)
+    config = builder.create_builder_config()
+    config.set_flag(trt.BuilderFlag.DIRECT_IO)
+    blob = builder.build_serialized_network(network, config)
+    assert blob is not None, "engine build failed"
+    return trt.Runtime(logger).deserialize_cuda_engine(blob)
+
+
+def _run_channel_last(engine, logical):
+    """``logical`` are (C, H, W) arrays. They are stored channel-last: strides (1, W * C, C)."""
+    context = engine.create_execution_context()
+    tensors = [
+        torch.from_numpy(h).cuda().permute(1, 2, 0).contiguous().permute(2, 0, 1) for h in logical
+    ]
+    out = torch.empty((C3, H3, W3), dtype=torch.float32, device="cuda")
+    for name, tensor in zip("abc", tensors):
+        assert tensor.stride() == (1, W3 * C3, C3)
+        context.set_tensor_address(name, tensor.data_ptr())
+    context.set_tensor_address("out", out.data_ptr())
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        assert context.execute_async_v3(stream.cuda_stream)
+    stream.synchronize()
+    return out.cpu().numpy()
+
+
+@pytest.mark.parametrize("strided", [True, False])
+def test_cutile_kernel_with_channel_last_inputs(strided):
+    """Inputs with a last stride other than 1 need a kernel that is built strided."""
+    pytest.importorskip("cuda.tile")
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU")
+    from .user_kernel_cutile_fma import fma_3d_tile
+
+    kernel = UserKernel.from_cutile(
+        "user_fma_3d",
+        PATTERN_3D,
+        fma_3d_tile,
+        tiles=(4, 2, 8),
+        ranks=[3, 3, 3, 3],
+        strided=strided,
+    )
+    rng = np.random.default_rng(0)
+    logical = [rng.standard_normal((C3, H3, W3)).astype(np.float32) for _ in range(3)]
+    original = logical[0] * logical[1] + logical[2]
+
+    baseline = _run_channel_last(_build_channel_last_engine(), logical)
+    np.testing.assert_allclose(baseline, original, rtol=1e-5, atol=1e-6)
+    if not strided:
+        # The default kernel assumes a last stride of 1, so the compiler refuses the region and
+        # the engine build fails instead of computing with the wrong layout.
+        with user_kernels([kernel]), pytest.raises(AssertionError, match="engine build failed"):
+            _build_channel_last_engine()
+        return
+    with user_kernels([kernel]):
+        replaced = _run_channel_last(_build_channel_last_engine(), logical)
+    if np.allclose(replaced, baseline, rtol=1e-5, atol=1e-6):
+        pytest.skip("this TensorRT build ignores the user kernel option")
+    np.testing.assert_allclose(replaced, original + 1.0, rtol=1e-5, atol=1e-6)
