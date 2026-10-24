@@ -8,9 +8,10 @@ import Link from '@docusaurus/Link';
 import Layout from '@theme/Layout';
 import {usePluginData} from '@docusaurus/useGlobalData';
 import RecipePageLayout from './RecipePageLayout';
+import styles from './styles.module.css';
 
 export default function ModelTaskRecipePage({taskSlug}) {
-  const {taskRecipes} = usePluginData('model-support-inventory');
+  const {taskRecipes, familyRecipes} = usePluginData('model-support-inventory');
   const task = taskRecipes.find((candidate) => candidate.slug === taskSlug);
 
   if (!task) {
@@ -19,7 +20,7 @@ export default function ModelTaskRecipePage({taskSlug}) {
 
   return (
     <RecipePageLayout title={`${task.label} model recipes`} description={task.description}>
-      <article>
+      <article className={styles.page}>
         <p><Link to="/models-recipes/model-recipes">← All model recipe tasks</Link></p>
         <h1>{task.label}</h1>
         <p>{task.description}</p>
@@ -31,30 +32,34 @@ export default function ModelTaskRecipePage({taskSlug}) {
         )}
 
         <h2>Model families</h2>
-        <table>
+        <div className={styles.tableScroll}><table>
           <thead>
             <tr>
               <th>Model family</th>
               <th>Declared recipes</th>
               <th>Exact checkpoint examples</th>
-              <th>Runtime CLI</th>
+              <th>Family native CLI</th>
             </tr>
           </thead>
           <tbody>
-            {task.families.map((family) => (
-              <tr key={family.family}>
+            {task.families.map((family) => {
+              const owner = familyRecipes.find((candidate) => candidate.family === family.family);
+              const commands = owner?.declaredCliCommands || [];
+              return <tr key={family.family}>
                 <td>
                   <Link to={`/models-recipes/model-recipes/families/${family.slug}`}>
                     <code>{family.family}</code>
                   </Link>
                 </td>
                 <td>{family.recipeCount}</td>
-                <td>{family.hfIds.map((hfId) => <div key={hfId}><code>{hfId}</code></div>)}</td>
-                <td>{family.cliCommands.map((command) => <div key={command}><code>trtmc {command}</code></div>)}</td>
-              </tr>
-            ))}
+                <td>{(owner?.profiles.filter((profile) => profile.tasks.includes(task.task)) || []).map((profile) => (
+                  <div key={profile.sourcePath}><Link to={profile.url}><code>{profile.hfId}</code></Link><small className={styles.note}>{profile.profile}</small></div>
+                ))}</td>
+                <td>{commands.length ? commands.map((command) => <div key={command}><code>trtmc {family.family} {command}</code></div>) : 'No native family CLI declared'}</td>
+              </tr>;
+            })}
           </tbody>
-        </table>
+        </table></div>
       </article>
     </RecipePageLayout>
   );
