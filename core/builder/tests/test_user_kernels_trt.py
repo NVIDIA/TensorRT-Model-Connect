@@ -263,7 +263,10 @@ PATTERN_3D = f"""  nvg.graph @fma_3d_pattern(%a: {_T3}, %b: {_T3}, %c: {_T3}) ->
 
 
 def _build_channel_last_engine():
-    """Inputs are channel-last (HWC): the last dimension has stride C, not 1. Output is linear."""
+    """Inputs are channel-last (HWC): the last dimension has stride C, not 1. Output is linear.
+
+    Returns None when TensorRT has no implementation for this on the GPU.
+    """
     logger = trt.Logger(trt.Logger.ERROR)
     builder = trt.Builder(logger)
     network = builder.create_network(0)
@@ -281,8 +284,7 @@ def _build_channel_last_engine():
     config = builder.create_builder_config()
     config.set_flag(trt.BuilderFlag.DIRECT_IO)
     blob = builder.build_serialized_network(network, config)
-    assert blob is not None, "engine build failed"
-    return trt.Runtime(logger).deserialize_cuda_engine(blob)
+    return trt.Runtime(logger).deserialize_cuda_engine(blob) if blob is not None else None
 
 
 def _run_channel_last(engine, logical):
@@ -323,16 +325,21 @@ def test_cutile_kernel_with_channel_last_inputs(strided):
     logical = [rng.standard_normal((C3, H3, W3)).astype(np.float32) for _ in range(3)]
     original = logical[0] * logical[1] + logical[2]
 
-    baseline = _run_channel_last(_build_channel_last_engine(), logical)
+    engine = _build_channel_last_engine()
+    if engine is None:
+        pytest.skip("TensorRT has no direct-IO implementation of channel-last inputs on this GPU")
+    baseline = _run_channel_last(engine, logical)
     np.testing.assert_allclose(baseline, original, rtol=1e-5, atol=1e-6)
     if not strided:
         # The default kernel assumes a last stride of 1, so the compiler refuses the region and
         # the engine build fails instead of computing with the wrong layout.
-        with user_kernels([kernel]), pytest.raises(AssertionError, match="engine build failed"):
-            _build_channel_last_engine()
+        with user_kernels([kernel]):
+            assert _build_channel_last_engine() is None
         return
     with user_kernels([kernel]):
-        replaced = _run_channel_last(_build_channel_last_engine(), logical)
+        engine = _build_channel_last_engine()
+    assert engine is not None
+    replaced = _run_channel_last(engine, logical)
     if np.allclose(replaced, baseline, rtol=1e-5, atol=1e-6):
         pytest.skip("this TensorRT build ignores the user kernel option")
     np.testing.assert_allclose(replaced, original + 1.0, rtol=1e-5, atol=1e-6)
