@@ -58,6 +58,8 @@ from .native_kv_attention_builder import (
 )
 
 from . import graph_ops
+from . import checkpoint_mapper
+from . import weight_stripping
 from . import graph_blocks
 
 
@@ -85,12 +87,42 @@ def _resolve_prefill_lengths(
     return resolved_opt, resolved_max
 
 
+
+def _configure_weight_stripping(trt_config: "trt.IBuilderConfig") -> None:
+    """Enable a stripped plan when a weight-strip session is active.
+
+    No-op otherwise, so a normal build is unaffected.
+    """
+    if weight_stripping.active() is None:
+        return
+
+    # TensorRT's placeholder validation requires both flags together.
+    trt_config.set_flag(trt.BuilderFlag.STRIP_PLAN)
+    trt_config.set_flag(trt.BuilderFlag.REFIT_INDIVIDUAL)
+
+    # Placeholder constants are rejected alongside sparsity.
+    if trt_config.get_flag(trt.BuilderFlag.SPARSE_WEIGHTS):
+        raise ValueError("weight stripping is incompatible with BuilderFlag.SPARSE_WEIGHTS")
+
+    # At builder optimization level >= 4 TensorRT may execute the build-time
+    # engine for multi-backend timing, which silently turns the
+    # refittable-weight omission off -- the build would succeed and quietly
+    # keep its weights. Fail loudly instead.
+    level = getattr(trt_config, "builder_optimization_level", None)
+    if level is not None and int(level) >= 4:
+        raise ValueError(
+            "weight stripping requires builder_optimization_level < 4 "
+            f"(got {level}); at level >= 4 TensorRT stops omitting refittable "
+            "weight values and the plan would still contain them")
+
+
 def _const_in_work_dtype(
     network: trt.INetworkDefinition,
     shape: tuple,
     values: np.ndarray,
     work_np_dtype: np.dtype,
     work_trt_dtype: trt.DataType,
+    name: str | None = None,
 ) -> trt.ITensor:
     """Create a constant in work_np_dtype storage and cast it to work_trt_dtype.
 
@@ -102,7 +134,8 @@ def _const_in_work_dtype(
     inputs to share a dtype) accept it. fp16 / fp32 builds are no-ops
     because work_np_dtype maps directly to work_trt_dtype.
     """
-    const = graph_ops.add_constant(network, shape, values, dtype=work_np_dtype)
+    const = graph_ops.add_constant(
+        network, shape, values, dtype=work_np_dtype, name=name)
     if const.dtype != work_trt_dtype:
         const = network.add_cast(const, work_trt_dtype).get_output(0)
     return const
@@ -124,8 +157,13 @@ def _make_matmul_fn(
     """
     if quant_ctx is None:
         def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
+            native = checkpoint_mapper.native_layout()
+            # Declare the constant in the weight's own dtype so a bf16 build
+            # wants bf16 -- then the checkpoint bytes need no conversion.
+            weight_dtype = rhs_weights.dtype if native else dtype
             return graph_ops.add_matmul_rhs_constant(
-                network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype)
+                network, lhs, lhs_w, rhs_w, rhs_weights, dtype=weight_dtype,
+                name=weight_name, hf_layout=native)
         return matmul
 
     def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
@@ -385,6 +423,7 @@ def build_dual_profile_decoder_engine(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 3
+    _configure_weight_stripping(trt_config)
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
     elif precision == "bf16":
@@ -461,7 +500,9 @@ def build_dual_profile_decoder_engine(
     # ---- Shared constants ------------------------------------------------
     embedding_table = _const_in_work_dtype(
         network, (vocab, hidden), weights["embedding"],
-        work_np_dtype, work_trt_dtype)
+        (weights["embedding"].dtype
+         if checkpoint_mapper.native_layout() else work_np_dtype),
+        work_trt_dtype, name="embedding")
 
     # Native KV derives RoPE only for runtime-active positions, so the engine
     # stores a small [D/2] inverse-frequency constant instead of serializing an
@@ -795,11 +836,18 @@ def build_dual_profile_decoder_engine(
         slicer.set_input(2, size_t)
         lm_input = slicer.get_output(0)
 
-    out_vocab = (weights["w_out"].shape[1]
-                 if isinstance(weights["w_out"], np.ndarray) else vocab)
+    _hf_layout = checkpoint_mapper.native_layout()
+    if checkpoint_mapper.is_tensor_like(weights["w_out"]):
+        # [in, out] normally; [out, in] when the checkpoint layout is kept.
+        out_vocab = weights["w_out"].shape[0 if _hf_layout else 1]
+    else:
+        out_vocab = vocab
+    _w_out_dtype = (weights["w_out"].dtype
+                    if _hf_layout and checkpoint_mapper.is_tensor_like(weights["w_out"])
+                    else work_np_dtype)
     logits = graph_ops.add_matmul_rhs_constant(
         network, lm_input, hidden, out_vocab, weights["w_out"],
-        dtype=work_np_dtype)
+        dtype=_w_out_dtype, name="w_out", hf_layout=_hf_layout)
     lm_bias = weights.get("lm_head_bias")
     if lm_bias is not None:
         logits = graph_ops.add_bias_sum(
