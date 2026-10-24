@@ -25,7 +25,7 @@ Interface& require_interface(trtmc::ITask& task) {
 
 nlohmann::json execute(const std::string& handler, const nlohmann::json& values,
                        const char* default_runtime_root) {
-    if (handler != "encode" && handler != "embed" && handler != "rerank")
+    if (handler != "encode" && handler != "embed")
         throw std::invalid_argument("unknown BERT CLI handler: " + handler);
     // Check identity before loading: a BERT command must not execute another
     // family's bundle just because it implements the same public interface.
@@ -34,13 +34,6 @@ nlohmann::json execute(const std::string& handler, const nlohmann::json& values,
         throw std::invalid_argument("BERT CLI requires a bert bundle");
     auto task =
         trtmc::load_task(reader, values.value("runtime_root", std::string(default_runtime_root)));
-    if (handler == "rerank") {
-        const auto score = require_interface<trtmc::IReranking>(*task).rerank(
-            values.at("query").get<std::string>(), values.at("document").get<std::string>());
-        if (!std::isfinite(score))
-            throw std::runtime_error("BERT reranking returned a non-finite score");
-        return {{"score", score}};
-    }
     const auto text = values.at("text").get<std::string>();
     const auto result = handler == "encode"
                             ? require_interface<trtmc::IEncoding>(*task).encode(text)

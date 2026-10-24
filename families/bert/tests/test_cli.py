@@ -62,3 +62,14 @@ def test_bundle_selects_backend_before_import_and_aborts_on_owner_failure(monkey
     with pytest.raises(RuntimeError, match="build failed"):
         cli.build_bundle(cli.BuildRequest(tmp_path, backend="trt_rtx"), tmp_path / "out")
     assert events == ["trt_rtx", "abort"]
+
+
+def test_cli_rejects_unsupported_reranking_before_build(monkeypatch, tmp_path):
+    def unexpected_build(*args, **kwargs):
+        pytest.fail("unsupported reranking must not reach the builder")
+
+    monkeypatch.setattr(cli, "build_bundle", unexpected_build)
+    with pytest.raises(SystemExit) as caught:
+        family_cli.main(["bert", "build", str(tmp_path), "-o", str(tmp_path / "out"),
+                         "--task", "reranking"])
+    assert caught.value.code == 2

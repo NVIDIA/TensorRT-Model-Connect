@@ -56,6 +56,19 @@ set_target_properties(trtmc_cli_bert PROPERTIES
 install(TARGETS trtmc_cli_bert LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_bert_task_capabilities
+    ${PROJECT_SOURCE_DIR}/families/bert/tests/cpp/test_task_capabilities.cpp
+  )
+  target_include_directories(test_bert_task_capabilities PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_bert_task_capabilities SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_bert_task_capabilities PRIVATE trtmc_model_bert trtmc_core)
+  target_compile_options(test_bert_task_capabilities PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME bert_task_capabilities COMMAND test_bert_task_capabilities)
+
   add_executable(test_bert_cli
     ${PROJECT_SOURCE_DIR}/families/bert/tests/cpp/test_cli.cpp
     cli.cpp
