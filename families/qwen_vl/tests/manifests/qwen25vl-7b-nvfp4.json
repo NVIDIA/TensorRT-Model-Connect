@@ -1,0 +1,25 @@
+{
+  "name": "qwen25vl-7b-nvfp4",
+  "hf_id": "nvidia/Qwen2.5-VL-7B-Instruct-NVFP4",
+  "hf_revision": "d13bb1f2d8fbbd9f16cbb7688c8d6b6932d797d7",
+  "bundle": "qwen25vl-7b-nvfp4.bundle",
+  "family": "qwen_vl",
+  "task": "vision_language_generation",
+  "precision": "fp16",
+  "quantization": "nvfp4",
+  "testcases": [
+    {
+      "name": "qwen25vl-7b-nvfp4",
+      "premerge": true,
+      "reference_backend": "golden_snapshot",
+      "prompt": "What color is the vehicle in this image? Answer in one word.",
+      "max_new_tokens": 10,
+      "test_image": "data/test_img.jpeg",
+      "metadata": {
+        "golden_text": "White"
+      }
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 256
+}

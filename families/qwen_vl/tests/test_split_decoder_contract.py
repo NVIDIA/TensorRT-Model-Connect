@@ -44,7 +44,7 @@ def test_build_marks_both_decoder_plans_as_one_active_split_build(monkeypatch, t
 
     class FamilyModel:
         @staticmethod
-        def load_weights(_model_dir, _config):
+        def load_weights(_model_dir, _config, quant_ctx=None):
             return {}
 
         @staticmethod
@@ -121,7 +121,7 @@ def test_build_streams_tp_rank_plans_and_builds_vision_once(
 
     class FamilyModel:
         @staticmethod
-        def load_weights(_model_dir, active_config):
+        def load_weights(_model_dir, active_config, quant_ctx=None):
             assert active_config.raw["_fp32_layers"] == (28, 30, 53)
             return {"weights": True}
 
