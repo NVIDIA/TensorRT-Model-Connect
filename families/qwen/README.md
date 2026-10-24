@@ -1,0 +1,57 @@
+# Qwen text continuation
+
+This family implements `IModel` and `ITextContinuation` with its own binding
+and Config declaration. The existing shared C ABI and header-only C++
+`TextContinuation` wrapper discover that binding. No sibling family is imported.
+Single-process bundles also retain the upstream streaming Task, cancellation and
+exclusive generation lease. Tensor-parallel bundles do not advertise streaming.
+
+The input is UTF-8 text or checkpoint token IDs. Text uses the existing family
+tokenizer and optional chat template. Token IDs are passed directly to the
+decoder, without decoding/re-tokenizing or applying a chat template. Results own
+only the newly generated text and token IDs, plus setup/prefill/decode timings.
+The original graph, weights, sampler, native-KV cache and tensor-parallel
+implementation remain. Family-local logits tracing still uses the same pipeline.
+
+Build a fresh bundle; the old `text_generation` primary mode is not retained by
+this family runtime. The usual CLI remains:
+
+```sh
+trtmc build Qwen/Qwen3-0.6B -o model.bundle
+trtmc run model.bundle --prompt "Hello" --max-new-tokens 20
+```
+
+## Config and defaults
+
+`runtime/task_config.h` owns the complete declaration and conversion. Defaults
+remain 128 new tokens, temperature 1, top-k 1, top-p 1, min-p 0, seed -1, checkpoint
+EOS, autoregressive mode, chat template off, thinking on, answer-stop off and
+stop-check interval 16. An explicit token limit of zero returns an empty
+continuation. Unknown or mistyped options are errors, not silently ignored.
+`repetition_penalty` accepts only the neutral value 1: the existing sampler does
+not implement a non-neutral penalty. No new sampling algorithm is added.
+`system_prompt` retains the upstream ChatML behavior and requires
+`use_chat_template=true`.
+
+## Validation
+
+The existing Qwen3 and Qwen2.5 checkpoint cases, including FP8, native-KV and
+tensor-parallel cases, and their reference criteria remain.
+The single-device HF-reference cases also call the direct public C11 and C++17
+consumers with both input representations. Their complete token IDs and text
+must agree; text input must also agree with the existing CLI. Consumers read
+the owned result after releasing the model handle. Sampling and contract-only
+cases retain their existing CLI checks. The added checks do not replace the
+original reference oracle or certify unexecuted distributed profiles.
+
+```sh
+cmake --build build --target trtmc trtmc_backend_trt trtmc_model_qwen test_qwen_task_config
+ctest --test-dir build --output-on-failure -R '^qwen_task_config$'
+build/test_qwen_sdk_c model.bundle build text "Hello" max_new_tokens=20
+build/test_qwen_sdk_cpp model.bundle build text "Hello" max_new_tokens=20
+```
+
+The family and Config CTest targets also build both SDK consumers. Existing E2Es use
+`TRTMC_NATIVE_BUILD_DIR` to locate them. The server consumer must support semantic
+Tasks before serving a migrated family; legacy-interface inheritance is not kept
+in this family to work around an unmigrated application.

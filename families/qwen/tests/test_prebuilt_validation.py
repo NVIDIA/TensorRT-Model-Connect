@@ -18,7 +18,7 @@ def _inputs(tmp_path, monkeypatch):
     model_dir = tmp_path / "models--example--model" / "snapshots" / ("a" * 40)
     model_dir.mkdir(parents=True)
     (model_dir / "config.json").write_text(f'{{"model_type":"{_FAMILY}"}}')
-    manifest = {"name": "pilot", "task": "text_generation", "precision": "fp16",
+    manifest = {"name": "pilot", "task": "text_continuation", "precision": "fp16",
                 "max_sequence_length": 256, "tensor_parallel_size": 1, "hf_id": "example/model"}
     bundle = tmp_path / "served.bundle"
     bundle.write_bytes(b"fixture bundle")
@@ -34,10 +34,10 @@ def _recorded(manifest, model_dir, **changes):
                "max_sequence_length": manifest["max_sequence_length"],
                "tensor_parallel_size": manifest["tensor_parallel_size"], **changes}
     return collect(BuildRequest(model_dir=model_dir, output_path=model_dir.parent / "built.bundle",
-                                family=_FAMILY, task="text_generation", **profile))
+                                family=_FAMILY, task="text_continuation", **profile))
 
 
-def _inspect_returns(monkeypatch, bundle, provenance, family=_FAMILY, task="text_generation"):
+def _inspect_returns(monkeypatch, bundle, provenance, family=_FAMILY, task="text_continuation"):
     """Stand in for `trtmc inspect`; the native reader and its provenance output have their own tests."""
     def inspect(binary, path):
         assert (binary, path) == (_BINARY, bundle)
@@ -117,7 +117,9 @@ def test_prebuilt_bundle_rejects_unknown_provenance(tmp_path, monkeypatch, chang
         _validation_bundle(manifest, model_dir, tmp_path / "unused", _BINARY)
 
 
-@pytest.mark.parametrize("family,task", [("other", "text_generation"), (_FAMILY, "embedding")])
+@pytest.mark.parametrize("family,task", [
+    ("other", "text_continuation"), (_FAMILY, "embedding"), (_FAMILY, "text_generation")
+])
 def test_prebuilt_bundle_rejects_another_family_or_task(tmp_path, monkeypatch, family, task):
     model_dir, manifest, bundle = _inputs(tmp_path, monkeypatch)
     _inspect_returns(monkeypatch, bundle, _recorded(manifest, model_dir), family, task)
