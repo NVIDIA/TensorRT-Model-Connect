@@ -49,7 +49,7 @@ from . import graph_ops
 from . import graph_blocks
 from .parallel import normalize_parallel_config
 from .default_decoder import _apply_norm, _mark_debug_output
-from .utils import make_rope_half_tables
+from .utils import const_in_work_dtype, make_rope_half_tables
 
 
 if TYPE_CHECKING:
@@ -546,21 +546,21 @@ def _add_gpt_oss_expert(
         up = graph_ops.add_bias_sum(network, up, intermediate_size, up_bias, dtype=dtype)
 
     # Clamp gate to max=limit
-    limit_const = graph_ops.add_constant(
-        network, (1, 1), np.array([limit], dtype=dtype), dtype=dtype
+    limit_const = const_in_work_dtype(
+        network, (1, 1), np.array([limit], dtype=dtype), dtype, inp.dtype
     )
     gate = network.add_elementwise(gate, limit_const, trt.ElementWiseOperation.MIN).get_output(0)
 
     # Clamp up to [-limit, limit]
-    neg_limit_const = graph_ops.add_constant(
-        network, (1, 1), np.array([-limit], dtype=dtype), dtype=dtype
+    neg_limit_const = const_in_work_dtype(
+        network, (1, 1), np.array([-limit], dtype=dtype), dtype, inp.dtype
     )
     up = network.add_elementwise(up, limit_const, trt.ElementWiseOperation.MIN).get_output(0)
     up = network.add_elementwise(up, neg_limit_const, trt.ElementWiseOperation.MAX).get_output(0)
 
     # glu = gate * sigmoid(gate * alpha)
-    alpha_const = graph_ops.add_constant(
-        network, (1, 1), np.array([alpha], dtype=dtype), dtype=dtype
+    alpha_const = const_in_work_dtype(
+        network, (1, 1), np.array([alpha], dtype=dtype), dtype, inp.dtype
     )
     gate_scaled = network.add_elementwise(
         gate, alpha_const, trt.ElementWiseOperation.PROD
@@ -569,7 +569,7 @@ def _add_gpt_oss_expert(
     glu = network.add_elementwise(gate, sigmoid, trt.ElementWiseOperation.PROD).get_output(0)
 
     # output = (up + 1) * glu
-    one_const = graph_ops.add_constant(network, (1, 1), np.array([1.0], dtype=dtype), dtype=dtype)
+    one_const = const_in_work_dtype(network, (1, 1), np.array([1.0], dtype=dtype), dtype, inp.dtype)
     up_plus_one = network.add_elementwise(up, one_const, trt.ElementWiseOperation.SUM).get_output(0)
     gated = network.add_elementwise(up_plus_one, glu, trt.ElementWiseOperation.PROD).get_output(0)
 
@@ -830,8 +830,8 @@ def _add_gpt_oss_attention(
 
         # --- Attention sinks ---
         # sinks: [num_heads] -> reshape to [num_heads, 1, 1]
-        sinks_const = graph_ops.add_constant(
-            network, (num_heads, 1, 1), sinks.reshape(num_heads, 1, 1), dtype=dtype
+        sinks_const = const_in_work_dtype(
+            network, (num_heads, 1, 1), sinks.reshape(num_heads, 1, 1), dtype, normed.dtype
         )
         # Concatenate sink column to attention logits: [H, 1, W] + [H, 1, 1] -> [H, 1, W+1]
         combined = network.add_concatenation([masked.get_output(0), sinks_const])
