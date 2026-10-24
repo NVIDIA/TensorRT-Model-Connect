@@ -222,6 +222,19 @@ class Dialogue final : public ISpeechDialogueSession,
         cv_.notify_all();
         return true;
     }
+    bool append_text(std::string_view input) override {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        require_active();
+        if (behavior_ == "unsupported_text")
+            return ISpeechDialogueSession::append_text(input);
+        if (behavior_ == "fatal_text")
+            throw std::logic_error("unexpected text fixture invariant failure");
+        if (input.size() > 16)
+            return false;
+        emit(SpeechEventKind::UserTranscript, "text:" + std::string(input), true);
+        cv_.notify_all();
+        return true;
+    }
     void finish_input() override {
         const std::lock_guard<std::mutex> lock(mutex_);
         if (state_ == SpeechReadState::EpochEnded)

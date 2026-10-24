@@ -1,0 +1,26 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+COPY requirements.txt /opt/trtmc-ci/lfm2_audio/requirements.txt
+RUN python -m pip install --disable-pip-version-check --no-cache-dir \
+      --requirement /opt/trtmc-ci/lfm2_audio/requirements.txt \
+    && python -m pip check
+
+ENV TRTMC_LFM2_AUDIO_MODEL_DIR=/opt/trtmc-lfm2-audio-assets
+RUN set -eu; for asset in asr.wav question.wav; do \
+      python -c 'import os, sys, urllib.request, wave; from pathlib import Path; \
+        name = sys.argv[1]; directory = Path(os.environ["TRTMC_LFM2_AUDIO_MODEL_DIR"]); \
+        directory.mkdir(parents=True, exist_ok=True); \
+        revision = "19e65845923a7f136442c95137884ec61eb386aa"; \
+        url = f"https://raw.githubusercontent.com/Liquid4All/liquid-audio/{revision}/assets/{name}"; \
+        response = urllib.request.urlopen(url, timeout=60); data = response.read(); response.close(); \
+        path = directory / name; path.write_bytes(data); audio = wave.open(str(path), "rb"); \
+        assert audio.getnchannels() == 1 and audio.getsampwidth() == 2; \
+        assert audio.getframerate() == {"asr.wav": 44100, "question.wav": 16000}[name]; \
+        assert audio.getnframes() > 0; \
+        assert len(audio.readframes(audio.getnframes())) == audio.getnframes() * audio.getsampwidth(); \
+        audio.close()' "$asset"; \
+    done

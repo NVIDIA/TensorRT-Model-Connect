@@ -541,6 +541,14 @@ trtmc_status TRTMC_CALL finish_input(trtmc_speech_session* session, trtmc_error*
     return session_call(session, error, true,
                         [](DialogueRun& run) { run.session->finish_input(); });
 }
+trtmc_status TRTMC_CALL append_text(trtmc_speech_session* session, trtmc_string_view text,
+                                    trtmc_error** error) noexcept {
+    bool accepted = true;
+    const auto status = session_call(session, error, true, [&](DialogueRun& run) {
+        accepted = run.session->append_text(string_view(text));
+    });
+    return status == TRTMC_OK && !accepted ? TRTMC_AGAIN : status;
+}
 trtmc_status TRTMC_CALL cancel(trtmc_speech_session* session, trtmc_error** error) noexcept {
     return session_call(session, error, true, [](DialogueRun& run) { run.session->cancel(); });
 }
@@ -725,7 +733,8 @@ const trtmc_speech_session_api_v1 session_api{{1, 0, sizeof(session_api)},
                                               config_snapshot_view,
                                               get_realtime,
                                               get_tools,
-                                              session_release};
+                                              session_release,
+                                              append_text};
 const trtmc_duplex_speech_dialogue_api_v1 duplex_api{
     {1, 0, sizeof(duplex_api)},
     create_dialogue<internal::IDuplexSpeechDialogue,

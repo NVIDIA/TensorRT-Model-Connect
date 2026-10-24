@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "commands": [{
+    "name": "build",
+    "help": "Build the LFM2.5 audio speech and text bundle",
+    "executor": "python",
+    "handler": "cli:build",
+    "arguments": [
+      {"name": "model", "type": "string", "help": "Hugging Face model ID or local snapshot"},
+      {"name": "output", "type": "path", "flags": ["-o", "--output"], "required": true},
+      {"name": "revision", "type": "string", "flags": ["--revision"]},
+      {"name": "task", "type": "string", "flags": ["--task"], "choices": ["offline_speech_dialogue", "speech_transcription", "speech_to_speech_response", "text_to_speech", "streaming_text_to_speech", "audio_text_to_text", "text_conversation"], "default": "offline_speech_dialogue"},
+      {"name": "precision", "type": "string", "flags": ["--precision"], "choices": ["bf16"], "default": "bf16"},
+      {"name": "max_sequence_length", "type": "int", "flags": ["--max-sequence-length"], "default": 32768},
+      {"name": "verbose", "type": "bool", "flags": ["--verbose"], "action": "store_true", "default": false}
+    ]
+  }]
+}
