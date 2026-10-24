@@ -83,6 +83,27 @@ void test_copy_section(const std::filesystem::path& directory) {
     check(fails("data", output), "stream copy detects truncation after validation");
 }
 
+void test_reserved_header(const std::filesystem::path& directory) {
+    const auto path = directory / "reserved-header.bundle";
+    std::string header =
+        R"({"format":1,"family":"fake","task":"text","backend":"fake","sections":{"engine.plan":{"offset":0,"length":4},"empty":{"offset":4,"length":0},"extra.bin":{"offset":4,"length":2}}})";
+    header.resize(64 * 1024, ' ');
+    const std::string payload("PLAN\0\xff", 6);
+    write_bundle(path, header, payload);
+    const trtmc::BundleReader reader(path.string());
+    check(reader.info().format == 1 && reader.info().sections.size() == 3,
+          "reserved whitespace header remains format v1");
+    const auto plan = reader.read_section("engine.plan");
+    check(std::string(plan.begin(), plan.end()) == "PLAN", "reserved-header plan bytes");
+    const auto extra = reader.read_section("extra.bin");
+    check(extra.size() == 2 && extra[0] == '\0' && static_cast<unsigned char>(extra[1]) == 255,
+          "reserved-header binary bytes and section offsets");
+    check(reader.read_section("empty").empty(), "reserved-header empty section");
+    std::ostringstream copied;
+    reader.copy_section("engine.plan", copied);
+    check(copied.str() == "PLAN", "reserved-header bounded section copying");
+}
+
 } // namespace
 
 int main() {
@@ -135,6 +156,7 @@ int main() {
     check(read_throws(out_of_bounds), "out of bounds section rejected");
 
     test_copy_section(directory);
+    test_reserved_header(directory);
     std::filesystem::remove_all(directory);
     std::cerr << (failures == 0 ? "ALL PASSED\n" : "SOME FAILED\n");
     return failures;

@@ -17,6 +17,7 @@ from . import graph_ops as op
 from .config import (
     DENOISER_DEFAULT_WORKSPACE_BYTES,
     MiniMaxH3Config,
+    Ref2VAPackedProfile,
     SOL_ENGINE_1344X768_124F,
 )
 
@@ -270,8 +271,10 @@ def _refine_text(network, text, weights, profile: MiniMaxH3Config):
     )
 
 
-def _packed_hidden(network, video, audio, text, weights, profile: MiniMaxH3Config):
-    """Project and pack text | audio | video exactly like the Diffusers model."""
+def _packed_hidden(
+    network, video, audio, text, weights, profile: MiniMaxH3Config, *, packed_indices=None
+):
+    """Project operands, then gather their exact reference-order sequence."""
 
     text_hidden = _refine_text(network, text, weights, profile)
     audio_hidden = op.linear(
@@ -284,7 +287,8 @@ def _packed_hidden(network, video, audio, text, weights, profile: MiniMaxH3Confi
     video_hidden = op.cast(network, video_hidden, trt.bfloat16)
     packed = network.add_concatenation((text_hidden, audio_hidden, video_hidden))
     packed.axis = 0
-    return packed.get_output(0)
+    hidden = packed.get_output(0)
+    return hidden if packed_indices is None else op.gather_rows(network, hidden, packed_indices)
 
 
 def _transformer_block(
@@ -375,18 +379,32 @@ def _mark_full_velocity_outputs(network, hidden, weights):
     network.mark_output(audio_all)
 
 
-def _mark_sliced_velocity_outputs(network, hidden, weights, profile: MiniMaxH3Config):
+def _mark_sliced_velocity_outputs(
+    network,
+    hidden,
+    weights,
+    profile: MiniMaxH3Config,
+    *,
+    target_video_indices=None,
+    target_audio_indices=None,
+):
     """Project only rows consumed by the audio and video scheduler updates."""
 
-    audio_hidden = op.slice_rows_from_end(
-        network,
-        hidden,
-        offset=profile.audio_rows + profile.video_rows,
-        rows=profile.audio_rows,
-    )
-    video_hidden = op.slice_rows_from_end(
-        network, hidden, offset=profile.video_rows, rows=profile.video_rows
-    )
+    if (target_video_indices is None) != (target_audio_indices is None):
+        raise ValueError("H3 indexed outputs require both audio and video row indices")
+    if target_video_indices is not None:
+        audio_hidden = op.gather_rows(network, hidden, target_audio_indices)
+        video_hidden = op.gather_rows(network, hidden, target_video_indices)
+    else:
+        audio_hidden = op.slice_rows_from_end(
+            network,
+            hidden,
+            offset=profile.audio_rows + profile.video_rows,
+            rows=profile.audio_rows,
+        )
+        video_hidden = op.slice_rows_from_end(
+            network, hidden, offset=profile.video_rows, rows=profile.video_rows
+        )
     video = op.linear(
         network,
         video_hidden,
@@ -483,6 +501,29 @@ def _serialize(
     return bytes(plan)
 
 
+def _add_reference_profile(builder, config, profile, reference):
+    reference.validate(profile)
+    optimization = builder.create_optimization_profile()
+    shapes = {
+        "encoder_hidden_states": tuple((rows, profile.text_dim) for rows in reference.text_rows),
+        "video_hidden_states": tuple(
+            (profile.video_rows + rows, profile.video_patch_dim)
+            for rows in reference.condition_video_rows
+        ),
+        "audio_hidden_states": tuple(
+            (profile.audio_rows + rows, profile.audio_in_channels)
+            for rows in reference.condition_audio_rows
+        ),
+    }
+    packed = reference.sequence_rows(profile)
+    shapes["position_ids"] = tuple((rows, 3) for rows in packed)
+    for name in ("adaln_indices", "timestep_indices", "packed_indices"):
+        shapes[name] = tuple((rows,) for rows in packed)
+    for name, (minimum, optimum, maximum) in shapes.items():
+        optimization.set_shape(name, min=minimum, opt=optimum, max=maximum)
+    config.add_optimization_profile(optimization)
+
+
 def build_dit_engine(
     weights: dict,
     profile: MiniMaxH3Config,
@@ -490,32 +531,50 @@ def build_dit_engine(
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
+    reference_profile: Ref2VAPackedProfile | None = None,
 ) -> bytes:
     """Build the full-sequence single-device H3 TensorRT plan."""
 
     profile.validate()
     if profile.first_block_cache:
         raise ValueError("MiniMax-H3 first_block_cache profile requires the split DiT builders")
+    if reference_profile is not None:
+        reference_profile.validate(profile)
     rows = -1
     logger, builder, network, config = _native_builder(verbose, workspace_bytes)
 
     video = network.add_input(
-        "video_hidden_states", trt.float32, (profile.video_rows, profile.video_patch_dim)
+        "video_hidden_states",
+        trt.float32,
+        (-1 if reference_profile is not None else profile.video_rows, profile.video_patch_dim),
     )
     audio = network.add_input(
-        "audio_hidden_states", trt.float32, (profile.audio_rows, profile.audio_in_channels)
+        "audio_hidden_states",
+        trt.float32,
+        (-1 if reference_profile is not None else profile.audio_rows, profile.audio_in_channels),
     )
     text = network.add_input("encoder_hidden_states", trt.float32, (-1, profile.text_dim))
     positions = network.add_input("position_ids", trt.float32, (-1, 3))
     adaln_indices = network.add_input("adaln_indices", trt.int32, (-1,))
     timestep_indices = network.add_input("timestep_indices", trt.int32, (-1,))
-    _add_dynamic_profile(
-        builder,
-        config,
-        profile,
-        text_inputs=("encoder_hidden_states",),
-        packed_inputs=("position_ids", "adaln_indices", "timestep_indices"),
-    )
+    packed_indices, target_video_indices, target_audio_indices = None, None, None
+    if reference_profile is None:
+        _add_dynamic_profile(
+            builder,
+            config,
+            profile,
+            text_inputs=("encoder_hidden_states",),
+            packed_inputs=("position_ids", "adaln_indices", "timestep_indices"),
+        )
+    else:
+        packed_indices = network.add_input("packed_indices", trt.int32, (-1,))
+        target_video_indices = network.add_input(
+            "target_video_indices", trt.int32, (profile.video_rows,)
+        )
+        target_audio_indices = network.add_input(
+            "target_audio_indices", trt.int32, (profile.audio_rows,)
+        )
+        _add_reference_profile(builder, config, profile, reference_profile)
     block_modulations = [
         network.add_input(
             f"block_modulation_{index}",
@@ -527,10 +586,11 @@ def build_dit_engine(
     final_modulation = network.add_input(
         "final_modulation", trt.bfloat16, (profile.max_timestep_count, 2, profile.hidden_size)
     )
-    # The public single-device FL2VA profile is packed as text | audio | video.
-    # Projection, text refinement, packing, and full-sequence attention all
-    # remain native TensorRT operations on one device.
-    hidden = _packed_hidden(network, video, audio, text, weights, profile)
+    # Ref2VA interleaves reference operands; the original text-only path uses
+    # its identity text | audio | video packing. Both stay native TRT graphs.
+    hidden = _packed_hidden(
+        network, video, audio, text, weights, profile, packed_indices=packed_indices
+    )
 
     cos, sin = _rope_tables(network, positions, profile, rows)
     # The dynamic packed sequence contains live rows only, like Diffusers, so
@@ -549,7 +609,14 @@ def build_dit_engine(
         )
 
     hidden = _final_hidden(network, hidden, timestep_indices, final_modulation, weights, profile)
-    _mark_sliced_velocity_outputs(network, hidden, weights, profile)
+    _mark_sliced_velocity_outputs(
+        network,
+        hidden,
+        weights,
+        profile,
+        target_video_indices=target_video_indices,
+        target_audio_indices=target_audio_indices,
+    )
 
     op.validate_native_network(
         network,
@@ -557,10 +624,15 @@ def build_dit_engine(
         label="DiT",
     )
 
+    packed_rows = (
+        (profile.min_sequence_length, profile.opt_sequence_length, profile.sequence_length)
+        if reference_profile is None
+        else reference_profile.sequence_rows(profile)
+    )
     print(
         f"[minimax-h3] building native DiT: layers={profile.num_layers}, "
-        f"packed={profile.min_sequence_length}..{profile.sequence_length} "
-        f"(opt={profile.opt_sequence_length}), devices=1",
+        f"packed={packed_rows[0]}..{packed_rows[2]} "
+        f"(opt={packed_rows[1]}), devices=1",
         file=sys.stderr,
     )
     return _serialize(
