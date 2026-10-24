@@ -181,7 +181,7 @@ def build_standard_decoder_engine(
         work_np_dtype = np.float16
         work_trt_dtype = trt.float16
     elif precision == "bf16":
-        work_np_dtype = np.float16  # stored as float16, TRT uses bfloat16
+        work_np_dtype = np.float32
         work_trt_dtype = trt.bfloat16
     else:
         work_np_dtype = np.float32
@@ -341,9 +341,6 @@ def build_standard_decoder_engine(
         )
         hidden_state = pos_add.get_output(0)
 
-    # In BF16 mode many embedding/position constants are still materialized from
-    # float16 storage. Normalize the decoder's main hidden stream back to the
-    # requested runtime dtype before entering the layer stack.
     if hidden_state.dtype != work_trt_dtype:
         hidden_state = network.add_cast(hidden_state, work_trt_dtype).get_output(0)
 

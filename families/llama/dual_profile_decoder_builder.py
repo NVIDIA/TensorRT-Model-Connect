@@ -70,16 +70,7 @@ def _const_in_work_dtype(
     work_np_dtype: np.dtype,
     work_trt_dtype: trt.DataType,
 ) -> trt.ITensor:
-    """Create a constant in work_np_dtype storage and cast it to work_trt_dtype.
-
-    Needed for bf16 builds: the dual-profile builder stores bf16 weights
-    on disk as fp16 (work_np_dtype = np.float16), but the runtime tensor
-    must be bfloat16 to match the rest of the graph. ``add_constant``
-    alone produces an fp16 constant — we need an explicit cast to
-    bfloat16 so layers like IRotaryEmbeddingLayer (which require all
-    inputs to share a dtype) accept it. fp16 / fp32 builds are no-ops
-    because work_np_dtype maps directly to work_trt_dtype.
-    """
+    """Create a constant in storage dtype and cast it to runtime dtype."""
     const = graph_ops.add_constant(network, shape, values, dtype=work_np_dtype)
     if const.dtype != work_trt_dtype:
         const = network.add_cast(const, work_trt_dtype).get_output(0)
@@ -309,7 +300,7 @@ def build_dual_profile_decoder_engine(
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
     elif precision == "bf16":
-        work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
+        work_np_dtype, work_trt_dtype = np.float32, trt.bfloat16
     else:
         work_np_dtype, work_trt_dtype = np.float32, trt.float32
 
@@ -427,14 +418,11 @@ def build_dual_profile_decoder_engine(
                 interleaved=interleaved_rope,
                 rope_scaling=config.raw.get("rope_scaling"),
             )
-            # BF16 must round directly from the FP32 indexed table. Routing
-            # through FP16 storage would introduce FP16 -> BF16 double rounding.
-            rope_np_dtype = np.float32 if work_trt_dtype == trt.bfloat16 else work_np_dtype
             cos_half_table = _const_in_work_dtype(
-                network, cos_half_np.shape, cos_half_np, rope_np_dtype, work_trt_dtype
+                network, cos_half_np.shape, cos_half_np, work_np_dtype, work_trt_dtype
             )
             sin_half_table = _const_in_work_dtype(
-                network, sin_half_np.shape, sin_half_np, rope_np_dtype, work_trt_dtype
+                network, sin_half_np.shape, sin_half_np, work_np_dtype, work_trt_dtype
             )
 
     # Learned position embedding (GPT-2 / OPT / GPT-Neo / XGLM).
@@ -490,8 +478,6 @@ def build_dual_profile_decoder_engine(
         )
         hidden_state = pos_add.get_output(0)
 
-    # Make sure the main hidden stream is in the requested runtime dtype
-    # before entering the layer stack (BF16 mode stores fp16 constants).
     if hidden_state.dtype != work_trt_dtype:
         hidden_state = network.add_cast(hidden_state, work_trt_dtype).get_output(0)
 
