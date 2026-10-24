@@ -176,3 +176,77 @@ def test_cutile_kernel_replaces_pattern():
     if np.allclose(replaced, baseline, rtol=1e-5, atol=1e-6):
         pytest.skip("this TensorRT build ignores the user kernel option")
     np.testing.assert_allclose(replaced, original + 1.0, rtol=1e-5, atol=1e-6)
+
+
+R2, C2 = 8, 64
+_X = "!nvg.tensor<f32, {[8, 64], stride_order = [1, 0]}>"
+_S = "!nvg.tensor<f32, {[1, 64], stride_order = [1, 0]}>"
+_R = "!nvg.tensor<f32, {[8, 1], stride_order = [1, 0]}>"
+_B = "!nvg.tensor<f32, {[8, 64]}>"
+# x * broadcast(s) + broadcast(r): the broadcasts are part of the pattern, so the kernel receives
+# the small tensors and does the broadcast itself.
+BCAST_PATTERN = f"""  nvg.graph @fma_bcast_pattern(%x: {_X}, %s: {_S}, %r: {_R}) -> {_X}
+      attributes {{}} {{
+    %sb = nvg.broadcast(%s) : {_S} -> {_B}
+    %m = nvg.mul(%x, %sb) : ({_X}, {_B}) -> {_B}
+    %rb = nvg.broadcast(%r) : {_R} -> {_B}
+    %o = nvg.add(%m, %rb) : ({_B}, {_B}) -> {_X}
+    nvg.graph_return %o : {_X}
+  }}"""
+
+
+def _build_2d_engine(shapes):
+    """out = in0 * in1 + in2 with the given input shapes (broadcast by TensorRT)."""
+    logger = trt.Logger(trt.Logger.ERROR)
+    builder = trt.Builder(logger)
+    network = builder.create_network(0)
+    inputs = [network.add_input(name, trt.float32, s) for name, s in zip("abc", shapes)]
+    prod = network.add_elementwise(inputs[0], inputs[1], trt.ElementWiseOperation.PROD)
+    total = network.add_elementwise(prod.get_output(0), inputs[2], trt.ElementWiseOperation.SUM)
+    out = total.get_output(0)
+    out.name = "out"
+    network.mark_output(out)
+    blob = builder.build_serialized_network(network, builder.create_builder_config())
+    assert blob is not None, "engine build failed"
+    return trt.Runtime(logger).deserialize_cuda_engine(blob)
+
+
+def _run_2d(engine, host):
+    context = engine.create_execution_context()
+    tensors = [torch.from_numpy(h).cuda() for h in host]
+    out = torch.empty((R2, C2), dtype=torch.float32, device="cuda")
+    for name, tensor in zip("abc", tensors):
+        context.set_tensor_address(name, tensor.data_ptr())
+    context.set_tensor_address("out", out.data_ptr())
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        assert context.execute_async_v3(stream.cuda_stream)
+    stream.synchronize()
+    return out.cpu().numpy()
+
+
+@pytest.mark.parametrize("broadcast", [False, True])
+def test_cutile_nd_kernel_with_non_flat_and_broadcast_inputs(broadcast):
+    """The kernel sees 2-D arrays with their real shapes, including the broadcast operands."""
+    pytest.importorskip("cuda.tile")
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU")
+    from .user_kernel_cutile_fma import fma_2d_tile, fma_bcast_tile
+
+    shapes = [(R2, C2), (1, C2), (R2, 1)] if broadcast else [(R2, C2)] * 3
+    pattern, kernel_fn = (BCAST_PATTERN, fma_bcast_tile) if broadcast else (PATTERN, fma_2d_tile)
+    kernel = UserKernel.from_cutile(
+        "user_fma_nd", pattern, kernel_fn, tiles=(8, 64), ranks=[2, 2, 2, 2], dtype="float32"
+    )
+    rng = np.random.default_rng(0)
+    host = [rng.standard_normal(s).astype(np.float32) for s in shapes]
+    original = host[0] * host[1] + host[2]
+
+    baseline = _run_2d(_build_2d_engine(shapes), host)
+    np.testing.assert_allclose(baseline, original, rtol=1e-5, atol=1e-6)
+    with user_kernels([kernel]):
+        replaced = _run_2d(_build_2d_engine(shapes), host)
+
+    if np.allclose(replaced, baseline, rtol=1e-5, atol=1e-6):
+        pytest.skip("this TensorRT build ignores the user kernel option")
+    np.testing.assert_allclose(replaced, original + 1.0, rtol=1e-5, atol=1e-6)

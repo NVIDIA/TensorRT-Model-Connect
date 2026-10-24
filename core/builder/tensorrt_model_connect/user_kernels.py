@@ -21,6 +21,12 @@ Kernel contract (cuTile): one 1-D array parameter per pattern input (in the patt
 order), then one for the output, then constexpr parameters. The arrays are flat views of the
 contiguous tensors with int64 shape and stride. Thread block count is ``ceil(n / tile)``.
 
+Kernel contract (cuTile, N-D): each array keeps its own rank and shape (give ``ranks``), so an
+input can be smaller than the output, for example the operand of a broadcast that the pattern
+names. The last stride of every array is 1. ``tiles`` has one entry per output dimension (at most
+3) and is passed to the kernel as constexpr parameters after the arrays. ``ct.bid(d)`` is the block
+index along output dimension ``d``, and the grid is ``ceil(dim / tile)`` per dimension.
+
 A cubin kernel records the architecture it was built for. ``user_kernels`` raises if the current
 device has another one, because the engine build would otherwise fail with a module load error.
 
@@ -38,7 +44,7 @@ import io
 import os
 import re
 import tempfile
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 
 # Internal option channel that the TensorRT builder reads. It needs no TensorRT API change.
 _ENV = "__LUNOWUD"
@@ -62,6 +68,7 @@ class UserKernel:
     # GPU architecture the cubin was built for, for example "sm_90". Empty means unknown, and the
     # check in ``user_kernels`` is skipped.
     arch: str = ""
+    tiles: tuple[int, ...] = ()
 
     @classmethod
     def from_cutile(
@@ -70,32 +77,72 @@ class UserKernel:
         pattern: str,
         kernel,
         *,
-        tile: int,
-        num_arrays: int,
-        dtype: str = "float32",
+        tile: int | None = None,
+        tiles: Sequence[int] | None = None,
+        num_arrays: int | None = None,
+        ranks: Sequence[int] | None = None,
+        dtype: str | Sequence[str] = "float32",
         gpu_code: str | None = None,
     ) -> UserKernel:
         """Build a cuTile kernel into a cubin.
 
-        ``kernel`` is a ``@ct.kernel`` function ``(arr_0, ..., arr_{num_arrays-1}, TILE)``: the
-        pattern inputs, then the output, as 1-D arrays of ``dtype``, then the tile size.
+        Flat mode (``tile`` and ``num_arrays``): ``kernel`` is a ``@ct.kernel`` function
+        ``(arr_0, ..., arr_{num_arrays-1}, TILE)``, the pattern inputs then the output as 1-D
+        arrays, then the tile size.
+
+        N-D mode (``tiles`` and ``ranks``): ``ranks[i]`` is the rank of array ``i`` (pattern
+        inputs, then the output), and ``tiles`` has one entry per output dimension. The kernel is
+        ``(arr_0, ..., arr_k, TILE_0, ..., TILE_{rank-1})``.
+
+        ``dtype`` is one cuTile dtype name for all arrays or one per array.
         """
+        if (tile is None) == (tiles is None):
+            raise ValueError("give exactly one of tile (flat mode) and tiles (N-D mode)")
+        if tiles is None:
+            if num_arrays is None:
+                raise ValueError("flat mode needs num_arrays")
+            ranks = [1] * num_arrays
+            tile_args: tuple[int, ...] = (tile,)
+        else:
+            if ranks is None:
+                raise ValueError("N-D mode needs ranks")
+            tile_args = tuple(tiles)
+            if not 1 <= len(tile_args) <= 3 or ranks[-1] != len(tile_args):
+                raise ValueError("tiles needs one entry (at most 3) per output dimension")
         entry = f"{name}_tile"
         gpu_code = gpu_code or device_arch()
         if gpu_code is None:
             raise RuntimeError("no CUDA device found; pass gpu_code to build for a given GPU")
         cubin = cutile_cubin(
-            kernel, num_arrays=num_arrays, dtype=dtype, tile=tile, entry=entry, gpu_code=gpu_code
+            kernel,
+            ranks=ranks,
+            dtype=dtype,
+            tiles=tile_args,
+            entry=entry,
+            gpu_code=gpu_code,
         )
         return cls(
-            name, pattern, block=_TILE_THREADS, cubin=cubin, entry=entry, tile=tile, arch=gpu_code
+            name,
+            pattern,
+            block=_TILE_THREADS,
+            cubin=cubin,
+            entry=entry,
+            tile=tile or 0,
+            tiles=tuple(tiles) if tiles is not None else (),
+            arch=gpu_code,
         )
 
 
 def cutile_cubin(
-    kernel, *, num_arrays: int, dtype: str, tile: int, entry: str, gpu_code: str | None = None
+    kernel,
+    *,
+    ranks: Sequence[int],
+    dtype: str | Sequence[str],
+    tiles: Sequence[int],
+    entry: str,
+    gpu_code: str | None = None,
 ) -> bytes:
-    """Compile ``kernel`` for flat 1-D arrays with int64 shape and stride into a cubin."""
+    """Compile ``kernel`` for arrays of the given ranks (int64 shape and stride) into a cubin."""
     import cuda.tile as ct
     from cuda.tile.compilation import (
         ArrayConstraint,
@@ -107,21 +154,23 @@ def cutile_cubin(
     gpu_code = gpu_code or device_arch()
     if gpu_code is None:
         raise RuntimeError("no CUDA device found; pass gpu_code to build for a given GPU")
-    element = getattr(ct, dtype)
+    dtypes = [dtype] * len(ranks) if isinstance(dtype, str) else list(dtype)
+    if len(dtypes) != len(ranks):
+        raise ValueError("dtype needs one entry per array")
 
-    def array():
+    def array(element_name: str, rank: int):
         return ArrayConstraint(
-            element,
-            1,
+            getattr(ct, element_name),
+            rank,
             index_dtype=ct.int64,
-            stride_constant=(1,),
+            stride_constant=(None,) * (rank - 1) + (1,),
             alias_groups=[],
             stride_lower_bound_incl=0,
             may_alias_internally=False,
         )
 
     signature = KernelSignature(
-        [array() for _ in range(num_arrays)] + [tile],
+        [array(d, r) for d, r in zip(dtypes, ranks)] + list(tiles),
         CallingConvention.cutile_python_v2(),
         symbol=entry,
     )
@@ -196,8 +245,10 @@ def _tag_pattern(kernel: UserKernel, directory: str | None) -> str:
     if kernel.source:
         attrs += f", nvm.user_kernel_source = {_mlir_string(kernel.source)}"
     else:
-        if not kernel.entry or kernel.tile <= 0:
+        if not kernel.entry or (kernel.tile <= 0 and not kernel.tiles):
             raise ValueError(f"cubin kernel {kernel.name!r} needs an entry and a tile")
+        if kernel.tiles and (len(kernel.tiles) > 3 or min(kernel.tiles) <= 0):
+            raise ValueError(f"tiles of {kernel.name!r} must be 1 to 3 positive numbers")
         if directory is None or not _NAME.fullmatch(kernel.name):
             raise ValueError(f"cubin kernel {kernel.name!r} needs a plain name and a directory")
         path = os.path.join(directory, kernel.name + ".cubin")
@@ -206,8 +257,11 @@ def _tag_pattern(kernel: UserKernel, directory: str | None) -> str:
         attrs += (
             f", nvm.user_kernel_cubin = {_mlir_string(path)}"
             f", nvm.user_kernel_entry = {_mlir_string(kernel.entry)}"
-            f", nvm.user_kernel_tile = {kernel.tile} : i64"
         )
+        if kernel.tiles:
+            attrs += f", nvm.user_kernel_tiles = array<i64: {', '.join(map(str, kernel.tiles))}>"
+        else:
+            attrs += f", nvm.user_kernel_tile = {kernel.tile} : i64"
     end = pos + len(marker)
     rest = kernel.pattern[end:].lstrip()
     sep = "" if rest.startswith("}") else ", "
