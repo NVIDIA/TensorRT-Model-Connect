@@ -21,6 +21,9 @@ Kernel contract (cuTile): one 1-D array parameter per pattern input (in the patt
 order), then one for the output, then constexpr parameters. The arrays are flat views of the
 contiguous tensors with int64 shape and stride. Thread block count is ``ceil(n / tile)``.
 
+A cubin kernel records the architecture it was built for. ``user_kernels`` raises if the current
+device has another one, because the engine build would otherwise fail with a module load error.
+
 Usage::
 
     with user_kernels([UserKernel("user_fma", PATTERN, SOURCE, block=128)]):
@@ -56,6 +59,9 @@ class UserKernel:
     cubin: bytes = b""
     entry: str = ""
     tile: int = 0
+    # GPU architecture the cubin was built for, for example "sm_90". Empty means unknown, and the
+    # check in ``user_kernels`` is skipped.
+    arch: str = ""
 
     @classmethod
     def from_cutile(
@@ -75,10 +81,15 @@ class UserKernel:
         pattern inputs, then the output, as 1-D arrays of ``dtype``, then the tile size.
         """
         entry = f"{name}_tile"
+        gpu_code = gpu_code or device_arch()
+        if gpu_code is None:
+            raise RuntimeError("no CUDA device found; pass gpu_code to build for a given GPU")
         cubin = cutile_cubin(
             kernel, num_arrays=num_arrays, dtype=dtype, tile=tile, entry=entry, gpu_code=gpu_code
         )
-        return cls(name, pattern, block=_TILE_THREADS, cubin=cubin, entry=entry, tile=tile)
+        return cls(
+            name, pattern, block=_TILE_THREADS, cubin=cubin, entry=entry, tile=tile, arch=gpu_code
+        )
 
 
 def cutile_cubin(
@@ -93,11 +104,9 @@ def cutile_cubin(
         export_kernel,
     )
 
+    gpu_code = gpu_code or device_arch()
     if gpu_code is None:
-        import torch
-
-        major, minor = torch.cuda.get_device_capability()
-        gpu_code = f"sm_{major}{minor}"
+        raise RuntimeError("no CUDA device found; pass gpu_code to build for a given GPU")
     element = getattr(ct, dtype)
 
     def array():
@@ -119,6 +128,39 @@ def cutile_cubin(
     buffer = io.BytesIO()
     export_kernel(kernel, [signature], buffer, gpu_code=gpu_code, output_format="cubin")
     return buffer.getvalue()
+
+
+def device_arch() -> str | None:
+    """Architecture of the current CUDA device, for example ``sm_90``. None without a device."""
+    try:
+        import torch
+    except ImportError:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    major, minor = torch.cuda.get_device_capability(torch.cuda.current_device())
+    return f"sm_{major}{minor}"
+
+
+def _same_arch(built: str, current: str) -> bool:
+    # "sm_100a" and "sm_100f" are variants of sm_100.
+    return built.rstrip("af") == current.rstrip("af")
+
+
+def check_architecture(kernels: Iterable[UserKernel], current: str | None = None) -> None:
+    """Raise if a cubin kernel was built for another GPU architecture than the current device.
+
+    The check is skipped for kernels without ``arch`` and when there is no CUDA device.
+    """
+    current = current or device_arch()
+    if current is None:
+        return
+    for kernel in kernels:
+        if kernel.cubin and kernel.arch and not _same_arch(kernel.arch, current):
+            raise ValueError(
+                f"kernel {kernel.name!r} was built for {kernel.arch}, but the current device is "
+                f"{current}; rebuild it on this device or build on the matching device"
+            )
 
 
 def _mlir_string(text: str) -> str:
@@ -200,6 +242,7 @@ def user_kernels(kernels: Iterable[UserKernel]) -> Iterator[str | None]:
     if not kernels:
         yield None
         return
+    check_architecture(kernels)
     with tempfile.TemporaryDirectory(prefix="user_kernels_") as tmp:
         path = os.path.join(tmp, "registration.mlir")
         with open(path, "w") as f:

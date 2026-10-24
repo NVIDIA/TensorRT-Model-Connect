@@ -106,3 +106,31 @@ def test_cubin_kernel_needs_entry_tile_and_directory(tmp_path):
     ok = uk.UserKernel("k", _PATTERN, cubin=b"y", entry="e", tile=1)
     with pytest.raises(ValueError, match="directory"):
         uk.registration_text([ok])
+
+
+def _cubin_kernel(arch: str = "sm_90") -> uk.UserKernel:
+    return uk.UserKernel("k", _PATTERN, cubin=b"y", entry="e", tile=1, arch=arch)
+
+
+def test_architecture_mismatch_is_reported_with_both_names():
+    with pytest.raises(ValueError, match=r"built for sm_120.*current device is sm_90"):
+        uk.check_architecture([_cubin_kernel("sm_120")], current="sm_90")
+
+
+def test_architecture_match_and_variants_pass():
+    uk.check_architecture([_cubin_kernel("sm_90")], current="sm_90")
+    uk.check_architecture([_cubin_kernel("sm_100a")], current="sm_100")
+
+
+def test_architecture_check_is_skipped_without_arch_or_source():
+    uk.check_architecture([_cubin_kernel("")], current="sm_90")
+    source = uk.UserKernel("s", _PATTERN, source="x", arch="sm_120")
+    uk.check_architecture([source], current="sm_90")
+
+
+def test_user_kernels_context_checks_the_architecture(monkeypatch):
+    monkeypatch.setattr(uk, "device_arch", lambda: "sm_90")
+    with pytest.raises(ValueError, match="sm_120"):
+        with uk.user_kernels([_cubin_kernel("sm_120")]):
+            pass
+    assert "__LUNOWUD" not in os.environ or "user_kernels" not in os.environ["__LUNOWUD"]
