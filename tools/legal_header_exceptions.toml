@@ -4,6 +4,18 @@
 schema_version = 1
 
 [[exceptions]]
+path = "families/nomic_bert/tests/reference/configuration_hf_nomic_bert.py"
+reason = "Pinned publisher oracle; preserve upstream source and notices, normalizing whitespace only."
+license = "Apache-2.0"
+source = "https://huggingface.co/nomic-ai/nomic-bert-2048/blob/7710840340a098cfb869c4f65e87cf2b1b70caca/configuration_hf_nomic_bert.py"
+
+[[exceptions]]
+path = "families/nomic_bert/tests/reference/modeling_hf_nomic_bert.py"
+reason = "Pinned publisher oracle with adapted FlashAttention source; preserve upstream notices and semantics."
+license = "Apache-2.0 AND BSD-3-Clause"
+source = "https://huggingface.co/nomic-ai/nomic-bert-2048/blob/7710840340a098cfb869c4f65e87cf2b1b70caca/modeling_hf_nomic_bert.py"
+
+[[exceptions]]
 path = "third_party/stb/stb_image.h"
 reason = "Vendored third-party source; preserve the upstream notices and bytes unchanged."
 license = "MIT OR Public Domain"

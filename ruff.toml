@@ -17,3 +17,11 @@ ignore = [
 
 [lint.per-file-ignores]
 "tests/**" = ["F811"]
+"families/nomic_bert/tests/reference/configuration_hf_nomic_bert.py" = ["ALL"]
+"families/nomic_bert/tests/reference/modeling_hf_nomic_bert.py" = ["ALL"]
+
+[format]
+exclude = [
+    "families/nomic_bert/tests/reference/configuration_hf_nomic_bert.py",
+    "families/nomic_bert/tests/reference/modeling_hf_nomic_bert.py",
+]
