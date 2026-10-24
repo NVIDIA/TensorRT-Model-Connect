@@ -6,7 +6,7 @@
 The user kernel computes ``a * b + c + 1``, so its output cannot be mistaken for the output of the
 original ops. In the first test the graph is exactly the pattern. In the second test the pattern is
 one sub structure of a larger graph, and only that part is replaced. The kernel is either CUDA
-source or a cuTile kernel that the helper builds into a cubin (needs a Blackwell GPU). A TensorRT
+source or a cuTile kernel that the helper builds into a cubin for the GPU in the machine. A TensorRT
 build that ignores the build option returns the original result, and the tests skip.
 """
 
@@ -46,8 +46,6 @@ def _make_kernel(kind: str) -> UserKernel:
     pytest.importorskip("cuda.tile")
     if not torch.cuda.is_available():
         pytest.skip("needs a CUDA GPU")
-    if torch.cuda.get_device_capability()[0] < 10:
-        pytest.skip("cuTile needs a Blackwell GPU")
     from .user_kernel_cutile_fma import fma_tile
 
     return UserKernel.from_cutile(
