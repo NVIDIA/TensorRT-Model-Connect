@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "ti2v"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_generation"
+        ],
+        "default_task": "image_generation"
+      }
+    },
+    {
+      "if": {
+        "/model_index/_class_name": {
+          "in": [
+            "WanModel"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_generation"
+        ],
+        "default_task": "image_generation"
+      }
+    }
+  ]
+}

@@ -3,11 +3,7 @@
 
 """Family-owned model and task support for patchtst."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    model_types=("patchtst",),
-    tasks=("time_series_forecast",),
-    default_task="time_series_forecast",
-)
+describe = support_from_json(__file__)

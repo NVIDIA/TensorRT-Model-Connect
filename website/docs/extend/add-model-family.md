@@ -35,26 +35,55 @@ runtime's semantic Task migration; neither migration requires another family's
 implementation or a central list of migrated families.
 
 `support.py` owns checkpoint identity and task capabilities without importing
-the family implementation or its dependencies:
+the family implementation or its dependencies. New families declare their rules
+as data in `support.json` next to it, so any tool can evaluate the same rules
+without running Python:
 
 ```python
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
-describe = family_support(
-    model_types=("my_model",),
-    architectures=("MyModelForGeneration",),
-    tasks=("text_continuation",),
-    default_task="text_continuation",
-)
+describe = support_from_json(__file__)
 ```
 
-Support uses exact normalized identity only. Do not add broad prefixes,
-priority, scoring, or fallback. Zero matching families means unsupported;
-multiple matching families are an ownership error. `support.py` may import only
-the shared support contract. When an upstream repository has no standard model
-identity field, write a small `describe(metadata)` function that checks its
-exact family-owned root JSON shape or declare a minimal set of exact sentinel
-files; do not match the repository name.
+```json
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": { "/config/model_type": { "in": ["my_model"] } },
+      "then": { "tasks": ["text_continuation"], "default_task": "text_continuation" }
+    },
+    {
+      "if": { "/config/architectures": { "contains_any": ["MyModelForGeneration"] } },
+      "then": { "tasks": ["text_continuation"], "default_task": "text_continuation" }
+    }
+  ]
+}
+```
+
+Rules are checked in order and the first rule whose conditions all hold
+decides: `then` lists the supported tasks, or `"reject"` declines the model.
+Conditions are JSON Pointers into the model's `config.json` (`/config/...`),
+`model_index.json` (`/model_index/...`), `adapter_config.json`
+(`/adapter_config/...`), or its Hugging Face `/repo_id` and `/revision`, plus
+`files_all` and `files_none` for the repository file list. Each pointer takes
+one or more tests: `in`, `contains_any`, `equals`, `exists`, `type`,
+`nonempty`, and `prefix`. Strings compare exactly and are case-sensitive, so
+list each spelling the family accepts. The format is defined by
+`tools/support_rules.schema.json`, and `tools/support_rules_conformance.json`
+holds the shared cases every parser must pass.
+
+Support uses exact identity only. Do not add broad prefixes, priority, scoring,
+or fallback. Zero matching families means unsupported; multiple matching
+families are an ownership error. When an upstream repository has no standard
+model identity field, check its exact family-owned root JSON shape or a minimal
+set of exact sentinel files. When even that is too broad, list the exact
+validated checkpoints with `/repo_id`; never match a pattern in the repository
+name.
+
+Families that have not moved yet still declare support in Python with
+`family_support(...)` or a small `describe(metadata)` function. `support.py`
+may import only the shared support contract either way.
 
 `model.py` must expose exactly one plain function. Any helper it calls is
 implemented in this file or elsewhere in the same family directory:

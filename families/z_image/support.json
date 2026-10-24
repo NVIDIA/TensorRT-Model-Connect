@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "z-image",
+            "z_image",
+            "zimage",
+            "zimagepipeline"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_generation"
+        ],
+        "default_task": "image_generation"
+      }
+    },
+    {
+      "if": {
+        "/model_index/_class_name": {
+          "in": [
+            "ZImagePipeline"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_generation"
+        ],
+        "default_task": "image_generation"
+      }
+    }
+  ]
+}

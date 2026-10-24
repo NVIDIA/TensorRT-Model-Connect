@@ -3,12 +3,7 @@
 
 """Family-owned model and task support for flux."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    model_types=("flux", "flux.2"),
-    pipeline_classes=("Flux2Pipeline", "FluxPipeline"),
-    tasks=("image_generation", "image_generation_batch"),
-    default_task="image_generation",
-)
+describe = support_from_json(__file__)

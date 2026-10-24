@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "pixart",
+            "pixart_alpha",
+            "pixart_sigma",
+            "pixartalpha",
+            "pixartsigma"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_generation"
+        ],
+        "default_task": "image_generation"
+      }
+    },
+    {
+      "if": {
+        "/model_index/_class_name": {
+          "in": [
+            "PixArtAlphaPipeline",
+            "PixArtSigmaPipeline"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_generation"
+        ],
+        "default_task": "image_generation"
+      }
+    }
+  ]
+}

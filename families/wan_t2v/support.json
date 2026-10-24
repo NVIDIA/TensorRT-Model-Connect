@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "wan",
+            "wan2.1",
+            "wan_t2v",
+            "want2v"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_generation"
+        ],
+        "default_task": "image_generation"
+      }
+    },
+    {
+      "if": {
+        "/model_index/_class_name": {
+          "in": [
+            "WanPipeline",
+            "WanVideoToVideoPipeline"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_generation"
+        ],
+        "default_task": "image_generation"
+      }
+    }
+  ]
+}

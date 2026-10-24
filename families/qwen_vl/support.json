@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "qwen2_5_vl",
+            "qwen2_vl",
+            "qwen3_vl",
+            "qwen_vl",
+            "qwenvl"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "vision_language_generation"
+        ],
+        "default_task": "vision_language_generation"
+      }
+    }
+  ]
+}

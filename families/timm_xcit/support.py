@@ -3,43 +3,7 @@
 
 """Family-owned model and task support for timm XCiT."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-_ARCHITECTURES = (
-    "xcit_large_24_p16_224",
-    "xcit_large_24_p16_384",
-    "xcit_large_24_p8_224",
-    "xcit_large_24_p8_384",
-    "xcit_medium_24_p16_224",
-    "xcit_medium_24_p16_384",
-    "xcit_medium_24_p8_224",
-    "xcit_medium_24_p8_384",
-    "xcit_nano_12_p16_224",
-    "xcit_nano_12_p16_384",
-    "xcit_nano_12_p8_224",
-    "xcit_nano_12_p8_384",
-    "xcit_small_12_p16_224",
-    "xcit_small_12_p16_384",
-    "xcit_small_12_p8_224",
-    "xcit_small_12_p8_384",
-    "xcit_small_24_p16_224",
-    "xcit_small_24_p16_384",
-    "xcit_small_24_p8_224",
-    "xcit_small_24_p8_384",
-    "xcit_tiny_12_p16_224",
-    "xcit_tiny_12_p16_384",
-    "xcit_tiny_12_p8_224",
-    "xcit_tiny_12_p8_384",
-    "xcit_tiny_24_p16_224",
-    "xcit_tiny_24_p16_384",
-    "xcit_tiny_24_p8_224",
-    "xcit_tiny_24_p8_384",
-)
-
-describe = family_support(
-    model_types=("timm_xcit",) + _ARCHITECTURES,
-    architectures=_ARCHITECTURES,
-    tasks=("image_to_class_scores",),
-    default_task="image_to_class_scores",
-)
+describe = support_from_json(__file__)

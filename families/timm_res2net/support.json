@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "timm_res2net",
+            "res2net50_14w_8s",
+            "res2net50_26w_4s",
+            "res2net50_26w_6s",
+            "res2net50_26w_8s",
+            "res2net50_48w_2s",
+            "res2net50d",
+            "res2net101_26w_4s",
+            "res2net101d",
+            "res2next50"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "classification"
+        ],
+        "default_task": "classification"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "res2net50_14w_8s",
+            "res2net50_26w_4s",
+            "res2net50_26w_6s",
+            "res2net50_26w_8s",
+            "res2net50_48w_2s",
+            "res2net50d",
+            "res2net101_26w_4s",
+            "res2net101d",
+            "res2next50"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "classification"
+        ],
+        "default_task": "classification"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "res2net50_14w_8s",
+            "res2net50_26w_4s",
+            "res2net50_26w_6s",
+            "res2net50_26w_8s",
+            "res2net50_48w_2s",
+            "res2net50d",
+            "res2net101_26w_4s",
+            "res2net101d",
+            "res2next50"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "classification"
+        ],
+        "default_task": "classification"
+      }
+    }
+  ]
+}

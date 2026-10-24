@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "nemotron_h",
+            "nemotron_hybrid",
+            "nemotronh"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "text_generation"
+        ],
+        "default_task": "text_generation"
+      }
+    }
+  ]
+}

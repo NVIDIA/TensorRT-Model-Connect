@@ -3,12 +3,7 @@
 
 """Family-owned model and task support for z_image."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    model_types=("z-image", "z_image", "zimage", "zimagepipeline"),
-    pipeline_classes=("ZImagePipeline",),
-    tasks=("image_generation",),
-    default_task="image_generation",
-)
+describe = support_from_json(__file__)

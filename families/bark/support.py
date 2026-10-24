@@ -3,11 +3,7 @@
 
 """Family-owned model and task support for bark."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    model_types=("bark",),
-    tasks=("audio_generation",),
-    default_task="audio_generation",
-)
+describe = support_from_json(__file__)

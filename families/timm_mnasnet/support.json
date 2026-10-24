@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "mnasnet_100"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "classification"
+        ],
+        "default_task": "classification"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "mnasnet_100"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "classification"
+        ],
+        "default_task": "classification"
+      }
+    }
+  ]
+}
