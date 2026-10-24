@@ -89,3 +89,29 @@ def test_generation_config_must_hold_one_object(tmp_path: Path) -> None:
     (tmp_path / "generation_config.json").write_text(json.dumps([1, 2]), encoding="utf-8")
     with pytest.raises(ValueError, match="must contain one JSON object"):
         _runtime_config(tmp_path, _config(2))
+
+
+@pytest.mark.parametrize("name", ["bos_token_id", "eos_token_id", "pad_token_id"])
+def test_zero_special_token_survives_checkpoint_to_runtime(tmp_path: Path, name: str) -> None:
+    raw = {"model_type": "llama", "eos_token_id": 2, name: 0}
+    (tmp_path / "config.json").write_text(json.dumps(raw), encoding="utf-8")
+    runtime = _runtime_config(tmp_path, ModelConfig.from_dir(tmp_path))
+    assert runtime[name] == 0
+    if name == "eos_token_id":
+        assert "eos_token_ids" not in runtime
+
+
+@pytest.mark.parametrize(
+    "tokens",
+    [{}, {name: None for name in ("bos_token_id", "eos_token_id", "pad_token_id")}],
+)
+def test_absent_special_tokens_keep_runtime_sentinel(tmp_path: Path, tokens: dict) -> None:
+    (tmp_path / "config.json").write_text(json.dumps(tokens), encoding="utf-8")
+    runtime = _runtime_config(tmp_path, ModelConfig.from_dir(tmp_path))
+    assert [runtime[name] for name in ("bos_token_id", "eos_token_id", "pad_token_id")] == [-1, -1, -1]
+
+
+def test_zero_in_stop_list_keeps_order(tmp_path: Path) -> None:
+    runtime = _runtime_config(tmp_path, _config([0, 2]))
+    assert runtime["eos_token_id"] == 0
+    assert runtime["eos_token_ids"] == [0, 2]
