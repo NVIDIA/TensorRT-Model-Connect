@@ -22,7 +22,8 @@
 // Outputs: out[T,d_inner], conv_state'[conv_dim,4]  (same type as qkv)
 //          ssm_state'[H,D,D]                                      (fp32)
 // Workspace: y[T,conv_dim] (act), g[T,H] (fp32), beta[T,H] (act), o[T,H,D] (act),
-//            kq [H,2T,D], k_w, v_corr [H,T,D], qk_mask [H,T,chunk], g_cum [H,T] (fp32).
+//            kq [H,2T,D], k_w (k_w^T [H,D,T] for the CUDA chain kernel), qk_mask [H,T,chunk]
+//            (fp32, fp16 with the CUDA chain kernel), v_corr [H,T,D] (fp32), g_cum [H,T] (fp32).
 
 #include <NvInferRuntime.h>
 #include <array>
@@ -78,6 +79,8 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
                 else if (name == "chunk") chunk_ = as_int();
                 else if (name == "dynamic") dynamic_ = as_int();
                 else if (name == "conv_rows") conv_rows_ = as_int();
+                else if (name == "inter_cuda") inter_cuda_ = as_int();
+                else if (name == "inter_smem") inter_smem_ = as_int();
             } else if (f.type == nvinfer1::PluginFieldType::kINT8) {
                 for (int32_t s = 0; s < kNumStages; ++s)
                     if (name == kStageField[s])
@@ -87,7 +90,7 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
         }
         valid_ = num_heads_ > 0 && num_kv_heads_ > 0 && head_dim_ > 0 && conv_dim_ > 0 &&
                  seq_len_ > 0 && (act_bytes_ == 2) && conv_block_ > 0 && block_v_ > 0 &&
-                 head_dim_ % block_v_ == 0 && chunk_ > 0 && conv_rows_ > 0 &&
+                 head_dim_ % block_v_ == 0 && chunk_ > 0 && conv_rows_ > 0 && (inter_cuda_ == 0 || inter_smem_ > 0) &&
                  (dynamic_ != 0 || seq_len_ % chunk_ == 0);
         for (int32_t s = 0; s < kNumStages; ++s)
             valid_ = valid_ && !cubins_[s].empty() && threads_[s] > 0;
@@ -189,7 +192,7 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
             return -1;
         std::array<LoadedKernel, kNumStages> kernels;
         for (int32_t s = 0; s < kNumStages; ++s)
-            if (!get_kernel(cubins_[s], kStageSymbol[s], kernels[s]))
+            if (!get_kernel(cubins_[s], (s == 4 && inter_cuda_ != 0) ? "gdn_inter" : kStageSymbol[s], kernels[s]))
                 return -1;
 
         int32_t const T = rows, H = num_heads_, NK = num_kv_heads_, D = head_dim_,
@@ -201,16 +204,19 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
         void* const g = base + align_up(Tm * CD * act_bytes_);
         void* const beta = static_cast<char*>(g) + align_up(Tm * H * 4);
         void* const o = static_cast<char*>(beta) + align_up(Tm * H * act_bytes_);
-        std::size_t const hd_bytes = align_up(static_cast<std::size_t>(H) * Tm * D * 4);
         int32_t const CS = chunk_;
-        std::size_t const CS_ = chunk_;
         int32_t const NC = (T + CS - 1) / CS;
         char* const wq = static_cast<char*>(o) + align_up(Tm * H * D * act_bytes_);
-        void* const kq = wq;                    // [H, NC, 2 CS, D]: k_cumdecay, then q * exp(g_cum)
-        void* const kw = wq + 2 * hd_bytes;     // [H, NC, CS, D]
-        void* const vc = wq + 3 * hd_bytes;     // [H, NC, CS, D]
-        void* const qm = wq + 4 * hd_bytes;     // [H, NC, CS, CS]
-        void* const gc = wq + 4 * hd_bytes + align_up(static_cast<std::size_t>(H) * Tm * CS_ * 4);
+        // intra -> inter operands: fp16 for the CUDA chain kernel, fp32 for the cuTile one.
+        std::size_t const hb = inter_cuda_ != 0 ? 2 : 4;
+        std::size_t const hd_h = align_up(static_cast<std::size_t>(H) * Tm * D * hb);
+        std::size_t const hd_f = align_up(static_cast<std::size_t>(H) * Tm * D * 4);
+        std::size_t const CS_ = chunk_;
+        void* const kq = wq;                                    // [H, NC, 2 CS, D]: k_cumdecay, then q * exp(g_cum)
+        void* const kw = wq + 2 * hd_h;                         // [H, NC, CS, D] (CUDA: [H, NC, D, CS])
+        void* const vc = wq + 3 * hd_h;                         // [H, NC, CS, D] fp32
+        void* const qm = wq + 3 * hd_h + hd_f;                  // [H, NC, CS, CS]
+        void* const gc = wq + 3 * hd_h + hd_f + align_up(static_cast<std::size_t>(H) * Tm * CS_ * hb);
         auto* const yb = static_cast<char*>(y);
         std::size_t const qk_bytes = static_cast<std::size_t>(NK) * D * act_bytes_;
         auto cast = [](void const* p) { return const_cast<void*>(p); };
@@ -260,7 +266,7 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
             {g, 3, {1, T, H, 0}},
             {beta, 3, {1, T, H, 0}},
             {kq, 4, {H, NC, 2 * CS, D}},
-            {kw, 4, {H, NC, CS, D}},
+            {kw, 4, {H, NC, inter_cuda_ != 0 ? D : CS, inter_cuda_ != 0 ? CS : D}},
             {qm, 4, {H, NC, CS, CS}},
             {vc, 4, {H, NC, CS, D}},
             {gc, 3, {H, NC, CS, 0}},
@@ -270,19 +276,34 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
             return -1;
 
         // 4b. state passing over the chunks and the chunk outputs
-        std::array<Arr, 8> inter{{
-            {kq, 4, {H, NC, 2 * CS, D}},
-            {kw, 4, {H, NC, CS, D}},
-            {qm, 4, {H, NC, CS, CS}},
-            {vc, 4, {H, NC, CS, D}},
-            {gc, 3, {H, NC, CS, 0}},
-            {o, 4, {1, T, H, D}},
-            {cast(inputs[10]), 4, {1, H, D, D}},
-            {outputs[2], 4, {1, H, D, D}},
-        }};
-        if (!launch(kernels[4], {static_cast<unsigned>(H), static_cast<unsigned>(D / block_v_), 1}, static_cast<unsigned>(threads_[4]),
-                    inter.data(), 8, stream))
-            return -1;
+        if (inter_cuda_ != 0) {
+            void* p_kq = kq; void* p_kw = kw; void* p_qm = qm; void* p_vc = vc; void* p_gc = gc;
+            void* p_o = o; void* p_s0 = cast(inputs[10]); void* p_s1 = outputs[2];
+            int32_t a_nc = NC, a_t = T, a_h = H;
+            void* args[] = {&p_kq, &p_kw, &p_qm, &p_vc, &p_gc, &p_o, &p_s0, &p_s1, &a_nc, &a_t, &a_h};
+            if (cuFuncSetAttribute(kernels[4].function, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                                   inter_smem_) != CUDA_SUCCESS)
+                return -1;
+            if (cuLaunchKernel(kernels[4].function, static_cast<unsigned>(H), static_cast<unsigned>(D / 64), 1,
+                               static_cast<unsigned>(threads_[4]), 1, 1, static_cast<unsigned>(inter_smem_),
+                               reinterpret_cast<CUstream>(stream), args, nullptr) != CUDA_SUCCESS)
+                return -1;
+        } else {
+            std::array<Arr, 8> inter{{
+                {kq, 4, {H, NC, 2 * CS, D}},
+                {kw, 4, {H, NC, CS, D}},
+                {qm, 4, {H, NC, CS, CS}},
+                {vc, 4, {H, NC, CS, D}},
+                {gc, 3, {H, NC, CS, 0}},
+                {o, 4, {1, T, H, D}},
+                {cast(inputs[10]), 4, {1, H, D, D}},
+                {outputs[2], 4, {1, H, D, D}},
+            }};
+            if (!launch(kernels[4], {static_cast<unsigned>(H), static_cast<unsigned>(D / block_v_), 1}, static_cast<unsigned>(threads_[4]),
+                        inter.data(), 8, stream))
+                return -1;
+
+        }
 
         // 5. gated RMSNorm, zero for padding rows
         std::array<Arr, 5> norm{{
@@ -310,6 +331,8 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
         fields_.push_back({"chunk", &chunk_, nvinfer1::PluginFieldType::kINT32, 1});
         fields_.push_back({"dynamic", &dynamic_, nvinfer1::PluginFieldType::kINT32, 1});
         fields_.push_back({"conv_rows", &conv_rows_, nvinfer1::PluginFieldType::kINT32, 1});
+        fields_.push_back({"inter_cuda", &inter_cuda_, nvinfer1::PluginFieldType::kINT32, 1});
+        fields_.push_back({"inter_smem", &inter_smem_, nvinfer1::PluginFieldType::kINT32, 1});
         fields_.push_back({"threads", threads_.data(), nvinfer1::PluginFieldType::kINT32,
                            kNumStages});
         for (int32_t s = 0; s < kNumStages; ++s)
@@ -324,8 +347,9 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
     std::size_t workspace_bytes() const noexcept {
         std::size_t const T = seq_len_, H = num_heads_, D = head_dim_, CD = conv_dim_;
         return align_up(T * CD * act_bytes_) + align_up(T * H * 4) + align_up(T * H * act_bytes_) +
-               align_up(T * H * D * act_bytes_) + 4 * align_up(H * T * D * 4) +
-               align_up(H * T * static_cast<std::size_t>(chunk_) * 4) + align_up(H * T * 4);
+               align_up(T * H * D * act_bytes_) + 3 * align_up(H * T * D * (inter_cuda_ != 0 ? 2 : 4)) +
+               align_up(H * T * D * 4) + align_up(H * T * static_cast<std::size_t>(chunk_) * (inter_cuda_ != 0 ? 2 : 4)) +
+               align_up(H * T * 4);
     }
 
     int32_t num_heads_{0};
@@ -339,6 +363,8 @@ class Qwen38GdnPrefillTileGymPlugin final : public nvinfer1::IPluginV3,
     int32_t chunk_{0};
     int32_t dynamic_{0};
     int32_t conv_rows_{0};
+    int32_t inter_cuda_{0};
+    int32_t inter_smem_{0};
     std::array<std::vector<char>, kNumStages> cubins_;
     std::array<int32_t, kNumStages> threads_{};
     bool valid_{false};

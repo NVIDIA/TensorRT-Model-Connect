@@ -175,27 +175,9 @@ def gate_kernel(
     ct.scatter(g_out, (t, offs), ct.astype(g, g_out.dtype), check_bounds=True)
 
 
-@ct.kernel(occupancy=2)
-def intra_kernel(
-    Query,  # (1, T, H_K, K) strided view of y
-    Key,  # (1, T, H_K, K)
-    Value,  # (1, T, H, V)
-    Gate,  # (1, T, H) fp32
-    Beta,  # (1, T, H)
-    KQ,  # (H, NC, 2 * CS, K) fp32: rows [0, CS) k_cumdecay, rows [CS, 2 * CS) q * exp(g_cum)
-    K_w,  # (H, NC, CS, K) fp32: k * exp(g_last - g_cum)
-    QK_mask,  # (H, NC, CS, CS) fp32: causal, decayed q k^T
-    V_corr,  # (H, NC, CS, V) fp32
-    G_cum,  # (H, NC, CS) fp32
-    scale: ConstFloat,
-    CS: ConstInt,
-    BLOCK_K: ConstInt,
-):
-    """Grid: (H, NC). One chunk of CS tokens of one head: cumulative decay, the triangular solve
-    of the WY form, the corrected values, and every product that does not depend on the state
-    (inter_kernel only keeps the sequential state chain)."""
-    h = ct.bid(0)
-    c = ct.bid(1)
+def _intra_chunk(Query, Key, Value, Gate, Beta, h, c, scale, CS, BLOCK_K):
+    """Everything about chunk c of value head h that does not depend on the running state:
+    returns (g_cum, v_corr, k_cumdecay, q * exp(g_cum), k * exp(g_last - g_cum), q k^T mask)."""
     hk = h // (Value.shape[2] // Query.shape[2])
     zero = ct.PaddingMode.ZERO
     k_t = ct.astype(ct.load(Key, index=(0, c, hk, 0), shape=(1, CS, 1, BLOCK_K),
@@ -227,13 +209,70 @@ def intra_kernel(
     q_g = q_t * exp_g
     k_w = k_t * ct.expand_dims(ct.exp(g_last - g_cum), axis=1)
     qk_mask = ct.where(rr >= cc, _mm(q_t, ct.transpose(k_t)) * decay, 0.0)
+    return g_cum, v_corr, k_cum, q_g, k_w, qk_mask
 
+
+@ct.kernel(occupancy=2)
+def intra_kernel(
+    Query,  # (1, T, H_K, K) strided view of y
+    Key,  # (1, T, H_K, K)
+    Value,  # (1, T, H, V)
+    Gate,  # (1, T, H) fp32
+    Beta,  # (1, T, H)
+    KQ,  # (H, NC, 2 * CS, K) fp32: rows [0, CS) k_cumdecay, rows [CS, 2 * CS) q * exp(g_cum)
+    K_w,  # (H, NC, CS, K) fp32: k * exp(g_last - g_cum)
+    QK_mask,  # (H, NC, CS, CS) fp32: causal, decayed q k^T
+    V_corr,  # (H, NC, CS, V) fp32
+    G_cum,  # (H, NC, CS) fp32
+    scale: ConstFloat,
+    CS: ConstInt,
+    BLOCK_K: ConstInt,
+):
+    """Grid: (H, NC). One chunk of CS tokens of one head: cumulative decay, the triangular solve
+    of the WY form, the corrected values, and every product that does not depend on the state
+    (inter_kernel only keeps the sequential state chain)."""
+    h = ct.bid(0)
+    c = ct.bid(1)
+    g_cum, v_corr, k_cum, q_g, k_w, qk_mask = _intra_chunk(
+        Query, Key, Value, Gate, Beta, h, c, scale, CS, BLOCK_K)
     ct.store(G_cum, index=(h, c, 0), tile=ct.reshape(g_cum, (1, 1, CS)))
     ct.store(V_corr, index=(h, c, 0, 0), tile=ct.reshape(v_corr, (1, 1, CS, BLOCK_K)))
     ct.store(KQ, index=(h, c, 0, 0), tile=ct.reshape(k_cum, (1, 1, CS, BLOCK_K)))
     ct.store(KQ, index=(h, c, 1, 0), tile=ct.reshape(q_g, (1, 1, CS, BLOCK_K)))
     ct.store(K_w, index=(h, c, 0, 0), tile=ct.reshape(k_w, (1, 1, CS, BLOCK_K)))
     ct.store(QK_mask, index=(h, c, 0, 0), tile=ct.reshape(qk_mask, (1, 1, CS, CS)))
+
+
+@ct.kernel(occupancy=2)
+def intra_cuda_kernel(
+    Query,  # (1, T, H_K, K) strided view of y
+    Key,  # (1, T, H_K, K)
+    Value,  # (1, T, H, V)
+    Gate,  # (1, T, H) fp32
+    Beta,  # (1, T, H)
+    KQ,  # (H, NC, 2 * CS, K) fp16: rows [0, CS) k_cumdecay, rows [CS, 2 * CS) q * exp(g_cum)
+    K_wT,  # (H, NC, K, CS) fp16: (k * exp(g_last - g_cum))^T
+    QK_mask,  # (H, NC, CS, CS) fp16: causal, decayed q k^T
+    V_corr,  # (H, NC, CS, V) fp32
+    G_cum,  # (H, NC, CS) fp32
+    scale: ConstFloat,
+    CS: ConstInt,
+    BLOCK_K: ConstInt,
+):
+    """intra_kernel for the CUDA state-chain kernel (native_plugins/gdn_chain_inter.cu): the
+    operands that only feed matmuls are stored as fp16 (the matmuls round them to fp16 anyway),
+    K_w transposed."""
+    h = ct.bid(0)
+    c = ct.bid(1)
+    g_cum, v_corr, k_cum, q_g, k_w, qk_mask = _intra_chunk(
+        Query, Key, Value, Gate, Beta, h, c, scale, CS, BLOCK_K)
+    ct.store(G_cum, index=(h, c, 0), tile=ct.reshape(g_cum, (1, 1, CS)))
+    ct.store(V_corr, index=(h, c, 0, 0), tile=ct.reshape(v_corr, (1, 1, CS, BLOCK_K)))
+    ct.store(KQ, index=(h, c, 0, 0), tile=ct.reshape(ct.astype(k_cum, KQ.dtype), (1, 1, CS, BLOCK_K)))
+    ct.store(KQ, index=(h, c, 1, 0), tile=ct.reshape(ct.astype(q_g, KQ.dtype), (1, 1, CS, BLOCK_K)))
+    ct.store(K_wT, index=(h, c, 0, 0),
+             tile=ct.reshape(ct.astype(ct.transpose(k_w), K_wT.dtype), (1, 1, BLOCK_K, CS)))
+    ct.store(QK_mask, index=(h, c, 0, 0), tile=ct.reshape(ct.astype(qk_mask, QK_mask.dtype), (1, 1, CS, CS)))
 
 
 @ct.kernel

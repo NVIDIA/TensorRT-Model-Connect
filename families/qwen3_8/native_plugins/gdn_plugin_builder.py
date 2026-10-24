@@ -13,6 +13,8 @@ Decode (T = 1) and prefill (static T, with valid_len for a padded last chunk) ar
 Environment (all optional):
   TRTMC_GDN_CONV_BLOCK / TRTMC_GDN_BLOCK_V / TRTMC_GDN_STREAM_V   decode kernel tile sizes
   TRTMC_GDN_PREFILL_BLOCK_V                                       prefill delta-rule V tile
+  TRTMC_GDN_PREFILL_INTER=auto|cuda|cutile                        prefill state-chain kernel: CUDA (NVRTC,
+                                                                  validated on sm_120) or cuTile; auto picks CUDA where validated
 """
 
 from __future__ import annotations
@@ -304,12 +306,61 @@ def add_gdn_decode_plugin(network, trt, *, inputs, num_heads: int, num_kv_heads:
 PREFILL_PLUGIN_NAME = "Qwen38GdnPrefillTileGym"
 _PREFILL_SYMBOLS = {"conv": "gdnp_conv", "conv_state": "gdnp_conv_state", "gate": "gdnp_gate",
                     "intra": "gdnp_intra", "inter": "gdnp_inter", "norm": "gdnp_norm"}
-_PREFILL_CUBIN_CACHE: dict[tuple, dict[str, bytes]] = {}
+_PREFILL_CUBIN_CACHE: dict[tuple, "_Cubins"] = {}
+_CUDA_INTER_ARCHS = {"sm_120"}  # GPUs the CUDA state-chain kernel has been validated on
+# Dynamic shared memory of gdn_chain_inter.cu: two stages of
+# KQ (64 x 136 fp16) + K_w^T (128 x 40 fp16) + QK_mask (32 x 40 fp16) + V_corr (32 x 68 fp32) + g (32 fp32).
+_CHAIN_INTER_SMEM = 2 * (64 * 136 * 2 + 128 * 40 * 2 + 32 * 40 * 2 + 32 * 68 * 4 + 32 * 4)
+
+
+class _Cubins(dict):
+    """Stage name -> cubin. `inter_cuda` tells that the inter stage is the CUDA kernel."""
+
+    inter_cuda = False
+
+
+def _inter_cuda_mode() -> str:
+    mode = os.environ.get("TRTMC_GDN_PREFILL_INTER", "auto")
+    if mode not in ("auto", "cuda", "cutile"):
+        raise ValueError("TRTMC_GDN_PREFILL_INTER must be auto, cuda or cutile")
+    return mode
+
+
+def _inter_cuda_unsupported(K, gpu_code: str, chunk: int, head_dim: int) -> str | None:
+    if gpu_code not in _CUDA_INTER_ARCHS:
+        return f"the CUDA chain kernel is not validated on {gpu_code}"
+    if chunk != 32 or head_dim != 128:
+        return "the CUDA chain kernel needs chunk 32 and head_dim 128"
+    if K._MM_DTYPE != K.ct.float16:
+        return "the CUDA chain kernel needs fp16 matmul operands"
+    return None
+
+
+def _compile_chain_inter(gpu_code: str, bf16: bool) -> bytes:
+    """gdn_chain_inter.cu -> cubin for `gpu_code` with NVRTC."""
+    from cuda.bindings import nvrtc
+
+    source = (Path(__file__).parent / "gdn_chain_inter.cu").read_text()
+    err, prog = nvrtc.nvrtcCreateProgram(source.encode(), b"gdn_chain_inter.cu", 0, [], [])
+    options = [f"--gpu-architecture={gpu_code}".encode(), b"-std=c++17",
+               f"-DOUT_BF16={int(bf16)}".encode()]
+    result, = nvrtc.nvrtcCompileProgram(prog, len(options), options)
+    if int(result) != 0:
+        _, size = nvrtc.nvrtcGetProgramLogSize(prog)
+        log = b" " * size
+        nvrtc.nvrtcGetProgramLog(prog, log)
+        raise RuntimeError(f"NVRTC failed to compile gdn_chain_inter.cu: {log.decode(errors='replace')}")
+    _, size = nvrtc.nvrtcGetCUBINSize(prog)
+    cubin = b" " * size
+    nvrtc.nvrtcGetCUBIN(prog, cubin)
+    nvrtc.nvrtcDestroyProgram(prog)
+    return cubin
 
 
 def compile_prefill_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, seq_len: int,
-                           bf16: bool, gpu_code: str, dynamic: bool = False) -> dict[str, bytes]:
-    """Compile the six prefill stage kernels (cutile/gdn_prefill.py).
+                           bf16: bool, gpu_code: str, dynamic: bool = False) -> _Cubins:
+    """Compile the six prefill stage kernels (cutile/gdn_prefill.py). The inter stage is the CUDA
+    kernel gdn_chain_inter.cu (NVRTC) when TRTMC_GDN_PREFILL_INTER allows it, else a cuTile kernel.
 
     Static: shapes are constants for `seq_len` tokens. Dynamic: the token count is a runtime
     extent (any 1 <= T <= seq_len; the kernels read it from the array shapes)."""
@@ -319,7 +370,7 @@ def compile_prefill_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, 
     block_v = prefill_block_v()
     chunk = prefill_chunk()
     key = (num_heads, num_kv_heads, head_dim, seq_len, bf16, gpu_code, conv_block, conv_rows,
-           block_v, chunk, dynamic)
+           block_v, chunk, dynamic, _inter_cuda_mode())
     if key in _PREFILL_CUBIN_CACHE:
         return _PREFILL_CUBIN_CACHE[key]
 
@@ -330,6 +381,19 @@ def compile_prefill_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, 
     H, D, NK, T = num_heads, head_dim, num_kv_heads, seq_len
     CD = 2 * NK * D + H * D
     act, f32, i32 = (ct.bfloat16 if bf16 else ct.float16), ct.float32, ct.int32
+    mode = _inter_cuda_mode()
+    use_cuda = False
+    if mode != "cutile":
+        reason = _inter_cuda_unsupported(K, gpu_code, chunk, head_dim)
+        chain_cubin = None
+        if reason is None:
+            try:
+                chain_cubin = _compile_chain_inter(gpu_code, bf16)
+            except Exception as error:  # NVRTC missing or failing
+                reason = str(error).splitlines()[0] if str(error) else type(error).__name__
+        if reason is not None and mode == "cuda":
+            raise RuntimeError(f"TRTMC_GDN_PREFILL_INTER=cuda is not available: {reason}")
+        use_cuda = reason is None
     if T % chunk and not dynamic:
         raise ValueError(f"seq_len {T} must be a multiple of the prefill chunk {chunk}")
     NC = None if dynamic else T // chunk
@@ -342,6 +406,7 @@ def compile_prefill_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, 
     def pow2(n):
         return 1 << (n - 1).bit_length()
 
+    hoist = ct.float16 if use_cuda else f32  # intra -> inter operands that only feed matmuls
     TH = None if T is None else T * H
     qkv_rows = (None if T is None else T * CD, CD, D, 1)  # q, k, v: strided views of the [T, CD] conv output
     stages = {
@@ -354,13 +419,13 @@ def compile_prefill_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, 
         "gate": (K.gate_kernel, [
             arr(act, (T, H)), arr(act, (T, H)), arr(f32, (H,)), arr(f32, (H,)), arr(i32, (1,)),
             arr(act, (T, H)), arr(f32, (T, H)), pow2(H)]),
-        "intra": (K.intra_kernel, [
+        "intra": (K.intra_cuda_kernel if use_cuda else K.intra_kernel, [
             arr(act, (1, T, NK, D), qkv_rows), arr(act, (1, T, NK, D), qkv_rows),
             arr(act, (1, T, H, D), qkv_rows), arr(f32, (1, T, H)), arr(act, (1, T, H)),
-            arr(f32, (H, NC, 2 * chunk, D)), arr(f32, (H, NC, chunk, D)),
-            arr(f32, (H, NC, chunk, chunk)), arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk)),
+            arr(hoist, (H, NC, 2 * chunk, D)), arr(hoist, (H, NC, D, chunk) if use_cuda else (H, NC, chunk, D)),
+            arr(hoist, (H, NC, chunk, chunk)), arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk)),
             float(D) ** -0.5, chunk, pow2(D)]),
-        "inter": (K.inter_kernel, [
+        "inter": (None if use_cuda else K.inter_kernel, [
             arr(f32, (H, NC, 2 * chunk, D)), arr(f32, (H, NC, chunk, D)),
             arr(f32, (H, NC, chunk, chunk)), arr(f32, (H, NC, chunk, D)), arr(f32, (H, NC, chunk)),
             arr(act, (1, T, H, D)), arr(f32, (1, H, D, D)), arr(f32, (1, H, D, D)),
@@ -369,8 +434,12 @@ def compile_prefill_cubins(*, num_heads: int, num_kv_heads: int, head_dim: int, 
             arr(act, (TH, D)), arr(act, (TH, D)), arr(f32, (H, D)), arr(i32, (1,)),
             arr(act, (TH, D)), _NORM_EPS, D, pow2(D), H]),
     }
-    cubins = {}
+    cubins = _Cubins()
+    cubins.inter_cuda = use_cuda
     for name, (kernel, parameters) in stages.items():
+        if name == "inter" and use_cuda:
+            cubins[name] = chain_cubin
+            continue
         signature = KernelSignature(parameters, CallingConvention.cutile_python_v2(),
                                     symbol=_PREFILL_SYMBOLS[name])
         buffer = io.BytesIO()
@@ -412,7 +481,9 @@ def add_gdn_prefill_plugin(network, trt, *, inputs, num_heads: int, num_kv_heads
               int_field("seq_len", seq_len), int_field("act_bytes", 2),
               int_field("conv_block", conv_block), int_field("block_v", block_v),
               int_field("chunk", chunk), int_field("dynamic", int(dynamic)),
-              int_field("conv_rows", K.CONV_ROWS)]
+              int_field("conv_rows", K.CONV_ROWS),
+              int_field("inter_cuda", int(cubins.inter_cuda)),
+              int_field("inter_smem", _CHAIN_INTER_SMEM if cubins.inter_cuda else 0)]
     fields.append(trt.PluginField(
         "threads", np.array([_block_threads(blob) for blob in cubins.values()], dtype=np.int32),
         trt.PluginFieldType.INT32))
