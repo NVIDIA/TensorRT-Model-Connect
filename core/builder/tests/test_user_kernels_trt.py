@@ -88,7 +88,7 @@ R, C = 8, 64
 
 
 def _build_larger_engine(weights):
-    """matmul, relu, (p * s + r), relu, reduce_sum; only ``p * s + r`` matches the pattern."""
+    """matmul, (p * s + r), relu, reduce_sum; only ``p * s + r`` matches the pattern."""
     logger = trt.Logger(trt.Logger.ERROR)
     builder = trt.Builder(logger)
     network = builder.create_network(0)
@@ -97,8 +97,7 @@ def _build_larger_engine(weights):
     m = network.add_matrix_multiply(
         x, trt.MatrixOperation.NONE, w, trt.MatrixOperation.NONE
     ).get_output(0)
-    p = network.add_activation(m, trt.ActivationType.RELU).get_output(0)
-    prod = network.add_elementwise(p, s, trt.ElementWiseOperation.PROD).get_output(0)
+    prod = network.add_elementwise(m, s, trt.ElementWiseOperation.PROD).get_output(0)
     u = network.add_elementwise(prod, r, trt.ElementWiseOperation.SUM).get_output(0)
     v = network.add_activation(u, trt.ActivationType.RELU).get_output(0)
     out = network.add_reduce(v, trt.ReduceOperation.SUM, 1 << 1, False).get_output(0)
@@ -130,7 +129,7 @@ def test_pattern_replaced_inside_larger_graph():
     rng = np.random.default_rng(0)
     weights = (rng.standard_normal((C, C)) / 8).astype(np.float32)
     host = [rng.standard_normal((R, C)).astype(np.float32) for _ in range(3)]
-    p = np.maximum(host[0].astype(np.float64) @ weights.astype(np.float64), 0)
+    p = host[0].astype(np.float64) @ weights.astype(np.float64)
     original = np.maximum(p * host[1] + host[2], 0).sum(1)
     expected = np.maximum(p * host[1] + host[2] + 1.0, 0).sum(1)
 
