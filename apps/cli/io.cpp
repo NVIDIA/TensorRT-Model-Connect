@@ -25,7 +25,8 @@
 namespace trtmc::cli::io {
 
 void write_wav(const AudioResult& audio, const std::string& path) {
-    write_wav_interleaved({audio.samples.data(), audio.samples.size()}, audio.sample_rate, 1, path);
+    write_wav_interleaved({audio.samples.data(), audio.samples.size()}, audio.sample_rate,
+                          audio.channels, path);
 }
 
 void write_wav_interleaved(Span<const float> samples, std::int32_t sample_rate,
@@ -172,6 +173,8 @@ AudioResult read_wav(const std::string& path) {
     AudioResult result;
     result.sample_rate = audio.sample_rate;
     result.num_samples = static_cast<std::int32_t>(frames);
+    // Multi-channel input is downmixed above, so the returned audio is mono.
+    result.channels = 1;
     if (channels == 1) {
         result.samples = std::move(audio.samples);
     } else {
