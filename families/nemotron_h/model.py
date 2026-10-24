@@ -75,13 +75,16 @@ from .prepared_quantization import PreparedPolicy, PreparedQuantContext, checkpo
 def _parse_layer_types(pattern: str) -> list[str]:
     """Parse hybrid_override_pattern: M=mamba2, -=mlp, *=attention."""
     mapping = {"M": "mamba2", "-": "mlp", "*": "attention", "E": "moe"}
-    return [mapping[ch] for ch in pattern if ch in mapping]
+    invalid = sorted(set(pattern) - mapping.keys())
+    if invalid:
+        raise ValueError(f"Invalid hybrid pattern characters: {invalid}")
+    return [mapping[ch] for ch in pattern]
 
 
 def _config_layer_types(raw: dict, num_layers: int) -> list[str]:
     forms = []
     pattern = raw.get("hybrid_override_pattern")
-    if pattern:
+    if pattern is not None:
         if not isinstance(pattern, str) or any(ch not in "M-*E" for ch in pattern):
             raise ValueError("Unsupported Nemotron-H hybrid layer marker")
         forms.append(_parse_layer_types(pattern))
@@ -95,7 +98,8 @@ def _config_layer_types(raw: dict, num_layers: int) -> list[str]:
         forms.append(["mamba2"] * num_layers)
     if any(form != forms[0] for form in forms):
         raise ValueError("Conflicting Nemotron-H hybrid layer specifications")
-    assert len(forms[0]) == num_layers, f"Pattern length {len(forms[0])} != num_hidden_layers {num_layers}"
+    if len(forms[0]) != num_layers:
+        raise ValueError(f"Pattern length {len(forms[0])} != num_hidden_layers {num_layers}")
     return forms[0]
 
 
@@ -196,9 +200,8 @@ class _NemotronHModel:
 
         # Embedding
         embedding = _load_tensor(readers, "backbone.embeddings.weight")
-        assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
-        )
+        if embedding.shape != (vocab, hidden):
+            raise ValueError(f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
         weights["embedding"] = embedding.astype(np.float32)
 
         mamba_count = 0

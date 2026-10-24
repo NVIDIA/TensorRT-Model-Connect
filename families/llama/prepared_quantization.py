@@ -10,7 +10,6 @@ from pathlib import Path
 import numpy as np
 import ml_dtypes
 from safetensors import safe_open
-import tensorrt as trt
 
 
 
@@ -122,6 +121,8 @@ class PreparedLinear:
                    positive_scale(get_tensor(prefix + ".weight_scale_2"), name))
 
     def matmul(self, network, activation, lhs_width, rhs_width):
+        import tensorrt as trt
+
         if not self.transposed or self.shape != (lhs_width, rhs_width):
             raise ValueError("Prepared Llama projection dimensions differ from the graph")
         if len(activation.shape) != 2:
@@ -162,6 +163,8 @@ class PreparedLinear:
 
 def quantize_cache_value(network, value, scale):
     """Keep source FP8 cache values in the existing native compute-type buffers."""
+    import tensorrt as trt
+
     constant = network.add_constant((1,), trt.Weights(scale)).get_output(0)
     quantized = network.add_quantize(value, constant, trt.DataType.FP8).get_output(0)
     return network.add_dequantize(quantized, constant, value.dtype).get_output(0)
