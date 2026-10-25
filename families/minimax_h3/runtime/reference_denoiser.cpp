@@ -6,6 +6,7 @@
 #include "families/minimax_h3/runtime/reference_denoiser.h"
 
 #include "families/minimax_h3/runtime/pipeline.h"
+#include "families/minimax_h3/runtime/reference_continuation.h"
 #include "families/minimax_h3/runtime/torch_cuda_normal.h"
 
 #include <algorithm>
@@ -158,22 +159,58 @@ void ImageReferenceDenoiser::precompute(const ImageReferenceLayout& layout,
 ReferenceDenoiserResult
 ImageReferenceDenoiser::run(const ReferenceImageConditioning& text,
                             const std::vector<EncodedVisualReference>& images, uint64_t seed) {
-    return run_impl(text, images, seed, nullptr, 0.0, std::nullopt);
+    std::lock_guard<std::mutex> guard(mutex_);
+    return run_unlocked(text, images, seed, nullptr, 0.0, std::nullopt);
 }
 
 ReferenceDenoiserResult ImageReferenceDenoiser::run_continuation(
-    const ReferenceImageConditioning& text,
-    const std::vector<EncodedVisualReference>& images, const ReferenceLatentGuide& guide,
-    uint64_t seed, double temporal_offset, std::optional<int32_t> media_time_origin) {
-    return run_impl(text, images, seed, &guide, temporal_offset, media_time_origin);
-}
-
-ReferenceDenoiserResult ImageReferenceDenoiser::run_impl(
-    const ReferenceImageConditioning& text,
-    const std::vector<EncodedVisualReference>& images, uint64_t seed,
-    const ReferenceLatentGuide* guide, double temporal_offset,
+    const ReferenceImageConditioning& text, const std::vector<EncodedVisualReference>& images,
+    const ReferenceLatentGuide& guide, uint64_t seed, double temporal_offset,
     std::optional<int32_t> media_time_origin) {
     std::lock_guard<std::mutex> guard(mutex_);
+    return run_unlocked(text, images, seed, &guide, temporal_offset, media_time_origin);
+}
+
+ReferenceDenoiserResult
+ImageReferenceDenoiser::run_windows(const ReferenceImageConditioning& text,
+                                    const std::vector<EncodedVisualReference>& images,
+                                    uint64_t seed, int32_t output_frames) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if ((output_frames != 124 && output_frames != 226) || config_.target.frames != 37 ||
+        config_.target.audio_latents != 207)
+        throw std::invalid_argument(
+            "MiniMax-H3 window execution requires the explicit 124/226 profile");
+    const auto windows = plan_reference_continuation(output_frames, 124, 22, 2);
+    if (windows.size() == 2) {
+        std::vector<ImageReferenceLatentShape> shapes;
+        for (const auto& image : images)
+            shapes.push_back({image.latent_height, image.latent_width});
+        // Reject a packed cap that fits only window one before its 49 forwards.
+        const auto& child = windows[1];
+        (void)make_continuation_reference_layout(
+            text.presentation.h3_token_tags, shapes, config_.target, config_.max_sequence_rows,
+            {child.guide_video_latent_frames, child.guide_audio_latents}, child.temporal_offset);
+    }
+    auto result = run_unlocked(text, images, seed, nullptr, 0.0, std::nullopt);
+    if (result.forwards != 49)
+        throw std::runtime_error("MiniMax-H3 window requires exactly 49 denoiser forwards");
+    if (windows.size() == 2) {
+        const auto guide = reference_latent_guide(result, windows[1]);
+        // The fixed upstream reuses the request seed for each fresh window;
+        // guide augmentation extends that window's own original RNG stream.
+        auto child =
+            run_unlocked(text, images, seed, &guide, windows[1].temporal_offset, std::nullopt);
+        if (child.forwards != 49)
+            throw std::runtime_error("MiniMax-H3 continuation requires exactly 49 child forwards");
+        result = append_reference_window(result, child, windows[1]);
+    }
+    return result;
+}
+
+ReferenceDenoiserResult ImageReferenceDenoiser::run_unlocked(
+    const ReferenceImageConditioning& text, const std::vector<EncodedVisualReference>& images,
+    uint64_t seed, const ReferenceLatentGuide* guide, double temporal_offset,
+    std::optional<int32_t> media_time_origin) {
     const auto rows = text.presentation.h3_token_tags.size();
     if (rows == 0 || rows > static_cast<std::size_t>(config_.max_sequence_rows) ||
         text.embeddings.size() != rows * static_cast<std::size_t>(config_.text_width) ||
@@ -192,12 +229,14 @@ ReferenceDenoiserResult ImageReferenceDenoiser::run_impl(
     if (guide && (guide->shape.height != config_.target.height ||
                   guide->shape.width != config_.target.width))
         throw std::invalid_argument("MiniMax-H3 continuation guide must retain target geometry");
-    auto layout = guide
-        ? make_continuation_reference_layout(text.presentation.h3_token_tags, shapes,
-              config_.target, config_.max_sequence_rows,
-              {guide->shape.frames, guide->shape.audio_latents}, temporal_offset, media_time_origin)
-        : make_image_reference_layout(text.presentation.h3_token_tags, shapes,
-              config_.target, config_.max_sequence_rows);
+    auto layout =
+        guide
+            ? make_continuation_reference_layout(text.presentation.h3_token_tags, shapes,
+                                                 config_.target, config_.max_sequence_rows,
+                                                 {guide->shape.frames, guide->shape.audio_latents},
+                                                 temporal_offset, media_time_origin)
+            : make_image_reference_layout(text.presentation.h3_token_tags, shapes, config_.target,
+                                          config_.max_sequence_rows);
     if (guide && (guide->video_rows.size() !=
                       static_cast<std::size_t>(layout.continuation_video_rows) * kVideoWidth ||
                   guide->audio_rows.size() !=
@@ -295,7 +334,8 @@ ReferenceDenoiserResult ImageReferenceDenoiser::run_impl(
         for (const auto& item : common)
             require_profile(module, item.first.c_str(), item.second.shape, item.second.dtype);
         const auto prefix = static_cast<std::size_t>(layout.condition_video_rows) * kVideoWidth;
-        const auto audio_prefix = static_cast<std::size_t>(layout.condition_audio_rows) * kAudioWidth;
+        const auto audio_prefix =
+            static_cast<std::size_t>(layout.condition_audio_rows) * kAudioWidth;
         int32_t forwards = 0;
         for (std::size_t index = 0; index < video_schedule.timesteps.size(); ++index) {
             auto plan = make_image_reference_timesteps(layout, video_schedule.timesteps[index],
@@ -332,8 +372,8 @@ ReferenceDenoiserResult ImageReferenceDenoiser::run_impl(
                                       video_schedule.timesteps[index], video_schedule.sigmas[index],
                                       video_schedule.sigmas[index + 1]);
             minimax_h3_scheduler_step(audio.data() + audio_prefix, audio_velocity,
-                                      audio.size() - audio_prefix,
-                                      audio_schedule.timesteps[index], audio_schedule.sigmas[index],
+                                      audio.size() - audio_prefix, audio_schedule.timesteps[index],
+                                      audio_schedule.sigmas[index],
                                       audio_schedule.sigmas[index + 1]);
         }
         module.sync();

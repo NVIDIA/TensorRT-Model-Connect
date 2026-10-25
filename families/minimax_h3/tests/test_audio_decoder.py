@@ -72,6 +72,50 @@ def test_audio_weight_norm_preserves_original_output_axis():
         _weight_norm({"x.weight_v": np.zeros_like(value), "x.weight_g": scale}, "x")
 
 
+@pytest.mark.parametrize("frames", [0, -1, 1, True, 377.0, "377", None, 2**31])
+def test_audio_decoder_rejects_unsupported_lengths_before_cuda(frames):
+    with pytest.raises(ValueError, match="latent_frames"):
+        build_audio_vae_decoder_engine({}, [0.0] * 32, [1.0] * 32, latent_frames=frames)
+
+
+@pytest.mark.parametrize("frames", [207, 377])
+def test_audio_decoder_build_uses_exact_requested_static_length(monkeypatch, frames):
+    from families.minimax_h3 import audio_vae_builder as audio
+
+    class CapturedInput(Exception):
+        pass
+
+    class Network:
+        def add_input(self, name, dtype, shape):
+            assert name == "normalized_audio_latents" and dtype == audio.trt.float32
+            assert shape == (2, 32, frames)
+            raise CapturedInput
+
+    class Config:
+        def clear_flag(self, _flag):
+            pass
+
+        def set_memory_pool_limit(self, _pool, value):
+            self.limit = value
+
+        def get_memory_pool_limit(self, _pool):
+            return self.limit
+
+    class Builder:
+        def create_network(self, _flags):
+            return Network()
+
+        def create_builder_config(self):
+            return Config()
+
+    monkeypatch.setattr(audio.trt, "Builder", lambda _logger: Builder())
+    weights = {n: np.broadcast_to(np.float32(1), s) for n, s in checkpoint_shapes().items()}
+    with pytest.raises(CapturedInput):
+        build_audio_vae_decoder_engine(
+            weights, [0.0] * 32, [1.0] * 32, latent_frames=frames, workspace_bytes=1 << 30
+        )
+
+
 @pytest.mark.parametrize("consume", [False, True])
 def test_audio_decoder_cleans_borrowed_buffers_on_graph_failure(monkeypatch, consume):
     from families.minimax_h3 import audio_vae_builder as audio
