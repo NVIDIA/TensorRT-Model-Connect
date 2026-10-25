@@ -249,41 +249,16 @@ __global__ void build_block_map(const float* scores, const int32_t* sizes, const
         q2k_num[row] = selected;
 }
 
-__global__ void softmax_scores(float* scores, const int32_t* sizes, VsaGeometry g) {
-    const int row = static_cast<int>(blockIdx.x);
-    float* row_scores = scores + static_cast<int64_t>(row) * g.tiles;
-    __shared__ float reduction[256];
-
-    float local_max = -FLT_MAX;
-    for (int column = static_cast<int>(threadIdx.x); column < g.tiles; column += blockDim.x) {
-        if (sizes[column] > 0)
-            local_max = fmaxf(local_max, row_scores[column]);
-    }
-    reduction[threadIdx.x] = local_max;
-    __syncthreads();
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (threadIdx.x < stride)
-            reduction[threadIdx.x] = fmaxf(reduction[threadIdx.x], reduction[threadIdx.x + stride]);
-        __syncthreads();
-    }
-    const float maximum = reduction[0];
-
-    float local_sum = 0.0F;
-    for (int column = static_cast<int>(threadIdx.x); column < g.tiles; column += blockDim.x) {
-        const float probability = sizes[column] > 0 ? expf(row_scores[column] - maximum) : 0.0F;
-        row_scores[column] = probability;
-        local_sum += probability;
-    }
-    reduction[threadIdx.x] = local_sum;
-    __syncthreads();
-    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
-        if (threadIdx.x < stride)
-            reduction[threadIdx.x] += reduction[threadIdx.x + stride];
-        __syncthreads();
-    }
-    const float inverse_sum = 1.0F / reduction[0];
-    for (int column = static_cast<int>(threadIdx.x); column < g.tiles; column += blockDim.x)
-        row_scores[column] *= inverse_sum;
+void softmax_scores(float* scores, const int32_t* sizes, VsaGeometry g, cudaStream_t stream) {
+    // Compression has FP32 scores and one validity value per key tile. Retain
+    // the declared oracle's reduction order and explicit division: a different
+    // FP32 sum can cross a BF16 midpoint before the gated addcmul.
+    if (g.tiles <= 2048)
+        trtmc::minimax_h3::fp32_vsa::softmax_short<<<g.heads * g.tiles, 32, 0, stream>>>(
+            scores, sizes, g.tiles);
+    else
+        trtmc::minimax_h3::fp32_vsa::softmax_regular<<<g.heads * g.tiles, 1024, 0, stream>>>(
+            scores, sizes, g.tiles);
 }
 
 __global__ void add_gate_compression(__nv_bfloat16* output, const __nv_bfloat16* gate,
@@ -426,7 +401,7 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::Ten
     trace_stage("routing_map_enqueued");
     // Finish the independent compression branch before reusing its dead scratch.
     trace_stage("compression_softmax_enter");
-    softmax_scores<<<g.heads * g.tiles, kThreads, 0, stream>>>(scores, sizes, g);
+    softmax_scores(scores, sizes, g, stream);
     check_cuda(cudaGetLastError(), "OmniRef compression softmax");
     trace_stage("compression_softmax_enqueued");
     const float compression_alpha = 1.0F;

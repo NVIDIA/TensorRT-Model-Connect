@@ -15,6 +15,14 @@ and attention retain the same 128-token geometry on every backend.
 The compression epilogue rounds the compressed vector to BF16, then performs
 the multiply/add before one final BF16 rounding, matching the released
 `addcmul_` boundary. This differs from the old four-step T2V binding.
+Compression softmax retains FP32 exponentials, the warp reduction for at most
+2048 key tiles and the full-block reduction above that bound, followed by an
+explicit FP32 division. INT32 valid sizes mask empty key tiles directly, so
+this shares the family-owned fine-attention reductions without another mask
+allocation. Replacing a reduction tree or multiplying by a rounded reciprocal
+can move a compressed value across a BF16 midpoint and amplify cancellation
+at the final gated addition. The external workspace and BF16 boundaries do
+not change.
 
 The binding contains a generic SM80+ CUDA implementation. Enable
 `TRTMC_BUILD_MINIMAX_H3_OMNIREF_VSA_SM100A` to also embed optimized sm100a and
