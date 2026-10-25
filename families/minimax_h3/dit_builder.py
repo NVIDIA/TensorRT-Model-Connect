@@ -301,6 +301,8 @@ def _transformer_block(
     weights,
     profile: MiniMaxH3Config,
     index: int,
+    *,
+    attention=None,
 ):
     """Add one native H3 transformer block and return its residual stream."""
 
@@ -318,7 +320,8 @@ def _transformer_block(
         profile.norm_eps,
     )
     normalized = op.modulate(network, normalized, shift_msa, scale_msa)
-    update = _attention_block(
+    attend = _attention_block if attention is None else attention
+    update = attend(
         network,
         normalized,
         weights,

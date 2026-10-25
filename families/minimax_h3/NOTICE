@@ -33,3 +33,10 @@ INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
 LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE
 OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 PERFORMANCE OF THIS SOFTWARE.
+
+The forward sparse-attention headers under kernels/ are derived from the
+Apache-2.0 FastVideo repository at revision
+48a047c05ff4138f20cfa33351499c6ec5945f5d:
+https://github.com/hao-ai-lab/FastVideo
+They retain their upstream license markers and the existing sm103a
+compatibility patch. The OmniRef TVM-FFI binding is family-owned code.
