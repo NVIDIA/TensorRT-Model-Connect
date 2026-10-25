@@ -11,8 +11,10 @@ then unload this weight-heavy plan before loading the recurrent DiT plan.
 from __future__ import annotations
 
 import gc
+import math
 import sys
 
+import numpy as np
 import tensorrt as trt
 
 from . import graph_ops as op
@@ -48,8 +50,13 @@ def build_adaln_precompute_engine(
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
+    input_timesteps: bool = False,
 ) -> bytes:
     profile.validate()
+    if not isinstance(input_timesteps, bool) or (
+        input_timesteps and profile.timestep_input_dim % 2
+    ):
+        raise ValueError("MiniMax-H3 native timestep projection requires an even feature width")
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -68,11 +75,31 @@ def build_adaln_precompute_engine(
     # denoising steps. Time one tactic so every build selects the same kernels.
     config.max_num_tactics = 1
 
-    features = network.add_input(
-        "timestep_features",
-        trt.float32,
-        (profile.max_timestep_count, profile.timestep_input_dim),
-    )
+    if input_timesteps:
+        # Ref2VA consumes the original sorted, unique FP32 row times. Keep its
+        # sinusoidal projection in the mathematical TRT graph, not a CPU
+        # double-precision trigonometric approximation in runtime orchestration.
+        times = network.add_input("timesteps", trt.float32, (profile.max_timestep_count,))
+        reshape = network.add_shuffle(times)
+        reshape.reshape_dims = (profile.max_timestep_count, 1)
+        half = profile.timestep_input_dim // 2
+        exponent = -math.log(10000) * np.arange(half, dtype=np.float32)
+        exponent = exponent / half
+        frequency = op.constant(network, np.exp(exponent).reshape(1, half))
+        phase = network.add_elementwise(
+            reshape.get_output(0), frequency, trt.ElementWiseOperation.PROD
+        ).get_output(0)
+        cosine = network.add_unary(phase, trt.UnaryOperation.COS).get_output(0)
+        sine = network.add_unary(phase, trt.UnaryOperation.SIN).get_output(0)
+        concatenate = network.add_concatenation((cosine, sine))
+        concatenate.axis = 1
+        features = concatenate.get_output(0)
+    else:
+        features = network.add_input(
+            "timestep_features",
+            trt.float32,
+            (profile.max_timestep_count, profile.timestep_input_dim),
+        )
     temb = op.linear(
         network,
         features,
