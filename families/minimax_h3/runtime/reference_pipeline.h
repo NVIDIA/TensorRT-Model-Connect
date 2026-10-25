@@ -19,6 +19,8 @@ struct ReferencePipelineConfig {
     int32_t max_text_rows{0};
     int32_t max_condition_video_rows{16384};
     ReferenceMemoryPreset memory{ReferenceMemoryPreset::Minimal};
+    int32_t output_frames{124}; // Explicit bundle profile: one window or two (226 frames).
+    int32_t max_condition_audio_rows{0};
 };
 
 // Native original-H3 image Ref2VA composition. This class uses the existing

@@ -301,9 +301,9 @@ def _resblock(network, tensor, weights: dict, block: int, kernel: int):
     return hidden
 
 
-def _network(network, weights, latents_mean, latents_std):
+def _network(network, weights, latents_mean, latents_std, latent_frames=LATENT_FRAMES):
     latent = network.add_input(
-        "normalized_audio_latents", trt.float32, (BATCH, LATENT_CHANNELS, LATENT_FRAMES)
+        "normalized_audio_latents", trt.float32, (BATCH, LATENT_CHANNELS, latent_frames)
     )
     mean = _constant(network, np.asarray(latents_mean, np.float32).reshape(1, -1, 1))
     std = _constant(network, np.asarray(latents_std, np.float32).reshape(1, -1, 1))
@@ -365,7 +365,7 @@ def _network(network, weights, latents_mean, latents_std):
     upper = _constant(network, np.asarray([[[1.0]]], np.float32))
     waveform = network.add_elementwise(waveform, lower, trt.ElementWiseOperation.MAX).get_output(0)
     waveform = network.add_elementwise(waveform, upper, trt.ElementWiseOperation.MIN).get_output(0)
-    if tuple(waveform.shape) != (BATCH, 1, SAMPLES):
+    if tuple(waveform.shape) != (BATCH, 1, latent_frames * HOP_LENGTH):
         raise RuntimeError(f"MiniMax-H3 audio decoder produced shape {tuple(waveform.shape)}")
     waveform.name = "waveform"
     network.mark_output(waveform)
@@ -379,7 +379,10 @@ def build_audio_vae_decoder_engine(
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
+    latent_frames: int = LATENT_FRAMES,
 ) -> bytes:
+    if type(latent_frames) is not int or latent_frames not in (207, 377):
+        raise ValueError("MiniMax-H3 audio decoder latent_frames must be 207 or 377")
     if not isinstance(consume_weights, bool):
         raise ValueError("MiniMax-H3 audio decoder consume_weights must be a boolean")
     if np.asarray(latents_mean).shape != (LATENT_CHANNELS,) or np.asarray(latents_std).shape != (
@@ -403,11 +406,11 @@ def build_audio_vae_decoder_engine(
     )
     print(
         f"[minimax-h3] building native audio VAE decoder: batch={BATCH}, "
-        f"latent_frames={LATENT_FRAMES}, samples={SAMPLES}",
+        f"latent_frames={latent_frames}, samples={latent_frames * HOP_LENGTH}",
         file=sys.stderr,
     )
     try:
-        _network(network, weights, latents_mean, latents_std)
+        _network(network, weights, latents_mean, latents_std, latent_frames)
         op.validate_native_network(network, expected_attentions=0, label="audio decoder")
         plan = builder.build_serialized_network(network, config)
     finally:

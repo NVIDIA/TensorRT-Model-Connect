@@ -8,8 +8,9 @@ qualify the eight inference components.
 
 This path requires the original `transformer_ref` checkpoint partition. A
 text-only checkpoint, including a text-only FastH3 checkpoint, is not a
-replacement. It is image-reference conditioning, not initial-frame/video
-continuation, and does not enable four-step reference inference.
+replacement. The default profile provides image-reference conditioning;
+the explicit two-window development profile below adds latent continuation.
+Neither profile enables initial-frame editing or four-step reference inference.
 
 ## Explicit experimental build
 
@@ -261,10 +262,35 @@ synthetic BF16 plans and fixed upstream layout source through
 `TRTMC_H3_PACKED_SEQUENCE_SOURCE`; it keeps the existing 49-forward trajectory
 criterion at `rtol=0.016`, `atol=1e-5` and FP32 samples. A synthetic test does not
 qualify trained continuation, decoding, performance or output quality.
+`test_native_reference_windows.py` separately compares the complete 98-forward
+two-window execution with the fixed upstream model and packed layout, including
+the generated parent-to-child guide and cumulative stereo suffix append. It
+uses the same FP32 samples and numerical criterion; it also uses synthetic
+weights and does not decode or qualify a trained video.
 
-The public image-reference pipeline and bundle builder still generate a single
-124-frame window. Their original audio plan accepts 207 latents and their DiT
-profile has no condition-audio rows. They cannot execute continuation by editing
-metadata or ignoring guide rows. Cumulative audio decoding, explicit continuation
-profiles, complete pipeline integration and trained/visual validation remain
-required before this capability can be enabled or advertised.
+The default explicit builder and pipeline retain the original 124-frame profile.
+For development, `reference_build.build(request, writer, continuation=True)`
+builds a separate `minimax_h3.image_ref2va_continuation/v1` bundle. Specify
+`video_num_frames=226` (or leave it unset); other durations are rejected.
+This profile admits zero audio guide rows in window one and 74 in window two.
+Its video condition maximum includes seven target-grid latent frames in
+addition to the complete static-image budget. At 1344x768 with `six_portrait`,
+the maximum is 56,208 condition-video rows and 159,528 total packed rows.
+The Qwen visual/text budgets and every reference's preparation remain unchanged.
+
+`ImageReferenceDenoiser::run_windows` serializes the complete two-window request,
+uses the original request seed independently for each window, retains all static
+references and the same prompt, and appends only the generated latent suffix.
+It runs 49 forwards per window (98 total). The runtime decodes all 67 video latent
+frames using the original seven-latent static tile engine and builds a new
+377-latent audio decoder for 301,600 samples per stereo channel at 32 kHz.
+The resulting video is 226 frames at 24 fps. Native video/audio endpoints remain
+distinct; neither stream is stretched, truncated or padded to match the other.
+Both `minimal` and `original` residency policies apply to the new profile.
+An old bundle cannot acquire these operand/decoder shapes by editing metadata.
+
+This within-request profile does not expose cross-request continuation state,
+change prompts between windows, accept decoded video/audio reference operands,
+preserve previously accepted decoded pixels, or qualify trained-model video
+quality. Complete trained numerical gates and visible/audio boundary review
+remain required before advertising continuation support or realtime generation.

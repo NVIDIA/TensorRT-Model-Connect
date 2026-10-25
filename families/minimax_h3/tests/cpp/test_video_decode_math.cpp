@@ -79,6 +79,10 @@ void test_geometry_and_validation() {
     const auto master = make_video_decode_geometry(37, 96, 54);
     require(master.height == 1536 && master.width == 864 && master.tiles() == 40,
             "exact 9:16 without reducing the 768-pixel short edge");
+    const auto cumulative = make_video_decode_geometry(67, 84, 48);
+    require(cumulative.frames == 226 && cumulative.clips == 13 && cumulative.pad_tokens == 0 &&
+                cumulative.tiles() == 28,
+            "complete two-window history reuses the original seven-latent tile plan");
     must_throw([] { make_video_decode_geometry(2, 16, 16); });
     must_throw([] { make_video_decode_geometry(37, 17, 16); });
     must_throw([] { make_video_decode_geometry(37, 16, 15); });

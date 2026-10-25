@@ -89,7 +89,7 @@ if(TRTMC_BUILD_TESTS)
   add_executable(test_minimax_h3_reference_pipeline
     reference_pipeline.cpp reference_conditioner.cpp reference_visual_encoder.cpp
     reference_denoiser.cpp reference_image.cpp reference_layout.cpp qwen_reference.cpp
-    diffusion_schedule.cpp audio_decoder.cpp video_decoder.cpp video_decode_math.cpp
+    diffusion_schedule.cpp reference_continuation.cpp audio_decoder.cpp video_decoder.cpp video_decode_math.cpp
     visual_reference.cpp
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_pipeline.cpp
   )
@@ -191,7 +191,7 @@ if(TRTMC_BUILD_TESTS)
   target_compile_options(minimax_h3_reference_denoiser_probe PRIVATE -Wall -Wextra -Wpedantic)
 
   add_executable(test_minimax_h3_reference_denoiser
-    diffusion_schedule.cpp reference_layout.cpp reference_denoiser.cpp
+    diffusion_schedule.cpp reference_layout.cpp reference_denoiser.cpp reference_continuation.cpp
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_denoiser.cpp
   )
   target_include_directories(test_minimax_h3_reference_denoiser PRIVATE
