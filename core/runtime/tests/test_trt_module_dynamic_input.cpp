@@ -151,111 +151,128 @@ extern "C" cudaError_t CUDARTAPI cudaStreamSynchronize(cudaStream_t stream) {
     return cudaSuccess;
 }
 
+namespace {
+using Reader = trtmc::TrtPlanStreamReader;
+
+void test_owned_source() {
+    bool source_alive = true;
+
+    {
+        auto source = std::make_unique<MemoryReader>(4);
+        source->alive = &source_alive;
+        Reader reader(std::move(source));
+        check(source == nullptr && source_alive, "Callback did not retain transferred source");
+        char result[4];
+        check(reader.read(result, 4, expected_stream) == 4,
+              "Transferred source was unavailable after its caller released ownership");
+    }
+    check(!source_alive, "Callback leaked its owned source");
+}
+
+void test_host_destination(bool bad_attributes) {
+    attribute_error = bad_attributes;
+    auto source_owner = std::make_unique<MemoryReader>(4096);
+    auto& source = *source_owner;
+    Reader reader(std::move(source_owner));
+    std::vector<char> result(source.bytes.size(), '!');
+    if (bad_attributes) {
+        check(
+            reader.read(result.data(), result.size(), expected_stream) == -1 &&
+                source.cursor == 0 &&
+                std::all_of(result.begin(), result.end(), [](char value) { return value == '!'; }),
+            "Pointer-query failure was treated as writable host memory");
+        expect_failure(reader);
+        return;
+    }
+    check(reader.read(result.data(), result.size(), expected_stream) == 4096 &&
+              result == source.bytes,
+          "Host destination bytes changed");
+    check(reader.seek(-2, nvinfer1::SeekPosition::kEND), "End-relative callback seek failed");
+    check(reader.read(result.data(), 8, expected_stream) == 2 && result[0] == source.bytes[4094] &&
+              result[1] == source.bytes[4095],
+          "Host partial read crossed EOF");
+    check(reader.read(result.data(), 1, expected_stream) == 0, "EOF callback changed");
+    check(!reader.seek(1, nvinfer1::SeekPosition::kCUR), "Invalid callback seek accepted");
+    reader.rethrow_if_failed();
+    check(pinned.empty() && queued.empty(), "Host read allocated a device staging buffer");
+}
+
+void test_device_destination(cudaMemoryType type) {
+    destination_type = type;
+    auto source_owner = std::make_unique<MemoryReader>(3 * Reader::transfer_bytes + 19);
+    auto& source = *source_owner;
+    std::vector<char> result(source.bytes.size(), '!');
+    device = &result;
+    const auto before = copy_count;
+    {
+        Reader reader(std::move(source_owner));
+        check(reader.read(result.data(), result.size(), expected_stream) ==
+                  static_cast<std::int64_t>(result.size()),
+              "Device callback incomplete");
+        reader.rethrow_if_failed();
+        check(result == source.bytes && queued.empty(), "Asynchronous bytes were overwritten");
+        check(pinned.size() == 1 && largest_pinned == Reader::transfer_bytes &&
+                  source.maximum_read <= Reader::transfer_bytes && copy_count - before == 4,
+              "Device reads were not bounded to one reusable staging buffer");
+    }
+    check(pinned.empty() && !unsafe_free, "Staging was leaked or freed while pending");
+    device = nullptr;
+}
+
+void test_error_cleanup(int failure) {
+    auto source_owner = std::make_unique<MemoryReader>(2 * Reader::transfer_bytes + 19);
+    auto& source = *source_owner;
+    std::vector<char> result(source.bytes.size(), '!');
+    device = &result;
+    if (failure == 0)
+        source.throw_at = Reader::transfer_bytes;
+    copy_error = failure == 1;
+    sync_errors = failure >= 2 ? failure - 1 : 0;
+    {
+        Reader reader(std::move(source_owner));
+        check(reader.read(result.data(), result.size(), expected_stream) == -1,
+              "Source or CUDA failure was accepted");
+        check(!reader.seek(0, nvinfer1::SeekPosition::kSET) &&
+                  reader.read(result.data(), 1, expected_stream) == -1,
+              "Failed reader silently resumed");
+        expect_failure(reader);
+    }
+    check(!unsafe_free, "Error cleanup released a pending transfer buffer");
+    if (failure == 3) {
+        check(pinned.size() == 1 && queued.size() == 1,
+              "Persistent CUDA error did not preserve pending source storage");
+        check(cudaStreamSynchronize(expected_stream) == cudaSuccess,
+              "Cannot complete the simulated pending copy");
+        check(cudaFreeHost(pinned.begin()->first) == cudaSuccess,
+              "Cannot release the test-owned retained buffer after completion");
+    }
+    check(pinned.empty() && queued.empty(), "Completed error path leaked staging");
+    copy_error = false;
+    device = nullptr;
+}
+
+void test_read_sizes() {
+    auto source_owner = std::make_unique<MemoryReader>(4);
+
+    Reader reader(std::move(source_owner));
+    check(reader.read(nullptr, 0, expected_stream) == 0, "Zero-byte callback failed");
+    check(reader.read(nullptr, -1, expected_stream) == -1, "Negative byte count accepted");
+    expect_failure(reader);
+}
+
+} // namespace
+
 int main() {
     try {
-        using Reader = trtmc::TrtPlanStreamReader;
-        bool source_alive = true;
-        {
-            auto source = std::make_unique<MemoryReader>(4);
-            source->alive = &source_alive;
-            Reader reader(std::move(source));
-            check(source == nullptr && source_alive, "Callback did not retain transferred source");
-            char result[4];
-            check(reader.read(result, 4, expected_stream) == 4,
-                  "Transferred source was unavailable after its caller released ownership");
-        }
-        check(!source_alive, "Callback leaked its owned source");
-        for (const bool bad_attributes : {false, true}) {
-            attribute_error = bad_attributes;
-            auto source_owner = std::make_unique<MemoryReader>(4096);
-            auto& source = *source_owner;
-            Reader reader(std::move(source_owner));
-            std::vector<char> result(source.bytes.size(), '!');
-            if (bad_attributes) {
-                check(reader.read(result.data(), result.size(), expected_stream) == -1 &&
-                          source.cursor == 0 &&
-                          std::all_of(result.begin(), result.end(),
-                                      [](char value) { return value == '!'; }),
-                      "Pointer-query failure was treated as writable host memory");
-                expect_failure(reader);
-                continue;
-            }
-            check(reader.read(result.data(), result.size(), expected_stream) == 4096 &&
-                      result == source.bytes,
-                  "Host destination bytes changed");
-            check(reader.seek(-2, nvinfer1::SeekPosition::kEND),
-                  "End-relative callback seek failed");
-            check(reader.read(result.data(), 8, expected_stream) == 2 &&
-                      result[0] == source.bytes[4094] && result[1] == source.bytes[4095],
-                  "Host partial read crossed EOF");
-            check(reader.read(result.data(), 1, expected_stream) == 0, "EOF callback changed");
-            check(!reader.seek(1, nvinfer1::SeekPosition::kCUR), "Invalid callback seek accepted");
-            reader.rethrow_if_failed();
-            check(pinned.empty() && queued.empty(), "Host read allocated a device staging buffer");
-        }
+        test_owned_source();
+        for (const bool bad_attributes : {false, true})
+            test_host_destination(bad_attributes);
         attribute_error = false;
-
-        for (const auto type : {cudaMemoryTypeDevice, cudaMemoryTypeManaged}) {
-            destination_type = type;
-            auto source_owner = std::make_unique<MemoryReader>(3 * Reader::transfer_bytes + 19);
-            auto& source = *source_owner;
-            std::vector<char> result(source.bytes.size(), '!');
-            device = &result;
-            const auto before = copy_count;
-            {
-                Reader reader(std::move(source_owner));
-                check(reader.read(result.data(), result.size(), expected_stream) ==
-                          static_cast<std::int64_t>(result.size()),
-                      "Device callback incomplete");
-                reader.rethrow_if_failed();
-                check(result == source.bytes && queued.empty(),
-                      "Asynchronous bytes were overwritten");
-                check(pinned.size() == 1 && largest_pinned == Reader::transfer_bytes &&
-                          source.maximum_read <= Reader::transfer_bytes && copy_count - before == 4,
-                      "Device reads were not bounded to one reusable staging buffer");
-            }
-            check(pinned.empty() && !unsafe_free, "Staging was leaked or freed while pending");
-            device = nullptr;
-        }
-
-        for (int failure = 0; failure != 4; ++failure) {
-            auto source_owner = std::make_unique<MemoryReader>(2 * Reader::transfer_bytes + 19);
-            auto& source = *source_owner;
-            std::vector<char> result(source.bytes.size(), '!');
-            device = &result;
-            if (failure == 0)
-                source.throw_at = Reader::transfer_bytes;
-            copy_error = failure == 1;
-            sync_errors = failure >= 2 ? failure - 1 : 0;
-            {
-                Reader reader(std::move(source_owner));
-                check(reader.read(result.data(), result.size(), expected_stream) == -1,
-                      "Source or CUDA failure was accepted");
-                check(!reader.seek(0, nvinfer1::SeekPosition::kSET) &&
-                          reader.read(result.data(), 1, expected_stream) == -1,
-                      "Failed reader silently resumed");
-                expect_failure(reader);
-            }
-            check(!unsafe_free, "Error cleanup released a pending transfer buffer");
-            if (failure == 3) {
-                check(pinned.size() == 1 && queued.size() == 1,
-                      "Persistent CUDA error did not preserve pending source storage");
-                check(cudaStreamSynchronize(expected_stream) == cudaSuccess,
-                      "Cannot complete the simulated pending copy");
-                check(cudaFreeHost(pinned.begin()->first) == cudaSuccess,
-                      "Cannot release the test-owned retained buffer after completion");
-            }
-            check(pinned.empty() && queued.empty(), "Completed error path leaked staging");
-            copy_error = false;
-            device = nullptr;
-        }
-        {
-            auto source_owner = std::make_unique<MemoryReader>(4);
-            Reader reader(std::move(source_owner));
-            check(reader.read(nullptr, 0, expected_stream) == 0, "Zero-byte callback failed");
-            check(reader.read(nullptr, -1, expected_stream) == -1, "Negative byte count accepted");
-            expect_failure(reader);
-        }
+        for (const auto type : {cudaMemoryTypeDevice, cudaMemoryTypeManaged})
+            test_device_destination(type);
+        for (int failure = 0; failure != 4; ++failure)
+            test_error_cleanup(failure);
+        test_read_sizes();
         std::cout << "CPU plan stream host/device bytes, stream order, bounds and failure "
                      "lifetimes passed\n";
         return 0;
