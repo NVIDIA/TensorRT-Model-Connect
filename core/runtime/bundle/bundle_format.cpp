@@ -7,7 +7,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
+#include <cstdio>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
@@ -15,6 +18,8 @@
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string_view>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 namespace trtmc {
@@ -139,6 +144,97 @@ std::uint64_t checked_section_file_offset(const BundleSectionInfo& section,
     return data_start + section.offset;
 }
 
+class SectionPlanReader final : public IPlanReader {
+    struct CloseFile {
+        void operator()(std::FILE* file) const noexcept { (void)std::fclose(file); }
+    };
+
+  public:
+    SectionPlanReader(const std::string& path, std::uint64_t file_size, std::uint64_t offset,
+                      std::uint64_t length)
+        : file_(std::fopen(path.c_str(), "rb")), offset_(offset), length_(length) {
+        if (!file_)
+            throw std::runtime_error("Cannot open bundle section stream: " + path);
+        const int fd = ::fileno(file_.get());
+        if (::fcntl(fd, F_SETFD, FD_CLOEXEC) != 0 || ::fstat(fd, &identity_) != 0 ||
+            !S_ISREG(identity_.st_mode) || identity_.st_size < 0 ||
+            static_cast<std::uint64_t>(identity_.st_size) != file_size || offset > file_size ||
+            length > file_size - offset ||
+            file_size > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max()))
+            throw std::runtime_error("Bundle changed or cannot be streamed: " + path);
+    }
+
+    std::uint64_t size() const noexcept override { return length_; }
+
+    std::size_t read(void* destination, std::size_t count) override {
+        verify();
+        if (count == 0 || cursor_ == length_)
+            return 0;
+        if (destination == nullptr)
+            throw std::invalid_argument("Bundle section read requires a destination");
+        const auto requested =
+            static_cast<std::size_t>(std::min<std::uint64_t>(count, length_ - cursor_));
+        std::size_t done = 0;
+        while (done < requested) {
+            const auto chunk = std::min<std::size_t>(
+                requested - done, static_cast<std::size_t>(std::numeric_limits<ssize_t>::max()));
+            const auto received =
+                ::pread(::fileno(file_.get()), static_cast<char*>(destination) + done, chunk,
+                        static_cast<off_t>(offset_ + cursor_ + done));
+            if (received < 0 && errno == EINTR)
+                continue;
+            if (received <= 0)
+                throw std::runtime_error("Failed reading complete bundle section bytes");
+            done += static_cast<std::size_t>(received);
+        }
+        verify();
+        cursor_ += done;
+        return done;
+    }
+
+    bool seek(std::int64_t offset, PlanSeekOrigin origin) override {
+        verify();
+        std::uint64_t base;
+        switch (origin) {
+        case PlanSeekOrigin::begin:
+            base = 0;
+            break;
+        case PlanSeekOrigin::current:
+            base = cursor_;
+            break;
+        case PlanSeekOrigin::end:
+            base = length_;
+            break;
+        default:
+            return false;
+        }
+        // The bundle validator already limits section lengths to streamsize.
+        const auto signed_base = static_cast<std::int64_t>(base);
+        if (offset < -signed_base || offset > static_cast<std::int64_t>(length_ - base))
+            return false;
+        cursor_ = static_cast<std::uint64_t>(signed_base + offset);
+        return true;
+    }
+
+  private:
+    void verify() const {
+        struct stat now{};
+        if (::fstat(::fileno(file_.get()), &now) != 0 || now.st_dev != identity_.st_dev ||
+            now.st_ino != identity_.st_ino || now.st_size != identity_.st_size ||
+            now.st_mtim.tv_sec != identity_.st_mtim.tv_sec ||
+            now.st_mtim.tv_nsec != identity_.st_mtim.tv_nsec ||
+            now.st_ctim.tv_sec != identity_.st_ctim.tv_sec ||
+            now.st_ctim.tv_nsec != identity_.st_ctim.tv_nsec)
+            throw std::runtime_error("Bundle file changed during streamed section loading");
+    }
+
+    std::unique_ptr<std::FILE, CloseFile> file_;
+    struct stat identity_{};
+    std::uint64_t offset_;
+    std::uint64_t length_;
+    std::uint64_t cursor_{0};
+};
+
 } // namespace
 
 BundleReader::BundleReader(std::string bundle_path) {
@@ -214,6 +310,14 @@ std::vector<char> BundleReader::read_section(std::string_view name) const {
                                  "' from: " + path_);
     }
     return data;
+}
+
+std::unique_ptr<IPlanReader> BundleReader::open_section(std::string_view name) const {
+    const auto* section = find_section(name);
+    if (section == nullptr)
+        throw std::runtime_error("Bundle section not found: " + std::string(name));
+    const auto offset = checked_section_file_offset(*section, data_offset_, file_size_, path_);
+    return std::make_unique<SectionPlanReader>(path_, file_size_, offset, section->length);
 }
 
 void BundleReader::copy_section(std::string_view name, std::ostream& output) const {

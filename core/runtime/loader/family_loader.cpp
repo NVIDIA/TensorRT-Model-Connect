@@ -7,6 +7,7 @@
 
 #include "runtime/bundle/bundle_format.h"
 #include "trtmc/runtime/family_factory.h"
+#include "trtmc/runtime/stream_backend.h"
 #include "trtmc/runtime/trt_backend.h"
 
 #include <dlfcn.h>
@@ -165,7 +166,7 @@ class FamilyLibrary {
     CreateFamilyFn create_{nullptr};
 };
 
-class RuntimeOptionsBackend final : public IBackend {
+class RuntimeOptionsBackend final : public IBackend, public IStreamBackend {
   public:
     RuntimeOptionsBackend(IBackend& backend, std::string runtime_cache_path, bool cuda_graphs)
         : backend_(backend), runtime_cache_path_(std::move(runtime_cache_path)),
@@ -192,6 +193,21 @@ class RuntimeOptionsBackend final : public IBackend {
     }
 
     const char* name() const override { return backend_.name(); }
+
+    bool supports_plan_streaming() const noexcept override {
+        const auto* streamed = dynamic_cast<const IStreamBackend*>(&backend_);
+        return streamed != nullptr && streamed->supports_plan_streaming();
+    }
+
+    std::unique_ptr<ITrtModule>
+    create_module_from_stream(std::unique_ptr<IPlanReader> plan, const ModuleCreateOptions& options,
+                              const std::vector<ModuleExternalBinding>& bindings) override {
+        auto* streamed = dynamic_cast<IStreamBackend*>(&backend_);
+        if (streamed == nullptr || !streamed->supports_plan_streaming())
+            throw std::runtime_error("Backend does not support streamed plans");
+        return streamed->create_module_from_stream(std::move(plan), with_runtime_options(options),
+                                                   bindings);
+    }
 
   private:
     ModuleCreateOptions with_runtime_options(ModuleCreateOptions options) const {

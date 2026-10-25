@@ -5,6 +5,7 @@
 
 #include "core/runtime/bundle/bundle_format.h"
 #include "families/minimax_h3/runtime/plan_loader.h"
+#include "trtmc/runtime/stream_backend.h"
 #include "trtmc/runtime/trt_backend.h"
 
 #include <algorithm>
@@ -25,6 +26,7 @@ constexpr std::size_t first = 2 * 1024 * 1024 + 17;
 constexpr std::size_t second = first + 31;
 bool enabled = false;
 std::size_t live = 0, peak = 0;
+std::size_t allocations_seen = 0;
 std::array<std::pair<void*, std::size_t>, 8> allocations{};
 
 void* allocate(std::size_t size) {
@@ -37,6 +39,7 @@ void* allocate(std::size_t size) {
                 entry = {pointer, size};
                 live += size;
                 peak = std::max(peak, live);
+                ++allocations_seen;
                 return pointer;
             }
         }
@@ -156,7 +159,7 @@ class Module final : public ITrtModule {
     bool valid_;
 };
 
-class Backend final : public IBackend {
+class Backend : public IBackend {
   public:
     int calls{0};
     int failure{0};
@@ -190,6 +193,38 @@ class Backend final : public IBackend {
         return {};
     }
     const char* name() const override { return "fixture"; }
+};
+
+class StreamBackend final : public Backend, public IStreamBackend {
+  public:
+    bool supported{true};
+    int stream_calls{0};
+    bool supports_plan_streaming() const noexcept override { return supported; }
+    std::unique_ptr<ITrtModule>
+    create_module_from_stream(std::unique_ptr<IPlanReader> plan, const ModuleCreateOptions& options,
+                              const std::vector<ModuleExternalBinding>& bindings) override {
+        ++stream_calls;
+        require(options.stream == expected_stream && bindings.empty(), "streamed options changed");
+        require(allocation_watch::live == 0, "streaming retained a serialized plan vector");
+        const char expected = plan->size() == allocation_watch::first ? 'A' : 'B';
+        std::array<char, 65536> buffer{};
+        std::uint64_t received = 0;
+        while (const auto count = plan->read(buffer.data(), buffer.size())) {
+            require(std::all_of(buffer.begin(), buffer.begin() + count,
+                                [=](char value) { return value == expected; }),
+                    "streamed serialized bytes changed");
+            received += count;
+            require(allocation_watch::live == 0, "streaming allocated a plan payload");
+        }
+        require(received == plan->size(), "streamed payload was incomplete");
+        if (during_create)
+            during_create();
+        if (failure == 1)
+            throw std::runtime_error("fixture streamed backend failure");
+        if (failure == 2)
+            return nullptr;
+        return std::make_unique<Module>(failure != 3);
+    }
 };
 
 void test_lazy_lifetime(const std::filesystem::path& path) {
@@ -273,6 +308,38 @@ void test_mutation(const std::filesystem::path& path) {
     must_throw([&] { MiniMaxH3PlanSource changed(stale); });
 }
 
+void test_streaming(const std::filesystem::path& path) {
+    write_bundle(path);
+    StreamBackend backend;
+    int stream_marker = 0;
+    backend.expected_stream = reinterpret_cast<cudaStream_t>(&stream_marker);
+    auto source = std::make_shared<MiniMaxH3PlanSource>(BundleReader(path.string()));
+    auto loader = make_minimax_h3_plan_loader(backend, source, {"a.plan", "b.plan"});
+    allocation_watch::enabled = true;
+    const auto before = allocation_watch::allocations_seen;
+    require(loader("a.plan", backend.expected_stream)->ok(), "streamed first module failed");
+    require(loader("b.plan", backend.expected_stream)->ok(), "streamed second module failed");
+    for (int failure = 1; failure <= 3; ++failure) {
+        backend.failure = failure;
+        must_throw([&] { loader("a.plan", backend.expected_stream); });
+    }
+    require(backend.calls == 0 && backend.stream_calls == 5 &&
+                allocation_watch::allocations_seen == before && allocation_watch::live == 0,
+            "streaming buffered a plan or retried a failed load through the legacy backend");
+    backend.failure = 0;
+    backend.supported = false;
+    require(loader("a.plan", backend.expected_stream)->ok(), "unsupported backend fallback failed");
+    require(backend.calls == 1 && backend.stream_calls == 5 &&
+                allocation_watch::allocations_seen == before + 1 && allocation_watch::live == 0,
+            "legacy fallback did not retain its original one-plan ownership");
+    backend.supported = true;
+    backend.during_create = [&] { std::filesystem::resize_file(path, 16); };
+    must_throw([&] { loader("a.plan", backend.expected_stream); });
+    require(backend.calls == 1 && backend.stream_calls == 6,
+            "late streamed mutation was retried through the legacy backend");
+    allocation_watch::enabled = false;
+}
+
 } // namespace
 
 int main() {
@@ -284,6 +351,7 @@ int main() {
         const auto path = std::filesystem::path(directory) / "fixture.bundle";
         test_lazy_lifetime(path);
         test_mutation(path);
+        test_streaming(path);
         std::filesystem::remove_all(directory);
         std::cout << "MiniMax-H3 lazy plan lifecycle and file identity checks passed\n";
         std::cout << "fixture_serialized_payload_peak_bytes=" << allocation_watch::peak
