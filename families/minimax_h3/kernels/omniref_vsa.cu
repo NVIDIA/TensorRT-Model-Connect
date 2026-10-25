@@ -457,9 +457,13 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::Ten
         const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
                                  std::chrono::steady_clock::now() - trace_start)
                                  .count();
+        const auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+                                   std::chrono::system_clock::now().time_since_epoch())
+                                   .count();
         std::cerr << "[MiniMax-H3 VSA trace] call=" << trace_id << " stage=" << stage
                   << " heads=" << g.heads << " tiles=" << g.tiles << " rows=" << g.sequence
                   << " regions=" << regions.shape()[0] << " host_elapsed_us=" << elapsed
+                  << " host_unix_us=" << timestamp
                   << std::endl;
     };
     constexpr int kThreads = 256;

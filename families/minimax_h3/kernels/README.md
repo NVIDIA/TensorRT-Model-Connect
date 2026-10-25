@@ -29,12 +29,15 @@ compatibility patch. The new binding selects their 128-token instantiation.
 Its optimized 128-token PV operation stores the softmax probability as three
 BF16 limbs: the rounded value, its rounded residual, and the remaining rounded
 tail. All three products with V accumulate into the existing FP32 output tile.
-The second limb uses the unused half of the QK tensor-memory tile; the third
-reuses the existing epilogue shared buffer until the final PV operation exits.
-Its producer waits for the previous epilogue TMA read to finish. The external
-workspace, shared-memory allocation and BF16 input/output contract stay
-unchanged. This adds PV computation; numerical agreement and its runtime cost
-require separate GPU measurements.
+The second limb uses the unused half of the QK tensor-memory tile. The third
+has a dedicated shared tile for each query tile, using the same probability
+handoff as the other limbs. It does not borrow the output epilogue's TMA
+buffer or wait on that pipeline. Two KV ring stages are reassigned to these
+two probability tiles, leaving one KV stage. The external workspace, total
+shared-memory allocation, arithmetic and BF16 input/output contract stay
+unchanged. Less KV prefetching and three PV products have a runtime cost;
+saved-output parity, repeated-call stability and full-model progress require
+separate GPU measurements. Compilation alone does not qualify the change.
 The 128-token softmax uses the hardware exponential rather than the released
 cubic emulation, whose approximation error can surface after gated cancellation.
 The old four-step kernel and its serialized registration are unchanged.
@@ -51,8 +54,9 @@ or realtime performance.
 
 `TRTMC_MINIMAX_H3_VSA_TRACE=1` enables host-side diagnostic messages for each
 call's geometry and pooling, routing, fine-attention, compression and gated-add
-boundaries. It is off by default and does not change device computations or
-insert synchronization. An `enqueued` message does not establish GPU completion.
+boundaries, including a host Unix timestamp to distinguish a stalled operation
+from setup time before the first call. It is off by default and does not change
+device computations or insert synchronization. An `enqueued` message does not establish GPU completion.
 For a separate bounded failure-localization run, `CUDA_LAUNCH_BLOCKING=1` can
 help identify the last entered operation; that setting changes execution
 scheduling and its host elapsed times are not benchmark evidence. Neither

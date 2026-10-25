@@ -149,8 +149,12 @@ __host__ inline cudaError_t launch_block_sparse_sm100a(const BlockSparseVsaArgs&
     }
 
     const size_t smem = (size_t)2 * Q_TILE_BYTES + NUM_KV_STAGES * KV_RING_SLOT_BYTES +
+                        PROBABILITY_TAIL_BYTES +
                         (size_t)2 * M_TILE * HEAD_DIM * sizeof(__nv_bfloat16) +
-                        (2 * NUM_KV_STAGES + 22) * 8 + (size_t)CLC_STAGES * (2 * 8 + 16) + 16 + 8 +
+                        // Preserve the previous reservation; the one-stage
+                        // 128-token ring needs fewer of these barriers.
+                        (2 * (BLK128 ? 3 : NUM_KV_STAGES) + 22) * 8 +
+                        (size_t)CLC_STAGES * (2 * 8 + 16) + 16 + 8 +
                         (size_t)2 * STAT_REGIONS * STATS * sizeof(float) + 256;
 
 #ifndef VSA_NAMED_BAR
