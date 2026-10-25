@@ -57,6 +57,39 @@ void rejects(Call call) {
     throw std::runtime_error("expected pipeline rejection did not occur");
 }
 
+void forward_counts() {
+    struct Case {
+        ReferenceSamplingRecipe recipe;
+        int32_t frames;
+        int32_t forwards;
+    };
+    const std::array<Case, 4> cases{{
+        {ReferenceSamplingRecipe::OriginalH3, 124, 49},
+        {ReferenceSamplingRecipe::OriginalH3, 226, 98},
+        {ReferenceSamplingRecipe::OmniRefPdd8, 124, 8},
+        {ReferenceSamplingRecipe::OmniRefPdd8, 226, 16},
+    }};
+    for (const auto& item : cases) {
+        auto config = configuration(ReferenceMemoryPreset::Minimal);
+        config.denoiser.recipe = item.recipe;
+        config.output_frames = item.frames;
+        config.validate_forward_count(item.forwards);
+        for (const int32_t actual :
+             {-1, 0, 8, 16, 49, 50, 98, 100, item.forwards - 1, item.forwards + 1}) {
+            if (actual != item.forwards)
+                rejects<std::runtime_error>([&] { config.validate_forward_count(actual); });
+        }
+    }
+    auto config = configuration(ReferenceMemoryPreset::Minimal);
+    for (const int32_t frames : {0, 123, 125, 225, 227}) {
+        config.output_frames = frames;
+        rejects<std::invalid_argument>([&] { config.validate_forward_count(49); });
+    }
+    config.output_frames = 124;
+    config.denoiser.recipe = static_cast<ReferenceSamplingRecipe>(99);
+    rejects<std::invalid_argument>([&] { config.validate_forward_count(49); });
+}
+
 void exercise(ReferenceMemoryPreset preset) {
     int loads = 0;
     const auto stream = reinterpret_cast<cudaStream_t>(uintptr_t{0x1234});
@@ -254,9 +287,10 @@ uint64_t torch_cuda_normal_consumed_offset(std::size_t) {
 
 int main() {
     try {
+        forward_counts();
         exercise(ReferenceMemoryPreset::Minimal);
         exercise(ReferenceMemoryPreset::Original);
-        std::cout << "original H3 pipeline preflight and first-phase recovery passed\n";
+        std::cout << "H3 recipe counts, pipeline preflight and first-phase recovery passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
