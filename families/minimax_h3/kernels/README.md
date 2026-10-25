@@ -32,6 +32,8 @@ products with V into the existing FP32 output tile. The residual uses the
 unused half of the QK tensor-memory tile, so the external workspace and BF16
 input/output contract stay unchanged. This adds PV computation; numerical
 agreement and its runtime cost require separate GPU measurements.
+The 128-token softmax uses the hardware exponential rather than the released
+cubic emulation, whose approximation error can surface after gated cancellation.
 The old four-step kernel and its serialized registration are unchanged.
 
 The family runtime must validate transport geometry before uploading it.

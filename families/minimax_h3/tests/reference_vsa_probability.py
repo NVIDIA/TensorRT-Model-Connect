@@ -30,7 +30,23 @@ def bf16(value):
     return rounded.view(np.float32)
 
 
-def simulate(q, k, v, sizes, keys):
+def emulated_exp2(value):
+    """Mirror the released kernel's cubic approximation with FP32 FMA steps."""
+    value = np.maximum(np.asarray(value, dtype=np.float32), np.float32(-127))
+    integer = np.floor(value).astype(np.int32)
+    fraction = (value - integer.astype(np.float32)).astype(np.float32)
+    c3, c2, c1 = np.asarray([0x3D9DF09D, 0x3E6906A4, 0x3F31F519], dtype=np.uint32).view(np.float32)
+
+    def fma(left, right, add):
+        return (left.astype(np.float64) * right + add).astype(np.float32)
+
+    polynomial = fma(fraction, float(c3), float(c2))
+    polynomial = fma(polynomial, fraction.astype(np.float64), float(c1))
+    polynomial = fma(polynomial, fraction.astype(np.float64), 1.0)
+    return np.ldexp(polynomial, integer).astype(np.float32)
+
+
+def simulate(q, k, v, sizes, keys, *, emulate_exponential=False):
     scale = np.float32(1 / math.sqrt(128))
     scale_log2 = np.float32(scale * np.float32(math.log2(math.e)))
     maximum, denominator = None, 0.0
@@ -58,6 +74,10 @@ def simulate(q, k, v, sizes, keys):
             + float(np.float32(-new_maximum * scale_log2))
         ).astype(np.float32)
         probability = np.exp2(exponent).astype(np.float32)
+        if emulate_exponential:
+            pair = np.arange(len(probability)) // 2
+            emulated = (pair % 8 >= 6) & (pair < 48)
+            probability[emulated] = emulated_exp2(exponent[emulated])
         high = bf16(probability)
         low = bf16(probability - high)
         accumulators *= float(alpha)
