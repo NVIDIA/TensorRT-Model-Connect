@@ -162,7 +162,7 @@ __host__ inline cudaError_t launch_block_sparse_sm100a(const BlockSparseVsaArgs&
 #ifndef VSA_USE_CLC
 #define VSA_USE_CLC true
 #endif
-    // The 128-token kernel stores both probability limbs before PV consumes
+    // The 128-token kernel stores all probability limbs before PV consumes
     // them. Keep the early partial-P handoff only for the 64-token kernel.
     // Cubic exponent emulation loses precision that a cancelling gated sum
     // can expose. Use the hardware exponential for the 128-token operation.

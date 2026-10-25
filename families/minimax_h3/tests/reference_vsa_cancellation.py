@@ -28,11 +28,90 @@ def bitwise_equal(left, right):
     return bool(np.array_equal(left.view(np.uint32), right.view(np.uint32)))
 
 
+def project_failures(args, manifest):
+    """Infer only uniquely recoverable BF16 fine values at gated failures."""
+    arrays = {
+        name: np.load(args.input_dir / (name + ".bf16.npy"), allow_pickle=False, mmap_mode="r")
+        for name in ("q", "k", "v", "gate", "actual", "expected", "fine-reference")
+    }
+    actual, expected, gate = (as_float(arrays[n]) for n in ("actual", "expected", "gate"))
+    compression = as_float(np.load(args.input_dir / "compression.bf16.npy", allow_pickle=False))
+    failed = np.argwhere(np.abs(actual - expected) > ATOL + RTOL * np.abs(expected))
+    assert len(failed) == manifest["candidate_failed_elements"]
+    with np.load(args.input_dir / "native-taps.npz", allow_pickle=False) as taps:
+        indices, counts = taps["route_indices"].copy(), taps["route_counts"].copy()
+        previous_compression = bf16(taps["compression"].copy())
+    with np.load(args.input_dir / "geometry.npz", allow_pickle=False) as geometry:
+        sizes = geometry["sizes"].copy()
+    inferred = []
+    for index in failed:
+        key = tuple(index)
+        head, row, dimension = map(int, index[1:])
+        tile = row // 128
+        assert (
+            previous_compression[0, head, tile, dimension] == compression[0, head, tile, dimension]
+        )
+        bits = int(arrays["fine-reference"][key])
+        neighbors = as_float(np.arange(max(0, bits - 4), min(65536, bits + 5), dtype=np.uint16))
+        combined = fused(neighbors, compression[0, head, tile, dimension], gate[key])
+        matching = neighbors[combined.view(np.uint32) == actual[key].view(np.uint32)]
+        inferred.append(
+            dict(
+                index=list(map(int, index)),
+                matching_fine_values=matching.tolist(),
+                reference_fine=float(as_float(arrays["fine-reference"][key])),
+            )
+        )
+    pairs = sorted({(int(i[1]), int(i[2])) for i in failed})
+    projections, references = [], []
+    for head, row in pairs:
+        tile = row // 128
+        prediction = simulate(
+            as_float(arrays["q"][0, head, row]),
+            arrays["k"][0, head],
+            arrays["v"][0, head],
+            sizes,
+            indices[head, tile, : int(counts[head, tile])],
+            include_third=True,
+        )
+        projections.append(fused(prediction, compression[0, head, tile], gate[0, head, row]))
+        references.append(expected[0, head, row])
+    projections, references = np.asarray(projections), np.asarray(references)
+    names = ("one_bf16_limb", "two_bf16_limbs", "three_bf16_limbs", "unrounded_probability")
+    report = dict(
+        status="CPU-failure-projection-complete",
+        actual_gated_failed_elements=len(failed),
+        uniquely_inferred_fine_values=sum(len(x["matching_fine_values"]) == 1 for x in inferred),
+        inferred_fine_values=inferred,
+        native_fine_not_directly_recorded=True,
+        CPU_projected_queries=len(pairs),
+        CPU_projected_gated_comparisons={
+            n: observation(projections[:, i], references) for i, n in enumerate(names)
+        },
+        limitations="Inferred fine values only at listed failures, assuming the unchanged fused boundary and common compression. CPU probability simulation uses FP64 dot products/accumulators and approximate CUDA exponent/reduction behavior; no CUDA acceptance claim.",
+        original_rtol=RTOL,
+        original_atol=ATOL,
+        original_case_still_failed=True,
+        GPU_calls=0,
+    )
+    args.output.mkdir()
+    np.savez(
+        args.output / "projected-queries.npz",
+        queries=np.asarray(pairs),
+        simulated=projections,
+        reference=references,
+    )
+    with (args.output / "report.json").open("x") as stream:
+        json.dump(report, stream, indent=2, allow_nan=False)
+    print(json.dumps(report))
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--input-dir", type=Path, required=True)
     p.add_argument("--manifest", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--project-gated-failures", action="store_true")
     args = p.parse_args()
     manifest = json.loads(args.manifest.read_text())
     assert manifest["case"] == "interleaved-video-guide"
@@ -43,6 +122,9 @@ def main():
         with path.open("rb") as stream:
             assert hashlib.file_digest(stream, "sha256").hexdigest() == row["sha256"]
     assert not args.output.exists()
+    if args.project_gated_failures:
+        project_failures(args, manifest)
+        return
     arrays = {
         name: np.load(args.input_dir / (name + ".bf16.npy"), allow_pickle=False, mmap_mode="r")
         for name in ("q", "k", "v", "gate", "actual", "expected", "fine-native", "fine-reference")
