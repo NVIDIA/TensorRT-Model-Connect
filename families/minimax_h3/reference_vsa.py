@@ -140,7 +140,11 @@ def workspace_bytes(heads, max_tiles):
     pools = heads * max_tiles * 128 * 4
     scores = heads * max_tiles * max_tiles * 4
     counts = heads * max_tiles * 4
-    return 3 * pools + 2 * scores + counts
+    rows = max_tiles * 128
+    # One head's FP32 K/V, compact Q/output, one score tile and a key mask.
+    # Compression finishes first, leaving two pools and routing scores reusable.
+    fine = 3 * rows * 128 * 4 + 2 * 128 * 128 * 4 + rows
+    return pools + max(2 * pools + scores, fine) + scores + counts
 
 
 def add_tiled_attention(

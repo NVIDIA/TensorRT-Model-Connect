@@ -106,6 +106,13 @@ install(FILES ${PROJECT_SOURCE_DIR}/families/minimax_h3/NOTICE
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_minimax_h3_vsa_workspace
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_vsa_workspace.cpp
+  )
+  target_include_directories(test_minimax_h3_vsa_workspace PRIVATE ${PROJECT_SOURCE_DIR})
+  target_compile_options(test_minimax_h3_vsa_workspace PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_vsa_workspace COMMAND test_minimax_h3_vsa_workspace)
+
   add_executable(test_minimax_h3_reference_vsa_geometry
     reference_vsa_geometry.cpp diffusion_schedule.cpp
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_vsa_geometry.cpp

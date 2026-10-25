@@ -52,3 +52,15 @@ def test_zero_valid_pair_does_not_change_logical_budget():
 def test_invalid_workspace_profile_is_rejected(heads, tiles):
     with pytest.raises(ValueError):
         vsa.workspace_bytes(heads, tiles)
+
+
+@pytest.mark.parametrize("tiles,legacy_bytes", [(708, 285624192), (1026, 560081088)])
+def test_trained_profiles_reuse_the_existing_workspace(tiles, legacy_bytes):
+    # These existing compiled profiles have enough dead pool/score storage for
+    # one-head FP32 fine attention; changing its arena must not enlarge them.
+    assert vsa.workspace_bytes(56, tiles) == legacy_bytes
+
+
+def test_small_profile_includes_the_complete_native_fine_arena():
+    # The two-head saved failure case needs a larger arena than routing alone.
+    assert vsa.workspace_bytes(2, 38) == 7657808
