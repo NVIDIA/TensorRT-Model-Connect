@@ -5,7 +5,6 @@
 
 #include "core/runtime/bundle/bundle_format.h"
 #include "families/minimax_h3/runtime/plan_loader.h"
-#include "trtmc/runtime/stream_backend.h"
 #include "trtmc/runtime/trt_backend.h"
 
 #include <algorithm>

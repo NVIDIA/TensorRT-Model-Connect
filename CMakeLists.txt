@@ -477,7 +477,8 @@ if(TRTMC_BUILD_TESTS)
   target_compile_options(test_bundle_format_v1 PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME bundle_format_v1 COMMAND test_bundle_format_v1)
 
-  add_executable(test_bundle_stream_reader core/runtime/tests/test_bundle_stream_reader.cpp)
+  add_executable(test_bundle_stream_reader core/runtime/tests/test_bundle_format_v1.cpp)
+  target_compile_definitions(test_bundle_stream_reader PRIVATE TRTMC_TEST_BUNDLE_STREAM_READER)
   target_include_directories(test_bundle_stream_reader PRIVATE ${PROJECT_SOURCE_DIR}/core)
   target_link_libraries(test_bundle_stream_reader PRIVATE trtmc_core)
   target_compile_options(test_bundle_stream_reader PRIVATE -Wall -Wextra -Wpedantic)
@@ -485,7 +486,8 @@ if(TRTMC_BUILD_TESTS)
 
   # This executable supplies delayed CPU-only CUDA transfer stubs. It tests
   # callback buffer ownership without allocating or running on a GPU.
-  add_executable(test_trt_plan_stream_reader core/runtime/tests/test_trt_plan_stream_reader.cpp)
+  add_executable(test_trt_plan_stream_reader core/runtime/tests/test_trt_module_dynamic_input.cpp)
+  target_compile_definitions(test_trt_plan_stream_reader PRIVATE TRTMC_TEST_PLAN_STREAM_READER)
   target_include_directories(test_trt_plan_stream_reader PRIVATE
     ${PROJECT_SOURCE_DIR}/core ${PROJECT_SOURCE_DIR}/core/runtime/include
     ${TRTMC_TRT_INCLUDE_DIR} ${CUDAToolkit_INCLUDE_DIRS})
