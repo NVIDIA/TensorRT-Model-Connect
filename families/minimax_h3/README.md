@@ -350,3 +350,25 @@ bundle. The student still needs its complete weight partition, TensorRT graph,
 validation. An eight-step setting on the original checkpoint is not equivalent.
 Neither the CPU checks nor upstream multi-GPU latency establishes single-GPU
 performance, output quality or compatibility with existing compiled bundles.
+
+`reference_pdd_builder.py` adds a strongly typed TensorRT output-head selector
+and projection component. It stores the eight precomposed banks in BF16,
+selects one bank per forward, accumulates the linear operation and bias in
+FP32, and explicitly rounds the velocity to BF16 before widening for the
+scheduler. The family runtime must validate its internal selector in 0..7.
+This component does not implement the student's transformer or attention.
+
+The GPU component oracle compares identical synthetic BF16 banks with PyTorch
+at hidden widths 17, 64 and 5376, three dynamic row profiles, and all eight
+steps. It retains each plan, input, expected output and actual output. Its
+72 enqueues and 144 output comparisons use the existing BF16 numeric limits:
+
+```bash
+PYTHONPATH=core/builder:apps/benchmark:. python -m \
+  families.minimax_h3.tests.reference_pdd_projection_oracle \
+  --output /path/to/new-output-directory
+```
+
+Add `--preflight` to enumerate the cases without creating a CUDA context.
+Passing this synthetic component oracle does not qualify the trained student,
+128-token VSA, complete audiovisual generation or single-GPU performance.
