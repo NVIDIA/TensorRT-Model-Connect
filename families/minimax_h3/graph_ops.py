@@ -400,6 +400,25 @@ def partial_rope(
     return heads_to_rows(network, result.get_output(0), rows, heads * head_dim)
 
 
+def emit_serialized_plan(plan, output=None):
+    """Keep the default bytes API or stream the native host buffer unchanged.
+
+    The streamed path avoids a second plan-sized Python bytes allocation.
+    The TensorRT IHostMemory owner stays alive until the final bounded write.
+    """
+    if output is None:
+        return bytes(plan)
+    with memoryview(plan).cast("B") as data:
+        offset = 0
+        while offset < len(data):
+            chunk = data[offset : offset + (1 << 20)]
+            written = output.write(chunk)
+            if type(written) is not int or not 0 < written <= len(chunk):
+                raise OSError("MiniMax-H3 serialized plan write made invalid progress")
+            offset += written
+    return None
+
+
 def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int, name: str):
     """Full-sequence single-device fused TensorRT attention."""
 

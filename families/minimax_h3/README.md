@@ -432,3 +432,29 @@ TensorRT component plans, retains all raw operands/outputs, and applies the
 existing BF16 `rtol=0.016, atol=1e-5` envelope to every output element. Add
 `--preflight` to enumerate all nine cases without initializing CUDA. Component
 agreement is still distinct from complete student DiT/AV qualification.
+
+`reference_pdd_build.build` constructs the explicit experimental student bundle
+from its exact canonical Hugging Face snapshot. It checks both released
+contracts, the widened-head transformer config and the complete 688-tensor
+index before loading student weights. Both AdaLN and DiT are rebuilt from the
+student. Six unchanged common plans may be copied from an explicitly pinned,
+profile-compatible original-H3 bundle after its metadata, provenance and full
+content check. The builder admits only base revisions
+`9bfb6693f2cf6de171db46d1aa586f67d773a1da` and
+`48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc`; their text encoder, tokenizer and
+video/audio VAE file identities match. The execution campaign must separately
+retain local checkpoint and compiled-artifact verification.
+
+The source bundle must match the requested single/two-window geometry and
+memory preset. In particular, a 377-latent audio decoder from a two-window
+bundle cannot become a single-window decoder by editing metadata. Student
+runtime metadata uses the explicit PDD schemas and records the exact student,
+eight forwards per window and all sparse-attention settings. Automatic model
+discovery and production App adoption remain gated on complete trained proof.
+
+This build writes the native serialized AdaLN/DiT host buffers directly into
+the bundle, then streams the selected common sections in bounded chunks.
+It avoids the second plan-sized Python `bytes` allocation and another full
+bundle disk copy. The default builder bytes API is preserved. This is a
+serialization change, not a precision or sampling change, and does not bound
+TensorRT optimizer memory or establish a minimum supported host RAM budget.
