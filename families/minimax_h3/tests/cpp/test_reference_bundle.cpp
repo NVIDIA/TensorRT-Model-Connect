@@ -5,6 +5,8 @@
 
 #include "families/minimax_h3/runtime/reference_bundle.h"
 
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <set>
@@ -191,15 +193,88 @@ void check() {
     const auto names = image_reference_plan_names();
     require(names.size() == 8 && std::set<std::string>(names.begin(), names.end()).size() == 8,
             "exact eight unique plan sections");
+
+    std::ifstream contract_file(std::filesystem::path(__FILE__).parent_path() /
+                                "../fixtures/omniref-pdd-contract.json");
+    Json contract;
+    contract_file >> contract;
+    for (const bool multi : {false, true}) {
+        auto student = multi ? continuation : expanded;
+        student["schema_version"] =
+            multi ? "minimax_h3.omniref_pdd_continuation/v1" : "minimax_h3.omniref_pdd/v1";
+        student["workflow"] = multi ? "omniref_pdd_continuation" : "omniref_pdd";
+        student["num_inference_steps"] = student["denoiser_forwards"] = 8;
+        if (multi)
+            student["total_denoiser_forwards"] = 16;
+        student["checkpoint"] = {
+            {"hf_id", "FastVideo/FastVideo-FastH3-Omni-8-Step-V1"},
+            {"revision", "53e0d26a1691aa473b6262d8196a8feb2c297df0"},
+        };
+        student["inference_contract"] = contract;
+        student["max_vsa_tiles"] = 2048;
+        const auto value = parse_omniref_pdd_config(student);
+        require(value.denoiser.recipe == ReferenceSamplingRecipe::OmniRefPdd8 &&
+                    value.denoiser.max_vsa_tiles == 2048 &&
+                    value.output_frames == (multi ? 226 : 124),
+                "closed student contract selects eight-forward runtime and VSA ABI");
+        rejects(student); // A student cannot masquerade as the original recipe.
+        const auto reject_student = [](const Json& config) {
+            try {
+                (void)parse_omniref_pdd_config(config);
+            } catch (const std::exception&) {
+                return;
+            }
+            throw std::runtime_error("incompatible OmniRef recipe was accepted");
+        };
+        reject_student(multi ? continuation : expanded);
+        for (const auto* name : {"checkpoint", "inference_contract", "max_vsa_tiles"}) {
+            auto missing = student;
+            missing.erase(name);
+            reject_student(missing);
+        }
+        for (const auto& field : contract.items()) {
+            auto missing = student;
+            missing["inference_contract"].erase(field.key());
+            reject_student(missing);
+            auto changed = student;
+            changed["inference_contract"][field.key()] = nullptr;
+            reject_student(changed);
+        }
+        for (const auto& change :
+             std::vector<std::pair<const char*, Json>>{{"max_vsa_tiles", 2047},
+                                                       {"max_vsa_tiles", 0},
+                                                       {"max_vsa_tiles", 8194},
+                                                       {"max_vsa_tiles", true},
+                                                       {"denoiser_forwards", 49},
+                                                       {"num_inference_steps", 50}}) {
+            auto changed = student;
+            changed[change.first] = change.second;
+            reject_student(changed);
+        }
+        for (const auto* name : {"hf_id", "revision"}) {
+            auto changed = student;
+            changed["checkpoint"][name] = "unknown";
+            reject_student(changed);
+        }
+        auto unexpected = student;
+        unexpected["inference_contract"]["extra"] = false;
+        reject_student(unexpected);
+        auto mistyped = student;
+        mistyped["inference_contract"]["pdd_steps"] = 32.0;
+        reject_student(mistyped);
+    }
 }
 } // namespace
 
 int main(int argc, char** argv) {
     try {
-        if (argc == 2 && std::string(argv[1]) == "--validate-stdin") {
+        if (argc == 2 && (std::string(argv[1]) == "--validate-stdin" ||
+                          std::string(argv[1]) == "--validate-pdd-stdin")) {
             Json input;
             std::cin >> input;
-            const auto config = trtmc::minimax_h3::parse_image_reference_config(input);
+            const auto config = std::string(argv[1]) == "--validate-pdd-stdin"
+                                    ? trtmc::minimax_h3::parse_omniref_pdd_config(input)
+                                    : trtmc::minimax_h3::parse_image_reference_config(input);
             std::cout << Json({{"max_sequence_rows", config.denoiser.max_sequence_rows},
                                {"latent_height", config.denoiser.target.height},
                                {"latent_width", config.denoiser.target.width}})

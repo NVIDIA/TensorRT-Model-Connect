@@ -344,10 +344,11 @@ PYTHONPATH=core/builder:apps/benchmark:. python -m \
   --output pdd-math.json
 ```
 
-This is mathematical groundwork, not a registered model or usable student
-bundle. The student still needs its complete weight partition, TensorRT graph,
-128-token reference-aware VSA operation, native orchestration and trained-model
-validation. An eight-step setting on the original checkpoint is not equivalent.
+The implementation includes the student graph, 128-token reference-aware VSA
+binding and an explicit native sampling recipe. It is not a registered model or
+qualified student bundle. Building its exact learned weight partitions and
+completing trained-model validation remain required. An eight-step setting on
+the original checkpoint is not equivalent.
 Neither the CPU checks nor upstream multi-GPU latency establishes single-GPU
 performance, output quality or compatibility with existing compiled bundles.
 
@@ -382,8 +383,15 @@ Blackwell cubins. See `kernels/README.md` for its exact binding contract.
 `reference_pdd_dit_builder.py` composes the complete student DiT graph: dense
 text refinement, one VSA binding per transformer block, target-only output
 selection and the eight fused PDD heads. Original H3 retains its dense path.
-The native student orchestration, exact checkpoint build and trained-model
-validation are still required before registering or serving this model.
+The native denoiser selects the eight trained head banks, scales only target
+noise by the initial sigma, prepares matching AdaLN times and retains fixed
+image/video/audio conditioning. Its explicit bundle schemas are
+`minimax_h3.omniref_pdd/v1` and `minimax_h3.omniref_pdd_continuation/v1`.
+The latter retains two complete eight-forward windows, the original overlap
+and cumulative audio/video decoding geometry. The factory requires the full
+released checkpoint/sampling contract and an explicit VSA tile capacity.
+Original-H3 schemas retain their original 49-forward recipe. Source presence
+does not establish a trained bundle or output quality for either recipe.
 
 The CPU geometry oracle compares the transport with the supplied upstream
 functions, including interleaved reference videos and six portrait images:
@@ -397,3 +405,30 @@ PYTHONPATH=core/builder:apps/benchmark:. python -m \
 ```
 
 Geometry agreement does not establish GPU attention or full-model agreement.
+Pass `--native-probe /path/to/test_minimax_h3_reference_vsa_geometry` to also
+compare every native transport index and the FP32 schedule bits. The pinned
+contract fixture is copied from the released checkpoint's
+`fastvideo_inference.json` at the revision above.
+
+The GPU attention oracle requires the compiled generic TVM-FFI bridge, this
+family's kernel DSO and the supplied upstream sources. Run each forced backend
+in a separate process because backend selection is cached for that process:
+
+```bash
+TRTMC_MINIMAX_H3_VSA_BACKEND=generic \
+PYTHONPATH=core/builder:apps/benchmark:. python -m \
+  families.minimax_h3.tests.reference_vsa_gpu_oracle \
+  --backend generic --output /path/to/new-output-directory \
+  --library /path/to/libtrtmc_minimax_h3_omniref_vsa.so \
+  --bridge /path/to/libtrtmc_byok_tvm_ffi.so \
+  --base-source /path/to/FastVideo/fastvideo/attention/backends/video_sparse_attn.py \
+  --h3-source /path/to/FastVideo/fastvideo/attention/backends/video_sparse_attn_h3.py
+```
+
+Use `blackwell` for the optimized backend. Each route includes four synthetic
+cases; Blackwell also executes one attention operation at the six-portrait
+window's actual row/head dimensions. The oracle builds dynamic strongly typed
+TensorRT component plans, retains all raw operands/outputs, and applies the
+existing BF16 `rtol=0.016, atol=1e-5` envelope to every output element. Add
+`--preflight` to enumerate all nine cases without initializing CUDA. Component
+agreement is still distinct from complete student DiT/AV qualification.

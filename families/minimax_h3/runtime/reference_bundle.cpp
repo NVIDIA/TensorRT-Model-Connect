@@ -41,6 +41,14 @@ bool same_value(const nlohmann::json& value, const nlohmann::json& expected) {
                 return false;
         return true;
     }
+    if (expected.is_object()) {
+        if (value.size() != expected.size())
+            return false;
+        for (const auto& field : expected.items())
+            if (!value.contains(field.key()) || !same_value(value.at(field.key()), field.value()))
+                return false;
+        return true;
+    }
     return value == expected;
 }
 
@@ -71,12 +79,49 @@ std::vector<std::string> image_reference_plan_names() {
             "adaln.plan",  "denoiser.plan",     "vae.plan",         "audio_vae.plan"};
 }
 
-ReferencePipelineConfig parse_image_reference_config(const nlohmann::json& runtime) {
-    const bool continuation =
-        runtime.at("schema_version") == "minimax_h3.image_ref2va_continuation/v1";
-    exact(runtime, "schema_version",
-          continuation ? "minimax_h3.image_ref2va_continuation/v1" : "minimax_h3.image_ref2va/v1");
-    exact(runtime, "workflow", continuation ? "image_ref2va_continuation" : "image_ref2va");
+namespace {
+void require_pdd_contract(const nlohmann::json& runtime) {
+    exact(runtime, "checkpoint",
+          {
+              {"hf_id", "FastVideo/FastVideo-FastH3-Omni-8-Step-V1"},
+              {"revision", "53e0d26a1691aa473b6262d8196a8feb2c297df0"},
+          });
+    exact(runtime, "inference_contract",
+          {
+              {"schema", "fasth3-inference-contract-v1"},
+              {"schema_version", "fasth3-inference-contract-v1"},
+              {"model_type", "ref2va"},
+              {"transformer_component", "transformer_ref"},
+              {"base_model_revision",
+               "hf://MiniMaxAI/MiniMax-H3@9bfb6693f2cf6de171db46d1aa586f67d773a1da"},
+              {"conditioning", "fixed_ordered_references_target_only_flow"},
+              {"pdd_steps", 32},
+              {"pdd_step_indices", {0, 4, 8, 12, 16, 20, 24, 28, 32}},
+              {"num_inference_steps", 8},
+              {"transformer_forwards", 8},
+              {"grid_max_t", 0.999},
+              {"video_scheduler_shift", 12.0},
+              {"audio_scheduler_shift", 3.0},
+              {"guidance_scale", 1.0},
+              {"attention_backend", "VIDEO_SPARSE_ATTN_H3"},
+              {"vsa_sparsity", 0.9},
+              {"vsa_tile_size", 128},
+              {"vsa_ref_keep_rate", 0.1},
+              {"vsa_ref_policy", "p2_multi_region"},
+          });
+}
+
+ReferencePipelineConfig parse_reference_config(const nlohmann::json& runtime, bool pdd) {
+    const std::string single = pdd ? "minimax_h3.omniref_pdd/v1" : "minimax_h3.image_ref2va/v1";
+    const std::string multi =
+        pdd ? "minimax_h3.omniref_pdd_continuation/v1" : "minimax_h3.image_ref2va_continuation/v1";
+    const bool continuation = runtime.at("schema_version") == multi;
+    exact(runtime, "schema_version", continuation ? multi : single);
+    exact(runtime, "workflow",
+          pdd ? (continuation ? "omniref_pdd_continuation" : "omniref_pdd")
+              : (continuation ? "image_ref2va_continuation" : "image_ref2va"));
+    if (pdd)
+        require_pdd_contract(runtime);
     exact(runtime, "weights_variant", "transformer_ref");
     const auto capacity = runtime.value("reference_capacity", std::string("standard"));
     if (capacity != "standard" && capacity != "six_portrait")
@@ -85,8 +130,8 @@ ReferencePipelineConfig parse_image_reference_config(const nlohmann::json& runti
     const int32_t static_condition_rows = capacity == "six_portrait" ? 49152 : 16384;
     for (const auto& pair : {std::pair{"num_frames", continuation ? 226 : 124},
                              {"fps", 24},
-                             {"num_inference_steps", 50},
-                             {"denoiser_forwards", 49},
+                             {"num_inference_steps", pdd ? 8 : 50},
+                             {"denoiser_forwards", pdd ? 8 : 49},
                              {"latent_frames", 37},
                              {"audio_latent_frames", 207},
                              {"audio_sampling_rate", 32000},
@@ -97,7 +142,7 @@ ReferencePipelineConfig parse_image_reference_config(const nlohmann::json& runti
                              {"context_parallel_size", 1}}) {
         if (integer(runtime, pair.first) != pair.second)
             throw std::invalid_argument(
-                "MiniMax-H3 reference metadata declares a different original topology");
+                "MiniMax-H3 reference metadata declares a different topology or recipe");
     }
     if (integer(runtime, "max_text_rows") != text_rows)
         throw std::invalid_argument("MiniMax-H3 reference capacity and text budget disagree");
@@ -110,7 +155,7 @@ ReferencePipelineConfig parse_image_reference_config(const nlohmann::json& runti
                              {"continuation_windows", 2},
                              {"decoded_latent_frames", 67},
                              {"decoded_audio_latent_frames", 377},
-                             {"total_denoiser_forwards", 98}}) {
+                             {"total_denoiser_forwards", pdd ? 16 : 98}}) {
         if (continuation)
             exact(runtime, pair.first, pair.second);
         else if (runtime.contains(pair.first))
@@ -119,6 +164,13 @@ ReferencePipelineConfig parse_image_reference_config(const nlohmann::json& runti
     }
     exact(runtime, "reference_pixels", nlohmann::json::array({16384, 22016, 65536}));
     ReferencePipelineConfig config;
+    if (pdd) {
+        const int32_t tiles = integer(runtime, "max_vsa_tiles");
+        if (tiles < 2 || tiles > 8192 || tiles % 2)
+            throw std::invalid_argument("OmniRef VSA requires an even supported tile capacity");
+        config.denoiser.recipe = ReferenceSamplingRecipe::OmniRefPdd8;
+        config.denoiser.max_vsa_tiles = tiles;
+    }
     const auto mode = runtime.at("memory_preset").get<std::string>();
     const auto batch = integer(runtime, "vae_tile_batch");
     if (mode == "minimal" && batch == 1)
@@ -163,6 +215,15 @@ ReferencePipelineConfig parse_image_reference_config(const nlohmann::json& runti
                 "MiniMax-H3 reference config digest must be lowercase SHA-256");
     }
     return config;
+}
+} // namespace
+
+ReferencePipelineConfig parse_image_reference_config(const nlohmann::json& runtime) {
+    return parse_reference_config(runtime, false);
+}
+
+ReferencePipelineConfig parse_omniref_pdd_config(const nlohmann::json& runtime) {
+    return parse_reference_config(runtime, true);
 }
 
 } // namespace trtmc::minimax_h3

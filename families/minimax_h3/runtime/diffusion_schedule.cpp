@@ -28,6 +28,25 @@ MiniMaxH3Schedule make_minimax_h3_schedule(int32_t grid_points, float shift) {
     return result;
 }
 
+MiniMaxH3Schedule make_minimax_h3_pdd_schedule(float shift) {
+    if (shift != 12.0F && shift != 3.0F)
+        throw std::invalid_argument("OmniRef PDD requires the released video/audio shift");
+    MiniMaxH3Schedule result;
+    for (int32_t node = 0; node <= 32; node += 4) {
+        // Match the pinned FP64 linspace and rational shift without contracting
+        // the multiplication/subtraction into a fused operation.
+        volatile double offset = static_cast<double>(node) * (0.999 / 32.0);
+        const double t = node == 32 ? 0.0 : 0.999 - offset;
+        volatile double product = t * (static_cast<double>(shift) - 1.0);
+        const double denominator = product + 0.999;
+        volatile double numerator = static_cast<double>(shift) * t;
+        result.sigmas.push_back(static_cast<float>((numerator * 0.999) / denominator));
+    }
+    for (std::size_t step = 0; step < 8; ++step)
+        result.timesteps.push_back(1.0F - result.sigmas[step]);
+    return result;
+}
+
 void minimax_h3_scheduler_step(float* sample, const float* velocity, std::size_t count,
                                float timestep, float sigma, float sigma_next) {
     if (sample == nullptr || velocity == nullptr || !(sigma > 0.0F))

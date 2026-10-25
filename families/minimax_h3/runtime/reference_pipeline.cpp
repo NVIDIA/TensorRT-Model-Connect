@@ -6,6 +6,7 @@
 #include "families/minimax_h3/runtime/reference_pipeline.h"
 
 #include "families/minimax_h3/runtime/audio_decoder.h"
+#include "families/minimax_h3/runtime/reference_vsa_geometry.h"
 #include "families/minimax_h3/runtime/video_decoder.h"
 
 #include <algorithm>
@@ -17,7 +18,7 @@ namespace trtmc::minimax_h3 {
 namespace {
 const internal::ConfigField kFields[] = {
     {"seed", internal::ConfigKind::I64, internal::ConfigValue{int64_t{42}},
-     "Nonnegative original-H3 request seed; reference posterior seeds remain 42."},
+     "Nonnegative H3 request seed; reference posterior seeds remain 42."},
 };
 const internal::ConfigField kWindowFields[] = {
     kFields[0],
@@ -71,6 +72,10 @@ void preflight(const internal::ReferencesTextToAudioVideoRequest& request,
         config.denoiser.max_sequence_rows, media_origin);
     if (layout.condition_video_rows > config.max_condition_video_rows)
         throw std::length_error("MiniMax-H3 reference images exceed their own DiT operand profile");
+    if (config.denoiser.recipe == ReferenceSamplingRecipe::OmniRefPdd8)
+        (void)make_reference_vsa_layout(static_cast<int32_t>(presentation.h3_token_tags.size()),
+                                        latent_shapes, config.denoiser.target, std::nullopt,
+                                        config.denoiser.max_vsa_tiles);
     if (config.output_frames == 226) {
         const auto guided = make_continuation_reference_layout(
             continuation ? continuation->h3_token_tags : presentation.h3_token_tags, latent_shapes,
@@ -79,6 +84,13 @@ void preflight(const internal::ReferencesTextToAudioVideoRequest& request,
         if (guided.condition_video_rows > config.max_condition_video_rows ||
             guided.condition_audio_rows > config.max_condition_audio_rows)
             throw std::length_error("MiniMax-H3 continuation exceeds its DiT operand profiles");
+        if (config.denoiser.recipe == ReferenceSamplingRecipe::OmniRefPdd8)
+            (void)make_reference_vsa_layout(
+                static_cast<int32_t>(
+                    (continuation ? continuation->h3_token_tags : presentation.h3_token_tags)
+                        .size()),
+                latent_shapes, config.denoiser.target, ReferenceContinuationGuideShape{7, 37},
+                config.denoiser.max_vsa_tiles);
     }
 }
 } // namespace
