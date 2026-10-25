@@ -162,7 +162,9 @@ __host__ inline cudaError_t launch_block_sparse_sm100a(const BlockSparseVsaArgs&
 #ifndef VSA_USE_CLC
 #define VSA_USE_CLC true
 #endif
-    constexpr bool FULL_NAMED_BAR = VSA_NAMED_BAR, EX2_EMU = true, SPLIT_P = true,
+    // The 128-token kernel stores both probability limbs before PV consumes
+    // them. Keep the early partial-P handoff only for the 64-token kernel.
+    constexpr bool FULL_NAMED_BAR = VSA_NAMED_BAR, EX2_EMU = true, SPLIT_P = !BLK128,
                    SOFTMAX_THROTTLE = VSA_THROTTLE, USE_CLC = VSA_USE_CLC, Q_RASTER = true,
                    MHA = true;
     auto kfn = &fmha_context_bf16_gen_kernel<32, FULL_NAMED_BAR, EX2_EMU, SPLIT_P, SOFTMAX_THROTTLE,

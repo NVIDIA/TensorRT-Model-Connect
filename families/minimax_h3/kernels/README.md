@@ -26,6 +26,12 @@ validation. An unavailable explicitly requested route fails.
 `block_sparse_launch_sm100a.cuh` originate from Apache-2.0 FastVideo commit
 `48a047c05ff4138f20cfa33351499c6ec5945f5d`, preserving the existing sm103a
 compatibility patch. The new binding selects their 128-token instantiation.
+Its optimized 128-token PV operation stores the softmax probability as two
+BF16 limbs: the rounded value and its rounded residual. It accumulates both
+products with V into the existing FP32 output tile. The residual uses the
+unused half of the QK tensor-memory tile, so the external workspace and BF16
+input/output contract stay unchanged. This adds PV computation; numerical
+agreement and its runtime cost require separate GPU measurements.
 The old four-step kernel and its serialized registration are unchanged.
 
 The family runtime must validate transport geometry before uploading it.
