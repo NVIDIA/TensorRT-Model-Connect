@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "trtmc/runtime/stream_backend.h"
 #include "trtmc/runtime/trt_backend.h"
 
 #include <cstring>
