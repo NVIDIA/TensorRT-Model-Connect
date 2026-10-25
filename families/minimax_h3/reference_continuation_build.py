@@ -15,13 +15,33 @@ from pathlib import Path
 import re
 import struct
 
-from tensorrt_model_connect import provenance
 from tensorrt_model_connect.bundle_writer import BUNDLE_MAGIC
 
 from . import reference_build as owner
 
 REUSED_PLANS = tuple(n for n in owner.PLAN_NAMES if n not in ("denoiser.plan", "audio_vae.plan"))
 _CHUNK = 8 << 20
+
+
+def _checkpoint_identity(model_dir):
+    """Recognize the snapshot identity used by this family's source-bundle gate."""
+    if model_dir is None:
+        return None
+    try:
+        path = Path(model_dir).resolve()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return None
+    repository = path.parent.parent.name
+    if (
+        path.parent.name != "snapshots"
+        or re.fullmatch("[0-9a-f]{40}", path.name) is None
+        or not repository.startswith("models--")
+    ):
+        return None
+    return {
+        "hf_id": repository.removeprefix("models--").replace("--", "/"),
+        "revision": path.name,
+    }
 
 
 def _identity(stat):
@@ -196,7 +216,7 @@ def build(
         height, width, base_target, base_reference, configs, hashes, continuation=False, **common
     )
     source = _ImageBundle(
-        source_bundle, source_sha256, expected_base, provenance.checkpoint_identity(root), tokenizer
+        source_bundle, source_sha256, expected_base, _checkpoint_identity(root), tokenizer
     )
     writer.enable_direct_staging()
     writer.set_header(family="minimax_h3", task=owner.TASK, backend="trt")
