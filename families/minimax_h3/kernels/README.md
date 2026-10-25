@@ -32,6 +32,12 @@ to hold the linear fine-attention arena. Routing indices, counts and compressed
 output remain live and disjoint. New small profiles reserve additional scratch;
 the existing 56-head, 708/1026-tile workspace sizes remain unchanged. An old
 bundle without sufficient generic scratch fails explicitly and needs rebuilding.
+PV uses a batch of two independent copies instead of singleton GEMM, whose FP32
+reduction can differ at BF16 rounding boundaries. The dead Q tile holds the
+first output and the fine tile holds the second; these outputs never overlap
+each other or the live V/probability inputs. The completed softmax's key-mask
+storage holds the device pointer table and is rebuilt for the next query tile.
+This trades duplicate PV computation for retaining the same one-head arena.
 These execution changes require complete GPU comparison and timing evidence;
 host arena checks alone do not qualify numerical equivalence or performance.
 

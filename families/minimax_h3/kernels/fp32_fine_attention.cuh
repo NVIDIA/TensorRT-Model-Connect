@@ -132,6 +132,18 @@ __global__ void store_fine(const float* fine, __nv_bfloat16* output, const int32
         output[index] = __float2bfloat16_rn(index / 128 < sizes[tile] ? fine[index] : 0.0F);
 }
 
+__global__ void prepare_pv_batch(const float* value, const float* probability, float* first,
+                                 float* second, const float** inputs, float** outputs) {
+    if (threadIdx.x == 0) {
+        inputs[0] = value;
+        inputs[1] = value;
+        inputs[2] = probability;
+        inputs[3] = probability;
+        outputs[0] = first;
+        outputs[1] = second;
+    }
+}
+
 inline void run(const __nv_bfloat16* query, const __nv_bfloat16* key, const __nv_bfloat16* value,
                 const int32_t* indices, const int32_t* counts, const int32_t* sizes,
                 __nv_bfloat16* output, uint8_t* workspace, const VsaWorkspaceLayout& layout,
@@ -144,6 +156,10 @@ inline void run(const __nv_bfloat16* query, const __nv_bfloat16* key, const __nv
     auto* scores = reinterpret_cast<float*>(workspace + layout.score_offset);
     auto* fine = reinterpret_cast<float*>(workspace + layout.fine_output_offset);
     auto* mask = workspace + layout.key_mask_offset;
+    // The key mask is dead after softmax. Reuse its aligned storage for six
+    // device pointers, without allocating a separate batched-GEMM pointer table.
+    auto** pv_inputs = reinterpret_cast<const float**>(mask);
+    auto** pv_outputs = reinterpret_cast<float**>(mask + 4 * sizeof(const float*));
     const float factor = static_cast<float>(std::sqrt(1.0 / std::sqrt(128.0)));
     const float one = 1.0F, zero = 0.0F;
     require_cublas(cublasSetMathMode(handle, CUBLAS_PEDANTIC_MATH));
@@ -171,8 +187,16 @@ inline void run(const __nv_bfloat16* query, const __nv_bfloat16* key, const __nv
             else
                 softmax_regular<<<128, 1024, 0, stream>>>(scores, mask, rows);
             require_cuda(cudaGetLastError());
-            require_cublas(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N, 128, 128, rows, &one,
-                                       float_value, 128, scores, rows, &zero, fine, 128));
+            // Singleton PV selects a different FP32 reduction from batched PV.
+            // Two independent products retain one head's residency: Q is dead
+            // after QK, so it is the first output; the fine tile is the second.
+            // Read-only inputs may repeat, while both outputs remain disjoint.
+            prepare_pv_batch<<<1, 1, 0, stream>>>(float_value, scores, scaled_query, fine,
+                                                  pv_inputs, pv_outputs);
+            require_cuda(cudaGetLastError());
+            require_cublas(cublasSgemmBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, 128, 128, rows,
+                                              &one, pv_inputs, 128, pv_inputs + 2, rows, &zero,
+                                              pv_outputs, 128, 2));
             store_fine<<<64, 256, 0, stream>>>(fine, output + base + tile * 16384, sizes, tile);
             require_cuda(cudaGetLastError());
         }
