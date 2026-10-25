@@ -37,21 +37,26 @@ __global__ void prepare_keys(const __nv_bfloat16* key, const __nv_bfloat16* valu
     }
 }
 
-__global__ void prepare_query(const __nv_bfloat16* query, float* scaled_query, float factor) {
+__global__ void prepare_query(const __nv_bfloat16* query, float* scaled_query, float factor,
+                              int query_tiles = 1) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index < 128 * 128)
+    if (index < query_tiles * 128 * 128)
         scaled_query[index] = __fmul_rn(__bfloat162float(query[index]), factor);
 }
 
 __global__ void key_mask(const int32_t* indices, const int32_t* count, const int32_t* sizes,
-                         uint8_t* mask, int tiles) {
+                         uint8_t* mask, int tiles, int query_tiles = 1) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
-    const int rank = index / 128;
-    if (rank >= tiles || rank >= *count)
+    const int rows = tiles * 128;
+    const int query = index / rows;
+    const int local = index % rows;
+    const int rank = local / 128;
+    if (query >= query_tiles || rank >= count[query])
         return;
-    const int tile = indices[rank];
+    const int tile = indices[static_cast<int64_t>(query) * tiles + rank];
     assert(tile >= 0 && tile < tiles && sizes[tile] >= 0 && sizes[tile] <= 128);
-    mask[tile * 128 + index % 128] = index % 128 < sizes[tile];
+    mask[static_cast<int64_t>(query) * rows + tile * 128 + local % 128] =
+        local % 128 < sizes[tile];
 }
 
 template <bool Maximum>
@@ -78,7 +83,8 @@ __device__ float block_reduce(float value, float* shared) {
 }
 
 template <typename Mask>
-__global__ void softmax_short(float* scores, const Mask* mask, int keys) {
+__global__ void softmax_short(float* scores, const Mask* mask, int keys, int mask_stride = 0) {
+    mask += static_cast<int64_t>(blockIdx.x / 128) * mask_stride;
     float* row = scores + static_cast<int64_t>(blockIdx.x) * keys;
     float maximum = -FLT_MAX;
     for (int column = threadIdx.x; column < keys; column += 32)
@@ -97,7 +103,8 @@ __global__ void softmax_short(float* scores, const Mask* mask, int keys) {
 }
 
 template <typename Mask>
-__global__ void softmax_regular(float* scores, const Mask* mask, int keys) {
+__global__ void softmax_regular(float* scores, const Mask* mask, int keys, int mask_stride = 0) {
+    mask += static_cast<int64_t>(blockIdx.x / 128) * mask_stride;
     __shared__ float reduction[32];
     float* row = scores + static_cast<int64_t>(blockIdx.x) * keys;
     const int full = keys <= 9216 ? 0 : keys / 4096 * 4096;
@@ -128,21 +135,33 @@ __global__ void softmax_regular(float* scores, const Mask* mask, int keys) {
 }
 
 __global__ void store_fine(const float* fine, __nv_bfloat16* output, const int32_t* sizes,
-                           int tile) {
+                           int tile, int query_tiles = 1) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
-    if (index < 128 * 128)
-        output[index] = __float2bfloat16_rn(index / 128 < sizes[tile] ? fine[index] : 0.0F);
+    if (index < query_tiles * 128 * 128)
+        output[index] = __float2bfloat16_rn(
+            index % (128 * 128) / 128 < sizes[tile + index / (128 * 128)] ? fine[index] : 0.0F);
+}
+
+__global__ void prepare_qk_batch(const float* key, const float* query, float* scores,
+                                 const float** inputs, float** outputs, int keys, int queries) {
+    const int index = threadIdx.x;
+    if (index < queries) {
+        inputs[index] = key;
+        inputs[queries + index] = query + index * 128 * 128;
+        outputs[index] = scores + static_cast<int64_t>(index) * 128 * keys;
+    }
 }
 
 __global__ void prepare_pv_batch(const float* value, const float* probability, float* first,
-                                 float* second, const float** inputs, float** outputs) {
-    if (threadIdx.x == 0) {
-        inputs[0] = value;
-        inputs[1] = value;
-        inputs[2] = probability;
-        inputs[3] = probability;
-        outputs[0] = first;
-        outputs[1] = second;
+                                 float* fine, const float** inputs, float** outputs,
+                                 int keys, int queries) {
+    const int products = queries > 1 ? queries : 2;
+    const int index = threadIdx.x;
+    if (index < products) {
+        inputs[index] = value;
+        inputs[products + index] =
+            probability + static_cast<int64_t>(queries > 1 ? index : 0) * 128 * keys;
+        outputs[index] = queries > 1 ? fine + index * 128 * 128 : (index == 0 ? first : fine);
     }
 }
 
@@ -158,48 +177,65 @@ inline void run(const __nv_bfloat16* query, const __nv_bfloat16* key, const __nv
     auto* scores = reinterpret_cast<float*>(workspace + layout.score_offset);
     auto* fine = reinterpret_cast<float*>(workspace + layout.fine_output_offset);
     auto* mask = workspace + layout.key_mask_offset;
-    // The key mask is dead after softmax. Reuse its aligned storage for six
-    // device pointers, without allocating a separate batched-GEMM pointer table.
-    auto** pv_inputs = reinterpret_cast<const float**>(mask);
-    auto** pv_outputs = reinterpret_cast<float**>(mask + 4 * sizeof(const float*));
     const float factor = static_cast<float>(std::sqrt(1.0 / std::sqrt(128.0)));
     const float one = 1.0F, zero = 0.0F;
     require_cublas(cublasSetMathMode(handle, CUBLAS_PEDANTIC_MATH));
     require_cublas(cublasSetAtomicsMode(handle, CUBLAS_ATOMICS_NOT_ALLOWED));
-    // Reuse one head's arena and one complete query tile. There is no hidden
-    // allocation, stream synchronization or full-sequence score matrix.
+    // Reuse one head's K/V and fit independent query tiles into caller scratch.
+    // There is no hidden allocation, synchronization or full-sequence score matrix.
     for (int head = 0; head < heads; ++head) {
         const int64_t base = head * head_elements;
         prepare_keys<<<(head_elements + 255) / 256, 256, 0, stream>>>(
             key + base, value + base, scaled_key, float_value, head_elements, factor);
         require_cuda(cudaGetLastError());
-        for (int tile = 0; tile < tiles; ++tile) {
+        for (int tile = 0; tile < tiles; tile += layout.query_tile_batch) {
+            const int queries = std::min(layout.query_tile_batch, tiles - tile);
+            const int query_elements = queries * 128 * 128;
+            const int mask_elements = queries * rows;
             const int64_t map_row = static_cast<int64_t>(head) * tiles + tile;
-            prepare_query<<<64, 256, 0, stream>>>(query + base + tile * 16384, scaled_query,
-                                                  factor);
+            prepare_query<<<(query_elements + 255) / 256, 256, 0, stream>>>(
+                query + base + tile * 16384, scaled_query, factor, queries);
             require_cuda(cudaGetLastError());
-            require_cuda(cudaMemsetAsync(mask, 0, rows, stream));
-            key_mask<<<(rows + 255) / 256, 256, 0, stream>>>(indices + map_row * tiles,
-                                                             counts + map_row, sizes, mask, tiles);
+            require_cuda(cudaMemsetAsync(mask, 0, mask_elements, stream));
+            key_mask<<<(mask_elements + 255) / 256, 256, 0, stream>>>(
+                indices + map_row * tiles, counts + map_row, sizes, mask, tiles, queries);
             require_cuda(cudaGetLastError());
-            require_cublas(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, rows, 128, 128, &one,
-                                       scaled_key, 128, scaled_query, 128, &zero, scores, rows));
+            if (queries == 1) {
+                require_cublas(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, rows, 128, 128, &one,
+                                           scaled_key, 128, scaled_query, 128, &zero, scores, rows));
+            } else {
+                // PV output is dead during QK. Reuse its first bytes for the
+                // device pointer table; QK never writes or reads PV data.
+                auto** inputs = reinterpret_cast<const float**>(fine);
+                auto** outputs = reinterpret_cast<float**>(
+                    reinterpret_cast<uint8_t*>(fine) + 2 * queries * sizeof(const float*));
+                prepare_qk_batch<<<1, 32, 0, stream>>>(scaled_key, scaled_query, scores,
+                                                       inputs, outputs, rows, queries);
+                require_cuda(cudaGetLastError());
+                require_cublas(cublasSgemmBatched(handle, CUBLAS_OP_T, CUBLAS_OP_N, rows, 128, 128,
+                                                  &one, inputs, 128, inputs + queries, 128, &zero,
+                                                  outputs, rows, queries));
+            }
             if (rows <= 2048)
-                softmax_short<<<128, 32, 0, stream>>>(scores, mask, rows);
+                softmax_short<<<queries * 128, 32, 0, stream>>>(scores, mask, rows, rows);
             else
-                softmax_regular<<<128, 1024, 0, stream>>>(scores, mask, rows);
+                softmax_regular<<<queries * 128, 1024, 0, stream>>>(scores, mask, rows, rows);
             require_cuda(cudaGetLastError());
-            // Singleton PV selects a different FP32 reduction from batched PV.
-            // Two independent products retain one head's residency: Q is dead
-            // after QK, so it is the first output; the fine tile is the second.
-            // Read-only inputs may repeat, while both outputs remain disjoint.
-            prepare_pv_batch<<<1, 1, 0, stream>>>(float_value, scores, scaled_query, fine,
-                                                  pv_inputs, pv_outputs);
+            // Softmax no longer needs the mask. Its bytes hold the PV pointer
+            // table. A single query retains the proven duplicate-PV reduction,
+            // with dead Q and fine as disjoint destinations; larger batches
+            // contain independent original query tiles with shared read-only V.
+            const int products = queries > 1 ? queries : 2;
+            auto** pv_inputs = reinterpret_cast<const float**>(mask);
+            auto** pv_outputs = reinterpret_cast<float**>(mask + 2 * products * sizeof(const float*));
+            prepare_pv_batch<<<1, 32, 0, stream>>>(float_value, scores, scaled_query, fine,
+                                                   pv_inputs, pv_outputs, rows, queries);
             require_cuda(cudaGetLastError());
             require_cublas(cublasSgemmBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, 128, 128, rows,
-                                              &one, pv_inputs, 128, pv_inputs + 2, rows, &zero,
-                                              pv_outputs, 128, 2));
-            store_fine<<<64, 256, 0, stream>>>(fine, output + base + tile * 16384, sizes, tile);
+                                              &one, pv_inputs, 128, pv_inputs + products, rows, &zero,
+                                              pv_outputs, 128, products));
+            store_fine<<<(query_elements + 255) / 256, 256, 0, stream>>>(
+                fine, output + base + tile * 16384, sizes, tile, queries);
             require_cuda(cudaGetLastError());
         }
     }
