@@ -5,6 +5,7 @@
 
 #include "families/minimax_h3/runtime/plan_loader.h"
 
+#include "trtmc/runtime/stream_backend.h"
 #include "trtmc/runtime/trt_backend.h"
 
 #include <algorithm>
@@ -86,6 +87,13 @@ std::vector<char> MiniMaxH3PlanSource::read_required(std::string_view name) cons
     return result;
 }
 
+std::unique_ptr<IPlanReader> MiniMaxH3PlanSource::open_required(std::string_view name) const {
+    require_nonempty(name);
+    auto result = state_->bundle.open_section(name);
+    state_->verify();
+    return result;
+}
+
 MiniMaxH3ModuleLoader make_minimax_h3_plan_loader(IBackend& backend,
                                                   std::shared_ptr<const MiniMaxH3PlanSource> source,
                                                   std::vector<std::string> plan_names) {
@@ -100,12 +108,10 @@ MiniMaxH3ModuleLoader make_minimax_h3_plan_loader(IBackend& backend,
             names = std::move(plan_names)](const std::string& name, cudaStream_t stream) {
         if (!std::binary_search(names.begin(), names.end(), name))
             throw std::runtime_error("MiniMax-H3 requested undeclared plan: " + name);
-        // Both supported backends synchronously deserialize this input. The
-        // local payload is released on return, including every failure path.
-        const auto plan = source->read_required(name);
+        auto plan = source->open_required(name);
         ModuleCreateOptions options{};
         options.stream = stream;
-        auto module = backend.create_module(plan.data(), plan.size(), options);
+        auto module = create_module_from_reader(backend, std::move(plan), options);
         if (!module || !module->ok())
             throw std::runtime_error("MiniMax-H3 failed to load plan: " + name);
         source->require_nonempty(name);

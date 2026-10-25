@@ -26,6 +26,7 @@ class MiniMaxH3PlanSource final {
     ~MiniMaxH3PlanSource();
 
     std::vector<char> read_required(std::string_view name) const;
+    std::unique_ptr<IPlanReader> open_required(std::string_view name) const;
     void require_nonempty(std::string_view name) const;
 
   private:
