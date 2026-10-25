@@ -95,6 +95,24 @@ void preflight(const internal::ReferencesTextToAudioVideoRequest& request,
 }
 } // namespace
 
+void ReferencePipelineConfig::validate_forward_count(int32_t forwards) const {
+    if (output_frames != 124 && output_frames != 226)
+        throw std::invalid_argument("MiniMax-H3 Ref2VA requires a supported window profile");
+    int32_t forwards_per_window;
+    switch (denoiser.recipe) {
+    case ReferenceSamplingRecipe::OriginalH3:
+        forwards_per_window = 49;
+        break;
+    case ReferenceSamplingRecipe::OmniRefPdd8:
+        forwards_per_window = 8;
+        break;
+    default:
+        throw std::invalid_argument("MiniMax-H3 Ref2VA sampling recipe is unknown");
+    }
+    if (forwards != forwards_per_window * (output_frames == 226 ? 2 : 1))
+        throw std::runtime_error("MiniMax-H3 Ref2VA window forward count mismatch");
+}
+
 struct ImageReferencePipeline::State {
     ReferenceImageConditioner conditioner;
     ReferenceVisualEncoder visual;
@@ -214,8 +232,7 @@ ImageReferencePipeline::run(const internal::ReferencesTextToAudioVideoRequest& r
         // request for releasing their host storage before full video decoding.
         if (config_.memory == ReferenceMemoryPreset::Minimal)
             state_->denoiser.reset();
-        if (generated.forwards != (config_.output_frames == 226 ? 98 : 49))
-            throw std::runtime_error("MiniMax-H3 original Ref2VA window forward count mismatch");
+        config_.validate_forward_count(generated.forwards);
         auto video = state_->video.run(generated.video_rows);
         std::vector<float>().swap(generated.video_rows);
         auto audio = state_->audio.run(generated.audio_rows);

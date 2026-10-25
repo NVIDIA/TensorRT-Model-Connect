@@ -21,6 +21,8 @@ struct ReferencePipelineConfig {
     ReferenceMemoryPreset memory{ReferenceMemoryPreset::Minimal};
     int32_t output_frames{124}; // Explicit bundle profile: one window or two (226 frames).
     int32_t max_condition_audio_rows{0};
+
+    void validate_forward_count(int32_t forwards) const;
 };
 
 // Native image Ref2VA composition with an explicit original or student recipe.
