@@ -71,7 +71,10 @@ def write(path, value):
 def build_engine(torch, trt, bridge, heads, max_tiles, output):
     from families.minimax_h3.dit_builder import _native_builder
 
-    logger, builder, network, config = _native_builder(False, 256 << 20)
+    # The shared 56-head profile includes the largest selected tile geometry.
+    # Its declared BYOK scratch can exceed the historical 256 MiB builder cap.
+    workspace_limit = max(256 << 20, owner.workspace_bytes(heads, max_tiles))
+    logger, builder, network, config = _native_builder(False, workspace_limit)
     operands = {
         n: network.add_input(n, trt.bfloat16, (1, heads, -1, 128)) for n in ("q", "k", "v", "gate")
     }
