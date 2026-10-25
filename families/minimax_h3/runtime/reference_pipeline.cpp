@@ -21,8 +21,7 @@ const internal::ConfigField kFields[] = {
 };
 const internal::ConfigField kWindowFields[] = {
     kFields[0],
-    {"continuation_prompt", internal::ConfigKind::String,
-     internal::ConfigValue{std::string_view{}},
+    {"continuation_prompt", internal::ConfigKind::String, internal::ConfigValue{std::string_view{}},
      "Second-window prompt for the 226-frame profile; empty reuses the initial prompt."},
 };
 
@@ -62,22 +61,21 @@ void preflight(const internal::ReferencesTextToAudioVideoRequest& request,
     std::optional<QwenImagePresentation> continuation;
     std::optional<int32_t> media_origin;
     if (!continuation_prompt.empty() && continuation_prompt != request.prompt) {
-        continuation = make_qwen_image_presentation(
-            tokenizer, std::string(continuation_prompt), grids, config.max_text_rows);
-        media_origin = static_cast<int32_t>(std::max(presentation.h3_token_tags.size(),
-                                                    continuation->h3_token_tags.size()));
+        continuation = make_qwen_image_presentation(tokenizer, std::string(continuation_prompt),
+                                                    grids, config.max_text_rows);
+        media_origin = static_cast<int32_t>(
+            std::max(presentation.h3_token_tags.size(), continuation->h3_token_tags.size()));
     }
-    const auto layout =
-        make_image_reference_layout(presentation.h3_token_tags, latent_shapes,
-                                    config.denoiser.target, config.denoiser.max_sequence_rows,
-                                    media_origin);
+    const auto layout = make_image_reference_layout(
+        presentation.h3_token_tags, latent_shapes, config.denoiser.target,
+        config.denoiser.max_sequence_rows, media_origin);
     if (layout.condition_video_rows > config.max_condition_video_rows)
         throw std::length_error("MiniMax-H3 reference images exceed their own DiT operand profile");
     if (config.output_frames == 226) {
         const auto guided = make_continuation_reference_layout(
-            continuation ? continuation->h3_token_tags : presentation.h3_token_tags,
-            latent_shapes, config.denoiser.target,
-            config.denoiser.max_sequence_rows, {7, 37}, 170.0, media_origin);
+            continuation ? continuation->h3_token_tags : presentation.h3_token_tags, latent_shapes,
+            config.denoiser.target, config.denoiser.max_sequence_rows, {7, 37}, 170.0,
+            media_origin);
         if (guided.condition_video_rows > config.max_condition_video_rows ||
             guided.condition_audio_rows > config.max_condition_audio_rows)
             throw std::length_error("MiniMax-H3 continuation exceeds its DiT operand profiles");
@@ -147,7 +145,8 @@ ImageReferencePipeline::ImageReferencePipeline(ReferenceModuleLoader loader,
 ImageReferencePipeline::~ImageReferencePipeline() = default;
 
 std::vector<internal::TaskInstance> ImageReferencePipeline::task_bindings() {
-    return {internal::bind<internal::IReferencesTextToAudioVideo>(*this, fields(config_.output_frames))};
+    return {internal::bind<internal::IReferencesTextToAudioVideo>(*this,
+                                                                  fields(config_.output_frames))};
 }
 
 internal::AudioVideoResult
@@ -185,7 +184,8 @@ ImageReferencePipeline::run(const internal::ReferencesTextToAudioVideoRequest& r
             auto text = state_->conditioner.encode(qwen_images, std::string(request.prompt));
             std::optional<ReferenceImageConditioning> continuation;
             if (!continuation_prompt.empty() && continuation_prompt != request.prompt)
-                continuation = state_->conditioner.encode(qwen_images, std::string(continuation_prompt));
+                continuation =
+                    state_->conditioner.encode(qwen_images, std::string(continuation_prompt));
             std::vector<EncodedVisualReference> latents;
             for (auto& image : prepared) {
                 latents.push_back(state_->visual.encode_image(image));

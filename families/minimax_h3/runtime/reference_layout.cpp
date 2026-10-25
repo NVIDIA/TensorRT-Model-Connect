@@ -74,11 +74,9 @@ void fill_video_positions(std::vector<double>& positions, int32_t begin, int32_t
 
 } // namespace
 
-ImageReferenceLayout
-make_image_reference_layout(const std::vector<int32_t>& text_tags,
-                            const std::vector<ImageReferenceLatentShape>& images,
-                            ReferenceTargetLatentShape target, int32_t max_rows,
-                            std::optional<int32_t> media_time_origin) {
+ImageReferenceLayout make_image_reference_layout(
+    const std::vector<int32_t>& text_tags, const std::vector<ImageReferenceLatentShape>& images,
+    ReferenceTargetLatentShape target, int32_t max_rows, std::optional<int32_t> media_time_origin) {
     if (max_rows <= 0 || text_tags.empty() || images.empty() || images.size() > 9 ||
         target.audio_latents <= 0 ||
         !std::all_of(text_tags.begin(), text_tags.end(),
@@ -88,8 +86,7 @@ make_image_reference_layout(const std::vector<int32_t>& text_tags,
     if (text_tags.size() > static_cast<std::size_t>(max_rows))
         throw std::length_error("MiniMax-H3 text exceeds the loaded reference DiT profile");
     if (media_time_origin &&
-        (*media_time_origin < 0 ||
-         static_cast<std::size_t>(*media_time_origin) < text_tags.size()))
+        (*media_time_origin < 0 || static_cast<std::size_t>(*media_time_origin) < text_tags.size()))
         throw std::invalid_argument("MiniMax-H3 media origin must follow the complete text prefix");
     const int32_t target_video_rows = video_rows(target.frames, target.height, target.width);
     const int64_t target_audio_rows = static_cast<int64_t>(target.audio_latents) * 2;
@@ -114,8 +111,8 @@ make_image_reference_layout(const std::vector<int32_t>& text_tags,
         result.positions[index * 3] = static_cast<double>(index);
 
     int32_t cursor = static_cast<int32_t>(text_tags.size());
-    double rotary_time = media_time_origin ? static_cast<double>(*media_time_origin)
-                                           : static_cast<double>(cursor);
+    double rotary_time =
+        media_time_origin ? static_cast<double>(*media_time_origin) : static_cast<double>(cursor);
     for (const auto image : images) {
         const int32_t rows = video_rows(1, image.height, image.width);
         append_indices(result.video_indices, cursor, rows);
@@ -149,15 +146,14 @@ make_image_reference_layout(const std::vector<int32_t>& text_tags,
 }
 
 ImageReferenceLayout make_continuation_reference_layout(
-    const std::vector<int32_t>& text_tags,
-    const std::vector<ImageReferenceLatentShape>& images, ReferenceTargetLatentShape target,
-    int32_t max_rows, ReferenceContinuationGuideShape guide, double temporal_offset,
-    std::optional<int32_t> media_time_origin) {
-    if (guide.video_frames <= 0 || guide.video_frames > target.frames ||
-        guide.audio_latents <= 0 || guide.audio_latents > target.audio_latents ||
-        !std::isfinite(temporal_offset) || temporal_offset < 0 ||
+    const std::vector<int32_t>& text_tags, const std::vector<ImageReferenceLatentShape>& images,
+    ReferenceTargetLatentShape target, int32_t max_rows, ReferenceContinuationGuideShape guide,
+    double temporal_offset, std::optional<int32_t> media_time_origin) {
+    if (guide.video_frames <= 0 || guide.video_frames > target.frames || guide.audio_latents <= 0 ||
+        guide.audio_latents > target.audio_latents || !std::isfinite(temporal_offset) ||
+        temporal_offset < 0 ||
         (media_time_origin && (*media_time_origin < 0 ||
-                              static_cast<std::size_t>(*media_time_origin) < text_tags.size())))
+                               static_cast<std::size_t>(*media_time_origin) < text_tags.size())))
         throw std::invalid_argument("MiniMax-H3 continuation guide has invalid geometry or clock");
     const int32_t video_conditions = video_rows(guide.video_frames, target.height, target.width);
     const int64_t audio_conditions = int64_t{2} * guide.audio_latents;
@@ -166,7 +162,7 @@ ImageReferenceLayout make_continuation_reference_layout(
         throw std::length_error("MiniMax-H3 continuation guide exceeds the loaded profile");
     // Keep legacy validation and its exact image-only layout unchanged.
     const auto base = make_image_reference_layout(text_tags, images, target,
-                                                 max_rows - static_cast<int32_t>(extra));
+                                                  max_rows - static_cast<int32_t>(extra));
     const auto total = base.token_tags.size() + static_cast<std::size_t>(extra);
     ImageReferenceLayout result;
     result.condition_video_rows = base.condition_video_rows + video_conditions;
@@ -201,7 +197,8 @@ ImageReferenceLayout make_continuation_reference_layout(
                 // Apply the global shift after each local FP64 coordinate,
                 // matching the reference tensor operation's rounding order.
                 result.positions[row * 3] = (origin + t) + temporal_offset;
-                result.positions[row * 3 + 2] = channel == 0 ? width_axis.front() : width_axis.back();
+                result.positions[row * 3 + 2] =
+                    channel == 0 ? width_axis.front() : width_axis.back();
                 result.token_tags[row] = 2;
             }
         cursor += count;
@@ -247,7 +244,8 @@ ReferenceRowTimesteps make_image_reference_timesteps(const ImageReferenceLayout&
     for (const auto index : layout.audio_indices)
         rows.at(static_cast<std::size_t>(index)) = audio_timestep;
     for (int32_t index = 0; index < layout.condition_audio_rows; ++index)
-        rows.at(static_cast<std::size_t>(layout.audio_indices[static_cast<std::size_t>(index)])) = 1.0F;
+        rows.at(static_cast<std::size_t>(layout.audio_indices[static_cast<std::size_t>(index)])) =
+            1.0F;
     ReferenceRowTimesteps result;
     result.timesteps = rows;
     std::sort(result.timesteps.begin(), result.timesteps.end());

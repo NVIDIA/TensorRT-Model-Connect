@@ -130,8 +130,9 @@ class RecordingModule final : public trtmc::ITrtModule {
 int main(int argc, char** argv) {
     try {
         if (argc != 7 && argc != 8)
-            throw std::invalid_argument("usage: probe RUNTIME_ROOT PLAN_DIR INPUT_DIR "
-                                        "OUTPUT_PREFIX staged|resident SEED [guide|windows|window-prompts]");
+            throw std::invalid_argument(
+                "usage: probe RUNTIME_ROOT PLAN_DIR INPUT_DIR "
+                "OUTPUT_PREFIX staged|resident SEED [guide|windows|window-prompts]");
         const std::string root = argv[1], plans = argv[2], inputs = argv[3], output = argv[4],
                           mode = argv[5];
         if (mode != "staged" && mode != "resident")
@@ -195,7 +196,8 @@ int main(int argc, char** argv) {
             continuation_text = text;
             continuation_text->presentation.h3_token_tags.resize(rows, 1);
             continuation_text->presentation.input_ids.assign(rows, 43);
-            continuation_text->embeddings = read_floats(inputs + "/continuation-text.f32.bin", rows * 8);
+            continuation_text->embeddings =
+                read_floats(inputs + "/continuation-text.f32.bin", rows * 8);
             max_text_rows = std::max(15, rows);
         }
         const std::vector<EncodedVisualReference> images = {
