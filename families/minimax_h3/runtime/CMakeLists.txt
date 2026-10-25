@@ -17,6 +17,7 @@ add_library(trtmc_model_minimax_h3 SHARED
   reference_layout.cpp
   reference_pipeline.cpp
   reference_visual_encoder.cpp
+  reference_vsa_geometry.cpp
   visual_reference.cpp
   video_decode_math.cpp
   video_decoder.cpp
@@ -105,6 +106,18 @@ install(FILES ${PROJECT_SOURCE_DIR}/families/minimax_h3/NOTICE
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_minimax_h3_reference_vsa_geometry
+    reference_vsa_geometry.cpp diffusion_schedule.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_vsa_geometry.cpp
+  )
+  target_include_directories(test_minimax_h3_reference_vsa_geometry PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_minimax_h3_reference_vsa_geometry SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_minimax_h3_reference_vsa_geometry PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_minimax_h3_reference_vsa_geometry PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_reference_vsa_geometry COMMAND test_minimax_h3_reference_vsa_geometry)
+
   add_executable(minimax_h3_reference_factory_probe
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/reference_factory_probe.cpp
   )
@@ -138,6 +151,7 @@ if(TRTMC_BUILD_TESTS)
     reference_denoiser.cpp reference_image.cpp reference_layout.cpp qwen_reference.cpp
     diffusion_schedule.cpp reference_continuation.cpp audio_decoder.cpp video_decoder.cpp video_decode_math.cpp
     visual_reference.cpp
+    reference_vsa_geometry.cpp
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_pipeline.cpp
   )
   target_include_directories(test_minimax_h3_reference_pipeline PRIVATE
@@ -239,6 +253,7 @@ if(TRTMC_BUILD_TESTS)
 
   add_executable(test_minimax_h3_reference_denoiser
     diffusion_schedule.cpp reference_layout.cpp reference_denoiser.cpp reference_continuation.cpp
+    reference_vsa_geometry.cpp
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_denoiser.cpp
   )
   target_include_directories(test_minimax_h3_reference_denoiser PRIVATE

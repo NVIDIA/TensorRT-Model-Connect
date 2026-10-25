@@ -9,12 +9,14 @@ import functools
 import json
 import math
 from pathlib import Path
+import subprocess
 import types
 
 import numpy as np
 import torch
 
 from families.minimax_h3 import reference_vsa as candidate
+from families.minimax_h3.reference_pdd import sampling_plan
 
 
 CASES = (
@@ -25,6 +27,8 @@ CASES = (
     ((3, 10, 18), 17, (6, 14, 22), 257, (9, 18, 34)),
     (4000, 7296, 7296, 7296, 7296, 7296, 7296, 754, (37, 84, 48)),
     (4000, 7296, (6, 84, 48), 377, 7296, 754, (37, 84, 48)),
+    (4000, 7296, 7296, 7296, 7296, 7296, 7296, 414, (37, 84, 48)),
+    (4000, 7296, 7296, 7296, 7296, 7296, 7296, (7, 84, 48), 74, 414, (37, 84, 48)),
 )
 
 
@@ -71,7 +75,7 @@ def upstream_math(base_path, h3_path):
     return module
 
 
-def run(base_path, h3_path):
+def run(base_path, h3_path, native_probe=None):
     upstream = upstream_math(base_path, h3_path)
     results = []
     for segments in CASES:
@@ -103,6 +107,36 @@ def run(base_path, h3_path):
         rows = np.arange(got.source_rows, dtype=np.int32)
         extended = np.concatenate([rows, np.asarray([-1], dtype=np.int32)])
         np.testing.assert_array_equal(extended[got.gather_indices][got.untile_indices], rows)
+        if native_probe is not None:
+            native = json.loads(
+                subprocess.run(
+                    [str(native_probe), "--json"],
+                    input=json.dumps({"segments": segments}),
+                    text=True,
+                    capture_output=True,
+                    check=True,
+                    timeout=30,
+                ).stdout
+            )
+            for name in (
+                "source_rows",
+                "prefix_tiles",
+                "logical_tiles",
+                "gather_indices",
+                "untile_indices",
+                "block_sizes",
+                "regions",
+            ):
+                expected = getattr(got, name)
+                actual = np.asarray(native[name]).reshape(np.asarray(expected).shape)
+                np.testing.assert_array_equal(actual, expected)
+            for modality in ("video", "audio"):
+                schedule = sampling_plan(modality)
+                for name in ("sigmas", "timesteps"):
+                    np.testing.assert_array_equal(
+                        np.asarray(native[modality][name], dtype=np.float32).view(np.uint32),
+                        getattr(schedule, name).view(np.uint32),
+                    )
         results.append(
             {
                 "segments": segments,
@@ -118,6 +152,7 @@ def run(base_path, h3_path):
         "passed": True,
         "cases": results,
         "case_count": len(results),
+        "native_geometry_and_schedule_compared": native_probe is not None,
         "GPU_calls": 0,
         "VSA_kernel_qualified": False,
         "trained_model_qualified": False,
@@ -130,8 +165,9 @@ def main():
     parser.add_argument("--base-source", type=Path, required=True)
     parser.add_argument("--h3-source", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--native-probe", type=Path)
     args = parser.parse_args()
-    value = run(args.base_source, args.h3_source)
+    value = run(args.base_source, args.h3_source, args.native_probe)
     with args.output.open("x") as f:
         json.dump(value, f, indent=2)
     print(json.dumps({k: v for k, v in value.items() if k != "cases"}))

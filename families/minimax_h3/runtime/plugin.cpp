@@ -46,7 +46,11 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const auto runtime = source->read_required("runtime.json");
     const auto config = nlohmann::json::parse(runtime.begin(), runtime.end());
     if (context.reader.info().task == "references_text_to_audio_video") {
-        const auto reference = minimax_h3::parse_image_reference_config(config);
+        const auto schema = config.at("schema_version").get<std::string>();
+        const bool pdd = schema == "minimax_h3.omniref_pdd/v1" ||
+                         schema == "minimax_h3.omniref_pdd_continuation/v1";
+        const auto reference = pdd ? minimax_h3::parse_omniref_pdd_config(config)
+                                   : minimax_h3::parse_image_reference_config(config);
         return new minimax_h3::ImageReferencePipeline(
             make_minimax_h3_plan_loader(context.backend, source,
                                         minimax_h3::image_reference_plan_names()),

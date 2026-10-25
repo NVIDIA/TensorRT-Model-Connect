@@ -18,12 +18,16 @@
 
 namespace trtmc::minimax_h3 {
 
+enum class ReferenceSamplingRecipe { OriginalH3, OmniRefPdd8 };
+
 struct ReferenceDenoiserConfig {
     ReferenceTargetLatentShape target{37, 84, 48, 207};
     int32_t layers{50};
     int32_t hidden_size{5376};
     int32_t text_width{5120};
     int32_t max_sequence_rows{0}; // Required exact loaded Ref2VA profile cap.
+    ReferenceSamplingRecipe recipe{ReferenceSamplingRecipe::OriginalH3};
+    int32_t max_vsa_tiles{0}; // Explicit only for the OmniRef VSA engine ABI.
 };
 
 enum class ReferenceDenoiserResidency { Staged, Resident };
@@ -44,10 +48,10 @@ struct ReferenceLatentGuide {
     std::vector<float> audio_rows;
 };
 
-// Original image Ref2VA denoising, using encoded Qwen/VisualVAE outputs and
-// family plans through ITrtModule. No FastH3, guidance, cache approximation,
-// downscaled reference or substitution of the transformer's weight partition.
-// The caller must select transformer_ref when building these plans.
+// Image Ref2VA denoising with an explicit checkpoint/sampling recipe, using
+// encoded Qwen/VisualVAE outputs and family plans through ITrtModule. The
+// original-H3 default retains 49 forwards; the OmniRef student uses its eight
+// trained heads and native 128-token VSA geometry. No implicit recipe fallback.
 // This private component does not register a public Task or decode a video.
 class ImageReferenceDenoiser {
   public:
