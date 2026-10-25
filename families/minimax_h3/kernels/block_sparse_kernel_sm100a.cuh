@@ -71,7 +71,15 @@ constexpr int Q_TILE_BYTES = Q_SUBTILES * Q_SUB_COLS_BYTES;
 constexpr int KV_RING_SLOT_BYTES = 32 * 1024;
 constexpr int SLOTS_PER_KV_TILE = BLK128 ? 1 : 2;
 
-constexpr int NUM_KV_STAGES = BLK128 ? 3 : 4;
+// The 128-token probability tail has the same producer/consumer lifetime as
+// P in TMEM. Give it dedicated shared storage instead of borrowing the output
+// epilogue buffer, whose TMA lifetime belongs to a different pipeline.
+constexpr int NUM_KV_STAGES = BLK128 ? 1 : 4;
+constexpr int PROBABILITY_TAIL_BYTES =
+    BLK128 ? M_TILES_PER_CTA * M_TILE * HEAD_DIM * sizeof(__nv_bfloat16) : 0;
+static_assert(!BLK128 || NUM_KV_STAGES * KV_RING_SLOT_BYTES + PROBABILITY_TAIL_BYTES ==
+                            3 * KV_RING_SLOT_BYTES,
+              "Dedicated probability tails must retain the existing shared-memory budget");
 
 constexpr int V_BLK_BYTES = HEAD_DIM * SUB_COLS_BYTES;
 
@@ -232,8 +240,12 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
     __nv_bfloat16* sO0 = reinterpret_cast<__nv_bfloat16*>(sKV + NUM_KV_STAGES * KV_RING_SLOT_BYTES);
     __nv_bfloat16* sO1 = sO0 + M_TILE * HEAD_DIM;
     __nv_bfloat16* sO_bufs[2] = {sO0, sO1};
-    uint64_t* full_bar = reinterpret_cast<uint64_t*>(reinterpret_cast<uint8_t*>(sO1) +
-                                                     M_TILE * HEAD_DIM * sizeof(__nv_bfloat16));
+    auto* probability_tail = reinterpret_cast<__nv_bfloat16*>(
+        reinterpret_cast<uint8_t*>(sO1) + M_TILE * HEAD_DIM * sizeof(__nv_bfloat16));
+    __nv_bfloat16* probability_tail_bufs[2] = {
+        probability_tail, probability_tail + M_TILE * HEAD_DIM};
+    uint64_t* full_bar = reinterpret_cast<uint64_t*>(
+        reinterpret_cast<uint8_t*>(probability_tail) + PROBABILITY_TAIL_BYTES);
     uint64_t* empty_bar = full_bar + NUM_KV_STAGES;
     uint64_t* full_bar_q = empty_bar + NUM_KV_STAGES;
     uint64_t* empty_bar_q = full_bar_q + 2;
@@ -586,11 +598,12 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
                                 lead, o_tmem_addr,
                                 s_tmem_addr + S_COLS / 2 + (uint32_t)(a * 8),
                                 desc_bv.u64, idesc_pv, true);
-                            // The third limb reuses the epilogue's shared
-                            // buffer while the output is still in TMEM. Its
-                            // 128x128 layout matches the Q descriptor.
+                            // The third limb uses dedicated shared storage.
+                            // Its 128x128 layout matches the Q descriptor and
+                            // its handoff follows the other P limbs.
                             const uint64_t tail_descriptor = build_smem_desc_blackwell(
-                                smem_ptr_u32(reinterpret_cast<const uint8_t*>(sO_bufs[i])),
+                                smem_ptr_u32(reinterpret_cast<const uint8_t*>(
+                                    probability_tail_bufs[i])),
                                 DESC_SBO, DESC_LBO, SmemSwizzleBlackwell::B128);
                             tcgen05_mma_f16_ss_lead(
                                 lead, o_tmem_addr,
@@ -1011,7 +1024,6 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
             tmem_base + (uint32_t)(m_tile * S_COLS) + ((uint32_t)(warp_in_group * 32) << 16);
         PhaseTracker<1> spo_ph;
         PhaseTracker<1> scale_empty_ph;
-        [[maybe_unused]] PhaseTracker<1> probability_tail_empty_ph;
         [[maybe_unused]] int clc_stage = 0;
         [[maybe_unused]] uint32_t clc_phase = 0;
 
@@ -1185,13 +1197,10 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
                             p_tmem_addr + S_COLS / 2 + 32,
                             *reinterpret_cast<uint32_t (*)[32]>(&p_regs[32]));
                         tcgen05_wait_st();
-                        // A previous work item may still be reading sO for
-                        // its TMA store. Wait for the same empty generation
-                        // that its correction warps use before reusing sO.
-                        if constexpr (IS_FIRST)
-                            mbarrier_wait_parity_suspend(
-                                smem_ptr_u32(&empty_bar_o_epi[m_tile]),
-                                probability_tail_empty_ph.get_phase());
+                        // QK completion follows the preceding PV consumption,
+                        // so this dedicated tile can be overwritten together
+                        // with the other probability limbs. It never waits
+                        // on, or aliases, the output epilogue's TMA buffer.
 #pragma unroll
                         for (int c = 0; c < S_COLS / 2; ++c) {
                             const float low_x = __uint_as_float(p_regs[c] << 16);
@@ -1200,7 +1209,8 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
                                 scores2[c].x - low_x, scores2[c].y - low_y);
                             const int plane = (2 * c) / SUB_COLS_BF16;
                             const int column = (2 * c) % SUB_COLS_BF16;
-                            auto* destination = sO_bufs[m_tile] + plane * M_TILE * SUB_COLS_BF16 +
+                            auto* destination = probability_tail_bufs[m_tile] +
+                                                plane * M_TILE * SUB_COLS_BF16 +
                                                 sm_tid * SUB_COLS_BF16 +
                                                 (column ^ ((sm_tid & 7) * 8));
                             *reinterpret_cast<uint32_t*>(destination) = tail;
@@ -1254,9 +1264,6 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
                 full_bar_arrive(m_tile, warp_in_group);
             else
                 mbarrier_arrive(smem_ptr_u32(&full_bar_l[m_tile]));
-
-            if constexpr (BLK128)
-                probability_tail_empty_ph.advance();
 
             if constexpr (USE_CLC) {
                 ClcTileInfo next = clc_fetch_next_tile<1, 1, ClcRasterOrder::AlongN, 1, true>(
