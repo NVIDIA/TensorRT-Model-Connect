@@ -218,7 +218,11 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
     __CUDA_ARCH__ == 1030
 
     static_assert(!BLK128 || !SPLIT_P,
-                  "128-token PV requires both probability limbs before handoff");
+                  "128-token PV requires all probability limbs before handoff");
+    static_assert(!BLK128 || (HEAD_DIM == K_TILE && HEAD_DIM == 128),
+                  "Probability tail storage requires the existing 128x128 output buffer");
+    static_assert(!BLK128 || !DEFER_ROWSUM,
+                  "128-token probability limbs require the unrounded row sum first");
     const int total_workitems = num_samples * num_heads * packed_mtiles_per_seq;
 
     uint8_t* sQ0 = fmha_smem;
@@ -581,6 +585,16 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
                             tcgen05_mma_f16_ts_1sm_lead(
                                 lead, o_tmem_addr,
                                 s_tmem_addr + S_COLS / 2 + (uint32_t)(a * 8),
+                                desc_bv.u64, idesc_pv, true);
+                            // The third limb reuses the epilogue's shared
+                            // buffer while the output is still in TMEM. Its
+                            // 128x128 layout matches the Q descriptor.
+                            const uint64_t tail_descriptor = build_smem_desc_blackwell(
+                                smem_ptr_u32(reinterpret_cast<const uint8_t*>(sO_bufs[i])),
+                                DESC_SBO, DESC_LBO, SmemSwizzleBlackwell::B128);
+                            tcgen05_mma_f16_ss_lead(
+                                lead, o_tmem_addr,
+                                tail_descriptor + (uint64_t)p * Q_SUB_DELTA + 2 * ki,
                                 desc_bv.u64, idesc_pv, true);
                             desc_add_lo(desc_bv, PV_DESC_STEP);
                         } else {
@@ -997,6 +1011,7 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
             tmem_base + (uint32_t)(m_tile * S_COLS) + ((uint32_t)(warp_in_group * 32) << 16);
         PhaseTracker<1> spo_ph;
         PhaseTracker<1> scale_empty_ph;
+        [[maybe_unused]] PhaseTracker<1> probability_tail_empty_ph;
         [[maybe_unused]] int clc_stage = 0;
         [[maybe_unused]] uint32_t clc_phase = 0;
 
@@ -1159,8 +1174,9 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
                         for (int c = 0; c < S_COLS / 2; ++c) {
                             const float high_x = __uint_as_float(p_regs[c] << 16);
                             const float high_y = __uint_as_float(p_regs[c] & 0xffff0000U);
-                            p_regs[c] = cvt_f32x2_to_bf16x2(
-                                scores2[c].x - high_x, scores2[c].y - high_y);
+                            scores2[c].x -= high_x;
+                            scores2[c].y -= high_y;
+                            p_regs[c] = cvt_f32x2_to_bf16x2(scores2[c].x, scores2[c].y);
                         }
                         tcgen05_st_32x32b_x32(
                             p_tmem_addr + S_COLS / 2,
@@ -1169,6 +1185,27 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
                             p_tmem_addr + S_COLS / 2 + 32,
                             *reinterpret_cast<uint32_t (*)[32]>(&p_regs[32]));
                         tcgen05_wait_st();
+                        // A previous work item may still be reading sO for
+                        // its TMA store. Wait for the same empty generation
+                        // that its correction warps use before reusing sO.
+                        if constexpr (IS_FIRST)
+                            mbarrier_wait_parity_suspend(
+                                smem_ptr_u32(&empty_bar_o_epi[m_tile]),
+                                probability_tail_empty_ph.get_phase());
+#pragma unroll
+                        for (int c = 0; c < S_COLS / 2; ++c) {
+                            const float low_x = __uint_as_float(p_regs[c] << 16);
+                            const float low_y = __uint_as_float(p_regs[c] & 0xffff0000U);
+                            const uint32_t tail = cvt_f32x2_to_bf16x2(
+                                scores2[c].x - low_x, scores2[c].y - low_y);
+                            const int plane = (2 * c) / SUB_COLS_BF16;
+                            const int column = (2 * c) % SUB_COLS_BF16;
+                            auto* destination = sO_bufs[m_tile] + plane * M_TILE * SUB_COLS_BF16 +
+                                                sm_tid * SUB_COLS_BF16 +
+                                                (column ^ ((sm_tid & 7) * 8));
+                            *reinterpret_cast<uint32_t*>(destination) = tail;
+                        }
+                        fence_proxy_async_shared_cta();
                     }
                     tcgen05_fence_before_thread_sync();
                     mbarrier_arrive(smem_ptr_u32(&empty_bar_spo[m_tile]));
@@ -1217,6 +1254,9 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
                 full_bar_arrive(m_tile, warp_in_group);
             else
                 mbarrier_arrive(smem_ptr_u32(&full_bar_l[m_tile]));
+
+            if constexpr (BLK128)
+                probability_tail_empty_ph.advance();
 
             if constexpr (USE_CLC) {
                 ClcTileInfo next = clc_fetch_next_tile<1, 1, ClcRasterOrder::AlongN, 1, true>(

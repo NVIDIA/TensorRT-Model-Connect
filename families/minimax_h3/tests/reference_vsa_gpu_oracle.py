@@ -293,9 +293,11 @@ def run(args):
             temp = args.output / "progress.pending.json"
             temp.write_text(json.dumps(dict(completed_cases=len(results))))
             os.replace(temp, progress)
-            if not passed:
+            if not passed and args.failure_policy == "stop":
                 raise AssertionError("OmniRef VSA differs from its unchanged BF16 numeric gate")
             del operands, actual, expected, mask, compressed
+        if not all(item["passed"] for item in results):
+            raise AssertionError("OmniRef VSA differs from its unchanged BF16 numeric gate")
     except Exception as exc:
         write(
             args.output / "failure.json",
@@ -315,6 +317,7 @@ def run(args):
                 cases=[f"{args.backend}/{c['name']}" for c in selected],
                 results=results,
                 TRT_VSA_enqueues=enqueues,
+                failure_policy=args.failure_policy,
                 rtol=RTOL,
                 atol=ATOL,
                 TensorRT_version=trt.__version__,
@@ -339,6 +342,7 @@ def main():
     parser.add_argument("--bridge", type=Path)
     parser.add_argument("--base-source", type=Path)
     parser.add_argument("--h3-source", type=Path)
+    parser.add_argument("--failure-policy", choices=("stop", "continue"), default="stop")
     parser.add_argument("--preflight", action="store_true")
     args = parser.parse_args()
     if args.preflight:
@@ -350,6 +354,7 @@ def main():
                     GPU_model_calls=0,
                     CUDA_initialized=False,
                     Torch_imported="torch" in sys.modules,
+                    failure_policy=args.failure_policy,
                     TensorRT_version=importlib.metadata.version("tensorrt"),
                     rtol=RTOL,
                     atol=ATOL,

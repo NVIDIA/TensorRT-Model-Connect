@@ -46,11 +46,11 @@ def emulated_exp2(value):
     return np.ldexp(polynomial, integer).astype(np.float32)
 
 
-def simulate(q, k, v, sizes, keys, *, emulate_exponential=False):
+def simulate(q, k, v, sizes, keys, *, emulate_exponential=False, include_third=False):
     scale = np.float32(1 / math.sqrt(128))
     scale_log2 = np.float32(scale * np.float32(math.log2(math.e)))
     maximum, denominator = None, 0.0
-    accumulators = np.zeros((3, 128), dtype=np.float64)
+    accumulators = np.zeros((4 if include_third else 3, 128), dtype=np.float64)
     for tile in keys:
         start = int(tile) * 128
         stop = start + int(sizes[tile])
@@ -83,7 +83,12 @@ def simulate(q, k, v, sizes, keys, *, emulate_exponential=False):
         accumulators *= float(alpha)
         accumulators[0] += high.astype(np.float64) @ value
         accumulators[1] += (high.astype(np.float64) + low.astype(np.float64)) @ value
-        accumulators[2] += probability.astype(np.float64) @ value
+        if include_third:
+            tail = bf16((probability - high) - low)
+            accumulators[2] += (
+                high.astype(np.float64) + low.astype(np.float64) + tail.astype(np.float64)
+            ) @ value
+        accumulators[-1] += probability.astype(np.float64) @ value
         denominator = denominator * float(alpha) + probability.astype(np.float64).sum()
         maximum = new_maximum
     assert denominator > 0
