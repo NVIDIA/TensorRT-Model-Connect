@@ -77,7 +77,8 @@ void fill_video_positions(std::vector<double>& positions, int32_t begin, int32_t
 ImageReferenceLayout
 make_image_reference_layout(const std::vector<int32_t>& text_tags,
                             const std::vector<ImageReferenceLatentShape>& images,
-                            ReferenceTargetLatentShape target, int32_t max_rows) {
+                            ReferenceTargetLatentShape target, int32_t max_rows,
+                            std::optional<int32_t> media_time_origin) {
     if (max_rows <= 0 || text_tags.empty() || images.empty() || images.size() > 9 ||
         target.audio_latents <= 0 ||
         !std::all_of(text_tags.begin(), text_tags.end(),
@@ -86,6 +87,10 @@ make_image_reference_layout(const std::vector<int32_t>& text_tags,
             "MiniMax-H3 image Ref2VA requires text, 1..9 images and stereo audio");
     if (text_tags.size() > static_cast<std::size_t>(max_rows))
         throw std::length_error("MiniMax-H3 text exceeds the loaded reference DiT profile");
+    if (media_time_origin &&
+        (*media_time_origin < 0 ||
+         static_cast<std::size_t>(*media_time_origin) < text_tags.size()))
+        throw std::invalid_argument("MiniMax-H3 media origin must follow the complete text prefix");
     const int32_t target_video_rows = video_rows(target.frames, target.height, target.width);
     const int64_t target_audio_rows = static_cast<int64_t>(target.audio_latents) * 2;
     int64_t total = static_cast<int64_t>(text_tags.size()) + target_video_rows + target_audio_rows;
@@ -109,7 +114,8 @@ make_image_reference_layout(const std::vector<int32_t>& text_tags,
         result.positions[index * 3] = static_cast<double>(index);
 
     int32_t cursor = static_cast<int32_t>(text_tags.size());
-    double rotary_time = cursor;
+    double rotary_time = media_time_origin ? static_cast<double>(*media_time_origin)
+                                           : static_cast<double>(cursor);
     for (const auto image : images) {
         const int32_t rows = video_rows(1, image.height, image.width);
         append_indices(result.video_indices, cursor, rows);

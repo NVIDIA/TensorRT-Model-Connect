@@ -64,17 +64,25 @@ class ImageReferenceDenoiser {
                      const ReferenceLatentGuide& guide, uint64_t seed, double temporal_offset,
                      std::optional<int32_t> media_time_origin = std::nullopt);
 
-    // One bounded request with the same canonical images/prompt in both
-    // windows. A 226-frame request uses two complete 124-frame windows and
+    // One bounded request with the same canonical images in both windows.
+    // Optional child conditioning pins the media clock after the longest text
+    // prefix, matching the fixed upstream per-window conditioning behavior.
+    // A 226-frame request uses two complete 124-frame windows and
     // returns cumulative normalized latents, not cross-request accepted state.
     ReferenceDenoiserResult run_windows(const ReferenceImageConditioning& text,
                                         const std::vector<EncodedVisualReference>& images,
-                                        uint64_t seed, int32_t output_frames);
+                                        uint64_t seed, int32_t output_frames,
+                                        const ReferenceImageConditioning* continuation_text = nullptr);
 
   private:
     struct Modulations;
     void precompute(const ImageReferenceLayout& layout, const std::vector<float>& video_times,
                     const std::vector<float>& audio_times);
+    ImageReferenceLayout validate_conditioning(
+        const ReferenceImageConditioning& text,
+        const std::vector<EncodedVisualReference>& images,
+        std::optional<ReferenceContinuationGuideShape> guide, double temporal_offset,
+        std::optional<int32_t> media_time_origin) const;
     // The public family entry points hold mutex_ for the whole request.
     ReferenceDenoiserResult run_unlocked(const ReferenceImageConditioning& text,
                                          const std::vector<EncodedVisualReference>& images,
