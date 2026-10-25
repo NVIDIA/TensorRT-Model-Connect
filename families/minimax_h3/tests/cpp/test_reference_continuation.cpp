@@ -20,9 +20,13 @@ void require(bool value, const char* message) {
         throw std::runtime_error(message);
 }
 
-template <class F> void rejects(F&& call) {
-    try { call(); }
-    catch (const std::exception&) { return; }
+template <class F>
+void rejects(F&& call) {
+    try {
+        call();
+    } catch (const std::exception&) {
+        return;
+    }
     throw std::runtime_error("invalid continuation was accepted");
 }
 
@@ -42,8 +46,8 @@ ReferenceDenoiserResult fixture(int32_t video_frames, int32_t audio_frames, floa
 
 void test_assembly() {
     const auto windows = plan_reference_continuation(328, 124, 22, 3);
-    require(windows.size() == 3 && windows[1].start_frame == 102 &&
-                windows[1].end_frame == 226 && windows[1].temporal_offset == 170.0,
+    require(windows.size() == 3 && windows[1].start_frame == 102 && windows[1].end_frame == 226 &&
+                windows[1].temporal_offset == 170.0,
             "full native windows retain the source-defined frame and global AV clock");
     auto first = fixture(37, 207, 10000.0F);
     auto second = fixture(37, 207, 30000.0F);
@@ -58,9 +62,11 @@ void test_assembly() {
             "extract the tail of each audio channel separately");
     const auto combined = append_reference_window(first, second, windows[1]);
     require(combined.shape.frames == 67 && combined.shape.audio_latents == 377 &&
-                combined.forwards == 98, "two full windows retain the cumulative latent lengths");
-    require(std::equal(first.video_rows.begin(), first.video_rows.end(), combined.video_rows.begin()),
-            "the parent video latent prefix remains bit-identical");
+                combined.forwards == 98,
+            "two full windows retain the cumulative latent lengths");
+    require(
+        std::equal(first.video_rows.begin(), first.video_rows.end(), combined.video_rows.begin()),
+        "the parent video latent prefix remains bit-identical");
     require(combined.video_rows[37 * 96] == second.video_rows[7 * 96],
             "discard the new window's overlapping target video, not the accepted parent");
     for (int32_t channel = 0; channel < 2; ++channel) {
@@ -119,17 +125,23 @@ int main(int argc, char** argv) {
     try {
         if (argc == 6 && std::string(argv[1]) == "--dump") {
             nlohmann::json result = nlohmann::json::array();
-            for (const auto& w : plan_reference_continuation(std::stoi(argv[2]),
-                    std::stoi(argv[3]), std::stoi(argv[4]), std::stoi(argv[5])))
-                result.push_back({{"start", w.start_frame}, {"end", w.end_frame},
-                    {"overlap", w.overlap_frames}, {"video_latent_frames", w.video_latent_frames},
-                    {"audio_latents", w.audio_latents}, {"guide_video_latent_frames", w.guide_video_latent_frames},
-                    {"guide_audio_latents", w.guide_audio_latents}, {"temporal_offset", w.temporal_offset}});
+            for (const auto& w :
+                 plan_reference_continuation(std::stoi(argv[2]), std::stoi(argv[3]),
+                                             std::stoi(argv[4]), std::stoi(argv[5])))
+                result.push_back({{"start", w.start_frame},
+                                  {"end", w.end_frame},
+                                  {"overlap", w.overlap_frames},
+                                  {"video_latent_frames", w.video_latent_frames},
+                                  {"audio_latents", w.audio_latents},
+                                  {"guide_video_latent_frames", w.guide_video_latent_frames},
+                                  {"guide_audio_latents", w.guide_audio_latents},
+                                  {"temporal_offset", w.temporal_offset}});
             std::cout << result.dump() << '\n';
             return 0;
         }
         if (argc != 1)
-            throw std::invalid_argument("expected --dump total_frames window_frames overlap_frames maximum_windows");
+            throw std::invalid_argument(
+                "expected --dump total_frames window_frames overlap_frames maximum_windows");
         test_assembly();
         test_rounding_and_rejections();
         return 0;

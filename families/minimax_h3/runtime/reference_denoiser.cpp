@@ -171,11 +171,9 @@ ReferenceDenoiserResult ImageReferenceDenoiser::run_continuation(
     return run_unlocked(text, images, seed, &guide, temporal_offset, media_time_origin);
 }
 
-ReferenceDenoiserResult
-ImageReferenceDenoiser::run_windows(const ReferenceImageConditioning& text,
-                                    const std::vector<EncodedVisualReference>& images,
-                                    uint64_t seed, int32_t output_frames,
-                                    const ReferenceImageConditioning* continuation_text) {
+ReferenceDenoiserResult ImageReferenceDenoiser::run_windows(
+    const ReferenceImageConditioning& text, const std::vector<EncodedVisualReference>& images,
+    uint64_t seed, int32_t output_frames, const ReferenceImageConditioning* continuation_text) {
     std::lock_guard<std::mutex> guard(mutex_);
     if ((output_frames != 124 && output_frames != 226) || config_.target.frames != 37 ||
         config_.target.audio_latents != 207 || (continuation_text && output_frames != 226))
@@ -196,11 +194,10 @@ ImageReferenceDenoiser::run_windows(const ReferenceImageConditioning& text,
         // Validate the complete child payload, not just its packed row count,
         // before any first-window RNG draw, engine load or denoiser forward.
         const auto& child = windows[1];
-        (void)validate_conditioning(
-            child_text, images,
-            ReferenceContinuationGuideShape{child.guide_video_latent_frames,
-                                            child.guide_audio_latents},
-            child.temporal_offset, media_origin);
+        (void)validate_conditioning(child_text, images,
+                                    ReferenceContinuationGuideShape{child.guide_video_latent_frames,
+                                                                    child.guide_audio_latents},
+                                    child.temporal_offset, media_origin);
     }
     auto result = run_unlocked(text, images, seed, nullptr, 0.0, media_origin);
     if (result.forwards != 49)
@@ -209,8 +206,8 @@ ImageReferenceDenoiser::run_windows(const ReferenceImageConditioning& text,
         const auto guide = reference_latent_guide(result, windows[1]);
         // The fixed upstream reuses the request seed for each fresh window;
         // guide augmentation extends that window's own original RNG stream.
-        auto child =
-            run_unlocked(child_text, images, seed, &guide, windows[1].temporal_offset, media_origin);
+        auto child = run_unlocked(child_text, images, seed, &guide, windows[1].temporal_offset,
+                                  media_origin);
         if (child.forwards != 49)
             throw std::runtime_error("MiniMax-H3 continuation requires exactly 49 child forwards");
         result = append_reference_window(result, child, windows[1]);
@@ -238,12 +235,11 @@ ImageReferenceLayout ImageReferenceDenoiser::validate_conditioning(
         shapes.push_back({image.latent_height, image.latent_width});
     }
     auto layout =
-        guide
-            ? make_continuation_reference_layout(text.presentation.h3_token_tags, shapes,
-                                                 config_.target, config_.max_sequence_rows,
-                                                 *guide, temporal_offset, media_time_origin)
-            : make_image_reference_layout(text.presentation.h3_token_tags, shapes, config_.target,
-                                          config_.max_sequence_rows, media_time_origin);
+        guide ? make_continuation_reference_layout(text.presentation.h3_token_tags, shapes,
+                                                   config_.target, config_.max_sequence_rows,
+                                                   *guide, temporal_offset, media_time_origin)
+              : make_image_reference_layout(text.presentation.h3_token_tags, shapes, config_.target,
+                                            config_.max_sequence_rows, media_time_origin);
     if (text.presentation.visual_rows.size() !=
         static_cast<std::size_t>(layout.condition_video_rows - layout.continuation_video_rows))
         throw std::invalid_argument(
@@ -269,7 +265,7 @@ ReferenceDenoiserResult ImageReferenceDenoiser::run_unlocked(
     auto layout = validate_conditioning(
         text, images,
         guide ? std::optional<ReferenceContinuationGuideShape>{{guide->shape.frames,
-                                                               guide->shape.audio_latents}}
+                                                                guide->shape.audio_latents}}
               : std::nullopt,
         temporal_offset, media_time_origin);
     if (guide && (guide->video_rows.size() !=
