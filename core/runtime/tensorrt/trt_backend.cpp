@@ -8,11 +8,9 @@
 
 #include "trtmc/runtime/trt_backend.h"
 
-#include "plan_stream_reader.h"
 #include "runtime/primitives/cuda_common.h"
 #include "runtime/tensorrt/trt_logger.h"
 #include "trt_module_impl.h"
-#include "trtmc/runtime/stream_backend.h"
 
 #include <NvInfer.h>
 #include <iostream>

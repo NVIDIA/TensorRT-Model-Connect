@@ -118,7 +118,7 @@ fixtures do not establish model quality or GPU support.
 Families can open a bounded engine section and pass its reader to the backend:
 
 ```cpp
-#include <trtmc/runtime/stream_backend.h>
+#include <trtmc/runtime/trt_backend.h>
 
 auto plan = context.reader.open_section("engine.plan");
 auto module = trtmc::create_module_from_reader(context.backend, std::move(plan), options);

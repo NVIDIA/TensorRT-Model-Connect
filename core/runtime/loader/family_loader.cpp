@@ -7,7 +7,6 @@
 
 #include "runtime/bundle/bundle_format.h"
 #include "trtmc/runtime/family_factory.h"
-#include "trtmc/runtime/stream_backend.h"
 #include "trtmc/runtime/trt_backend.h"
 
 #include <dlfcn.h>
