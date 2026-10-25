@@ -323,3 +323,30 @@ accept decoded video/audio reference operands,
 preserve previously accepted decoded pixels, or qualify trained-model video
 quality. Complete trained numerical gates and visible/audio boundary review
 remain required before advertising continuation support or realtime generation.
+## Experimental OmniRef PDD primitives
+
+`reference_pdd.py` owns the sampling contract and build-time output-head math
+for `FastVideo/FastVideo-FastH3-Omni-8-Step-V1`, revision
+`53e0d26a1691aa473b6262d8196a8feb2c297df0`. The student partitions a 32-interval
+base grid into eight blocks, with separate video/audio shifts. Each block
+normalizes and combines its trained output heads in FP32, rounds the fused
+parameters to BF16, and retains H3's separate FP32 score and scheduler clocks.
+Target noise starts at 0.999; fixed conditioning rows must remain unchanged.
+
+The CPU oracle extracts the original mathematical methods from an explicitly
+supplied upstream source checkout:
+
+```bash
+PYTHONPATH=core/builder:apps/benchmark:. python -m \
+  families.minimax_h3.tests.reference_pdd_oracle \
+  --pdd-source /path/to/FastVideo/fastvideo/layers/pdd.py \
+  --scheduler-source /path/to/FastVideo/fastvideo/models/schedulers/scheduling_minimax_h3.py \
+  --output pdd-math.json
+```
+
+This is mathematical groundwork, not a registered model or usable student
+bundle. The student still needs its complete weight partition, TensorRT graph,
+128-token reference-aware VSA operation, native orchestration and trained-model
+validation. An eight-step setting on the original checkpoint is not equivalent.
+Neither the CPU checks nor upstream multi-GPU latency establishes single-GPU
+performance, output quality or compatibility with existing compiled bundles.
