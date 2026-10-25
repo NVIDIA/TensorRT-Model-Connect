@@ -55,7 +55,8 @@ struct State {
 State* rng_state = nullptr;
 
 ImageReferenceLayout expected_layout(const State& state) {
-    const auto& tags = state.continuation && !state.child_tags.empty() ? state.child_tags : state.tags;
+    const auto& tags =
+        state.continuation && !state.child_tags.empty() ? state.child_tags : state.tags;
     if (state.continuation)
         return make_continuation_reference_layout(
             tags, {{4, 6}, {2, 4}}, state.config.target, state.config.max_sequence_rows,
@@ -115,8 +116,8 @@ class Module final : public ITrtModule {
         if (!state_.first_text.empty()) {
             const auto& wanted = state_.continuation ? state_.child_text : state_.first_text;
             const auto& got = input.at("encoder_hidden_states");
-            require(got.numel() == wanted.size() &&
-                        std::equal(wanted.begin(), wanted.end(), static_cast<const float*>(got.data)),
+            require(got.numel() == wanted.size() && std::equal(wanted.begin(), wanted.end(),
+                                                               static_cast<const float*>(got.data)),
                     "each window receives its own complete Qwen embeddings");
             if (state_.continuation)
                 ++state_.child_text_forwards;

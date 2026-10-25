@@ -132,15 +132,13 @@ void exercise(ReferenceMemoryPreset preset) {
     auto cap = configuration(preset);
     cap.max_text_rows = 10;
     ImageReferencePipeline text_limited(loader, std::make_unique<Tokenizer>(), cap, stream);
-    rejects<std::length_error>([&] {
-        (void)text_limited.run({{references.data(), references.size()}, "prompt"}, {});
-    });
+    rejects<std::length_error>(
+        [&] { (void)text_limited.run({{references.data(), references.size()}, "prompt"}, {}); });
     cap = configuration(preset);
     cap.denoiser.max_sequence_rows = 40000;
     ImageReferencePipeline dit_limited(loader, std::make_unique<Tokenizer>(), cap, stream);
-    rejects<std::length_error>([&] {
-        (void)dit_limited.run({{references.data(), references.size()}, "prompt"}, {});
-    });
+    rejects<std::length_error>(
+        [&] { (void)dit_limited.run({{references.data(), references.size()}, "prompt"}, {}); });
     require(loads == 0, "Qwen and Ref2VA packed caps must fail before allocation/inference");
     cap = configuration(preset);
     cap.denoiser.max_sequence_rows = 86862;
@@ -174,52 +172,46 @@ void exercise(ReferenceMemoryPreset preset) {
     cap = configuration(preset);
     cap.denoiser.max_sequence_rows = 152398;
     ImageReferencePipeline old_text(loader, std::make_unique<Tokenizer>(), cap, stream);
-    rejects<std::length_error>([&] {
-        (void)old_text.run({{references.data(), references.size()}, "prompt"}, {});
-    });
+    rejects<std::length_error>(
+        [&] { (void)old_text.run({{references.data(), references.size()}, "prompt"}, {}); });
     cap.max_text_rows = 65536;
     ImageReferencePipeline old_visual(loader, std::make_unique<Tokenizer>(), cap, stream);
-    rejects<std::length_error>([&] {
-        (void)old_visual.run({{references.data(), references.size()}, "prompt"}, {});
-    });
+    rejects<std::length_error>(
+        [&] { (void)old_visual.run({{references.data(), references.size()}, "prompt"}, {}); });
     require(loads == before, "both legacy operand budgets reject six portraits before loading");
     cap.max_condition_video_rows = 49152;
     ImageReferencePipeline expanded(loader, std::make_unique<Tokenizer>(), cap, stream);
-    rejects<std::runtime_error>([&] {
-        (void)expanded.run({{references.data(), references.size()}, "prompt"}, {});
-    });
+    rejects<std::runtime_error>(
+        [&] { (void)expanded.run({{references.data(), references.size()}, "prompt"}, {}); });
     require(loads == before + 1,
             "expanded six-portrait input reaches the real conditioner without dropping references");
     cap.output_frames = 226;
     cap.max_condition_audio_rows = 74;
     cap.denoiser.max_sequence_rows = 159528;
     ImageReferencePipeline old_guide_cap(loader, std::make_unique<Tokenizer>(), cap, stream);
-    rejects<std::length_error>([&] {
-        (void)old_guide_cap.run({{references.data(), references.size()}, "prompt"}, {});
-    });
+    rejects<std::length_error>(
+        [&] { (void)old_guide_cap.run({{references.data(), references.size()}, "prompt"}, {}); });
     require(loads == before + 1,
             "six canonical portraits plus the guide cannot fit the old video operand cap");
     cap.max_condition_video_rows = 56208;
     ImageReferencePipeline continuation(loader, std::make_unique<Tokenizer>(), cap, stream);
-    rejects<std::runtime_error>([&] {
-        (void)continuation.run({{references.data(), references.size()}, "prompt"}, {});
-    });
+    rejects<std::runtime_error>(
+        [&] { (void)continuation.run({{references.data(), references.size()}, "prompt"}, {}); });
     require(loads == before + 2,
             "complete two-window profiles retain all six images and reach the real conditioner");
     const auto window_bindings = continuation.task_bindings();
-    require(window_bindings[0].fields.size() == 2 &&
-                window_bindings[0].fields[1].name == "continuation_prompt" &&
-                window_bindings[0].fields[1].kind == ConfigKind::String &&
-                config_value_as<std::string_view>(
-                    *window_bindings[0].fields[1].default_value).empty(),
-            "only the two-window profile advertises optional second-window text");
+    require(
+        window_bindings[0].fields.size() == 2 &&
+            window_bindings[0].fields[1].name == "continuation_prompt" &&
+            window_bindings[0].fields[1].kind == ConfigKind::String &&
+            config_value_as<std::string_view>(*window_bindings[0].fields[1].default_value).empty(),
+        "only the two-window profile advertises optional second-window text");
     const auto run_child = [&](ConfigView config) {
         return continuation.run({{references.data(), references.size()}, "prompt"}, config);
     };
     const ConfigEntry child_type[] = {{"continuation_prompt", int64_t{42}}};
-    const ConfigEntry child_duplicate[] = {
-        {"continuation_prompt", std::string_view{"wait"}},
-        {"continuation_prompt", std::string_view{"turn"}}};
+    const ConfigEntry child_duplicate[] = {{"continuation_prompt", std::string_view{"wait"}},
+                                           {"continuation_prompt", std::string_view{"turn"}}};
     rejects<ConfigError>([&] { (void)run_child(child_type); });
     rejects<ConfigError>([&] { (void)run_child(child_duplicate); });
     const std::string too_long(65536, 'x');
@@ -227,8 +219,8 @@ void exercise(ReferenceMemoryPreset preset) {
     rejects<std::length_error>([&] { (void)run_child(oversized_child); });
     require(loads == before + 2,
             "invalid child text fails before the first vision/Qwen/VAE/DiT plan load");
-    for (const std::string_view prompt : {std::string_view{}, std::string_view{"prompt"},
-                                          std::string_view{"They wait quietly."}}) {
+    for (const std::string_view prompt :
+         {std::string_view{}, std::string_view{"prompt"}, std::string_view{"They wait quietly."}}) {
         const ConfigEntry child[] = {{"continuation_prompt", prompt}};
         rejects<std::runtime_error>([&] { (void)run_child(child); });
     }

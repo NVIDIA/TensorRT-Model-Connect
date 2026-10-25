@@ -58,10 +58,9 @@ struct ReferenceContinuationGuideShape {
 // static-image reference clock. Only temporal AV coordinates receive the
 // window offset; text, static images and all spatial coordinates stay fixed.
 ImageReferenceLayout make_continuation_reference_layout(
-    const std::vector<int32_t>& text_tags,
-    const std::vector<ImageReferenceLatentShape>& images, ReferenceTargetLatentShape target,
-    int32_t max_rows, ReferenceContinuationGuideShape guide, double temporal_offset,
-    std::optional<int32_t> media_time_origin = std::nullopt);
+    const std::vector<int32_t>& text_tags, const std::vector<ImageReferenceLatentShape>& images,
+    ReferenceTargetLatentShape target, int32_t max_rows, ReferenceContinuationGuideShape guide,
+    double temporal_offset, std::optional<int32_t> media_time_origin = std::nullopt);
 
 struct ReferenceRowTimesteps {
     std::vector<float> timesteps; // Sorted, deduplicated original FP32 values.
