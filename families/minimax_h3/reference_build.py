@@ -271,6 +271,67 @@ def _target(request, memory_preset, reference_capacity="standard", continuation=
     return height, width, target, reference
 
 
+def runtime_metadata(
+    height,
+    width,
+    target,
+    reference,
+    configs,
+    config_sha256,
+    *,
+    memory_preset,
+    reference_capacity,
+    continuation,
+):
+    """Describe the exact family profile, shared by full and incremental builds."""
+    batch = 1 if memory_preset == "minimal" else 28
+    return dict(
+        schema_version=CONTINUATION_SCHEMA if continuation else SCHEMA,
+        workflow="image_ref2va_continuation" if continuation else "image_ref2va",
+        weights_variant="transformer_ref",
+        memory_preset=memory_preset,
+        vae_tile_batch=batch,
+        height=height,
+        width=width,
+        num_frames=226 if continuation else 124,
+        fps=24,
+        num_inference_steps=50,
+        denoiser_forwards=49,
+        latent_frames=37,
+        latent_height=height // 16,
+        latent_width=width // 16,
+        audio_latent_frames=207,
+        audio_sampling_rate=32000,
+        audio_channels=2,
+        max_text_rows=reference.text_rows[2],
+        max_sequence_rows=reference.sequence_rows(target)[2],
+        text_rows=list(reference.text_rows),
+        condition_video_rows=list(reference.condition_video_rows),
+        condition_audio_rows=list(reference.condition_audio_rows),
+        reference_pixels=list(REFERENCE_PIXELS),
+        layers=50,
+        hidden_size=5376,
+        text_width=5120,
+        context_parallel_size=1,
+        first_block_cache=False,
+        config_sha256=config_sha256,
+        **(
+            dict(
+                continuation_window_frames=124,
+                continuation_overlap_frames=22,
+                continuation_windows=2,
+                decoded_latent_frames=67,
+                decoded_audio_latent_frames=377,
+                total_denoiser_forwards=98,
+            )
+            if continuation
+            else {}
+        ),
+        **_statistics(configs["vae"], 24, "video VAE"),
+        **({"reference_capacity": reference_capacity} if reference_capacity != "standard" else {}),
+    )
+
+
 def build(
     request, writer, *, memory_preset="minimal", reference_capacity="standard", continuation=False
 ):
@@ -402,53 +463,15 @@ def build(
     writer.add_bytes("tokenizer.json", tokenizer)
     writer.add_json(
         "runtime.json",
-        dict(
-            schema_version=CONTINUATION_SCHEMA if continuation else SCHEMA,
-            workflow="image_ref2va_continuation" if continuation else "image_ref2va",
-            weights_variant="transformer_ref",
+        runtime_metadata(
+            height,
+            width,
+            target,
+            reference,
+            configs,
+            config_sha256,
             memory_preset=memory_preset,
-            vae_tile_batch=batch,
-            height=height,
-            width=width,
-            num_frames=226 if continuation else 124,
-            fps=24,
-            num_inference_steps=50,
-            denoiser_forwards=49,
-            latent_frames=37,
-            latent_height=height // 16,
-            latent_width=width // 16,
-            audio_latent_frames=207,
-            audio_sampling_rate=32000,
-            audio_channels=2,
-            max_text_rows=reference.text_rows[2],
-            max_sequence_rows=reference.sequence_rows(target)[2],
-            text_rows=list(reference.text_rows),
-            condition_video_rows=list(reference.condition_video_rows),
-            condition_audio_rows=list(reference.condition_audio_rows),
-            reference_pixels=list(REFERENCE_PIXELS),
-            layers=50,
-            hidden_size=5376,
-            text_width=5120,
-            context_parallel_size=1,
-            first_block_cache=False,
-            config_sha256=config_sha256,
-            **(
-                dict(
-                    continuation_window_frames=124,
-                    continuation_overlap_frames=22,
-                    continuation_windows=2,
-                    decoded_latent_frames=67,
-                    decoded_audio_latent_frames=377,
-                    total_denoiser_forwards=98,
-                )
-                if continuation
-                else {}
-            ),
-            **_statistics(configs["vae"], 24, "video VAE"),
-            **(
-                {"reference_capacity": reference_capacity}
-                if reference_capacity != "standard"
-                else {}
-            ),
+            reference_capacity=reference_capacity,
+            continuation=continuation,
         ),
     )
