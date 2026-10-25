@@ -86,8 +86,10 @@ void exercise(ReferenceMemoryPreset preset) {
     const ConfigEntry duplicate[] = {{"seed", int64_t{42}}, {"seed", int64_t{43}}};
     const ConfigEntry wrong_type[] = {{"seed", 42.0}};
     const ConfigEntry negative[] = {{"seed", int64_t{-1}}};
+    const ConfigEntry child_on_single[] = {{"continuation_prompt", std::string_view{"wait"}}};
     for (const ConfigView config :
-         {ConfigView{unknown}, ConfigView{duplicate}, ConfigView{wrong_type}, ConfigView{negative}})
+         {ConfigView{unknown}, ConfigView{duplicate}, ConfigView{wrong_type}, ConfigView{negative},
+          ConfigView{child_on_single}})
         rejects<ConfigError>([&] { (void)run(config); });
     rejects<UnsupportedTask>([&] { (void)model.run({{}, "prompt"}, {}); });
     references.push_back(AudioView{});
@@ -204,6 +206,34 @@ void exercise(ReferenceMemoryPreset preset) {
     });
     require(loads == before + 2,
             "complete two-window profiles retain all six images and reach the real conditioner");
+    const auto window_bindings = continuation.task_bindings();
+    require(window_bindings[0].fields.size() == 2 &&
+                window_bindings[0].fields[1].name == "continuation_prompt" &&
+                window_bindings[0].fields[1].kind == ConfigKind::String &&
+                config_value_as<std::string_view>(
+                    *window_bindings[0].fields[1].default_value).empty(),
+            "only the two-window profile advertises optional second-window text");
+    const auto run_child = [&](ConfigView config) {
+        return continuation.run({{references.data(), references.size()}, "prompt"}, config);
+    };
+    const ConfigEntry child_type[] = {{"continuation_prompt", int64_t{42}}};
+    const ConfigEntry child_duplicate[] = {
+        {"continuation_prompt", std::string_view{"wait"}},
+        {"continuation_prompt", std::string_view{"turn"}}};
+    rejects<ConfigError>([&] { (void)run_child(child_type); });
+    rejects<ConfigError>([&] { (void)run_child(child_duplicate); });
+    const std::string too_long(65536, 'x');
+    const ConfigEntry oversized_child[] = {{"continuation_prompt", std::string_view{too_long}}};
+    rejects<std::length_error>([&] { (void)run_child(oversized_child); });
+    require(loads == before + 2,
+            "invalid child text fails before the first vision/Qwen/VAE/DiT plan load");
+    for (const std::string_view prompt : {std::string_view{}, std::string_view{"prompt"},
+                                          std::string_view{"They wait quietly."}}) {
+        const ConfigEntry child[] = {{"continuation_prompt", prompt}};
+        rejects<std::runtime_error>([&] { (void)run_child(child); });
+    }
+    require(loads == before + 5,
+            "empty, repeated and distinct child prompts pass real operand preflight");
     cap.max_condition_audio_rows = 0;
     rejects<std::invalid_argument>(
         [&] { ImageReferencePipeline invalid(loader, std::make_unique<Tokenizer>(), cap); });

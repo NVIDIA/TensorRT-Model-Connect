@@ -280,7 +280,7 @@ The Qwen visual/text budgets and every reference's preparation remain unchanged.
 
 `ImageReferenceDenoiser::run_windows` serializes the complete two-window request,
 uses the original request seed independently for each window, retains all static
-references and the same prompt, and appends only the generated latent suffix.
+references, and appends only the generated latent suffix.
 It runs 49 forwards per window (98 total). The runtime decodes all 67 video latent
 frames using the original seven-latent static tile engine and builds a new
 377-latent audio decoder for 301,600 samples per stereo channel at 32 kHz.
@@ -288,6 +288,22 @@ The resulting video is 226 frames at 24 fps. Native video/audio endpoints remain
 distinct; neither stream is stretched, truncated or padded to match the other.
 Both `minimal` and `original` residency policies apply to the new profile.
 An old bundle cannot acquire these operand/decoder shapes by editing metadata.
+
+Only the 226-frame profile declares the optional string runtime configuration
+`continuation_prompt`. Empty or identical text reuses the initial conditioning
+and preserves the original same-prompt path. Distinct text is encoded separately
+with every original static reference. Both windows use the longest complete Qwen
+text prefix as their media-time origin, following the fixed upstream per-window
+conditioning implementation. Both prompts and operand caps are checked before
+the first plan load; malformed child conditioning is rejected before any first
+window denoising. A longer child prompt can therefore change the first window's
+rotary coordinates as well. This is a program fixed for one bounded request,
+not a live prompt update or an assurance that dialogue occurs only once.
+
+The `test_real_native_window_prompts_match_98_forward_upstream` cases retain the
+same numerical gate with shorter and longer child text, full 98-forward traces,
+clean stereo guides and staged/resident cold/warm comparisons. Synthetic
+conditioning parity does not establish trained speech or visible quality.
 
 If a compatible original single-window bundle already exists, the owning
 `reference_continuation_build.build(request, writer, source_bundle=...,
@@ -303,7 +319,7 @@ with the selected backend; this entry point does not perform hardware adaptation
 An incompatible source fails explicitly, and the original bundle is preserved.
 
 This within-request profile does not expose cross-request continuation state,
-change prompts between windows, accept decoded video/audio reference operands,
+accept decoded video/audio reference operands,
 preserve previously accepted decoded pixels, or qualify trained-model video
 quality. Complete trained numerical gates and visible/audio boundary review
 remain required before advertising continuation support or realtime generation.
