@@ -460,3 +460,12 @@ It avoids the second plan-sized Python `bytes` allocation and another full
 bundle disk copy. The default builder bytes API is preserved. This is a
 serialization change, not a precision or sampling change, and does not bound
 TensorRT optimizer memory or establish a minimum supported host RAM budget.
+
+The explicit `denoiser_workspace_bytes` build option controls only the DiT's
+TensorRT tactic scratch-memory cap. Omitting it preserves the existing 8-GiB
+limit; AdaLN remains at 8 GiB. Large VSA transport fusions can require more
+scratch memory than that default, so a caller may select a larger bounded
+limit without changing the input profile, weights, precision or sampling.
+The reuse receipt records both rebuilt plans' workspace limits. This does not
+change either residency preset or establish runtime memory/quality results;
+TensorRT selects and allocates the actual implementation's required memory.
