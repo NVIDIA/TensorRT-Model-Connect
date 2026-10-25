@@ -132,9 +132,9 @@ def build_adaln_precompute_engine(
             6,
             profile.hidden_size,
         )
-        output = reshape.get_output(0)
-        output.name = f"block_modulation_{index}"
-        network.mark_output(output)
+        block_output = reshape.get_output(0)
+        block_output.name = f"block_modulation_{index}"
+        network.mark_output(block_output)
 
     final_modulation = op.linear(
         network,
