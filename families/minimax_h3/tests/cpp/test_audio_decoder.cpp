@@ -5,6 +5,7 @@
 
 #include "families/minimax_h3/runtime/audio_decoder.h"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -34,6 +35,7 @@ struct State {
     int loads{0}, live{0}, failure{0};
     cudaStream_t stream{nullptr};
     std::vector<float> expected;
+    int64_t frames{3};
 };
 
 // CPU lifecycle double, never an audio-quality or waveform-model oracle.
@@ -42,6 +44,7 @@ class Module final : public ITrtModule {
     explicit Module(State& state) : state_(state) { ++state.live; }
     ~Module() override { --state_.live; }
     TensorMap forward(const TensorMap& inputs) override {
+        const int64_t kFrames = state_.frames, kSamples = kFrames * 800;
         require(inputs.size() == 1, "one audio operand");
         const auto& tensor = inputs.at("normalized_audio_latents");
         require(tensor.dtype == DType::kFloat32 &&
@@ -60,7 +63,9 @@ class Module final : public ITrtModule {
         for (int64_t s = 0; s < 2; ++s)
             for (int64_t t = 0; t < kSamples; ++t)
                 output_[s * kSamples + t] =
-                    static_cast<float>(t) / 10000.0F + static_cast<float>(s) * 0.25F;
+                    static_cast<float>(t) /
+                        static_cast<float>(std::max<int64_t>(10000, kSamples * 2)) +
+                    static_cast<float>(s) * 0.25F;
         if (state_.failure == 3)
             output_[0] = std::numeric_limits<float>::infinity();
         if (state_.failure == 4)
@@ -89,6 +94,7 @@ class Module final : public ITrtModule {
     bool has_output(const std::string& name) const override { return name == "waveform"; }
     DType tensor_dtype(const std::string&) const override { return DType::kFloat32; }
     std::vector<int64_t> tensor_shape(const std::string& name) const override {
+        const int64_t kFrames = state_.frames, kSamples = kFrames * 800;
         if (name == "waveform")
             return {2, 1, kSamples};
         return {2, 32, state_.failure == 2 ? kFrames + 1 : kFrames};
@@ -113,8 +119,10 @@ class Module final : public ITrtModule {
     std::vector<float> output_;
 };
 
-void test_lifecycle(AudioDecoderResidency residency) {
+void test_lifecycle(AudioDecoderResidency residency, int64_t frames = 3) {
+    const int64_t kFrames = frames, kSamples = kFrames * 800;
     State state;
+    state.frames = frames;
     for (int64_t i = 0; i < 2 * kFrames * 32; ++i)
         state.expected.push_back(static_cast<float>(i) / 1000.0F);
     int marker = 0;
@@ -142,7 +150,9 @@ void test_lifecycle(AudioDecoderResidency residency) {
         for (int64_t t = 0; t < kSamples; ++t)
             for (int64_t s = 0; s < 2; ++s)
                 require(cold.interleaved_samples[t * 2 + s] ==
-                            static_cast<float>(t) / 10000.0F + static_cast<float>(s) * 0.25F,
+                            static_cast<float>(t) /
+                                    static_cast<float>(std::max<int64_t>(10000, kSamples * 2)) +
+                                static_cast<float>(s) * 0.25F,
                         "correct channel interleaving");
         const bool resident = residency == AudioDecoderResidency::Resident;
         require(state.loads == (resident ? 1 : 2) && state.live == (resident ? 1 : 0),
@@ -168,6 +178,10 @@ int main() {
     try {
         test_lifecycle(AudioDecoderResidency::Staged);
         test_lifecycle(AudioDecoderResidency::Resident);
+        test_lifecycle(AudioDecoderResidency::Staged, 207);
+        test_lifecycle(AudioDecoderResidency::Resident, 207);
+        test_lifecycle(AudioDecoderResidency::Staged, 377);
+        test_lifecycle(AudioDecoderResidency::Resident, 377);
         std::cout << "MiniMax-H3 native audio lifecycle checks passed\n";
         return 0;
     } catch (const std::exception& error) {

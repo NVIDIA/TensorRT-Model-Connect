@@ -58,20 +58,29 @@ class ImageReferenceDenoiser {
     ReferenceDenoiserResult run(const ReferenceImageConditioning& text,
                                 const std::vector<EncodedVisualReference>& images, uint64_t seed);
 
-    ReferenceDenoiserResult run_continuation(
-        const ReferenceImageConditioning& text,
-        const std::vector<EncodedVisualReference>& images, const ReferenceLatentGuide& guide,
-        uint64_t seed, double temporal_offset,
-        std::optional<int32_t> media_time_origin = std::nullopt);
+    ReferenceDenoiserResult
+    run_continuation(const ReferenceImageConditioning& text,
+                     const std::vector<EncodedVisualReference>& images,
+                     const ReferenceLatentGuide& guide, uint64_t seed, double temporal_offset,
+                     std::optional<int32_t> media_time_origin = std::nullopt);
+
+    // One bounded request with the same canonical images/prompt in both
+    // windows. A 226-frame request uses two complete 124-frame windows and
+    // returns cumulative normalized latents, not cross-request accepted state.
+    ReferenceDenoiserResult run_windows(const ReferenceImageConditioning& text,
+                                        const std::vector<EncodedVisualReference>& images,
+                                        uint64_t seed, int32_t output_frames);
 
   private:
     struct Modulations;
     void precompute(const ImageReferenceLayout& layout, const std::vector<float>& video_times,
                     const std::vector<float>& audio_times);
-    ReferenceDenoiserResult run_impl(const ReferenceImageConditioning& text,
-        const std::vector<EncodedVisualReference>& images, uint64_t seed,
-        const ReferenceLatentGuide* guide, double temporal_offset,
-        std::optional<int32_t> media_time_origin);
+    // The public family entry points hold mutex_ for the whole request.
+    ReferenceDenoiserResult run_unlocked(const ReferenceImageConditioning& text,
+                                         const std::vector<EncodedVisualReference>& images,
+                                         uint64_t seed, const ReferenceLatentGuide* guide,
+                                         double temporal_offset,
+                                         std::optional<int32_t> media_time_origin);
 
     ReferenceModuleLoader loader_;
     ReferenceDenoiserConfig config_;

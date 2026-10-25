@@ -130,13 +130,15 @@ void exercise(ReferenceMemoryPreset preset) {
     auto cap = configuration(preset);
     cap.max_text_rows = 10;
     ImageReferencePipeline text_limited(loader, std::make_unique<Tokenizer>(), cap, stream);
-    rejects<std::length_error>(
-        [&] { (void)text_limited.run({{references.data(), references.size()}, "prompt"}, {}); });
+    rejects<std::length_error>([&] {
+        (void)text_limited.run({{references.data(), references.size()}, "prompt"}, {});
+    });
     cap = configuration(preset);
     cap.denoiser.max_sequence_rows = 40000;
     ImageReferencePipeline dit_limited(loader, std::make_unique<Tokenizer>(), cap, stream);
-    rejects<std::length_error>(
-        [&] { (void)dit_limited.run({{references.data(), references.size()}, "prompt"}, {}); });
+    rejects<std::length_error>([&] {
+        (void)dit_limited.run({{references.data(), references.size()}, "prompt"}, {});
+    });
     require(loads == 0, "Qwen and Ref2VA packed caps must fail before allocation/inference");
     cap = configuration(preset);
     cap.denoiser.max_sequence_rows = 86862;
@@ -170,19 +172,45 @@ void exercise(ReferenceMemoryPreset preset) {
     cap = configuration(preset);
     cap.denoiser.max_sequence_rows = 152398;
     ImageReferencePipeline old_text(loader, std::make_unique<Tokenizer>(), cap, stream);
-    rejects<std::length_error>(
-        [&] { (void)old_text.run({{references.data(), references.size()}, "prompt"}, {}); });
+    rejects<std::length_error>([&] {
+        (void)old_text.run({{references.data(), references.size()}, "prompt"}, {});
+    });
     cap.max_text_rows = 65536;
     ImageReferencePipeline old_visual(loader, std::make_unique<Tokenizer>(), cap, stream);
-    rejects<std::length_error>(
-        [&] { (void)old_visual.run({{references.data(), references.size()}, "prompt"}, {}); });
+    rejects<std::length_error>([&] {
+        (void)old_visual.run({{references.data(), references.size()}, "prompt"}, {});
+    });
     require(loads == before, "both legacy operand budgets reject six portraits before loading");
     cap.max_condition_video_rows = 49152;
     ImageReferencePipeline expanded(loader, std::make_unique<Tokenizer>(), cap, stream);
-    rejects<std::runtime_error>(
-        [&] { (void)expanded.run({{references.data(), references.size()}, "prompt"}, {}); });
+    rejects<std::runtime_error>([&] {
+        (void)expanded.run({{references.data(), references.size()}, "prompt"}, {});
+    });
     require(loads == before + 1,
             "expanded six-portrait input reaches the real conditioner without dropping references");
+    cap.output_frames = 226;
+    cap.max_condition_audio_rows = 74;
+    cap.denoiser.max_sequence_rows = 159528;
+    ImageReferencePipeline old_guide_cap(loader, std::make_unique<Tokenizer>(), cap, stream);
+    rejects<std::length_error>([&] {
+        (void)old_guide_cap.run({{references.data(), references.size()}, "prompt"}, {});
+    });
+    require(loads == before + 1,
+            "six canonical portraits plus the guide cannot fit the old video operand cap");
+    cap.max_condition_video_rows = 56208;
+    ImageReferencePipeline continuation(loader, std::make_unique<Tokenizer>(), cap, stream);
+    rejects<std::runtime_error>([&] {
+        (void)continuation.run({{references.data(), references.size()}, "prompt"}, {});
+    });
+    require(loads == before + 2,
+            "complete two-window profiles retain all six images and reach the real conditioner");
+    cap.max_condition_audio_rows = 0;
+    rejects<std::invalid_argument>(
+        [&] { ImageReferencePipeline invalid(loader, std::make_unique<Tokenizer>(), cap); });
+    cap = configuration(preset);
+    cap.output_frames = 225;
+    rejects<std::invalid_argument>(
+        [&] { ImageReferencePipeline invalid(loader, std::make_unique<Tokenizer>(), cap); });
     auto bad_topology = configuration(preset);
     bad_topology.denoiser.layers = 1;
     rejects<std::invalid_argument>([&] {

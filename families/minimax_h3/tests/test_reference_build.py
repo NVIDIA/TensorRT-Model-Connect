@@ -62,6 +62,8 @@ def plans(monkeypatch):
         partitions=[],
         text_rows=32768,
         condition_rows=(4096, 5504, 16384),
+        audio_condition_rows=(0, 0, 0),
+        decoded_audio_latents=207,
     )
 
     class Plan(bytes):
@@ -94,12 +96,15 @@ def plans(monkeypatch):
             elif name == "adaln.plan":
                 assert kwargs["input_timesteps"] is True and args[0].first_block_cache is False
             elif name == "denoiser.plan":
-                assert kwargs["reference_profile"].condition_audio_rows == (0, 0, 0)
+                assert (
+                    kwargs["reference_profile"].condition_audio_rows == state.audio_condition_rows
+                )
                 assert kwargs["reference_profile"].condition_video_rows == state.condition_rows
             elif name == "vae.plan":
                 assert kwargs["batch_size"] == state.batch
             elif name == "audio_vae.plan":
                 assert len(args[0]) == len(args[1]) == 32
+                assert kwargs.get("latent_frames", 207) == state.decoded_audio_latents
             weights.clear()
             state.built.append(name)
             return Plan(name)
@@ -267,6 +272,84 @@ def test_unknown_reference_capacity_fails_before_weights(checkpoint, plans, tmp_
         owner.build(request(checkpoint, output), writer, reference_capacity=capacity)
     writer.abort()
     assert not plans.loaded and not output.exists()
+
+
+@pytest.mark.parametrize("preset,batch", [("minimal", 1), ("original", 28)])
+@pytest.mark.parametrize("capacity", ["standard", "six_portrait"])
+@pytest.mark.parametrize("height,width", [(1344, 768), (1536, 864)])
+def test_two_window_build_has_real_guide_and_cumulative_decoder_profiles(
+    checkpoint, plans, tmp_path, preset, batch, capacity, height, width
+):
+    output = tmp_path / "two-window.bundle"
+    writer = BundleWriter(output)
+    plans.batch = batch
+    plans.text_rows, base = owner.REFERENCE_CAPACITIES[capacity]
+    guide = 7 * (height // 32) * (width // 32)
+    plans.condition_rows = (base[0], base[1] + guide, base[2] + guide)
+    plans.audio_condition_rows = (0, 74, 74)
+    plans.decoded_audio_latents = 377
+    add = writer.add_bytes
+
+    def stage(name, value):
+        if name.endswith(".plan"):
+            plans.emitted.append(name)
+        add(name, value)
+
+    writer.add_bytes = stage
+    owner.build(
+        request(checkpoint, output, video_num_frames=226, image_height=height, image_width=width),
+        writer,
+        memory_preset=preset,
+        reference_capacity=capacity,
+        continuation=True,
+    )
+    writer.finish()
+    _, data = sections(output)
+    runtime = json.loads(data["runtime.json"])
+    assert plans.built == plans.emitted == list(owner.PLAN_NAMES)
+    assert plans.retired == set(owner.PLAN_NAMES)
+    assert runtime["schema_version"] == "minimax_h3.image_ref2va_continuation/v1"
+    assert runtime["workflow"] == "image_ref2va_continuation"
+    assert runtime["condition_video_rows"] == list(plans.condition_rows)
+    assert runtime["condition_audio_rows"] == [0, 74, 74]
+    assert runtime["max_sequence_rows"] == (
+        37 * (height // 32) * (width // 32) + 414 + plans.text_rows + base[2] + guide + 74
+    )
+    assert [
+        runtime[k]
+        for k in [
+            "num_frames",
+            "continuation_window_frames",
+            "continuation_overlap_frames",
+            "continuation_windows",
+            "latent_frames",
+            "audio_latent_frames",
+            "decoded_latent_frames",
+            "decoded_audio_latent_frames",
+            "denoiser_forwards",
+            "total_denoiser_forwards",
+        ]
+    ] == [226, 124, 22, 2, 37, 207, 67, 377, 49, 98]
+    assert runtime["num_inference_steps"] == 50 and runtime["first_block_cache"] is False
+    assert runtime["memory_preset"] == preset and runtime["vae_tile_batch"] == batch
+    assert plans.partitions == [("transformer_ref", 638), ("vae", 703)]
+
+
+@pytest.mark.parametrize(
+    "continuation,frames", [(True, 124), (False, 226), (1, 226), ("true", 226), (None, 226)]
+)
+def test_invalid_continuation_profile_rejected_before_weights(
+    checkpoint, plans, tmp_path, continuation, frames
+):
+    writer = BundleWriter(tmp_path / "invalid.bundle")
+    with pytest.raises(ValueError, match="frames|continuation"):
+        owner.build(
+            request(checkpoint, tmp_path / "invalid.bundle", video_num_frames=frames),
+            writer,
+            continuation=continuation,
+        )
+    writer.abort()
+    assert not plans.loaded
 
 
 def test_missing_ref_partition_cannot_fall_back_to_text_only(checkpoint, plans, tmp_path):

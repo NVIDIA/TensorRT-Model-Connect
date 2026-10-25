@@ -106,6 +106,41 @@ void check() {
     auto unlabeled = expanded;
     unlabeled.erase("reference_capacity");
     rejects(unlabeled); // Existing metadata cannot silently become an expanded profile.
+    auto continuation = expanded;
+    continuation["schema_version"] = "minimax_h3.image_ref2va_continuation/v1";
+    continuation["workflow"] = "image_ref2va_continuation";
+    continuation["num_frames"] = 226;
+    continuation["condition_video_rows"] = {4096, 50832, 56208};
+    continuation["condition_audio_rows"] = {0, 74, 74};
+    continuation["max_sequence_rows"] = 159528;
+    for (const auto& pair : {std::pair{"continuation_window_frames", 124},
+                             {"continuation_overlap_frames", 22},
+                             {"continuation_windows", 2},
+                             {"decoded_latent_frames", 67},
+                             {"decoded_audio_latent_frames", 377},
+                             {"total_denoiser_forwards", 98}})
+        continuation[pair.first] = pair.second;
+    parsed = parse_image_reference_config(continuation);
+    require(parsed.output_frames == 226 && parsed.max_condition_audio_rows == 74 &&
+                parsed.max_condition_video_rows == 56208 && parsed.denoiser.target.frames == 37 &&
+                parsed.denoiser.target.audio_latents == 207,
+            "new guide profiles and cumulative decoders retain full single-window DiT geometry");
+    for (const auto& name : {"condition_video_rows", "condition_audio_rows", "num_frames",
+                             "schema_version", "workflow", "max_sequence_rows"}) {
+        auto incompatible = continuation;
+        incompatible[name] = expanded[name];
+        rejects(incompatible);
+    }
+    for (const auto* name :
+         {"continuation_window_frames", "continuation_overlap_frames", "continuation_windows",
+          "decoded_latent_frames", "decoded_audio_latent_frames", "total_denoiser_forwards"}) {
+        auto incompatible = continuation;
+        incompatible[name] = 1;
+        rejects(incompatible);
+        incompatible = expanded;
+        incompatible[name] = continuation[name];
+        rejects(incompatible);
+    }
     const std::vector<std::pair<const char*, Json>> changes = {
         {"schema_version", "v2"},
         {"weights_variant", "transformer"},
