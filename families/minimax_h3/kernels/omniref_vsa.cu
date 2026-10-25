@@ -23,6 +23,8 @@
 #include <tvm/ffi/function.h>
 #include <utility>
 
+#include "fp32_fine_attention.cuh"
+
 #if defined(TRTMC_MINIMAX_H3_VSA_HAS_BLACKWELL)
 #define VSA_BLK128 true
 #define VSA_BHSD true
@@ -44,8 +46,6 @@ struct VsaGeometry {
     int64_t score_elements;
     int64_t workspace_bytes;
 };
-constexpr int kWarpSize = 32;
-constexpr int kGenericWarpsPerBlock = 8;
 
 void require_cuda_contiguous(const tvm::ffi::TensorView& tensor, const char* name) {
     if (tensor.device().device_type != kDLCUDA)
@@ -122,80 +122,6 @@ cublasHandle_t get_cublas_handle(int device, cudaStream_t stream) {
     }
     check_cublas(cublasSetStream(holder.value, stream), "cuBLAS stream binding");
     return holder.value;
-}
-
-__device__ float warp_sum(float value) {
-    for (int offset = kWarpSize / 2; offset > 0; offset >>= 1)
-        value += __shfl_down_sync(0xffffffffU, value, offset);
-    return value;
-}
-
-__global__ void block_sparse_attention_generic(const __nv_bfloat16* query, const __nv_bfloat16* key,
-                                               const __nv_bfloat16* value, const int32_t* q2k_idx,
-                                               const int32_t* q2k_num, const int32_t* sizes,
-                                               __nv_bfloat16* output, float scale, VsaGeometry g) {
-    const int warp = static_cast<int>(threadIdx.x) / kWarpSize;
-    const int lane = static_cast<int>(threadIdx.x) % kWarpSize;
-    const int64_t query_index = static_cast<int64_t>(blockIdx.x) * kGenericWarpsPerBlock + warp;
-    if (query_index >= static_cast<int64_t>(g.heads) * g.sequence)
-        return;
-
-    const int row = static_cast<int>(query_index % g.sequence);
-    const int head = static_cast<int>(query_index / g.sequence);
-    const int query_tile = row / kTileSize;
-    const int query_offset = row % kTileSize;
-    const int64_t output_base = query_index * kHeadDim;
-    if (query_offset >= sizes[query_tile]) {
-#pragma unroll
-        for (int item = 0; item < kHeadDim / kWarpSize; ++item)
-            output[output_base + lane + item * kWarpSize] = __float2bfloat16_rn(0.0F);
-        return;
-    }
-
-    float query_values[kHeadDim / kWarpSize];
-    float accumulator[kHeadDim / kWarpSize] = {};
-#pragma unroll
-    for (int item = 0; item < kHeadDim / kWarpSize; ++item)
-        query_values[item] = __bfloat162float(query[output_base + lane + item * kWarpSize]);
-
-    float maximum = -FLT_MAX;
-    float denominator = 0.0F;
-    const int map_row = head * g.tiles + query_tile;
-    const int selected_tiles = q2k_num[map_row];
-    for (int selected = 0; selected < selected_tiles; ++selected) {
-        int key_tile = lane == 0 ? q2k_idx[static_cast<int64_t>(map_row) * g.tiles + selected] : 0;
-        key_tile = __shfl_sync(0xffffffffU, key_tile, 0);
-        int valid = lane == 0 ? sizes[key_tile] : 0;
-        valid = __shfl_sync(0xffffffffU, valid, 0);
-        for (int key_offset = 0; key_offset < valid; ++key_offset) {
-            const int key_row = key_tile * kTileSize + key_offset;
-            const int64_t key_base = (static_cast<int64_t>(head) * g.sequence + key_row) * kHeadDim;
-            float partial = 0.0F;
-#pragma unroll
-            for (int item = 0; item < kHeadDim / kWarpSize; ++item) {
-                const int dimension = lane + item * kWarpSize;
-                partial += query_values[item] * __bfloat162float(key[key_base + dimension]);
-            }
-            const float score = __shfl_sync(0xffffffffU, warp_sum(partial), 0) * scale;
-            const float next_maximum = fmaxf(maximum, score);
-            const float old_weight = __expf(maximum - next_maximum);
-            const float new_weight = __expf(score - next_maximum);
-            denominator = denominator * old_weight + new_weight;
-#pragma unroll
-            for (int item = 0; item < kHeadDim / kWarpSize; ++item) {
-                const int dimension = lane + item * kWarpSize;
-                accumulator[item] = accumulator[item] * old_weight +
-                                    new_weight * __bfloat162float(value[key_base + dimension]);
-            }
-            maximum = next_maximum;
-        }
-    }
-
-    const float inverse_denominator = denominator > 0.0F ? 1.0F / denominator : 0.0F;
-#pragma unroll
-    for (int item = 0; item < kHeadDim / kWarpSize; ++item)
-        output[output_base + lane + item * kWarpSize] =
-            __float2bfloat16_rn(accumulator[item] * inverse_denominator);
 }
 
 trtmc::minimax_h3::VsaBackend selected_backend(int device) {
@@ -420,8 +346,10 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::Ten
     g.sequence = g.tiles * kTileSize;
     g.pool_elements = static_cast<int64_t>(g.heads) * g.tiles * kHeadDim;
     g.score_elements = static_cast<int64_t>(g.heads) * g.tiles * g.tiles;
-    g.workspace_bytes = 3 * g.pool_elements * sizeof(float) + 2 * g.score_elements * sizeof(float) +
-                        static_cast<int64_t>(g.heads) * g.tiles * sizeof(int32_t);
+    const auto backend = selected_backend(query.device().device_id);
+    const auto layout = trtmc::minimax_h3::make_vsa_workspace_layout(
+        g.heads, g.tiles, backend == trtmc::minimax_h3::VsaBackend::kGeneric);
+    g.workspace_bytes = layout.bytes;
     const int64_t qkv_shape[] = {kBatch, g.heads, g.sequence, kHeadDim};
     require_shape(query, qkv_shape, "query");
     require_shape(key, qkv_shape, "key");
@@ -429,7 +357,9 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::Ten
     require_shape(gate, qkv_shape, "gate");
     require_shape(output, qkv_shape, "output");
     if (workspace.numel() < g.workspace_bytes)
-        TVM_FFI_THROW(ValueError) << "OmniRef VSA workspace is too small";
+        TVM_FFI_THROW(ValueError)
+            << "OmniRef VSA workspace is too small for the selected backend; rebuild the "
+               "bundle with the current family workspace contract";
     auto stream =
         reinterpret_cast<cudaStream_t>(TVMFFIEnvGetStream(kDLCUDA, query.device().device_id));
     auto* cursor = tensor_data<uint8_t>(workspace);
@@ -440,10 +370,8 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::Ten
     auto* v_pool = reinterpret_cast<float*>(cursor);
     cursor += g.pool_elements * sizeof(float);
     auto* scores = reinterpret_cast<float*>(cursor);
-    cursor += g.score_elements * sizeof(float);
-    auto* q2k_idx = reinterpret_cast<int32_t*>(cursor);
-    cursor += g.score_elements * sizeof(int32_t);
-    auto* q2k_num = reinterpret_cast<int32_t*>(cursor);
+    auto* q2k_idx = reinterpret_cast<int32_t*>(tensor_data<uint8_t>(workspace) + layout.index_offset);
+    auto* q2k_num = reinterpret_cast<int32_t*>(tensor_data<uint8_t>(workspace) + layout.count_offset);
     const auto* sizes = tensor_data<int32_t>(variable_block_sizes);
     const char* trace_option = std::getenv("TRTMC_MINIMAX_H3_VSA_TRACE");
     const bool trace = trace_option && std::string(trace_option) == "1";
@@ -496,7 +424,20 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::Ten
         q2k_num, g);
     check_cuda(cudaGetLastError(), "OmniRef per-region Top-K");
     trace_stage("routing_map_enqueued");
-    const auto backend = selected_backend(query.device().device_id);
+    // Finish the independent compression branch before reusing its dead scratch.
+    trace_stage("compression_softmax_enter");
+    softmax_scores<<<g.heads * g.tiles, kThreads, 0, stream>>>(scores, sizes, g);
+    check_cuda(cudaGetLastError(), "OmniRef compression softmax");
+    trace_stage("compression_softmax_enqueued");
+    const float compression_alpha = 1.0F;
+    trace_stage("compression_gemm_enter");
+    check_cublas(cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, kHeadDim, g.tiles,
+                                           g.tiles, &compression_alpha, v_pool, kHeadDim,
+                                           g.pool_elements / g.heads, scores, g.tiles,
+                                           g.score_elements / g.heads, &beta, q_pool, kHeadDim,
+                                           g.pool_elements / g.heads, g.heads),
+                 "OmniRef compression GEMM");
+    trace_stage("compression_gemm_enqueued");
     trace_stage("fine_attention_enter");
     if (backend == trtmc::minimax_h3::VsaBackend::kBlackwell) {
 #if defined(TRTMC_MINIMAX_H3_VSA_HAS_BLACKWELL)
@@ -522,30 +463,13 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::Ten
         TVM_FFI_THROW(RuntimeError) << "OmniRef VSA selected an unavailable Blackwell kernel";
 #endif
     } else {
-        constexpr int kGenericThreads = kGenericWarpsPerBlock * kWarpSize;
-        const int64_t queries = static_cast<int64_t>(g.heads) * g.sequence;
-        const int blocks =
-            static_cast<int>((queries + kGenericWarpsPerBlock - 1) / kGenericWarpsPerBlock);
-        block_sparse_attention_generic<<<blocks, kGenericThreads, 0, stream>>>(
+        trtmc::minimax_h3::fp32_vsa::run(
             tensor_data<__nv_bfloat16>(query), tensor_data<__nv_bfloat16>(key),
             tensor_data<__nv_bfloat16>(value), q2k_idx, q2k_num, sizes,
-            tensor_data<__nv_bfloat16>(output), alpha, g);
-        check_cuda(cudaGetLastError(), "OmniRef generic attention");
+            tensor_data<__nv_bfloat16>(output), tensor_data<uint8_t>(workspace),
+            layout, g.heads, g.tiles, handle, stream);
     }
     trace_stage("fine_attention_enqueued");
-    trace_stage("compression_softmax_enter");
-    softmax_scores<<<g.heads * g.tiles, kThreads, 0, stream>>>(scores, sizes, g);
-    check_cuda(cudaGetLastError(), "OmniRef compression softmax");
-    trace_stage("compression_softmax_enqueued");
-    const float compression_alpha = 1.0F;
-    trace_stage("compression_gemm_enter");
-    check_cublas(cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, kHeadDim, g.tiles,
-                                           g.tiles, &compression_alpha, v_pool, kHeadDim,
-                                           g.pool_elements / g.heads, scores, g.tiles,
-                                           g.score_elements / g.heads, &beta, q_pool, kHeadDim,
-                                           g.pool_elements / g.heads, g.heads),
-                 "OmniRef compression GEMM");
-    trace_stage("compression_gemm_enqueued");
     const int64_t elements = static_cast<int64_t>(g.heads) * g.sequence * kHeadDim;
     const int blocks = static_cast<int>((elements + kThreads - 1) / kThreads);
     trace_stage("gated_add_enter");

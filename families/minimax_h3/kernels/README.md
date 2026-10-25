@@ -22,6 +22,19 @@ sm103a cubins; runtime `auto` selects the optimized route when available.
 `TRTMC_MINIMAX_H3_VSA_BACKEND=generic` or `blackwell` forces a route for
 validation. An unavailable explicitly requested route fails.
 
+The generic route scales FP32 Q and K separately before the QK product,
+retains FP32 scores/probabilities and PV, then rounds fine attention to BF16.
+It processes one head and one query tile at a time while retaining the full
+original key order and regional mask. It uses caller-provided BYOK scratch;
+there are no hidden allocations or stream synchronizations. Compression
+finishes before fine attention, allowing its dead K/V pools and routing scores
+to hold the linear fine-attention arena. Routing indices, counts and compressed
+output remain live and disjoint. New small profiles reserve additional scratch;
+the existing 56-head, 708/1026-tile workspace sizes remain unchanged. An old
+bundle without sufficient generic scratch fails explicitly and needs rebuilding.
+These execution changes require complete GPU comparison and timing evidence;
+host arena checks alone do not qualify numerical equivalence or performance.
+
 `primitives.cuh`, `block_sparse_kernel_sm100a.cuh` and
 `block_sparse_launch_sm100a.cuh` originate from Apache-2.0 FastVideo commit
 `48a047c05ff4138f20cfa33351499c6ec5945f5d`, preserving the existing sm103a
