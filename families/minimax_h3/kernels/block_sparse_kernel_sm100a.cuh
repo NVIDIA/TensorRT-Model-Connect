@@ -7,7 +7,7 @@
 // Warp-specialized: load / MMA (tcgen05) / softmax / correction / epilogue / scheduler.
 // Writes O and, when asked, the log-sum-exp the backward consumes.
 //
-// Generated (comments stripped). Do not edit by hand.
+// Family-owned adaptation of the released FastVideo kernel.
 #ifndef BLOCK_SPARSE_VSA_KERNEL_SM100A_CUH
 #define BLOCK_SPARSE_VSA_KERNEL_SM100A_CUH
 
@@ -217,6 +217,8 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
 #if !defined(__CUDA_ARCH__) || (__CUDA_ARCH__ == 1000 && defined(__CUDA_ARCH_FEAT_SM100_ALL)) ||   \
     __CUDA_ARCH__ == 1030
 
+    static_assert(!BLK128 || !SPLIT_P,
+                  "128-token PV requires both probability limbs before handoff");
     const int total_workitems = num_samples * num_heads * packed_mtiles_per_seq;
 
     uint8_t* sQ0 = fmha_smem;
@@ -573,6 +575,13 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
                             tcgen05_mma_f16_ts_1sm_lead(lead, o_tmem_addr,
                                                         s_tmem_addr + (uint32_t)(a * 8),
                                                         desc_bv.u64, idesc_pv, accumulate);
+                            // Retain the softmax probability residual using a
+                            // second BF16 limb and the same V tile. Both terms
+                            // accumulate into the existing FP32 output tile.
+                            tcgen05_mma_f16_ts_1sm_lead(
+                                lead, o_tmem_addr,
+                                s_tmem_addr + S_COLS / 2 + (uint32_t)(a * 8),
+                                desc_bv.u64, idesc_pv, true);
                             desc_add_lo(desc_bv, PV_DESC_STEP);
                         } else {
                             tcgen05_mma_ws_f16_ts_1sm_lead(lead, o_tmem_addr,
@@ -1142,6 +1151,25 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
                     tcgen05_st_32x32b_x32(p_tmem_addr + 32,
                                           *reinterpret_cast<uint32_t (*)[32]>(&p_regs[32]));
                     tcgen05_wait_st();
+                    if constexpr (BLK128) {
+                        // QK used 128 FP32 columns; packed BF16 P occupies
+                        // only 64. Its residual fits in the other 64 columns,
+                        // without another workspace or TMEM allocation.
+#pragma unroll
+                        for (int c = 0; c < S_COLS / 2; ++c) {
+                            const float high_x = __uint_as_float(p_regs[c] << 16);
+                            const float high_y = __uint_as_float(p_regs[c] & 0xffff0000U);
+                            p_regs[c] = cvt_f32x2_to_bf16x2(
+                                scores2[c].x - high_x, scores2[c].y - high_y);
+                        }
+                        tcgen05_st_32x32b_x32(
+                            p_tmem_addr + S_COLS / 2,
+                            *reinterpret_cast<uint32_t (*)[32]>(&p_regs[0]));
+                        tcgen05_st_32x32b_x32(
+                            p_tmem_addr + S_COLS / 2 + 32,
+                            *reinterpret_cast<uint32_t (*)[32]>(&p_regs[32]));
+                        tcgen05_wait_st();
+                    }
                     tcgen05_fence_before_thread_sync();
                     mbarrier_arrive(smem_ptr_u32(&empty_bar_spo[m_tile]));
                 }
