@@ -32,6 +32,14 @@ int main() {
             require(value.score_offset > value.scaled_query_offset);
             require(value.fine_output_offset > value.score_offset);
             require(value.key_mask_offset > value.fine_output_offset);
+            // Batched PV reuses dead Q for one output and fine for the other;
+            // neither may overlap its live score/value input or pointer table.
+            require(value.scaled_query_offset + 128 * 128 * 4 <= value.score_offset);
+            require(value.score_offset + int64_t(tiles) * 128 * 128 * 4 <=
+                    value.fine_output_offset);
+            require(value.fine_output_offset + 128 * 128 * 4 <= value.key_mask_offset);
+            require(value.key_mask_offset + int64_t(6 * sizeof(void*)) <=
+                    value.fine_offset + value.fine_bytes);
             if (tiles > 2)
                 require(value.bytes >=
                         trtmc::minimax_h3::make_vsa_workspace_layout(heads, tiles - 2).bytes);
