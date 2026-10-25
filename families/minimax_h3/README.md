@@ -426,8 +426,10 @@ PYTHONPATH=core/builder:apps/benchmark:. python -m \
 ```
 
 Use `blackwell` for the optimized backend. Each route includes four synthetic
-cases; Blackwell also executes one attention operation at the six-portrait
-window's actual row/head dimensions. The oracle builds dynamic strongly typed
+cases; Blackwell also executes one attention operation with the trained target
+and six-reference spatial dimensions and head count. Its 4000-row text segment
+is synthetic; a complete request also includes Qwen's visual token rows.
+The oracle builds dynamic strongly typed
 TensorRT component plans, retains all raw operands/outputs, and applies the
 existing BF16 `rtol=0.016, atol=1e-5` envelope to every output element. Add
 `--preflight` to enumerate all nine cases without initializing CUDA. Component

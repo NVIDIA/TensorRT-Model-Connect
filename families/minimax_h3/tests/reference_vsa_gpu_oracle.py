@@ -5,8 +5,10 @@
 
 Use the supplied pinned upstream pooling/routing functions and an FP32 PyTorch
 attention oracle. Retain every BF16 operand/output, geometry, plan and failure.
-The large Blackwell case has the actual six-portrait window's rows and heads;
-it remains one synthetic attention operation, not a full-model qualification.
+The large Blackwell case uses the trained spatial geometry and head count,
+with a synthetic 4000-row text segment. A real six-reference Qwen prefix also
+contains its image-token rows; this is not the complete request's sequence.
+It remains one synthetic attention operation, not a full-model qualification.
 """
 
 import argparse
