@@ -75,6 +75,8 @@ constexpr int SLOTS_PER_KV_TILE = BLK128 ? 1 : 2;
 // P in TMEM. Give it dedicated shared storage instead of borrowing the output
 // epilogue buffer, whose TMA lifetime belongs to a different pipeline.
 constexpr int NUM_KV_STAGES = BLK128 ? 1 : 4;
+constexpr bool PREFILL_Q_FIRST =
+    NUM_KV_STAGES < M_TILES_PER_CTA * SLOTS_PER_KV_TILE;
 constexpr int PROBABILITY_TAIL_BYTES =
     BLK128 ? M_TILES_PER_CTA * M_TILE * HEAD_DIM * sizeof(__nv_bfloat16) : 0;
 static_assert(!BLK128 || NUM_KV_STAGES * KV_RING_SLOT_BYTES + PROBABILITY_TAIL_BYTES ==
@@ -452,8 +454,14 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
                     load_v_oneslot(mtile_idx, ktile_idx, 1);
             };
 
-            load_k(0, 0);
-            load_k(1, 0);
+            // With fewer ring slots than initial K loads, preloading K
+            // before Q would wait for MMA to release a slot while MMA is
+            // still waiting for Q. The four-slot 64-token path keeps its
+            // original K-prefill order.
+            if constexpr (!PREFILL_Q_FIRST) {
+                load_k(0, 0);
+                load_k(1, 0);
+            }
 
 #pragma unroll
             for (int m = 0; m < M_TILES_PER_CTA; ++m) {
@@ -468,6 +476,10 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
                 }
             }
             q_empty_ph.advance();
+            if constexpr (PREFILL_Q_FIRST) {
+                load_k(0, 0);
+                load_k(1, 0);
+            }
             for (int ktile_idx = 0; ktile_idx + 1 < num_k_tiles; ++ktile_idx) {
                 load_v(0, ktile_idx);
                 load_k(0, ktile_idx + 1);

@@ -35,7 +35,10 @@ handoff as the other limbs. It does not borrow the output epilogue's TMA
 buffer or wait on that pipeline. Two KV ring stages are reassigned to these
 two probability tiles, leaving one KV stage. The external workspace, total
 shared-memory allocation, arithmetic and BF16 input/output contract stay
-unchanged. Less KV prefetching and three PV products have a runtime cost;
+unchanged. When the ring cannot hold both initial K loads, Q is prefetched
+first so MMA can consume the first K tile and release its slot. The four-slot
+64-token startup order stays unchanged. Less KV prefetching and three PV
+products have a runtime cost;
 saved-output parity, repeated-call stability and full-model progress require
 separate GPU measurements. Compilation alone does not qualify the change.
 The 128-token softmax uses the hardware exponential rather than the released
