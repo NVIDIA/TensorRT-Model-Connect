@@ -112,3 +112,36 @@ additional public compatibility promise, and disappear with the last family
 using them. A family migration must qualify its real inference path and retain
 its existing examples, benchmark behavior and validation coverage; CPU protocol
 fixtures do not establish model quality or GPU support.
+
+## Serialized engine inputs
+
+Families can open a bounded engine section and pass its reader to the backend:
+
+```cpp
+#include <trtmc/runtime/stream_backend.h>
+
+auto plan = context.reader.open_section("engine.plan");
+auto module = trtmc::create_module_from_reader(context.backend, std::move(plan), options);
+```
+
+`BundleReader::open_section` owns an independent file handle and cursor, restricts
+reads and seeks to the selected section, and rejects changes to the opened
+file's identity. It does not allocate a buffer for the complete section.
+
+The optional `IStreamBackend` capability leaves the existing `IBackend` vtable
+unchanged. The runtime-options adapter forwards this capability and its options.
+The TensorRT backend retains the reader with its engine and uses `IStreamReaderV2`;
+device destinations use one 1 MiB
+pinned transfer buffer and synchronize the supplied stream before reusing it.
+On a persistent CUDA error, pending transfer storage remains allocated until
+process teardown rather than being freed while it may still be referenced.
+Unsupported backends retain the buffered input path. A failed streamed load
+propagates its error without retrying through that path.
+
+MiniMax-H3 owns its plan selection and load timing. Its loader retains validated
+metadata and a file identity, checks the bundle before and after loading, and
+uses streaming when supported. Tokenizer and runtime metadata remain ordinary
+small section reads. Serialized engine bytes, bundle format, model math and
+resident GPU weights are unchanged. Total host memory also includes TensorRT's
+allocations; measure complete loading and inference before reporting a memory
+reduction or output parity.

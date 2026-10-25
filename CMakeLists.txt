@@ -477,6 +477,22 @@ if(TRTMC_BUILD_TESTS)
   target_compile_options(test_bundle_format_v1 PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME bundle_format_v1 COMMAND test_bundle_format_v1)
 
+  add_executable(test_bundle_stream_reader core/runtime/tests/test_bundle_stream_reader.cpp)
+  target_include_directories(test_bundle_stream_reader PRIVATE ${PROJECT_SOURCE_DIR}/core)
+  target_link_libraries(test_bundle_stream_reader PRIVATE trtmc_core)
+  target_compile_options(test_bundle_stream_reader PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME bundle_stream_reader COMMAND test_bundle_stream_reader)
+
+  # This executable supplies delayed CPU-only CUDA transfer stubs. It tests
+  # callback buffer ownership without allocating or running on a GPU.
+  add_executable(test_trt_plan_stream_reader core/runtime/tests/test_trt_plan_stream_reader.cpp)
+  target_include_directories(test_trt_plan_stream_reader PRIVATE
+    ${PROJECT_SOURCE_DIR}/core ${PROJECT_SOURCE_DIR}/core/runtime/include
+    ${TRTMC_TRT_INCLUDE_DIR} ${CUDAToolkit_INCLUDE_DIRS})
+  target_link_libraries(test_trt_plan_stream_reader PRIVATE Threads::Threads)
+  target_compile_options(test_trt_plan_stream_reader PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME trt_plan_stream_reader_cpu COMMAND test_trt_plan_stream_reader)
+
   add_executable(test_task_api core/runtime/tests/test_task_api.cpp)
   target_include_directories(test_task_api PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
   target_compile_options(test_task_api PRIVATE -Wall -Wextra -Wpedantic)
@@ -665,6 +681,37 @@ if(TRTMC_BUILD_TESTS)
   )
   add_dependencies(test_cli trtmc_test_default_runtime_root)
   add_test(NAME family_loader COMMAND test_family_loader "${_trtmc_test_runtime_root}")
+
+  set(_trtmc_stream_test_root "${CMAKE_BINARY_DIR}/tests/runtime-stream")
+  add_library(trtmc_test_backend_stream SHARED core/runtime/tests/fake_backend.cpp)
+  target_include_directories(trtmc_test_backend_stream PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
+  target_link_libraries(trtmc_test_backend_stream PRIVATE CUDA::cudart)
+  target_compile_definitions(trtmc_test_backend_stream PRIVATE
+    TRTMC_FAKE_BACKEND_NAME="trt_rtx" TRTMC_TEST_STREAM_BACKEND)
+  set_target_properties(trtmc_test_backend_stream PROPERTIES
+    OUTPUT_NAME trtmc_backend_trt_rtx LIBRARY_OUTPUT_DIRECTORY "${_trtmc_stream_test_root}")
+
+  add_library(trtmc_test_family_stream SHARED core/runtime/tests/fake_family.cpp)
+  target_include_directories(trtmc_test_family_stream PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include)
+  target_link_libraries(trtmc_test_family_stream PRIVATE trtmc_core)
+  target_compile_definitions(trtmc_test_family_stream PRIVATE TRTMC_TEST_STREAM_FAMILY)
+  set_target_properties(trtmc_test_family_stream PROPERTIES
+    OUTPUT_NAME trtmc_model_fake LIBRARY_OUTPUT_DIRECTORY "${_trtmc_stream_test_root}"
+    BUILD_RPATH "\$ORIGIN;\$ORIGIN/../..")
+
+  add_custom_target(trtmc_test_stream_runtime
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${_trtmc_stream_test_root}"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      $<TARGET_FILE:trtmc_test_backend_fake> "${_trtmc_stream_test_root}"
+    DEPENDS trtmc_test_backend_fake trtmc_test_backend_stream trtmc_test_family_stream)
+  add_executable(test_stream_backend_loader core/runtime/tests/test_family_loader.cpp)
+  target_include_directories(test_stream_backend_loader PRIVATE
+    ${PROJECT_SOURCE_DIR}/core/runtime/include ${PROJECT_SOURCE_DIR}/core)
+  target_link_libraries(test_stream_backend_loader PRIVATE trtmc_runtime)
+  target_compile_definitions(test_stream_backend_loader PRIVATE TRTMC_TEST_STREAM_BACKEND)
+  target_compile_options(test_stream_backend_loader PRIVATE -Wall -Wextra -Wpedantic)
+  add_dependencies(test_stream_backend_loader trtmc_test_stream_runtime trtmc_test_default_runtime_root)
+  add_test(NAME stream_backend_loader COMMAND test_stream_backend_loader "${_trtmc_stream_test_root}")
 
   set(_trtmc_api_test_runtime_root "${CMAKE_BINARY_DIR}/tests/api-runtime")
   add_library(trtmc_api_test_backend SHARED core/runtime/tests/fake_backend.cpp)

@@ -5,8 +5,11 @@
 
 #pragma once
 
+#include "trtmc/plan_reader.h"
+
 #include <cstdint>
 #include <iosfwd>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -44,6 +47,10 @@ class BundleReader {
     const BundleInfo& info() const noexcept { return info_; }
     const BundleSectionInfo* find_section(std::string_view name) const noexcept;
     std::vector<char> read_section(std::string_view name) const;
+
+    // Open an independent bounded reader without allocating a section-sized
+    // buffer. The opened regular file must retain its identity while reading.
+    std::unique_ptr<IPlanReader> open_section(std::string_view name) const;
 
     /// Copy a named section to an output stream using bounded working memory.
     /// @param name Validated bundle section name.

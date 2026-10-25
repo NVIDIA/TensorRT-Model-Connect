@@ -4,6 +4,7 @@
 add_library(trtmc_model_minimax_h3 SHARED
   bpe_tokenizer.cpp
   pipeline.cpp
+  plan_loader.cpp
   plugin.cpp
   torch_cuda_normal.cu
 )
@@ -40,6 +41,16 @@ install(TARGETS trtmc_model_minimax_h3
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_minimax_h3_plan_loader
+    plan_loader.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_plan_loader.cpp)
+  target_include_directories(test_minimax_h3_plan_loader PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include)
+  target_include_directories(test_minimax_h3_plan_loader SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_minimax_h3_plan_loader PRIVATE trtmc_core)
+  target_compile_options(test_minimax_h3_plan_loader PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_plan_loader COMMAND test_minimax_h3_plan_loader)
+
   add_executable(test_minimax_h3_math
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_minimax_h3_math.cpp
   )

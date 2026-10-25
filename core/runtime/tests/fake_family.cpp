@@ -4,11 +4,36 @@
  */
 
 #include "trtmc/runtime/family_factory.h"
+#include "trtmc/runtime/stream_backend.h"
 #include "trtmc/runtime/trt_backend.h"
 
+#include <algorithm>
+#include <cstring>
 #include <stdexcept>
 
 namespace {
+
+#ifdef TRTMC_TEST_STREAM_FAMILY
+class FixturePlanReader final : public trtmc::IPlanReader {
+  public:
+    std::uint64_t size() const noexcept override { return 4; }
+    std::size_t read(void* destination, std::size_t count) override {
+        count = std::min(count, 4 - cursor_);
+        std::memcpy(destination, "PLAN" + cursor_, count);
+        cursor_ += count;
+        return count;
+    }
+    bool seek(std::int64_t offset, trtmc::PlanSeekOrigin origin) override {
+        if (origin != trtmc::PlanSeekOrigin::begin || offset < 0 || offset > 4)
+            return false;
+        cursor_ = static_cast<std::size_t>(offset);
+        return true;
+    }
+
+  private:
+    std::size_t cursor_{0};
+};
+#endif
 
 class FakeForecast final : public trtmc::ITimeSeriesForecast {
   public:
@@ -21,8 +46,14 @@ class FakeForecast final : public trtmc::ITimeSeriesForecast {
             (std::string(backend_name) != "fake" && std::string(backend_name) != "trt_rtx")) {
             throw std::runtime_error("backend lifetime did not extend to task execution");
         }
-        if (std::string(backend_name) == "trt_rtx")
+        if (std::string(backend_name) == "trt_rtx") {
+#ifdef TRTMC_TEST_STREAM_FAMILY
+            auto plan = std::make_unique<FixturePlanReader>();
+            (void)trtmc::create_module_from_reader(backend_, std::move(plan), {});
+#else
             (void)backend_.create_module(nullptr, 0, {});
+#endif
+        }
         if (!request.observed_mask.empty() &&
             request.observed_mask.size() != request.past_values.size()) {
             throw std::invalid_argument("observed_mask length must match past_values");
