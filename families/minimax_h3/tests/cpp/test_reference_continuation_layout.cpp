@@ -32,10 +32,12 @@ void dump_case(const std::string& field) {
     for (const auto& value : input.at("images")) images.push_back({value.at(0), value.at(1)});
     const auto origin = input.contains("media_origin")
         ? std::optional<int32_t>(input.at("media_origin")) : std::nullopt;
-    const auto layout = make_continuation_reference_layout(
-        input.at("text_tags").get<std::vector<int32_t>>(), images,
-        {target[0], target[1], target[2], target[3]}, input.at("max_rows"),
-        {guide[0], guide[1]}, input.at("offset"), origin);
+    const auto tags = input.at("text_tags").get<std::vector<int32_t>>();
+    const ReferenceTargetLatentShape shape{target[0], target[1], target[2], target[3]};
+    const auto layout = guide == std::vector<int32_t>{0, 0}
+        ? make_image_reference_layout(tags, images, shape, input.at("max_rows"), origin)
+        : make_continuation_reference_layout(tags, images, shape, input.at("max_rows"),
+                                            {guide[0], guide[1]}, input.at("offset"), origin);
     if (field == "positions") dump(layout.positions);
     else if (field == "tags") dump(layout.token_tags);
     else if (field == "text") dump(layout.text_indices);
@@ -85,6 +87,8 @@ void tests() {
     rejects([&] { request({1,1}, std::numeric_limits<double>::quiet_NaN(), 37); });
     rejects([&] { request({1,1}, 0, 36); });
     rejects([&] { request({1,1}, 0, 37, 2); });
+    rejects([&] { make_image_reference_layout({1, 0, 1}, {{4, 6}}, {2, 4, 6, 3}, 100, 2); });
+    rejects([&] { make_image_reference_layout({1, 0, 1}, {{4, 6}}, {2, 4, 6, 3}, 100, -1); });
 }
 }
 int main(int argc, char** argv) {

@@ -131,13 +131,14 @@ int main(int argc, char** argv) {
     try {
         if (argc != 7 && argc != 8)
             throw std::invalid_argument("usage: probe RUNTIME_ROOT PLAN_DIR INPUT_DIR "
-                                        "OUTPUT_PREFIX staged|resident SEED [guide|windows]");
+                                        "OUTPUT_PREFIX staged|resident SEED [guide|windows|window-prompts]");
         const std::string root = argv[1], plans = argv[2], inputs = argv[3], output = argv[4],
                           mode = argv[5];
         if (mode != "staged" && mode != "resident")
             throw std::invalid_argument("invalid residency");
         const bool guided = argc == 8 && std::string(argv[7]) == "guide";
-        const bool windows = argc == 8 && std::string(argv[7]) == "windows";
+        const bool window_prompts = argc == 8 && std::string(argv[7]) == "window-prompts";
+        const bool windows = argc == 8 && (std::string(argv[7]) == "windows" || window_prompts);
         if (argc == 8 && !guided && !windows)
             throw std::invalid_argument("invalid continuation probe mode");
         std::size_t parsed = 0;
@@ -182,11 +183,26 @@ int main(int argc, char** argv) {
         text.presentation.input_ids.assign(15, 42);
         text.presentation.visual_rows = {2, 3, 4, 5, 6, 7, 10, 11};
         text.embeddings = read_floats(inputs + "/text.f32.bin", 15 * 8);
+        std::optional<ReferenceImageConditioning> continuation_text;
+        int32_t max_text_rows = 15;
+        if (window_prompts) {
+            const auto bytes = read_bytes(inputs + "/continuation-text-rows.txt");
+            const std::string raw(bytes.begin(), bytes.end());
+            std::size_t count = 0;
+            const auto rows = std::stoi(raw, &count);
+            if (count != raw.size() || rows < 14 || rows > 19)
+                throw std::invalid_argument("invalid continuation text row fixture");
+            continuation_text = text;
+            continuation_text->presentation.h3_token_tags.resize(rows, 1);
+            continuation_text->presentation.input_ids.assign(rows, 43);
+            continuation_text->embeddings = read_floats(inputs + "/continuation-text.f32.bin", rows * 8);
+            max_text_rows = std::max(15, rows);
+        }
         const std::vector<EncodedVisualReference> images = {
             {4, 6, read_floats(inputs + "/reference-0.f32.bin", 24 * 4 * 6)},
             {2, 4, read_floats(inputs + "/reference-1.f32.bin", 24 * 2 * 4)}};
         const ReferenceDenoiserConfig config =
-            windows ? ReferenceDenoiserConfig{{37, 4, 6, 207}, 1, 8, 8, 775}
+            windows ? ReferenceDenoiserConfig{{37, 4, 6, 207}, 1, 8, 8, 760 + max_text_rows}
                     : ReferenceDenoiserConfig{{2, 4, 6, 3}, 1, 8, 8, guided ? 49 : 41};
         ReferenceLatentGuide guide{{1, 4, 6, 1}, {}, {}};
         if (guided) {
@@ -199,7 +215,8 @@ int main(int argc, char** argv) {
                                               : ReferenceDenoiserResidency::Staged);
         const auto execute = [&] {
             if (windows)
-                return owner.run_windows(text, images, seed, 226);
+                return owner.run_windows(text, images, seed, 226,
+                                         continuation_text ? &*continuation_text : nullptr);
             return guided ? owner.run_continuation(text, images, guide, seed, 17.5, 21)
                           : owner.run(text, images, seed);
         };

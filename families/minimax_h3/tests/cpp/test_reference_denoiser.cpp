@@ -47,19 +47,24 @@ struct State {
     std::vector<float> prefix;
     std::vector<float> audio_prefix;
     std::vector<int32_t> tags = {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1};
+    std::optional<int32_t> media_origin;
+    std::vector<int32_t> child_tags;
+    std::vector<float> first_text, child_text;
+    int child_text_forwards{0};
 };
 State* rng_state = nullptr;
 
 ImageReferenceLayout expected_layout(const State& state) {
+    const auto& tags = state.continuation && !state.child_tags.empty() ? state.child_tags : state.tags;
     if (state.continuation)
         return make_continuation_reference_layout(
-            state.tags, {{4, 6}, {2, 4}}, state.config.target, state.config.max_sequence_rows,
+            tags, {{4, 6}, {2, 4}}, state.config.target, state.config.max_sequence_rows,
             state.windows ? ReferenceContinuationGuideShape{7, 37}
                           : ReferenceContinuationGuideShape{1, 1},
             state.windows ? 170.0 : 17.5,
-            state.windows ? std::nullopt : std::optional<int32_t>{21});
-    return make_image_reference_layout(state.tags, {{4, 6}, {2, 4}}, state.config.target,
-                                       state.config.max_sequence_rows);
+            state.windows ? state.media_origin : std::optional<int32_t>{21});
+    return make_image_reference_layout(tags, {{4, 6}, {2, 4}}, state.config.target,
+                                       state.config.max_sequence_rows, state.media_origin);
 }
 
 class Module final : public ITrtModule {
@@ -107,6 +112,15 @@ class Module final : public ITrtModule {
         if (state_.fail && step_ == 10 && (!state_.fail_only_guide || state_.continuation))
             throw std::runtime_error("fixture forward failure");
         require(input.size() == 11, "all reference DiT operands supplied exactly once");
+        if (!state_.first_text.empty()) {
+            const auto& wanted = state_.continuation ? state_.child_text : state_.first_text;
+            const auto& got = input.at("encoder_hidden_states");
+            require(got.numel() == wanted.size() &&
+                        std::equal(wanted.begin(), wanted.end(), static_cast<const float*>(got.data)),
+                    "each window receives its own complete Qwen embeddings");
+            if (state_.continuation)
+                ++state_.child_text_forwards;
+        }
         const auto& video = input.at("video_hidden_states");
         const auto layout = expected_layout(state_);
         const auto video_targets = static_cast<int64_t>(layout.target_video_indices.size());
@@ -436,6 +450,24 @@ void run_windows_case(ReferenceDenoiserResidency residency) {
         require(repeated.video_rows == joined.video_rows &&
                     repeated.audio_rows == joined.audio_rows,
                 "complete two-window cold/warm determinism");
+        auto child_text = text;
+        child_text.presentation.h3_token_tags.resize(19, 1);
+        child_text.presentation.input_ids.resize(19, 43);
+        child_text.embeddings.assign(19 * 4, -0.5F);
+        state.media_origin = 19;
+        state.child_tags = child_text.presentation.h3_token_tags;
+        state.first_text = text.embeddings;
+        state.child_text = child_text.embeddings;
+        const auto changed = owner.run_windows(text, images, 77, 226, &child_text);
+        const auto changed_warm = owner.run_windows(text, images, 77, 226, &child_text);
+        require(changed.forwards == 98 && state.child_text_forwards == 98 &&
+                    changed.video_rows == changed_warm.video_rows &&
+                    changed.audio_rows == changed_warm.audio_rows,
+                "distinct child text reaches all 49 child forwards with one shared media origin");
+        state.media_origin.reset();
+        state.child_tags.clear();
+        state.first_text.clear();
+        state.child_text.clear();
         const auto before = state.draws.size();
         rejects([&] { owner.run_windows(text, images, 77, 225); });
         auto limited = state.config;
@@ -443,6 +475,38 @@ void run_windows_case(ReferenceDenoiserResidency residency) {
         ImageReferenceDenoiser too_small(load, limited, nullptr, residency);
         rejects([&] { too_small.run_windows(text, images, 77, 226); });
         require(state.draws.size() == before, "reject a child cap before first-window inference");
+        for (int kind = 0; kind < 6; ++kind) {
+            auto bad_child = text;
+            switch (kind) {
+            case 0:
+                bad_child.embeddings.pop_back();
+                break;
+            case 1:
+                bad_child.embeddings[0] = std::numeric_limits<float>::quiet_NaN();
+                break;
+            case 2:
+                bad_child.presentation.input_ids.pop_back();
+                break;
+            case 3:
+                bad_child.presentation.visual_rows[0] = -1;
+                break;
+            case 4:
+                bad_child.presentation.visual_rows[1] = bad_child.presentation.visual_rows[0];
+                break;
+            case 5:
+                bad_child.presentation.h3_token_tags[0] = 3;
+                break;
+            }
+            const auto adaln_before = state.adaln_loads;
+            const auto dit_before = state.dit_loads;
+            rejects([&] { owner.run_windows(text, images, 77, 226, &bad_child); });
+            require(state.draws.size() == before && state.adaln_loads == adaln_before &&
+                        state.dit_loads == dit_before,
+                    "invalid child payload rejects before any first-window work");
+        }
+        rejects([&] { owner.run_windows(text, images, 77, 124, &text); });
+        require(state.draws.size() == before,
+                "a single-window request cannot silently ignore child conditioning");
         state.fail = state.fail_only_guide = true;
         rejects([&] { owner.run_windows(text, images, 77, 226); });
         require(state.adaln_live == 0 && state.dit_live == 0,

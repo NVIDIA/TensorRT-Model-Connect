@@ -42,13 +42,17 @@ def main():
                   guide=[7, 37], offset=340.0),
              dict(name='different-text-length-shared-origin', text_tags=[1, 0, 1],
                   images=[[4, 6], [2, 4]], target=[7, 4, 6, 9], guide=[2, 3],
-                  offset=170.5, media_origin=65536)]
+                  offset=170.5, media_origin=65536),
+             dict(name='initial-window-shared-origin', text_tags=[1, 0, 1],
+                  images=[[4, 6], [2, 4]], target=[7, 4, 6, 9], guide=[0, 0],
+                  offset=0.0, media_origin=65536)]
     records = []
     for case in cases:
         t, h, w, audio = case['target']
         refs = [dict(kind='image', latent_h=y, latent_w=x) for y, x in case['images']]
-        refs.append(dict(kind='latent_guide', latent_t=case['guide'][0],
-                         latent_h=h, latent_w=w, ref_audio_t=case['guide'][1]))
+        if case['guide'] != [0, 0]:
+            refs.append(dict(kind='latent_guide', latent_t=case['guide'][0],
+                             latent_h=h, latent_w=w, ref_audio_t=case['guide'][1]))
         # The existing native profile explicitly has no padding. Upstream's
         # default aligns to 64 rows, so select its supported exact row count.
         used = (len(case['text_tags']) + sum(y * x // 4 for y, x in case['images'])

@@ -19,10 +19,11 @@ from .test_native_reference_continuation import _trajectory_profile
 from families.minimax_h3.config import Ref2VAPackedProfile
 
 
-def _window_profile():
+def _window_profile(child_rows=None):
     profile, _ = _trajectory_profile()
     profile = replace(profile, video_rows=222, audio_rows=414, padded_sequence_length=651)
-    return profile, Ref2VAPackedProfile((15, 15, 15), (8, 50, 50), (0, 74, 74))
+    rows = (15, 15, 15) if child_rows is None else (min(15, child_rows), 15, max(15, child_rows))
+    return profile, Ref2VAPackedProfile(rows, (8, 50, 50), (0, 74, 74))
 
 
 def test_window_fixture_admits_first_window_and_complete_av_guide():
@@ -35,6 +36,17 @@ def test_window_fixture_admits_first_window_and_complete_av_guide():
 @pytest.mark.gpu
 @pytest.mark.trt
 def test_real_native_two_windows_match_98_forward_upstream(tmp_path, record_property):
+    _run_window_oracle(tmp_path, record_property)
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+@pytest.mark.parametrize("child_rows", [14, 19])
+def test_real_native_window_prompts_match_98_forward_upstream(tmp_path, record_property, child_rows):
+    _run_window_oracle(tmp_path, record_property, child_rows)
+
+
+def _run_window_oracle(tmp_path, record_property, child_rows=None):
     import torch
     from diffusers.models.transformers.transformer_minimax_h3 import MiniMaxH3Transformer3DModel
     from diffusers.modular_pipelines.minimax_h3.before_denoise import (
@@ -50,7 +62,7 @@ def test_real_native_two_windows_match_98_forward_upstream(tmp_path, record_prop
     runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
     probe = runtime / "minimax_h3_reference_denoiser_probe"
     assert probe.is_file()
-    profile, reference = _window_profile()
+    profile, reference = _window_profile(child_rows)
     weights = _weights(profile)
     np.savez(tmp_path / "synthetic-weights.npz", **weights)
     (tmp_path / "case.json").write_text(
@@ -68,6 +80,8 @@ def test_real_native_two_windows_match_98_forward_upstream(tmp_path, record_prop
                 cumulative_latent_frames=67,
                 cumulative_audio_latents=377,
                 expected_forwards=98,
+                continuation_text_rows=child_rows,
+                media_time_origin=None if child_rows is None else max(15, child_rows),
                 rtol=0.016,
                 atol=1e-5,
                 sample_dtype="float32",
@@ -111,6 +125,11 @@ def test_real_native_two_windows_match_98_forward_upstream(tmp_path, record_prop
     embeddings.tofile(tmp_path / "text.f32.bin")
     for i, image in enumerate(images):
         image.tofile(tmp_path / f"reference-{i}.f32.bin")
+    child_embeddings = embeddings
+    if child_rows is not None:
+        child_embeddings = np.random.default_rng(92).normal(0, 0.5, (child_rows, 8)).astype(np.float32)
+        child_embeddings.tofile(tmp_path / "continuation-text.f32.bin")
+        (tmp_path / "continuation-text-rows.txt").write_text(str(child_rows))
     source = Path(os.environ["TRTMC_H3_PACKED_SEQUENCE_SOURCE"])
     raw = source.read_bytes()
     assert (
@@ -126,8 +145,15 @@ def test_real_native_two_windows_match_98_forward_upstream(tmp_path, record_prop
     upstream = {"OmniClientError": ValueError}
     exec(compile(tree, str(source), "exec"), upstream)
     text_tags = torch.tensor([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1])
+    child_tags = text_tags
+    if child_rows is not None:
+        child_tags = torch.ones(child_rows, dtype=text_tags.dtype)
+        child_tags[:min(15, child_rows)] = text_tags[:min(15, child_rows)]
+    media_origin = None if child_rows is None else max(15, child_rows)
 
-    def sample_window(guide=None):
+    def sample_window(guide=None, conditioning=None):
+        encoded, encoded_tags = (embeddings, text_tags) if conditioning is None else conditioning
+        text_rows = len(encoded)
         cv, ca = (8, 0) if guide is None else (50, 74)
         blocks = [
             dict(kind="image", latent_h=4, latent_w=6),
@@ -138,17 +164,18 @@ def test_real_native_two_windows_match_98_forward_upstream(tmp_path, record_prop
                 dict(kind="latent_guide", latent_t=7, latent_h=4, latent_w=6, ref_audio_t=37)
             )
         packed = upstream["minimax_h3_packed_sequence_ref2va_blocks"](
-            text_len=15,
+            text_len=text_rows,
             latent_t=37,
             latent_h=4,
             latent_w=6,
             audio_t=207,
             ref_blocks=blocks,
             temporal_offset=0.0 if guide is None else 170.0,
-            seq_len=659 if guide is None else 775,
+            seq_len=text_rows + (644 if guide is None else 760),
+            media_time_origin=media_origin,
         )
         tags = packed["token_tags"].clone()
-        tags[packed["text_pos"]] = text_tags
+        tags[packed["text_pos"]] = encoded_tags
         gen = torch.Generator().manual_seed(42)
         vs, aus = MiniMaxH3Scheduler(shift=12.0), MiniMaxH3Scheduler(shift=3.0)
         vs.set_timesteps(50, device="cuda")
@@ -183,7 +210,7 @@ def test_real_native_two_windows_match_98_forward_upstream(tmp_path, record_prop
                 packed["audio_pos"],
                 cv,
                 ca,
-                15,
+                text_rows,
                 float(t),
                 float(a),
                 max(float(t), 0.999),
@@ -192,7 +219,7 @@ def test_real_native_two_windows_match_98_forward_upstream(tmp_path, record_prop
             vv, av = model(
                 hidden_states=video[None],
                 audio_hidden_states=audio[None],
-                encoder_hidden_states=torch.from_numpy(embeddings)[None].cuda(),
+                encoder_hidden_states=torch.from_numpy(encoded)[None].cuda(),
                 timestep=times.cuda(),
                 timestep_indices=inverse.cuda(),
                 position_ids=packed["img_position_ids"].cuda(),
@@ -217,7 +244,9 @@ def test_real_native_two_windows_match_98_forward_upstream(tmp_path, record_prop
     try:
         with torch.no_grad(), torch.backends.cudnn.flags(allow_tf32=False):
             first_v, first_a, first_trace = sample_window()
-            child_v, child_a, child_trace = sample_window((first_v[-42:], first_a[:, -37:]))
+            child_v, child_a, child_trace = sample_window(
+                (first_v[-42:], first_a[:, -37:]), (child_embeddings, child_tags)
+            )
             expected = {
                 "video": torch.cat((first_v, child_v[42:])).cpu().numpy(),
                 "audio": torch.cat((first_a, child_a[:, 37:]), dim=1)
@@ -243,7 +272,7 @@ def test_real_native_two_windows_match_98_forward_upstream(tmp_path, record_prop
                 str(prefix),
                 mode,
                 "42",
-                "windows",
+                "windows" if child_rows is None else "window-prompts",
             ],
             capture_output=True,
             text=True,

@@ -46,7 +46,8 @@ struct ImageReferenceLayout {
 ImageReferenceLayout
 make_image_reference_layout(const std::vector<int32_t>& text_tags,
                             const std::vector<ImageReferenceLatentShape>& images,
-                            ReferenceTargetLatentShape target, int32_t max_rows);
+                            ReferenceTargetLatentShape target, int32_t max_rows,
+                            std::optional<int32_t> media_time_origin = std::nullopt);
 
 struct ReferenceContinuationGuideShape {
     int32_t video_frames;
