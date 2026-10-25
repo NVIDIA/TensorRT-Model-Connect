@@ -54,14 +54,15 @@ def add_kernel(
     }
     if extra_args:
         spec["extra_args"] = extra_args
+    # PluginField borrows its payload until create_plugin copies it.
+    kernel_name_data = kernel_name.encode("utf-8")
+    shape_spec_data = json.dumps(spec, separators=(",", ":")).encode("utf-8")
     fields = trt.PluginFieldCollection(
         [
-            trt.PluginField(
-                "kernel_name", kernel_name.encode("utf-8"), trt.PluginFieldType.CHAR
-            ),
+            trt.PluginField("kernel_name", kernel_name_data, trt.PluginFieldType.CHAR),
             trt.PluginField(
                 "shape_spec",
-                json.dumps(spec, separators=(",", ":")).encode("utf-8"),
+                shape_spec_data,
                 trt.PluginFieldType.CHAR,
             ),
         ]
