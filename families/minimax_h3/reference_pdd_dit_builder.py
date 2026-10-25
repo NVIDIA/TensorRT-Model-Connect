@@ -227,8 +227,8 @@ def build_engine(
             "video": op.gather_rows(network, hidden, target_video_indices),
             "audio": op.gather_rows(network, hidden, target_audio_indices),
         }
-        for output in add_output_heads(network, targets, selector, banks).values():
-            network.mark_output(output)
+        for head_output in add_output_heads(network, targets, selector, banks).values():
+            network.mark_output(head_output)
         _validate_student_network(network, profile)
 
         packed_rows = (
