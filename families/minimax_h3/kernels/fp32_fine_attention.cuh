@@ -77,7 +77,8 @@ __device__ float block_reduce(float value, float* shared) {
     return shared[0];
 }
 
-__global__ void softmax_short(float* scores, const uint8_t* mask, int keys) {
+template <typename Mask>
+__global__ void softmax_short(float* scores, const Mask* mask, int keys) {
     float* row = scores + static_cast<int64_t>(blockIdx.x) * keys;
     float maximum = -FLT_MAX;
     for (int column = threadIdx.x; column < keys; column += 32)
@@ -95,7 +96,8 @@ __global__ void softmax_short(float* scores, const uint8_t* mask, int keys) {
         row[column] = mask[column] ? __fdiv_rn(expf(__fsub_rn(row[column], maximum)), total) : 0.0F;
 }
 
-__global__ void softmax_regular(float* scores, const uint8_t* mask, int keys) {
+template <typename Mask>
+__global__ void softmax_regular(float* scores, const Mask* mask, int keys) {
     __shared__ float reduction[32];
     float* row = scores + static_cast<int64_t>(blockIdx.x) * keys;
     const int full = keys <= 9216 ? 0 : keys / 4096 * 4096;
