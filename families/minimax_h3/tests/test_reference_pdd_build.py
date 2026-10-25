@@ -104,7 +104,13 @@ def student_builders(monkeypatch, baseline):
     def builder(group):
         def build(weights, target, **options):
             assert weights == {"student_partition": group}
-            assert options["consume_weights"] is True and options["workspace_bytes"] == 8 << 30
+            assert options["consume_weights"] is True
+            expected_workspace = (
+                baseline.get("denoiser_workspace_bytes", 8 << 30)
+                if group == "denoiser"
+                else 8 << 30
+            )
+            assert options["workspace_bytes"] == expected_workspace
             if group == "adaln":
                 assert options["input_timesteps"] is True
             else:
@@ -180,6 +186,40 @@ def test_student_build_replaces_both_learned_partitions_and_streams_common_plans
     assert set(receipt["reused_sections"]) == set(student.REUSED_PLANS)
     provenance = json.loads(after["trtmc.provenance.json"])
     assert provenance["checkpoint"] == metadata["checkpoint"]
+
+
+def test_explicit_denoiser_workspace_preserves_adaln_budget_and_runtime_contract(
+    baseline,
+    student_builders,
+):
+    baseline["denoiser_workspace_bytes"] = 16 << 30
+    writer = BundleWriter(baseline["output"])
+    run_build(baseline, writer, denoiser_workspace_bytes=16 << 30)
+    writer.finish()
+    _, data = sections(baseline["output"])
+    receipt = json.loads(data["minimax_h3.reused_plans.json"])
+    assert receipt["rebuilt_plan_workspace_bytes"] == {
+        "adaln.plan": 8 << 30,
+        "denoiser.plan": 16 << 30,
+    }
+    assert student_builders == (["adaln", "denoiser"], ["adaln", "denoiser"])
+    runtime = json.loads(data["runtime.json"])
+    assert runtime["inference_contract"] == CONTRACT
+    assert runtime["max_vsa_tiles"] == 2048
+    assert runtime["num_inference_steps"] == 8
+
+
+@pytest.mark.parametrize("workspace", [True, 0, -1, 1.5, "16 GiB"])
+def test_invalid_denoiser_workspace_fails_before_weight_loading(
+    baseline,
+    student_builders,
+    workspace,
+):
+    writer = BundleWriter(baseline["output"])
+    with pytest.raises(ValueError, match="workspace_bytes"):
+        run_build(baseline, writer, denoiser_workspace_bytes=workspace)
+    assert student_builders == ([], [])
+    writer.abort()
 
 
 @pytest.mark.parametrize(

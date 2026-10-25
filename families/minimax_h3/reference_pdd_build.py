@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 from . import reference_build as base
+from .config import resolve_workspace_bytes
 from .reference_continuation_build import _ImageBundle, _checkpoint_identity
 from .reference_pdd import (
     CONTRACT,
@@ -88,6 +89,7 @@ def build(
     reference_capacity="six_portrait",
     continuation=True,
     max_vsa_tiles=2048,
+    denoiser_workspace_bytes=None,
 ):
     """Construct the exact BF16 student from its own 106/582-tensor partitions.
 
@@ -99,6 +101,9 @@ def build(
     """
     if request.graph_transform is not None:
         raise ValueError("OmniRef incremental build does not support graph transforms")
+    denoiser_workspace = resolve_workspace_bytes(
+        denoiser_workspace_bytes, default_bytes=base.WORKSPACE_BYTES
+    )
     if Path(source_bundle).resolve() == Path(request.output_path).resolve():
         raise ValueError("OmniRef must preserve its original source bundle")
     if type(max_vsa_tiles) is not int or not 2 <= max_vsa_tiles <= 8192 or max_vsa_tiles % 2:
@@ -172,7 +177,7 @@ def build(
             options = dict(
                 verbose=request.verbose,
                 consume_weights=True,
-                workspace_bytes=base.WORKSPACE_BYTES,
+                workspace_bytes=base.WORKSPACE_BYTES if group == "adaln" else denoiser_workspace,
                 output=output,
             )
             if group == "adaln":
@@ -224,5 +229,9 @@ def build(
             student_checkpoint=student_identity,
             reused_sections={name: source.digests[name] for name in REUSED_PLANS},
             rebuilt_sections=list(REBUILT_PLANS),
+            rebuilt_plan_workspace_bytes={
+                "adaln.plan": base.WORKSPACE_BYTES,
+                "denoiser.plan": denoiser_workspace,
+            },
         ),
     )
