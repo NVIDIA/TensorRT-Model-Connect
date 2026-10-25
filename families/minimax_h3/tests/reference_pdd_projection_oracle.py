@@ -96,11 +96,22 @@ def run(output):
                 for name, value in widened.items():
                     assert context.set_input_shape(name + "_hidden_states", tuple(value.shape))
                     assert context.set_tensor_address(name + "_hidden_states", value.data_ptr())
-                    shape = tuple(context.get_tensor_shape(name + "_velocity"))
-                    assert shape == (value.shape[0], reference[name][1].shape[1])
+                assert context.set_tensor_address("pdd_step", selector.data_ptr())
+                # TensorRT resolves output dimensions after the complete set
+                # of dynamic input shapes and shape operands is available.
+                missing = context.infer_shapes()
+                shapes = {
+                    name: tuple(context.get_tensor_shape(name + "_velocity")) for name in widened
+                }
+                with (folder / f"shapes-{video_rows}-{audio_rows}-step-{step}.json").open("x") as f:
+                    json.dump({"missing_inputs": missing, "output_shapes": shapes}, f)
+                assert not missing, f"Unspecified TensorRT inputs: {missing}"
+                for name, value in widened.items():
+                    shape = shapes[name]
+                    expected_shape = (value.shape[0], reference[name][1].shape[1])
+                    assert shape == expected_shape, (name, shape, expected_shape)
                     outputs[name] = torch.empty(shape, device="cuda", dtype=torch.float32)
                     assert context.set_tensor_address(name + "_velocity", outputs[name].data_ptr())
-                assert context.set_tensor_address("pdd_step", selector.data_ptr())
                 assert context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
                 torch.cuda.synchronize()
                 enqueues += 1
