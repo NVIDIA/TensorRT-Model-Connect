@@ -289,6 +289,19 @@ distinct; neither stream is stretched, truncated or padded to match the other.
 Both `minimal` and `original` residency policies apply to the new profile.
 An old bundle cannot acquire these operand/decoder shapes by editing metadata.
 
+If a compatible original single-window bundle already exists, the owning
+`reference_continuation_build.build(request, writer, source_bundle=...,
+source_sha256=...)` entry point rebuilds only `denoiser.plan` and `audio_vae.plan`.
+It verifies the complete explicit source digest, the original profile and
+checkpoint configuration/statistics, tokenizer, BF16 provenance, and the same
+pinned Hugging Face snapshot before loading new weights. It streams the six
+unchanged plans through bounded buffers and verifies their content again while
+copying. The new bundle records their source and individual digests in
+`minimax_h3.reused_plans.json`. Select the same memory preset and reference
+capacity as the source bundle. The source compiled plans must be compatible
+with the selected backend; this entry point does not perform hardware adaptation.
+An incompatible source fails explicitly, and the original bundle is preserved.
+
 This within-request profile does not expose cross-request continuation state,
 change prompts between windows, accept decoded video/audio reference operands,
 preserve previously accepted decoded pixels, or qualify trained-model video
