@@ -48,3 +48,12 @@ selection. See `reference_vsa.py` for the CPU geometry contract.
 This implementation is experimental. Source presence and successful
 compilation do not establish GPU numerical agreement, trained-model quality,
 or realtime performance.
+
+For immutable saved operands from the interleaved-guide oracle case,
+`families.minimax_h3.tests.reference_vsa_rounding` observes only its existing
+failed coordinates on CPU. It compares FP64 attention with approximate FP32
+operation orders and rounds directly from FP64 to BF16 to avoid an extra
+FP32 midpoint rounding. Current native fine values remain conditionally
+inferred from the gated output and unchanged compression until directly
+recorded. This diagnostic never substitutes its output for the GPU reference
+or changes an acceptance threshold.
