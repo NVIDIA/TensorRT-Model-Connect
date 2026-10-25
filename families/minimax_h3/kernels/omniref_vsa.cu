@@ -322,7 +322,7 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::Ten
     g.pool_elements = static_cast<int64_t>(g.heads) * g.tiles * kHeadDim;
     g.score_elements = static_cast<int64_t>(g.heads) * g.tiles * g.tiles;
     const auto backend = selected_backend(query.device().device_id);
-    const auto layout = trtmc::minimax_h3::make_vsa_workspace_layout(
+    auto layout = trtmc::minimax_h3::make_vsa_workspace_layout(
         g.heads, g.tiles, backend == trtmc::minimax_h3::VsaBackend::kGeneric);
     g.workspace_bytes = layout.bytes;
     const int64_t qkv_shape[] = {kBatch, g.heads, g.sequence, kHeadDim};
@@ -335,6 +335,11 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::Ten
         TVM_FFI_THROW(ValueError)
             << "OmniRef VSA workspace is too small for the selected backend; rebuild the "
                "bundle with the current family workspace contract";
+    if (backend == trtmc::minimax_h3::VsaBackend::kGeneric) {
+        layout = trtmc::minimax_h3::make_vsa_query_batch_layout(
+            g.heads, g.tiles, workspace.numel());
+        g.workspace_bytes = layout.bytes;
+    }
     auto stream =
         reinterpret_cast<cudaStream_t>(TVMFFIEnvGetStream(kDLCUDA, query.device().device_id));
     auto* cursor = tensor_data<uint8_t>(workspace);

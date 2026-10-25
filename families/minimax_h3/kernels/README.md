@@ -32,20 +32,29 @@ validation. An unavailable explicitly requested route fails.
 
 The generic route scales FP32 Q and K separately before the QK product,
 retains FP32 scores/probabilities and PV, then rounds fine attention to BF16.
-It processes one head and one query tile at a time while retaining the full
-original key order and regional mask. It uses caller-provided BYOK scratch;
+It processes one head at a time while retaining the full original key order
+and regional mask. Up to 32 independent query tiles share each QK/PV batch,
+bounded by the caller's existing BYOK scratch capacity. The compressed output
+stays at the front and routing indices/counts at the aligned tail; only dead
+pool/score storage holds the one-head K/V and per-query Q, scores, outputs and
+masks. Small allocations can retain one query tile. The current 2048-tile
+56-head profile can hold 32 queries at 708 tiles or 24 at 1026 tiles without
+increasing its allocation. It uses caller-provided BYOK scratch;
 there are no hidden allocations or stream synchronizations. Compression
 finishes before fine attention, allowing its dead K/V pools and routing scores
 to hold the linear fine-attention arena. Routing indices, counts and compressed
 output remain live and disjoint. New small profiles reserve additional scratch;
 the existing 56-head, 708/1026-tile workspace sizes remain unchanged. An old
 bundle without sufficient generic scratch fails explicitly and needs rebuilding.
-PV uses a batch of two independent copies instead of singleton GEMM, whose FP32
-reduction can differ at BF16 rounding boundaries. The dead Q tile holds the
-first output and the fine tile holds the second; these outputs never overlap
-each other or the live V/probability inputs. The completed softmax's key-mask
-storage holds the device pointer table and is rebuilt for the next query tile.
-This trades duplicate PV computation for retaining the same one-head arena.
+When only one query tile is active, PV retains two independent copies instead
+of singleton GEMM, whose FP32 reduction can differ at BF16 rounding boundaries.
+The dead Q tile holds the first output and the fine tile holds the second.
+Larger batches contain independent original query tiles, sharing read-only
+K/V while retaining disjoint scores, output tiles and masks. QK's pointer table
+uses the dead PV-output buffer; PV's table uses the completed softmax masks.
+These tables are rewritten in stream order before use, and none overlaps its
+operation's live inputs or outputs. Compression continues to use its own
+single validity mask across query rows.
 These execution changes require complete GPU comparison and timing evidence;
 host arena checks alone do not qualify numerical equivalence or performance.
 

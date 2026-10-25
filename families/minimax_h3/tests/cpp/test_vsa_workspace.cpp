@@ -15,6 +15,39 @@ void require(bool condition) {
         throw std::runtime_error("VSA workspace lifetime invariant failed");
 }
 
+void check_query_batch_layout(int heads, int tiles, int64_t capacity) {
+    const auto a = trtmc::minimax_h3::make_vsa_query_batch_layout(heads, tiles, capacity);
+    const int64_t b = a.query_tile_batch;
+    const int64_t pool = int64_t(heads) * tiles * 128 * 4;
+    const int64_t route = int64_t(heads) * tiles * tiles * 4;
+    const int64_t counts = int64_t(heads) * tiles * 4;
+    const int64_t rows = int64_t(tiles) * 128;
+    const int64_t kv = rows * 128 * 4;
+    const int64_t tile = 128 * 128 * 4;
+    require(b >= 1 && b <= 32 && b <= tiles);
+    require(a.fine_offset == pool && a.scaled_key_offset == pool);
+    require(a.scaled_key_offset + kv <= a.value_offset);
+    require(a.value_offset + kv <= a.scaled_query_offset);
+    require(a.scaled_query_offset + b * tile <= a.score_offset);
+    require(a.score_offset + b * 128 * rows * 4 <= a.fine_output_offset);
+    require(a.fine_output_offset + b * tile <= a.key_mask_offset);
+    require(a.key_mask_offset + b * rows <= a.index_offset);
+    require(a.index_offset + route <= a.count_offset);
+    require(a.count_offset + counts <= capacity);
+    require(a.fine_offset + a.fine_bytes <= a.index_offset);
+    for (auto offset : {a.scaled_key_offset, a.value_offset, a.scaled_query_offset,
+                        a.score_offset, a.fine_output_offset, a.key_mask_offset, a.index_offset})
+        require(offset % 256 == 0);
+    // QK reads K/Q and writes scores; its pointer table occupies dead PV output.
+    require(3 * b * int64_t(sizeof(void*)) <= b * tile);
+    // PV reads V/probability and writes independent tile outputs. Its pointer
+    // table occupies the completed softmax mask, including the B=1 duplicate.
+    const int64_t products = std::max(int64_t(2), b);
+    require(3 * products * int64_t(sizeof(void*)) <= b * rows);
+    if (b == 1)
+        require(a.scaled_query_offset + tile <= a.score_offset);
+}
+
 int main() {
     int checked = 0;
     for (int heads : {1, 2, 4, 8, 56, 128, 256}) {
@@ -75,8 +108,44 @@ int main() {
         }
         require(rejected);
     }
+    int batch_checked = 0;
+    for (int heads : {1, 2, 4, 8, 56, 128, 256}) {
+        const auto profile = trtmc::minimax_h3::make_vsa_workspace_layout(heads, 8192);
+        for (int tiles = 2; tiles <= 8192; tiles += 2) {
+            const auto base = trtmc::minimax_h3::make_vsa_workspace_layout(heads, tiles);
+            for (int64_t capacity : {base.bytes, base.bytes + 1, base.bytes + 255,
+                                      base.bytes + 256, profile.bytes}) {
+                check_query_batch_layout(heads, tiles, capacity);
+                ++batch_checked;
+            }
+            bool rejected = false;
+            try { trtmc::minimax_h3::make_vsa_query_batch_layout(heads, tiles, base.bytes - 1); }
+            catch (const std::invalid_argument&) { rejected = true; }
+            require(rejected);
+        }
+    }
+    for (int tiles : {708, 1026}) {
+        const auto profile = trtmc::minimax_h3::make_vsa_workspace_layout(56, 2048);
+        const auto value = trtmc::minimax_h3::make_vsa_query_batch_layout(56, tiles, profile.bytes);
+        require(value.query_tile_batch == (tiles == 708 ? 32 : 24));
+        require(value.bytes == 2055667712);
+    }
+    for (const auto& profile : {std::pair{1, 2}, std::pair{2, 38}, std::pair{56, 10}}) {
+        const auto base = trtmc::minimax_h3::make_vsa_workspace_layout(profile.first, profile.second);
+        const auto value = trtmc::minimax_h3::make_vsa_query_batch_layout(
+            profile.first, profile.second, base.bytes * 4);
+        require(value.query_tile_batch > 1);
+        std::vector<uint8_t> memory(value.bytes, 0x5a);
+        std::fill(memory.begin() + value.fine_offset,
+                  memory.begin() + value.fine_offset + value.fine_bytes, 0xa5);
+        require(std::all_of(memory.begin(), memory.begin() + value.fine_offset,
+                            [](uint8_t v) { return v == 0x5a; }));
+        require(std::all_of(memory.begin() + value.index_offset, memory.end(),
+                            [](uint8_t v) { return v == 0x5a; }));
+    }
     std::cout << "{\"geometry_profiles_checked\":" << checked
-              << ",\"retained_buffer_sentinel_checks\":4,"
+              << ",\"query_batch_capacity_profiles_checked\":" << batch_checked
+              << ",\"query_batch_sentinel_checks\":3,\"retained_buffer_sentinel_checks\":4,"
                  "\"large_profiles_need_additional_workspace\":false,"
                  "\"GPU_execution_performed\":false}"
               << std::endl;
