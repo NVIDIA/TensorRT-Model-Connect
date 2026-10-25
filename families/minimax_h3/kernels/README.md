@@ -49,6 +49,15 @@ This implementation is experimental. Source presence and successful
 compilation do not establish GPU numerical agreement, trained-model quality,
 or realtime performance.
 
+`TRTMC_MINIMAX_H3_VSA_TRACE=1` enables host-side diagnostic messages for each
+call's geometry and pooling, routing, fine-attention, compression and gated-add
+boundaries. It is off by default and does not change device computations or
+insert synchronization. An `enqueued` message does not establish GPU completion.
+For a separate bounded failure-localization run, `CUDA_LAUNCH_BLOCKING=1` can
+help identify the last entered operation; that setting changes execution
+scheduling and its host elapsed times are not benchmark evidence. Neither
+option changes the original correctness or full-model completion gates.
+
 For immutable saved operands from the interleaved-guide oracle case,
 `families.minimax_h3.tests.reference_vsa_rounding` observes only its existing
 failed coordinates on CPU. It compares FP64 attention with approximate FP32
