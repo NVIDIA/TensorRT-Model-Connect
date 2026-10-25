@@ -501,7 +501,8 @@ def _serialize(
     weights: dict,
     consume_weights: bool,
     label: str,
-) -> bytes:
+    output=None,
+) -> bytes | None:
     try:
         plan = builder.build_serialized_network(network, config)
     finally:
@@ -512,7 +513,7 @@ def _serialize(
         raise RuntimeError(f"TensorRT failed to build MiniMax-H3 {label} engine")
     del network, config, builder, logger
     gc.collect()
-    return bytes(plan)
+    return op.emit_serialized_plan(plan, output)
 
 
 def _add_reference_profile(builder, config, profile, reference):

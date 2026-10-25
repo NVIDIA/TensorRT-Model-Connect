@@ -136,7 +136,8 @@ def build_engine(
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
     reference_profile: Ref2VAPackedProfile | None = None,
-) -> bytes:
+    output=None,
+) -> bytes | None:
     """Build the explicit experimental eight-step student's complete DiT plan."""
 
     profile.validate()
@@ -249,6 +250,7 @@ def build_engine(
             weights=weights,
             consume_weights=consume_weights,
             label="OmniRef PDD VSA DiT",
+            output=output,
         )
     finally:
         op.release_weight_buffers(network)

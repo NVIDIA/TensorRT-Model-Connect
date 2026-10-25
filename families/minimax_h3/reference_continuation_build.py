@@ -51,7 +51,17 @@ def _identity(stat):
 class _ImageBundle:
     """Validate every byte once; copy selected plans with bounded host buffers."""
 
-    def __init__(self, path, expected_sha256, expected_runtime, checkpoint, tokenizer):
+    def __init__(
+        self,
+        path,
+        expected_sha256,
+        expected_runtime,
+        checkpoint,
+        tokenizer,
+        *,
+        reused_plans=REUSED_PLANS,
+        allow_reuse_receipt=False,
+    ):
         if not isinstance(expected_sha256, str) or not re.fullmatch(
             "[0-9a-f]{64}", expected_sha256
         ):
@@ -59,6 +69,11 @@ class _ImageBundle:
         self.path = Path(path)
         self.sha256 = expected_sha256
         self.identity = _identity(self.path.stat())
+        self.reused_plans = frozenset(reused_plans)
+        if not self.reused_plans or not self.reused_plans <= set(owner.PLAN_NAMES):
+            raise ValueError("MiniMax-H3 source reuse requires explicit owned plan names")
+        if type(allow_reuse_receipt) is not bool:
+            raise ValueError("MiniMax-H3 reuse receipt admission must be explicit")
         with self.path.open("rb") as source:
             prefix = source.read(16)
             if len(prefix) != 16 or prefix[:8] != BUNDLE_MAGIC:
@@ -79,7 +94,10 @@ class _ImageBundle:
                 "tokenizer.json",
                 "trtmc.provenance.json",
             }
-            if set(self.sections) != required:
+            if set(self.sections) != required and not (
+                allow_reuse_receipt
+                and set(self.sections) == required | {"minimax_h3.reused_plans.json"}
+            ):
                 raise ValueError(
                     "MiniMax-H3 source requires the complete original eight-plan bundle"
                 )
@@ -159,8 +177,8 @@ class _ImageBundle:
             raise ValueError("MiniMax-H3 source bundle changed during reuse")
 
     def copy_to(self, name, writer):
-        if name not in REUSED_PLANS:
-            raise ValueError("MiniMax-H3 continuation must rebuild its DiT and audio decoder")
+        if name not in self.reused_plans:
+            raise ValueError("MiniMax-H3 must rebuild every plan outside its explicit reuse set")
         self._unchanged()
         section = self.sections[name]
         digest = hashlib.sha256()
