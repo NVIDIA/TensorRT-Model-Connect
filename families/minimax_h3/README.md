@@ -372,3 +372,28 @@ PYTHONPATH=core/builder:apps/benchmark:. python -m \
 Add `--preflight` to enumerate the cases without creating a CUDA context.
 Passing this synthetic component oracle does not qualify the trained student,
 128-token VSA, complete audiovisual generation or single-GPU performance.
+
+`reference_vsa.py` now defines the 128-token segment transport, separate
+reference-video regions, zero-valid partner tile and TVM-FFI graph boundary.
+`kernels/omniref_vsa.cu` implements routing, sparse attention and the learned
+compression branch. It includes a generic backend and optional optimized
+Blackwell cubins. See `kernels/README.md` for its exact binding contract.
+
+`reference_pdd_dit_builder.py` composes the complete student DiT graph: dense
+text refinement, one VSA binding per transformer block, target-only output
+selection and the eight fused PDD heads. Original H3 retains its dense path.
+The native student orchestration, exact checkpoint build and trained-model
+validation are still required before registering or serving this model.
+
+The CPU geometry oracle compares the transport with the supplied upstream
+functions, including interleaved reference videos and six portrait images:
+
+```bash
+PYTHONPATH=core/builder:apps/benchmark:. python -m \
+  families.minimax_h3.tests.reference_vsa_geometry_oracle \
+  --base-source /path/to/FastVideo/fastvideo/attention/backends/video_sparse_attn.py \
+  --h3-source /path/to/FastVideo/fastvideo/attention/backends/video_sparse_attn_h3.py \
+  --output vsa-geometry.json
+```
+
+Geometry agreement does not establish GPU attention or full-model agreement.
