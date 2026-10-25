@@ -66,43 +66,7 @@ class TrtPlanStreamReader final : public nvinfer1::IStreamReaderV2 {
             if (destination == nullptr)
                 throw std::invalid_argument("Serialized plan stream requires a destination");
 
-            cudaPointerAttributes attributes{};
-            // Supported CUDA runtimes classify ordinary host pointers as
-            // Unregistered. A query failure must not become an unchecked host write.
-            require_cuda(cudaPointerGetAttributes(&attributes, destination));
-            if (attributes.type == cudaMemoryTypeHost ||
-                attributes.type == cudaMemoryTypeUnregistered) {
-                const auto received = source_->read(destination, static_cast<std::size_t>(count));
-                if (received > static_cast<std::size_t>(count))
-                    throw std::runtime_error("Serialized plan source returned excess data");
-                return static_cast<std::int64_t>(received);
-            }
-
-            if (attributes.type != cudaMemoryTypeDevice && attributes.type != cudaMemoryTypeManaged)
-                throw std::runtime_error("Unsupported serialized plan destination memory type");
-
-            if (transfer_ == nullptr)
-                require_cuda(cudaMallocHost(&transfer_, transfer_bytes));
-            std::size_t done = 0;
-            const auto requested = static_cast<std::size_t>(count);
-            while (done < requested) {
-                const auto chunk =
-                    source_->read(transfer_, std::min(transfer_bytes, requested - done));
-                if (chunk == 0)
-                    break;
-                if (chunk > transfer_bytes || chunk > requested - done)
-                    throw std::runtime_error("Serialized plan source returned excess data");
-                pending_stream_ = stream;
-                pending_ = true;
-                require_cuda(cudaMemcpyAsync(static_cast<char*>(destination) + done, transfer_,
-                                             chunk, cudaMemcpyDefault, stream));
-                // Complete this copy before reusing or destroying the pinned
-                // bytes. Synchronize only the stream supplied by TensorRT.
-                require_cuda(cudaStreamSynchronize(stream));
-                pending_ = false;
-                done += chunk;
-            }
-            return static_cast<std::int64_t>(done);
+            return read_destination(destination, static_cast<std::size_t>(count), stream);
         } catch (...) {
             if (lock.owns_lock())
                 error_ = std::current_exception();
@@ -140,6 +104,49 @@ class TrtPlanStreamReader final : public nvinfer1::IStreamReaderV2 {
     }
 
   private:
+    std::int64_t read_destination(void* destination, std::size_t count, cudaStream_t stream) {
+        cudaPointerAttributes attributes{};
+        // Supported CUDA runtimes classify ordinary host pointers as
+        // Unregistered. A query failure must not become an unchecked host write.
+        require_cuda(cudaPointerGetAttributes(&attributes, destination));
+        if (attributes.type == cudaMemoryTypeHost ||
+            attributes.type == cudaMemoryTypeUnregistered) {
+            const auto received = source_->read(destination, count);
+            if (received > count)
+                throw std::runtime_error("Serialized plan source returned excess data");
+            return static_cast<std::int64_t>(received);
+        }
+
+        if (attributes.type != cudaMemoryTypeDevice && attributes.type != cudaMemoryTypeManaged)
+            throw std::runtime_error("Unsupported serialized plan destination memory type");
+
+        return read_device(destination, count, stream);
+    }
+
+    std::int64_t read_device(void* destination, std::size_t count, cudaStream_t stream) {
+        if (transfer_ == nullptr)
+            require_cuda(cudaMallocHost(&transfer_, transfer_bytes));
+        std::size_t done = 0;
+        const auto requested = count;
+        while (done < requested) {
+            const auto chunk = source_->read(transfer_, std::min(transfer_bytes, requested - done));
+            if (chunk == 0)
+                break;
+            if (chunk > transfer_bytes || chunk > requested - done)
+                throw std::runtime_error("Serialized plan source returned excess data");
+            pending_stream_ = stream;
+            pending_ = true;
+            require_cuda(cudaMemcpyAsync(static_cast<char*>(destination) + done, transfer_, chunk,
+                                         cudaMemcpyDefault, stream));
+            // Complete this copy before reusing or destroying the pinned
+            // bytes. Synchronize only the stream supplied by TensorRT.
+            require_cuda(cudaStreamSynchronize(stream));
+            pending_ = false;
+            done += chunk;
+        }
+        return static_cast<std::int64_t>(done);
+    }
+
     static void require_cuda(cudaError_t status) {
         if (status != cudaSuccess)
             throw std::runtime_error(std::string("Serialized plan CUDA transfer failed: ") +
