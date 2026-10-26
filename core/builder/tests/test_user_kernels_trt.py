@@ -343,3 +343,54 @@ def test_cutile_kernel_with_channel_last_inputs(strided):
     if np.allclose(replaced, baseline, rtol=1e-5, atol=1e-6):
         pytest.skip("this TensorRT build ignores the user kernel option")
     np.testing.assert_allclose(replaced, original + 1.0, rtol=1e-5, atol=1e-6)
+
+
+SHAPE5 = (3, 2, 5, 4, 16)
+_T5 = "!nvg.tensor<f32, {[3, 2, 5, 4, 16], stride_order = [4, 3, 2, 1, 0]}>"
+PATTERN_5D = f"""  nvg.graph @fma_5d_pattern(%a: {_T5}, %b: {_T5}, %c: {_T5}) -> {_T5}
+      attributes {{}} {{
+    %m = nvg.mul(%a, %b) : ({_T5}, {_T5}) -> {_T5}
+    %s = nvg.add(%m, %c) : ({_T5}, {_T5}) -> {_T5}
+    nvg.graph_return %s : {_T5}
+  }}"""
+
+
+def test_cutile_kernel_with_rank_above_three():
+    """A 5-D output: grid z holds the block indices of dimensions 2, 3 and 4."""
+    pytest.importorskip("cuda.tile")
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU")
+    from .user_kernel_cutile_fma import fma_5d_tile
+
+    kernel = UserKernel.from_cutile(
+        "user_fma_5d",
+        PATTERN_5D,
+        fma_5d_tile,
+        tiles=(1, 1, 2, 2, 8),
+        ranks=[5, 5, 5, 5],
+    )
+    rng = np.random.default_rng(0)
+    host = [rng.standard_normal(SHAPE5).astype(np.float32) for _ in range(3)]
+    original = host[0] * host[1] + host[2]
+
+    def run(engine):
+        context = engine.create_execution_context()
+        tensors = [torch.from_numpy(h).cuda() for h in host]
+        out = torch.empty(SHAPE5, dtype=torch.float32, device="cuda")
+        for name, tensor in zip("abc", tensors):
+            context.set_tensor_address(name, tensor.data_ptr())
+        context.set_tensor_address("out", out.data_ptr())
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            assert context.execute_async_v3(stream.cuda_stream)
+        stream.synchronize()
+        return out.cpu().numpy()
+
+    baseline = run(_build_2d_engine([SHAPE5] * 3))
+    np.testing.assert_allclose(baseline, original, rtol=1e-5, atol=1e-6)
+    with user_kernels([kernel]):
+        replaced = run(_build_2d_engine([SHAPE5] * 3))
+
+    if np.allclose(replaced, baseline, rtol=1e-5, atol=1e-6):
+        pytest.skip("this TensorRT build ignores the user kernel option")
+    np.testing.assert_allclose(replaced, original + 1.0, rtol=1e-5, atol=1e-6)

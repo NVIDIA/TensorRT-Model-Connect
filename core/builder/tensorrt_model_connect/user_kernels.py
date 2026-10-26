@@ -26,8 +26,11 @@ input can be smaller than the output, for example the operand of a broadcast tha
 names. The last stride of every array is 1, unless the kernel is built with ``strided=True``: then
 the arrays can have any element strides, for example a channel-last input, and the kernel indexes
 them through their strides. ``tiles`` has one entry per output dimension (at most
-3) and is passed to the kernel as constexpr parameters after the arrays. ``ct.bid(d)`` is the block
-index along output dimension ``d``, and the grid is ``ceil(dim / tile)`` per dimension.
+8) and is passed to the kernel as constexpr parameters after the arrays. For rank up to 3,
+``ct.bid(d)`` is the block index along output dimension ``d``, and the grid is
+``ceil(dim / tile)`` per dimension. For rank above 3, ``ct.bid(0)`` and ``ct.bid(1)`` are
+dimensions 0 and 1, and ``ct.bid(2)`` is the row-major flattening of the block indices of
+dimensions 2 and up (last dimension fastest): the kernel splits it with the output shape.
 
 A cubin kernel records the architecture it was built for. ``user_kernels`` raises if the current
 device has another one, because the engine build would otherwise fail with a module load error.
@@ -113,8 +116,8 @@ class UserKernel:
             if ranks is None:
                 raise ValueError("N-D mode needs ranks")
             tile_args = tuple(tiles)
-            if not 1 <= len(tile_args) <= 3 or ranks[-1] != len(tile_args):
-                raise ValueError("tiles needs one entry (at most 3) per output dimension")
+            if not 1 <= len(tile_args) <= 8 or ranks[-1] != len(tile_args):
+                raise ValueError("tiles needs one entry (at most 8) per output dimension")
         if strided and tiles is None:
             raise ValueError("strided needs the N-D mode (tiles and ranks)")
         entry = f"{name}_tile"
@@ -258,8 +261,8 @@ def _tag_pattern(kernel: UserKernel, directory: str | None) -> str:
     else:
         if not kernel.entry or (kernel.tile <= 0 and not kernel.tiles):
             raise ValueError(f"cubin kernel {kernel.name!r} needs an entry and a tile")
-        if kernel.tiles and (len(kernel.tiles) > 3 or min(kernel.tiles) <= 0):
-            raise ValueError(f"tiles of {kernel.name!r} must be 1 to 3 positive numbers")
+        if kernel.tiles and (len(kernel.tiles) > 8 or min(kernel.tiles) <= 0):
+            raise ValueError(f"tiles of {kernel.name!r} must be 1 to 8 positive numbers")
         if directory is None or not _NAME.fullmatch(kernel.name):
             raise ValueError(f"cubin kernel {kernel.name!r} needs a plain name and a directory")
         path = os.path.join(directory, kernel.name + ".cubin")

@@ -5,7 +5,8 @@
 
 ``fma_tile`` works on flat arrays. ``fma_2d_tile`` works on 2-D arrays. ``fma_bcast_tile`` has the
 second input broadcast along rows and the third along columns. ``fma_3d_tile`` works on 3-D arrays
-with any strides, for example channel-last inputs.
+with any strides, for example channel-last inputs. ``fma_5d_tile`` works on 5-D arrays: grid z holds
+the block indices of dimensions 2, 3 and 4.
 
 This module needs ``cuda.tile``. The tests import it only after checking that it is installed.
 It has no ``from __future__ import annotations`` because cuTile reads the annotations.
@@ -55,3 +56,23 @@ def fma_3d_tile(a, b, c, out, TA: ConstInt, TB: ConstInt, TC: ConstInt):
     tb = ct.load(b, index=(i, j, k), shape=(TA, TB, TC), padding_mode=ct.PaddingMode.ZERO)
     tc = ct.load(c, index=(i, j, k), shape=(TA, TB, TC), padding_mode=ct.PaddingMode.ZERO)
     ct.store(out, index=(i, j, k), tile=ta * tb + tc + 1.0)
+
+
+@ct.kernel
+def fma_5d_tile(
+    a, b, c, out, T0: ConstInt, T1: ConstInt, T2: ConstInt, T3: ConstInt, T4: ConstInt
+):
+    i0 = ct.bid(0)
+    i1 = ct.bid(1)
+    z = ct.bid(2)
+    n3 = (out.shape[3] + T3 - 1) // T3
+    n4 = (out.shape[4] + T4 - 1) // T4
+    i4 = z % n4
+    i3 = (z // n4) % n3
+    i2 = z // (n4 * n3)
+    idx = (i0, i1, i2, i3, i4)
+    shape = (T0, T1, T2, T3, T4)
+    ta = ct.load(a, index=idx, shape=shape, padding_mode=ct.PaddingMode.ZERO)
+    tb = ct.load(b, index=idx, shape=shape, padding_mode=ct.PaddingMode.ZERO)
+    tc = ct.load(c, index=idx, shape=shape, padding_mode=ct.PaddingMode.ZERO)
+    ct.store(out, index=idx, tile=ta * tb + tc + 1.0)
