@@ -6,7 +6,8 @@
 A user supplies, per kernel:
   - pattern: MLIR text of an ``nvg.graph`` that describes the ops to replace,
   - source:  kernel source that replaces them (CUDA C++), or
-  - cubin:   a prebuilt kernel, for example a cuTile kernel built by ``UserKernel.from_cutile``,
+  - cubin:   a prebuilt kernel, for example a cuTile kernel built by ``UserKernel.from_cutile`` or a
+             CuTe DSL kernel built by ``UserKernel.from_cutedsl``,
   - block:   threads per block.
 
 ``user_kernels(...)`` writes one registration file and turns the build option on for the
@@ -31,6 +32,13 @@ them through their strides. ``tiles`` has one entry per output dimension (at mos
 ``ceil(dim / tile)`` per dimension. For rank above 3, ``ct.bid(0)`` and ``ct.bid(1)`` are
 dimensions 0 and 1, and ``ct.bid(2)`` is the row-major flattening of the block indices of
 dimensions 2 and up (last dimension fastest): the kernel splits it with the output shape.
+
+Kernel contract (CuTe DSL): ``from_cutedsl`` compiles a ``@cute.jit`` function with example
+tensors that have static layouts (the default of ``from_dlpack``). The cubin takes only the array
+pointers (the pattern inputs in order, then the output); shapes and strides are compiled in, so the
+region must have exactly these static, row-major shapes. The function launches one ``@cute.kernel``.
+Give the launch ``grid`` that the function uses. The block size comes from the cubin
+(``.reqntid``) or from ``block``. Dynamic shared memory and clusters are not supported.
 
 A cubin kernel records the architecture it was built for. ``user_kernels`` raises if the current
 device has another one, because the engine build would otherwise fail with a module load error.
@@ -75,6 +83,58 @@ class UserKernel:
     arch: str = ""
     tiles: tuple[int, ...] = ()
     strided: bool = False
+    grid: tuple[int, ...] = ()
+    # Shapes compiled into a pointer-only cubin: the inputs, then the output.
+    shapes: tuple[tuple[int, ...], ...] = ()
+
+    @classmethod
+    def from_cutedsl(
+        cls,
+        name: str,
+        pattern: str,
+        jit_function,
+        example_args: Sequence,
+        *,
+        grid: Sequence[int],
+        block: int | None = None,
+    ) -> UserKernel:
+        """Build a CuTe DSL kernel into a cubin.
+
+        ``jit_function`` is a ``@cute.jit`` function and ``example_args`` its tensor arguments
+        (the pattern inputs then the output), made with static layouts. ``grid`` is the launch grid
+        that the function uses (x, y, z).
+        """
+        import cutlass.cute as cute
+
+        grid = tuple(int(g) for g in grid)
+        if len(grid) != 3 or min(grid) <= 0:
+            raise ValueError("grid needs three positive numbers")
+        with tempfile.TemporaryDirectory(prefix="cutedsl_") as tmp:
+            options = f"--keep-cubin --keep-ptx --dump-dir={tmp}"
+            cute.compile(jit_function, *example_args, options=options)
+            cubin, ptx, arch = _read_cutedsl_artifacts(tmp)
+        entry, params, reqntid = _parse_ptx_entry(ptx)
+        if params != len(example_args):
+            raise ValueError(
+                f"the kernel takes {params} arguments, but only the {len(example_args)} array "
+                "pointers are allowed: make the layouts static (the default of from_dlpack)"
+            )
+        threads = reqntid or block
+        if threads is None:
+            raise ValueError("the cubin has no fixed block size: pass block")
+        if reqntid and block and block != reqntid:
+            raise ValueError(f"block {block} does not match the cubin block size {reqntid}")
+        shapes = tuple(_static_shape(arg) for arg in example_args)
+        return cls(
+            name,
+            pattern,
+            block=threads,
+            cubin=cubin,
+            entry=entry,
+            arch=arch,
+            grid=grid,
+            shapes=shapes,
+        )
 
     @classmethod
     def from_cutile(
@@ -193,6 +253,44 @@ def cutile_cubin(
     return buffer.getvalue()
 
 
+def _static_shape(tensor) -> tuple[int, ...]:
+    shape = tensor.shape
+    if not all(isinstance(d, int) for d in shape):
+        raise ValueError(f"example tensor needs a flat static shape, got {shape}")
+    return tuple(int(d) for d in shape)
+
+
+def _read_cutedsl_artifacts(directory: str) -> tuple[bytes, str, str]:
+    """Return the cubin, the PTX text and the architecture of the one kernel in ``directory``."""
+    cubins = sorted(f for f in os.listdir(directory) if f.endswith(".cubin"))
+    ptxs = sorted(f for f in os.listdir(directory) if f.endswith(".ptx"))
+    if len(cubins) != 1 or len(ptxs) != 1:
+        raise RuntimeError(f"expected one cubin and one PTX file, found {cubins} and {ptxs}")
+    match = re.search(r"\.(sm_\w+)\.cubin$", cubins[0])
+    with open(os.path.join(directory, cubins[0]), "rb") as f:
+        cubin = f.read()
+    with open(os.path.join(directory, ptxs[0])) as f:
+        ptx = f.read()
+    return cubin, ptx, match.group(1) if match else ""
+
+
+def _parse_ptx_entry(ptx: str) -> tuple[str, int, int | None]:
+    """Return the entry name, the number of parameters and the fixed thread count (or None)."""
+    entries = re.findall(r"\.visible \.entry\s+(\w+)\(([^)]*)\)", ptx)
+    if len(entries) != 1:
+        raise ValueError(f"the function must launch exactly one kernel, found {len(entries)}")
+    name, params = entries[0]
+    count = len(re.findall(r"\.param\b", params))
+    reqntid = re.search(r"\.reqntid\s+(\d+)\s*,\s*(\d+)\s*,\s*(\d+)", ptx)
+    threads = None
+    if reqntid:
+        x, y, z = (int(v) for v in reqntid.groups())
+        if y != 1 or z != 1:
+            raise ValueError("only one-dimensional thread blocks are supported")
+        threads = x
+    return name, count, threads
+
+
 def device_arch() -> str | None:
     """Architecture of the current CUDA device, for example ``sm_90``. None without a device."""
     try:
@@ -259,8 +357,12 @@ def _tag_pattern(kernel: UserKernel, directory: str | None) -> str:
     if kernel.source:
         attrs += f", nvm.user_kernel_source = {_mlir_string(kernel.source)}"
     else:
-        if not kernel.entry or (kernel.tile <= 0 and not kernel.tiles):
-            raise ValueError(f"cubin kernel {kernel.name!r} needs an entry and a tile")
+        if not kernel.entry or (kernel.tile <= 0 and not kernel.tiles and not kernel.grid):
+            raise ValueError(f"cubin kernel {kernel.name!r} needs an entry and a tile or a grid")
+        if kernel.grid and not kernel.shapes:
+            raise ValueError(f"cubin kernel {kernel.name!r} with a grid needs shapes")
+        if kernel.grid and (len(kernel.grid) != 3 or min(kernel.grid) <= 0):
+            raise ValueError(f"grid of {kernel.name!r} must be three positive numbers")
         if kernel.tiles and (len(kernel.tiles) > 8 or min(kernel.tiles) <= 0):
             raise ValueError(f"tiles of {kernel.name!r} must be 1 to 8 positive numbers")
         if directory is None or not _NAME.fullmatch(kernel.name):
@@ -274,7 +376,13 @@ def _tag_pattern(kernel: UserKernel, directory: str | None) -> str:
         )
         if kernel.strided:
             attrs += ", nvm.user_kernel_strided = true"
-        if kernel.tiles:
+        if kernel.grid:
+            shapes = ",".join("x".join(map(str, s)) for s in kernel.shapes)
+            attrs += (
+                f", nvm.user_kernel_grid = array<i64: {', '.join(map(str, kernel.grid))}>"
+                f", nvm.user_kernel_shapes = {_mlir_string(shapes)}"
+            )
+        elif kernel.tiles:
             attrs += f", nvm.user_kernel_tiles = array<i64: {', '.join(map(str, kernel.tiles))}>"
         else:
             attrs += f", nvm.user_kernel_tile = {kernel.tile} : i64"

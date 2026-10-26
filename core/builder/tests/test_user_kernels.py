@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import os
 
 import pytest
@@ -134,3 +135,37 @@ def test_user_kernels_context_checks_the_architecture(monkeypatch):
         with uk.user_kernels([_cubin_kernel("sm_120")]):
             pass
     assert "__LUNOWUD" not in os.environ or "user_kernels" not in os.environ["__LUNOWUD"]
+
+
+PTX = """
+.visible .entry k_entry_0(
+	.param .align 8 .b8 k_entry_0_param_0[8],
+	.param .align 8 .b8 k_entry_0_param_1[8]
+)
+.reqntid 128, 1, 1
+{
+"""
+
+
+def test_cutedsl_ptx_entry_is_parsed():
+    assert uk._parse_ptx_entry(PTX) == ("k_entry_0", 2, 128)
+    assert uk._parse_ptx_entry(PTX.replace(".reqntid 128, 1, 1", ""))[2] is None
+    with pytest.raises(ValueError, match="one-dimensional"):
+        uk._parse_ptx_entry(PTX.replace("128, 1, 1", "32, 4, 1"))
+    with pytest.raises(ValueError, match="exactly one kernel"):
+        uk._parse_ptx_entry(PTX + PTX)
+
+
+def test_grid_kernel_registration_has_grid_and_shapes(tmp_path):
+    kernel = uk.UserKernel(
+        "k", PATTERN, block=128, cubin=b"\x7fELF", entry="e", grid=(2, 1, 1),
+        shapes=((8, 64), (8, 64)),
+    )
+    text = uk.registration_text([kernel], str(tmp_path))
+    assert "nvm.user_kernel_grid = array<i64: 2, 1, 1>" in text
+    assert 'nvm.user_kernel_shapes = "8x64,8x64"' in text
+    assert "nvm.user_kernel_tile" not in text
+    with pytest.raises(ValueError, match="needs shapes"):
+        uk.registration_text(
+            [dataclasses.replace(kernel, shapes=())], str(tmp_path)
+        )

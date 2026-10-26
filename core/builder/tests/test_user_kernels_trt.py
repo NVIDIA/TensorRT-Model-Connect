@@ -394,3 +394,46 @@ def test_cutile_kernel_with_rank_above_three():
     if np.allclose(replaced, baseline, rtol=1e-5, atol=1e-6):
         pytest.skip("this TensorRT build ignores the user kernel option")
     np.testing.assert_allclose(replaced, original + 1.0, rtol=1e-5, atol=1e-6)
+
+
+def _cutedsl_kernel(shape, pattern=PATTERN):
+    pytest.importorskip("cutlass.cute")
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA GPU")
+    from cutlass.cute.runtime import from_dlpack
+
+    from .user_kernel_cutedsl_fma import THREADS, fma_run
+
+    arrays = [torch.empty(shape, dtype=torch.float32, device="cuda") for _ in range(4)]
+    example = [from_dlpack(t, assumed_align=16) for t in arrays]
+    numel = int(np.prod(shape))
+    grid = ((numel + THREADS - 1) // THREADS, 1, 1)
+    return UserKernel.from_cutedsl("user_fma_cute", pattern, fma_run, example, grid=grid)
+
+
+def test_cutedsl_kernel_replaces_pattern():
+    """A CuTe DSL kernel with static 2-D layouts replaces the pattern."""
+    kernel = _cutedsl_kernel((R2, C2))
+    rng = np.random.default_rng(0)
+    host = [rng.standard_normal((R2, C2)).astype(np.float32) for _ in range(3)]
+    original = host[0] * host[1] + host[2]
+
+    baseline = _run_2d(_build_2d_engine([(R2, C2)] * 3), host)
+    np.testing.assert_allclose(baseline, original, rtol=1e-5, atol=1e-6)
+    with user_kernels([kernel]):
+        replaced = _run_2d(_build_2d_engine([(R2, C2)] * 3), host)
+
+    if np.allclose(replaced, baseline, rtol=1e-5, atol=1e-6):
+        pytest.skip("this TensorRT build ignores the user kernel option")
+    np.testing.assert_allclose(replaced, original + 1.0, rtol=1e-5, atol=1e-6)
+
+
+def test_cutedsl_kernel_with_other_shapes_is_rejected():
+    """The cubin has its shapes compiled in, so the compiler refuses a region with other shapes.
+
+    The engine build fails and does not compute with the wrong layout.
+    """
+    kernel = _cutedsl_kernel((R2, C2))
+    shape = (R2 // 2, C2)
+    with user_kernels([kernel]), pytest.raises(AssertionError, match="engine build failed"):
+        _build_2d_engine([shape] * 3)
