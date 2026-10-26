@@ -39,6 +39,7 @@ from .checkpoint_mapper import (
 from .parallel import ParallelConfig, normalize_parallel_config
 from .decoder_tp_builder import build_qwen_vl_tp_decoder_engine
 from .lora import DynamicLoraConfig
+from .quantization import calibrate_qwen_vl, is_quantized_checkpoint
 from .default_decoder import build_standard_decoder_engine
 from . import graph_ops
 from . import graph_blocks
@@ -178,10 +179,11 @@ class _QwenVLModel:
         self,
         model_dir: str,
         config: ModelConfig,
+        quant_ctx=None,
     ) -> WeightDict:
         if _is_qwen3_vl(config):
             return _load_qwen3_vl_weights(model_dir, config)
-        return load_standard_weights(model_dir, config)
+        return load_standard_weights(model_dir, config, quant_ctx=quant_ctx)
 
     def build_engine(
         self,
@@ -1130,20 +1132,44 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.task != "vision_language_generation":
         raise ValueError("qwen_vl supports only task=vision_language_generation")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Qwen-VL supports only non-quantized builds")
+    if request.quantization not in {None, "none", "fp8", "nvfp4"}:
+        raise NotImplementedError(f"qwen_vl does not support quantization={request.quantization!r}")
+    quantized = request.quantization in {"fp8", "nvfp4"}
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if not ("qwen" in str(config.model_type).lower() and "vl" in str(config.model_type).lower()):
         raise ValueError(f"Qwen-VL does not support model_type={config.model_type!r}")
     precision = str(request.precision).lower()
+    if quantized:
+        if str(config.model_type).lower() != "qwen2_5_vl" or _is_qwen3_vl(config):
+            raise NotImplementedError("quantized qwen_vl builds support Qwen2.5-VL only")
+        if precision != "fp16":
+            raise NotImplementedError("quantized qwen_vl builds require fp16 precision")
+        if int(request.tensor_parallel_size) != 1:
+            raise NotImplementedError("quantized qwen_vl builds do not support tensor parallelism")
+        if request.fp32_layers:
+            raise NotImplementedError("quantized qwen_vl builds do not support fp32_layers")
+    elif is_quantized_checkpoint(model_dir):
+        raise ValueError("this checkpoint is quantized; build it with --quantization fp8 or nvfp4")
     max_length = int(request.max_sequence_length or _default_sequence_length(str(model_dir), config))
     parallel = ParallelConfig(tp_size=int(request.tensor_parallel_size))
     parallel.validate()
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_fp32_layers"] = tuple(request.fp32_layers)
+    if quantized:
+        # The fp16 decoder engines with native IAttention do not compile on TensorRT 11.4,
+        # while the FP32-score decomposed graph builds on every release. An explicit
+        # model-level option still wins.
+        build_options = config.raw.setdefault("_family_build_options", {})
+        if isinstance(build_options, dict):
+            decoder_options = build_options.setdefault("qwen_vl_decoder", {})
+            decoder_options.setdefault("decode_attention", "decomposed")
+            decoder_options.setdefault("prefill_attention", "decomposed")
     model = _QwenVLModel()
-    weights = model.load_weights(str(model_dir), config)
+    quant_ctx = None
+    if quantized:
+        quant_ctx = calibrate_qwen_vl(model_dir, config, graph_ops, request.quantization)
+    weights = model.load_weights(str(model_dir), config, quant_ctx=quant_ctx)
     writer.set_header(family="qwen_vl", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -1154,7 +1180,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                     weights,
                     max_length,
                     precision=precision,
-                    quant_ctx=None,
+                    quant_ctx=quant_ctx,
                     verbose=request.verbose,
                     parallel_config=parallel.for_rank(rank),
                 ),
@@ -1167,7 +1193,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=request.verbose,
             parallel_config=parallel,
         )
@@ -1177,7 +1203,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=request.verbose,
             parallel_config=parallel,
         )
