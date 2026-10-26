@@ -29,7 +29,7 @@ _DEFAULT_MAX_SEQUENCE_LENGTH = 4096
 _DEFAULT_PREFILL_SEQ_LEN = 128
 # Dynamic prefill engine: largest call and the token count the engine is tuned for.
 _DEFAULT_DYNAMIC_PREFILL_MAX_LEN = 1024
-_DEFAULT_DYNAMIC_PREFILL_OPT_LEN = 256
+_DEFAULT_DYNAMIC_PREFILL_OPT_LEN = 512
 
 
 def _resolve_lengths(

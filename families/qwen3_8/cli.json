@@ -146,7 +146,7 @@
             "--prefill-opt-len"
           ],
           "type": "int",
-          "help": "Token count the dynamic prefill engine is tuned for (default 256)"
+          "help": "Token count the dynamic prefill engine is tuned for (default 512)"
         },
         {
           "name": "mtp_seq_len",
