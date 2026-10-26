@@ -63,7 +63,7 @@ def _pooling_head(network, hidden, weights, cfg, *, dtype=np.float32):
     return g.add_sum(network, attended, inner)
 
 
-def build_vision_tower(network, pixel_values, weights, cfg, *, dtype=np.float32):
+def build_vision_tower(network, pixel_values, weights, cfg, *, dtype=np.float32, quant=None):
     """``[1, 3, H, W]`` pixels to an unnormalised ``[1, width]`` embedding."""
     width = cfg["hidden_size"]
     patch = cfg["patch_size"]
@@ -83,7 +83,8 @@ def build_vision_tower(network, pixel_values, weights, cfg, *, dtype=np.float32)
                                dtype=dtype)
     hidden = g.add_sum(network, hidden, positions)
 
-    hidden = encoder_builder.build_layers(network, hidden, weights, PREFIX, cfg, dtype=dtype)
+    hidden = encoder_builder.build_layers(network, hidden, weights, PREFIX, cfg, dtype=dtype,
+                                          quant=quant)
     hidden = g.add_layer_norm(network, hidden, weights[f"{PREFIX}.post_layernorm.weight"],
                               weights[f"{PREFIX}.post_layernorm.bias"], cfg["eps"])
     return _pooling_head(network, hidden, weights, cfg, dtype=dtype)
