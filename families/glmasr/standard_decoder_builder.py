@@ -28,6 +28,7 @@ from . import graph_ops
 from . import graph_blocks
 from .config import ModelConfig
 from .dual_profile_decoder_builder import build_dual_profile_decoder_engine
+from .quantization import configure_fp8_build
 from .utils import const_in_work_dtype
 
 
@@ -197,6 +198,7 @@ def build_standard_decoder_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
+    configure_fp8_build(trt_config, quant_ctx)
 
     # Precision configuration
     if precision == "fp16":
