@@ -176,8 +176,12 @@ class _QwenImageModel:
         precision: str = "bf16",
         verbose: bool = False,
         max_batch_size: int = 1,
+        quantization: str | None = None,
     ) -> dict:
         """Build TRT engines and bundle blobs for a Qwen-Image T2I checkpoint.
+
+        ``quantization="fp8"`` quantizes the MMDiT denoiser to FP8 (the text encoder and
+        VAE stay as they are).
 
         Produces:
           * Bundle config.json (``qwen_image_bundle_config``).
@@ -388,6 +392,7 @@ class _QwenImageModel:
                 verbose=verbose,
                 max_batch_size=dit_mbs,
                 opt_batch_size=dit_opt,
+                quantization=quantization,
             )
             dit_engine_bytes = dit_plan_path.read_bytes()
         finally:
@@ -487,8 +492,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError("Qwen-Image requires precision=bf16")
     if request.tensor_parallel_size != 1:
         raise NotImplementedError("Qwen-Image requires tensor_parallel_size=1")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Qwen-Image does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"Qwen-Image does not support quantization={request.quantization!r}"
+        )
+    if request.quantization == "fp8" and request.task != "image_generation":
+        raise NotImplementedError("Qwen-Image FP8 supports task=image_generation only")
     if request.fp32_layers:
         raise NotImplementedError("Qwen-Image does not support fp32_layers")
     if request.mtp_seq_len is not None:
@@ -523,6 +532,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         precision=request.precision,
         verbose=request.verbose,
         max_batch_size=request.max_batch_size,
+        quantization=request.quantization,
     )
     runtime = json.loads(components["config_json"])
     detected_task = "image_edit" if runtime["task_mode"] == "edit" else "image_generation"
