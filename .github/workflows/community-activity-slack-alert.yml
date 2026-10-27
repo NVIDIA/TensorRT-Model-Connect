@@ -40,7 +40,7 @@ jobs:
   notify-ready-pr:
     if: >-
       github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
-      github.event.workflow_run.name == 'Community CI' &&
+      contains(github.event.workflow_run.display_title, ' · community CI · head ') &&
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
