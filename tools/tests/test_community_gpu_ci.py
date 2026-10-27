@@ -446,7 +446,7 @@ def test_gpu_run_continues_after_one_family_fails(
         lambda native_build, plan, _repository: native_build / plan.family / "runtime",
     )
 
-    with pytest.raises(CiError, match="alpha: alpha exploded"):
+    with pytest.raises(community_gpu_ci.CommunityGpuFamilyError, match="alpha: alpha exploded"):
         community_gpu_ci.run(
             tmp_path,
             {
@@ -471,6 +471,58 @@ def test_gpu_run_continues_after_one_family_fails(
     ]
 
 
+def test_community_gpu_main_returns_family_failure_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A deterministic family error exits with EXIT_FAMILY_FAILURE (2)."""
+
+    def _failing_run(_repository: Path, _env: dict[str, str]) -> None:
+        raise community_gpu_ci.CommunityGpuFamilyError(
+            "Community GPU family failures: alpha: checkpoint staging exited 1"
+        )
+
+    monkeypatch.setattr(community_gpu_ci, "run", _failing_run)
+
+    exit_code = community_gpu_ci.main()
+
+    assert exit_code == community_gpu_ci.EXIT_FAMILY_FAILURE
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "ERROR: Community GPU family failures: alpha: checkpoint staging exited 1" in captured.err
+
+
+def test_community_gpu_main_returns_setup_failure_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An environment, setup, or generic CiError exits with EXIT_SETUP_FAILURE (1)."""
+
+    def _setup_error(_repository: Path, _env: dict[str, str]) -> None:
+        raise CiError("Docker daemon unreachable")
+
+    monkeypatch.setattr(community_gpu_ci, "run", _setup_error)
+
+    exit_code = community_gpu_ci.main()
+
+    assert exit_code == community_gpu_ci.EXIT_SETUP_FAILURE
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert "ERROR: Docker daemon unreachable" in captured.err
+
+
+def test_community_gpu_main_returns_success_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean Community GPU run exits with EXIT_SUCCESS (0)."""
+    monkeypatch.setattr(community_gpu_ci, "run", lambda _repository, _env: None)
+
+    exit_code = community_gpu_ci.main()
+
+    assert exit_code == community_gpu_ci.EXIT_SUCCESS
+    assert exit_code == 0
+
+
 def test_brev_wrapper_caches_application_failure_without_retry(tmp_path: Path) -> None:
     """A nonzero remote application is reported once without Brev rerunning it."""
     from tools import brev_exec
@@ -492,6 +544,30 @@ def test_brev_wrapper_caches_application_failure_without_retry(tmp_path: Path) -
     assert second.stdout == f"{marker}17\n"
     assert counter.read_text(encoding="utf-8") == "run"
     assert brev_exec.parse_remote_status(first.stdout.splitlines(), marker) == 17
+
+
+def test_brev_wrapper_caches_family_failure_exit_code(tmp_path: Path) -> None:
+    """Remote application exit 2 (family failure) is cached and preserved by Brev wrapper."""
+    from tools import brev_exec
+
+    app = tmp_path / "app.sh"
+    result_file = tmp_path / "result"
+    app.write_text(f"#!/bin/sh\nexit {community_gpu_ci.EXIT_FAMILY_FAILURE}\n", encoding="utf-8")
+    app.chmod(0o755)
+    marker = "__TRTMC_FAMILY_EXIT__="
+    wrapper = brev_exec.remote_wrapper((str(app),), result_file, marker)
+
+    first = subprocess.run(["bash", "-c", wrapper], check=False, capture_output=True, text=True)
+    second = subprocess.run(["bash", "-c", wrapper], check=False, capture_output=True, text=True)
+
+    assert first.returncode == 0
+    assert second.returncode == 0
+    assert first.stdout.endswith(f"{marker}2\n")
+    assert second.stdout == f"{marker}2\n"
+    assert (
+        brev_exec.parse_remote_status(first.stdout.splitlines(), marker)
+        == community_gpu_ci.EXIT_FAMILY_FAILURE
+    )
 
 
 def test_eagle_vlm_declares_remote_processor_http_dependency() -> None:

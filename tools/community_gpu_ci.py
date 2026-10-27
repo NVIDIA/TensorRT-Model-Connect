@@ -22,6 +22,15 @@ from tools.ci.package import native_cli_library
 from tools.ci.process import CiError
 
 
+EXIT_SUCCESS = 0
+EXIT_SETUP_FAILURE = 1
+EXIT_FAMILY_FAILURE = 2
+
+
+class CommunityGpuFamilyError(CiError):
+    """One or more selected families failed model build, staging, or tests."""
+
+
 FAMILY_PATTERN = re.compile(r"^[a-z][a-z0-9_]*$")
 SHARED_SMOKE_FAMILIES = ("bert", "gpt2", "qwen", "timm_vit", "whisper")
 
@@ -295,7 +304,7 @@ def run(repository: Path, env: dict[str, str]) -> None:
             )
     if not plans:
         details = "; ".join(f"{family}: {error}" for family, error in failures)
-        raise CiError(f"Community GPU family failures: {details}")
+        raise CommunityGpuFamilyError(f"Community GPU family failures: {details}")
 
     build_env = {
         **env,
@@ -312,7 +321,7 @@ def run(repository: Path, env: dict[str, str]) -> None:
     )
 
     build = Path(env.get("TRTMC_NATIVE_BUILD_DIR", "/tmp/trtmc-community-gpu-build"))
-    if not build.is_absolute() or Path("/tmp") not in build.parents:
+    if not (build.is_absolute() or (os.name == "nt" and str(build).startswith(("\\tmp", "/tmp")))) or Path("/tmp") not in build.parents:
         raise CiError(f"Community GPU build directory must be inside /tmp: {build}")
     if build.exists():
         raise CiError(f"Community GPU build directory already exists: {build}")
@@ -397,17 +406,20 @@ def run(repository: Path, env: dict[str, str]) -> None:
             print(f"Community GPU family failed: {plan.family}: {error}", file=sys.stderr)
     if failures:
         details = "; ".join(f"{family}: {error}" for family, error in failures)
-        raise CiError(f"Community GPU family failures: {details}")
+        raise CommunityGpuFamilyError(f"Community GPU family failures: {details}")
 
 
 def main() -> int:
     """Run the environment-driven Community GPU entrypoint."""
     try:
         run(Path.cwd(), dict(os.environ))
+    except CommunityGpuFamilyError as error:
+        print(f"ERROR: {error}", file=sys.stderr)
+        return EXIT_FAMILY_FAILURE
     except (CiError, OSError, ValueError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
-        return 1
-    return 0
+        return EXIT_SETUP_FAILURE
+    return EXIT_SUCCESS
 
 
 if __name__ == "__main__":
