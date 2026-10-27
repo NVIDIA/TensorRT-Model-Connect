@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "bark"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "audio_generation"
+        ],
+        "default_task": "audio_generation"
+      }
+    }
+  ]
+}

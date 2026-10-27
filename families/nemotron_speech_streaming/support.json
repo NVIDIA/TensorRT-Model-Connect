@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "enc_dec_rnnt_bpe",
+            "fastconformer_cacheaware_rnnt",
+            "nemotron3_5_asr",
+            "nemotron_asr_streaming",
+            "nemotron_speech_streaming",
+            "nemotronspeechstreaming",
+            "rnnt_bpe"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "transcription_streaming"
+        ],
+        "default_task": "transcription_streaming"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "Nemotron3_5AsrForRNNT"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "transcription_streaming"
+        ],
+        "default_task": "transcription_streaming"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "Nemotron3_5AsrForRNNT"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "transcription_streaming"
+        ],
+        "default_task": "transcription_streaming"
+      }
+    }
+  ]
+}

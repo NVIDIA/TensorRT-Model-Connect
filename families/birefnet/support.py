@@ -3,11 +3,7 @@
 
 """Family-owned model and task support for BiRefNet."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    architectures=("BiRefNet",),
-    tasks=("segmentation",),
-    default_task="segmentation",
-)
+describe = support_from_json(__file__)

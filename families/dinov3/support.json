@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "dinov3_vit",
+            "dinov3_convnext",
+            "vit_small_patch16_dinov3_qkvb"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_features"
+        ],
+        "default_task": "image_features"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "vit_small_patch16_dinov3_qkvb"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_features"
+        ],
+        "default_task": "image_features"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "vit_small_patch16_dinov3_qkvb"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_features"
+        ],
+        "default_task": "image_features"
+      }
+    }
+  ]
+}

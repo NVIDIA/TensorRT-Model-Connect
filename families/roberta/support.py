@@ -3,11 +3,7 @@
 
 """Family-owned model and task support for roberta."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    model_types=("camembert", "roberta", "xlm-roberta"),
-    tasks=("embedding", "encoding", "reranking"),
-    default_task="encoding",
-)
+describe = support_from_json(__file__)

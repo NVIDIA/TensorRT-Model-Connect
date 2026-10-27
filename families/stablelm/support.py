@@ -3,11 +3,7 @@
 
 """Family-owned model and task support for stablelm."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    model_types=("stablelm",),
-    tasks=("text_generation",),
-    default_task="text_generation",
-)
+describe = support_from_json(__file__)
