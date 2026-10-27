@@ -312,6 +312,12 @@ def _cosine(left: list[float], right: list[float]) -> float:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    # A quantized case states its own tolerances in the manifest: the defaults above
+    # are sized to catch structural errors in a float32 build and are far tighter than
+    # FP8 rounding. A case without them keeps the defaults.
+    embedding_tolerance = float(case.get("embedding_tolerance", _EMBEDDING_TOLERANCE))
+    logit_tolerance = float(case.get("logit_tolerance", _LOGIT_TOLERANCE))
+    cosine_floor = float(case.get("cosine_floor", _COSINE_FLOOR))
     model_dir = _model_dir(manifest)
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
@@ -324,8 +330,8 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
                                      str(_asset(case["test_image"])))
     image_delta = _max_abs(native_image, reference_image)
     image_cosine = _cosine(native_image, reference_image)
-    assert image_cosine >= _COSINE_FLOOR, f"image embedding cosine {image_cosine}"
-    assert image_delta <= _EMBEDDING_TOLERANCE, (
+    assert image_cosine >= cosine_floor, f"image embedding cosine {image_cosine}"
+    assert image_delta <= embedding_tolerance, (
         f"image embedding differs from the reference by {image_delta}"
     )
 
@@ -334,9 +340,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         native = _native_embedding(binary, runtime_root, bundle, case, "--task",
                                    "text_to_embedding", "--text", str(text))
         cosine = _cosine(native, expected)
-        assert cosine >= _COSINE_FLOOR, f"text embedding cosine {cosine} for {text!r}"
+        assert cosine >= cosine_floor, f"text embedding cosine {cosine} for {text!r}"
         delta = _max_abs(native, expected)
-        assert delta <= _EMBEDDING_TOLERANCE, (
+        assert delta <= embedding_tolerance, (
             f"text embedding for {text!r} differs from the reference by {delta}"
         )
         text_deltas.append(delta)
@@ -356,7 +362,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         assert 0.0 <= score <= 1.0, f"{FAMILY} returned a score outside [0, 1]: {score}"
         expected_logit = scale * sum(a * b for a, b in zip(reference_image, expected_text)) + bias
         delta = abs(_logit(score) - expected_logit)
-        assert delta <= _LOGIT_TOLERANCE, (
+        assert delta <= logit_tolerance, (
             f"relevance logit for {text!r} differs from the reference by {delta}"
         )
         logit_deltas.append(delta)

@@ -24,6 +24,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import config as config_module, text_builder, vision_builder
+from .quantization import calibrate_siglip
 
 _SUPPORTED_TASKS = ("image_to_embedding", "text_to_embedding", "text_image_to_relevance")
 
@@ -92,7 +93,10 @@ def _pad_token_id(model_dir: Path) -> int:
     raise ValueError(f"siglip pad token {pad_token!r} is not in the vocabulary")
 
 
-def _builder(verbose):
+_DUAL_GEMM_KNOB = "peep:match_dual_gemm"
+
+
+def _builder(verbose, quant_ctx=None):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -101,6 +105,13 @@ def _builder(verbose):
     # TF32 caps a conv-and-matmul graph near 0.99998 cosine by default,
     # which hides real graph error behind a plausible-looking number.
     config.clear_flag(trt.BuilderFlag.TF32)
+    if quant_ctx is not None:
+        # Keep layer names so the plan inspector shows which kernels run.
+        config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+        if quant_ctx.has_fp8_weights and _DUAL_GEMM_KNOB in getattr(config, "all_build_routes", ""):
+            # TensorRT's fused dual-GEMM kernel fails to compile with scalar-scale FP8.
+            # The route is set only when this TensorRT build lists the knob.
+            config.build_route = f"-{_DUAL_GEMM_KNOB}=off"
     return builder, network, config
 
 
@@ -111,27 +122,27 @@ def _serialize(builder, network, config, what):
     return bytes(plan)
 
 
-def build_vision_engine(weights, cfg, *, verbose=False) -> bytes:
-    builder, network, config = _builder(verbose)
+def build_vision_engine(weights, cfg, *, verbose=False, quant_ctx=None) -> bytes:
+    builder, network, config = _builder(verbose, quant_ctx)
     # fp32 throughout. build() refuses every other precision and records the
     # measurement behind that refusal.
     work_np = np.float32
     size = cfg["vision"]["image_size"]
     source = network.add_input("pixel_values", trt.float32, (1, 3, size, size))
     embeds = vision_builder.build_vision_tower(network, source, weights, cfg["vision"],
-                                               dtype=work_np)
+                                               dtype=work_np, quant=quant_ctx)
     embeds.name = "image_embeds"
     network.mark_output(embeds)
     return _serialize(builder, network, config, "vision")
 
 
-def build_text_engine(weights, cfg, *, verbose=False) -> bytes:
-    builder, network, config = _builder(verbose)
+def build_text_engine(weights, cfg, *, verbose=False, quant_ctx=None) -> bytes:
+    builder, network, config = _builder(verbose, quant_ctx)
     work_np = np.float32
     max_text_len = cfg["text"]["max_text_len"]
     input_ids = network.add_input("input_ids", trt.int32, (max_text_len,))
     embeds = text_builder.build_text_tower(network, input_ids, weights, cfg["text"],
-                                           dtype=work_np)
+                                           dtype=work_np, quant=quant_ctx)
     embeds.name = "text_embeds"
     network.mark_output(embeds)
     return _serialize(builder, network, config, "text")
@@ -153,8 +164,9 @@ def build(request, writer) -> None:
         raise NotImplementedError("siglip does not support context parallelism")
     if request.video_num_frames is not None:
         raise NotImplementedError("siglip does not support video_num_frames")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("siglip does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"siglip supports quantization fp8 or none; got {request.quantization!r}")
     if request.fp32_layers:
         raise NotImplementedError("siglip does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -204,11 +216,17 @@ def build(request, writer) -> None:
     logit_scale = float(math.exp(float(np.asarray(weights["logit_scale"]).reshape(()))))
     logit_bias = float(np.asarray(weights["logit_bias"]).reshape(()))
 
+    # fp8: the projections are quantized from the original checkpoint, so the weights
+    # above stay float32 and only the Q/DQ constants of quantized projections are new.
+    quant_ctx = None
+    if request.quantization == "fp8":
+        quant_ctx = calibrate_siglip(weights, cfg, "fp8")
+
     writer.set_header(family="siglip", task=request.task, backend=request.backend)
     writer.add_bytes("vision.plan", build_vision_engine(
-        weights, cfg, verbose=bool(request.verbose)))
+        weights, cfg, verbose=bool(request.verbose), quant_ctx=quant_ctx))
     writer.add_bytes("text.plan", build_text_engine(
-        weights, cfg, verbose=bool(request.verbose)))
+        weights, cfg, verbose=bool(request.verbose), quant_ctx=quant_ctx))
     writer.add_bytes("tokenizer.json", tokenizer.read_bytes())
     writer.add_json(
         "runtime.json",
