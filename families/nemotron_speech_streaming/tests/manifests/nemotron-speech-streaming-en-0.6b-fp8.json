@@ -1,0 +1,20 @@
+{
+  "name": "nemotron-speech-streaming-en-0.6b-fp8",
+  "hf_id": "nvidia/nemotron-speech-streaming-en-0.6b",
+  "hf_revision": "ebe59e5a817142986528bbbee5dba8db7b38ed50",
+  "bundle": "nemotron-speech-streaming-en-0.6b-fp8.bundle",
+  "family": "nemotron_speech_streaming",
+  "task": "transcription_streaming",
+  "precision": "fp16",
+  "quantization": "fp8",
+  "testcases": [
+    {
+      "name": "nemotron-speech-streaming-en-0.6b-fp8",
+      "premerge": true,
+      "test_input_audio": "data/Recording.wav",
+      "chunk_ms": 1120
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 128
+}

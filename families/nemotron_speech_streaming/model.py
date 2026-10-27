@@ -44,6 +44,7 @@ from .canary_encoder_helpers import (
     _to_np,
 )
 from .predictor_tp_builder import build_nemotron_streaming_tp_predictor
+from .quantization import calibrate_nemotron, configure_quantized_build, make_matmul_fn
 
 
 if TYPE_CHECKING:
@@ -250,7 +251,9 @@ def _add_streaming_rel_pos_attention(
     eps,
     enc_mask,
     dtype=np.float32,
+    quant_ctx=None,
 ):
+    matmul = make_matmul_fn(network, dtype, quant_ctx, graph_ops)
     key_len = cache_len + query_len
     pos_len = 2 * key_len - 1
     normed = graph_ops.add_layer_norm(
@@ -269,27 +272,21 @@ def _add_streaming_rel_pos_attention(
 
     q = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, hidden, weights[f"{pfx}.w_q"], dtype=dtype
-        ),
+        matmul(normed, hidden, hidden, weights[f"{pfx}.w_q"], f"{pfx}.w_q"),
         hidden,
         weights[f"{pfx}.b_q"],
         dtype=dtype,
     )
     k = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, kv, hidden, hidden, weights[f"{pfx}.w_k"], dtype=dtype
-        ),
+        matmul(kv, hidden, hidden, weights[f"{pfx}.w_k"], f"{pfx}.w_k"),
         hidden,
         weights[f"{pfx}.b_k"],
         dtype=dtype,
     )
     v = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, kv, hidden, hidden, weights[f"{pfx}.w_v"], dtype=dtype
-        ),
+        matmul(kv, hidden, hidden, weights[f"{pfx}.w_v"], f"{pfx}.w_v"),
         hidden,
         weights[f"{pfx}.b_v"],
         dtype=dtype,
@@ -356,9 +353,7 @@ def _add_streaming_rel_pos_attention(
     af.reshape_dims = (query_len, hidden)
     out = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, af.get_output(0), hidden, hidden, weights[f"{pfx}.w_o"], dtype=dtype
-        ),
+        matmul(af.get_output(0), hidden, hidden, weights[f"{pfx}.w_o"], f"{pfx}.w_o"),
         hidden,
         weights[f"{pfx}.b_o"],
         dtype=dtype,
@@ -479,8 +474,11 @@ def _add_streaming_conformer_block(
     enc_mask,
     conv_norm_type,
     dtype=np.float32,
+    quant_ctx=None,
 ):
-    ffn1 = _add_half_ffn(network, hs, weights, f"{pfx}.ff1", hidden, ffn, eps, dtype=dtype)
+    ffn1 = _add_half_ffn(
+        network, hs, weights, f"{pfx}.ff1", hidden, ffn, eps, dtype=dtype, quant_ctx=quant_ctx
+    )
     hs = network.add_elementwise(hs, ffn1, trt.ElementWiseOperation.SUM).get_output(0)
     attn, next_channel = _add_streaming_rel_pos_attention(
         network,
@@ -497,6 +495,7 @@ def _add_streaming_conformer_block(
         eps,
         enc_mask,
         dtype=dtype,
+        quant_ctx=quant_ctx,
     )
     hs = network.add_elementwise(hs, attn, trt.ElementWiseOperation.SUM).get_output(0)
     conv, next_time = _add_streaming_conv_module(
@@ -513,7 +512,9 @@ def _add_streaming_conformer_block(
         dtype=dtype,
     )
     hs = network.add_elementwise(hs, conv, trt.ElementWiseOperation.SUM).get_output(0)
-    ffn2 = _add_half_ffn(network, hs, weights, f"{pfx}.ff2", hidden, ffn, eps, dtype=dtype)
+    ffn2 = _add_half_ffn(
+        network, hs, weights, f"{pfx}.ff2", hidden, ffn, eps, dtype=dtype, quant_ctx=quant_ctx
+    )
     hs = network.add_elementwise(hs, ffn2, trt.ElementWiseOperation.SUM).get_output(0)
     out = graph_ops.add_layer_norm(
         network,
@@ -548,6 +549,7 @@ def _build_streaming_encoder(
     *,
     first_step: bool = False,
     precision: str = "fp32",
+    quant_ctx=None,
     verbose: bool = False,
 ) -> bytes:
     hidden = int(weights["_hidden"])
@@ -579,6 +581,7 @@ def _build_streaming_encoder(
     config = builder.create_builder_config()
     config.builder_optimization_level = 1
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+    configure_quantized_build(config, quant_ctx)
 
     eps = graph_ops.add_constant(
         network, (1, 1), np.array([1e-5], dtype=work_np_dtype), dtype=work_np_dtype
@@ -641,6 +644,7 @@ def _build_streaming_encoder(
             enc_mask,
             conv_norm_type=conv_norm_type,
             dtype=work_np_dtype,
+            quant_ctx=quant_ctx,
         )
         next_channels.append(next_channel)
         next_times.append(next_time)
@@ -1095,10 +1099,13 @@ class _NemotronSpeechStreamingModel:
         weights: WeightDict,
         *,
         precision: str = "fp32",
+        quant_ctx=None,
         verbose: bool = False,
     ) -> bytes | None:
         del model_dir
-        return _build_encoder(config, weights, precision=precision, verbose=verbose)
+        return _build_encoder(
+            config, weights, precision=precision, verbose=verbose, quant_ctx=quant_ctx
+        )
 
     def build_extra_engines(
         self,
@@ -1107,6 +1114,7 @@ class _NemotronSpeechStreamingModel:
         max_cache_length: int,
         *,
         precision: str = "fp32",
+        quant_ctx=None,
         verbose: bool = False,
     ) -> dict | None:
         del config, max_cache_length
@@ -1114,10 +1122,15 @@ class _NemotronSpeechStreamingModel:
         extras = {"joint.plan": joint_plan}
         for right_context in weights["_streaming_right_contexts"]:
             extras[f"streaming.{right_context}.plan"] = _build_streaming_encoder(
-                weights, right_context, precision=precision, verbose=verbose
+                weights, right_context, precision=precision, quant_ctx=quant_ctx, verbose=verbose
             )
             extras[f"streaming.{right_context}.first.plan"] = _build_streaming_encoder(
-                weights, right_context, first_step=True, precision=precision, verbose=verbose
+                weights,
+                right_context,
+                first_step=True,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                verbose=verbose,
             )
         if weights.get("_has_prompt_kernel"):
             extras["prompt.plan"] = _build_prompt_kernel(weights, verbose=verbose)
@@ -1458,12 +1471,15 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.task != "transcription_streaming":
         raise ValueError("nemotron_speech_streaming supports only task=transcription_streaming")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Nemotron Speech Streaming does not support quantization")
+    quantized = request.quantization not in {None, "none"}
+    if quantized and request.precision != "fp16":
+        raise ValueError("Nemotron Speech Streaming quantization requires precision=fp16")
     if request.fp32_layers:
         raise NotImplementedError("Nemotron Speech Streaming does not support fp32_layers")
     if request.mtp_seq_len is not None:
-        raise NotImplementedError("Nemotron Speech Streaming does not support MTP speculative decoding")
+        raise NotImplementedError(
+            "Nemotron Speech Streaming does not support MTP speculative decoding"
+        )
 
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
@@ -1474,8 +1490,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         )
     parallel = ParallelConfig(tp_size=int(request.tensor_parallel_size))
     parallel.validate()
+    if quantized and parallel.enabled:
+        raise ValueError(
+            "Nemotron Speech Streaming tensor-parallel builds do not support quantization"
+        )
     config.raw["_model_dir"] = str(model_dir)
     weights = model.load_weights(str(model_dir), config, precision=request.precision)
+    quant_ctx = calibrate_nemotron(weights, graph_ops, request.quantization) if quantized else None
     tokenizer_runtime, tokenizer_artifacts = _tokenizer_bundle_artifacts(model_dir)
     max_length = int(request.max_sequence_length or 256)
 
@@ -1514,6 +1535,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         config,
         weights,
         precision=request.precision,
+        quant_ctx=quant_ctx,
         verbose=request.verbose,
     )
     if encoder is None:
@@ -1524,6 +1546,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         weights,
         max_length,
         precision=request.precision,
+        quant_ctx=quant_ctx,
         verbose=request.verbose,
     )
     if not extras:
