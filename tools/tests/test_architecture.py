@@ -549,6 +549,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_new_ci.py",
         "tools/tests/test_model_benchmark.py",
         "tools/tests/test_pr_metadata.py",
+        "tools/tests/test_process_github_files.py",
         "tools/tests/test_public_source_hygiene.py",
     }
     expected_cmake = {
