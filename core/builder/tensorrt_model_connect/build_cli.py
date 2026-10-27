@@ -76,7 +76,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         base_parser.error("MODEL must immediately follow prepare-structure")
     preliminary, _ = base_parser.parse_known_args(arguments)
     model_dir = _resolve_model(preliminary.model, preliminary.revision)
-    metadata = load_model_metadata(model_dir)
+    remote = not Path(preliminary.model).is_dir()
+    metadata = load_model_metadata(
+        model_dir,
+        repo_id=preliminary.model if remote else "",
+        revision=(preliminary.revision or "") if remote else "",
+    )
     try:
         family, support = (
             resolve_family(metadata, preliminary.family)
