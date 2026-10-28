@@ -170,7 +170,7 @@ def test_build_emits_one_dual_profile_plan_per_rank(monkeypatch, tmp_path) -> No
 
     class FakeModel:
         @staticmethod
-        def load_weights(_model_dir, _config):
+        def load_weights(_model_dir, _config, **_kwargs):
             return WeightDict()
 
         @staticmethod

@@ -33,8 +33,10 @@ from .checkpoint_mapper import (
     _has_tensor,
     _transpose_2d,
 )
+from . import graph_ops
 from .parallel import ParallelConfig, normalize_parallel_config
 from .default_decoder import build_standard_decoder_engine
+from .quantization import calibrate_internvl
 
 if TYPE_CHECKING:
     pass
@@ -76,13 +78,17 @@ class _InternVLModel:
         self,
         model_dir: str,
         config: ModelConfig,
+        *,
+        quant_ctx=None,
     ) -> WeightDict:
         """Load text decoder weights (Qwen2 pattern).
 
         InternVL3-8B-hf stores text decoder weights under model.language_model.*
-        prefix. Falls back to standard model.layers.* if not found.
+        prefix. Falls back to standard model.layers.* if not found. Projections
+        owned by ``quant_ctx`` are not loaded: the engine consumes the FP8 bytes the
+        context quantized itself, so the decoder keeps a shape-only placeholder.
         """
-        return _load_internvl_text_weights(model_dir, config)
+        return _load_internvl_text_weights(model_dir, config, quant_ctx=quant_ctx)
 
     def build_engine(
         self,
@@ -227,9 +233,15 @@ class _InternVLModel:
 def _open_checkpoint(model_dir: Path):
     """Select the published disk layout; reader failures never change format."""
     layouts = (
-        (("model.safetensors", "model.safetensors.index.json",
-          "diffusion_pytorch_model.safetensors", "diffusion_pytorch_model.safetensors.index.json"),
-         _open_safetensors),
+        (
+            (
+                "model.safetensors",
+                "model.safetensors.index.json",
+                "diffusion_pytorch_model.safetensors",
+                "diffusion_pytorch_model.safetensors.index.json",
+            ),
+            _open_safetensors,
+        ),
         (("pytorch_model.bin", "pytorch_model.bin.index.json"), _open_torch_checkpoint),
     )
     for filenames, reader in layouts:
@@ -241,6 +253,8 @@ def _open_checkpoint(model_dir: Path):
 def _load_internvl_text_weights(
     model_dir: str,
     config: ModelConfig,
+    *,
+    quant_ctx=None,
 ) -> WeightDict:
     """Load InternVL3 text decoder weights.
 
@@ -288,6 +302,15 @@ def _load_internvl_text_weights(
     kv_attention_size = 0
     mlp_size = 0
 
+    def _projection(prefix: str, hf_prefix: str, engine_key: str, hf_stem: str) -> np.ndarray:
+        """One projection as [in, out], or a shape-only placeholder when it is quantized."""
+        name = f"{prefix}.{engine_key}"
+        if quant_ctx is not None and quant_ctx.should_quantize(name):
+            w = quant_ctx.scales[name].weight
+            return np.broadcast_to(np.zeros((), dtype=np.float32), (w.in_features, w.out_features))
+        raw = _load_projection(readers, f"{hf_prefix}.{hf_stem}", quantization)
+        return _transpose_2d(raw, hf_stem.rsplit(".", 1)[-1])
+
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
         hf_prefix = f"{layer_prefix}.{layer_idx}"
@@ -299,21 +322,15 @@ def _load_internvl_text_weights(
         weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
         # Q/K/V/O projections
-        q_raw = _load_projection(readers, f"{hf_prefix}.self_attn.q_proj", quantization)
-        k_raw = _load_projection(readers, f"{hf_prefix}.self_attn.k_proj", quantization)
-        v_raw = _load_projection(readers, f"{hf_prefix}.self_attn.v_proj", quantization)
-        o_raw = _load_projection(readers, f"{hf_prefix}.self_attn.o_proj", quantization)
+        q_t = _projection(prefix, hf_prefix, "w_q", "self_attn.q_proj")
+        k_t = _projection(prefix, hf_prefix, "w_k", "self_attn.k_proj")
+        v_t = _projection(prefix, hf_prefix, "w_v", "self_attn.v_proj")
+        o_t = _projection(prefix, hf_prefix, "w_o", "self_attn.o_proj")
 
-        q_hidden = q_raw.shape[0]
         if attention_size == 0:
-            attention_size = q_hidden
+            attention_size = q_t.shape[1]
         if kv_attention_size == 0:
-            kv_attention_size = k_raw.shape[0]
-
-        q_t = _transpose_2d(q_raw, "q_proj")
-        k_t = _transpose_2d(k_raw, "k_proj")
-        v_t = _transpose_2d(v_raw, "v_proj")
-        o_t = _transpose_2d(o_raw, "o_proj")
+            kv_attention_size = k_t.shape[1]
 
         weights[f"{prefix}.w_q"] = q_t
         weights[f"{prefix}.w_k"] = k_t
@@ -338,16 +355,16 @@ def _load_internvl_text_weights(
                 weights[f"{prefix}.{name}"] = _load_tensor(readers, key)
 
         # SwiGLU MLP
-        gate_raw = _load_projection(readers, f"{hf_prefix}.mlp.gate_proj", quantization)
-        up_raw = _load_projection(readers, f"{hf_prefix}.mlp.up_proj", quantization)
-        down_raw = _load_projection(readers, f"{hf_prefix}.mlp.down_proj", quantization)
+        gate_t = _projection(prefix, hf_prefix, "w_gate", "mlp.gate_proj")
+        up_t = _projection(prefix, hf_prefix, "w_up", "mlp.up_proj")
+        down_t = _projection(prefix, hf_prefix, "w_down", "mlp.down_proj")
 
         if mlp_size == 0:
-            mlp_size = gate_raw.shape[0]
+            mlp_size = gate_t.shape[1]
 
-        weights[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate")
-        weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up")
-        weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down")
+        weights[f"{prefix}.w_gate"] = gate_t
+        weights[f"{prefix}.w_up"] = up_t
+        weights[f"{prefix}.w_down"] = down_t
 
     # Final norm
     final_norm_key = f"{layer_prefix.rsplit('.layers', 1)[0]}.norm.weight"
@@ -416,16 +433,25 @@ def _native_vision_key(key: str) -> str:
     if key in embeddings:
         return embeddings[key]
     if key.startswith("vision_model.embeddings.patch_embedding."):
-        return key.replace("vision_model.embeddings.patch_embedding.",
-                           "vision_tower.embeddings.patch_embeddings.projection.", 1)
+        return key.replace(
+            "vision_model.embeddings.patch_embedding.",
+            "vision_tower.embeddings.patch_embeddings.projection.",
+            1,
+        )
     if key.startswith("vision_model.encoder.layers."):
-        return (key.replace("vision_model.encoder.layers.", "vision_tower.encoder.layer.", 1)
-                .replace(".norm1.", ".layernorm_before.")
-                .replace(".norm2.", ".layernorm_after.")
-                .replace(".ls1", ".lambda_1").replace(".ls2", ".lambda_2"))
+        return (
+            key.replace("vision_model.encoder.layers.", "vision_tower.encoder.layer.", 1)
+            .replace(".norm1.", ".layernorm_before.")
+            .replace(".norm2.", ".layernorm_after.")
+            .replace(".ls1", ".lambda_1")
+            .replace(".ls2", ".lambda_2")
+        )
     # Original mlp1 is LayerNorm -> Linear -> GELU -> Linear, not Linear -> LN.
-    for source, target in (("mlp1.0.", "layer_norm."), ("mlp1.1.", "linear_1."),
-                           ("mlp1.3.", "linear_2.")):
+    for source, target in (
+        ("mlp1.0.", "layer_norm."),
+        ("mlp1.1.", "linear_1."),
+        ("mlp1.3.", "linear_2."),
+    ):
         if key.startswith(source):
             return key.replace(source, f"multi_modal_projector.{target}", 1)
     return key
@@ -501,9 +527,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
         if request.task != "vision_language_generation":
             raise ValueError("internvl supports only task=vision_language_generation")
-        if request.quantization not in {None, "none"} or request.fp32_layers:
+        if request.quantization not in {None, "none", "fp8"}:
             raise NotImplementedError(
-                "InternVL supports only source-checkpoint quantization and uniform compute precision"
+                f"InternVL does not support quantization={request.quantization!r}"
+            )
+        quantized = request.quantization == "fp8"
+        if quantized and str(request.precision).lower() != "fp16":
+            raise NotImplementedError("internvl fp8 quantization requires precision fp16")
+        if quantized and int(request.tensor_parallel_size) != 1:
+            raise NotImplementedError(
+                "internvl fp8 quantization does not support tensor parallelism"
             )
         model_dir = Path(request.model_dir)
         config = ModelConfig.from_dir(model_dir)
@@ -516,7 +549,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         config.raw["_model_dir"] = str(model_dir)
         model = _InternVLModel()
         model_vl = model.get_vl_config(config) or {}
-        weights = model.load_weights(str(model_dir), config)
+        quant_ctx = calibrate_internvl(model_dir, graph_ops, "fp8", config) if quantized else None
+        weights = model.load_weights(str(model_dir), config, quant_ctx=quant_ctx)
         writer.set_header(family="internvl", task=request.task, backend=request.backend)
         if parallel.enabled:
             for rank in range(parallel.tp_size):
@@ -527,7 +561,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                         weights,
                         max_length,
                         precision=precision,
-                        quant_ctx=None,
+                        quant_ctx=quant_ctx,
                         verbose=request.verbose,
                         parallel_config=parallel.for_rank(rank),
                     ),
@@ -541,7 +575,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 weights,
                 max_length,
                 precision=precision,
-                quant_ctx=None,
+                quant_ctx=quant_ctx,
                 verbose=request.verbose,
                 parallel_config=parallel,
             )

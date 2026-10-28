@@ -32,20 +32,36 @@ def build_bundle(request: BuildRequest, output: Path) -> None:
         writer.abort()
         raise
 
+
 def build(
-    *, model: str, output: Path, revision: str | None = None,
-    task: str = "vision_language_generation", precision: str = "fp32", backend: str = "trt",
-    max_sequence_length: int | None = None, tensor_parallel_size: int = 1,
-    int4_gemm_plugin_version: int | None = None, verbose: bool = False,
+    *,
+    model: str,
+    output: Path,
+    revision: str | None = None,
+    task: str = "vision_language_generation",
+    precision: str = "fp32",
+    backend: str = "trt",
+    max_sequence_length: int | None = None,
+    tensor_parallel_size: int = 1,
+    int4_gemm_plugin_version: int | None = None,
+    quantization: str | None = None,
+    verbose: bool = False,
 ) -> int:
     """Run the declared owner command; help never imports this handler."""
     model_dir = resolve_model(model, revision)
     resolve_family(load_model_metadata(model_dir), "internvl")
     request = BuildRequest(
-        model_dir=model_dir, output_path=output, family="internvl",
-        task=task, precision=precision, backend=backend,
-        max_sequence_length=max_sequence_length, tensor_parallel_size=tensor_parallel_size,
-        int4_gemm_plugin_version=int4_gemm_plugin_version, verbose=verbose,
+        model_dir=model_dir,
+        output_path=output,
+        family="internvl",
+        task=task,
+        precision=precision,
+        backend=backend,
+        max_sequence_length=max_sequence_length,
+        tensor_parallel_size=tensor_parallel_size,
+        int4_gemm_plugin_version=int4_gemm_plugin_version,
+        quantization=quantization,
+        verbose=verbose,
     )
     build_bundle(request, output)
     return 0

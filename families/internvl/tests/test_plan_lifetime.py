@@ -38,7 +38,7 @@ def test_each_plan_is_staged_and_released_before_the_next_build(tmp_path, monkey
 
     class Model:
         @staticmethod
-        def load_weights(*_args):
+        def load_weights(*_args, **_kwargs):
             return {}
 
         @staticmethod
