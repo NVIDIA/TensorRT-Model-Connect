@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 import pytest
 import numpy as np
@@ -22,10 +23,14 @@ MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
 
 
+MANIFESTS: dict[str, dict] = {}
+
+
 def _case_index() -> dict[str, tuple[Path, dict, dict]]:
     result = {}
     for path in sorted(MANIFEST_ROOT.glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
+        MANIFESTS[str(manifest["name"])] = manifest
         assert manifest["family"] == FAMILY
         assert manifest["task"] in TASKS
         for case in manifest["testcases"]:
@@ -94,10 +99,7 @@ def _required_path(value: str | None, label: str) -> Path:
     return path
 
 
-def _model_dir(manifest: dict) -> Path:
-    explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
-    if explicit:
-        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+def _cached_snapshot(manifest: dict) -> Path:
     from huggingface_hub import snapshot_download
 
     try:
@@ -109,6 +111,30 @@ def _model_dir(manifest: dict) -> Path:
             f"selected {FAMILY} E2E requires the exact cached checkpoint {manifest['hf_id']}"
         ) from error
     return Path(snapshot)
+
+
+def _model_dir(manifest: dict) -> Path:
+    explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+    if explicit:
+        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+    return _cached_snapshot(manifest)
+
+
+def _reference_model_dir(manifest: dict, model_dir: Path) -> Path:
+    """Checkpoint the official reference runs on.
+
+    A ModelOpt FP8 checkpoint keeps raw FP8 weights and separate scales, which
+    transformers does not apply (it logs "Unknown quantization type, got modelopt"),
+    so a reference loaded from it is wrong. The FP8 build is compared with the
+    unquantized checkpoint of the same model, declared by the sibling manifest
+    without the "-fp8" suffix.
+    """
+    if not manifest.get("quantization"):
+        return model_dir
+    base = MANIFESTS[str(manifest["name"]).removesuffix("-fp8")]
+    assert not base.get("quantization") and base["task"] == manifest["task"]
+    assert base["hf_id"] != manifest["hf_id"]
+    return _cached_snapshot(base)
 
 
 def _runtime(manifest: dict) -> tuple[Path, Path]:
@@ -191,7 +217,13 @@ def _run_json(
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
     record_evidence("commands", {"argv": getattr(completed, "args", None)})
-    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
+    record_evidence(
+        "native",
+        {
+            "stdout": getattr(completed, "stdout", None),
+            "stderr": getattr(completed, "stderr", None),
+        },
+    )
     payloads = []
     for line in completed.stdout.splitlines():
         start = line.find("{")
@@ -342,6 +374,16 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     return {"values": values.float().cpu().numpy()}
 
 
+def test_fp8_reference_uses_the_unquantized_checkpoint(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "_cached_snapshot", lambda m: Path(m["hf_id"]))
+    for name in ("nemotron-embed-vl-1b-v2", "nemotron-rerank-vl-1b-v2"):
+        quantized = MANIFESTS[f"{name}-fp8"]
+        base = MANIFESTS[name]
+        assert quantized["quantization"] == "fp8"
+        assert _reference_model_dir(quantized, tmp_path / "fp8") == Path(base["hf_id"])
+        assert _reference_model_dir(base, tmp_path / "base") == tmp_path / "base"
+
+
 def test_embedding_reference_requests_hidden_states(monkeypatch, tmp_path: Path) -> None:
     import torch
     import transformers
@@ -453,7 +495,7 @@ def test_reranking_bundle_uses_checkpoint_pooling(monkeypatch, tmp_path: Path) -
 
     config = SimpleNamespace(model_type="llama_nemotron_vl_rerank", raw={"pooling": "avg"})
     model = SimpleNamespace(
-        load_weights=lambda *args: {},
+        load_weights=lambda *args, **kwargs: {},
         build_engine=lambda *args, **kwargs: b"engine",
     )
     sections = {}
@@ -510,6 +552,8 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
                 pairwise.append(left_order == right_order)
         agreement = float(np.mean(pairwise))
         assert agreement >= float(thresholds.get("contract_ranking_agreement", 0.9))
+        if "contract_score_max_abs_diff" in thresholds:
+            assert np.max(np.abs(left - right)) <= float(thresholds["contract_score_max_abs_diff"])
         return
     raise AssertionError(f"{FAMILY} has no parity gate for task={task}")
 
@@ -522,11 +566,28 @@ def test_reranking_gate_distinguishes_ties_from_strict_order() -> None:
         _assert_parity({"scores": [1.0, 1.0]}, {"scores": [1.0, 2.0]}, manifest, {}, thresholds)
 
 
+def test_reranking_gate_checks_score_distance_when_configured() -> None:
+    manifest = {"task": "reranking"}
+    thresholds = {"contract_ranking_agreement": 1.0, "contract_score_max_abs_diff": 0.5}
+    _assert_parity({"scores": [-8.9, -10.1]}, {"scores": [-9.0, -10.3]}, manifest, {}, thresholds)
+    with pytest.raises(AssertionError):
+        _assert_parity(
+            {"scores": [-8.9, -10.1]}, {"scores": [-0.3, -0.5]}, manifest, {}, thresholds
+        )
+
+
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     model_dir = _model_dir(manifest)
-    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
@@ -535,7 +596,11 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
     record_evidence("native", actual)
     with evidence_stage("reference"):
-        expected = _official_reference(model_dir, manifest, case, tmp_path)
+        expected = _official_reference(
+            _reference_model_dir(manifest, model_dir), manifest, case, tmp_path
+        )
     record_evidence("reference", expected)
     with evidence_stage("compare"):
-        _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+        _assert_parity(
+            actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name))
+        )

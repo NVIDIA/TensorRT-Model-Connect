@@ -37,6 +37,7 @@ from .checkpoint_mapper import (
     _transpose_2d,
 )
 from .parallel import normalize_parallel_config
+from .quantization import calibrate_eagle, configure_fp8_build, is_quantized_checkpoint
 
 if TYPE_CHECKING:
     pass
@@ -82,8 +83,10 @@ class _EagleModel:
         self,
         model_dir: str,
         config: ModelConfig,
+        *,
+        quant_ctx=None,
     ) -> WeightDict:
-        return _load_eagle_weights(model_dir, config)
+        return _load_eagle_weights(model_dir, config, quant_ctx=quant_ctx)
 
     def build_engine(
         self,
@@ -117,6 +120,7 @@ class _EagleModel:
             max_cache_length,
             is_reranker=is_rerank,
             precision=precision,
+            quant_ctx=quant_ctx,
             verbose=verbose,
         )
 
@@ -170,8 +174,12 @@ class _EagleModel:
 # ---------------------------------------------------------------------------
 
 
-def _load_eagle_weights(model_dir: str, config: ModelConfig) -> WeightDict:
-    """Load Eagle text backbone weights (Llama architecture)."""
+def _load_eagle_weights(model_dir: str, config: ModelConfig, *, quant_ctx=None) -> WeightDict:
+    """Load Eagle text backbone weights (Llama architecture).
+
+    Projections owned by ``quant_ctx`` are not loaded: the engine consumes the checkpoint's
+    FP8 bytes, so the decoder keeps a shape-only placeholder.
+    """
     from pathlib import Path
 
     model_dir_path = Path(model_dir)
@@ -214,6 +222,18 @@ def _load_eagle_weights(model_dir: str, config: ModelConfig) -> WeightDict:
     attention_size = 0
     mlp_size = 0
 
+    def _projection(prefix: str, hf_prefix: str, engine_key: str, hf_stem: str) -> np.ndarray:
+        """One projection as [in, out], or a shape-only placeholder when it is quantized."""
+        name = f"{prefix}.{engine_key}"
+        if quant_ctx is not None and quant_ctx.should_quantize(name):
+            w = quant_ctx.scales[name].weight
+            return np.broadcast_to(np.zeros((), dtype=np.float32), (w.in_features, w.out_features))
+        if quant_ctx is not None and name in quant_ctx.dense_weights:
+            raw = quant_ctx.dense_weights[name]
+        else:
+            raw = _load_tensor(readers, f"{hf_prefix}.{hf_stem}.weight")
+        return _transpose_2d(raw, hf_stem.rsplit(".", 1)[-1])
+
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
         hf_prefix = f"{layer_prefix}.{layer_idx}"
@@ -225,19 +245,13 @@ def _load_eagle_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
         # Q/K/V/O projections
-        q_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.q_proj.weight")
-        k_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.k_proj.weight")
-        v_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.v_proj.weight")
-        o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
+        q_t = _projection(prefix, hf_prefix, "w_q", "self_attn.q_proj")
+        k_t = _projection(prefix, hf_prefix, "w_k", "self_attn.k_proj")
+        v_t = _projection(prefix, hf_prefix, "w_v", "self_attn.v_proj")
+        o_t = _projection(prefix, hf_prefix, "w_o", "self_attn.o_proj")
 
-        q_hidden = q_raw.shape[0]
         if attention_size == 0:
-            attention_size = q_hidden
-
-        q_t = _transpose_2d(q_raw, "q_proj")
-        k_t = _transpose_2d(k_raw, "k_proj")
-        v_t = _transpose_2d(v_raw, "v_proj")
-        o_t = _transpose_2d(o_raw, "o_proj")
+            attention_size = q_t.shape[1]
 
         weights[f"{prefix}.w_q"] = q_t
         weights[f"{prefix}.w_k"] = k_t
@@ -245,16 +259,16 @@ def _load_eagle_weights(model_dir: str, config: ModelConfig) -> WeightDict:
         weights[f"{prefix}.w_o"] = o_t
 
         # SwiGLU MLP
-        gate_raw = _load_tensor(readers, f"{hf_prefix}.mlp.gate_proj.weight")
-        up_raw = _load_tensor(readers, f"{hf_prefix}.mlp.up_proj.weight")
-        down_raw = _load_tensor(readers, f"{hf_prefix}.mlp.down_proj.weight")
+        gate_t = _projection(prefix, hf_prefix, "w_gate", "mlp.gate_proj")
+        up_t = _projection(prefix, hf_prefix, "w_up", "mlp.up_proj")
+        down_t = _projection(prefix, hf_prefix, "w_down", "mlp.down_proj")
 
         if mlp_size == 0:
-            mlp_size = gate_raw.shape[0]
+            mlp_size = gate_t.shape[1]
 
-        weights[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate")
-        weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up")
-        weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down")
+        weights[f"{prefix}.w_gate"] = gate_t
+        weights[f"{prefix}.w_up"] = up_t
+        weights[f"{prefix}.w_down"] = down_t
 
     # Final norm — derive from layer_prefix
     final_norm_key = f"{layer_prefix.rsplit('.layers', 1)[0]}.norm.weight"
@@ -340,6 +354,7 @@ def _build_eagle_engine(
     *,
     is_reranker: bool = False,
     precision: str = "fp32",
+    quant_ctx=None,
     verbose: bool = False,
 ) -> bytes:
     """Build Eagle text backbone engine for embedding or reranking.
@@ -383,6 +398,7 @@ def _build_eagle_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
+    configure_fp8_build(trt_config, quant_ctx)
 
     # --- Inputs ---
     # Text reranking has no public image-input path. Give it a dynamic token
@@ -594,6 +610,27 @@ def _build_eagle_engine(
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
 
+        def _projection(lhs, in_width, out_width, key, *, fp32_compute=False, prefix=prefix):
+            """One layer projection: FP8 Q/DQ when quantized, the constant matmul otherwise."""
+            name = f"{prefix}.{key}"
+            if quant_ctx is not None and quant_ctx.should_quantize(name):
+                out = quant_ctx.maybe_quantized_matmul(
+                    network, lhs, in_width, out_width, None, name, dtype=work_np_dtype
+                )
+                if fp32_compute and out.dtype != trt.float32:
+                    # The reranker keeps Q/K/V in fp32 (its RoPE tables are fp32).
+                    out = network.add_cast(out, trt.float32).get_output(0)
+                return out
+            return graph_ops.add_matmul_rhs_constant(
+                network,
+                lhs,
+                in_width,
+                out_width,
+                weights[name],
+                dtype=work_np_dtype,
+                fp32_compute=fp32_compute,
+            )
+
         # Pre-norm
         norm1 = graph_blocks.apply_norm(
             network,
@@ -610,31 +647,25 @@ def _build_eagle_engine(
             compute_norm1 = network.add_cast(compute_norm1, work_trt_dtype).get_output(0)
 
         # Self-attention: Q, K, V projections
-        q = graph_ops.add_matmul_rhs_constant(
-            network,
+        q = _projection(
             compute_norm1,
             hidden,
             attention_size,
-            weights[f"{prefix}.w_q"],
-            dtype=work_np_dtype,
+            "w_q",
             fp32_compute=stable_reranker_residual,
         )
-        k = graph_ops.add_matmul_rhs_constant(
-            network,
+        k = _projection(
             compute_norm1,
             hidden,
             kv_attention_size,
-            weights[f"{prefix}.w_k"],
-            dtype=work_np_dtype,
+            "w_k",
             fp32_compute=stable_reranker_residual,
         )
-        v = graph_ops.add_matmul_rhs_constant(
-            network,
+        v = _projection(
             compute_norm1,
             hidden,
             kv_attention_size,
-            weights[f"{prefix}.w_v"],
-            dtype=work_np_dtype,
+            "w_v",
             fp32_compute=stable_reranker_residual,
         )
 
@@ -682,14 +713,7 @@ def _build_eagle_engine(
             compute_attn_concat = network.add_cast(compute_attn_concat, work_trt_dtype).get_output(
                 0
             )
-        proj_out = graph_ops.add_matmul_rhs_constant(
-            network,
-            compute_attn_concat,
-            attention_size,
-            hidden,
-            weights[f"{prefix}.w_o"],
-            dtype=work_np_dtype,
-        )
+        proj_out = _projection(compute_attn_concat, attention_size, hidden, "w_o")
         if stable_reranker_residual and proj_out.dtype != trt.float32:
             proj_out = network.add_cast(proj_out, trt.float32).get_output(0)
 
@@ -719,6 +743,7 @@ def _build_eagle_engine(
             mlp_size=mlp_size,
             dtype=work_np_dtype,
             fp32_down_projection=(stable_reranker_residual and layer_idx >= max(0, num_layers - 4)),
+            quant_ctx=quant_ctx,
         )
         if stable_reranker_residual and mlp_out.dtype != trt.float32:
             mlp_out = network.add_cast(mlp_out, trt.float32).get_output(0)
@@ -1498,12 +1523,24 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config = ModelConfig.from_dir(model_dir)
     if not str(config.model_type).lower().startswith("llama_nemotron_vl"):
         raise ValueError(f"Eagle does not support model_type={config.model_type!r}")
-    if request.quantization not in {None, "none"} or request.fp32_layers:
-        raise NotImplementedError("Eagle does not support quantization or mixed-precision layers")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(f"Eagle does not support quantization={request.quantization!r}")
+    if request.fp32_layers:
+        raise NotImplementedError("Eagle does not support mixed-precision layers")
+    quantized = request.quantization == "fp8"
+    if not quantized and is_quantized_checkpoint(model_dir):
+        raise ValueError(f"{model_dir} is a quantized checkpoint; build it with quantization='fp8'")
+    if quantized and request.precision != "fp16":
+        raise NotImplementedError("eagle_vlm fp8 quantization requires precision fp16")
+    if quantized and int(request.tensor_parallel_size) != 1:
+        raise NotImplementedError("eagle_vlm fp8 quantization does not support tensor parallelism")
     parallel = ParallelConfig(tp_size=int(request.tensor_parallel_size))
     parallel.validate()
     model = _EagleModel()
-    weights = model.load_weights(str(model_dir), config)
+    from . import graph_ops
+
+    quant_ctx = calibrate_eagle(model_dir, graph_ops, "fp8", config) if quantized else None
+    weights = model.load_weights(str(model_dir), config, quant_ctx=quant_ctx)
     writer.set_header(family="eagle_vlm", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -1527,7 +1564,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 weights,
                 int(request.max_sequence_length or 512),
                 precision=request.precision,
-                quant_ctx=None,
+                quant_ctx=quant_ctx,
                 verbose=request.verbose,
                 parallel_config=parallel,
             ),
