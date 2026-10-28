@@ -43,6 +43,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import graph_ops
+from .quantization import add_nvfp4_matmul
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
@@ -121,6 +122,13 @@ def _add_constant_reduced(network, shape, values_fp32):
     return network.add_constant(shape, w).get_output(0)
 
 
+def _fp32_scalar_factory(network):
+    def constant(value):
+        return graph_ops.add_constant(network, (1,), np.asarray([value], dtype=np.float32))
+
+    return constant
+
+
 def _fp8_weight_key(prefix: str) -> str:
     return f"{prefix}{_FP8_WEIGHT_SUFFIX}"
 
@@ -151,12 +159,30 @@ def _matmul_reduced_precision(
     inp_scale=None,
     wt_scale=None,
     fp8_weight_tn=None,
+    nvfp4=None,
 ):
     """Matmul in reduced precision. Input/output stay in _CAST_DTYPE.
+
+    If nvfp4 (a checkpoint NVFP4Projection) is given, the activation goes through
+    a dynamic FP4 quantize and the checkpoint's packed FP4 weight is used as is.
 
     If inp_scale/wt_scale are provided and _FP8_MODE is True, inserts FP8 Q/DQ
     nodes with TN layout for proper fusion on Hopper+/Blackwell.
     """
+    if nvfp4 is not None:
+        if (nvfp4.in_features, nvfp4.out_features) != (lhs_width, rhs_width):
+            raise ValueError(
+                f"NVFP4 projection is [{nvfp4.out_features}, {nvfp4.in_features}], "
+                f"graph expects [{rhs_width}, {lhs_width}]"
+            )
+        return add_nvfp4_matmul(
+            network,
+            _to_compute_dtype(network, lhs),
+            nvfp4,
+            _weight_refs,
+            _fp32_scalar_factory(network),
+        )
+
     # FP8 path: ONLY use FP8 Q/DQ for layers with calibrated scales.
     # Non-calibrated layers (context_embedder, x_embedder, time_text_embed,
     # norm_out, etc.) fall through to the BF16 path below.
@@ -258,7 +284,10 @@ def build_flux2_dit_engine(
     config = builder.create_builder_config()
     config.builder_optimization_level = 1
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 128 << 30)
-    if fp8_scales is not None:
+    has_nvfp4 = any(key.endswith(".nvfp4") for key in weights)
+    if fp8_scales is not None and has_nvfp4:
+        raise ValueError("FLUX.2 FP8 scales and an NVFP4 checkpoint cannot be combined")
+    if fp8_scales is not None or has_nvfp4:
         config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
 
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -593,7 +622,8 @@ def build_flux2_dit_engine(
         # --- Fused QKV + MLP projection ---
         # to_qkv_mlp_proj: [dim, 3*dim + 2*ffn_dim]  (gated MLP: gate + value)
         fused_out_dim = 3 * dim + 2 * ffn_dim
-        fused_w = weights[f"{p}.attn.to_qkv_mlp_proj.weight"]
+        fused_q = weights.get(f"{p}.attn.to_qkv_mlp_proj.nvfp4")
+        fused_w = None if fused_q is not None else weights[f"{p}.attn.to_qkv_mlp_proj.weight"]
         _fused_inp_s = _FP8_SCALES.get(f"{p}.attn.to_qkv_mlp_proj", {}).get("input_scale")
         _fused_wt_s = _FP8_SCALES.get(f"{p}.attn.to_qkv_mlp_proj", {}).get("weight_scale")
         fused = _matmul_reduced_precision(
@@ -605,6 +635,7 @@ def build_flux2_dit_engine(
             inp_scale=_fused_inp_s,
             wt_scale=_fused_wt_s,
             fp8_weight_tn=weights.get(_fp8_weight_key(f"{p}.attn.to_qkv_mlp_proj")),
+            nvfp4=fused_q,
         )
         fused_b = weights.get(f"{p}.attn.to_qkv_mlp_proj.bias")
         if fused_b is not None:
@@ -665,7 +696,8 @@ def build_flux2_dit_engine(
         cat_attn_mlp = network.add_concatenation([attn_out_s, mlp_hidden])
         cat_attn_mlp.axis = 1  # [total_seq, dim + ffn_dim]
 
-        to_out_w = weights[f"{p}.attn.to_out.weight"]
+        to_out_q = weights.get(f"{p}.attn.to_out.nvfp4")
+        to_out_w = None if to_out_q is not None else weights[f"{p}.attn.to_out.weight"]
         _to_inp_s = _FP8_SCALES.get(f"{p}.attn.to_out", {}).get("input_scale")
         _to_wt_s = _FP8_SCALES.get(f"{p}.attn.to_out", {}).get("weight_scale")
         in_features = dim + ffn_dim
@@ -678,6 +710,7 @@ def build_flux2_dit_engine(
             inp_scale=_to_inp_s,
             wt_scale=_to_wt_s,
             fp8_weight_tn=weights.get(_fp8_weight_key(f"{p}.attn.to_out")),
+            nvfp4=to_out_q,
         )
         to_out_b = weights.get(f"{p}.attn.to_out.bias")
         if to_out_b is not None:
@@ -847,15 +880,17 @@ def _linear(network, inp, in_dim, out_dim, weights, prefix):
     fp8_inp_s = _FP8_SCALES.get(prefix, {}).get("input_scale")
     fp8_wt_s = _FP8_SCALES.get(prefix, {}).get("weight_scale")
 
+    nvfp4 = weights.get(f"{prefix}.nvfp4")
     out = _matmul_reduced_precision(
         network,
         inp,
         in_dim,
         out_dim,
-        weights[f"{prefix}.weight"],
+        None if nvfp4 is not None else weights[f"{prefix}.weight"],
         inp_scale=fp8_inp_s,
         wt_scale=fp8_wt_s,
         fp8_weight_tn=weights.get(_fp8_weight_key(prefix)),
+        nvfp4=nvfp4,
     )
     b = weights.get(f"{prefix}.bias")
     if b is not None:
@@ -990,8 +1025,9 @@ def _gate_1d(network, x, gate, seq_len):
 
 def _swiglu_ffn(network, inp, dim, weights, prefix):
     """SwiGLU FFN in reduced precision."""
-    fc1_w = weights[f"{prefix}.linear_in.weight"]
-    double_ffn_dim = fc1_w.shape[1]  # 2 * ffn_dim
+    fc1_q = weights.get(f"{prefix}.linear_in.nvfp4")
+    fc1_w = None if fc1_q is not None else weights[f"{prefix}.linear_in.weight"]
+    double_ffn_dim = fc1_q.out_features if fc1_q is not None else fc1_w.shape[1]  # 2 * ffn_dim
     ffn_dim = double_ffn_dim // 2
 
     # Look up FP8 scales for both linear layers
@@ -1007,6 +1043,7 @@ def _swiglu_ffn(network, inp, dim, weights, prefix):
         inp_scale=fc1_inp_s,
         wt_scale=fc1_wt_s,
         fp8_weight_tn=weights.get(_fp8_weight_key(f"{prefix}.linear_in")),
+        nvfp4=fc1_q,
     )
     fc1_b = weights.get(f"{prefix}.linear_in.bias")
     if fc1_b is not None:
@@ -1020,7 +1057,8 @@ def _swiglu_ffn(network, inp, dim, weights, prefix):
     gate_act = graph_ops.add_activation(network, x1, "silu")
     gated = network.add_elementwise(gate_act, x2, trt.ElementWiseOperation.PROD).get_output(0)
 
-    fc2_w = weights[f"{prefix}.linear_out.weight"]
+    fc2_q = weights.get(f"{prefix}.linear_out.nvfp4")
+    fc2_w = None if fc2_q is not None else weights[f"{prefix}.linear_out.weight"]
     fc2_inp_s = _FP8_SCALES.get(f"{prefix}.linear_out", {}).get("input_scale")
     fc2_wt_s = _FP8_SCALES.get(f"{prefix}.linear_out", {}).get("weight_scale")
     fc2 = _matmul_reduced_precision(
@@ -1032,6 +1070,7 @@ def _swiglu_ffn(network, inp, dim, weights, prefix):
         inp_scale=fc2_inp_s,
         wt_scale=fc2_wt_s,
         fp8_weight_tn=weights.get(_fp8_weight_key(f"{prefix}.linear_out")),
+        nvfp4=fc2_q,
     )
     fc2_b = weights.get(f"{prefix}.linear_out.bias")
     if fc2_b is not None:
