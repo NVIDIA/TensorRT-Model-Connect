@@ -37,6 +37,8 @@ PointNetPipeline::run(const internal::PointsToSemanticSegmentationRequest& reque
 
     const auto point_count = static_cast<std::size_t>(request.num_points);
     const auto channel_count = static_cast<std::size_t>(input_dim_);
+    if (request.points.size() != point_count * channel_count)
+        throw std::invalid_argument("PointNet: points span does not match num_points * input_dim");
     std::vector<float> transposed(point_count * channel_count);
     for (std::size_t point = 0; point < point_count; ++point)
         for (std::size_t channel = 0; channel < channel_count; ++channel)

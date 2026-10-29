@@ -106,6 +106,13 @@ void test_rejects_invalid_inputs() {
     } catch (const std::invalid_argument&) {
     }
     invalid = request();
+    invalid.num_points = 2;
+    try {
+        model.run(invalid, {});
+        throw std::runtime_error("expected span-size rejection");
+    } catch (const std::invalid_argument&) {
+    }
+    invalid = request();
     invalid.input_dim = 4;
     try {
         model.run(invalid, {});

@@ -8,6 +8,7 @@
 #include "trtmc/point_cloud.h"
 
 #include <cstdint>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -19,12 +20,12 @@ namespace {
 
 internal::PointsToSemanticSegmentationRequest
 convert(const trtmc_points_to_semantic_segmentation_request_v1& input) {
-    require(input.points != nullptr || input.num_points == 0,
-            "point-cloud input points pointer is null");
     require(input.input_dim > 0, "point-cloud input_dim must be positive");
-    const auto count = checked_size(input.num_points, input.input_dim);
-    return {Span<const float>{input.points, count}, static_cast<std::uint32_t>(input.num_points),
-            input.input_dim};
+    require(input.num_points <= std::numeric_limits<std::uint32_t>::max(),
+            "point-cloud num_points exceeds the uint32 range");
+    // Both factors fit in 32 bits, so the float count cannot overflow uint64.
+    return {checked_span(input.points, input.num_points * input.input_dim),
+            static_cast<std::uint32_t>(input.num_points), input.input_dim};
 }
 
 struct PointCloudSegmentationStorage final : ResultStorage {

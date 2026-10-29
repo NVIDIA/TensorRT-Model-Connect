@@ -29,9 +29,15 @@ struct PointsToSemanticSegmentationWireRequest {
     trtmc_points_to_semantic_segmentation_request_v1 wire;
 };
 
+// The wire carries a point count, not a float count; Core sizes the span from
+// num_points * input_dim, so a mismatched caller span must never reach it.
 inline auto point_cloud_request(const PointsToSemanticSegmentationRequest& input) {
+    if (input.points.size() !=
+        static_cast<std::uint64_t>(input.num_points) * static_cast<std::uint64_t>(input.input_dim))
+        throw Error(TRTMC_INVALID_ARGUMENT,
+                    "point-cloud points must hold exactly num_points * input_dim floats");
     return PointsToSemanticSegmentationWireRequest{
-        {input.points.data(), static_cast<std::uint64_t>(input.points.size()), input.input_dim}};
+        {input.points.data(), static_cast<std::uint64_t>(input.num_points), input.input_dim}};
 }
 
 template <class Result, class Table, class Request>

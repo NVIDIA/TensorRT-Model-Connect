@@ -463,8 +463,6 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/api/include/trtmc/tools.hpp",
         "core/api/include/trtmc/matrix.h",
         "core/api/include/trtmc/matrix.hpp",
-        "core/api/include/trtmc/point_cloud.h",
-        "core/api/include/trtmc/point_cloud.hpp",
         "core/api/include/trtmc/scores.h",
         "core/api/include/trtmc/scores.hpp",
         "core/api/runtime/api.cpp",
@@ -473,7 +471,6 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/api/runtime/exports.map",
         "core/api/runtime/image_tasks.cpp",
         "core/api/runtime/language_internal.h",
-        "core/api/runtime/point_cloud.cpp",
         "core/api/runtime/scores.cpp",
         "core/api/runtime/text_runtime.cpp",
         "core/api/runtime/text_tasks.cpp",
@@ -501,6 +498,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     for group in (
         "audio", "features", "numeric", "stream", "video", "perception",
         "language", "tracking", "speech", "action", "recurrent", "structure",
+        "point_cloud",
     ):
         expected_api.update(
             {

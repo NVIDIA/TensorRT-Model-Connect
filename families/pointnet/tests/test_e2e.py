@@ -202,6 +202,11 @@ def _assert_parity(actual: dict, expected: dict, limits: dict) -> None:
     error = np.abs(actual_logits - expected_logits)
     assert float(np.mean(error)) <= float(limits["mean_abs_logits_error"])
     assert float(np.max(error)) <= float(limits["max_abs_logits_error"])
+    # The reference is log-softmax, so every row must stay a normalized
+    # log-distribution; a constant offset would pass the checks above.
+    peak = actual_logits.max(axis=1, keepdims=True).astype(np.float64)
+    log_sum_exp = peak[:, 0] + np.log(np.exp(actual_logits - peak).sum(axis=1))
+    assert float(np.max(np.abs(log_sum_exp))) <= float(limits["max_abs_log_sum_exp"])
 
 
 def _thresholds(case_name: str) -> dict:

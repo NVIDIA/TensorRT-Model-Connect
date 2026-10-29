@@ -143,8 +143,14 @@ class S3DISSemSeg(nn.Module):
 
 def run(model_dir: Path, points_path: Path, num_points: int) -> dict:
     """Run the upstream PyTorch checkpoint and return per-point logits and labels."""
-    checkpoint = torch.load(model_dir / "best_model.pth", map_location="cuda",
-                            weights_only=False)
+    # Upstream stores class_avg_iou as a numpy float64; allow only that scalar
+    # (under its numpy<2 pickled name) instead of unrestricted unpickling.
+    scalar = np.float64(0).__reduce__()[0]
+    numpy_scalar_globals = [(scalar, "numpy.core.multiarray.scalar"), np.dtype,
+                            type(np.dtype(np.float64))]
+    with torch.serialization.safe_globals(numpy_scalar_globals):
+        checkpoint = torch.load(model_dir / "best_model.pth", map_location="cuda",
+                                weights_only=True)
     model = S3DISSemSeg(num_class=13).cuda().eval()
     model.load_state_dict(checkpoint["model_state_dict"])
     points = np.fromfile(points_path, dtype=np.float32).reshape(num_points, 9)
