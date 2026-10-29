@@ -107,11 +107,45 @@ Measured on one NVIDIA GB300, TensorRT 11.1, CUDA 13, batch one,
 | --- | --- | --- |
 | Max abs error vs LeRobot fp32, 3 frames | 3.2e-3 / 6.4e-3 / 4.3e-3 | 6.3e-7 / 1.1e-6 / 4.8e-7 |
 | LeRobot bf16 vs LeRobot fp32 (reference noise) | 3.3e-3 / 1.5e-2 / 4.6e-3 | - |
-| Action chunk, p50 / p95 | 34.6 / 34.7 ms | 119.9 / 120.7 ms |
+| Action chunk, p50 / p95 | 34.3-34.5 / 34.4-34.7 ms | 119.9 / 120.7 ms |
 | Build (checkpoint to bundle) | 2 min 35 s | 1 min 30 s |
 | Bundle size | 7.6 GB | 13.0 GB |
-| Model load | 1.7 s | 2.3 s |
+| Model load | 1.6 s warm (3.3 s cold) | 2.3 s |
 | Peak GPU memory | 8.1 GiB | 13.3 GiB |
 
 For comparison, LeRobot's eager PyTorch policy takes about 340 ms per chunk on the
-same GPU. Other GPUs and TensorRT versions are not qualified.
+same GPU.
+
+### Trained checkpoints and un-normalization
+
+`pi05_libero_base` carries no statistics, so CI cannot test un-normalization with it.
+It was checked once, outside CI, on two published `lerobot-train` outputs with
+statistics, building float32 bundles straight from their directories and comparing
+robot-unit actions on the same three frames and noise against the eager LeRobot policy:
+
+| Checkpoint | Normalization | Max abs error |
+| --- | --- | --- |
+| `lerobot/pi05-libero` @ `9ba5431256f4136a01c224ab0307b0d3035cc92c` | `MEAN_STD`, bfloat16 weights | 1.1e-6 / 1.3e-6 / 6.0e-7 |
+| `lerobot/pi05_libero_finetuned_quantiles_v044` @ `b6bfb493bc0f21c4ab24d816409ea3cebf5e43bd` | `QUANTILES` (LeRobot's pi05 default) | 7.8e-7 / 9.5e-7 / 7.2e-7 |
+
+These outputs store weights in bfloat16 under a `model.` name prefix and may keep an
+untied `embed_tokens` table; the loader handles all three. Both enable `torch.compile`
+in their config, which changes LeRobot's own numerics at about 1e-3, so the oracle is
+always eager (`official_reference.py`).
+
+## Known limits
+
+- Qualified on one NVIDIA GB300 with TensorRT 11.1 and CUDA 13. Other GPUs, TensorRT
+  versions and Jetson are not.
+- Batch one, one observation step, square cameras; Pi 0, Pi 0-FAST, Pi 0.7, memory and
+  real-time chunking are rejected at build time.
+- An instruction plus state longer than `tokenizer_max_length` is rejected, where LeRobot
+  would truncate it silently.
+- `within_training_bounds` is always false; `n_action_steps` queueing stays in the caller.
+- Between the two engines the prefix keys and values pass through host memory. The
+  latency above includes that copy; keeping them on the device is a possible speed-up.
+- Building needs `sentencepiece`, `protobuf` and, unless the checkpoint directory holds
+  `tokenizer.model`, network access to the public tokenizer file.
+- The LeRobot side is not part of this repository. `lerobot-rollout` ships with LeRobot
+  0.6.1, but `lerobot-export` does not, so the bundle has not been driven through either;
+  only the runtime contract above is provided.
