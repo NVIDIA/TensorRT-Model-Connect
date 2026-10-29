@@ -18,9 +18,20 @@ import numpy as np
 from . import graph as g
 
 
-def build_layers(network, hidden, weights, prefix, cfg, *, dtype=np.float32):
-    """Run ``cfg["num_layers"]`` pre-norm encoder layers over rows ``[seq, width]``."""
+def build_layers(network, hidden, weights, prefix, cfg, *, dtype=np.float32, quant_ctx=None):
+    """Run ``cfg["num_layers"]`` pre-norm encoder layers over rows ``[seq, width]``.
+
+    ``quant_ctx`` routes the projections it has a scale for through FP8 Q/DQ.
+    """
     width = cfg["hidden_size"]
+
+    def linear(inp, index, stem, suffix):
+        weight = weights[f"{prefix}.encoder.layer.{index}.{suffix}.weight"]
+        bias = weights[f"{prefix}.encoder.layer.{index}.{suffix}.bias"]
+        if quant_ctx is None:
+            return g.add_linear(network, inp, weight, bias, dtype=dtype)
+        return quant_ctx.linear(network, inp, f"layer.{index}.{stem}", weight, bias, dtype)
+
     for index in range(cfg["num_layers"]):
         layer = f"{prefix}.encoder.layer.{index}"
 
@@ -29,25 +40,18 @@ def build_layers(network, hidden, weights, prefix, cfg, *, dtype=np.float32):
                                   weights[f"{layer}.layernorm_before.bias"], cfg["eps"])
         projections = []
         for name in ("query", "key", "value"):
-            projections.append(g.add_linear(network, normed,
-                                            weights[f"{layer}.attention.attention.{name}.weight"],
-                                            weights[f"{layer}.attention.attention.{name}.bias"],
-                                            dtype=dtype))
+            projections.append(linear(normed, index, name, f"attention.attention.{name}"))
         attention = g.add_attention(network, *projections, num_heads=cfg["num_heads"],
                                     head_dim=cfg["head_dim"])
-        attention = g.add_linear(network, attention,
-                                 weights[f"{layer}.attention.output.dense.weight"],
-                                 weights[f"{layer}.attention.output.dense.bias"], dtype=dtype)
+        attention = linear(attention, index, "attn_out", "attention.output.dense")
         hidden = g.add_sum(network, hidden, attention)
 
         normed = g.add_layer_norm(network, hidden,
                                   weights[f"{layer}.layernorm_after.weight"],
                                   weights[f"{layer}.layernorm_after.bias"], cfg["eps"])
-        inner = g.add_linear(network, normed, weights[f"{layer}.intermediate.dense.weight"],
-                             weights[f"{layer}.intermediate.dense.bias"], dtype=dtype)
+        inner = linear(normed, index, "fc1", "intermediate.dense")
         inner = g.add_gelu(network, inner)
-        inner = g.add_linear(network, inner, weights[f"{layer}.output.dense.weight"],
-                             weights[f"{layer}.output.dense.bias"], dtype=dtype)
+        inner = linear(inner, index, "fc2", "output.dense")
         hidden = g.add_sum(network, hidden, inner)
         assert int(hidden.shape[-1]) == width
     return hidden
