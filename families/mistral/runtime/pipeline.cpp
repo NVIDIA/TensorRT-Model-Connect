@@ -207,7 +207,7 @@ void MistralTextGenerationPipeline::prime_decoder_after_batched_prefill(
         return;
 
     ITrtModule& decoder = bind_decoder_for_step();
-    if (!decoder.cuda_graph_active())
+    if (!decoder.cuda_graph_active() || decoder.cuda_graph_captured())
         return;
 
     int32_t token_id = input_ids.back();
@@ -224,9 +224,10 @@ void MistralTextGenerationPipeline::prime_decoder_after_batched_prefill(
 }
 
 void MistralTextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
-                                                std::vector<float>& logits) {
+                                                std::vector<float>& logits, bool prime_decoder) {
     run_prefill_batched(input_ids, logits);
-    prime_decoder_after_batched_prefill(input_ids);
+    if (prime_decoder)
+        prime_decoder_after_batched_prefill(input_ids);
     state_->mark_prefill_complete();
 }
 
@@ -267,7 +268,7 @@ MistralTextGenerationPipeline::TimedGenResult MistralTextGenerationPipeline::gen
 
     std::vector<float> logits;
     const auto t0 = Clock::now();
-    run_prefill(input_ids, logits);
+    run_prefill(input_ids, logits, max_new_tokens > 1);
     const auto t1 = Clock::now();
 
     std::vector<int32_t> output = input_ids;
@@ -309,6 +310,8 @@ int32_t MistralTextGenerationPipeline::run_decode_loop(
                                   result.is_eos))
             break;
         if (result.is_eos)
+            break;
+        if (step + 1 >= max_new_tokens)
             break;
         run_step(result.token_id, logits);
     }
