@@ -23,6 +23,7 @@ import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from ..tokenizer import TOKENIZER_FILE, TOKENIZER_REPO, TOKENIZER_REVISION
 
 
 FAMILY = "lerobot_pi05"
@@ -33,6 +34,7 @@ TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
 MODEL_FILES = ("config.json", "model.safetensors", "policy_preprocessor.json", "policy_postprocessor.json")
+CI_ASSET_DIR = Path("/opt/trtmc-ci")
 
 
 def _cases() -> dict[str, tuple[dict, dict]]:
@@ -109,6 +111,30 @@ def _model_dir(manifest: dict) -> Path:
     )
 
 
+@pytest.fixture(scope="module")
+def model_dirs(tmp_path_factory):
+    """Overlay CI's public tokenizer on the unchanged staged checkpoint directory."""
+    resolved: dict[str, Path] = {}
+
+    def get(manifest: dict) -> Path:
+        name = manifest["name"]
+        if name not in resolved:
+            directory = _model_dir(manifest)
+            (asset,) = manifest["external_files"]
+            assert asset["path"] == TOKENIZER_FILE
+            ci_tokenizer = CI_ASSET_DIR / asset["path"]
+            if ci_tokenizer.is_file() and not (directory / TOKENIZER_FILE).is_file():
+                overlay = tmp_path_factory.mktemp(f"{name}-with-tokenizer")
+                for path in directory.iterdir():
+                    (overlay / path.name).symlink_to(path)
+                (overlay / TOKENIZER_FILE).symlink_to(ci_tokenizer)
+                directory = overlay
+            resolved[name] = directory
+        return resolved[name]
+
+    return get
+
+
 def _staged_state_files(directory: Path) -> list[str]:
     names = []
     for processor in ("policy_preprocessor.json", "policy_postprocessor.json"):
@@ -117,17 +143,16 @@ def _staged_state_files(directory: Path) -> list[str]:
     return names
 
 
-def test_pinned_assets_are_staged(case_name: str) -> None:
+def test_pinned_assets_are_staged(case_name: str, model_dirs) -> None:
     """Fail before any build, with the asset named, when the build would not find an input.
 
     Pytest runs this first. CI stages the manifest's checkpoint revision and its
-    ``hf_dependencies``, then runs offline, so both must already be local: the checkpoint with
-    every statistics file its processors name, and the PaliGemma tokenizer, which the build
-    reads from the Hugging Face cache unless the checkpoint carries tokenizer.model.
+    public tokenizer into the family CI image, then runs offline. The checkpoint,
+    every statistics file its processors name, and the tokenizer must be local.
     """
     manifest, _ = CASES[case_name]
     try:
-        directory = _model_dir(manifest)
+        directory = model_dirs(manifest)
     except Exception as error:  # noqa: BLE001 - surface why the staged snapshot is unusable
         pytest.fail(f"{manifest['hf_id']}@{manifest['hf_revision']} is not staged locally: {error}")
     missing = [name for name in MODEL_FILES if not (directory / name).is_file()]
@@ -137,17 +162,16 @@ def test_pinned_assets_are_staged(case_name: str) -> None:
         return
     from huggingface_hub import hf_hub_download
 
-    (tokenizer,) = manifest["hf_dependencies"]
     try:
-        hf_hub_download(tokenizer["repo_id"], "tokenizer.model", revision=tokenizer["revision"],
+        hf_hub_download(TOKENIZER_REPO, TOKENIZER_FILE, revision=TOKENIZER_REVISION,
                         local_files_only=True)
     except Exception as error:  # noqa: BLE001 - name the dependency that is not staged
-        pytest.fail(f"tokenizer.model of {tokenizer['repo_id']}@{tokenizer['revision']} "
+        pytest.fail(f"{TOKENIZER_FILE} of {TOKENIZER_REPO}@{TOKENIZER_REVISION} "
                     f"is not staged locally: {error}")
 
 
 @pytest.fixture(scope="module")
-def bundles(tmp_path_factory):
+def bundles(tmp_path_factory, model_dirs):
     """Build each manifest's bundle once per module: it takes minutes and many cases share it."""
     built: dict[str, Path] = {}
 
@@ -157,7 +181,7 @@ def bundles(tmp_path_factory):
             with evidence_stage("build"):
                 build(
                     BuildRequest(
-                        model_dir=_model_dir(manifest),
+                        model_dir=model_dirs(manifest),
                         output_path=output,
                         family=FAMILY,
                         task=manifest["task"],

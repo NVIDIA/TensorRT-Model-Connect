@@ -27,7 +27,7 @@ import numpy as np
 from official_reference import fixed_noise, run_reference
 
 HERE = Path(__file__).resolve().parent
-SOURCE = json.loads((HERE / "reference-source.json").read_text(encoding="utf-8"))
+SOURCE = json.loads((HERE / "fixture-source.json").read_text(encoding="utf-8"))
 
 # Instructions that exercise cleaning, whitespace, digits, punctuation, Unicode, byte fallback,
 # special-looking text, a long prompt that fits and one that LeRobot truncates.

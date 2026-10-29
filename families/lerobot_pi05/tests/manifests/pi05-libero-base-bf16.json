@@ -2,10 +2,10 @@
   "name": "pi05-libero-base-bf16",
   "hf_id": "lerobot/pi05_libero_base",
   "hf_revision": "5fcf06fc42b6717e22ab885fd381a096574b12c7",
-  "hf_dependencies": [
+  "external_files": [
     {
-      "repo_id": "google/paligemma-3b-pt-224",
-      "revision": "35e4f46485b4d07967e7e9935bc3786aad50687c"
+      "path": "tokenizer.model",
+      "url": "https://storage.googleapis.com/big_vision/paligemma_tokenizer.model?generation=1711547605575873"
     }
   ],
   "bundle": "pi05-libero-base-bf16.bundle",

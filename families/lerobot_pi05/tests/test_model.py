@@ -19,6 +19,7 @@ from .. import model as model_module
 from ..checkpoint import canonical_name, embedding_key, load_checkpoint, require
 from ..model import TASK, _normalization_json, _prefix_length, build
 from ..tokenizer import (
+    PUBLIC_COPY,
     SPECIAL_IDS,
     TOKENIZER_BYTES,
     TOKENIZER_FILE,
@@ -483,10 +484,12 @@ def test_tokenizer_falls_back_to_the_pinned_hub_revision(tmp_path, monkeypatch) 
         load_tokenizer_model(checkpoint)
 
 
-def test_manifests_declare_the_pinned_tokenizer() -> None:
-    # CI stages only what a manifest declares, at the declared revision, before running offline.
-    expected = [{"repo_id": TOKENIZER_REPO, "revision": TOKENIZER_REVISION}]
+def test_manifests_declare_the_public_tokenizer_copy() -> None:
+    # CI cannot authorize a new family's gated dependency from an untrusted PR manifest.
+    expected = [{"path": TOKENIZER_FILE, "url": PUBLIC_COPY + "?generation=1711547605575873"}]
     manifests = sorted((Path(__file__).parent / "manifests").glob("*.json"))
     assert manifests
     for path in manifests:
-        assert json.loads(path.read_text(encoding="utf-8"))["hf_dependencies"] == expected, path.name
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        assert manifest["external_files"] == expected, path.name
+        assert "hf_dependencies" not in manifest, path.name
