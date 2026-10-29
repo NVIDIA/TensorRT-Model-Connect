@@ -462,6 +462,7 @@ def test_reference_routes_restore_the_checked_in_l0_golden() -> None:
     expected_backends = {
         "deepseek-ocr-l0": "golden_snapshot",
         "deepseek-ocr-l0-tp2": "golden_snapshot",
+        "deepseek-ocr-fp8": "golden_snapshot",
         "deepseek-ocr": "hf_transformers",
     }
     assert {name: case["reference_backend"] for name, (_, _, case) in CASES.items()} == (
@@ -477,7 +478,7 @@ def test_reference_routes_restore_the_checked_in_l0_golden() -> None:
         "eval_mode=True",
     ):
         assert required in source
-    for name in ("deepseek-ocr-l0", "deepseek-ocr-l0-tp2"):
+    for name in ("deepseek-ocr-l0", "deepseek-ocr-l0-tp2", "deepseek-ocr-fp8"):
         _, manifest, case = CASES[name]
         reference = _reference(Path("unused"), Path("unused"), manifest, case, Path("unused"))
         assert reference["text"]
