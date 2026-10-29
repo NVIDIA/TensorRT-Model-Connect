@@ -43,6 +43,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("pointnet does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("pointnet does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("pointnet does not support MTP speculative decoding")
 
     config = ModelConfig.load(Path(request.model_dir))
     plan = build_pointnet_engine(
