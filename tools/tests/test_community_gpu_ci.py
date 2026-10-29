@@ -2567,6 +2567,53 @@ def test_persistent_catalog_mismatch_reports_what_brev_returned(fake, catalog, d
     )
 
 
+def test_capacity_fallback_tries_a_known_good_type_after_persistent_outage(fake):
+    fake.catalog = [
+        {"type": "g6e.4xlarge", "provider": "aws", "disk_min_gb": 50, "disk_max_gb": 2560},
+    ]
+    assert fake.provision(provider="aws") == "gpu"
+    assert fake.creates == ["gpu"]
+    assert fake.sku == "g6e.4xlarge"
+    searches = sum(command[1] == "search" for command in fake.commands)
+    # PREFLIGHT_ATTEMPTS searches exhaust the primary type, then one more
+    # search finds the fallback on the first try.
+    assert searches == brev_provision.PREFLIGHT_ATTEMPTS + 1
+    lease = json.loads(fake.lease.read_text())
+    assert lease["sku"] == "g6e.4xlarge"
+
+
+def test_capacity_fallback_is_not_tried_for_a_non_aws_provider(fake):
+    fake.catalog = [
+        {"type": "g6e.4xlarge", "provider": "aws", "disk_min_gb": 50, "disk_max_gb": 2560},
+    ]
+    with pytest.raises(
+        brev_provision.PreflightUnavailable, match=brev_provision.NEBIUS_INSTANCE_TYPE
+    ):
+        fake.provision(provider="nebius", host_ram_gib=64)
+    assert not fake.creates
+    assert sum(command[1] == "search" for command in fake.commands) == (
+        brev_provision.PREFLIGHT_ATTEMPTS
+    )
+
+
+def test_capacity_fallback_does_not_mask_a_deterministic_disk_mismatch(fake):
+    fake.catalog = [
+        {
+            "type": brev_provision.DEFAULT_INSTANCE_TYPE,
+            "provider": "aws",
+            "disk_min_gb": 50,
+            "disk_max_gb": 100,
+        },
+        {"type": "g6e.4xlarge", "provider": "aws", "disk_min_gb": 50, "disk_max_gb": 2560},
+    ]
+    with pytest.raises(brev_provision.ProvisionError, match="cannot provide the requested disk"):
+        fake.provision(provider="aws")
+    assert not fake.creates
+    # A deterministic rejection is not a PreflightUnavailable/InventoryError,
+    # so neither _preflight nor the fallback retries it.
+    assert sum(command[1] == "search" for command in fake.commands) == 1
+
+
 def test_unavailable_allocation_organization_is_retried_before_any_allocation(fake, monkeypatch):
     attempts = []
 
