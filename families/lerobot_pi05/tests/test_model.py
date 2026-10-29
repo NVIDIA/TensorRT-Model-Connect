@@ -72,12 +72,19 @@ def _processors(*, stats: bool, mode: str = "MEAN_STD", padding_side: str = "rig
 
 
 def _model_dir(root: Path, *, stats: bool = False, config: dict | None = None, **processor_args) -> Path:
+    mode = processor_args.get("mode", "MEAN_STD")
     root.mkdir(parents=True, exist_ok=True)
     (root / "config.json").write_text(json.dumps(config or _config()), encoding="utf-8")
     pre, post = _processors(stats=stats, **processor_args)
     (root / "policy_preprocessor.json").write_text(json.dumps(pre), encoding="utf-8")
     (root / "policy_postprocessor.json").write_text(json.dumps(post), encoding="utf-8")
-    if stats:
+    if stats and mode == "QUANTILES":
+        state_q99 = np.arange(8, dtype=np.float32) + 4.0
+        state_q99[2] = 2.0  # q01 == q99 on this dimension
+        save_file({"observation.state.q01": np.arange(8, dtype=np.float32),
+                   "observation.state.q99": state_q99}, str(root / NORMALIZER))
+        save_file({"action.q01": -np.ones(7, np.float32), "action.q99": np.ones(7, np.float32) * 3}, str(root / UNNORMALIZER))
+    elif stats:
         save_file({"observation.state.mean": np.arange(8, dtype=np.float32),
                    "observation.state.std": np.full(8, 2.0, np.float32)}, str(root / NORMALIZER))
         save_file({"action.mean": np.arange(7, dtype=np.float32),
@@ -107,17 +114,29 @@ def test_config_ignores_a_placeholder_camera_listed_as_a_feature(tmp_path) -> No
 def test_config_loads_statistics_when_the_checkpoint_has_them(tmp_path) -> None:
     cfg = config_module.load_config(_model_dir(tmp_path / "ckpt", stats=True))
     assert not cfg.state_normalization.is_identity
-    assert cfg.state_normalization.mean == tuple(float(v) for v in range(8))
-    assert cfg.action_normalization.std == (3.0,) * 7
+    assert cfg.state_normalization.offset == tuple(float(v) for v in range(8))
+    assert cfg.action_normalization.scale == (3.0,) * 7
     assert _normalization_json(cfg.action_normalization)["mode"] == "MEAN_STD"
     assert _normalization_json(config_module.Normalization("MEAN_STD", 1e-8)) == {"mode": "IDENTITY"}
 
 
+def test_config_reads_quantile_statistics_as_lerobot_defines_them(tmp_path) -> None:
+    # LeRobot's pi05 default is QUANTILES, so a plain lerobot-train output uses it.
+    cfg = config_module.load_config(_model_dir(tmp_path / "ckpt", stats=True, mode="QUANTILES"))
+    state = cfg.state_normalization
+    assert state.mode == "QUANTILES" and not state.is_identity
+    assert state.offset == tuple(float(v) for v in range(8))  # q01
+    # scale is q99 - q01, with eps where they coincide (dimension 2).
+    assert state.scale[0] == 4.0 and state.scale[2] == np.float32(1e-8)
+    assert cfg.action_normalization.offset == (-1.0,) * 7 and cfg.action_normalization.scale == (4.0,) * 7
+    assert _normalization_json(state)["scale"][2] == pytest.approx(1e-8)
+
+
 def test_config_rejects_unsupported_normalization_only_when_statistics_exist(tmp_path) -> None:
-    with pytest.raises(NotImplementedError, match="QUANTILES"):
-        config_module.load_config(_model_dir(tmp_path / "with-stats", stats=True, mode="QUANTILES"))
+    with pytest.raises(NotImplementedError, match="MIN_MAX"):
+        config_module.load_config(_model_dir(tmp_path / "with-stats", stats=True, mode="MIN_MAX"))
     # Without statistics the mode is moot, as in LeRobot.
-    cfg = config_module.load_config(_model_dir(tmp_path / "no-stats", mode="QUANTILES"))
+    cfg = config_module.load_config(_model_dir(tmp_path / "no-stats", mode="MIN_MAX"))
     assert cfg.state_normalization.is_identity
 
 
@@ -212,7 +231,7 @@ def test_build_writes_the_bundle_contract(tmp_path, stubbed_build) -> None:
     assert (runtime["empty_cameras"], runtime["prefix_tokens"], runtime["precision"]) == (1, 968, "fp32")
     assert (runtime["state_dim"], runtime["action_dim"], runtime["max_action_dim"]) == (8, 7, 32)
     assert runtime["state_normalization"]["mode"] == "MEAN_STD"
-    assert runtime["action_normalization"]["std"] == [3.0] * 7
+    assert runtime["action_normalization"]["scale"] == [3.0] * 7
     assert stubbed_build == ["weights", "prefix", "denoise"]
 
 

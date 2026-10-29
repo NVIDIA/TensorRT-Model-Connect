@@ -82,7 +82,7 @@ def _build_denoise_plan(cfg, weights, *, precision: str, verbose: bool = False) 
 def _normalization_json(norm: config_module.Normalization) -> dict:
     if norm.is_identity:
         return {"mode": "IDENTITY"}
-    return {"mode": norm.mode, "eps": norm.eps, "mean": list(norm.mean), "std": list(norm.std)}
+    return {"mode": norm.mode, "eps": norm.eps, "offset": list(norm.offset), "scale": list(norm.scale)}
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:

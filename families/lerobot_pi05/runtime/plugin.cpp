@@ -29,11 +29,15 @@ Normalization parse_normalization(const nlohmann::json& json) {
     const auto mode = json.at("mode").get<std::string>();
     if (mode == "IDENTITY")
         return norm;
-    if (mode != "MEAN_STD")
+    if (mode == "MEAN_STD")
+        norm.mode = NormalizationMode::kMeanStd;
+    else if (mode == "QUANTILES")
+        norm.mode = NormalizationMode::kQuantiles;
+    else
         throw std::runtime_error("lerobot_pi05 runtime.json has an unsupported normalization mode");
     norm.eps = json.at("eps").get<float>();
-    norm.mean = json.at("mean").get<std::vector<float>>();
-    norm.std = json.at("std").get<std::vector<float>>();
+    norm.offset = json.at("offset").get<std::vector<float>>();
+    norm.scale = json.at("scale").get<std::vector<float>>();
     return norm;
 }
 

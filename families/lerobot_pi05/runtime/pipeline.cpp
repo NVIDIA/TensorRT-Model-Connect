@@ -73,8 +73,8 @@ Pipeline::Pipeline(std::unique_ptr<ITrtModule> prefix, std::unique_ptr<ITrtModul
         throw std::runtime_error("lerobot_pi05 runtime.json does not match its runtime contract");
     }
     const auto check_stats = [](const Normalization& norm, std::int32_t dim, const char* what) {
-        if (!norm.identity() && (norm.mean.size() != static_cast<std::size_t>(dim) ||
-                                 norm.std.size() != norm.mean.size()))
+        if (!norm.identity() && (norm.offset.size() != static_cast<std::size_t>(dim) ||
+                                 norm.scale.size() != norm.offset.size()))
             throw std::runtime_error(std::string("lerobot_pi05 ") + what +
                                      " statistics do not match the feature size");
     };
@@ -183,8 +183,7 @@ std::vector<float> Pipeline::normalized_state(Span<const float> state) const {
     for (std::size_t index = 0; index < values.size(); ++index) {
         if (!std::isfinite(values[index]))
             throw std::invalid_argument("lerobot_pi05 state must be finite");
-        if (!norm.identity())
-            values[index] = (values[index] - norm.mean[index]) / (norm.std[index] + norm.eps);
+        values[index] = normalize_value(norm, index, values[index]);
     }
     return values;
 }
@@ -281,8 +280,7 @@ Pipeline::run(const internal::ImagesStateTextToActionChunkRequest& request,
     for (std::size_t row = 0; row < rows; ++row) {
         for (std::size_t column = 0; column < columns; ++column) {
             float value = sample[row * static_cast<std::size_t>(config_.max_action_dim) + column];
-            if (!norm.identity())
-                value = value * norm.std[column] + norm.mean[column];
+            value = unnormalize_value(norm, column, value);
             if (!std::isfinite(value))
                 throw std::runtime_error("lerobot_pi05 produced a non-finite action");
             result.actions.values.values.push_back(value);

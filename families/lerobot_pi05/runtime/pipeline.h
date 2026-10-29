@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "families/lerobot_pi05/runtime/normalization.h"
 #include "families/lerobot_pi05/runtime/paligemma_bpe.h"
 #include "trtmc/internal/action.h"
 #include "trtmc/internal/model.h"
@@ -17,15 +18,6 @@
 #include <vector>
 
 namespace trtmc::lerobot_pi05 {
-
-// Per-feature normalization. Empty statistics mean the value passes through, as
-// LeRobot skips a feature that has none.
-struct Normalization {
-    float eps{1.0e-8F};
-    std::vector<float> mean;
-    std::vector<float> std;
-    bool identity() const { return mean.empty(); }
-};
 
 struct RuntimeConfig {
     std::vector<std::string> cameras; // Real cameras, in the checkpoint's order.

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 add_library(trtmc_model_lerobot_pi05 SHARED
+  normalization.cpp
   paligemma_bpe.cpp
   pipeline.cpp
   plugin.cpp
@@ -53,4 +54,13 @@ if(TRTMC_BUILD_TESTS)
   target_compile_options(test_lerobot_pi05_prompt PRIVATE -Wall -Wextra -Wpedantic -Werror)
   add_test(NAME lerobot_pi05_prompt COMMAND test_lerobot_pi05_prompt)
   set_tests_properties(lerobot_pi05_prompt PROPERTIES LABELS "cpu")
+
+  add_executable(test_lerobot_pi05_normalization
+    ${PROJECT_SOURCE_DIR}/families/lerobot_pi05/tests/cpp/test_normalization.cpp
+    ${PROJECT_SOURCE_DIR}/families/lerobot_pi05/runtime/normalization.cpp
+  )
+  target_include_directories(test_lerobot_pi05_normalization PRIVATE ${PROJECT_SOURCE_DIR})
+  target_compile_options(test_lerobot_pi05_normalization PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME lerobot_pi05_normalization COMMAND test_lerobot_pi05_normalization)
+  set_tests_properties(lerobot_pi05_normalization PROPERTIES LABELS "cpu")
 endif()
