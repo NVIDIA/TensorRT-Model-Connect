@@ -7,18 +7,25 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 from safetensors.numpy import save_file
 from tensorrt_model_connect import BuildRequest
-from tensorrt_model_connect.model_support import ModelMetadata, resolve_family
 
 from .. import config as config_module
+from .. import model as model_module
 from ..checkpoint import load_checkpoint, require
-from ..model import TASK, _normalization_json, _validate, prefix_length
-from ..support import describe
-from ..tokenizer import TOKENIZER_BYTES, _verified, load_tokenizer_model
+from ..model import TASK, _normalization_json, _prefix_length, build
+from ..tokenizer import (
+    SPECIAL_IDS,
+    TOKENIZER_BYTES,
+    VOCABULARY_PIECES,
+    _checked,
+    check_vocabulary,
+    load_tokenizer_model,
+)
 
 NORMALIZER = "policy_preprocessor_step_2_normalizer_processor.safetensors"
 UNNORMALIZER = "policy_postprocessor_step_0_unnormalizer_processor.safetensors"
@@ -78,17 +85,6 @@ def _model_dir(root: Path, *, stats: bool = False, config: dict | None = None, *
     return root
 
 
-def test_support_claims_only_pi05_policies() -> None:
-    support = describe(ModelMetadata(config={"type": "pi05"}, model_index={}))
-    assert support is not None
-    assert support.tasks == (TASK,) and support.default_task == TASK
-    assert support.default_precision == "bf16"
-    family, resolved = resolve_family(ModelMetadata(config={"type": "pi05"}, model_index={}))
-    assert family == "lerobot_pi05" and resolved == support
-    for other in ({"type": "pi0"}, {"type": "pi0_fast"}, {"type": "act"}, {}):
-        assert describe(ModelMetadata(config=other, model_index={})) is None
-
-
 def test_config_reads_the_checkpoint_contract(tmp_path) -> None:
     cfg = config_module.load_config(_model_dir(tmp_path / "ckpt"))
     assert cfg.cameras == ("observation.images.image", "observation.images.image2")
@@ -98,7 +94,7 @@ def test_config_reads_the_checkpoint_contract(tmp_path) -> None:
     assert cfg.tokenizer_name == "google/paligemma-3b-pt-224"
     # No statistics in the directory: LeRobot passes the value through.
     assert cfg.state_normalization.is_identity and cfg.action_normalization.is_identity
-    assert prefix_length(cfg) == 3 * 256 + 200
+    assert _prefix_length(cfg) == 3 * 256 + 200
 
 
 def test_config_ignores_a_placeholder_camera_listed_as_a_feature(tmp_path) -> None:
@@ -169,37 +165,82 @@ def test_config_rejects_unsupported_camera_and_tokenizer_layouts(tmp_path) -> No
         config_module.load_config(_model_dir(tmp_path / "left", padding_side="left"))
 
 
-def _request(**overrides) -> BuildRequest:
-    values = {"model_dir": Path("."), "output_path": Path("out.bundle"), "family": "lerobot_pi05",
+def _request(model_dir: Path, **overrides) -> BuildRequest:
+    values = {"model_dir": model_dir, "output_path": Path("out.bundle"), "family": "lerobot_pi05",
               "task": TASK, "precision": "bf16"}
     values.update(overrides)
     return BuildRequest(**values)
 
 
-def test_request_validation_accepts_the_supported_shape(tmp_path) -> None:
-    cfg = config_module.load_config(_model_dir(tmp_path / "ckpt"))
-    assert _validate(_request(), cfg) == "bf16"
-    assert _validate(_request(precision="FP32", max_sequence_length=200, image_height=256), cfg) == "fp32"
+class _Writer:
+    def __init__(self) -> None:
+        self.header: dict = {}
+        self.sections: dict = {}
+
+    def set_header(self, **fields) -> None:
+        self.header = fields
+
+    def add_bytes(self, name: str, data: bytes) -> None:
+        self.sections[name] = data
+
+    def add_json(self, name: str, value: dict) -> None:
+        self.sections[name] = value
+
+
+@pytest.fixture
+def stubbed_build(monkeypatch):
+    """Replace only the heavy steps (weights, tokenizer, engine builds) of ``build``."""
+    calls: list[str] = []
+    metadata = SimpleNamespace(piece_count=VOCABULARY_PIECES, **SPECIAL_IDS)
+    monkeypatch.setattr(model_module, "load_checkpoint", lambda _: calls.append("weights") or {})
+    monkeypatch.setattr(model_module, "load_tokenizer_model", lambda _: b"tokenizer")
+    monkeypatch.setattr(model_module, "convert_paligemma_tokenizer_model", lambda _: (b"bpe", metadata))
+    monkeypatch.setattr(model_module, "_build_prefix_plan", lambda *a, **k: calls.append("prefix") or b"P")
+    monkeypatch.setattr(model_module, "_build_denoise_plan", lambda *a, **k: calls.append("denoise") or b"D")
+    return calls
+
+
+def test_build_writes_the_bundle_contract(tmp_path, stubbed_build) -> None:
+    model_dir = _model_dir(tmp_path / "ckpt", stats=True)
+    writer = _Writer()
+    build(_request(model_dir, precision="FP32", max_sequence_length=200, image_height=256), writer)
+    assert writer.header == {"family": "lerobot_pi05", "task": TASK, "backend": "trt"}
+    assert writer.sections["prefix.plan"] == b"P" and writer.sections["denoise.plan"] == b"D"
+    assert writer.sections["tokenizer.bpe"] == b"bpe"
+    runtime = writer.sections["runtime.json"]
+    assert runtime["cameras"] == ["observation.images.image", "observation.images.image2"]
+    assert (runtime["empty_cameras"], runtime["prefix_tokens"], runtime["precision"]) == (1, 968, "fp32")
+    assert (runtime["state_dim"], runtime["action_dim"], runtime["max_action_dim"]) == (8, 7, 32)
+    assert runtime["state_normalization"]["mode"] == "MEAN_STD"
+    assert runtime["action_normalization"]["std"] == [3.0] * 7
+    assert stubbed_build == ["weights", "prefix", "denoise"]
 
 
 @pytest.mark.parametrize(
-    ("overrides", "error"),
+    ("overrides", "error", "message"),
     [
-        ({"task": "robot_control"}, ValueError),
-        ({"precision": "fp16"}, ValueError),
-        ({"max_batch_size": 2}, NotImplementedError),
-        ({"tensor_parallel_size": 2}, NotImplementedError),
-        ({"dynamic_kv_cache": True}, NotImplementedError),
-        ({"quantization": "fp8"}, NotImplementedError),
-        ({"max_sequence_length": 100}, NotImplementedError),
-        ({"image_height": 224}, NotImplementedError),
-        ({"image_width": 224}, NotImplementedError),
+        ({"task": "robot_control"}, ValueError, "task"),
+        ({"precision": "fp16"}, ValueError, "precision"),
+        ({"backend": "trt_rtx", "max_batch_size": 2}, NotImplementedError, "batch size one"),
+        ({"tensor_parallel_size": 2}, NotImplementedError, "one device"),
+        ({"context_parallel_size": 2}, NotImplementedError, "one device"),
+        ({"dynamic_kv_cache": True}, NotImplementedError, "does not support dynamic_kv_cache"),
+        ({"video_num_frames": 4}, NotImplementedError, "video_num_frames"),
+        ({"mtp_seq_len": 2}, NotImplementedError, "MTP"),
+        ({"quantization": "fp8"}, NotImplementedError, "quantization"),
+        ({"fp32_layers": (3,)}, NotImplementedError, "mixed-precision"),
+        ({"max_sequence_length": 100}, NotImplementedError, "prompt length"),
+        ({"image_height": 224}, NotImplementedError, "height"),
+        ({"image_width": 224}, NotImplementedError, "width"),
     ],
 )
-def test_request_validation_rejects_unsupported_requests(tmp_path, overrides: dict, error: type) -> None:
-    cfg = config_module.load_config(_model_dir(tmp_path / "ckpt"))
-    with pytest.raises(error):
-        _validate(_request(**overrides), cfg)
+def test_build_rejects_unsupported_requests_before_any_heavy_work(
+    tmp_path, stubbed_build, overrides: dict, error: type, message: str
+) -> None:
+    model_dir = _model_dir(tmp_path / "ckpt")
+    with pytest.raises(error, match=message):
+        build(_request(model_dir, **overrides), _Writer())
+    assert stubbed_build == []
 
 
 def test_checkpoint_loading_and_shape_checks(tmp_path) -> None:
@@ -225,9 +266,15 @@ def test_checkpoint_loading_and_shape_checks(tmp_path) -> None:
         load_checkpoint(tmp_path)
 
 
-def test_tokenizer_asset_is_pinned_by_content(tmp_path) -> None:
-    with pytest.raises(ValueError, match="does not match"):
-        _verified(b"\x00" * TOKENIZER_BYTES, "test")
+def test_tokenizer_asset_is_pinned_by_size_and_vocabulary(tmp_path) -> None:
+    with pytest.raises(ValueError, match="not the supported vocabulary"):
+        _checked(b"\x00" * (TOKENIZER_BYTES - 1), "test")
+    assert _checked(b"\x00" * TOKENIZER_BYTES, "test")
     (tmp_path / "tokenizer.model").write_bytes(b"not the paligemma tokenizer")
-    with pytest.raises(ValueError, match="does not match"):
+    with pytest.raises(ValueError, match="not the supported vocabulary"):
         load_tokenizer_model(tmp_path)
+    check_vocabulary(SimpleNamespace(piece_count=VOCABULARY_PIECES, **SPECIAL_IDS))
+    with pytest.raises(ValueError, match="special ids"):
+        check_vocabulary(SimpleNamespace(piece_count=VOCABULARY_PIECES, **{**SPECIAL_IDS, "bos_id": 1}))
+    with pytest.raises(ValueError, match="pieces"):
+        check_vocabulary(SimpleNamespace(piece_count=1000, **SPECIAL_IDS))

@@ -39,10 +39,11 @@ LeRobot does: its "robot units" are the model's output.
 
 `google/paligemma-3b-pt-224` is gated and no checkpoint ships it. The builder
 takes `tokenizer.model` from the checkpoint directory if present, otherwise the
-public `big_vision/paligemma_tokenizer.model`, and accepts only the file with
-sha256 `8986bb4f...a168fc6`. That hash was checked against the gated repository.
-Building the converted asset needs `sentencepiece` and `protobuf` (see
-`requirements.txt`).
+public `big_vision/paligemma_tokenizer.model`, which was checked byte for byte
+against the gated repository's file when this family was added. A file of any
+other size is refused, and the converted vocabulary must have 257,152 pieces with
+pad, eos, bos and unk at ids 0 to 3. Converting it needs `sentencepiece` and
+`protobuf` (see `requirements.txt`).
 
 ## Bundle
 

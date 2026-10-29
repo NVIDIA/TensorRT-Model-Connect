@@ -19,7 +19,7 @@
 #include "trtmc/action.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
-#include "stb_image.h"
+#include "../../../../third_party/stb/stb_image.h"
 
 #include <chrono>
 #include <cstdint>

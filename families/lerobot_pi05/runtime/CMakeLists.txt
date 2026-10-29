@@ -39,7 +39,6 @@ if(TRTMC_BUILD_TESTS)
   )
   target_include_directories(trtmc_lerobot_pi05_qualification PRIVATE
     ${PROJECT_SOURCE_DIR}/core/runtime/include
-    ${PROJECT_SOURCE_DIR}/third_party/stb
   )
   target_link_libraries(trtmc_lerobot_pi05_qualification PRIVATE trtmc_c)
   target_compile_options(trtmc_lerobot_pi05_qualification PRIVATE -Wall -Wextra -Wpedantic)
