@@ -65,6 +65,9 @@ def run_reference(
     config = PI05Config.from_pretrained(str(model_dir))
     config.dtype = dtype
     config.device = device
+    # The oracle is eager PyTorch. Some trained checkpoints ask for torch.compile with autotuned
+    # kernels, whose numerics differ from eager at the 1e-3 level and are not a stable reference.
+    config.compile_model = False
     policy = PI05Policy.from_pretrained(str(model_dir), config=config).to(device).eval()
     pre, post = make_pre_post_processors(
         policy.config,

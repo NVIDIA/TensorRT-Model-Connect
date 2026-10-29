@@ -16,7 +16,7 @@ from tensorrt_model_connect import BuildRequest
 
 from .. import config as config_module
 from .. import model as model_module
-from ..checkpoint import load_checkpoint, require
+from ..checkpoint import canonical_name, embedding_key, load_checkpoint, require
 from ..model import TASK, _normalization_json, _prefix_length, build
 from ..tokenizer import (
     SPECIAL_IDS,
@@ -282,6 +282,73 @@ def test_checkpoint_loading_and_shape_checks(tmp_path) -> None:
         require(weights, "absent", (1,))
     save_file({"time_mlp_in.bias": np.zeros(3, np.float32)}, str(tmp_path / "model.safetensors"))
     with pytest.raises(KeyError, match="lm_head"):
+        load_checkpoint(tmp_path)
+
+
+def test_checkpoint_stored_in_bfloat16_loads_as_float32(tmp_path) -> None:
+    import subprocess
+    import sys
+
+    import ml_dtypes
+
+    values = np.array([0.5, -1.25, 3.0, 1000.0], dtype=ml_dtypes.bfloat16)
+    save_file(
+        {"paligemma_with_expert.paligemma.lm_head.weight": values.reshape(2, 2),
+         "paligemma_with_expert.time_mlp_in.bias": values},
+        str(tmp_path / "model.safetensors"),
+    )
+    # A fresh interpreter: this test registers bfloat16 itself, which would hide a loader
+    # that forgot to. Checkpoints trained in bf16 store it, and NumPy has no such dtype alone.
+    repository = Path(__file__).resolve().parents[3]
+    script = (
+        "import sys; sys.path[:0] = [sys.argv[1], sys.argv[1] + '/core/builder']\n"
+        "from families.lerobot_pi05.checkpoint import load_checkpoint\n"
+        "w = load_checkpoint(sys.argv[2])['time_mlp_in.bias']\n"
+        "print(w.dtype, w.tolist())\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", script, str(repository), str(tmp_path)],
+        capture_output=True, text=True, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "float32 [0.5, -1.25, 3.0, 1000.0]"
+
+
+@pytest.mark.parametrize(
+    ("stored", "canonical"),
+    [
+        ("paligemma_with_expert.action_in_proj.weight", "action_in_proj.weight"),
+        ("model.paligemma_with_expert.action_in_proj.weight", "action_in_proj.weight"),
+        ("model.paligemma_with_expert.gemma_expert.model.layers.0.mlp.up_proj.weight",
+         "gemma_expert.model.layers.0.mlp.up_proj.weight"),
+        ("time_mlp_in.bias", "time_mlp_in.bias"),
+    ],
+)
+def test_both_checkpoint_layouts_share_canonical_names(stored: str, canonical: str) -> None:
+    # A converted checkpoint and a lerobot-train output differ only by the leading prefixes.
+    assert canonical_name(stored) == canonical
+
+
+def test_train_output_layout_loads_and_prefers_the_embedding_table(tmp_path) -> None:
+    low, high = np.zeros((4, 2), np.float32), np.ones((4, 2), np.float32)
+    save_file(
+        {"model.paligemma_with_expert.paligemma.lm_head.weight": low,
+         "model.paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight": high,
+         "model.paligemma_with_expert.gemma_expert.lm_head.weight": low,
+         "model.time_mlp_in.bias": np.zeros(3, np.float32)},
+        str(tmp_path / "model.safetensors"),
+    )
+    weights = load_checkpoint(tmp_path)
+    assert "time_mlp_in.bias" in weights and "gemma_expert.lm_head.weight" not in weights
+    # Untied tables: LeRobot looks tokens up in embed_tokens, not lm_head.
+    assert embedding_key(weights) == "paligemma.model.language_model.embed_tokens.weight"
+    assert weights[embedding_key(weights)].sum() == 8.0
+    with pytest.raises(KeyError, match="none of"):
+        embedding_key({"unrelated": low})
+    # Two spellings of one tensor are an error, not a silent overwrite.
+    save_file({"paligemma_with_expert.time_mlp_in.bias": low, "model.paligemma_with_expert.time_mlp_in.bias": low},
+              str(tmp_path / "model.safetensors"))
+    with pytest.raises(ValueError, match="twice"):
         load_checkpoint(tmp_path)
 
 
