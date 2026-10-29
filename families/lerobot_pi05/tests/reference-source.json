@@ -1,0 +1,19 @@
+{
+  "repository": "huggingface/lerobot",
+  "package": "lerobot[pi]==0.6.1",
+  "model": {
+    "hf_id": "lerobot/pi05_libero_base",
+    "hf_revision": "5fcf06fc42b6717e22ab885fd381a096574b12c7"
+  },
+  "tokenizer": {
+    "name": "google/paligemma-3b-pt-224",
+    "sha256": "8986bb4f423f07f8c7f70d0dbe3526fb2316056c17bae71b1ea975e77a168fc6"
+  },
+  "frames": {
+    "dataset": "physical-intelligence/libero",
+    "revision": "a4336d589d589045d1c56423ffdf3b88a0e19b1f",
+    "episode": 0,
+    "frame_indices": [0, 90, 180]
+  },
+  "noise": {"seed": 0, "shape": [50, 32], "generator": "torch.randn, CPU, float32"}
+}

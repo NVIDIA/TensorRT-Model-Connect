@@ -1,0 +1,14 @@
+{
+  "source": "physical-intelligence/libero@a4336d589d589045d1c56423ffdf3b88a0e19b1f episode 0 frame 180",
+  "state": [
+    -0.027764106169342995,
+    0.17823526263237,
+    0.5854359269142151,
+    3.085361957550049,
+    -0.556632399559021,
+    -0.11672280728816986,
+    0.005086391698569059,
+    -0.00559427822008729
+  ],
+  "task": "put the white mug on the left plate and put the yellow and white mug on the right plate"
+}
