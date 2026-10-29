@@ -20,7 +20,32 @@ from safetensors import safe_open
 
 
 EMPTY_CAMERA_PREFIX = "observation.images.empty_camera_"
-SUPPORTED_NORMALIZATION = ("IDENTITY", "MEAN_STD", "QUANTILES")
+STATE_KEY = "observation.state"
+ACTION_KEY = "action"
+# LeRobot's statistics per normalization mode: (offset, upper or scale) entry names.
+_STATISTICS = {
+    "MEAN_STD": ("mean", "std"),
+    "MIN_MAX": ("min", "max"),
+    "QUANTILES": ("q01", "q99"),
+    "QUANTILE10": ("q10", "q90"),
+}
+SUPPORTED_NORMALIZATION = ("IDENTITY", *_STATISTICS)
+# Processor steps whose effect this family reproduces, or that are no-ops for inference.
+_PREPROCESSOR_STEPS = {
+    "rename_observations_processor",  # inputs already use the checkpoint's own keys
+    "to_batch_processor",
+    "relative_actions_processor",  # accepted only when disabled
+    "normalizer_processor",
+    "pi05_prepare_state_tokenizer_processor_step",
+    "tokenizer_processor",
+    "device_processor",
+}
+_POSTPROCESSOR_STEPS = {
+    "unnormalizer_processor",
+    "absolute_actions_processor",  # accepted only when disabled
+    "device_processor",
+}
+_DISABLED_ONLY = {"relative_actions_processor", "absolute_actions_processor"}
 
 # PaliGemma Gemma-2B prefix and Gemma-300M action expert, as LeRobot defines them.
 PREFIX_VARIANT = "gemma_2b"
@@ -40,15 +65,18 @@ _REQUIRED_EXACT = {
 
 @dataclass(frozen=True)
 class Normalization:
-    """One feature's normalization. ``offset``/``scale`` are None when the checkpoint has no stats.
+    """One feature's normalization, as LeRobot's NormalizerProcessorStep applies it.
 
-    LeRobot skips a feature whose statistics are absent, so ``None`` means the value passes
-    through unchanged regardless of the configured mode. Otherwise, per dimension:
+    ``offset``/``scale`` are None when LeRobot would pass the value through: identity mode,
+    a feature the processor does not normalize, or no statistics for it. Otherwise, per
+    dimension and in float32 with LeRobot's operation order:
 
-    - ``MEAN_STD``: ``offset=mean``, ``scale=std``; normalize ``(x - mean) / (std + eps)``,
-      unnormalize ``x * std + mean``.
-    - ``QUANTILES``: ``offset=q01``, ``scale=q99 - q01`` (``eps`` where that is exactly zero);
-      normalize ``2 (x - q01) / scale - 1``, unnormalize ``(x + 1) scale / 2 + q01``.
+    - ``MEAN_STD``: ``offset=mean``, ``scale=std``; ``(x - mean) / (std + eps)`` and
+      ``x * std + mean``.
+    - ``QUANTILES`` / ``QUANTILE10`` / ``MIN_MAX``: ``offset`` is the lower statistic (q01, q10
+      or min) and ``scale`` the spread to the upper one, ``eps`` where it is exactly zero;
+      ``2 (x - offset) / scale - 1``, and back with ``(x + 1) scale / 2 + offset`` (quantiles)
+      or ``(x + 1) / 2 scale + offset`` (min/max).
     """
 
     mode: str
@@ -80,6 +108,8 @@ class Pi05Config:
     max_period: float
     state_normalization: Normalization
     action_normalization: Normalization
+    # Dataset min/max of each action dimension, when the checkpoint carries them.
+    action_range: tuple[tuple[float, ...], tuple[float, ...]] | None = None
 
     @property
     def camera_slots(self) -> int:
@@ -121,62 +151,111 @@ def _features(raw: dict[str, Any]) -> tuple[list[tuple[str, list[int]]], int, in
         for name, spec in inputs.items()
         if spec.get("type") == "VISUAL" and not name.startswith(EMPTY_CAMERA_PREFIX)
     ]
-    state = [spec for spec in inputs.values() if spec.get("type") == "STATE"]
-    action = [spec for spec in outputs.values() if spec.get("type") == "ACTION"]
+    state = [(name, spec) for name, spec in inputs.items() if spec.get("type") == "STATE"]
+    action = [(name, spec) for name, spec in outputs.items() if spec.get("type") == "ACTION"]
     if not cameras:
         raise ValueError("LeRobot Pi 0.5 checkpoint declares no camera input")
-    if len(state) != 1 or len(action) != 1:
-        raise ValueError("LeRobot Pi 0.5 needs exactly one STATE input and one ACTION output")
-    return cameras, int(state[0]["shape"][0]), int(action[0]["shape"][0])
+    # LeRobot's pi05 prompt step reads the state from this exact key.
+    if [name for name, _ in state] != [STATE_KEY] or [name for name, _ in action] != [ACTION_KEY]:
+        raise ValueError(f"LeRobot Pi 0.5 needs exactly one {STATE_KEY} input and one {ACTION_KEY} output")
+    state_shape, action_shape = list(state[0][1]["shape"]), list(action[0][1]["shape"])
+    if len(state_shape) != 1 or len(action_shape) != 1:
+        raise ValueError("LeRobot Pi 0.5 state and action must be vectors")
+    return cameras, int(state_shape[0]), int(action_shape[0])
 
 
-def _normalization(
-    model_dir: Path, processor: str, registry_name: str, feature_key: str, feature_type: str
-) -> Normalization:
-    document = _read_json(model_dir / processor)
-    steps = [s for s in document.get("steps", []) if s.get("registry_name") == registry_name]
-    if len(steps) != 1:
-        raise ValueError(f"{processor} must contain exactly one {registry_name} step")
-    step = steps[0]
-    settings = step.get("config", {})
-    mode = str(settings.get("norm_map", {}).get(feature_type, "IDENTITY")).upper()
-    eps = float(settings.get("eps", 1e-8))
-    state_file = step.get("state_file")
+def _steps(model_dir: Path, processor: str, allowed: set[str]) -> list[dict[str, Any]]:
+    """The processor's steps, after refusing any whose effect this family does not reproduce."""
+    steps = _read_json(model_dir / processor).get("steps", [])
+    for step in steps:
+        name = str(step.get("registry_name", ""))
+        known = name in allowed or name.startswith("to_batch_processor")
+        if not known:
+            raise NotImplementedError(f"LeRobot Pi 0.5 does not support the {name!r} step in {processor}")
+        if name in _DISABLED_ONLY and step.get("config", {}).get("enabled", False):
+            raise NotImplementedError(f"LeRobot Pi 0.5 does not support an enabled {name!r} step")
+    return steps
+
+
+def _one_step(steps: list[dict[str, Any]], processor: str, name: str) -> tuple[int, dict[str, Any]]:
+    found = [(index, step) for index, step in enumerate(steps) if step.get("registry_name") == name]
+    if len(found) != 1:
+        raise ValueError(f"{processor} must contain exactly one {name} step")
+    return found[0]
+
+
+def _statistics(model_dir: Path, state_file: str | None, feature_key: str) -> dict[str, np.ndarray]:
+    """``{stat: values}`` for one feature, empty when the checkpoint has none for it."""
     if not state_file:
-        # LeRobot skips normalization for a feature with no statistics at all.
-        return Normalization(mode=mode, eps=eps)
-    if mode not in SUPPORTED_NORMALIZATION:
-        raise NotImplementedError(
-            f"LeRobot Pi 0.5 normalization mode {mode} for {feature_type} is not supported "
-            f"(supported: {', '.join(SUPPORTED_NORMALIZATION)})"
-        )
+        return {}
     path = model_dir / state_file
     if not path.is_file():
         raise FileNotFoundError(f"LeRobot Pi 0.5 checkpoint is missing {state_file}")
-    names_for_mode = {"MEAN_STD": ("mean", "std"), "QUANTILES": ("q01", "q99")}
+    prefix = feature_key + "."
     with safe_open(str(path), framework="numpy") as reader:
-        names = set(reader.keys())
-        wanted = tuple(f"{feature_key}.{stat}" for stat in names_for_mode.get(mode, ()))
-        if mode == "IDENTITY":
-            return Normalization(mode=mode, eps=eps)
-        if any(name not in names for name in wanted):
-            raise KeyError(f"{state_file} has no {wanted[0]} / {wanted[1]} statistics")
-        first, second = (np.asarray(reader.get_tensor(name), dtype=np.float32).reshape(-1) for name in wanted)
+        return {
+            name[len(prefix):]: np.asarray(reader.get_tensor(name), dtype=np.float32).reshape(-1)
+            for name in reader.keys()
+            if name.startswith(prefix)
+        }
+
+
+def _normalization(model_dir: Path, step: dict[str, Any], feature_key: str, observation: bool) -> Normalization:
+    """Mirror ``_NormalizationMixin`` for one feature of one (un)normalizer step."""
+    settings = step.get("config", {})
+    norm_map = {str(k).upper(): str(v).upper() for k, v in settings.get("norm_map", {}).items()}
+    eps = float(settings.get("eps", 1e-8))
+    if observation:
+        # Observations are normalized only when the step lists them, and only those kept by
+        # normalize_observation_keys; the listed feature type selects the mode.
+        feature = settings.get("features", {}).get(feature_key)
+        selected = settings.get("normalize_observation_keys")
+        if feature is None or feature.get("type") == "ACTION" or (
+            selected is not None and feature_key not in selected
+        ):
+            return Normalization(mode="IDENTITY", eps=eps)
+        feature_type = str(feature.get("type")).upper()
+    else:
+        # Actions are always (un)normalized by the ACTION mode, whatever the step lists.
+        feature_type = "ACTION"
+    mode = norm_map.get(feature_type, "IDENTITY")
+    stats = _statistics(model_dir, step.get("state_file"), feature_key)
+    if mode == "IDENTITY" or not stats:
+        # LeRobot passes a feature through when it has no statistics at all.
+        return Normalization(mode=mode, eps=eps)
+    if mode not in _STATISTICS:
+        raise NotImplementedError(
+            f"LeRobot Pi 0.5 normalization mode {mode} for {feature_key} is not supported "
+            f"(supported: {', '.join(SUPPORTED_NORMALIZATION)})"
+        )
+    low, high = _STATISTICS[mode]
+    if low not in stats or high not in stats:
+        raise ValueError(f"{mode} normalization of {feature_key} needs its {low} and {high} statistics")
     if mode == "MEAN_STD":
-        return Normalization(mode=mode, eps=eps, offset=tuple(map(float, first)), scale=tuple(map(float, second)))
-    spread = (second - first).astype(np.float32)
-    spread = np.where(spread == 0, np.float32(eps), spread)
-    return Normalization(mode=mode, eps=eps, offset=tuple(map(float, first)), scale=tuple(map(float, spread)))
+        offset, scale = stats["mean"], stats["std"]
+    else:
+        offset = stats[low]
+        spread = (stats[high] - stats[low]).astype(np.float32)
+        scale = np.where(spread == 0, np.float32(eps), spread).astype(np.float32)
+    return Normalization(
+        mode=mode, eps=eps, offset=tuple(map(float, offset)), scale=tuple(map(float, scale))
+    )
 
 
-def _tokenizer_name(model_dir: Path) -> str:
-    document = _read_json(model_dir / "policy_preprocessor.json")
-    steps = [s for s in document.get("steps", []) if s.get("registry_name") == "tokenizer_processor"]
-    if len(steps) != 1:
-        raise ValueError("policy_preprocessor.json must contain exactly one tokenizer_processor step")
-    config = steps[0].get("config", {})
+def _action_range(model_dir: Path, step: dict[str, Any]):
+    stats = _statistics(model_dir, step.get("state_file"), ACTION_KEY)
+    if "min" not in stats or "max" not in stats:
+        return None
+    return tuple(map(float, stats["min"])), tuple(map(float, stats["max"]))
+
+
+def _tokenizer_name(steps: list[dict[str, Any]], tokenizer_max_length: int) -> str:
+    _, step = _one_step(steps, "policy_preprocessor.json", "tokenizer_processor")
+    config = step.get("config", {})
     if config.get("padding_side", "right") != "right" or config.get("padding") != "max_length":
         raise NotImplementedError("LeRobot Pi 0.5 requires right-padded max_length tokenization")
+    if int(config.get("max_length", tokenizer_max_length)) != tokenizer_max_length:
+        raise ValueError("LeRobot Pi 0.5 tokenizer max_length differs from tokenizer_max_length")
     return str(config.get("tokenizer_name", ""))
 
 
@@ -196,6 +275,15 @@ def load_config(model_dir: str | Path) -> Pi05Config:
         # The reference pads a non-square image to a square; that is not implemented.
         raise NotImplementedError("LeRobot Pi 0.5 requires square camera images")
 
+    pre = _steps(model_dir, "policy_preprocessor.json", _PREPROCESSOR_STEPS)
+    post = _steps(model_dir, "policy_postprocessor.json", _POSTPROCESSOR_STEPS)
+    normalizer_index, normalizer = _one_step(pre, "policy_preprocessor.json", "normalizer_processor")
+    prompt_index, _ = _one_step(pre, "policy_preprocessor.json", "pi05_prepare_state_tokenizer_processor_step")
+    if normalizer_index > prompt_index:
+        # The prompt discretizes the state, so it must see the normalized value.
+        raise NotImplementedError("LeRobot Pi 0.5 requires the state to be normalized before the prompt step")
+    _, unnormalizer = _one_step(post, "policy_postprocessor.json", "unnormalizer_processor")
+
     max_state_dim = int(raw["max_state_dim"])
     max_action_dim = int(raw["max_action_dim"])
     if state_dim > max_state_dim or action_dim > max_action_dim:
@@ -214,13 +302,10 @@ def load_config(model_dir: str | Path) -> Pi05Config:
         max_action_dim=max_action_dim,
         num_inference_steps=int(raw["num_inference_steps"]),
         tokenizer_max_length=int(raw["tokenizer_max_length"]),
-        tokenizer_name=_tokenizer_name(model_dir),
+        tokenizer_name=_tokenizer_name(pre, int(raw["tokenizer_max_length"])),
         min_period=float(raw["min_period"]),
         max_period=float(raw["max_period"]),
-        state_normalization=_normalization(
-            model_dir, "policy_preprocessor.json", "normalizer_processor", "observation.state", "STATE"
-        ),
-        action_normalization=_normalization(
-            model_dir, "policy_postprocessor.json", "unnormalizer_processor", "action", "ACTION"
-        ),
+        state_normalization=_normalization(model_dir, normalizer, STATE_KEY, observation=True),
+        action_normalization=_normalization(model_dir, unnormalizer, ACTION_KEY, observation=False),
+        action_range=_action_range(model_dir, unnormalizer),
     )

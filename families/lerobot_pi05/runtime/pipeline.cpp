@@ -47,12 +47,14 @@ const Tensor& require_output(const TensorMap& outputs, const char* name, std::si
     return found->second;
 }
 
-void require_engine_inputs(const ITrtModule& engine, std::initializer_list<const char*> names,
-                           const char* what) {
-    for (const char* name : names)
-        if (!engine.has_input(name))
-            throw std::runtime_error(std::string("lerobot_pi05 ") + what + " engine has no input " +
-                                     name);
+void require_shape(const ITrtModule& engine, const char* name, std::vector<std::int64_t> expected,
+                   const char* what) {
+    if (!engine.has_input(name) && !engine.has_output(name))
+        throw std::runtime_error(std::string("lerobot_pi05 ") + what + " engine has no tensor " +
+                                 name);
+    if (engine.tensor_shape(name) != expected)
+        throw std::runtime_error(std::string("lerobot_pi05 ") + what + " engine tensor " + name +
+                                 " does not match runtime.json");
 }
 
 } // namespace
@@ -80,11 +82,35 @@ Pipeline::Pipeline(std::unique_ptr<ITrtModule> prefix, std::unique_ptr<ITrtModul
     };
     check_stats(config_.state_normalization, config_.state_dim, "state");
     check_stats(config_.action_normalization, config_.action_dim, "action");
-    require_engine_inputs(*prefix_, {"pixel_values", "token_ids", "position_ids", "attention_bias"},
-                          "prefix");
-    require_engine_inputs(
-        *denoise_, {"x_t", "time", "dt", "position_offset", "prefix_bias", "k_cache", "v_cache"},
-        "denoise");
+    const auto range_size = static_cast<std::size_t>(config_.action_dim);
+    if (config_.action_min.size() != config_.action_max.size() ||
+        (!config_.action_min.empty() && config_.action_min.size() != range_size))
+        throw std::runtime_error("lerobot_pi05 action range does not match the action size");
+    validate_engines();
+}
+
+// Both engines must agree with runtime.json and with each other on the cache they hand over.
+void Pipeline::validate_engines() {
+    const std::int64_t prefix = config_.prefix_tokens;
+    require_shape(*prefix_, "pixel_values",
+                  {config_.camera_slots(), 3, config_.camera_height, config_.camera_width},
+                  "prefix");
+    require_shape(*prefix_, "token_ids", {config_.prompt_tokens}, "prefix");
+    require_shape(*prefix_, "position_ids", {prefix}, "prefix");
+    require_shape(*prefix_, "attention_bias", {prefix, prefix}, "prefix");
+    require_shape(*denoise_, "x_t", {config_.chunk_size, config_.max_action_dim}, "denoise");
+    require_shape(*denoise_, "prefix_bias", {prefix}, "denoise");
+    for (const char* name : {"time", "dt", "position_offset"})
+        require_shape(*denoise_, name, {1}, "denoise");
+    for (const char* name : {"k_cache", "v_cache"}) {
+        const auto shape = denoise_->tensor_shape(name);
+        if (!prefix_->has_output(name) || prefix_->tensor_shape(name) != shape ||
+            prefix_->tensor_dtype(name) != denoise_->tensor_dtype(name) || shape.size() != 3 ||
+            shape[1] != prefix)
+            throw std::runtime_error(
+                std::string("lerobot_pi05 prefix and denoise engines disagree on ") + name);
+        cache_numel_ = static_cast<std::size_t>(shape[0] * shape[1] * shape[2]);
+    }
 }
 
 std::vector<internal::TaskInstance> Pipeline::task_bindings() {
@@ -188,107 +214,121 @@ std::vector<float> Pipeline::normalized_state(Span<const float> state) const {
     return values;
 }
 
-internal::ImagesStateTextActionChunkResult
-Pipeline::run(const internal::ImagesStateTextToActionChunkRequest& request,
-              internal::ConfigView config) {
-    const auto started = std::chrono::steady_clock::now();
-    const auto& observation = request.observation;
-    const auto options = parse_options(config);
+Pipeline::PrefixInputs
+Pipeline::prefix_inputs(const internal::ImagesStateTextObservation& observation) const {
     if (observation.text.empty())
         throw std::invalid_argument("lerobot_pi05 requires a non-empty instruction");
-
-    auto pixels = pack_pixels(observation);
-    const auto state = normalized_state(observation.state);
-    auto prompt = tokenizer_.tokenize_pi05(observation.text, state,
+    PrefixInputs inputs;
+    inputs.pixels = pack_pixels(observation);
+    auto prompt = tokenizer_.tokenize_pi05(observation.text, normalized_state(observation.state),
                                            static_cast<std::size_t>(config_.prompt_tokens));
     if (prompt.truncated)
         throw std::invalid_argument("lerobot_pi05 instruction and state exceed " +
                                     std::to_string(config_.prompt_tokens) + " prompt tokens");
+    inputs.token_ids = std::move(prompt.token_ids);
 
     // Masks and positions follow LeRobot: a masked camera slot or a padded prompt token neither
-    // attends nor advances the position counter.
+    // attends nor advances the position counter. Real cameras fill the first slots.
     const auto prefix = static_cast<std::size_t>(config_.prefix_tokens);
     const auto tokens_per_image = static_cast<std::size_t>(config_.tokens_per_image);
     std::vector<std::uint8_t> valid(prefix, 0);
-    for (std::size_t slot = 0; slot < config_.cameras.size(); ++slot)
-        std::fill_n(valid.begin() + slot * tokens_per_image, tokens_per_image, 1);
-    const std::size_t prompt_start =
-        static_cast<std::size_t>(config_.camera_slots()) * tokens_per_image;
+    std::fill_n(valid.begin(), config_.cameras.size() * tokens_per_image, 1);
+    const auto prompt_start = static_cast<std::size_t>(config_.camera_slots()) * tokens_per_image;
     for (std::size_t index = 0; index < prompt.token_mask.size(); ++index)
         valid[prompt_start + index] = prompt.token_mask[index] != 0 ? 1 : 0;
 
-    std::vector<std::int32_t> positions(prefix);
-    std::int32_t counter = 0;
+    inputs.positions.resize(prefix);
     for (std::size_t index = 0; index < prefix; ++index) {
-        counter += valid[index];
-        positions[index] = counter - 1;
+        inputs.real_tokens += valid[index];
+        inputs.positions[index] = inputs.real_tokens - 1;
     }
-    std::vector<float> bias(prefix * prefix, kBlocked);
-    std::vector<float> prefix_bias(prefix, kBlocked);
+    inputs.attention_bias.assign(prefix * prefix, kBlocked);
+    inputs.prefix_bias.assign(prefix, kBlocked);
     for (std::size_t row = 0; row < prefix; ++row) {
-        if (valid[row] != 0) {
-            prefix_bias[row] = 0.0F;
-            for (std::size_t column = 0; column < prefix; ++column)
-                if (valid[column] != 0)
-                    bias[row * prefix + column] = 0.0F;
-        }
+        if (valid[row] == 0)
+            continue;
+        inputs.prefix_bias[row] = 0.0F;
+        for (std::size_t column = 0; column < prefix; ++column)
+            if (valid[column] != 0)
+                inputs.attention_bias[row * prefix + column] = 0.0F;
     }
+    return inputs;
+}
 
-    const auto slots = static_cast<std::int64_t>(config_.camera_slots());
-    auto prefix_outputs = prefix_->forward(
-        {{"pixel_values",
-          tensor_of(pixels.data(), {slots, 3, config_.camera_height, config_.camera_width},
-                    DType::kFloat32)},
-         {"token_ids", tensor_of(prompt.token_ids.data(), {config_.prompt_tokens}, DType::kInt32)},
-         {"position_ids", tensor_of(positions.data(), {config_.prefix_tokens}, DType::kInt32)},
-         {"attention_bias", tensor_of(bias.data(), {config_.prefix_tokens, config_.prefix_tokens},
-                                      DType::kFloat32)}});
-    const auto cache_numel = prefix_outputs.count("k_cache") != 0
-                                 ? prefix_outputs.at("k_cache").numel()
-                                 : std::size_t{0};
-    const Tensor& k_cache = require_output(prefix_outputs, "k_cache", cache_numel);
-    const Tensor& v_cache = require_output(prefix_outputs, "v_cache", cache_numel);
-
-    auto sample = initial_noise(options);
-    std::int32_t offset = counter;
-    const float step_size = static_cast<float>(-1.0 / config_.num_inference_steps);
+std::vector<float> Pipeline::denoise(PrefixInputs& inputs, const Tensor& k_cache,
+                                     const Tensor& v_cache, std::vector<float> sample) {
+    // LeRobot's schedule: t = 1 + step * dt with dt = -1 / steps, evaluated in double.
+    const double dt = -1.0 / config_.num_inference_steps;
+    float step_size = static_cast<float>(dt);
     for (std::int32_t step = 0; step < config_.num_inference_steps; ++step) {
-        float time = static_cast<float>(1.0 + step * (-1.0 / config_.num_inference_steps));
-        float dt = step_size;
+        float time = static_cast<float>(1.0 + step * dt);
         auto outputs = denoise_->forward(
             {{"x_t", tensor_of(sample.data(), {config_.chunk_size, config_.max_action_dim},
                                DType::kFloat32)},
              {"time", tensor_of(&time, {1}, DType::kFloat32)},
-             {"dt", tensor_of(&dt, {1}, DType::kFloat32)},
-             {"position_offset", tensor_of(&offset, {1}, DType::kInt32)},
+             {"dt", tensor_of(&step_size, {1}, DType::kFloat32)},
+             {"position_offset", tensor_of(&inputs.real_tokens, {1}, DType::kInt32)},
              {"prefix_bias",
-              tensor_of(prefix_bias.data(), {config_.prefix_tokens}, DType::kFloat32)},
+              tensor_of(inputs.prefix_bias.data(), {config_.prefix_tokens}, DType::kFloat32)},
              {"k_cache", k_cache},
              {"v_cache", v_cache}});
         const Tensor& next = require_output(outputs, "x_next", sample.size());
         std::memcpy(sample.data(), next.data, sample.size() * sizeof(float));
     }
+    return sample;
+}
 
+internal::ImagesStateTextActionChunkResult
+Pipeline::pack_actions(const std::vector<float>& sample) const {
     // Keep the leading action_dim columns of the padded action and undo the normalization.
     internal::ImagesStateTextActionChunkResult result;
     const auto rows = static_cast<std::size_t>(config_.chunk_size);
     const auto columns = static_cast<std::size_t>(config_.action_dim);
-    const auto& norm = config_.action_normalization;
+    const auto padded = static_cast<std::size_t>(config_.max_action_dim);
     result.actions.values.rows = rows;
     result.actions.values.columns = columns;
     result.actions.values.values.reserve(rows * columns);
+    // Within range only when the checkpoint knows its dataset range and every action is inside.
+    bool within = !config_.action_min.empty();
     for (std::size_t row = 0; row < rows; ++row) {
         for (std::size_t column = 0; column < columns; ++column) {
-            float value = sample[row * static_cast<std::size_t>(config_.max_action_dim) + column];
-            value = unnormalize_value(norm, column, value);
+            const float value = unnormalize_value(config_.action_normalization, column,
+                                                  sample[row * padded + column]);
             if (!std::isfinite(value))
                 throw std::runtime_error("lerobot_pi05 produced a non-finite action");
+            if (within &&
+                (value < config_.action_min[column] || value > config_.action_max[column]))
+                within = false;
             result.actions.values.values.push_back(value);
         }
     }
     result.actions.schema = {"lerobot.pi05", {}, {}, "", "unnormalized"};
-    // The checkpoint carries no training range to compare against.
-    result.within_training_bounds = false;
+    result.within_training_bounds = within;
+    return result;
+}
+
+internal::ImagesStateTextActionChunkResult
+Pipeline::run(const internal::ImagesStateTextToActionChunkRequest& request,
+              internal::ConfigView config) {
+    const auto started = std::chrono::steady_clock::now();
+    const auto options = parse_options(config);
+    auto inputs = prefix_inputs(request.observation);
+
+    auto prefix_outputs = prefix_->forward(
+        {{"pixel_values",
+          tensor_of(inputs.pixels.data(),
+                    {config_.camera_slots(), 3, config_.camera_height, config_.camera_width},
+                    DType::kFloat32)},
+         {"token_ids", tensor_of(inputs.token_ids.data(), {config_.prompt_tokens}, DType::kInt32)},
+         {"position_ids",
+          tensor_of(inputs.positions.data(), {config_.prefix_tokens}, DType::kInt32)},
+         {"attention_bias",
+          tensor_of(inputs.attention_bias.data(), {config_.prefix_tokens, config_.prefix_tokens},
+                    DType::kFloat32)}});
+    const Tensor& k_cache = require_output(prefix_outputs, "k_cache", cache_numel_);
+    const Tensor& v_cache = require_output(prefix_outputs, "v_cache", cache_numel_);
+
+    auto result = pack_actions(denoise(inputs, k_cache, v_cache, initial_noise(options)));
     result.inference_ms =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
             .count();

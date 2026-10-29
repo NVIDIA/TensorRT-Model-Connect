@@ -34,6 +34,8 @@ struct RuntimeConfig {
     std::int32_t num_inference_steps{0};
     Normalization state_normalization;
     Normalization action_normalization;
+    std::vector<float> action_min; // Dataset range per action dimension; empty when unknown.
+    std::vector<float> action_max;
 
     std::int32_t camera_slots() const {
         return static_cast<std::int32_t>(cameras.size()) + empty_cameras;
@@ -60,10 +62,24 @@ class Pipeline final : public internal::IModel, public internal::IImagesStateTex
         std::uint64_t seed{0};
         std::vector<float> noise; // Empty unless supplied explicitly.
     };
+    // What the prefix engine reads, and the masks the denoise steps reuse.
+    struct PrefixInputs {
+        std::vector<float> pixels;
+        std::vector<std::int32_t> token_ids;
+        std::vector<std::int32_t> positions;
+        std::vector<float> attention_bias;
+        std::vector<float> prefix_bias;
+        std::int32_t real_tokens{0};
+    };
     Options parse_options(internal::ConfigView config) const;
     std::vector<float> initial_noise(const Options& options);
     std::vector<float> pack_pixels(const internal::ImagesStateTextObservation& observation) const;
     std::vector<float> normalized_state(Span<const float> state) const;
+    PrefixInputs prefix_inputs(const internal::ImagesStateTextObservation& observation) const;
+    std::vector<float> denoise(PrefixInputs& inputs, const Tensor& k_cache, const Tensor& v_cache,
+                               std::vector<float> sample);
+    internal::ImagesStateTextActionChunkResult pack_actions(const std::vector<float>& sample) const;
+    void validate_engines();
 
     std::unique_ptr<ITrtModule> prefix_;
     std::unique_ptr<ITrtModule> denoise_;
@@ -71,6 +87,7 @@ class Pipeline final : public internal::IModel, public internal::IImagesStateTex
     RuntimeConfig config_;
     std::string primary_task_;
     std::mt19937_64 rng_;
+    std::size_t cache_numel_{0}; // Elements in one K or V cache, from the engines themselves.
 };
 
 } // namespace trtmc::lerobot_pi05

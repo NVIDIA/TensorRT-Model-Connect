@@ -152,5 +152,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "precision": precision,
             "state_normalization": _normalization_json(cfg.state_normalization),
             "action_normalization": _normalization_json(cfg.action_normalization),
+            "action_range": (
+                None if cfg.action_range is None
+                else {"min": list(cfg.action_range[0]), "max": list(cfg.action_range[1])}
+            ),
         },
     )
