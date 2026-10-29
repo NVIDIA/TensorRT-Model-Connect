@@ -1,0 +1,45 @@
+<!doctype html>
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TRTMC Short Drama</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="bar">
+    <div class="brand"><span class="mark">TRTMC</span> Short Drama</div>
+    <div id="machine" class="machine"></div>
+    <div id="activity" class="activity"></div>
+  </header>
+  <div class="layout">
+    <aside class="side">
+      <h2>Projects</h2>
+      <ul id="projects" class="projects"></ul>
+      <details class="new" id="new-project" open>
+        <summary>New project</summary>
+        <label>Title <input id="new-title" value="阿Q正传"></label>
+        <label class="check"><input type="checkbox" id="new-sample" checked> Use the sample novel (《阿Q正传》, public domain)</label>
+        <label>Or paste a novel <textarea id="new-novel" rows="4" placeholder="第一章 …"></textarea></label>
+        <label>Or open a text file <input type="file" id="new-file" accept=".txt,text/plain"></label>
+        <div class="row">
+          <label>Episodes <input id="new-episodes" type="number" min="1" max="20" value="4"></label>
+          <label>Max seconds <input id="new-seconds" type="number" min="10" max="600" value="60"></label>
+        </div>
+        <button id="create" class="primary">Create</button>
+      </details>
+    </aside>
+    <main id="main" class="main">
+      <section class="empty">
+        <h1>Novel in, vertical episodes out.</h1>
+        <p>Every step runs on your GPU through TensorRT Model Connect: a language model plans the drama,
+          an image model draws the cast and places, a video model films each shot with sound, and a speech
+          model times the subtitles.</p>
+      </section>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

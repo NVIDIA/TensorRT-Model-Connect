@@ -218,4 +218,17 @@ with the rest of the project:
 - `families/openfold3/tests/data/openfold3_features.npz`
 - `families/openfold3/tests/data/openfold3_structure.json`
 
+## Short-drama sample novel
+
+`apps/short_drama/samples/ah_q_zheng_zhuan.txt` is the complete text of
+《阿Q正传》 (The True Story of Ah Q) by Lu Xun (1881-1936), first serialized in
+1921-1922. The author died in 1936, so the work is in the public domain in
+mainland China, Taiwan and countries with copyright terms of life plus 50 to 80
+years, and in the United States. The text was taken from the Chinese Wikisource
+edition based on the 1938 《鲁迅全集》, which Wikisource marks public domain. The
+file keeps the nine chapters and the closing date line; the corner brackets
+(『』「」) were changed to curly quotation marks and nothing else was edited.
+
+- Source: https://zh.wikisource.org/wiki/阿Q正傳 (simplified-Chinese view)
+
 <!-- Collaborative review anchor: batch 2. -->
