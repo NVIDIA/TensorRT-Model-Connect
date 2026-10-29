@@ -2,6 +2,12 @@
   "name": "pi05-libero-base-fp32",
   "hf_id": "lerobot/pi05_libero_base",
   "hf_revision": "5fcf06fc42b6717e22ab885fd381a096574b12c7",
+  "hf_dependencies": [
+    {
+      "repo_id": "google/paligemma-3b-pt-224",
+      "revision": "35e4f46485b4d07967e7e9935bc3786aad50687c"
+    }
+  ],
   "bundle": "pi05-libero-base-fp32.bundle",
   "family": "lerobot_pi05",
   "task": "images_state_text_to_action_chunk",

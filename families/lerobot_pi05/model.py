@@ -117,12 +117,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         if given not in {None, wanted}:
             raise NotImplementedError(f"lerobot_pi05 camera {axis} is fixed at the checkpoint's {wanted}")
 
-    weights = load_checkpoint(model_dir)
-    # Convert before the long engine builds so a bad tokenizer or a missing converter
-    # dependency fails early.
+    # The tokenizer first: a missing or wrong file, or a missing converter dependency,
+    # then fails in seconds rather than after the weights load.
     tokenizer_asset, tokenizer_metadata = convert_paligemma_tokenizer_model(
         load_tokenizer_model(model_dir))
     check_vocabulary(tokenizer_metadata)
+    weights = load_checkpoint(model_dir)
 
     verbose = bool(request.verbose)
     prefix_plan = _build_prefix_plan(cfg, weights, precision=precision, verbose=verbose)

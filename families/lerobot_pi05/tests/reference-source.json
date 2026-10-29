@@ -7,6 +7,7 @@
   },
   "tokenizer": {
     "name": "google/paligemma-3b-pt-224",
+    "revision": "35e4f46485b4d07967e7e9935bc3786aad50687c",
     "public_copy": "storage.googleapis.com/big_vision/paligemma_tokenizer.model",
     "bytes": 4264023,
     "pieces": 257152

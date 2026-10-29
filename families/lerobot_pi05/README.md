@@ -41,13 +41,18 @@ model's output.
 
 ### Tokenizer
 
-`google/paligemma-3b-pt-224` is gated and no checkpoint ships it. The builder
-takes `tokenizer.model` from the checkpoint directory if present, otherwise the
-public `big_vision/paligemma_tokenizer.model`, which was checked byte for byte
-against the gated repository's file when this family was added. A file of any
-other size is refused, and the converted vocabulary must have 257,152 pieces with
-pad, eos, bos and unk at ids 0 to 3. Converting it needs `sentencepiece` and
-`protobuf` (see `requirements.txt`).
+LeRobot's pi05 processor loads its tokenizer from `google/paligemma-3b-pt-224`,
+and no checkpoint ships it. The builder takes `tokenizer.model` from the
+checkpoint directory if present, otherwise that file from the repository at
+revision `35e4f46485b4d07967e7e9935bc3786aad50687c` through the Hugging Face
+cache, so after the first download builds also work offline. The repository is
+gated, as it is for LeRobot itself: downloading needs a Hugging Face login with
+access to it. Without access, copy the public
+`https://storage.googleapis.com/big_vision/paligemma_tokenizer.model` (same size
+and SHA-256 as the pinned file) into the checkpoint directory as
+`tokenizer.model`. A file of any other size is refused, and the converted
+vocabulary must have 257,152 pieces with pad, eos, bos and unk at ids 0 to 3.
+Converting it needs `sentencepiece` and `protobuf` (see `requirements.txt`).
 
 ## Bundle
 
@@ -98,8 +103,9 @@ auto chunk = task.run({{images, state, "pick up the bowl"}});   // chunk.actions
 float32 and bfloat16 outputs for each and the reference's flow noise, plus LeRobot's
 own prompt token ids for 22 instructions chosen to stress the tokenizer (whitespace,
 digits, punctuation, Unicode, byte fallback, special-looking text, truncation).
-`test_e2e.py` first checks that the checkpoint is staged locally and the tokenizer is
-reachable, then builds the pinned checkpoint, runs each observation through the SDK
+The manifests declare the tokenizer repository in `hf_dependencies`, so CI stages it
+with the checkpoint. `test_e2e.py` first checks that both are staged locally, then
+builds the pinned checkpoint, runs each observation through the SDK
 and compares all 50x7 actions, checks the bundle's tokenizer against the 22 cases,
 and checks that the native runtime links no Python or PyTorch library. Thresholds are
 in `thresholds/` and are anchored to LeRobot's own bfloat16-versus-float32 noise.
@@ -162,9 +168,9 @@ oracle is always eager.
 - Between the two engines the prefix keys and values pass through host memory, and the
   vision tower also runs on placeholder camera slots whose tokens are masked. The latency
   above includes both; neither affects results.
-- Building needs `sentencepiece`, `protobuf` and, unless the checkpoint directory holds
-  `tokenizer.model`, network access to the public tokenizer file. The repository's GPU CI
-  stages only the checkpoint, so this file is the one build input it does not provide.
+- Building needs `sentencepiece`, `protobuf` and the PaliGemma tokenizer: in the
+  checkpoint directory, or in the Hugging Face cache, which the first download from the
+  gated repository fills.
 - The LeRobot side is not part of this repository. `lerobot-rollout` ships with LeRobot
   0.6.1, but `lerobot-export` does not, so the bundle has not been driven through either;
   only the runtime contract above is provided.
