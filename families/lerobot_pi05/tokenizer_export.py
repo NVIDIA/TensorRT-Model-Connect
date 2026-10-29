@@ -16,7 +16,6 @@ token IDs.
 
 from __future__ import annotations
 
-import hashlib
 import math
 import struct
 from collections import Counter
@@ -92,12 +91,10 @@ class FlatBpeAsset:
 
 @dataclass(frozen=True)
 class TokenizerExportMetadata:
-    """Hash-bound provenance returned to ``prepare_model_dir`` callers."""
+    """Facts about one converted tokenizer, returned with the asset."""
 
     schema_version: int
     source_model_type: str
-    source_sha256: str
-    asset_sha256: str
     asset_size: int
     piece_count: int
     piece_type_counts: dict[str, int]
@@ -117,10 +114,6 @@ class TokenizerExportMetadata:
         """Return a JSON-ready copy for the conversion manifest."""
 
         return asdict(self)
-
-
-def _sha256(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
 
 
 def _load_sentencepiece_proto_module():
@@ -515,8 +508,6 @@ def convert_paligemma_tokenizer_model(
     metadata = TokenizerExportMetadata(
         schema_version=ASSET_VERSION,
         source_model_type="BPE",
-        source_sha256=_sha256(model_bytes),
-        asset_sha256=_sha256(asset_bytes),
         asset_size=len(asset_bytes),
         piece_count=len(pieces),
         piece_type_counts={type_names[kind]: counts.get(kind, 0) for kind in sorted(type_names)},

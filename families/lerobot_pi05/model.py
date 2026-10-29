@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 from . import config as config_module
 from .checkpoint import load_checkpoint
-from .tokenizer import TOKENIZER_SHA256, load_tokenizer_model
+from .tokenizer import check_vocabulary, load_tokenizer_model
 from .tokenizer_export import convert_paligemma_tokenizer_model
 
 
@@ -58,7 +58,11 @@ def _serialize(builder, network, config, what: str) -> bytes:
     return bytes(plan)
 
 
-def build_prefix_plan(cfg, weights, *, precision: str, verbose: bool = False, debug: bool = False) -> bytes:
+def _prefix_length(cfg) -> int:
+    return cfg.camera_slots * config_module.IMAGE_TOKENS + cfg.tokenizer_max_length
+
+
+def _build_prefix_plan(cfg, weights, *, precision: str, verbose: bool = False, debug: bool = False) -> bytes:
     from . import prefix
 
     builder, network, config = _builder(precision, verbose)
@@ -66,17 +70,13 @@ def build_prefix_plan(cfg, weights, *, precision: str, verbose: bool = False, de
     return _serialize(builder, network, config, "prefix")
 
 
-def build_denoise_plan(cfg, weights, *, precision: str, verbose: bool = False) -> bytes:
+def _build_denoise_plan(cfg, weights, *, precision: str, verbose: bool = False) -> bytes:
     from . import denoise
 
     builder, network, config = _builder(precision, verbose)
     denoise.build_denoise(
-        network, weights, cfg, dtype=_dtype(precision), prefix_len=prefix_length(cfg))
+        network, weights, cfg, dtype=_dtype(precision), prefix_len=_prefix_length(cfg))
     return _serialize(builder, network, config, "denoise")
-
-
-def prefix_length(cfg) -> int:
-    return cfg.camera_slots * config_module.IMAGE_TOKENS + cfg.tokenizer_max_length
 
 
 def _normalization_json(norm: config_module.Normalization) -> dict:
@@ -85,7 +85,11 @@ def _normalization_json(norm: config_module.Normalization) -> dict:
     return {"mode": norm.mode, "eps": norm.eps, "mean": list(norm.mean), "std": list(norm.std)}
 
 
-def _validate(request: "BuildRequest", cfg) -> str:
+def build(request: "BuildRequest", writer: "BundleWriter") -> None:
+    """Build one LeRobot Pi 0.5 bundle: a prefix engine and one flow-matching step."""
+    model_dir = Path(request.model_dir)
+    cfg = config_module.load_config(model_dir)
+
     if request.task != TASK:
         raise ValueError(f"lerobot_pi05 supports only task={TASK}")
     if request.backend not in {"trt", "trt_rtx"}:
@@ -97,8 +101,12 @@ def _validate(request: "BuildRequest", cfg) -> str:
         raise NotImplementedError("lerobot_pi05 supports batch size one")
     if request.tensor_parallel_size != 1 or request.context_parallel_size != 1:
         raise NotImplementedError("lerobot_pi05 supports only one device")
-    if request.dynamic_kv_cache or request.video_num_frames is not None or request.mtp_seq_len is not None:
-        raise NotImplementedError("lerobot_pi05 does not support dynamic KV cache, video or MTP")
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("lerobot_pi05 does not support dynamic_kv_cache")
+    if request.video_num_frames is not None:
+        raise NotImplementedError("lerobot_pi05 does not support video_num_frames")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("lerobot_pi05 does not support MTP speculative decoding")
     if request.quantization not in {None, "none"} or request.fp32_layers:
         raise NotImplementedError("lerobot_pi05 does not support quantization or mixed-precision layers")
     if request.max_sequence_length not in {None, cfg.tokenizer_max_length}:
@@ -108,21 +116,17 @@ def _validate(request: "BuildRequest", cfg) -> str:
                                 (request.image_width, cfg.camera_width, "width")):
         if given not in {None, wanted}:
             raise NotImplementedError(f"lerobot_pi05 camera {axis} is fixed at the checkpoint's {wanted}")
-    return precision
 
-
-def build(request: "BuildRequest", writer: "BundleWriter") -> None:
-    """Build one LeRobot Pi 0.5 bundle."""
-    model_dir = Path(request.model_dir)
-    cfg = config_module.load_config(model_dir)
-    precision = _validate(request, cfg)
     weights = load_checkpoint(model_dir)
-    # Convert before the long engine builds so a missing converter dependency fails early.
+    # Convert before the long engine builds so a bad tokenizer or a missing converter
+    # dependency fails early.
     tokenizer_asset, tokenizer_metadata = convert_paligemma_tokenizer_model(
         load_tokenizer_model(model_dir))
+    check_vocabulary(tokenizer_metadata)
 
-    prefix_plan = build_prefix_plan(cfg, weights, precision=precision, verbose=bool(request.verbose))
-    denoise_plan = build_denoise_plan(cfg, weights, precision=precision, verbose=bool(request.verbose))
+    verbose = bool(request.verbose)
+    prefix_plan = _build_prefix_plan(cfg, weights, precision=precision, verbose=verbose)
+    denoise_plan = _build_denoise_plan(cfg, weights, precision=precision, verbose=verbose)
 
     writer.set_header(family="lerobot_pi05", task=request.task, backend=request.backend)
     writer.add_bytes("prefix.plan", prefix_plan)
@@ -137,7 +141,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "camera_width": cfg.camera_width,
             "tokens_per_image": config_module.IMAGE_TOKENS,
             "prompt_tokens": cfg.tokenizer_max_length,
-            "prefix_tokens": prefix_length(cfg),
+            "prefix_tokens": _prefix_length(cfg),
             "chunk_size": cfg.chunk_size,
             "state_dim": cfg.state_dim,
             "action_dim": cfg.action_dim,
@@ -146,8 +150,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "num_inference_steps": cfg.num_inference_steps,
             "state_bins": STATE_BINS,
             "precision": precision,
-            "tokenizer_sha256": TOKENIZER_SHA256,
-            "tokenizer_asset_sha256": tokenizer_metadata.asset_sha256,
             "state_normalization": _normalization_json(cfg.state_normalization),
             "action_normalization": _normalization_json(cfg.action_normalization),
         },
