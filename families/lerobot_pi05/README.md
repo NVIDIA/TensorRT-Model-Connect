@@ -100,7 +100,7 @@ python -m pytest families/lerobot_pi05/tests --e2e-model lerobot_pi05 -q
 
 `prepare_fixtures.py` regenerates the data; `official_reference.py` is the oracle.
 
-Measured on one NVIDIA GB300, TensorRT 11.1, CUDA 13, batch one,
+Measured on one NVIDIA GB300, TensorRT 11.1.0.106 with CUDA 13.3, batch one,
 `lerobot/pi05_libero_base` revision `5fcf06fc42b6717e22ab885fd381a096574b12c7`:
 
 | | bf16 | fp32 |
@@ -116,6 +116,21 @@ Measured on one NVIDIA GB300, TensorRT 11.1, CUDA 13, batch one,
 For comparison, LeRobot's eager PyTorch policy takes about 340 ms per chunk on the
 same GPU.
 
+The same tests and numbers on TensorRT 11.4.0.106 with CUDA 13.4 (same GPU, same code,
+bundles rebuilt because plans are version-specific):
+
+| | bf16 | fp32 |
+| --- | --- | --- |
+| Max abs error vs LeRobot fp32, 3 frames | 4.5e-3 / 8.9e-3 / 4.4e-3 | 8.3e-7 / 1.3e-6 / 4.6e-7 |
+| Action chunk, p50 / p95 | 33.3-33.4 / 33.5-33.7 ms | 120.5-121.2 / 120.9-121.7 ms |
+| Build (checkpoint to bundle) | 1 min 52 s | 1 min 23 s |
+| Model load | 1.5-1.6 s | 2.2 s |
+| Peak GPU memory | 7.9 GiB | 13.2 GiB |
+
+The bf16 error moves by a few 1e-3 between TensorRT versions because each picks its own
+kernels; on frame 0 it is above LeRobot's own bf16 error (3.3e-3) but inside the test
+bound, which is twice that. The fp32 bundle is unaffected.
+
 ### Trained checkpoints and un-normalization
 
 `pi05_libero_base` carries no statistics, so CI cannot test un-normalization with it.
@@ -125,8 +140,8 @@ robot-unit actions on the same three frames and noise against the eager LeRobot 
 
 | Checkpoint | Normalization | Max abs error |
 | --- | --- | --- |
-| `lerobot/pi05-libero` @ `9ba5431256f4136a01c224ab0307b0d3035cc92c` | `MEAN_STD`, bfloat16 weights | 1.1e-6 / 1.3e-6 / 6.0e-7 |
-| `lerobot/pi05_libero_finetuned_quantiles_v044` @ `b6bfb493bc0f21c4ab24d816409ea3cebf5e43bd` | `QUANTILES` (LeRobot's pi05 default) | 7.8e-7 / 9.5e-7 / 7.2e-7 |
+| `lerobot/pi05-libero` @ `9ba5431256f4136a01c224ab0307b0d3035cc92c` | `MEAN_STD`, bfloat16 weights | 1.1e-6 / 1.3e-6 / 6.0e-7 (11.4: 1.2e-6 / 1.2e-6 / 6.9e-7) |
+| `lerobot/pi05_libero_finetuned_quantiles_v044` @ `b6bfb493bc0f21c4ab24d816409ea3cebf5e43bd` | `QUANTILES` (LeRobot's pi05 default) | 7.8e-7 / 9.5e-7 / 7.2e-7 (11.4: 8.3e-7 / 9.5e-7 / 6.0e-7) |
 
 These outputs store weights in bfloat16 under a `model.` name prefix and may keep an
 untied `embed_tokens` table; the loader handles all three. Both enable `torch.compile`
@@ -135,8 +150,8 @@ always eager (`official_reference.py`).
 
 ## Known limits
 
-- Qualified on one NVIDIA GB300 with TensorRT 11.1 and CUDA 13. Other GPUs, TensorRT
-  versions and Jetson are not.
+- Qualified on one NVIDIA GB300 with TensorRT 11.1 (CUDA 13.3) and 11.4 (CUDA 13.4). Other
+  GPUs, TensorRT versions and Jetson are not.
 - Batch one, one observation step, square cameras; Pi 0, Pi 0-FAST, Pi 0.7, memory and
   real-time chunking are rejected at build time.
 - An instruction plus state longer than `tokenizer_max_length` is rejected, where LeRobot
