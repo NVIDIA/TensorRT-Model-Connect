@@ -9,6 +9,7 @@ from tools.e2e_evidence import evidence_stage, record_evidence
 
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import numpy as np
 import pytest
 from tensorrt_model_connect import BuildRequest, build
 
+from .official_reference import export_onnx
 from .official_reference import run as run_reference
 
 
@@ -101,10 +103,19 @@ def _model_dir(manifest: dict) -> Path:
         os.environ.get("TRTMC_POINTNET_MODEL_DIR"), "TRTMC_POINTNET_MODEL_DIR"
     )
     required = [dependency["path"] for dependency in manifest["external_files"]]
-    required.append("best_model.pth")
     missing = [name for name in required if not (model_dir / name).is_file()]
     assert not missing, f"PointNet model directory is missing declared files: {missing}"
     return model_dir
+
+
+def _engine_source(model_dir: Path, destination: Path) -> Path:
+    # Only the upstream checkpoint is published, so the builder's ONNX input is
+    # exported here; config.json carries the S3DIS shape contract.
+    destination.mkdir()
+    export_onnx(model_dir, destination / "pointnet.onnx")
+    shutil.copyfile(TEST_ROOT / "data/config.json", destination / "config.json")
+    record_evidence("checkpoint", {"model_dir": str(model_dir), "engine_source": str(destination)})
+    return destination
 
 
 def _runtime() -> tuple[Path, Path]:
@@ -222,7 +233,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     qualification, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
-        _build(model_dir, bundle, manifest)
+        _build(_engine_source(model_dir, tmp_path / "model"), bundle, manifest)
     native_dir = tmp_path / "native"
     with evidence_stage("native"):
         actual = _native(qualification, runtime_root, bundle, case, native_dir)

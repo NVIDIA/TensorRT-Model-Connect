@@ -6,7 +6,8 @@
   "precision": "fp16",
   "external_files": [
     {
-      "path": "pointnet.onnx"
+      "path": "best_model.pth",
+      "url": "https://raw.githubusercontent.com/yanx27/Pointnet_Pointnet2_pytorch/eb64fe0b4c24055559cea26299cb485dcb43d8dd/log/sem_seg/pointnet_sem_seg/checkpoints/best_model.pth"
     }
   ],
   "testcases": [

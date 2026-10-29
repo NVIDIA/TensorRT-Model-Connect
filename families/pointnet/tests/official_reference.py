@@ -141,18 +141,46 @@ class S3DISSemSeg(nn.Module):
         return x.view(batch, num_points, num_classes)
 
 
-def run(model_dir: Path, points_path: Path, num_points: int) -> dict:
-    """Run the upstream PyTorch checkpoint and return per-point logits and labels."""
+def _load(model_dir: Path, device: str) -> S3DISSemSeg:
     # Upstream stores class_avg_iou as a numpy float64; allow only that scalar
     # (under its numpy<2 pickled name) instead of unrestricted unpickling.
     scalar = np.float64(0).__reduce__()[0]
     numpy_scalar_globals = [(scalar, "numpy.core.multiarray.scalar"), np.dtype,
                             type(np.dtype(np.float64))]
     with torch.serialization.safe_globals(numpy_scalar_globals):
-        checkpoint = torch.load(model_dir / "best_model.pth", map_location="cuda",
+        checkpoint = torch.load(model_dir / "best_model.pth", map_location=device,
                                 weights_only=True)
-    model = S3DISSemSeg(num_class=13).cuda().eval()
+    model = S3DISSemSeg(num_class=13).to(device).eval()
     model.load_state_dict(checkpoint["model_state_dict"])
+    return model
+
+
+def export_onnx(model_dir: Path, destination: Path) -> None:
+    """Export the upstream checkpoint to the builder's pointnet.onnx contract."""
+    import onnx
+
+    model = _load(model_dir, "cpu")
+    with torch.no_grad():
+        torch.onnx.export(model, torch.zeros(1, 9, 4096), destination,
+                          input_names=["point"], output_names=["pred"],
+                          dynamic_axes={"point": {2: "num_points"}, "pred": {1: "num_points"}},
+                          opset_version=17, dynamo=False)
+    # The builder's FP16 rewrite converts initializers only, so float Constant
+    # nodes (the STN identity matrices) must become initializers too.
+    exported = onnx.load(str(destination))
+    for node in [node for node in exported.graph.node if node.op_type == "Constant"]:
+        tensor = node.attribute[0].t
+        if node.attribute[0].name == "value" and tensor.data_type == onnx.TensorProto.FLOAT:
+            tensor.name = node.output[0]
+            exported.graph.initializer.append(tensor)
+            exported.graph.node.remove(node)
+    onnx.checker.check_model(exported)
+    onnx.save(exported, str(destination))
+
+
+def run(model_dir: Path, points_path: Path, num_points: int) -> dict:
+    """Run the upstream PyTorch checkpoint and return per-point logits and labels."""
+    model = _load(model_dir, "cuda")
     points = np.fromfile(points_path, dtype=np.float32).reshape(num_points, 9)
     input_tensor = torch.from_numpy(points.T[None, :, :].copy()).cuda()  # [1, 9, N]
     with torch.no_grad():
