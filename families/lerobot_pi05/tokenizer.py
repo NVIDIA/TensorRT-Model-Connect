@@ -6,8 +6,8 @@
 LeRobot's pi05 processor loads its tokenizer from ``google/paligemma-3b-pt-224`` and
 checkpoints do not ship it. The builder takes ``tokenizer.model`` from the checkpoint
 directory if present, otherwise that file at a pinned revision of the repository through
-the Hugging Face cache, so a build is offline once it is cached; the manifests declare it
-in ``hf_dependencies`` for CI to stage. The repository is gated, and the public big_vision
+the Hugging Face cache, so a build is offline once it is cached. The repository is gated,
+so CI stages the public big_vision copy through its family-owned dependency image. That
 bucket serves the same file (identical size and SHA-256 at the pinned revision).
 The runtime tokenizer is only valid for this exact vocabulary, so a file of any other size
 is refused here and the converted vocabulary is checked in ``model.py``.

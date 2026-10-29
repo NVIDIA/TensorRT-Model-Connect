@@ -5,7 +5,7 @@
 
 This is the oracle for the family: LeRobot's own preprocessing, model and
 postprocessing, with the flow noise injected so the comparison is deterministic.
-It needs ``lerobot[pi]`` (see ``reference-source.json``) and a CUDA device for bfloat16.
+It needs ``lerobot[pi]`` (see ``fixture-source.json``) and a CUDA device for bfloat16.
 """
 
 from __future__ import annotations
