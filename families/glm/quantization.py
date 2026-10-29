@@ -24,8 +24,23 @@ FP8 GEMM overflow to NaN when a projection output is large.
 
 The attention output projection (``w_o``) stays unquantized: TensorRT 11.4
 cannot compile an FP8 Quantize right after a fused attention. ``lm_head`` and
-the embedding stay unquantized as well. A projection with no scale entry in the
-JSON file stays unquantized.
+the embedding stay unquantized as well. In the FP8 build a projection with no scale entry in
+the JSON file stays unquantized; the NVFP4 build refuses it with an error.
+
+NVFP4 (``quantization="nvfp4"``) is also self-quantization of the BF16 checkpoint (no ModelOpt
+NVFP4 checkpoint of this model exists). It needs a Blackwell GPU. The recipe
+(``NVFP4_RECIPES``) is: q/k/v FP8 W8A8 as above, the gate, up and down projections NVFP4 W4A4,
+except the whole MLP of the first two and last two layers and the down projection of layer 4
+(its input has massive activations), which stay FP8 W8A8. Weights are quantized at build time:
+``weight_scale_2 = amax / (6 * 448)``, one e4m3 block scale per 16 inputs
+(``block_amax / 6 / weight_scale_2``, clamped to 448), values rounded to the E2M1 grid and packed
+two per byte (first value in the low nibble). The activation goes through ``add_dynamic_quantize``
+with a calibrated per-tensor ``input_scale = amax / (6 * 448)`` read from
+``nvfp4_activation_scales.json`` (the FP8 projections use ``fp8_activation_scales.json``). The
+weight reaches the matmul through a double Dequantize (block scale times ``weight_scale_2``, then
+the packed FP4 constant) and TensorRT fuses the pattern into block-scaled FP4 GEMMs. The fused
+dual-GEMM kernel (gate and up, SwiGLU and the FP4 quantization of the down input in one kernel)
+stays enabled.
 """
 
 from __future__ import annotations
@@ -38,9 +53,14 @@ from typing import Any
 import ml_dtypes
 import numpy as np
 import tensorrt as trt
+import torch
 
 FP8_E4M3_MAX = 448.0
+E2M1_MAX = 6.0
+NVFP4_BLOCK_SIZE = 16
+NVFP4_MAX = E2M1_MAX * FP8_E4M3_MAX
 ACTIVATION_SCALES_FILENAME = "fp8_activation_scales.json"
+NVFP4_ACTIVATION_SCALES_FILENAME = "nvfp4_activation_scales.json"
 
 # HF projection module -> internal weight-dict stems used by graph_blocks. GLM fuses the
 # gate and up projections into one HF module (mlp.gate_up_proj) with one input
@@ -77,11 +97,22 @@ class _FP8Weight:
 
 
 @dataclass(frozen=True)
+class _FP4Weight:
+    """One projection weight in NVFP4: packed E2M1 bytes, e4m3 block scales, one global scale."""
+
+    packed: np.ndarray  # [out_features, in_features / 2] uint8, first value in the low nibble
+    block_scale: np.ndarray  # [out_features, in_features / 16] raw e4m3 bytes
+    weight_scale_2: float
+    out_features: int
+    in_features: int
+
+
+@dataclass(frozen=True)
 class _LayerScales:
-    """Static activation scale and FP8 weight of one quantized projection."""
+    """Static activation scale and quantized weight (FP8 or NVFP4) of one projection."""
 
     input_scale: float
-    weight: _FP8Weight
+    weight: _FP8Weight | _FP4Weight
 
 
 def _scale_const(network, graph_ops, value: float):
@@ -119,6 +150,53 @@ def _wrap_fp8_matmul(network, activation, scales: _LayerScales, *, graph_ops, ke
     return network.add_cast(output, activation.dtype).get_output(0)
 
 
+def _wrap_nvfp4_matmul(network, activation, scales: _LayerScales, *, graph_ops, keep_alive: list):
+    """Add ``activation @ weight.T`` with packed FP4 weights and block-scaled FP4 activations.
+
+    The activation is quantized at run time with ``add_dynamic_quantize`` (per-16 e4m3 block
+    scales, global scale = the calibrated ``input_scale``). The weight is an FP4 constant that
+    reaches the matmul through a double Dequantize (block scale times ``weight_scale_2``, then
+    the weight). TensorRT fuses the pattern into a block-scaled FP4 GEMM.
+    """
+    output_dtype = activation.dtype
+    w = scales.weight
+    n, k = w.out_features, w.in_features
+
+    # trt.Weights holds a raw pointer, so the buffers must outlive the build.
+    keep_alive.append(w.packed)
+    keep_alive.append(w.block_scale)
+
+    w_fp4 = trt.Weights(trt.DataType.FP4, w.packed.ctypes.data, n * k)
+    w_const = network.add_constant((n, k), w_fp4).get_output(0)
+    w_fp8_bs = trt.Weights(trt.DataType.FP8, w.block_scale.ctypes.data, w.block_scale.size)
+    w_bs_const = network.add_constant((n, k // NVFP4_BLOCK_SIZE), w_fp8_bs).get_output(0)
+    w_gs = _scale_const(network, graph_ops, w.weight_scale_2)
+    w_effective_scale = network.add_dequantize(w_bs_const, w_gs, output_dtype)
+    w_dequant = network.add_dequantize(w_const, w_effective_scale.get_output(0), output_dtype)
+    w_dequant.axis = 1
+
+    act_gs = _scale_const(network, graph_ops, scales.input_scale)
+    a_dynq = network.add_dynamic_quantize(
+        activation, 1, NVFP4_BLOCK_SIZE, trt.DataType.FP4, trt.DataType.FP8
+    )
+    a_dynq.set_input(1, act_gs)
+    a_effective_scale = network.add_dequantize(a_dynq.get_output(1), act_gs, output_dtype)
+    a_dequant = network.add_dequantize(
+        a_dynq.get_output(0), a_effective_scale.get_output(0), output_dtype
+    )
+    a_dequant.axis = 1
+
+    output = network.add_matrix_multiply(
+        a_dequant.get_output(0),
+        trt.MatrixOperation.NONE,
+        w_dequant.get_output(0),
+        trt.MatrixOperation.TRANSPOSE,
+    ).get_output(0)
+    if output.dtype == activation.dtype:
+        return output
+    return network.add_cast(output, activation.dtype).get_output(0)
+
+
 @dataclass(frozen=True)
 class GlmQuantContext:
     """Routes the quantized projections through Q/DQ; others stay unquantized."""
@@ -136,6 +214,11 @@ class GlmQuantContext:
         """Return True when this weight has a calibrated activation scale."""
         return weight_name in self.scales
 
+    @property
+    def has_fp4_weights(self) -> bool:
+        """True when any projection is NVFP4."""
+        return any(isinstance(entry.weight, _FP4Weight) for entry in self.scales.values())
+
     def maybe_quantized_matmul(
         self,
         network,
@@ -152,9 +235,8 @@ class GlmQuantContext:
             return self.graph_ops.add_matmul_rhs_constant(
                 network, lhs, lhs_width, rhs_width, rhs_weights, dtype=dtype
             )
-        return _wrap_fp8_matmul(
-            network, lhs, entry, graph_ops=self.graph_ops, keep_alive=self.keep_alive
-        )
+        wrap = _wrap_nvfp4_matmul if isinstance(entry.weight, _FP4Weight) else _wrap_fp8_matmul
+        return wrap(network, lhs, entry, graph_ops=self.graph_ops, keep_alive=self.keep_alive)
 
 
 def configure_fp8_build(trt_config, quant_ctx) -> None:
@@ -163,8 +245,10 @@ def configure_fp8_build(trt_config, quant_ctx) -> None:
         return
     # Keeps per-layer tactic names in the plan so FP8 lowering can be inspected.
     trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
-    # TensorRT's fused dual-GEMM (gate/up) kernel fails to compile with scalar-scale FP8
-    # inputs. The route is set only when this TensorRT build lists the knob.
+    # NVFP4 builds keep the fused dual-GEMM (gate/up) kernel. With FP8 only, it fails to compile
+    # with scalar-scale FP8 inputs, so the route is set only when this TensorRT build lists the knob.
+    if getattr(quant_ctx, "has_fp4_weights", False):
+        return
     if _DUAL_GEMM_KNOB in getattr(trt_config, "all_build_routes", ""):
         trt_config.build_route = f"-{_DUAL_GEMM_KNOB}=off"
 
@@ -231,4 +315,181 @@ def calibrate_glm_fp8(config, weights, graph_ops) -> GlmQuantContext:
             )
     if not scales:
         raise RuntimeError("GLM FP8 self-quantization matched no projection in the checkpoint")
+    return GlmQuantContext(scales=scales, graph_ops=graph_ops)
+
+
+# ---------------------------------------------------------------------------
+# NVFP4
+# ---------------------------------------------------------------------------
+
+_E2M1_GRID = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+# Midpoints between neighbouring E2M1 values. A value exactly on a midpoint goes to the
+# neighbour with an even code (0, 2, 4, 6): the first, third, fifth and seventh midpoint round
+# down and the others round up.
+_MIDPOINTS = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)
+_MIDPOINT_ROUNDS_UP = (False, True, False, True, False, True, False)
+
+
+def nvfp4_supported(in_features: int) -> bool:
+    """True when a projection with this input size can use 16-value blocks."""
+    return in_features > 0 and in_features % NVFP4_BLOCK_SIZE == 0
+
+
+def _e2m1_codes(scaled: torch.Tensor) -> torch.Tensor:
+    """Sign-magnitude E2M1 codes (0..15) of already block-scaled values."""
+    magnitude = scaled.abs()
+    code = torch.zeros(scaled.shape, dtype=torch.uint8, device=scaled.device)
+    for midpoint, up in zip(_MIDPOINTS, _MIDPOINT_ROUNDS_UP, strict=True):
+        code += (magnitude >= midpoint if up else magnitude > midpoint).to(torch.uint8)
+    return code | ((scaled < 0).to(torch.uint8) << 3)
+
+
+def quantize_nvfp4_weight(
+    weight: torch.Tensor | np.ndarray, weight_scale_2: float | None = None
+) -> tuple[np.ndarray, np.ndarray, float]:
+    """Quantize one ``[out, in]`` weight to NVFP4.
+
+    Returns the packed bytes ``[out, in / 2]`` (first value in the low nibble), the raw e4m3
+    block-scale bytes ``[out, in / 16]`` and ``weight_scale_2 = amax / (6 * 448)``. The block
+    scale is ``block_amax / 6 / weight_scale_2`` clamped to 448 and cast to e4m3; an all-zero
+    block (or one whose scale underflows e4m3) gets scale 1.
+    """
+    tensor = torch.as_tensor(weight).float()
+    if tensor.ndim != 2:
+        raise ValueError(f"expected a [out, in] weight, got shape {tuple(tensor.shape)}")
+    out_features, in_features = tensor.shape
+    if not nvfp4_supported(in_features):
+        raise ValueError(f"in_features={in_features} is not a multiple of {NVFP4_BLOCK_SIZE}")
+    if weight_scale_2 is None:
+        amax = float(tensor.abs().max())
+        if not np.isfinite(amax) or amax <= 0:
+            raise ValueError("weight tensor has no finite positive amax to scale from")
+        # ModelOpt computes this on the GPU as amax * fp32(1 / 2688) (a reciprocal multiply), which
+        # differs in the last bit from the correctly rounded division. Same operation here, so the
+        # scale is bit-identical to a ModelOpt export.
+        weight_scale_2 = float(
+            torch.tensor(amax, dtype=torch.float32)
+            * torch.tensor(1.0 / NVFP4_MAX, dtype=torch.float32)
+        )
+    packed_rows, scale_rows = [], []
+    step = 2048  # rows per chunk, bounds the temporary memory
+    for start in range(0, out_features, step):
+        rows = tensor[start : start + step]
+        blocks = rows.reshape(rows.shape[0], in_features // NVFP4_BLOCK_SIZE, NVFP4_BLOCK_SIZE)
+        block_scale = (blocks.abs().amax(-1) / E2M1_MAX / weight_scale_2).clamp_(max=FP8_E4M3_MAX)
+        block_scale = block_scale.to(torch.float8_e4m3fn)
+        scale_float = block_scale.float()
+        empty = scale_float == 0
+        if bool(empty.any()):
+            block_scale = torch.where(empty, torch.ones_like(scale_float), scale_float).to(
+                torch.float8_e4m3fn
+            )
+            scale_float = block_scale.float()
+        scaled = blocks / (scale_float.unsqueeze(-1) * weight_scale_2)
+        code = _e2m1_codes(scaled).reshape(rows.shape[0], in_features)
+        packed_rows.append((code[:, 0::2] | (code[:, 1::2] << 4)).contiguous().cpu())
+        scale_rows.append(block_scale.view(torch.uint8).cpu())
+    return (
+        np.ascontiguousarray(torch.cat(packed_rows).numpy()),
+        np.ascontiguousarray(torch.cat(scale_rows).numpy()),
+        float(weight_scale_2),
+    )
+
+
+def dequantize_nvfp4_weight(
+    packed: np.ndarray, block_scale: np.ndarray, weight_scale_2: float
+) -> torch.Tensor:
+    """The float32 values the NVFP4 bytes stand for, ``[out, in]`` (what the engine computes with)."""
+    packed_t = torch.from_numpy(np.ascontiguousarray(packed))
+    codes = torch.stack([packed_t & 0xF, packed_t >> 4], dim=-1).reshape(packed_t.shape[0], -1)
+    values = torch.tensor(_E2M1_GRID)[(codes & 7).long()] * torch.where(codes >= 8, -1.0, 1.0)
+    scale = torch.from_numpy(np.ascontiguousarray(block_scale)).view(torch.float8_e4m3fn).float()
+    return values * scale.repeat_interleave(NVFP4_BLOCK_SIZE, dim=-1) * weight_scale_2
+
+
+# NVFP4 recipe per calibrated model shape (see the module docstring): the layers whose whole MLP
+# stays FP8 W8A8, and the layers whose down projection stays FP8 W8A8.
+NVFP4_RECIPES = {
+    "glm-h4096-l40-i13696": {"fp8_mlp_layers": (0, 1, 38, 39), "fp8_down_layers": (4,)},
+}
+
+
+def projection_format(config, layer: int, stem: str) -> str:
+    """``"fp4"`` or ``"fp8"``: the format of one projection under the NVFP4 recipe."""
+    key = scale_key(config)
+    if key not in NVFP4_RECIPES:
+        raise NotImplementedError(
+            f"no NVFP4 recipe for {key!r}; available: {sorted(NVFP4_RECIPES)}"
+        )
+    recipe = NVFP4_RECIPES[key]
+    if stem in ("w_q", "w_k", "w_v") or layer in recipe["fp8_mlp_layers"]:
+        return "fp8"
+    if stem == "w_down" and layer in recipe["fp8_down_layers"]:
+        return "fp8"
+    return "fp4"
+
+
+def load_nvfp4_activation_scales(config) -> dict[str, float]:
+    """Return the committed NVFP4 activation scales for this model shape, or raise."""
+    path = Path(__file__).parent / NVFP4_ACTIVATION_SCALES_FILENAME
+    try:
+        table = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise RuntimeError(f"GLM NVFP4 build requires {path}, which was not found") from error
+    key = scale_key(config)
+    if key not in table:
+        raise NotImplementedError(
+            f"no calibrated NVFP4 activation scales for {key!r}; available: "
+            f"{sorted(table)}. Run calibrate_nvfp4_scales.py for this model shape."
+        )
+    return table[key]
+
+
+def calibrate_glm_nvfp4(config, weights, graph_ops) -> GlmQuantContext:
+    """Build the NVFP4 / FP8 Q/DQ context from the loaded GLM weights (``[in, out]`` layout).
+
+    Quantizes one projection at a time, so peak extra memory is one weight tensor.
+    """
+    if any(str(key).endswith((".weight_scale", ".input_scale")) for key in weights):
+        raise ValueError("the checkpoint is already quantized; NVFP4 self-quantization needs BF16")
+    fp8_scales = load_activation_scales(config)
+    fp4_scales = load_nvfp4_activation_scales(config)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    scales: dict[str, _LayerScales] = {}
+    for layer in range(int(config.num_hidden_layers)):
+        for weight_stem in WEIGHT_STEMS:
+            name = f"layer.{layer}.{weight_stem}"
+            fmt = projection_format(config, layer, weight_stem)
+            table = fp4_scales if fmt == "fp4" else fp8_scales
+            input_scale = table.get(name)
+            if input_scale is None:
+                where = (
+                    "nvfp4_activation_scales.json" if fmt == "fp4" else "fp8_activation_scales.json"
+                )
+                raise ValueError(
+                    f"{name} has no activation scale in {where}; "
+                    "run calibrate_nvfp4_scales.py / calibrate_fp8_scales.py"
+                )
+            if not np.isfinite(input_scale) or input_scale <= 0:
+                raise ValueError(f"activation scale of {name} must be finite and positive")
+            if name not in weights:
+                raise ValueError(f"checkpoint has no {name}")
+            transposed = np.asarray(weights[name])
+            in_features, out_features = transposed.shape
+            if fmt == "fp4":
+                weight = torch.from_numpy(np.ascontiguousarray(transposed.T)).to(device).float()
+                packed, block_scale, weight_scale_2 = quantize_nvfp4_weight(weight)
+                del weight
+                entry: _FP8Weight | _FP4Weight = _FP4Weight(
+                    packed, block_scale, weight_scale_2, out_features, in_features
+                )
+            else:
+                packed, weight_scale = quantize_fp8_weight(
+                    np.ascontiguousarray(transposed.T, dtype=np.float32)
+                )
+                entry = _FP8Weight(packed, weight_scale, out_features, in_features)
+            scales[name] = _LayerScales(input_scale=float(input_scale), weight=entry)
+    if not scales:
+        raise RuntimeError("GLM NVFP4 self-quantization matched no projection in the checkpoint")
     return GlmQuantContext(scales=scales, graph_ops=graph_ops)

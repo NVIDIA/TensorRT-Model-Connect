@@ -283,13 +283,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("GLM max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none", "fp8"}:
+    if request.quantization not in {None, "none", "fp8", "nvfp4"}:
         raise NotImplementedError(f"GLM does not support quantization={request.quantization!r}")
-    quantized = request.quantization == "fp8"
+    quantized = request.quantization in {"fp8", "nvfp4"}
     if quantized and precision not in {"fp16", "bf16"}:
-        raise NotImplementedError("GLM fp8 quantization requires precision fp16 or bf16")
+        raise NotImplementedError("GLM quantization requires precision fp16 or bf16")
     if quantized and request.tensor_parallel_size != 1:
-        raise NotImplementedError("GLM fp8 quantization does not support tensor parallelism")
+        raise NotImplementedError("GLM quantization does not support tensor parallelism")
     if request.fp32_layers:
         raise NotImplementedError("GLM does not expose mixed-precision layer selection")
     if request.mtp_seq_len is not None:
@@ -307,9 +307,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     quant_ctx = None
     if quantized:
         from . import graph_ops
-        from .quantization import calibrate_glm_fp8
+        from .quantization import calibrate_glm_fp8, calibrate_glm_nvfp4
 
-        quant_ctx = calibrate_glm_fp8(config, weights, graph_ops)
+        calibrate = calibrate_glm_nvfp4 if request.quantization == "nvfp4" else calibrate_glm_fp8
+        quant_ctx = calibrate(config, weights, graph_ops)
 
     writer.set_header(family="glm", task=request.task, backend=request.backend)
     if parallel.enabled:
