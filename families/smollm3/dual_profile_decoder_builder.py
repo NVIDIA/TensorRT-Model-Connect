@@ -27,6 +27,21 @@ from . import graph_blocks
 from .config import resolve_rope_layer_schedule
 from .utils import const_in_work_dtype
 
+
+_SCATTER_ND_KNOB = "kgen:fuse_scatter_nd"
+
+
+def _disable_scatter_nd_fusion(trt_config) -> None:
+    """Keep the native-KV prefill plan loadable on TensorRT 11.4.
+
+    With the fused reshape/transpose/scatter K/V-cache kernel, TensorRT 11.4 builds the
+    prefill plan but cannot create an execution context for it (CUDA error 500).
+    The route is set only when this TensorRT build lists the knob.
+    """
+    if _SCATTER_ND_KNOB in getattr(trt_config, "all_build_routes", ""):
+        trt_config.build_route = f"-{_SCATTER_ND_KNOB}=off"
+
+
 if TYPE_CHECKING:
     from .config import ModelConfig
     from .checkpoint_mapper import WeightDict
@@ -155,6 +170,7 @@ def build_dual_profile_decoder_engine(
     # default instead of imposing the former 1 GiB cap.
     if native_kv_cache:
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
+        _disable_scatter_nd_fusion(trt_config)
 
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
