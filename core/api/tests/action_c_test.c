@@ -47,6 +47,88 @@ static int bundle(const char* path, const char* task) {
     ok = (fwrite("PLAN", 1, 4, out) == 4) && ok;
     return fclose(out) == 0 && ok;
 }
+static void exercise_multi_image(const trtmc_core_api_v1* core,
+                                 const trtmc_load_options_v1* options, const char* root,
+                                 trtmc_model* unbound_model) {
+    char path[4096];
+    if (snprintf(path, sizeof(path), "%s/action_c_multi_image.bundle", root) >= (int)sizeof(path) ||
+        !bundle(path, "multi_image")) {
+        check(0, "multi-image bundle could not be written");
+        return;
+    }
+    trtmc_error* error = NULL;
+    trtmc_model* model = NULL;
+    const trtmc_api_header* header = NULL;
+    if (core->model_load(str(path), options, &model, &error) != TRTMC_OK ||
+        core->model_get_task_api(model, str(TRTMC_TASK_IMAGES_STATE_TEXT_TO_ACTION_CHUNK), 1, 0,
+                                 &header, &error) != TRTMC_OK) {
+        check(0, "multi-image model or Task table could not be opened");
+        return;
+    }
+    const trtmc_images_state_text_to_action_chunk_api_v1* api =
+        (const trtmc_images_state_text_to_action_chunk_api_v1*)header;
+    check(api->header.major == 1 && api->header.minor == 0 && api->header.byte_size == sizeof(*api),
+          "multi-image table reports its v1.0 size");
+
+    const float pixel_a[] = {0.5F, 0.25F, 0.125F};
+    const unsigned char pixel_b[] = {255, 255, 255};
+    float state[] = {2, 4};
+    trtmc_named_image_v1 images[] = {
+        {str("cam_a"), {pixel_a, sizeof(pixel_a), 1, 1, 3, TRTMC_IMAGE_FLOAT32}},
+        {str("cam_b"), {pixel_b, sizeof(pixel_b), 1, 1, 3, TRTMC_IMAGE_UINT8}}};
+    trtmc_images_state_text_to_action_chunk_request_v1 request = {
+        {images, 2, state, 2, str("pick up the cup")}};
+    trtmc_result *result = NULL, *rejected = NULL;
+    trtmc_images_state_text_action_chunk_view_v1 view = {0};
+    check(api->run(model, &request, NULL, &result, &error) == TRTMC_OK &&
+              api->result_view(result, &view, &error) == TRTMC_OK &&
+              view.actions.values.rows == 2 && view.actions.values.columns == 2 &&
+              view.actions.values.data[0] == 2.5F && view.actions.values.data[1] == 5.0F &&
+              view.actions.values.data[2] == 15.0F && view.actions.values.data[3] == 22.0F &&
+              view.within_training_bounds == 0 && view.inference_ms == 201 &&
+              equal(view.actions.schema.domain, "fixture.multi_image"),
+          "C multi-image chunk routes named cameras and passes state and text through");
+
+    check(api->run(unbound_model, &request, NULL, &rejected, &error) == TRTMC_UNSUPPORTED &&
+              rejected == NULL,
+          "multi-image table cannot bypass per-model capability");
+    clear_error(core, &error);
+
+    request.observation.images = NULL;
+    check(api->run(model, &request, NULL, &rejected, &error) == TRTMC_INVALID_ARGUMENT &&
+              rejected == NULL,
+          "image pointer/count contract is checked");
+    clear_error(core, &error);
+    request.observation.images = images;
+    request.observation.image_count = 0;
+    check(api->run(model, &request, NULL, &rejected, &error) == TRTMC_INVALID_ARGUMENT,
+          "an observation without images is rejected");
+    clear_error(core, &error);
+    request.observation.image_count = 2;
+    images[1].name = images[0].name;
+    check(api->run(model, &request, NULL, &rejected, &error) == TRTMC_INVALID_ARGUMENT,
+          "duplicate camera names are rejected");
+    clear_error(core, &error);
+    images[1].name = str("cam_b");
+    images[1].image.byte_size = 1;
+    check(api->run(model, &request, NULL, &rejected, &error) == TRTMC_INVALID_ARGUMENT,
+          "multi-image uses the existing image transport validation");
+    clear_error(core, &error);
+    images[1].image.byte_size = sizeof(pixel_b);
+    request.observation.text.data = NULL;
+    check(api->run(model, &request, NULL, &rejected, &error) == TRTMC_INVALID_ARGUMENT,
+          "text pointer/size contract is checked");
+    clear_error(core, &error);
+    check(api->run(model, NULL, NULL, &rejected, &error) == TRTMC_INVALID_ARGUMENT,
+          "null request is rejected");
+    clear_error(core, &error);
+    check(api->result_view(result, &view, &error) == TRTMC_OK &&
+              view.actions.values.data[0] == 2.5F,
+          "owned multi-image result survives rejected calls");
+    core->result_release(result);
+    core->model_release(model);
+    clear_error(core, &error);
+}
 int main(int argc, char** argv) {
     if (argc != 2)
         return 2;
@@ -204,6 +286,7 @@ int main(int argc, char** argv) {
     core->result_release(first);
     core->result_release(queued);
     core->result_release(fresh);
+    exercise_multi_image(core, &options, argv[1], disabled);
     core->model_release(disabled);
     clear_error(core, &error);
     return failures ? 1 : 0;

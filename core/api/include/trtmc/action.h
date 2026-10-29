@@ -48,6 +48,44 @@ typedef struct {
                                           trtmc_image_state_action_chunk_view_v1*, trtmc_error**);
 } trtmc_image_state_to_action_chunk_api_v1;
 
+/* Named images, one ordered state vector and a natural-language instruction.
+ * Image names are family-defined camera keys (for example "base_0_rgb"). Order
+ * and subset are not interpreted by the Core: the family validates unknown,
+ * missing and unsupported cameras and owns resizing, padding and masking.
+ * Names must be non-empty and unique. State and text may be empty when the
+ * family does not require them; the family rejects an empty required input.
+ * Family output actions are already unnormalized, as for the image/state Task.
+ * Inputs borrow host storage through the synchronous call. */
+typedef struct {
+    trtmc_string_view name;
+    trtmc_image_input_v1 image;
+} trtmc_named_image_v1;
+typedef struct {
+    const trtmc_named_image_v1* images;
+    uint64_t image_count;
+    const float* state;
+    uint64_t state_count;
+    trtmc_string_view text; /* UTF-8 instruction, not NUL-terminated. */
+} trtmc_images_state_text_observation_v1;
+typedef struct {
+    trtmc_images_state_text_observation_v1 observation;
+} trtmc_images_state_text_to_action_chunk_request_v1;
+typedef struct {
+    trtmc_action_sequence_view_v1 actions;
+    uint32_t within_training_bounds;
+    double inference_ms;
+} trtmc_images_state_text_action_chunk_view_v1;
+#define TRTMC_TASK_IMAGES_STATE_TEXT_TO_ACTION_CHUNK "images_state_text_to_action_chunk"
+typedef struct {
+    trtmc_api_header header;
+    trtmc_status(TRTMC_CALL* run)(trtmc_model*,
+                                  const trtmc_images_state_text_to_action_chunk_request_v1*,
+                                  const trtmc_config_view_v1*, trtmc_result**, trtmc_error**);
+    trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*,
+                                          trtmc_images_state_text_action_chunk_view_v1*,
+                                          trtmc_error**);
+} trtmc_images_state_text_to_action_chunk_api_v1;
+
 #define TRTMC_TASK_IMAGE_STATE_ACTION_QUEUE "image_state_action_queue"
 typedef struct {
     trtmc_api_header header;

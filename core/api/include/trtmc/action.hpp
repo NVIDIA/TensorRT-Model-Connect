@@ -25,6 +25,27 @@ class ImageStateActionChunkResult
     bool within_training_bounds() const { return view().within_training_bounds != 0; }
     double inference_ms() const { return view().inference_ms; }
 };
+// One named camera image. The name is a family-defined key; storage is borrowed.
+struct NamedImage {
+    std::string_view name;
+    ImageInput image;
+};
+struct ImagesStateTextObservation {
+    Span<const NamedImage> images; // Borrowed through the synchronous call.
+    Span<const float> state;       // May be empty when the family does not use state.
+    std::string_view text;         // UTF-8 instruction; may be empty if the family allows it.
+};
+struct ImagesStateTextToActionChunkRequest {
+    ImagesStateTextObservation observation;
+};
+class ImagesStateTextActionChunkResult
+    : public detail::ViewResult<trtmc_images_state_text_action_chunk_view_v1> {
+  public:
+    using ViewResult::ViewResult;
+    FloatMatrixView actions() const { return detail::action_values(view().actions); }
+    bool within_training_bounds() const { return view().within_training_bounds != 0; }
+    double inference_ms() const { return view().inference_ms; }
+};
 class ActionStepResult : public detail::ViewResult<trtmc_action_step_view_v1> {
   public:
     using ViewResult::ViewResult;
@@ -78,6 +99,45 @@ class ImageStateToActionChunk {
           api_(reinterpret_cast<const trtmc_image_state_to_action_chunk_api_v1*>(api)) {}
     std::shared_ptr<detail::ModelState> model_;
     const trtmc_image_state_to_action_chunk_api_v1* api_;
+};
+class ImagesStateTextToActionChunk {
+  public:
+    static constexpr std::string_view kTask = TRTMC_TASK_IMAGES_STATE_TEXT_TO_ACTION_CHUNK;
+    static constexpr uint32_t kMajor = 1, kMinor = 0;
+    static void validate_table(const trtmc_api_header* table) {
+        detail::validate_action_table<trtmc_images_state_text_to_action_chunk_api_v1>(table);
+    }
+    std::vector<ConfigField> config_fields() const {
+        return detail::config_fields(model_, kTask, kMajor, kMinor);
+    }
+    ImagesStateTextActionChunkResult run(const ImagesStateTextToActionChunkRequest& input,
+                                         const Config& config = {}) const {
+        const auto& observation = input.observation;
+        std::vector<trtmc_named_image_v1> images;
+        images.reserve(observation.images.size());
+        for (const auto& entry : observation.images)
+            images.push_back({detail::c_string(entry.name), entry.image.wire});
+        const trtmc_images_state_text_to_action_chunk_request_v1 request{
+            {images.data(), images.size(), observation.state.data(), observation.state.size(),
+             detail::c_string(observation.text)}};
+        const auto entries = config.c_entries();
+        const auto options = entries.view();
+        trtmc_result* raw = nullptr;
+        trtmc_error* error = nullptr;
+        const auto status = api_->run(model_->handle, &request, &options, &raw, &error);
+        detail::ResultOwner owner(model_, raw);
+        detail::check(model_->api, status, error);
+        return ImagesStateTextActionChunkResult(std::move(owner), api_->result_view);
+    }
+
+  private:
+    friend class Model;
+    ImagesStateTextToActionChunk(std::shared_ptr<detail::ModelState> model,
+                                 const trtmc_api_header* api)
+        : model_(std::move(model)),
+          api_(reinterpret_cast<const trtmc_images_state_text_to_action_chunk_api_v1*>(api)) {}
+    std::shared_ptr<detail::ModelState> model_;
+    const trtmc_images_state_text_to_action_chunk_api_v1* api_;
 };
 class ImageStateActionSession {
   public:
