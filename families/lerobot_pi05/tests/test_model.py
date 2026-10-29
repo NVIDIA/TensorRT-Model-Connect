@@ -21,6 +21,9 @@ from ..model import TASK, _normalization_json, _prefix_length, build
 from ..tokenizer import (
     SPECIAL_IDS,
     TOKENIZER_BYTES,
+    TOKENIZER_FILE,
+    TOKENIZER_REPO,
+    TOKENIZER_REVISION,
     VOCABULARY_PIECES,
     _checked,
     check_vocabulary,
@@ -299,7 +302,7 @@ def stubbed_build(monkeypatch):
     calls: list[str] = []
     metadata = SimpleNamespace(piece_count=VOCABULARY_PIECES, **SPECIAL_IDS)
     monkeypatch.setattr(model_module, "load_checkpoint", lambda _: calls.append("weights") or {})
-    monkeypatch.setattr(model_module, "load_tokenizer_model", lambda _: b"tokenizer")
+    monkeypatch.setattr(model_module, "load_tokenizer_model", lambda _: calls.append("tokenizer") or b"tokenizer")
     monkeypatch.setattr(model_module, "convert_paligemma_tokenizer_model", lambda _: (b"bpe", metadata))
     monkeypatch.setattr(model_module, "_build_prefix_plan", lambda *a, **k: calls.append("prefix") or b"P")
     monkeypatch.setattr(model_module, "_build_denoise_plan", lambda *a, **k: calls.append("denoise") or b"D")
@@ -320,7 +323,7 @@ def test_build_writes_the_bundle_contract(tmp_path, stubbed_build) -> None:
     assert runtime["state_normalization"]["mode"] == "MEAN_STD"
     assert runtime["action_normalization"]["scale"] == [3.0] * 7
     assert runtime["action_range"] == {"min": [-2.0] * 7, "max": [2.5] * 7}
-    assert stubbed_build == ["weights", "prefix", "denoise"]
+    assert stubbed_build == ["tokenizer", "weights", "prefix", "denoise"]
 
 
 @pytest.mark.parametrize(
@@ -452,3 +455,38 @@ def test_tokenizer_asset_is_pinned_by_size_and_vocabulary(tmp_path) -> None:
         check_vocabulary(SimpleNamespace(piece_count=VOCABULARY_PIECES, **{**SPECIAL_IDS, "bos_id": 1}))
     with pytest.raises(ValueError, match="pieces"):
         check_vocabulary(SimpleNamespace(piece_count=1000, **SPECIAL_IDS))
+
+
+def test_tokenizer_falls_back_to_the_pinned_hub_revision(tmp_path, monkeypatch) -> None:
+    import huggingface_hub
+
+    cached = tmp_path / "cache" / TOKENIZER_FILE
+    cached.parent.mkdir()
+    cached.write_bytes(b"\x01" * TOKENIZER_BYTES)
+    calls = []
+
+    def download(repo_id, filename, *, revision):
+        calls.append((repo_id, filename, revision))
+        return str(cached)
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    assert load_tokenizer_model(checkpoint) == cached.read_bytes()
+    assert calls == [(TOKENIZER_REPO, TOKENIZER_FILE, TOKENIZER_REVISION)]
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError("offline and not cached")
+
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", unavailable)
+    with pytest.raises(FileNotFoundError, match="gated"):
+        load_tokenizer_model(checkpoint)
+
+
+def test_manifests_declare_the_pinned_tokenizer() -> None:
+    # CI stages only what a manifest declares, at the declared revision, before running offline.
+    expected = [{"repo_id": TOKENIZER_REPO, "revision": TOKENIZER_REVISION}]
+    manifests = sorted((Path(__file__).parent / "manifests").glob("*.json"))
+    assert manifests
+    for path in manifests:
+        assert json.loads(path.read_text(encoding="utf-8"))["hf_dependencies"] == expected, path.name

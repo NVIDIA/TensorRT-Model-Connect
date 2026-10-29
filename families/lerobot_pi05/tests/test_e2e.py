@@ -16,7 +16,6 @@ from tools.e2e_evidence import evidence_stage, record_evidence
 import json
 import os
 import subprocess
-import urllib.request
 from functools import cache
 from pathlib import Path
 
@@ -34,8 +33,6 @@ TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
 MODEL_FILES = ("config.json", "model.safetensors", "policy_preprocessor.json", "policy_postprocessor.json")
-TOKENIZER_URL = "https://storage.googleapis.com/big_vision/paligemma_tokenizer.model"
-TOKENIZER_BYTES = 4264023
 
 
 def _cases() -> dict[str, tuple[dict, dict]]:
@@ -123,10 +120,10 @@ def _staged_state_files(directory: Path) -> list[str]:
 def test_pinned_assets_are_staged(case_name: str) -> None:
     """Fail before any build, with the asset named, when the build would not find an input.
 
-    Pytest runs this first. The checkpoint must already be local (CI stages the manifest's
-    revision, then runs offline), including every statistics file its processors name. The
-    PaliGemma tokenizer is the one input CI does not stage: unless the checkpoint carries
-    tokenizer.model, the build downloads the public file, so it must be reachable from here.
+    Pytest runs this first. CI stages the manifest's checkpoint revision and its
+    ``hf_dependencies``, then runs offline, so both must already be local: the checkpoint with
+    every statistics file its processors name, and the PaliGemma tokenizer, which the build
+    reads from the Hugging Face cache unless the checkpoint carries tokenizer.model.
     """
     manifest, _ = CASES[case_name]
     try:
@@ -138,14 +135,15 @@ def test_pinned_assets_are_staged(case_name: str) -> None:
     assert not missing, f"staged checkpoint is missing {missing}"
     if (directory / "tokenizer.model").is_file():
         return
+    from huggingface_hub import hf_hub_download
+
+    (tokenizer,) = manifest["hf_dependencies"]
     try:
-        request = urllib.request.Request(TOKENIZER_URL, method="HEAD")
-        with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
-            size = int(response.headers["Content-Length"])
-    except OSError as error:
-        pytest.fail(f"the PaliGemma tokenizer is neither in the checkpoint nor reachable at "
-                    f"{TOKENIZER_URL}: {error}")
-    assert size == TOKENIZER_BYTES, "the public tokenizer file changed"
+        hf_hub_download(tokenizer["repo_id"], "tokenizer.model", revision=tokenizer["revision"],
+                        local_files_only=True)
+    except Exception as error:  # noqa: BLE001 - name the dependency that is not staged
+        pytest.fail(f"tokenizer.model of {tokenizer['repo_id']}@{tokenizer['revision']} "
+                    f"is not staged locally: {error}")
 
 
 @pytest.fixture(scope="module")
