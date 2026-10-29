@@ -421,32 +421,20 @@ class _PhiMoEModel:
         return bytes(plan)
 
 
-def _add_swiglu_expert(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    hidden_size: int,
-    intermediate_size: int,
-    w_gate: np.ndarray,
-    w_up: np.ndarray,
-    w_down: np.ndarray,
-    dtype: np.dtype = np.float32,
-) -> trt.ITensor:
-    """Compute a single SwiGLU expert: down(silu(gate(x)) * up(x))."""
-    gate = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_gate, dtype=dtype
+def _expert_stack(
+    weights: WeightDict,
+    prefix: str,
+    name: str,
+    num_experts: int,
+    dtype: np.dtype,
+) -> np.ndarray:
+    """Stack one projection of every expert: ``[num_experts, in, out]`` in the compute dtype."""
+    return np.stack(
+        [
+            np.asarray(weights[f"{prefix}.expert.{e}.{name}"], dtype=dtype)
+            for e in range(num_experts)
+        ]
     )
-    up = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_up, dtype=dtype
-    )
-
-    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-    gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
-
-    down = graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), intermediate_size, hidden_size, w_down, dtype=dtype
-    )
-    return down
 
 
 def _sparsemixer_weight(
@@ -540,37 +528,21 @@ def _sparsemixer_weight(
     return weight.get_output(0), max_ind
 
 
-def _add_moe_block(
+def _add_sparsemixer_top2(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
     weights: WeightDict,
     prefix: str,
     hidden_size: int,
     num_experts: int,
-    moe_intermediate: int,
-    top_k: int,
-    jitter_eps: float = 0.01,
-    dtype: np.dtype = np.float32,
-    work_trt_dtype=None,
-) -> trt.ITensor:
-    """Add Mixture of Experts block with SparseMixer routing (top-2).
+    jitter_eps: float,
+    dtype: np.dtype,
+    work_trt_dtype,
+) -> tuple[trt.ITensor, trt.ITensor]:
+    """Route one token: returns ``(top_indices, top_weights)``, both ``[1, 2]``.
 
-    Dense implementation: computes all expert outputs, then selects top-2
-    via SparseMixer routing weights. The SparseMixer algorithm computes
-    each expert's weight from an independent softmax (weights do NOT
-    sum to 1.0).
-
-    Steps:
-      1. Router logits: inp @ router_weight -> [1, num_experts]
-      2. SparseMixer expert 1: masked softmax -> weight_1, index_1
-      3. Scatter -inf at index_1, SparseMixer expert 2 -> weight_2, index_2
-      4. Compute all expert SwiGLU outputs -> [num_experts, hidden]
-      5. Gather selected experts and apply weights
-      6. Weighted sum -> [1, hidden]
+    ``top_indices`` is int32; ``top_weights`` uses the graph compute dtype.
     """
-    if work_trt_dtype is None:
-        work_trt_dtype = trt.float32
-
     # 1. Router logits
     router_logits = graph_ops.add_matmul_rhs_constant(
         network, inp, hidden_size, num_experts, weights[f"{prefix}.router"], dtype=dtype
@@ -619,48 +591,86 @@ def _add_moe_block(
         work_trt_dtype=work_trt_dtype,
     )
 
-    # 5. Compute ALL expert outputs and stack
-    expert_outputs = []
-    for e in range(num_experts):
-        exp_out = _add_swiglu_expert(
-            network,
-            inp,
-            hidden_size,
-            moe_intermediate,
-            weights[f"{prefix}.expert.{e}.w_gate"],
-            weights[f"{prefix}.expert.{e}.w_up"],
-            weights[f"{prefix}.expert.{e}.w_down"],
-            dtype=dtype,
-        )  # [1, hidden_size]
-        expert_outputs.append(exp_out)
+    top_indices = network.add_concatenation([idx_1, idx_2])
+    top_indices.axis = 1
+    top_weights = network.add_concatenation([weight_1, weight_2])
+    top_weights.axis = 1
+    return top_indices.get_output(0), top_weights.get_output(0)
 
-    # Stack: [num_experts, hidden_size]
-    stacked = network.add_concatenation(expert_outputs)
-    stacked.axis = 0
-    stacked_out = stacked.get_output(0)  # [num_experts, hidden_size]
 
-    # 6. Gather expert 1 output and scale
-    idx_1_scalar = network.add_shuffle(idx_1)
-    idx_1_scalar.reshape_dims = (1,)
-    expert_1_out = network.add_gather(stacked_out, idx_1_scalar.get_output(0), 0)
-    # expert_1_out: [1, hidden_size]
-    scaled_1 = network.add_elementwise(
-        expert_1_out.get_output(0), weight_1, trt.ElementWiseOperation.PROD
+def _add_moe_block(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    hidden_size: int,
+    num_experts: int,
+    moe_intermediate: int,
+    top_k: int,
+    jitter_eps: float = 0.01,
+    dtype: np.dtype = np.float32,
+    work_trt_dtype=None,
+) -> trt.ITensor:
+    """Add Mixture of Experts block with SparseMixer routing (top-2).
+
+    Only the two experts chosen by the router are evaluated: their gate, up and
+    down weights are gathered from the stacked expert constants by the router
+    indices and run as batched matmuls. The SparseMixer algorithm computes each
+    expert's weight from an independent softmax (weights do NOT sum to 1.0).
+
+    Steps:
+      1. Router logits: inp @ router_weight -> [1, num_experts]
+      2. SparseMixer expert 1: masked softmax -> weight_1, index_1
+      3. Scatter -inf at index_1, SparseMixer expert 2 -> weight_2, index_2
+      4. Gather the selected experts' weights -> [1, 2, in, out] per projection
+      5. Batched SwiGLU over the two experts -> [1, 2, 1, hidden]
+      6. Weighted sum over the two experts -> [1, hidden]
+    """
+    if top_k != 2:
+        raise NotImplementedError("Phi-MoE routing selects exactly two experts per token")
+    if work_trt_dtype is None:
+        work_trt_dtype = trt.float32
+
+    # 1-3. Router logits and SparseMixer selection of two experts: [1, 2]
+    top_indices, top_weights = _add_sparsemixer_top2(
+        network, inp, weights, prefix, hidden_size, num_experts, jitter_eps, dtype, work_trt_dtype
     )
 
-    # Gather expert 2 output and scale
-    idx_2_scalar = network.add_shuffle(idx_2)
-    idx_2_scalar.reshape_dims = (1,)
-    expert_2_out = network.add_gather(stacked_out, idx_2_scalar.get_output(0), 0)
-    scaled_2 = network.add_elementwise(
-        expert_2_out.get_output(0), weight_2, trt.ElementWiseOperation.PROD
-    )
+    # 4. Gather the selected experts' weights: [1, 2, in, out]
+    def gathered(name: str) -> trt.ITensor:
+        stack = _expert_stack(weights, prefix, name, num_experts, dtype)
+        const = graph_ops.add_constant(network, stack.shape, stack, dtype=dtype)
+        return network.add_gather(const, top_indices, 0).get_output(0)  # [1, 2, in, out]
 
-    # Sum: weighted expert 1 + weighted expert 2
-    moe_out = network.add_elementwise(
-        scaled_1.get_output(0), scaled_2.get_output(0), trt.ElementWiseOperation.SUM
-    )
+    def reshape(tensor: trt.ITensor, dims: tuple[int, ...]) -> trt.ITensor:
+        shuffle = network.add_shuffle(tensor)
+        shuffle.reshape_dims = dims
+        return shuffle.get_output(0)
 
+    def batched_matmul(lhs: trt.ITensor, rhs: trt.ITensor) -> trt.ITensor:
+        return network.add_matrix_multiply(
+            lhs, trt.MatrixOperation.NONE, rhs, trt.MatrixOperation.NONE
+        ).get_output(0)
+
+    # 5. SwiGLU on both experts: [1, 1, 1, hidden] @ [1, 2, hidden, inter] -> [1, 2, 1, inter]
+    rows = reshape(inp, (1, 1, 1, hidden_size))
+    gate = batched_matmul(rows, gathered("w_gate"))
+    up = batched_matmul(rows, gathered("w_up"))
+    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
+    swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+    down = batched_matmul(gated.get_output(0), gathered("w_down"))  # [1, 2, 1, hidden]
+
+    # 6. Weighted sum over the two experts
+    per_expert = reshape(down, (1, top_k, hidden_size))
+    scaled = network.add_elementwise(
+        per_expert,
+        reshape(top_weights, (1, top_k, 1)),
+        trt.ElementWiseOperation.PROD,
+    )
+    moe_out = network.add_reduce(
+        scaled.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=False
+    )
     return moe_out.get_output(0)  # [1, hidden_size]
 
 
