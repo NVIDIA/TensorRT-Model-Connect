@@ -267,7 +267,7 @@ EXPECTED_REJECTIONS = {
 }
 
 
-def test_pi05_bundle_matches_the_lerobot_reference(case_name: str, bundles, tmp_path) -> None:
+def test_pi05_bundle_matches_the_lerobot_reference_e2e(case_name: str, bundles, tmp_path) -> None:
     manifest, case = CASES[case_name]
     limits = json.loads((THRESHOLD_ROOT / f"{case_name}.json").read_text(encoding="utf-8"))[
         "threshold_overrides"
