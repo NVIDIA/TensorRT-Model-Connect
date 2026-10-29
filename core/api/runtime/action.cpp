@@ -70,8 +70,16 @@ void timing(double milliseconds) {
     output_check(std::isfinite(milliseconds) && milliseconds >= 0,
                  "action inference timing is invalid");
 }
-// Owns only the converted array; every pointer inside still borrows caller storage.
+// Owns only the converted array; every pointer inside still borrows caller storage. `view`
+// points into `images`, so a copy would dangle: it is move-only, and moving a vector keeps
+// its buffer.
 struct MultiImageObservation {
+    MultiImageObservation() = default;
+    MultiImageObservation(const MultiImageObservation&) = delete;
+    MultiImageObservation& operator=(const MultiImageObservation&) = delete;
+    MultiImageObservation(MultiImageObservation&&) noexcept = default;
+    MultiImageObservation& operator=(MultiImageObservation&&) noexcept = default;
+
     std::vector<internal::NamedImage> images;
     internal::ImagesStateTextObservation view;
 };
