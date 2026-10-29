@@ -2,4 +2,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
 Pillow
-diffusers
+accelerate==1.14.0
+diffusers==0.39.0
