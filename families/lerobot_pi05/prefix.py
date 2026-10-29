@@ -15,7 +15,7 @@ import math
 import tensorrt as trt
 
 from . import graph, vision
-from .checkpoint import EMBEDDING_KEY, require
+from .checkpoint import embedding_key, require
 
 WIDTH = 2048
 DEPTH = 18
@@ -48,7 +48,7 @@ def build_prefix(network, weights, cfg, *, dtype, debug=False):
     images = vision.build_vision(network, pixels, weights, height=cfg.camera_height, width=cfg.camera_width)
     images = graph.shuffle(network, images, reshape=(slots * vision.TOKENS, WIDTH))
 
-    table = require(weights, EMBEDDING_KEY, (VOCAB, WIDTH))
+    table = require(weights, embedding_key(weights), (VOCAB, WIDTH))
     # The reference's embedding lookup already carries the sqrt(width) scale.
     lookup = network.add_gather(graph.const(network, table, dtype), token_ids, 0).get_output(0)
     language = graph.mul(network, lookup, graph.scalar(network, math.sqrt(WIDTH), 2, dtype))
