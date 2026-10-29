@@ -155,6 +155,14 @@ outcomes are not blindly retried. Cleanup reconciles every discovered owned ID,
 including late or duplicate instances; a failed query or delete is never treated
 as proof of release.
 
+The read-only lookups before the create request are retried when Brev reports
+them unavailable: the organization check (HTTP 429, 5xx or no response) and the
+catalog search, including a catalog that lists the requested type zero times or
+more than once. There are at most four lookups, 60, 120 and 180 seconds apart,
+and the final error states how many offers the catalog returned and from which
+provider. `brev login` is retried five times, 30 to 120 seconds apart. None of
+these retries can submit a second create.
+
 CI requests Jupyter disabled because the job uses Docker rather than notebooks.
 Transient inventory reads are retried on the same VM within the reservation
 deadline. While Brev still reports initialization in progress, bounded read-only
