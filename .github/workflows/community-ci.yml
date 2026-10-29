@@ -1213,7 +1213,18 @@ jobs:
       - name: Log in to Brev
         env:
           BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
-        run: brev login --api-key "$BREV_API_KEY"
+        run: |
+          # Brev has returned 503s and a mismatched TLS certificate for minutes at a
+          # time. Logging in again is harmless, so retry it before failing.
+          for attempt in 1 2 3 4 5; do
+            brev login --api-key "$BREV_API_KEY" && exit 0
+            if [ "$attempt" -lt 5 ]; then
+              echo "Brev login failed ($attempt/5); retrying in $((attempt * 30))s" >&2
+              sleep $((attempt * 30))
+            fi
+          done
+          echo "::error::Brev login failed after 5 attempts." >&2
+          exit 1
 
       - name: Release every earlier allocation attempt
         env:
@@ -1804,7 +1815,18 @@ jobs:
         if: ${{ steps.no_allocation.outputs.cleanup_confirmed != 'true' }}
         env:
           BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
-        run: brev login --api-key "$BREV_API_KEY"
+        run: |
+          # Brev has returned 503s and a mismatched TLS certificate for minutes at a
+          # time. Logging in again is harmless, so retry it before failing.
+          for attempt in 1 2 3 4 5; do
+            brev login --api-key "$BREV_API_KEY" && exit 0
+            if [ "$attempt" -lt 5 ]; then
+              echo "Brev login failed ($attempt/5); retrying in $((attempt * 30))s" >&2
+              sleep $((attempt * 30))
+            fi
+          done
+          echo "::error::Brev login failed after 5 attempts." >&2
+          exit 1
 
       - name: Delete every original GPU allocation
         id: release

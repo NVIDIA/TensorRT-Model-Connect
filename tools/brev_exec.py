@@ -413,6 +413,8 @@ HOST_INSTANCE_TYPES = {
 POLL_INTERVAL = 60.0
 CREATE_RATE_LIMIT_ATTEMPTS = 3
 CREATE_RATE_LIMIT_DELAY = 60.0
+PREFLIGHT_ATTEMPTS = 4
+PREFLIGHT_DELAY = 60.0
 CLI_TIMEOUT = 30.0
 PROBE_TIMEOUT = 180.0
 CLEANUP_TIMEOUT = 900.0
@@ -502,6 +504,10 @@ class CommandTimeout(ProvisionError):
         super().__init__(message)
         self.stdout = stdout
         self.stderr = stderr
+
+
+class PreflightUnavailable(ProvisionError):
+    """A read-only lookup before the create request failed; nothing was requested."""
 
 
 def _captured_text(value: str | bytes | None) -> str:
@@ -1167,6 +1173,10 @@ def _allocation_organization(deadline: float) -> str:
             "allocation requires a logged-in API key with its original organization"
         )
     status, body = _cleanup_request("AUTH", org, deadline)
+    if status == 429 or status >= 500:
+        raise PreflightUnavailable(
+            f"the original allocation organization could not be authenticated (HTTP {status})"
+        )
     if status != 200 or not isinstance(body, dict) or body.get("id") != org:
         raise ProvisionError("the original allocation organization could not be authenticated")
     return org
@@ -1239,16 +1249,29 @@ def _select_instance(
 ) -> dict:
     result = _run(["brev", "search", "--min-disk", str(disk_gb), "--json"], deadline)
     if result.returncode:
-        raise ProvisionError(f"Brev catalog search failed (exit {result.returncode})")
+        raise PreflightUnavailable(f"Brev catalog search failed (exit {result.returncode})")
     try:
         items = _json(result.stdout)
     except ValueError:
-        raise ProvisionError("Brev catalog search returned invalid JSON") from None
+        raise PreflightUnavailable("Brev catalog search returned invalid JSON") from None
     if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
         raise ProvisionError("Brev catalog search must return instance records")
     matching = [item for item in items if item.get("type") == instance_type]
     if len(matching) != 1:
-        raise ProvisionError("Brev catalog must contain exactly one requested instance type")
+        # Say whether the type was missing or listed twice; the remedy differs.
+        providers = sorted(
+            item["provider"]
+            if isinstance(item.get("provider"), str)
+            and re.fullmatch(r"[a-z0-9_-]{1,32}", item["provider"])
+            else "unknown"
+            for item in matching
+        )
+        raise PreflightUnavailable(
+            "Brev catalog must contain exactly one requested instance type; found "
+            f"{len(matching)} {instance_type} offers"
+            + (f" from {', '.join(providers)}" if providers else "")
+            + f" among {len(items)}"
+        )
     candidate = matching[0]
     low, high = candidate.get("disk_min_gb"), candidate.get("disk_max_gb")
     if (
@@ -1964,6 +1987,28 @@ def _create_with_rate_limit_retry(
             break
 
 
+def _preflight(lookup, instance: str, deadline: float, start: float):
+    """Retry a read-only lookup that runs before the create request.
+
+    Brev has failed these lookups for minutes at a time. Nothing has been
+    requested yet, so a retry cannot allocate a second VM.
+    """
+    for attempt in range(1, PREFLIGHT_ATTEMPTS):
+        try:
+            return lookup()
+        except (PreflightUnavailable, InventoryError) as error:
+            delay = PREFLIGHT_DELAY * attempt
+            if _remaining(deadline) <= delay:
+                raise
+            _log(
+                start,
+                f"{instance}: {error} ({attempt}/{PREFLIGHT_ATTEMPTS}); "
+                f"retrying in {delay:g}s before any allocation",
+            )
+            time.sleep(delay)
+    return lookup()
+
+
 def provision(
     instance: str,
     gpu: str = "",
@@ -2077,14 +2122,21 @@ def provision(
             output.write(json.dumps(lease, indent=2) + "\n")
             output.flush()
     try:
-        organization = _allocation_organization(deadline)
+        organization = _preflight(
+            lambda: _allocation_organization(deadline), instance, deadline, start
+        )
         if from_intent and lease.get("organization_id") != organization:
             raise ProvisionError("the allocation intent organization changed")
         lease["organization_id"] = organization
         _save_lease(path, lease)
         if _inventory(instance, deadline, start) is not None:
             raise ProvisionError("instance name already exists; refusing to reuse or delete it")
-        candidate = _select_instance(instance_type, disk_gb, provider, deadline, host_ram_gib)
+        candidate = _preflight(
+            lambda: _select_instance(instance_type, disk_gb, provider, deadline, host_ram_gib),
+            instance,
+            deadline,
+            start,
+        )
         if prepare_only:
             # Upload this intent before permitting the create step. Once that
             # step could have run, its archived state must assume a possible

@@ -2214,6 +2214,9 @@ def _row(name: str, **changes: str) -> dict[str, str]:
     return row
 
 
+_REAL_ALLOCATION_ORGANIZATION = brev_provision._allocation_organization
+
+
 class FakeClock:
     def __init__(self):
         self.now = 0.0
@@ -2523,6 +2526,69 @@ def test_insufficient_disk_catalog_never_allocates(fake):
     with pytest.raises(brev_provision.ProvisionError, match="requested disk"):
         fake.provision()
     assert not fake.creates
+    assert sum(command[1] == "search" for command in fake.commands) == 1
+
+
+def test_catalog_outage_is_retried_before_the_only_allocation(fake, monkeypatch):
+    available = fake.catalog
+    outages = [[], available[:1] * 2]
+
+    def flaky(command, deadline, cap=brev_provision.CLI_TIMEOUT, *, input_text=None):
+        if command[1] == "search":
+            fake.catalog = outages.pop(0) if outages else available
+        return fake(command, deadline, cap, input_text=input_text)
+
+    monkeypatch.setattr(brev_provision, "_run", flaky)
+    assert fake.provision() == "gpu"
+    assert fake.creates == ["gpu"]
+    searches = [moment for command, moment in fake.command_times if command[1] == "search"]
+    assert len(searches) == 3
+    assert searches[1] - searches[0] >= brev_provision.PREFLIGHT_DELAY
+    assert searches[2] - searches[1] >= 2 * brev_provision.PREFLIGHT_DELAY
+
+
+@pytest.mark.parametrize(
+    "catalog,detail",
+    [
+        ([], "found 0 g6.4xlarge offers among 0"),
+        (
+            [{"type": "g6.4xlarge", "provider": "aws"}, {"type": "g6.4xlarge", "provider": "aws"}],
+            "found 2 g6.4xlarge offers from aws, aws among 2",
+        ),
+    ],
+)
+def test_persistent_catalog_mismatch_reports_what_brev_returned(fake, catalog, detail):
+    fake.catalog = catalog
+    with pytest.raises(brev_provision.PreflightUnavailable, match=detail):
+        fake.provision()
+    assert not fake.creates
+    assert sum(command[1] == "search" for command in fake.commands) == (
+        brev_provision.PREFLIGHT_ATTEMPTS
+    )
+
+
+def test_unavailable_allocation_organization_is_retried_before_any_allocation(fake, monkeypatch):
+    attempts = []
+
+    def organization(deadline):
+        attempts.append(brev_provision.time.monotonic())
+        if len(attempts) == 1:
+            raise brev_provision.PreflightUnavailable("organization lookup returned HTTP 503")
+        return "org-test"
+
+    monkeypatch.setattr(brev_provision, "_allocation_organization", organization)
+    assert fake.provision() == "gpu"
+    assert fake.creates == ["gpu"]
+    assert attempts[1] - attempts[0] >= brev_provision.PREFLIGHT_DELAY
+
+
+@pytest.mark.parametrize("status,retried", [(503, True), (429, True), (401, False)])
+def test_allocation_organization_retries_only_unavailable_responses(monkeypatch, status, retried):
+    monkeypatch.setattr(brev_provision, "_cleanup_credentials", lambda: ("bak-test", "org-test"))
+    monkeypatch.setattr(brev_provision, "_cleanup_request", lambda *args: (status, None))
+    with pytest.raises(brev_provision.ProvisionError, match="could not be authenticated") as error:
+        _REAL_ALLOCATION_ORGANIZATION(time.monotonic() + 60)
+    assert isinstance(error.value, brev_provision.PreflightUnavailable) is retried
 
 
 @pytest.mark.parametrize(
