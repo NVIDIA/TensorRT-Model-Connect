@@ -34,7 +34,7 @@ int main() {
 
     // Statistics with a mode that says IDENTITY, or a mode with no statistics, also pass through.
     Normalization no_stats;
-    no_stats.mode = NormalizationMode::kQuantiles;
+    no_stats.mode = NormalizationMode::kRange;
     near(normalize_value(no_stats, 0, 0.25F), 0.25F, "no statistics passes through");
 
     Normalization mean_std;
@@ -47,7 +47,7 @@ int main() {
     near(unnormalize_value(mean_std, 1, 2.0F), -1.0F, "mean/std unnormalize, second dimension");
 
     Normalization quantiles;
-    quantiles.mode = NormalizationMode::kQuantiles;
+    quantiles.mode = NormalizationMode::kRange;
     quantiles.offset = {-1.0F, 10.0F, 5.0F};  // q01
     quantiles.scale = {4.0F, 20.0F, 1.0e-8F}; // q99 - q01; the last was zero, so eps
     near(normalize_value(quantiles, 0, 1.0F), 0.0F, "quantile midpoint");
@@ -60,6 +60,14 @@ int main() {
     near(normalize_value(quantiles, 0, 7.0F), 3.0F, "quantile extrapolates");
     // A degenerate (zero-spread) dimension unnormalizes to its quantile for any input in range.
     near(unnormalize_value(quantiles, 2, 0.0F), 5.0F, "zero-spread dimension");
+
+    // MIN_MAX uses the same arithmetic with min and max - min.
+    Normalization min_max;
+    min_max.mode = NormalizationMode::kRange;
+    min_max.offset = {-0.7F};
+    min_max.scale = {2.6F}; // max 1.9
+    near(normalize_value(min_max, 0, 0.3F), -0.23076922F, "min/max normalize");
+    near(unnormalize_value(min_max, 0, -0.23076922F), 0.3F, "min/max round trip");
 
     if (failures == 0)
         std::cout << "lerobot_pi05 normalization tests passed\n";

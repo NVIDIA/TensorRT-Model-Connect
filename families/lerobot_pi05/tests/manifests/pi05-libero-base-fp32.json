@@ -9,33 +9,33 @@
   "tensor_parallel_size": 1,
   "testcases": [
     {
-      "name": "pi05-libero-base-fp32-frame-000",
+      "name": "pi05-libero-base-fp32-ep0000-f000",
       "premerge": false,
       "inputs": {
-        "frame": "data/recorded_observation/frame_000",
+        "frame": "data/recorded_observation/ep0000_f000",
         "noise": "data/noise_seed0.f32",
-        "reference_fp32": "data/reference/frame_000.fp32.f32",
-        "reference_bf16": "data/reference/frame_000.bf16.f32"
+        "reference_fp32": "data/reference/ep0000_f000.fp32.f32",
+        "reference_bf16": "data/reference/ep0000_f000.bf16.f32"
       }
     },
     {
-      "name": "pi05-libero-base-fp32-frame-090",
+      "name": "pi05-libero-base-fp32-ep0379-f060",
       "premerge": false,
       "inputs": {
-        "frame": "data/recorded_observation/frame_090",
+        "frame": "data/recorded_observation/ep0379_f060",
         "noise": "data/noise_seed0.f32",
-        "reference_fp32": "data/reference/frame_090.fp32.f32",
-        "reference_bf16": "data/reference/frame_090.bf16.f32"
+        "reference_fp32": "data/reference/ep0379_f060.fp32.f32",
+        "reference_bf16": "data/reference/ep0379_f060.bf16.f32"
       }
     },
     {
-      "name": "pi05-libero-base-fp32-frame-180",
+      "name": "pi05-libero-base-fp32-ep0807-f070",
       "premerge": false,
       "inputs": {
-        "frame": "data/recorded_observation/frame_180",
+        "frame": "data/recorded_observation/ep0807_f070",
         "noise": "data/noise_seed0.f32",
-        "reference_fp32": "data/reference/frame_180.fp32.f32",
-        "reference_bf16": "data/reference/frame_180.bf16.f32"
+        "reference_fp32": "data/reference/ep0807_f070.fp32.f32",
+        "reference_bf16": "data/reference/ep0807_f070.bf16.f32"
       }
     }
   ]

@@ -56,39 +56,68 @@ def _config() -> dict:
     }
 
 
-def _processors(*, stats: bool, mode: str = "MEAN_STD", padding_side: str = "right") -> tuple[dict, dict]:
+_STATS = {"MEAN_STD": ("mean", "std"), "MIN_MAX": ("min", "max"),
+          "QUANTILES": ("q01", "q99"), "QUANTILE10": ("q10", "q90")}
+_FEATURES = {
+    "observation.images.image": {"type": "VISUAL", "shape": [3, 256, 256]},
+    "observation.state": {"type": "STATE", "shape": [8]},
+    "action": {"type": "ACTION", "shape": [7]},
+}
+
+
+def _processors(*, stats: bool, mode: str = "MEAN_STD", padding_side: str = "right",
+                features: dict | None = None, observation_keys: list | None = None,
+                extra_steps: tuple = (), normalize_after_prompt: bool = False,
+                max_length: int = 200) -> tuple[dict, dict]:
+    """Processor documents shaped like the ones LeRobot saves for pi05."""
     norm_map = {"VISUAL": "IDENTITY", "STATE": mode, "ACTION": mode}
-    pre_norm = {"registry_name": "normalizer_processor", "config": {"eps": 1e-8, "norm_map": norm_map}}
-    post_norm = {"registry_name": "unnormalizer_processor", "config": {"eps": 1e-8, "norm_map": norm_map}}
+    settings = {"eps": 1e-8, "norm_map": norm_map,
+                "features": _FEATURES if features is None else features}
+    if observation_keys is not None:
+        settings["normalize_observation_keys"] = observation_keys
+    pre_norm = {"registry_name": "normalizer_processor", "config": settings}
+    post_norm = {"registry_name": "unnormalizer_processor", "config": dict(settings)}
     if stats:
         pre_norm["state_file"] = NORMALIZER
         post_norm["state_file"] = UNNORMALIZER
+    prompt = {"registry_name": "pi05_prepare_state_tokenizer_processor_step", "config": {}}
     tokenizer = {
         "registry_name": "tokenizer_processor",
-        "config": {"max_length": 200, "padding_side": padding_side, "padding": "max_length",
+        "config": {"max_length": max_length, "padding_side": padding_side, "padding": "max_length",
                    "tokenizer_name": "google/paligemma-3b-pt-224"},
     }
-    return {"steps": [pre_norm, tokenizer]}, {"steps": [post_norm]}
+    middle = [prompt, pre_norm] if normalize_after_prompt else [pre_norm, prompt]
+    pre = [{"registry_name": "rename_observations_processor", "config": {"rename_map": {}}},
+           {"registry_name": "to_batch_processor", "config": {}}, *extra_steps, *middle, tokenizer,
+           {"registry_name": "device_processor", "config": {"device": "cuda"}}]
+    post = [post_norm, {"registry_name": "device_processor", "config": {"device": "cpu"}}]
+    return {"steps": pre}, {"steps": post}
 
 
-def _model_dir(root: Path, *, stats: bool = False, config: dict | None = None, **processor_args) -> Path:
+def _write_stats(root: Path, mode: str, *, state: bool = True) -> None:
+    low, high = _STATS[mode]
+    state_low = np.arange(8, dtype=np.float32)
+    state_high = state_low + 4.0
+    state_high[2] = state_low[2]  # a zero spread on this dimension
+    state_stats = {f"observation.state.{low}": state_low, f"observation.state.{high}": state_high}
+    save_file(state_stats if state else {"observation.images.image.mean": np.zeros(3, np.float32)},
+              str(root / NORMALIZER))
+    # The dataset range first: under MIN_MAX the mode's own statistics are that range.
+    action = {"action.min": np.full(7, -2.0, np.float32), "action.max": np.full(7, 2.5, np.float32),
+              f"action.{low}": -np.ones(7, np.float32), f"action.{high}": np.full(7, 3.0, np.float32)}
+    save_file(action, str(root / UNNORMALIZER))
+
+
+def _model_dir(root: Path, *, stats: bool = False, config: dict | None = None,
+               state_stats: bool = True, **processor_args) -> Path:
     mode = processor_args.get("mode", "MEAN_STD")
     root.mkdir(parents=True, exist_ok=True)
     (root / "config.json").write_text(json.dumps(config or _config()), encoding="utf-8")
     pre, post = _processors(stats=stats, **processor_args)
     (root / "policy_preprocessor.json").write_text(json.dumps(pre), encoding="utf-8")
     (root / "policy_postprocessor.json").write_text(json.dumps(post), encoding="utf-8")
-    if stats and mode == "QUANTILES":
-        state_q99 = np.arange(8, dtype=np.float32) + 4.0
-        state_q99[2] = 2.0  # q01 == q99 on this dimension
-        save_file({"observation.state.q01": np.arange(8, dtype=np.float32),
-                   "observation.state.q99": state_q99}, str(root / NORMALIZER))
-        save_file({"action.q01": -np.ones(7, np.float32), "action.q99": np.ones(7, np.float32) * 3}, str(root / UNNORMALIZER))
-    elif stats:
-        save_file({"observation.state.mean": np.arange(8, dtype=np.float32),
-                   "observation.state.std": np.full(8, 2.0, np.float32)}, str(root / NORMALIZER))
-        save_file({"action.mean": np.arange(7, dtype=np.float32),
-                   "action.std": np.full(7, 3.0, np.float32)}, str(root / UNNORMALIZER))
+    if stats and mode in _STATS:
+        _write_stats(root, mode, state=state_stats)
     return root
 
 
@@ -111,32 +140,61 @@ def test_config_ignores_a_placeholder_camera_listed_as_a_feature(tmp_path) -> No
     assert len(cfg.cameras) == 2 and cfg.camera_slots == 3
 
 
-def test_config_loads_statistics_when_the_checkpoint_has_them(tmp_path) -> None:
+def test_config_loads_mean_std_statistics_and_the_action_range(tmp_path) -> None:
     cfg = config_module.load_config(_model_dir(tmp_path / "ckpt", stats=True))
-    assert not cfg.state_normalization.is_identity
-    assert cfg.state_normalization.offset == tuple(float(v) for v in range(8))
-    assert cfg.action_normalization.scale == (3.0,) * 7
+    state = cfg.state_normalization
+    assert state.mode == "MEAN_STD" and not state.is_identity
+    assert state.offset == tuple(float(v) for v in range(8))  # mean
+    assert state.scale[0] == 4.0  # std, used with eps at run time
+    assert cfg.action_normalization.offset == (-1.0,) * 7 and cfg.action_normalization.scale == (3.0,) * 7
+    assert cfg.action_range == ((-2.0,) * 7, (2.5,) * 7)
     assert _normalization_json(cfg.action_normalization)["mode"] == "MEAN_STD"
     assert _normalization_json(config_module.Normalization("MEAN_STD", 1e-8)) == {"mode": "IDENTITY"}
 
 
-def test_config_reads_quantile_statistics_as_lerobot_defines_them(tmp_path) -> None:
+@pytest.mark.parametrize("mode", ["QUANTILES", "QUANTILE10", "MIN_MAX"])
+def test_config_reads_every_lerobot_range_mode(tmp_path, mode: str) -> None:
     # LeRobot's pi05 default is QUANTILES, so a plain lerobot-train output uses it.
-    cfg = config_module.load_config(_model_dir(tmp_path / "ckpt", stats=True, mode="QUANTILES"))
+    cfg = config_module.load_config(_model_dir(tmp_path / "ckpt", stats=True, mode=mode))
     state = cfg.state_normalization
-    assert state.mode == "QUANTILES" and not state.is_identity
-    assert state.offset == tuple(float(v) for v in range(8))  # q01
-    # scale is q99 - q01, with eps where they coincide (dimension 2).
+    assert state.mode == mode and not state.is_identity
+    assert state.offset == tuple(float(v) for v in range(8))  # the lower statistic
+    # scale is the spread to the upper statistic, eps where it is exactly zero (dimension 2).
     assert state.scale[0] == 4.0 and state.scale[2] == np.float32(1e-8)
     assert cfg.action_normalization.offset == (-1.0,) * 7 and cfg.action_normalization.scale == (4.0,) * 7
     assert _normalization_json(state)["scale"][2] == pytest.approx(1e-8)
+    expected_range = ((-1.0,) * 7, (3.0,) * 7) if mode == "MIN_MAX" else ((-2.0,) * 7, (2.5,) * 7)
+    assert cfg.action_range == expected_range
 
 
-def test_config_rejects_unsupported_normalization_only_when_statistics_exist(tmp_path) -> None:
-    with pytest.raises(NotImplementedError, match="MIN_MAX"):
-        config_module.load_config(_model_dir(tmp_path / "with-stats", stats=True, mode="MIN_MAX"))
+def test_state_is_normalized_only_when_the_step_selects_it(tmp_path) -> None:
+    # LeRobot normalizes an observation only if the step lists it as a non-action feature and
+    # normalize_observation_keys keeps it; the action is unnormalized regardless.
+    unlisted = {k: v for k, v in _FEATURES.items() if k != "observation.state"}
+    for name, kwargs in (("unlisted", {"features": unlisted}),
+                         ("filtered", {"observation_keys": ["observation.images.image"]}),
+                         ("as-action", {"features": {**_FEATURES, "observation.state": {"type": "ACTION"}}})):
+        cfg = config_module.load_config(_model_dir(tmp_path / name, stats=True, **kwargs))
+        assert cfg.state_normalization.is_identity, name
+        assert not cfg.action_normalization.is_identity, name
+    kept = config_module.load_config(
+        _model_dir(tmp_path / "kept", stats=True, observation_keys=["observation.state"]))
+    assert not kept.state_normalization.is_identity
+
+
+def test_statistics_absent_for_a_feature_pass_it_through_like_lerobot(tmp_path) -> None:
+    cfg = config_module.load_config(_model_dir(tmp_path / "ckpt", stats=True, state_stats=False))
+    assert cfg.state_normalization.is_identity
+    assert not cfg.action_normalization.is_identity
+
+
+def test_config_rejects_an_unknown_normalization_mode_only_when_statistics_exist(tmp_path) -> None:
+    with pytest.raises(NotImplementedError, match="LOG_SCALE"):
+        root = _model_dir(tmp_path / "with-stats", stats=True, mode="LOG_SCALE")
+        _write_stats(root, "MEAN_STD")
+        config_module.load_config(root)
     # Without statistics the mode is moot, as in LeRobot.
-    cfg = config_module.load_config(_model_dir(tmp_path / "no-stats", mode="MIN_MAX"))
+    cfg = config_module.load_config(_model_dir(tmp_path / "no-stats", mode="LOG_SCALE"))
     assert cfg.state_normalization.is_identity
 
 
@@ -145,9 +203,38 @@ def test_config_requires_the_statistics_it_names(tmp_path) -> None:
     (root / NORMALIZER).unlink()
     with pytest.raises(FileNotFoundError, match="normalizer_processor"):
         config_module.load_config(root)
+    # Present for the feature but missing what the mode needs: LeRobot raises too.
     save_file({"observation.state.mean": np.zeros(8, np.float32)}, str(root / NORMALIZER))
-    with pytest.raises(KeyError, match="std"):
+    with pytest.raises(ValueError, match="std"):
         config_module.load_config(root)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"extra_steps": ({"registry_name": "image_crop_processor", "config": {}},)}, "image_crop_processor"),
+        ({"extra_steps": ({"registry_name": "relative_actions_processor", "config": {"enabled": True}},)},
+         "enabled"),
+        ({"normalize_after_prompt": True}, "before the prompt step"),
+        ({"max_length": 48}, "max_length"),
+    ],
+)
+def test_config_refuses_processor_steps_it_does_not_reproduce(tmp_path, kwargs: dict, message: str) -> None:
+    with pytest.raises((NotImplementedError, ValueError), match=message):
+        config_module.load_config(_model_dir(tmp_path / "ckpt", stats=True, **kwargs))
+
+
+def test_config_accepts_disabled_relative_action_steps(tmp_path) -> None:
+    disabled = ({"registry_name": "relative_actions_processor", "config": {"enabled": False}},)
+    cfg = config_module.load_config(_model_dir(tmp_path / "ckpt", stats=True, extra_steps=disabled))
+    assert not cfg.state_normalization.is_identity
+
+
+def test_config_requires_lerobots_state_and_action_keys(tmp_path) -> None:
+    raw = _config()
+    raw["input_features"]["observation.joint_state"] = raw["input_features"].pop("observation.state")
+    with pytest.raises(ValueError, match="observation.state"):
+        config_module.load_config(_model_dir(tmp_path / "ckpt", config=raw))
 
 
 @pytest.mark.parametrize(
@@ -232,6 +319,7 @@ def test_build_writes_the_bundle_contract(tmp_path, stubbed_build) -> None:
     assert (runtime["state_dim"], runtime["action_dim"], runtime["max_action_dim"]) == (8, 7, 32)
     assert runtime["state_normalization"]["mode"] == "MEAN_STD"
     assert runtime["action_normalization"]["scale"] == [3.0] * 7
+    assert runtime["action_range"] == {"min": [-2.0] * 7, "max": [2.5] * 7}
     assert stubbed_build == ["weights", "prefix", "denoise"]
 
 

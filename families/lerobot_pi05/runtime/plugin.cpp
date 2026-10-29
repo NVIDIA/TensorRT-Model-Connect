@@ -31,8 +31,8 @@ Normalization parse_normalization(const nlohmann::json& json) {
         return norm;
     if (mode == "MEAN_STD")
         norm.mode = NormalizationMode::kMeanStd;
-    else if (mode == "QUANTILES")
-        norm.mode = NormalizationMode::kQuantiles;
+    else if (mode == "QUANTILES" || mode == "QUANTILE10" || mode == "MIN_MAX")
+        norm.mode = NormalizationMode::kRange;
     else
         throw std::runtime_error("lerobot_pi05 runtime.json has an unsupported normalization mode");
     norm.eps = json.at("eps").get<float>();
@@ -64,6 +64,11 @@ RuntimeConfig parse_config(const std::vector<char>& data) {
             "lerobot_pi05 runtime.json has an unsupported state discretization");
     config.state_normalization = parse_normalization(json.at("state_normalization"));
     config.action_normalization = parse_normalization(json.at("action_normalization"));
+    const auto& range = json.at("action_range");
+    if (!range.is_null()) {
+        config.action_min = range.at("min").get<std::vector<float>>();
+        config.action_max = range.at("max").get<std::vector<float>>();
+    }
     return config;
 }
 
@@ -73,6 +78,7 @@ std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<cha
     auto engine = backend.create_module(plan.data(), plan.size(), options);
     if (!engine || !engine->ok())
         throw std::runtime_error(std::string("lerobot_pi05 ") + what + " engine failed to load");
+    engine->set_timing_label(std::string("lerobot_pi05 ") + what);
     return engine;
 }
 

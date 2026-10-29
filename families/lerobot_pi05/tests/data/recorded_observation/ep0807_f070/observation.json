@@ -1,0 +1,14 @@
+{
+  "source": "physical-intelligence/libero@a4336d589d589045d1c56423ffdf3b88a0e19b1f episode 807 frame 70",
+  "state": [
+    0.027627212926745415,
+    -0.09439679980278015,
+    0.21052511036396027,
+    3.1528332233428955,
+    0.11009757965803146,
+    -0.44625571370124817,
+    0.027336811646819115,
+    -0.0257638581097126
+  ],
+  "task": "pick up the orange juice and place it in the basket"
+}

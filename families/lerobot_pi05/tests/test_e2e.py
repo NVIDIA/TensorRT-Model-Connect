@@ -97,6 +97,7 @@ def _required_path(value: str | None, name: str) -> Path:
 
 
 def _model_dir(manifest: dict) -> Path:
+    """The checkpoint directory: explicit, or the snapshot CI staged before this offline run."""
     explicit = os.environ.get("TRTMC_LEROBOT_PI05_MODEL_DIR")
     if explicit:
         return _required_path(explicit, "TRTMC_LEROBOT_PI05_MODEL_DIR")
@@ -106,40 +107,45 @@ def _model_dir(manifest: dict) -> Path:
         snapshot_download(
             repo_id=manifest["hf_id"],
             revision=manifest["hf_revision"],
-            allow_patterns=MODEL_FILES,
             local_files_only=True,
         )
     )
 
 
-def _head(url: str) -> urllib.request.addinfourl:
-    request = urllib.request.Request(url, method="HEAD")
-    return urllib.request.urlopen(request, timeout=60)  # noqa: S310
+def _staged_state_files(directory: Path) -> list[str]:
+    names = []
+    for processor in ("policy_preprocessor.json", "policy_postprocessor.json"):
+        steps = json.loads((directory / processor).read_text(encoding="utf-8")).get("steps", [])
+        names.extend(step["state_file"] for step in steps if step.get("state_file"))
+    return names
 
 
-def test_pinned_assets_are_reachable(case_name: str) -> None:
-    """Fail before any build when a pinned asset cannot be fetched, not partway through one.
+def test_pinned_assets_are_staged(case_name: str) -> None:
+    """Fail before any build, with the asset named, when the build would not find an input.
 
-    Pytest runs this first. A model directory given explicitly must be complete; otherwise
-    every pinned file must resolve anonymously at the manifest's revision, and so must the
-    public tokenizer unless the directory carries its own.
+    Pytest runs this first. The checkpoint must already be local (CI stages the manifest's
+    revision, then runs offline), including every statistics file its processors name. The
+    PaliGemma tokenizer is the one input CI does not stage: unless the checkpoint carries
+    tokenizer.model, the build downloads the public file, so it must be reachable from here.
     """
     manifest, _ = CASES[case_name]
-    explicit = os.environ.get("TRTMC_LEROBOT_PI05_MODEL_DIR")
-    if explicit:
-        directory = _required_path(explicit, "TRTMC_LEROBOT_PI05_MODEL_DIR")
-        missing = [name for name in MODEL_FILES if not (directory / name).is_file()]
-        assert not missing, f"model directory is missing {missing}"
-        if (directory / "tokenizer.model").is_file():
-            return
-    else:
-        for name in MODEL_FILES:
-            url = f"https://huggingface.co/{manifest['hf_id']}/resolve/{manifest['hf_revision']}/{name}"
-            with _head(url) as response:
-                assert response.status == 200, f"{url} is not reachable ({response.status})"
-    with _head(TOKENIZER_URL) as response:
-        assert response.status == 200
-        assert int(response.headers["Content-Length"]) == TOKENIZER_BYTES, "the public tokenizer changed"
+    try:
+        directory = _model_dir(manifest)
+    except Exception as error:  # noqa: BLE001 - surface why the staged snapshot is unusable
+        pytest.fail(f"{manifest['hf_id']}@{manifest['hf_revision']} is not staged locally: {error}")
+    missing = [name for name in MODEL_FILES if not (directory / name).is_file()]
+    missing += [name for name in _staged_state_files(directory) if not (directory / name).is_file()]
+    assert not missing, f"staged checkpoint is missing {missing}"
+    if (directory / "tokenizer.model").is_file():
+        return
+    try:
+        request = urllib.request.Request(TOKENIZER_URL, method="HEAD")
+        with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
+            size = int(response.headers["Content-Length"])
+    except OSError as error:
+        pytest.fail(f"the PaliGemma tokenizer is neither in the checkpoint nor reachable at "
+                    f"{TOKENIZER_URL}: {error}")
+    assert size == TOKENIZER_BYTES, "the public tokenizer file changed"
 
 
 @pytest.fixture(scope="module")
@@ -172,7 +178,8 @@ def _qualification_binary() -> tuple[Path, Path]:
     build_dir = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
     subprocess.run(
         ["cmake", "--build", str(build_dir), "--parallel", "8", "--target",
-         "trtmc_lerobot_pi05_qualification", "trtmc_backend_trt", "trtmc_model_lerobot_pi05"],
+         "trtmc_lerobot_pi05_qualification", "trtmc_lerobot_pi05_tokenizer_check",
+         "trtmc_backend_trt", "trtmc_model_lerobot_pi05"],
         check=True,
         timeout=900,
     )
@@ -287,3 +294,25 @@ def test_native_runtime_has_no_python_or_pytorch_dependency(case_name: str) -> N
         ).stdout.lower()
         record_evidence("linked_libraries", {library.name: listing})
         assert "python" not in listing and "torch" not in listing, f"{library.name}:\n{listing}"
+
+
+def test_native_tokenizer_matches_lerobot(case_name: str, bundles) -> None:
+    """The bundle's tokenizer reproduces LeRobot's prompt ids on instructions chosen to break it.
+
+    The recorded frames share few instructions, so this covers cleaning, whitespace, digits,
+    punctuation, Unicode, byte fallback, special-looking text and truncation separately.
+    """
+    manifest, _ = CASES[case_name]
+    bundle = bundles(manifest)
+    binary, root = _qualification_binary()
+    checker = binary.parent / "trtmc_lerobot_pi05_tokenizer_check"
+    golden = TEST_ROOT / "data" / "tokenizer_golden.json"
+    completed = subprocess.run(
+        [str(checker), str(bundle), str(golden)], check=False, capture_output=True, text=True,
+        env={**os.environ, "LD_LIBRARY_PATH": str(root)}, timeout=600,
+    )
+    record_evidence("tokenizer_check", {"stdout": completed.stdout, "stderr": completed.stderr})
+    assert completed.returncode == 0, completed.stdout or completed.stderr
+    summary = json.loads(completed.stdout)
+    assert summary["mismatches"] == [] and summary["cases"] == len(
+        json.loads(golden.read_text(encoding="utf-8"))["cases"])

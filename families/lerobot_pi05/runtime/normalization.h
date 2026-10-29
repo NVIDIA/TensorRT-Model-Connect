@@ -10,14 +10,16 @@
 
 namespace trtmc::lerobot_pi05 {
 
-enum class NormalizationMode { kIdentity, kMeanStd, kQuantiles };
+enum class NormalizationMode { kIdentity, kMeanStd, kRange };
 
 // Per-feature normalization in LeRobot's NormalizerProcessorStep arithmetic, in float32 and in
 // the same operation order. Empty statistics mean the value passes through, as LeRobot skips a
 // feature that has none.
-//   kMeanStd:   offset = mean, scale = std;  (x - mean) / (std + eps)   and  x * std + mean
-//   kQuantiles: offset = q01,  scale = q99 - q01 (eps where it is zero);
-//               2 (x - q01) / scale - 1     and  (x + 1) scale / 2 + q01
+//   kMeanStd: offset = mean, scale = std;  (x - mean) / (std + eps)  and  x * std + mean
+//   kRange:   QUANTILES, QUANTILE10 and MIN_MAX. offset = q01, q10 or min; scale = the spread to
+//             q99, q90 or max, eps where it is zero; 2 (x - offset) / scale - 1 and
+//             (x + 1) * scale / 2 + offset. LeRobot writes the min/max inverse as
+//             (x + 1) / 2 * scale, which is the same float32 value because halving is exact.
 struct Normalization {
     NormalizationMode mode{NormalizationMode::kIdentity};
     float eps{1.0e-8F};
