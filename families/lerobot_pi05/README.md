@@ -24,7 +24,7 @@ Anything outside this list fails at build time with the offending field named.
 | Cameras | one or more real cameras sharing one square `3xHxW` shape, plus `empty_cameras` masked placeholders; `image_resolution=[224, 224]` |
 | Batch | one |
 | Real-time chunking, relative actions | not supported (`rtc_config.enabled`, `use_relative_actions` must be off) |
-| Normalization | `IDENTITY` and `MEAN_STD`; `QUANTILES` is rejected when the checkpoint carries statistics |
+| Normalization | `IDENTITY`, `MEAN_STD` and `QUANTILES` (LeRobot's pi05 training default); other modes are rejected when the checkpoint carries statistics |
 | Precision | `bf16` (default) and `fp32` |
 | Prompt | right-padded to `tokenizer_max_length`; a longer instruction plus state is rejected, not truncated |
 | Not claimed | Pi 0, Pi 0-FAST, Pi 0.7, Jetson targets, quantization, multi-GPU |

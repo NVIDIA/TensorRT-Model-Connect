@@ -16,6 +16,7 @@ from tools.e2e_evidence import evidence_stage, record_evidence
 import json
 import os
 import subprocess
+import urllib.request
 from functools import cache
 from pathlib import Path
 
@@ -33,6 +34,8 @@ TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
 MODEL_FILES = ("config.json", "model.safetensors", "policy_preprocessor.json", "policy_postprocessor.json")
+TOKENIZER_URL = "https://storage.googleapis.com/big_vision/paligemma_tokenizer.model"
+TOKENIZER_BYTES = 4264023
 
 
 def _cases() -> dict[str, tuple[dict, dict]]:
@@ -107,6 +110,36 @@ def _model_dir(manifest: dict) -> Path:
             local_files_only=True,
         )
     )
+
+
+def _head(url: str) -> urllib.request.addinfourl:
+    request = urllib.request.Request(url, method="HEAD")
+    return urllib.request.urlopen(request, timeout=60)  # noqa: S310
+
+
+def test_pinned_assets_are_reachable(case_name: str) -> None:
+    """Fail before any build when a pinned asset cannot be fetched, not partway through one.
+
+    Pytest runs this first. A model directory given explicitly must be complete; otherwise
+    every pinned file must resolve anonymously at the manifest's revision, and so must the
+    public tokenizer unless the directory carries its own.
+    """
+    manifest, _ = CASES[case_name]
+    explicit = os.environ.get("TRTMC_LEROBOT_PI05_MODEL_DIR")
+    if explicit:
+        directory = _required_path(explicit, "TRTMC_LEROBOT_PI05_MODEL_DIR")
+        missing = [name for name in MODEL_FILES if not (directory / name).is_file()]
+        assert not missing, f"model directory is missing {missing}"
+        if (directory / "tokenizer.model").is_file():
+            return
+    else:
+        for name in MODEL_FILES:
+            url = f"https://huggingface.co/{manifest['hf_id']}/resolve/{manifest['hf_revision']}/{name}"
+            with _head(url) as response:
+                assert response.status == 200, f"{url} is not reachable ({response.status})"
+    with _head(TOKENIZER_URL) as response:
+        assert response.status == 200
+        assert int(response.headers["Content-Length"]) == TOKENIZER_BYTES, "the public tokenizer changed"
 
 
 @pytest.fixture(scope="module")
@@ -240,3 +273,17 @@ def test_pi05_bundle_matches_the_lerobot_reference(case_name: str, bundles, tmp_
     for name, needle in EXPECTED_REJECTIONS.items():
         assert rejections[name]["code"] != "ok", f"{name} was accepted"
         assert needle in rejections[name]["message"], rejections[name]
+
+
+def test_native_runtime_has_no_python_or_pytorch_dependency(case_name: str) -> None:
+    # Parametrized only so it is skipped unless the real E2E is selected; the result is case-independent.
+    binary, root = _qualification_binary()
+    libraries = [binary, root / "libtrtmc_model_lerobot_pi05.so", root / "libtrtmc_backend_trt.so"]
+    for library in libraries:
+        assert library.is_file(), library
+        listing = subprocess.run(
+            ["ldd", str(library)], check=True, capture_output=True, text=True,
+            env={**os.environ, "LD_LIBRARY_PATH": str(root)},
+        ).stdout.lower()
+        record_evidence("linked_libraries", {library.name: listing})
+        assert "python" not in listing and "torch" not in listing, f"{library.name}:\n{listing}"

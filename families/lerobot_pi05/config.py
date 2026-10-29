@@ -20,7 +20,7 @@ from safetensors import safe_open
 
 
 EMPTY_CAMERA_PREFIX = "observation.images.empty_camera_"
-SUPPORTED_NORMALIZATION = ("IDENTITY", "MEAN_STD")
+SUPPORTED_NORMALIZATION = ("IDENTITY", "MEAN_STD", "QUANTILES")
 
 # PaliGemma Gemma-2B prefix and Gemma-300M action expert, as LeRobot defines them.
 PREFIX_VARIANT = "gemma_2b"
@@ -40,20 +40,25 @@ _REQUIRED_EXACT = {
 
 @dataclass(frozen=True)
 class Normalization:
-    """One feature's normalization. ``mean``/``std`` are None when the checkpoint has no stats.
+    """One feature's normalization. ``offset``/``scale`` are None when the checkpoint has no stats.
 
-    LeRobot skips a feature whose statistics are absent, so ``None`` means the
-    value passes through unchanged regardless of the configured mode.
+    LeRobot skips a feature whose statistics are absent, so ``None`` means the value passes
+    through unchanged regardless of the configured mode. Otherwise, per dimension:
+
+    - ``MEAN_STD``: ``offset=mean``, ``scale=std``; normalize ``(x - mean) / (std + eps)``,
+      unnormalize ``x * std + mean``.
+    - ``QUANTILES``: ``offset=q01``, ``scale=q99 - q01`` (``eps`` where that is exactly zero);
+      normalize ``2 (x - q01) / scale - 1``, unnormalize ``(x + 1) scale / 2 + q01``.
     """
 
     mode: str
     eps: float
-    mean: tuple[float, ...] | None = None
-    std: tuple[float, ...] | None = None
+    offset: tuple[float, ...] | None = None
+    scale: tuple[float, ...] | None = None
 
     @property
     def is_identity(self) -> bool:
-        return self.mean is None or self.mode == "IDENTITY"
+        return self.offset is None or self.mode == "IDENTITY"
 
 
 @dataclass(frozen=True)
@@ -148,14 +153,20 @@ def _normalization(
     path = model_dir / state_file
     if not path.is_file():
         raise FileNotFoundError(f"LeRobot Pi 0.5 checkpoint is missing {state_file}")
+    names_for_mode = {"MEAN_STD": ("mean", "std"), "QUANTILES": ("q01", "q99")}
     with safe_open(str(path), framework="numpy") as reader:
         names = set(reader.keys())
-        wanted = (f"{feature_key}.mean", f"{feature_key}.std")
+        wanted = tuple(f"{feature_key}.{stat}" for stat in names_for_mode.get(mode, ()))
+        if mode == "IDENTITY":
+            return Normalization(mode=mode, eps=eps)
         if any(name not in names for name in wanted):
             raise KeyError(f"{state_file} has no {wanted[0]} / {wanted[1]} statistics")
-        mean = tuple(float(v) for v in np.asarray(reader.get_tensor(wanted[0])).reshape(-1))
-        std = tuple(float(v) for v in np.asarray(reader.get_tensor(wanted[1])).reshape(-1))
-    return Normalization(mode=mode, eps=eps, mean=mean, std=std)
+        first, second = (np.asarray(reader.get_tensor(name), dtype=np.float32).reshape(-1) for name in wanted)
+    if mode == "MEAN_STD":
+        return Normalization(mode=mode, eps=eps, offset=tuple(map(float, first)), scale=tuple(map(float, second)))
+    spread = (second - first).astype(np.float32)
+    spread = np.where(spread == 0, np.float32(eps), spread)
+    return Normalization(mode=mode, eps=eps, offset=tuple(map(float, first)), scale=tuple(map(float, spread)))
 
 
 def _tokenizer_name(model_dir: Path) -> str:
