@@ -480,55 +480,28 @@ void exercise_multi_image(const std::filesystem::path& root) {
     const std::vector<NamedImage> none;
     const std::vector<NamedImage> unknown{{"cam_a", camera_a}, {"cam_z", camera_b}};
     const std::vector<NamedImage> missing{{"cam_a", camera_a}};
-    rejects(
-        [&] {
-            (void)predictor.run(request(none, {state, 2}, text));
-        },
-        TRTMC_INVALID_ARGUMENT, "an observation without images is rejected by the Core");
-    rejects(
-        [&] {
-            (void)predictor.run(request(empty_name, {state, 2}, text));
-        },
-        TRTMC_INVALID_ARGUMENT, "an empty camera name is rejected by the Core");
-    rejects(
-        [&] {
-            (void)predictor.run(request(duplicated, {state, 2}, text));
-        },
-        TRTMC_INVALID_ARGUMENT, "duplicate camera names are rejected by the Core");
-    rejects(
-        [&] {
-            (void)predictor.run(request(unknown, {state, 2}, text));
-        },
-        TRTMC_INVALID_ARGUMENT, "an unknown camera name is rejected by the family");
-    rejects(
-        [&] {
-            (void)predictor.run(request(missing, {state, 2}, text));
-        },
-        TRTMC_INVALID_ARGUMENT, "a missing required camera is rejected by the family");
-    rejects(
-        [&] {
-            (void)predictor.run(request(forward, {state, 1}, text));
-        },
-        TRTMC_INVALID_ARGUMENT, "a wrong state size is rejected by the family");
-    rejects(
-        [&] {
-            (void)predictor.run(request(forward, {state, 2}, ""));
-        },
-        TRTMC_INVALID_ARGUMENT, "an empty required instruction is rejected by the family");
-    rejects(
-        [&] {
-            (void)predictor.run(request(forward, {state, 2}, text), {{"unknown", 1}});
-        },
-        TRTMC_INVALID_CONFIG, "undeclared config is rejected before the family runs");
+    rejects([&] { (void)predictor.run(request(none, {state, 2}, text)); }, TRTMC_INVALID_ARGUMENT,
+            "an observation without images is rejected by the Core");
+    rejects([&] { (void)predictor.run(request(empty_name, {state, 2}, text)); },
+            TRTMC_INVALID_ARGUMENT, "an empty camera name is rejected by the Core");
+    rejects([&] { (void)predictor.run(request(duplicated, {state, 2}, text)); },
+            TRTMC_INVALID_ARGUMENT, "duplicate camera names are rejected by the Core");
+    rejects([&] { (void)predictor.run(request(unknown, {state, 2}, text)); },
+            TRTMC_INVALID_ARGUMENT, "an unknown camera name is rejected by the family");
+    rejects([&] { (void)predictor.run(request(missing, {state, 2}, text)); },
+            TRTMC_INVALID_ARGUMENT, "a missing required camera is rejected by the family");
+    rejects([&] { (void)predictor.run(request(forward, {state, 1}, text)); },
+            TRTMC_INVALID_ARGUMENT, "a wrong state size is rejected by the family");
+    rejects([&] { (void)predictor.run(request(forward, {state, 2}, "")); }, TRTMC_INVALID_ARGUMENT,
+            "an empty required instruction is rejected by the family");
+    rejects([&] { (void)predictor.run(request(forward, {state, 2}, text), {{"unknown", 1}}); },
+            TRTMC_INVALID_CONFIG, "undeclared config is rejected before the family runs");
     check(predictor.run(request(forward, {state, 2}, text)).inference_ms() == 204,
           "rejected requests do not consume a prediction");
 
     auto malformed = load(root, "multi_image_bad_chunk").task<ImagesStateTextToActionChunk>();
-    rejects(
-        [&] {
-            (void)malformed.run(request(forward, {state, 2}, text));
-        },
-        TRTMC_INTERNAL_ERROR, "malformed multi-image chunk shape does not escape C ABI");
+    rejects([&] { (void)malformed.run(request(forward, {state, 2}, text)); }, TRTMC_INTERNAL_ERROR,
+            "malformed multi-image chunk shape does not escape C ABI");
 }
 } // namespace
 int main(int argc, char** argv) {
