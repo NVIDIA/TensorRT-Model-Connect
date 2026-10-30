@@ -22,7 +22,7 @@ from . import assist, editing, media, planning, review
 from .engine import Engine, Served
 from .flow import Context, Flows, Steps
 from .jobs import Job, Jobs
-from .llm import ChatClient
+from .llm import FREE_APIS, ChatClient
 from .store import Project, Store, read_json, write_json, write_secret
 
 log = logging.getLogger(__name__)
@@ -38,11 +38,13 @@ MAX_NOVEL = 400_000
 MAX_IDEA = 1000
 # Job parameters a request may set; anything else comes from the flow.
 REQUEST_PARAMS = {"revise": {"target", "instruction"}}
+NO_CHAT = ("no language model yet: choose a chat API in Settings (NVIDIA and OpenRouter have free tiers), "
+           "or start the app with --llm local to plan on this GPU")
 
 
 @dataclass
 class Services:
-    """What steps use: the engine, the served models and the optional external chat API."""
+    """What steps use: the engine, the served models and the chat API from Settings."""
 
     engine: Engine
     models: dict[str, tuple[str, Served]]  # name -> (role, served bundle)
@@ -67,10 +69,19 @@ class Services:
         same = secrets.get("external_chat_base_url") == self.external().get("base_url")
         return secrets.get("external_chat_api_key", "") if same else ""
 
+    def chat_ready(self) -> bool:
+        external = self.external()
+        return bool(external.get("base_url") and external.get("model")) or \
+            any(role == "llm" for role, _ in self.models.values())
+
     def chat(self, name: str | None) -> ChatClient:
+        """The chat API from Settings when one is set, else the local language model."""
+
         external = self.external()
         if external.get("base_url") and external.get("model"):
             return ChatClient(external["base_url"], external["model"], self.api_key(), local=False)
+        if not self.chat_ready():
+            raise ValueError(NO_CHAT)
         self.load(name)
         return ChatClient(self.engine.url, name)
 
@@ -175,6 +186,8 @@ def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any]
                 "flows": {name: flows.versions(name) for name in flows.names()},
                 "external_chat": {"base_url": external.get("base_url", ""), "model": external.get("model", ""),
                                   "has_key": bool(services.api_key())},
+                "chat_ready": services.chat_ready(),
+                "free_apis": {key: vars(api) for key, api in FREE_APIS.items()},
                 "sample": SAMPLE.is_file()}
 
     @app.post("/api/projects")
@@ -226,7 +239,8 @@ def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any]
                 "episodes": episodes, "novel_chars": len(novel), "flow_steps": flow_steps,
                 "previews": previews, "usage": media.usage(plan), "outdated_stills": outdated_stills,
                 "problems": problems, "origins": review.origins(plan, novel), "model_review": model_review,
-                "stages": review.progress(plan, stills, episodes, novel=bool(novel.strip()), problems=problems),
+                "stages": review.progress(plan, stills, episodes, novel=bool(novel.strip()), problems=problems,
+                                          chat_ready=services.chat_ready()),
                 "estimates": {"still": media.average_seconds(list(stills.values()),
                                                              entries.get("stills", {}).get("model")),
                               "shot": media.average_seconds(takes, shots_entry.get("model"))},
