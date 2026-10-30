@@ -55,8 +55,7 @@ __global__ void key_mask(const int32_t* indices, const int32_t* count, const int
         return;
     const int tile = indices[static_cast<int64_t>(query) * tiles + rank];
     assert(tile >= 0 && tile < tiles && sizes[tile] >= 0 && sizes[tile] <= 128);
-    mask[static_cast<int64_t>(query) * rows + tile * 128 + local % 128] =
-        local % 128 < sizes[tile];
+    mask[static_cast<int64_t>(query) * rows + tile * 128 + local % 128] = local % 128 < sizes[tile];
 }
 
 template <bool Maximum>
@@ -134,8 +133,8 @@ __global__ void softmax_regular(float* scores, const Mask* mask, int keys, int m
         row[column] = mask[column] ? __fdiv_rn(expf(__fsub_rn(row[column], maximum)), total) : 0.0F;
 }
 
-__global__ void store_fine(const float* fine, __nv_bfloat16* output, const int32_t* sizes,
-                           int tile, int query_tiles = 1) {
+__global__ void store_fine(const float* fine, __nv_bfloat16* output, const int32_t* sizes, int tile,
+                           int query_tiles = 1) {
     const int index = blockIdx.x * blockDim.x + threadIdx.x;
     if (index < query_tiles * 128 * 128)
         output[index] = __float2bfloat16_rn(
@@ -153,8 +152,8 @@ __global__ void prepare_qk_batch(const float* key, const float* query, float* sc
 }
 
 __global__ void prepare_pv_batch(const float* value, const float* probability, float* first,
-                                 float* fine, const float** inputs, float** outputs,
-                                 int keys, int queries) {
+                                 float* fine, const float** inputs, float** outputs, int keys,
+                                 int queries) {
     const int products = queries > 1 ? queries : 2;
     const int index = threadIdx.x;
     if (index < products) {
@@ -202,15 +201,16 @@ inline void run(const __nv_bfloat16* query, const __nv_bfloat16* key, const __nv
             require_cuda(cudaGetLastError());
             if (queries == 1) {
                 require_cublas(cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, rows, 128, 128, &one,
-                                           scaled_key, 128, scaled_query, 128, &zero, scores, rows));
+                                           scaled_key, 128, scaled_query, 128, &zero, scores,
+                                           rows));
             } else {
                 // PV output is dead during QK. Reuse its first bytes for the
                 // device pointer table; QK never writes or reads PV data.
                 auto** inputs = reinterpret_cast<const float**>(fine);
-                auto** outputs = reinterpret_cast<float**>(
-                    reinterpret_cast<uint8_t*>(fine) + 2 * queries * sizeof(const float*));
-                prepare_qk_batch<<<1, 32, 0, stream>>>(scaled_key, scaled_query, scores,
-                                                       inputs, outputs, rows, queries);
+                auto** outputs = reinterpret_cast<float**>(reinterpret_cast<uint8_t*>(fine) +
+                                                           2 * queries * sizeof(const float*));
+                prepare_qk_batch<<<1, 32, 0, stream>>>(scaled_key, scaled_query, scores, inputs,
+                                                       outputs, rows, queries);
                 require_cuda(cudaGetLastError());
                 require_cublas(cublasSgemmBatched(handle, CUBLAS_OP_T, CUBLAS_OP_N, rows, 128, 128,
                                                   &one, inputs, 128, inputs + queries, 128, &zero,
@@ -227,13 +227,14 @@ inline void run(const __nv_bfloat16* query, const __nv_bfloat16* key, const __nv
             // contain independent original query tiles with shared read-only V.
             const int products = queries > 1 ? queries : 2;
             auto** pv_inputs = reinterpret_cast<const float**>(mask);
-            auto** pv_outputs = reinterpret_cast<float**>(mask + 2 * products * sizeof(const float*));
+            auto** pv_outputs =
+                reinterpret_cast<float**>(mask + 2 * products * sizeof(const float*));
             prepare_pv_batch<<<1, 32, 0, stream>>>(float_value, scores, scaled_query, fine,
                                                    pv_inputs, pv_outputs, rows, queries);
             require_cuda(cudaGetLastError());
             require_cublas(cublasSgemmBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, 128, 128, rows,
-                                              &one, pv_inputs, 128, pv_inputs + products, rows, &zero,
-                                              pv_outputs, 128, products));
+                                              &one, pv_inputs, 128, pv_inputs + products, rows,
+                                              &zero, pv_outputs, 128, products));
             store_fine<<<(query_elements + 255) / 256, 256, 0, stream>>>(
                 fine, output + base + tile * 16384, sizes, tile, queries);
             require_cuda(cudaGetLastError());

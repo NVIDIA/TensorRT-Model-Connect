@@ -75,12 +75,11 @@ constexpr int SLOTS_PER_KV_TILE = BLK128 ? 1 : 2;
 // P in TMEM. Give it dedicated shared storage instead of borrowing the output
 // epilogue buffer, whose TMA lifetime belongs to a different pipeline.
 constexpr int NUM_KV_STAGES = BLK128 ? 1 : 4;
-constexpr bool PREFILL_Q_FIRST =
-    NUM_KV_STAGES < M_TILES_PER_CTA * SLOTS_PER_KV_TILE;
+constexpr bool PREFILL_Q_FIRST = NUM_KV_STAGES < M_TILES_PER_CTA * SLOTS_PER_KV_TILE;
 constexpr int PROBABILITY_TAIL_BYTES =
     BLK128 ? M_TILES_PER_CTA * M_TILE * HEAD_DIM * sizeof(__nv_bfloat16) : 0;
 static_assert(!BLK128 || NUM_KV_STAGES * KV_RING_SLOT_BYTES + PROBABILITY_TAIL_BYTES ==
-                            3 * KV_RING_SLOT_BYTES,
+                             3 * KV_RING_SLOT_BYTES,
               "Dedicated probability tails must retain the existing shared-memory budget");
 
 constexpr int V_BLK_BYTES = HEAD_DIM * SUB_COLS_BYTES;
@@ -244,10 +243,10 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
     __nv_bfloat16* sO_bufs[2] = {sO0, sO1};
     auto* probability_tail = reinterpret_cast<__nv_bfloat16*>(
         reinterpret_cast<uint8_t*>(sO1) + M_TILE * HEAD_DIM * sizeof(__nv_bfloat16));
-    __nv_bfloat16* probability_tail_bufs[2] = {
-        probability_tail, probability_tail + M_TILE * HEAD_DIM};
-    uint64_t* full_bar = reinterpret_cast<uint64_t*>(
-        reinterpret_cast<uint8_t*>(probability_tail) + PROBABILITY_TAIL_BYTES);
+    __nv_bfloat16* probability_tail_bufs[2] = {probability_tail,
+                                               probability_tail + M_TILE * HEAD_DIM};
+    uint64_t* full_bar = reinterpret_cast<uint64_t*>(reinterpret_cast<uint8_t*>(probability_tail) +
+                                                     PROBABILITY_TAIL_BYTES);
     uint64_t* empty_bar = full_bar + NUM_KV_STAGES;
     uint64_t* full_bar_q = empty_bar + NUM_KV_STAGES;
     uint64_t* empty_bar_q = full_bar_q + 2;
@@ -607,20 +606,19 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
                             // second BF16 limb and the same V tile. Both terms
                             // accumulate into the existing FP32 output tile.
                             tcgen05_mma_f16_ts_1sm_lead(
-                                lead, o_tmem_addr,
-                                s_tmem_addr + S_COLS / 2 + (uint32_t)(a * 8),
+                                lead, o_tmem_addr, s_tmem_addr + S_COLS / 2 + (uint32_t)(a * 8),
                                 desc_bv.u64, idesc_pv, true);
                             // The third limb uses dedicated shared storage.
                             // Its 128x128 layout matches the Q descriptor and
                             // its handoff follows the other P limbs.
                             const uint64_t tail_descriptor = build_smem_desc_blackwell(
-                                smem_ptr_u32(reinterpret_cast<const uint8_t*>(
-                                    probability_tail_bufs[i])),
+                                smem_ptr_u32(
+                                    reinterpret_cast<const uint8_t*>(probability_tail_bufs[i])),
                                 DESC_SBO, DESC_LBO, SmemSwizzleBlackwell::B128);
-                            tcgen05_mma_f16_ss_lead(
-                                lead, o_tmem_addr,
-                                tail_descriptor + (uint64_t)p * Q_SUB_DELTA + 2 * ki,
-                                desc_bv.u64, idesc_pv, true);
+                            tcgen05_mma_f16_ss_lead(lead, o_tmem_addr,
+                                                    tail_descriptor + (uint64_t)p * Q_SUB_DELTA +
+                                                        2 * ki,
+                                                    desc_bv.u64, idesc_pv, true);
                             desc_add_lo(desc_bv, PV_DESC_STEP);
                         } else {
                             tcgen05_mma_ws_f16_ts_1sm_lead(lead, o_tmem_addr,
@@ -1202,12 +1200,10 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
                             scores2[c].y -= high_y;
                             p_regs[c] = cvt_f32x2_to_bf16x2(scores2[c].x, scores2[c].y);
                         }
-                        tcgen05_st_32x32b_x32(
-                            p_tmem_addr + S_COLS / 2,
-                            *reinterpret_cast<uint32_t (*)[32]>(&p_regs[0]));
-                        tcgen05_st_32x32b_x32(
-                            p_tmem_addr + S_COLS / 2 + 32,
-                            *reinterpret_cast<uint32_t (*)[32]>(&p_regs[32]));
+                        tcgen05_st_32x32b_x32(p_tmem_addr + S_COLS / 2,
+                                              *reinterpret_cast<uint32_t (*)[32]>(&p_regs[0]));
+                        tcgen05_st_32x32b_x32(p_tmem_addr + S_COLS / 2 + 32,
+                                              *reinterpret_cast<uint32_t (*)[32]>(&p_regs[32]));
                         tcgen05_wait_st();
                         // QK completion follows the preceding PV consumption,
                         // so this dedicated tile can be overwritten together
@@ -1217,14 +1213,13 @@ __global__ void __cluster_dims__(1, 1, 1) __launch_bounds__(N_WARPS * 32, 1)
                         for (int c = 0; c < S_COLS / 2; ++c) {
                             const float low_x = __uint_as_float(p_regs[c] << 16);
                             const float low_y = __uint_as_float(p_regs[c] & 0xffff0000U);
-                            const uint32_t tail = cvt_f32x2_to_bf16x2(
-                                scores2[c].x - low_x, scores2[c].y - low_y);
+                            const uint32_t tail =
+                                cvt_f32x2_to_bf16x2(scores2[c].x - low_x, scores2[c].y - low_y);
                             const int plane = (2 * c) / SUB_COLS_BF16;
                             const int column = (2 * c) % SUB_COLS_BF16;
-                            auto* destination = probability_tail_bufs[m_tile] +
-                                                plane * M_TILE * SUB_COLS_BF16 +
-                                                sm_tid * SUB_COLS_BF16 +
-                                                (column ^ ((sm_tid & 7) * 8));
+                            auto* destination =
+                                probability_tail_bufs[m_tile] + plane * M_TILE * SUB_COLS_BF16 +
+                                sm_tid * SUB_COLS_BF16 + (column ^ ((sm_tid & 7) * 8));
                             *reinterpret_cast<uint32_t*>(destination) = tail;
                         }
                         fence_proxy_async_shared_cta();
