@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 chronos-forecasting==2.2.2
+# ml-dtypes 0.6 requires NumPy 2; the base image's onnx 1.23 requires >=0.5.4.
+ml-dtypes==0.5.4
 numpy==1.26.4
 scikit-learn==1.7.2
 scipy==1.15.3

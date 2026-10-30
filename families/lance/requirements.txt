@@ -5,6 +5,8 @@ Pillow
 # Imported by the official image reference checkout.
 flash-attn==2.8.3
 imageio==2.34.0
+# ml-dtypes 0.6 requires NumPy 2; the base image's onnx 1.23 requires >=0.5.4.
+ml-dtypes==0.5.4
 numpy==1.26.4
 opencv-python-headless==4.7.0.72
 scikit-learn==1.4.2
