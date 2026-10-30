@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import sys
-from typing import Mapping
+from typing import Mapping, MutableMapping
 
 import numpy as np
 
@@ -74,8 +74,11 @@ def validate_transformer_state_dict(
         raise KeyError("Cosmos3-Nano checkpoint is missing tensors: " + ", ".join(missing))
 
 
-def _array(state: Mapping[str, object], name: str) -> np.ndarray:
-    value = state[name]
+def _array(state: MutableMapping[str, object], name: str) -> np.ndarray:
+    # Every tensor name is read exactly once across one build; drop it from
+    # state immediately so the raw checkpoint shrinks as layers are built
+    # instead of staying fully resident through the TensorRT engine build.
+    value = state.pop(name)
     if hasattr(value, "detach"):
         value = value.detach().float().cpu().numpy()
     return np.asarray(value, dtype=np.float32)
@@ -416,6 +419,10 @@ def build_cosmos3_transformer_engine(
         f"vision={vision_length}, cp={cp_size}",
         file=sys.stderr,
     )
+    # Every tensor the network needs is already embedded in it; drop any
+    # unused leftovers (e.g. unread checkpoint tensors) before the engine
+    # build, which already runs with a 64 GiB TensorRT workspace budget.
+    state.clear()
     plan = builder.build_serialized_network(network, build_config)
     if plan is None:
         raise RuntimeError("TensorRT failed to build Cosmos3-Nano denoiser")
