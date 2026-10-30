@@ -10,11 +10,7 @@ from tensorrt_model_connect.model_support import ModelMetadata
 def test_primary_task_matches_the_semantic_runtime():
     support = describe(ModelMetadata(config={"model_type": "electra"}, model_index={}))
     assert support is not None
-    assert support.tasks == (
-        "text_to_embedding",
-        "text_to_pooled_features",
-        "text_pair_to_relevance",
-    )
+    assert support.tasks == ("text_to_embedding", "text_to_pooled_features")
     assert support.default_task == "text_to_pooled_features"
 
 

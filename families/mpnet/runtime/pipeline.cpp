@@ -91,10 +91,6 @@ void EncoderPipeline::require_mode(std::string_view expected) const {
 std::vector<internal::TaskInstance> EncoderPipeline::task_bindings() {
     if (mode_ == internal::ITextToEmbedding::kTask)
         return {internal::bind<internal::ITextToEmbedding>(*this)};
-    if (mode_ == internal::ITextPairToRelevance::kTask) {
-        return {internal::bind<internal::ITextPairToRelevance>(*this),
-                internal::bind<internal::ITextQueryDocumentsToRelevance>(*this)};
-    }
     return {internal::bind<internal::ITextToPooledFeatures>(*this)};
 }
 
@@ -179,18 +175,19 @@ EncoderPipeline::run(const internal::TextToEmbeddingRequest& request, internal::
     auto ids = tokenizer_->encode(std::string(request.text));
     auto [data, dim] = run_encoder(ids);
 
-    // For embedding models: the TRT engine returns [max_seq, hidden] hidden
-    // states. Mean-pool over actual input positions and L2-normalize.
-    internal::SemanticEmbeddingResult result;
+    // The engine returns [max_seq, hidden] hidden states. Mean-pool over the
+    // real input positions and L2-normalize; an output that does not have that
+    // shape is an error, never silently returned un-pooled.
     const auto actual_len = static_cast<int32_t>(ids.size());
     const int32_t hidden = infer_output_hidden_dim(*encoder_);
-    if (hidden > 0 && actual_len > 0 && dim >= actual_len * hidden) {
-        result.values = mean_pool_and_normalize(data.data(), actual_len, hidden);
-        result.pooling = "mean";
-        result.normalization = "l2";
-    } else {
-        result.values = std::move(data);
+    if (hidden <= 0 || actual_len <= 0 || dim < actual_len * hidden) {
+        throw std::runtime_error(
+            "EncoderPipeline: engine output does not hold one hidden vector per token");
     }
+    internal::SemanticEmbeddingResult result;
+    result.values = mean_pool_and_normalize(data.data(), actual_len, hidden);
+    result.pooling = "mean";
+    result.normalization = "l2";
     return result;
 }
 
@@ -216,41 +213,6 @@ EncoderPipeline::run(const internal::TextToPooledFeaturesRequest& request,
     result.values = std::move(data);
     result.pooling = "first_token";
     result.normalization = "none";
-    return result;
-}
-
-internal::RelevanceResult EncoderPipeline::run(const internal::TextPairToRelevanceRequest& request,
-                                               internal::ConfigView config) {
-    require_mode(internal::ITextPairToRelevance::kTask);
-    if (!config.empty()) {
-        throw internal::ConfigError(
-            "EncoderPipeline: text_pair_to_relevance has no runtime configuration");
-    }
-    // Match the text-only reranking template documented by the supported
-    // Nemotron rerank cross-encoder model card.
-    const std::string combined =
-        "question:" + std::string(request.query) + "   passage:" + std::string(request.document);
-    auto ids = tokenizer_->encode(combined);
-    auto [data, dim] = run_encoder(ids);
-    (void)dim;
-
-    internal::RelevanceResult result;
-    result.score = data.empty() ? 0.0f : data[0];
-    result.kind = internal::ScoreKind::Unbounded;
-    return result;
-}
-
-internal::DocumentRelevanceResult
-EncoderPipeline::run(const internal::TextQueryDocumentsToRelevanceRequest& request,
-                     internal::ConfigView config) {
-    require_mode(internal::ITextPairToRelevance::kTask);
-    internal::DocumentRelevanceResult result;
-    result.scores.reserve(request.documents.size());
-    for (const auto& document : request.documents) {
-        result.scores.push_back(
-            run(internal::TextPairToRelevanceRequest{request.query, document}, config).score);
-    }
-    result.kind = internal::ScoreKind::Unbounded;
     return result;
 }
 

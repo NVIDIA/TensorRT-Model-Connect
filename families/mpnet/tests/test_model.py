@@ -69,9 +69,7 @@ def _patch_build(monkeypatch) -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "task", ["text_to_pooled_features", "text_to_embedding", "text_pair_to_relevance"]
-)
+@pytest.mark.parametrize("task", ["text_to_pooled_features", "text_to_embedding"])
 def test_build_accepts_every_semantic_task(tmp_path: Path, monkeypatch, task: str) -> None:
     _patch_build(monkeypatch)
     writer = _Writer()
@@ -93,7 +91,9 @@ def test_build_accepts_every_semantic_task(tmp_path: Path, monkeypatch, task: st
     assert writer.sections["runtime.json"]["vocab_size"] == 100
 
 
-@pytest.mark.parametrize("task", ["encoding", "embedding", "reranking"])
+@pytest.mark.parametrize(
+    "task", ["encoding", "embedding", "reranking", "text_pair_to_relevance"]
+)
 def test_build_rejects_the_retired_task_names(tmp_path: Path, monkeypatch, task: str) -> None:
     _patch_build(monkeypatch)
 

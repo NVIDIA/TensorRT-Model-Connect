@@ -57,8 +57,7 @@ std::int64_t require_vocab_size(const nlohmann::json& config) {
 std::string require_task(const BundleInfo& info) {
     const std::string_view task = info.task;
     if (task == internal::ITextToPooledFeatures::kTask ||
-        task == internal::ITextToEmbedding::kTask ||
-        task == internal::ITextPairToRelevance::kTask) {
+        task == internal::ITextToEmbedding::kTask) {
         return info.task;
     }
     throw std::runtime_error("XLNet does not implement task: " + info.task);

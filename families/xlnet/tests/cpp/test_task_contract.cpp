@@ -76,7 +76,10 @@ class RecordingModule final : public trtmc::ITrtModule {
                 {"attention_mask", {-1}, trtmc::DType::kFloat32, true}};
     }
     std::vector<trtmc::TensorInfo> output_info() const override {
-        return {{"hidden_states", {-1, hidden}, trtmc::DType::kFloat32, false}};
+        return {{"hidden_states",
+                 {-1, reported_hidden >= 0 ? reported_hidden : hidden},
+                 trtmc::DType::kFloat32,
+                 false}};
     }
     bool has_input(const std::string& name) const override {
         return name == "input_ids" || name == "attention_mask";
@@ -101,6 +104,8 @@ class RecordingModule final : public trtmc::ITrtModule {
 
     int calls{0};
     std::int32_t hidden{2};
+    // When non-negative, the hidden size the engine metadata claims.
+    std::int32_t reported_hidden{-1};
     std::int64_t capacity{512};
     std::int64_t last_input_length{0};
     std::int64_t valid_seen{0};
@@ -211,39 +216,6 @@ void test_embedding_mean_pools_and_normalizes() {
             "embedding metadata must declare the real mean/l2 contract");
 }
 
-void test_relevance_single_pair_and_batch() {
-    RecordingModule* module = nullptr;
-    FakeTokenizer* tokenizer = nullptr;
-    auto pipeline = make_pipeline(std::string(trtmc::internal::ITextPairToRelevance::kTask),
-                                  &module, &tokenizer);
-
-    const auto bindings = pipeline->task_bindings();
-    require(bindings.size() == 2, "a reranking bundle must also expose batched document scoring");
-    bool has_pair = false, has_batch = false;
-    for (const auto& binding : bindings) {
-        has_pair = has_pair || binding.key.id == "text_pair_to_relevance";
-        has_batch = has_batch || binding.key.id == "text_query_documents_to_relevance";
-    }
-    require(has_pair && has_batch, "both the pair and the batch relevance Tasks must be bound");
-
-    const auto single = pipeline->run(
-        trtmc::internal::TextPairToRelevanceRequest{"what is the capital of France?", "Paris."},
-        {});
-    require(near(single.score, 1.0F), "the relevance score must be the engine's own first output");
-    require(single.kind == trtmc::internal::ScoreKind::Unbounded,
-            "an unnormalized cross-encoder score must be reported as Unbounded");
-
-    const std::vector<std::string_view> documents{"Paris.", "a river.", "a mountain."};
-    const auto batch = pipeline->run(
-        trtmc::internal::TextQueryDocumentsToRelevanceRequest{
-            "what is the capital of France?",
-            trtmc::Span<const std::string_view>{documents.data(), documents.size()}},
-        {});
-    require(batch.scores.size() == 3, "one score must be returned per input document, in order");
-    for (const auto score : batch.scores)
-        require(near(score, 1.0F), "batch scoring must reuse the exact same pair-scoring logic");
-}
-
 void test_shorter_input_after_longer_sees_no_stale_tokens() {
     RecordingModule* module = nullptr;
     FakeTokenizer* tokenizer = nullptr;
@@ -302,9 +274,26 @@ void test_each_mode_rejects_the_other_tasks() {
     rejects<trtmc::internal::UnsupportedTask>(
         [&] { pipeline->run(trtmc::internal::TextToEmbeddingRequest{"ab"}, {}); },
         "a pooled-features bundle must reject an embedding call, not silently mis-pool");
+
+    RecordingModule* embedding_module = nullptr;
+    FakeTokenizer* embedding_tokenizer = nullptr;
+    auto embedding_pipeline = make_pipeline(std::string(trtmc::internal::ITextToEmbedding::kTask),
+                                            &embedding_module, &embedding_tokenizer);
     rejects<trtmc::internal::UnsupportedTask>(
-        [&] { pipeline->run(trtmc::internal::TextPairToRelevanceRequest{"q", "d"}, {}); },
-        "a pooled-features bundle must reject a relevance call");
+        [&] { embedding_pipeline->run(trtmc::internal::TextToPooledFeaturesRequest{"ab"}, {}); },
+        "an embedding bundle must reject a pooled-features call");
+    require(embedding_module->calls == 0, "a rejected Task must fail before the engine runs");
+}
+
+void test_embedding_fails_loudly_on_an_unusable_engine_output() {
+    RecordingModule* module = nullptr;
+    FakeTokenizer* tokenizer = nullptr;
+    auto pipeline =
+        make_pipeline(std::string(trtmc::internal::ITextToEmbedding::kTask), &module, &tokenizer);
+    module->reported_hidden = 0;
+    rejects<std::runtime_error>(
+        [&] { pipeline->run(trtmc::internal::TextToEmbeddingRequest{"ab"}, {}); },
+        "an engine output with no hidden dimension must be an error, not an un-pooled result");
 }
 
 void test_unsupported_config_and_empty_input() {
@@ -358,10 +347,10 @@ int main() {
         test_pooled_features_binding_and_cls_extraction();
         test_pooled_features_accepts_token_ids_without_tokenizing();
         test_embedding_mean_pools_and_normalizes();
-        test_relevance_single_pair_and_batch();
         test_shorter_input_after_longer_sees_no_stale_tokens();
         test_token_ids_must_index_the_vocabulary();
         test_each_mode_rejects_the_other_tasks();
+        test_embedding_fails_loudly_on_an_unusable_engine_output();
         test_unsupported_config_and_empty_input();
         test_constructor_validates_its_dependencies();
         return 0;

@@ -5,9 +5,9 @@
 
 #pragma once
 
-// EncoderPipeline: single-pass encoder models (XLNet, embedding,
-// reranking) owned by xlnet and duplicated verbatim by its byte-
-// identical sibling families.
+// EncoderPipeline: single-pass encoder models (XLNet) serving the
+// pooled-features and embedding Tasks, owned by xlnet and duplicated by
+// its byte-identical sibling families.
 
 #include "families/xlnet/runtime/tokenizer.h"
 #include "trtmc/internal/features.h"
@@ -23,18 +23,15 @@
 
 namespace trtmc {
 
-// One loaded bundle commits to exactly one of the three Tasks below at build
-// time (mode_, recorded as the bundle's primary task). task_bindings()
-// advertises only that one capability (plus text_query_documents_to_relevance
-// alongside text_pair_to_relevance, since the retired IReranking contract
-// required batch reranking); the other run() overrides reject a mismatched
-// call with UnsupportedTask instead of silently computing a wrong result for
-// a capability this bundle was never built for.
+// One loaded bundle commits to exactly one of the two Tasks below at build time
+// (mode_, recorded as the bundle's primary task). task_bindings() advertises
+// only that Task; the other run() override rejects a mismatched call with
+// UnsupportedTask instead of silently computing a wrong result for a capability
+// this bundle was never built for. There is deliberately no relevance Task: the
+// engine returns hidden states, not a trained relevance score.
 class EncoderPipeline final : public internal::IModel,
                               public internal::ITextToEmbedding,
-                              public internal::ITextToPooledFeatures,
-                              public internal::ITextPairToRelevance,
-                              public internal::ITextQueryDocumentsToRelevance {
+                              public internal::ITextToPooledFeatures {
   public:
     EncoderPipeline(std::unique_ptr<ITrtModule> encoder, std::string mode,
                     std::shared_ptr<ITokenizer> tokenizer, std::int64_t vocab_size);
@@ -46,11 +43,6 @@ class EncoderPipeline final : public internal::IModel,
                                           internal::ConfigView config) override;
     internal::PooledFeaturesResult run(const internal::TextToPooledFeaturesRequest& request,
                                        internal::ConfigView config) override;
-    internal::RelevanceResult run(const internal::TextPairToRelevanceRequest& request,
-                                  internal::ConfigView config) override;
-    internal::DocumentRelevanceResult
-    run(const internal::TextQueryDocumentsToRelevanceRequest& request,
-        internal::ConfigView config) override;
 
   private:
     std::vector<std::int32_t> resolve_ids(const internal::TextSource& text) const;
@@ -59,8 +51,8 @@ class EncoderPipeline final : public internal::IModel,
     void require_mode(std::string_view expected) const;
 
     std::unique_ptr<ITrtModule> encoder_;
-    // One of ITextToEmbedding::kTask / ITextToPooledFeatures::kTask /
-    // ITextPairToRelevance::kTask: the bundle's single declared primary task.
+    // ITextToEmbedding::kTask or ITextToPooledFeatures::kTask: the bundle's
+    // single declared primary task.
     std::string mode_;
     std::shared_ptr<ITokenizer> tokenizer_;
     // Size of the model vocabulary: caller-supplied token ids must index it.
