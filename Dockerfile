@@ -87,7 +87,6 @@ ENV NCCL_LIB_DIR=/opt/venv/lib/python3.12/site-packages/nvidia/nccl/lib
 ENV TVM_FFI_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tvm_ffi/lib
 ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu
 ENV LD_LIBRARY_PATH=$TRT_LIB_DIR:$NCCL_LIB_DIR:$TVM_FFI_LIB_DIR:/usr/local/cuda/lib64
-ENV LD_PRELOAD=/usr/local/cuda/lib64/libcublas.so.13
 
 RUN python3.12 -c \
       "import importlib.metadata as m, tensorrt, torch, transformers, tvm_ffi; assert tensorrt.__version__ == '11.4.0.106'; assert torch.__version__ == '2.12.0+cu130'; assert transformers.__version__ == '5.2.0'; assert m.version('conan-py-build') == '0.4.3'; assert m.version('apache-tvm-ffi') == '0.1.12'; assert 80 <= int(m.version('setuptools').split('.', 1)[0]) < 82" \
