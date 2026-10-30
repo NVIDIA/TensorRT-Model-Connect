@@ -54,8 +54,6 @@ Json fixture() {
         {"latents_mean", std::vector<float>(24, 0)},
         {"latents_std", std::vector<float>(24, 1)},
     };
-    for (const auto* name : {"transformer_ref", "text_encoder", "vae", "audio_vae"})
-        config["config_sha256"][name] = std::string(64, 'a');
     return config;
 }
 
@@ -182,9 +180,6 @@ void check() {
         rejects(missing);
     }
     auto bad = fixture();
-    bad["config_sha256"]["vae"] = "wrong";
-    rejects(bad);
-    bad = fixture();
     bad["latents_mean"][0] = true;
     rejects(bad);
     bad = fixture();

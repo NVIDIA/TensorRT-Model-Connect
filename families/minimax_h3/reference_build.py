@@ -10,7 +10,6 @@ qualification or add reference support to automatic family discovery.
 
 from dataclasses import replace
 import gc
-import hashlib
 import json
 import math
 from pathlib import Path
@@ -83,11 +82,10 @@ def _statistics(config, channels, name):
 
 
 def _configs(root):
-    raw = {
-        name: (root / name / "config.json").read_bytes()
+    configs = {
+        name: json.loads((root / name / "config.json").read_bytes())
         for name in ("transformer_ref", "text_encoder", "vae", "audio_vae")
     }
-    configs = {name: json.loads(value) for name, value in raw.items()}
     _require(
         configs["transformer_ref"],
         dict(
@@ -204,7 +202,7 @@ def _configs(root):
     )
     _statistics(configs["vae"], 24, "video VAE")
     _statistics(configs["audio_vae"], 32, "audio VAE")
-    return configs, {name: hashlib.sha256(value).hexdigest() for name, value in raw.items()}
+    return configs
 
 
 def _target(request, memory_preset, reference_capacity="standard", continuation=False):
@@ -277,7 +275,6 @@ def runtime_metadata(
     target,
     reference,
     configs,
-    config_sha256,
     *,
     memory_preset,
     reference_capacity,
@@ -314,7 +311,6 @@ def runtime_metadata(
         text_width=5120,
         context_parallel_size=1,
         first_block_cache=False,
-        config_sha256=config_sha256,
         **(
             dict(
                 continuation_window_frames=124,
@@ -355,7 +351,7 @@ def build(
         request, memory_preset, reference_capacity, continuation
     )
     root = Path(request.model_dir)
-    configs, config_sha256 = _configs(root)
+    configs = _configs(root)
     tokenizer = (root / "tokenizer/tokenizer.json").read_bytes()
     parsed = json.loads(tokenizer)
     if parsed.get("model", {}).get("type") != "BPE":
@@ -469,7 +465,6 @@ def build(
             target,
             reference,
             configs,
-            config_sha256,
             memory_preset=memory_preset,
             reference_capacity=reference_capacity,
             continuation=continuation,

@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import ctypes
-import hashlib
 import os
 from pathlib import Path
 
@@ -40,15 +39,6 @@ def _publish(output: Path, build) -> None:
     except BaseException:
         writer.abort()
         raise
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        while chunk := file.read(64 << 20):
-            digest.update(chunk)
-    _drop_page_cache(path)
-    return digest.hexdigest()
 
 
 def _drop_page_cache(path: Path) -> None:
@@ -107,6 +97,6 @@ def build_omniref(*, output: Path, scratch: Path, bridge: Path, kernel_library: 
     request = _request(student_dir, output)
     _publish(output, lambda writer: build_student(
         request, writer, base_model_dir=base_dir, source_bundle=source,
-        source_sha256=_sha256(source), plugin_library=bridge.resolve(),
-        denoiser_workspace_bytes=denoiser_workspace_gib << 30, **PROFILE))
+        plugin_library=bridge.resolve(), denoiser_workspace_bytes=denoiser_workspace_gib << 30,
+        **PROFILE))
     return 0

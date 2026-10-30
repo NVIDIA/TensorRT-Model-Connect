@@ -5,7 +5,6 @@
 
 #include "families/minimax_h3/runtime/reference_bundle.h"
 
-#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <nlohmann/json.hpp>
@@ -205,15 +204,6 @@ ReferencePipelineConfig parse_reference_config(const nlohmann::json& runtime, bo
     config.max_condition_audio_rows = continuation ? 74 : 0;
     config.normalization.mean = statistics(runtime, "latents_mean", false);
     config.normalization.std = statistics(runtime, "latents_std", true);
-    const auto& hashes = runtime.at("config_sha256");
-    for (const auto* name : {"transformer_ref", "text_encoder", "vae", "audio_vae"}) {
-        const auto digest = hashes.at(name).get<std::string>();
-        if (digest.size() != 64 || !std::all_of(digest.begin(), digest.end(), [](char c) {
-                return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
-            }))
-            throw std::invalid_argument(
-                "MiniMax-H3 reference config digest must be lowercase SHA-256");
-    }
     return config;
 }
 } // namespace

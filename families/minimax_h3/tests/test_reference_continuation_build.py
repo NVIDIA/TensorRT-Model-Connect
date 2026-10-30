@@ -4,8 +4,8 @@
 """Incremental bundle identity/streaming checks; explicit builder doubles."""
 
 from dataclasses import replace
-import hashlib
 import json
+import os
 import shutil
 
 import pytest
@@ -51,7 +51,6 @@ def baseline(checkpoint, plans, tmp_path, request):
 
     full.build(original, observed(writer), reference_capacity="six_portrait", memory_preset=preset)
     writer.finish()
-    digest = hashlib.sha256(source.read_bytes()).hexdigest()
     for values in [plans.built, plans.emitted, plans.loaded, plans.partitions, plans.retired]:
         values.clear()
     plans.audio_condition_rows = (0, 74, 74)
@@ -60,7 +59,6 @@ def baseline(checkpoint, plans, tmp_path, request):
     output = tmp_path / "continuation.bundle"
     return dict(
         source=source,
-        digest=digest,
         request=replace(original, video_num_frames=226, output_path=output),
         output=output,
         writer=observed,
@@ -78,7 +76,6 @@ def test_incremental_build_loads_only_changed_partitions_and_preserves_six_plan_
         baseline["request"],
         writer,
         source_bundle=baseline["source"],
-        source_sha256=baseline["digest"],
         memory_preset=baseline["preset"],
     )
     writer.finish()
@@ -96,10 +93,7 @@ def test_incremental_build_loads_only_changed_partitions_and_preserves_six_plan_
     assert runtime["condition_audio_rows"] == [0, 74, 74]
     assert runtime["decoded_audio_latent_frames"] == 377
     receipt = json.loads(after["minimax_h3.reused_plans.json"])
-    assert receipt["source_bundle_sha256"] == baseline["digest"]
-    assert receipt["reused_sections"] == {
-        n: hashlib.sha256(before[n]).hexdigest() for n in incremental.REUSED_PLANS
-    }
+    assert receipt["reused_sections"] == list(incremental.REUSED_PLANS)
     assert receipt["rebuilt_sections"] == ["denoiser.plan", "audio_vae.plan"]
     provenance = json.loads(after["trtmc.provenance.json"])
     assert provenance["build"]["video_num_frames"] == 226
@@ -107,13 +101,13 @@ def test_incremental_build_loads_only_changed_partitions_and_preserves_six_plan_
 
 
 @pytest.mark.parametrize(
-    "change", ["sha", "profile", "checkpoint", "tokenizer", "source_output", "legacy"]
+    "change", ["trailing", "profile", "checkpoint", "tokenizer", "source_output", "legacy"]
 )
 def test_incompatible_source_fails_before_new_weights_or_engines(baseline, plans, change):
     req = baseline["request"]
-    digest = baseline["digest"]
-    if change == "sha":
-        digest = "0" * 64
+    if change == "trailing":
+        with baseline["source"].open("ab") as source:
+            source.write(b"\0")
     elif change == "profile":
         req = replace(req, image_height=1536)
     elif change == "checkpoint":
@@ -132,7 +126,6 @@ def test_incompatible_source_fails_before_new_weights_or_engines(baseline, plans
             req,
             writer,
             source_bundle=baseline["source"],
-            source_sha256=digest,
             memory_preset=baseline["preset"],
         )
     writer.abort()
@@ -144,14 +137,13 @@ def test_streamed_copy_detects_mutation_after_source_validation(baseline):
     height, width, target, reference = full._target(
         replace(req, video_num_frames=124), baseline["preset"], "six_portrait", False
     )
-    configs, hashes = full._configs(baseline["root"])
+    configs = full._configs(baseline["root"])
     expected = full.runtime_metadata(
         height,
         width,
         target,
         reference,
         configs,
-        hashes,
         memory_preset=baseline["preset"],
         reference_capacity="six_portrait",
         continuation=False,
@@ -160,14 +152,15 @@ def test_streamed_copy_detects_mutation_after_source_validation(baseline):
 
     source = incremental._ImageBundle(
         baseline["source"],
-        baseline["digest"],
         expected,
         checkpoint_identity(baseline["root"]),
         (baseline["root"] / "tokenizer/tokenizer.json").read_bytes(),
     )
     data = bytearray(baseline["source"].read_bytes())
     data[source.base] ^= 1
-    baseline["source"].write_bytes(data)
+    rewritten = baseline["source"].with_suffix(".rewritten")
+    rewritten.write_bytes(data)
+    os.replace(rewritten, baseline["source"])
     writer = BundleWriter(baseline["output"])
     writer.enable_direct_staging()
     writer.set_header(family="minimax_h3", task=full.TASK, backend="trt")
