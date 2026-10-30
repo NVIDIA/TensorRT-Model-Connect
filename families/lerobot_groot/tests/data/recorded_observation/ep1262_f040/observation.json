@@ -1,0 +1,14 @@
+{
+  "source": "physical-intelligence/libero@a4336d589d589045d1c56423ffdf3b88a0e19b1f episode 1262 frame 40",
+  "state": [
+    0.04703960195183754,
+    -0.1331629753112793,
+    1.1103090047836304,
+    3.0802857875823975,
+    0.7748944163322449,
+    0.06766381859779358,
+    0.039774227887392044,
+    -0.03433844447135925
+  ],
+  "task": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate"
+}

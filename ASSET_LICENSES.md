@@ -194,6 +194,30 @@ LeRobot's preprocessor produced for them; none of these contains third-party con
 - `reference/ep*_f*.{fp32,bf16}.f32`: little-endian float32 actions, 50 x 7
 - `tokenizer_golden.json`: test instructions, states and expected token ids
 
+## LeRobot GR00T N1.7 recorded-observation fixtures
+
+The files below `families/lerobot_groot/tests/data/` are three recorded LIBERO-spatial
+observations from three different tasks, the outputs of the pinned LeRobot `groot`
+policy for them, and LeRobot's prompt token ids for a set of test instructions.
+`recorded_observation/ep*_f*/` hold a lossless PNG re-encoding of the `image` and
+`wrist_image` columns and the exact `state` row and task text of episode 1272 frame 0,
+episode 1262 frame 40 and episode 1267 frame 80 in `physical-intelligence/libero`
+revision `a4336d589d589045d1c56423ffdf3b88a0e19b1f`. That dataset is distributed
+under CC-BY-4.0. Each `observation.json` records the source. The `*.processed.png`
+files are those same frames after LeRobot's evaluation crop and resize.
+`noise_seed0.f32` is a `torch.randn` draw, `reference/*.f32` are LeRobot
+`lerobot[groot]==0.6.1` outputs, and `tokenizer_golden.json` holds instructions
+written for this test with the token ids LeRobot's preprocessor produced for them;
+none of these contains third-party content beyond the frames above.
+
+- Dataset: https://huggingface.co/datasets/physical-intelligence/libero/tree/a4336d589d589045d1c56423ffdf3b88a0e19b1f
+- `recorded_observation/ep*_f*/image.png`, `wrist_image.png`: decoded RGB frames
+- `recorded_observation/ep*_f*/image.processed.png`, `wrist_image.processed.png`: the frames cropped and resized as LeRobot does
+- `recorded_observation/ep*_f*/observation.json`: state, task and source
+- `noise_seed0.f32`: little-endian float32 flow noise, 40 x 132
+- `reference/ep*_f*.{fp32,bf16}.f32`, `reference/ep1272_f000.alternate.{fp32,bf16}.f32`: little-endian float32 actions, 16 x 7
+- `tokenizer_golden.json`: test instructions and expected prompt token ids
+
 ## FoundationPose external model artifacts
 
 FoundationPose qualification downloads no model artifact into this repository.

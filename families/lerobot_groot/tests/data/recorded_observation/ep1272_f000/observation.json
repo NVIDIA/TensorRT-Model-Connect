@@ -1,0 +1,14 @@
+{
+  "source": "physical-intelligence/libero@a4336d589d589045d1c56423ffdf3b88a0e19b1f episode 1272 frame 0",
+  "state": [
+    -0.204423725605011,
+    0.0021315901540219784,
+    1.18168044090271,
+    3.139340877532959,
+    0.0005462145782075822,
+    -0.08861229568719864,
+    0.038784466683864594,
+    -0.03879138082265854
+  ],
+  "task": "pick up the black bowl between the plate and the ramekin and place it on the plate"
+}
