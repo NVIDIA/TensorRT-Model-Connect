@@ -476,15 +476,18 @@ def test_doctor_runs_one_cudnn_convolution_in_the_serving_interpreter(tmp_path, 
 
     fingerprint = {"fingerprint": {"gpu_arch": "sm110", "packages": {"torch": "2.12.0"}}}
 
-    def run(command, **_kwargs):
+    def run(command, env, **_kwargs):
         if command[1:3] == ["-m", "trtmc_perf_serving"]:
             return subprocess.CompletedProcess(command, 0, json.dumps(fingerprint), "")
         if command[-1] == preflight.CONVOLUTION_PROBE:
+            # The servers' interpreter and environment, serve_env included: the check is about those.
+            assert command[0] == "serve-python" and env["LD_PRELOAD"] == "/opt/cudnn/libcudnn.so.9"
             return subprocess.CompletedProcess(command, *convolution)
         return subprocess.CompletedProcess(command, 0, "[]", "")  # every serving package imports
 
     monkeypatch.setattr(preflight.subprocess, "run", run)
-    checks = preflight.check_serving(Environment({"repo": str(tmp_path), "serve_python": "python"}))
+    checks = preflight.check_serving(Environment({"repo": str(tmp_path), "serve_python": "serve-python",
+                                                  "serve_env": {"LD_PRELOAD": "/opt/cudnn/libcudnn.so.9"}}))
     assert checks["cudnn"].startswith(expected) and convolution[2][-40:] in checks["cudnn"]
     assert preflight.problems(checks) == ([] if expected.startswith("ok") else ["cudnn"])
 
