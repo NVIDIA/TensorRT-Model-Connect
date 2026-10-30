@@ -1,0 +1,50 @@
+{
+  "name": "minicpm5-1b",
+  "hf_id": "openbmb/MiniCPM5-1B",
+  "hf_revision": "87179e5c1f455ef22e6223592d2d61351b525bfc",
+  "bundle": "minicpm5-1b.bundle",
+  "family": "llama",
+  "task": "text_generation",
+  "trust_remote_code": false,
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "minicpm5-1b",
+      "premerge": true,
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "use_chat_template": true,
+      "reference_precision": "fp32",
+      "enable_thinking": false
+    },
+    {
+      "name": "minicpm5-1b-multilingual-digits",
+      "premerge": true,
+      "prompt": "你好，世界！\n1234567890\nThe next number after 9 is",
+      "expected_prompt_token_ids": [
+        0,
+        75828,
+        68572,
+        3708,
+        5645,
+        12740,
+        17371,
+        37,
+        220,
+        608,
+        2633,
+        1471,
+        1302,
+        242,
+        46,
+        357
+      ],
+      "max_new_tokens": 10,
+      "use_chat_template": false,
+      "reference_precision": "fp32",
+      "expected_runtime_prefill_tokens": 16
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}
