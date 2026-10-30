@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+COPY requirements.txt /opt/trtmc-ci/family-requirements.txt
+RUN python -m pip install --disable-pip-version-check --no-cache-dir \
+        --no-build-isolation -r /opt/trtmc-ci/family-requirements.txt \
+    && python -m pip check
+
+# The upstream S3DIS checkpoint, pinned to the manifest revision and checked by SHA-256.
+RUN python -c 'from hashlib import sha256; from pathlib import Path; from urllib.request import urlopen; data = urlopen("https://raw.githubusercontent.com/yanx27/Pointnet_Pointnet2_pytorch/eb64fe0b4c24055559cea26299cb485dcb43d8dd/log/sem_seg/pointnet_sem_seg/checkpoints/best_model.pth", timeout=300).read(); assert sha256(data).hexdigest() == "711e15ca18065444707f4351058cabf54b1e8e7f6ee08a209c26f7da24621bbb"; Path("/opt/trtmc-ci/pointnet").mkdir(parents=True); Path("/opt/trtmc-ci/pointnet/best_model.pth").write_bytes(data)'
+ENV TRTMC_POINTNET_MODEL_DIR=/opt/trtmc-ci/pointnet

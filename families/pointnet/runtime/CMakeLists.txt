@@ -50,5 +50,8 @@ if(TRTMC_BUILD_TESTS)
     ${PROJECT_SOURCE_DIR}/core/api/include
   )
   target_link_libraries(pointnet_qualification PRIVATE trtmc_c)
+  add_dependencies(pointnet_qualification trtmc_backend_trt trtmc_model_pointnet)
   target_compile_options(pointnet_qualification PRIVATE -Wall -Wextra -Wpedantic)
+  # Selective CI builds only targets behind add_test; the E2E needs the qualifier.
+  add_dependencies(test_pointnet_task_contract pointnet_qualification)
 endif()
