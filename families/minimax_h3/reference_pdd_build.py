@@ -10,7 +10,6 @@ This entry point does not advertise trained quality or automatic discovery.
 
 from copy import deepcopy
 import gc
-import hashlib
 import json
 from pathlib import Path
 
@@ -43,7 +42,6 @@ def runtime_metadata(
     target,
     reference,
     configs,
-    hashes,
     *,
     memory_preset,
     reference_capacity,
@@ -56,7 +54,6 @@ def runtime_metadata(
         target,
         reference,
         configs,
-        hashes,
         memory_preset=memory_preset,
         reference_capacity=reference_capacity,
         continuation=continuation,
@@ -83,7 +80,6 @@ def build(
     *,
     base_model_dir,
     source_bundle,
-    source_sha256,
     plugin_library,
     memory_preset="minimal",
     reference_capacity="six_portrait",
@@ -129,14 +125,13 @@ def build(
         raise ValueError("OmniRef common plans require an explicitly admitted base checkpoint")
     for name in ("export_manifest.json", "fastvideo_inference.json"):
         validate_contract(json.loads((root / name).read_text()))
-    raw_config = (root / "transformer_ref/config.json").read_bytes()
-    validate_transformer_config(json.loads(raw_config))
+    validate_transformer_config(json.loads((root / "transformer_ref/config.json").read_text()))
     validate_checkpoint_index(
         json.loads(
             (root / "transformer_ref/diffusion_pytorch_model.safetensors.index.json").read_text()
         )
     )
-    configs, hashes = base._configs(common_root)
+    configs = base._configs(common_root)
     tokenizer = (common_root / "tokenizer/tokenizer.json").read_bytes()
     common = dict(
         memory_preset=memory_preset,
@@ -149,12 +144,10 @@ def build(
         target,
         reference,
         configs,
-        hashes,
         **common,
     )
     source = _ImageBundle(
         source_bundle,
-        source_sha256,
         expected_source,
         common_identity,
         tokenizer,
@@ -204,8 +197,6 @@ def build(
         gc.collect()
     for name in REUSED_PLANS:
         source.copy_to(name, writer)
-    hashes = dict(hashes)
-    hashes["transformer_ref"] = hashlib.sha256(raw_config).hexdigest()
     writer.add_bytes("tokenizer.json", tokenizer)
     writer.add_json(
         "runtime.json",
@@ -215,7 +206,6 @@ def build(
             target,
             reference,
             configs,
-            hashes,
             max_vsa_tiles=max_vsa_tiles,
             **common,
         ),
@@ -223,11 +213,10 @@ def build(
     writer.add_json(
         "minimax_h3.reused_plans.json",
         dict(
-            source_bundle_sha256=source.sha256,
             source_checkpoint=common_identity,
             required_base_revision=REQUIRED_BASE_REVISION,
             student_checkpoint=student_identity,
-            reused_sections={name: source.digests[name] for name in REUSED_PLANS},
+            reused_sections=list(REUSED_PLANS),
             rebuilt_sections=list(REBUILT_PLANS),
             rebuilt_plan_workspace_bytes={
                 "adaln.plan": base.WORKSPACE_BYTES,

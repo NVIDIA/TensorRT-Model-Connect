@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Rebuild the two changed continuation plans from an explicitly pinned bundle.
+"""Rebuild the two changed continuation plans from an explicitly selected bundle.
 
 The caller selects compatible compiled artifacts and owns writer finish/abort.
 This does not adapt plans to another platform or qualify trained video output.
@@ -9,7 +9,6 @@ This does not adapt plans to another platform or qualify trained video output.
 
 from dataclasses import replace
 import gc
-import hashlib
 import json
 from pathlib import Path
 import re
@@ -49,12 +48,11 @@ def _identity(stat):
 
 
 class _ImageBundle:
-    """Validate every byte once; copy selected plans with bounded host buffers."""
+    """Validate the source layout and metadata; copy selected plans with bounded host buffers."""
 
     def __init__(
         self,
         path,
-        expected_sha256,
         expected_runtime,
         checkpoint,
         tokenizer,
@@ -62,12 +60,7 @@ class _ImageBundle:
         reused_plans=REUSED_PLANS,
         allow_reuse_receipt=False,
     ):
-        if not isinstance(expected_sha256, str) or not re.fullmatch(
-            "[0-9a-f]{64}", expected_sha256
-        ):
-            raise ValueError("MiniMax-H3 source bundle requires an explicit lowercase SHA-256")
         self.path = Path(path)
-        self.sha256 = expected_sha256
         self.identity = _identity(self.path.stat())
         self.reused_plans = frozenset(reused_plans)
         if not self.reused_plans or not self.reused_plans <= set(owner.PLAN_NAMES):
@@ -126,6 +119,11 @@ class _ImageBundle:
                 source.seek(self.base + section["offset"])
                 return json.loads(source.read(section["length"]))
 
+            section = self.sections["tokenizer.json"]
+            source.seek(self.base + section["offset"])
+            if section["length"] != len(tokenizer) or source.read(len(tokenizer)) != tokenizer:
+                raise ValueError("MiniMax-H3 source tokenizer differs from the new checkpoint")
+
             if metadata("runtime.json") != expected_runtime:
                 raise ValueError(
                     "MiniMax-H3 source profile/config/statistics differ from the requested base"
@@ -152,24 +150,6 @@ class _ImageBundle:
                 ),
                 "source bundle build overrides",
             )
-            source.seek(self.base)
-            whole = hashlib.sha256(prefix + raw_header)
-            self.digests = {}
-            for name, section in sorted(self.sections.items(), key=lambda x: x[1]["offset"]):
-                digest = hashlib.sha256()
-                remaining = section["length"]
-                while remaining:
-                    data = source.read(min(_CHUNK, remaining))
-                    if not data:
-                        raise ValueError("MiniMax-H3 source bundle was truncated")
-                    whole.update(data)
-                    digest.update(data)
-                    remaining -= len(data)
-                self.digests[name] = digest.hexdigest()
-            if whole.hexdigest() != expected_sha256:
-                raise ValueError("MiniMax-H3 source bundle SHA-256 mismatch")
-            if self.digests["tokenizer.json"] != hashlib.sha256(tokenizer).hexdigest():
-                raise ValueError("MiniMax-H3 source tokenizer differs from the new checkpoint")
         self._unchanged()
 
     def _unchanged(self):
@@ -181,7 +161,6 @@ class _ImageBundle:
             raise ValueError("MiniMax-H3 must rebuild every plan outside its explicit reuse set")
         self._unchanged()
         section = self.sections[name]
-        digest = hashlib.sha256()
         with self.path.open("rb") as source, writer.open_section(name) as output:
             source.seek(self.base + section["offset"])
             remaining = section["length"]
@@ -190,10 +169,7 @@ class _ImageBundle:
                 if not data:
                     raise ValueError("MiniMax-H3 source plan was truncated during copy")
                 output.write(data)
-                digest.update(data)
                 remaining -= len(data)
-            if digest.hexdigest() != self.digests[name]:
-                raise ValueError("MiniMax-H3 source plan content changed during copy")
             self._unchanged()
 
 
@@ -202,14 +178,13 @@ def build(
     writer,
     *,
     source_bundle,
-    source_sha256,
     memory_preset="minimal",
     reference_capacity="six_portrait",
 ):
-    """Build an explicit 226-frame bundle, reusing six byte-identical plans.
+    """Build an explicit 226-frame bundle, reusing six plans from the original bundle.
 
-    Validate the complete source digest, original profile, checkpoint identity,
-    configuration, statistics and tokenizer before loading any new weights.
+    Validate the source layout, original profile, checkpoint identity, build
+    settings, statistics and tokenizer before loading any new weights.
     The source's six compiled plans must be compatible with the selected backend;
     no numerical or hardware fallback is performed.
     """
@@ -223,7 +198,7 @@ def build(
         request, memory_preset, reference_capacity, True
     )
     root = Path(request.model_dir)
-    configs, hashes = owner._configs(root)
+    configs = owner._configs(root)
     tokenizer = (root / "tokenizer/tokenizer.json").read_bytes()
     base_request = replace(request, video_num_frames=124)
     _, _, base_target, base_reference = owner._target(
@@ -231,11 +206,9 @@ def build(
     )
     common = dict(memory_preset=memory_preset, reference_capacity=reference_capacity)
     expected_base = owner.runtime_metadata(
-        height, width, base_target, base_reference, configs, hashes, continuation=False, **common
+        height, width, base_target, base_reference, configs, continuation=False, **common
     )
-    source = _ImageBundle(
-        source_bundle, source_sha256, expected_base, _checkpoint_identity(root), tokenizer
-    )
+    source = _ImageBundle(source_bundle, expected_base, _checkpoint_identity(root), tokenizer)
     writer.enable_direct_staging()
     writer.set_header(family="minimax_h3", task=owner.TASK, backend="trt")
     writer.record_build(request)
@@ -272,14 +245,13 @@ def build(
     writer.add_json(
         "runtime.json",
         owner.runtime_metadata(
-            height, width, target, reference, configs, hashes, continuation=True, **common
+            height, width, target, reference, configs, continuation=True, **common
         ),
     )
     writer.add_json(
         "minimax_h3.reused_plans.json",
         dict(
-            source_bundle_sha256=source.sha256,
-            reused_sections={n: source.digests[n] for n in REUSED_PLANS},
+            reused_sections=list(REUSED_PLANS),
             rebuilt_sections=["denoiser.plan", "audio_vae.plan"],
         ),
     )

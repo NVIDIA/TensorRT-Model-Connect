@@ -4,7 +4,6 @@
 """CPU build-wiring/lifetime proofs, not trained-model or engine oracles."""
 
 from dataclasses import replace
-import hashlib
 import json
 from pathlib import Path
 import struct
@@ -25,10 +24,8 @@ def checkpoint(tmp_path):
     assert fixture["source_revision"] == "48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc"
     root = tmp_path / "checkpoint"
     for name, record in fixture["components"].items():
-        raw = record["utf8"].encode()
-        assert hashlib.sha256(raw).hexdigest() == record["sha256"]
         (root / name).mkdir(parents=True)
-        (root / name / "config.json").write_bytes(raw)
+        (root / name / "config.json").write_bytes(record["utf8"].encode())
     (root / "tokenizer").mkdir()
     (root / "tokenizer/tokenizer.json").write_text(
         json.dumps(
@@ -218,7 +215,6 @@ def test_reference_build_streams_all_eight_exact_partitions(
         runtime["latents_mean"]
         == json.loads((checkpoint / "vae/config.json").read_text())["latents_mean"]
     )
-    assert runtime["config_sha256"] == owner._configs(checkpoint)[1]
     assert "reference_capacity" not in runtime  # Legacy default metadata stays unchanged.
 
 
@@ -260,7 +256,6 @@ def test_six_portrait_capacity_rebuilds_language_and_dit_profiles_without_qualit
     ) == (124, 24, 50, 49, 1344, 768)
     assert runtime["memory_preset"] == preset and runtime["vae_tile_batch"] == batch
     assert runtime["weights_variant"] == "transformer_ref" and runtime["first_block_cache"] is False
-    assert runtime["config_sha256"] == owner._configs(checkpoint)[1]
     assert plans.partitions == [("transformer_ref", 638), ("vae", 703)]
 
 

@@ -4,7 +4,6 @@
 """Student partition/streaming/reuse admission with explicit engine doubles."""
 
 from dataclasses import replace
-import hashlib
 import json
 import shutil
 
@@ -78,7 +77,6 @@ def baseline(checkpoint, plans, tmp_path, request):
     output = tmp_path / "student.bundle"
     return dict(
         source=source,
-        digest=hashlib.sha256(source.read_bytes()).hexdigest(),
         request=replace(original_request, model_dir=model, output_path=output),
         output=output,
         base=root,
@@ -138,7 +136,6 @@ def run_build(baseline, writer, **overrides):
     options = dict(
         base_model_dir=baseline["base"],
         source_bundle=baseline["source"],
-        source_sha256=baseline["digest"],
         plugin_library=baseline["bridge"],
         memory_preset=baseline["preset"],
         reference_capacity="six_portrait",
@@ -176,10 +173,6 @@ def test_student_build_replaces_both_learned_partitions_and_streams_common_plans
         "minimax_h3.omniref_pdd_continuation/v1"
         if baseline["continuation"]
         else "minimax_h3.omniref_pdd/v1"
-    )
-    assert (
-        metadata["config_sha256"]["transformer_ref"]
-        != json.loads(before["runtime.json"])["config_sha256"]["transformer_ref"]
     )
     receipt = json.loads(after["minimax_h3.reused_plans.json"])
     assert receipt["rebuilt_sections"] == ["adaln.plan", "denoiser.plan"]
@@ -225,7 +218,7 @@ def test_invalid_denoiser_workspace_fails_before_weight_loading(
 @pytest.mark.parametrize(
     "problem",
     [
-        "source_digest",
+        "source_layout",
         "source_profile",
         "student_contract",
         "student_index",
@@ -243,8 +236,9 @@ def test_invalid_source_or_student_fails_before_loading_any_weights(
 ):
     options = {}
     root = baseline["request"].model_dir
-    if problem == "source_digest":
-        options["source_sha256"] = "0" * 64
+    if problem == "source_layout":
+        with baseline["source"].open("ab") as source:
+            source.write(b"\0")
     elif problem == "source_profile":
         options["continuation"] = not baseline["continuation"]
     elif problem == "student_contract":
