@@ -111,13 +111,18 @@ def test_an_image_text_reference_applies_its_processor_kwargs(monkeypatch):
                      ("vl", {"trust_remote_code": False})]
 
 
-def test_a_generation_reference_loads_its_weights_straight_onto_the_device(monkeypatch):
+@pytest.mark.parametrize("operation, adapter, loader", [
+    ("generate", "TextGeneration", "AutoModelForCausalLM"),
+    ("embed", "TextEncoder", "AutoModel"),
+    ("rerank", "Reranker", "AutoModelForSequenceClassification"),
+])
+def test_text_references_load_their_weights_straight_onto_the_device(monkeypatch, operation, adapter, loader):
     from types import SimpleNamespace
 
     import transformers
 
+    from trtmc_perf_serving.backends.reference import text
     from trtmc_perf_serving.backends.reference.common import ReferenceSpec
-    from trtmc_perf_serving.backends.reference.text import TextGeneration
 
     loads = []
 
@@ -129,9 +134,21 @@ def test_a_generation_reference_loads_its_weights_straight_onto_the_device(monke
         loads.append((model, kwargs))
         return Model()
 
-    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained",
-                        lambda *_args, **_kwargs: SimpleNamespace(is_encoder_decoder=False))
-    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: object())
-    monkeypatch.setattr(transformers.AutoModelForCausalLM, "from_pretrained", load)
-    TextGeneration(ReferenceSpec(operation="generate", model="lm", device="cuda:1"))
-    assert [(model, kwargs["device_map"]) for model, kwargs in loads] == [("lm", "cuda:1")]
+    config = SimpleNamespace(is_encoder_decoder=False, model_type="bert")
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: config)
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained",
+                        lambda *_args, **_kwargs: SimpleNamespace(model_max_length=512))
+    monkeypatch.setattr(transformers.AutoProcessor, "from_pretrained", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(getattr(transformers, loader), "from_pretrained", load)
+    getattr(text, adapter)(ReferenceSpec(operation=operation, model="checkpoint", device="cuda:1"))
+    assert [(model, kwargs["device_map"]) for model, kwargs in loads] == [("checkpoint", "cuda:1")]
+
+
+def test_a_bare_cuda_device_loads_onto_the_current_device(monkeypatch):
+    # Inputs moved with .to("cuda") land there; Transformers alone would read "cuda" as cuda:$LOCAL_RANK.
+    from trtmc_perf_serving.backends.reference.common import ReferenceSpec
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 2)
+    assert [ReferenceSpec(operation="generate", model="checkpoint", device=device).device_map
+            for device in ("cuda", "cuda:1", "cpu")] == ["cuda:2", "cuda:1", "cpu"]
