@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "fp32_fine_attention.cuh"
 #include "vsa_backend.h"
 
 #include <atomic>
@@ -22,8 +23,6 @@
 #include <tvm/ffi/extra/c_env_api.h>
 #include <tvm/ffi/function.h>
 #include <utility>
-
-#include "fp32_fine_attention.cuh"
 
 #if defined(TRTMC_MINIMAX_H3_VSA_HAS_BLACKWELL)
 #define VSA_BLK128 true
@@ -336,8 +335,8 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::Ten
             << "OmniRef VSA workspace is too small for the selected backend; rebuild the "
                "bundle with the current family workspace contract";
     if (backend == trtmc::minimax_h3::VsaBackend::kGeneric) {
-        layout = trtmc::minimax_h3::make_vsa_query_batch_layout(
-            g.heads, g.tiles, workspace.numel());
+        layout =
+            trtmc::minimax_h3::make_vsa_query_batch_layout(g.heads, g.tiles, workspace.numel());
         g.workspace_bytes = layout.bytes;
     }
     auto stream =
@@ -350,15 +349,17 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::Ten
     auto* v_pool = reinterpret_cast<float*>(cursor);
     cursor += g.pool_elements * sizeof(float);
     auto* scores = reinterpret_cast<float*>(cursor);
-    auto* q2k_idx = reinterpret_cast<int32_t*>(tensor_data<uint8_t>(workspace) + layout.index_offset);
-    auto* q2k_num = reinterpret_cast<int32_t*>(tensor_data<uint8_t>(workspace) + layout.count_offset);
+    auto* q2k_idx =
+        reinterpret_cast<int32_t*>(tensor_data<uint8_t>(workspace) + layout.index_offset);
+    auto* q2k_num =
+        reinterpret_cast<int32_t*>(tensor_data<uint8_t>(workspace) + layout.count_offset);
     const auto* sizes = tensor_data<int32_t>(variable_block_sizes);
     const char* trace_option = std::getenv("TRTMC_MINIMAX_H3_VSA_TRACE");
     const bool trace = trace_option && std::string(trace_option) == "1";
     static std::atomic<uint64_t> next_trace_id{0};
     const uint64_t trace_id = trace ? next_trace_id.fetch_add(1, std::memory_order_relaxed) : 0;
-    const auto trace_start = trace ? std::chrono::steady_clock::now()
-                                   : std::chrono::steady_clock::time_point{};
+    const auto trace_start =
+        trace ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const auto trace_stage = [&](const char* stage) {
         if (!trace)
             return;
@@ -371,8 +372,7 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::Ten
         std::cerr << "[MiniMax-H3 VSA trace] call=" << trace_id << " stage=" << stage
                   << " heads=" << g.heads << " tiles=" << g.tiles << " rows=" << g.sequence
                   << " regions=" << regions.shape()[0] << " host_elapsed_us=" << elapsed
-                  << " host_unix_us=" << timestamp
-                  << std::endl;
+                  << " host_unix_us=" << timestamp << std::endl;
     };
     constexpr int kThreads = 256;
     const int pool_blocks = static_cast<int>((g.pool_elements + kThreads - 1) / kThreads);
@@ -446,8 +446,8 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::Ten
         trtmc::minimax_h3::fp32_vsa::run(
             tensor_data<__nv_bfloat16>(query), tensor_data<__nv_bfloat16>(key),
             tensor_data<__nv_bfloat16>(value), q2k_idx, q2k_num, sizes,
-            tensor_data<__nv_bfloat16>(output), tensor_data<uint8_t>(workspace),
-            layout, g.heads, g.tiles, handle, stream);
+            tensor_data<__nv_bfloat16>(output), tensor_data<uint8_t>(workspace), layout, g.heads,
+            g.tiles, handle, stream);
     }
     trace_stage("fine_attention_enqueued");
     const int64_t elements = static_cast<int64_t>(g.heads) * g.sequence * kHeadDim;

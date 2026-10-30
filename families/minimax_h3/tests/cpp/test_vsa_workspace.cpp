@@ -1,4 +1,5 @@
-/* SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "families/minimax_h3/kernels/vsa_workspace.h"
@@ -35,8 +36,8 @@ void check_query_batch_layout(int heads, int tiles, int64_t capacity) {
     require(a.index_offset + route <= a.count_offset);
     require(a.count_offset + counts <= capacity);
     require(a.fine_offset + a.fine_bytes <= a.index_offset);
-    for (auto offset : {a.scaled_key_offset, a.value_offset, a.scaled_query_offset,
-                        a.score_offset, a.fine_output_offset, a.key_mask_offset, a.index_offset})
+    for (auto offset : {a.scaled_key_offset, a.value_offset, a.scaled_query_offset, a.score_offset,
+                        a.fine_output_offset, a.key_mask_offset, a.index_offset})
         require(offset % 256 == 0);
     // QK reads K/Q and writes scores; its pointer table occupies dead PV output.
     require(3 * b * int64_t(sizeof(void*)) <= b * tile);
@@ -113,14 +114,17 @@ int main() {
         const auto profile = trtmc::minimax_h3::make_vsa_workspace_layout(heads, 8192);
         for (int tiles = 2; tiles <= 8192; tiles += 2) {
             const auto base = trtmc::minimax_h3::make_vsa_workspace_layout(heads, tiles);
-            for (int64_t capacity : {base.bytes, base.bytes + 1, base.bytes + 255,
-                                      base.bytes + 256, profile.bytes}) {
+            for (int64_t capacity :
+                 {base.bytes, base.bytes + 1, base.bytes + 255, base.bytes + 256, profile.bytes}) {
                 check_query_batch_layout(heads, tiles, capacity);
                 ++batch_checked;
             }
             bool rejected = false;
-            try { trtmc::minimax_h3::make_vsa_query_batch_layout(heads, tiles, base.bytes - 1); }
-            catch (const std::invalid_argument&) { rejected = true; }
+            try {
+                trtmc::minimax_h3::make_vsa_query_batch_layout(heads, tiles, base.bytes - 1);
+            } catch (const std::invalid_argument&) {
+                rejected = true;
+            }
             require(rejected);
         }
     }
@@ -131,7 +135,8 @@ int main() {
         require(value.bytes == 2055667712);
     }
     for (const auto& profile : {std::pair{1, 2}, std::pair{2, 38}, std::pair{56, 10}}) {
-        const auto base = trtmc::minimax_h3::make_vsa_workspace_layout(profile.first, profile.second);
+        const auto base =
+            trtmc::minimax_h3::make_vsa_workspace_layout(profile.first, profile.second);
         const auto value = trtmc::minimax_h3::make_vsa_query_batch_layout(
             profile.first, profile.second, base.bytes * 4);
         require(value.query_tile_batch > 1);
