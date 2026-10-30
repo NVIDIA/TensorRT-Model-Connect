@@ -128,13 +128,13 @@ def add_rms_norm(
 ) -> trt.ITensor:
     """RMSNorm: gamma * (x / sqrt(mean(x^2) + eps)).
 
-    FP32 precision boundary: when dtype != float32, casts to FP32 before
+    FP32 precision boundary: when input is not float32, casts to FP32 before
     norm computation for numerical stability, then casts back.
 
     TRT's native normalization API implements mean-centered LayerNorm, not
     RMSNorm, so this remains a manual shared implementation.
     """
-    need_cast = (dtype != np.float32)
+    need_cast = (inp.dtype != trt.float32)
     output_dtype = inp.dtype
     if need_cast:
         inp = network.add_cast(inp, trt.float32).get_output(0)
@@ -169,12 +169,12 @@ def add_rms_norm_per_head(
 ) -> trt.ITensor:
     """Per-head RMSNorm for [Sq, num_heads * head_dim] tensors.
 
-    FP32 precision boundary: when dtype != float32, casts to FP32 before
+    FP32 precision boundary: when input is not float32, casts to FP32 before
     norm computation for numerical stability, then casts back.
     ``sequence_length=None`` means runtime-dynamic Sq.
     ``gamma`` may be [num_heads * head_dim] or [head_dim] broadcast to heads.
     """
-    need_cast = (dtype != np.float32)
+    need_cast = (inp.dtype != trt.float32)
     output_dtype = inp.dtype
     seq_dim = -1 if sequence_length is None else sequence_length
     reshape_in = network.add_shuffle(inp)
@@ -226,10 +226,10 @@ def add_layer_norm(
 ) -> trt.ITensor:
     """LayerNorm: gamma * ((x - mean) / sqrt(var + eps)) + beta.
 
-    FP32 precision boundary: when dtype != float32, casts to FP32 before
+    FP32 precision boundary: when input is not float32, casts to FP32 before
     norm computation for numerical stability, then casts back.
     """
-    need_cast = (dtype != np.float32)
+    need_cast = (inp.dtype != trt.float32)
     output_dtype = inp.dtype
     if need_cast:
         inp = network.add_cast(inp, trt.float32).get_output(0)
@@ -276,8 +276,8 @@ def add_gelu_new(
     """GELU (tanh approximation): 0.5*x*(1+tanh(sqrt(2/pi)*(x+0.044715*x^3))).
 
     Constants are cast to ``inp.dtype`` so the elementwise ops are valid in
-    a STRONGLY_TYPED network when ``inp`` is bf16 (storage np_dtype is
-    fp16, runtime trt_dtype is bfloat16) or any other non-matching combo.
+    a STRONGLY_TYPED network when ``inp`` is bf16 or any other
+    non-matching combo.
     """
     target_dtype = inp.dtype
     const_shape = (1,) * max(1, len(tuple(inp.shape)))
