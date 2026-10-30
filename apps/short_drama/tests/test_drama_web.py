@@ -175,6 +175,29 @@ def test_a_saved_key_never_follows_a_new_endpoint(tmp_path, monkeypatch):
 
 
 
+def test_without_a_language_model_the_plan_points_to_settings(tmp_path):
+    services = Services(FakeEngine(), {"v": ("video", Served("v", tmp_path / "v.bundle"))}, tmp_path)
+    app = create_app(services, plugins=None, info={"gpu": "test", "tier": "a"})
+    with TestClient(app, headers={"X-Short-Drama": "1"}) as client:
+        state = client.get("/api/state").json()
+        assert state["chat_ready"] is False
+        assert state["free_apis"]["openrouter"]["base_url"] == "https://openrouter.ai/api/v1"
+        created = client.post("/api/projects", json={"title": "t", "novel": "第一章\n文"}).json()
+        url = f"/api/projects/{created['id']}"
+        assert client.get(url).json()["stages"][0]["next"] == "Choose a language model in Settings"
+        client.post(f"{url}/run", json={"step": "plan"})
+        assert "choose a chat API in Settings" in wait(client)[0]["error"]
+
+        nvidia = state["free_apis"]["nvidia"]
+        client.put("/api/settings/external-chat", json={"base_url": nvidia["base_url"], "model": nvidia["models"][0],
+                                                        "api_key": "k"})
+        assert client.get("/api/state").json()["chat_ready"] is True
+        assert client.get(url).json()["stages"][0]["next"] == "Plan the drama from the novel"
+        chat = services.chat(None)
+        assert (chat.base_url, chat.model, chat.api_key, chat.local) == (
+            "https://integrate.api.nvidia.com/v1", "deepseek-ai/deepseek-v4.1-flash", "k", False)
+
+
 def test_a_failed_episode_step_does_not_cancel_other_episodes():
     from trtmc_short_drama.jobs import Jobs
 

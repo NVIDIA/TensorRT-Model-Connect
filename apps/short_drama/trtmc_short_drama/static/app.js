@@ -256,7 +256,9 @@ function renderPlan() {
       ? el("button", { disabled: busy() || !plan.episodes, onclick: () => run(s.step) }, `Run ${s.step}`)
       : el("span", { class: "error" }, `${s.step}: not installed, skipped`)),
     el("span", { class: "note" }, "The language model reads every chapter, then writes the cast, places and shot lists. Edit anything before rendering."));
-  if (!plan.episodes) return el("section", {}, renderStory(), actions, renderHistory());
+  const noModel = ui.state.chat_ready ? "" : el("p", { class: "error" }, "No language model yet. ",
+    el("button", { onclick: () => { ui.tab = "settings"; renderProject(); } }, "Choose one in Settings"));
+  if (!plan.episodes) return el("section", {}, noModel, renderStory(), actions, renderHistory());
   return el("section", {}, renderStory(), actions, renderChecks(), renderHistory(),
     el("div", { class: "row" },
       el("label", {}, "Title", input(plan.title, (v) => { plan.title = v; })),
@@ -486,22 +488,54 @@ function renderFlow() {
     el("p", { class: "note" }, "A plugin is one Python file in the plugins directory that defines STEP. Add its name to a flow version to run it; delete the file and reload to remove it. Actions (story, revise, review) run with the model of the flow's plan step."));
 }
 
+// The language model that plans, writes and revises: a chat API (free tiers preset) or the local one.
 function renderSettings() {
   const s = ui.state;
-  const base = el("input", { value: s.external_chat.base_url, placeholder: "https://…/v1" });
-  const model = el("input", { value: s.external_chat.model });
-  const key = el("input", { type: "password", placeholder: s.external_chat.has_key ? "saved; type to replace" : "" });
-  const save = (body) => api("/api/settings/external-chat", { method: "PUT", body }).then(refresh).then(renderProject);
+  const chat = s.external_chat;
+  const apis = s.free_apis;
+  const local = s.models.find((m) => m.role === "llm");
+  const saved = Object.keys(apis).find((k) => apis[k].base_url === chat.base_url);
+  const choice = el("select", {},
+    Object.entries(apis).map(([k, a]) => el("option", { value: k, selected: k === saved }, a.label)),
+    el("option", { value: "other", selected: Boolean(chat.base_url && !saved) }, "Another OpenAI-compatible API"));
+  const base = el("input", { value: chat.base_url, placeholder: "https://…/v1" });
+  const model = el("input", { value: chat.model, list: "chat-models" });
+  const models = el("datalist", { id: "chat-models" });
+  const key = el("input", { type: "password" });
+  const help = el("p", { class: "note" });
+  const link = (href, text) => el("a", { href, target: "_blank", rel: "noopener noreferrer" }, text);
+  const pick = (fill) => {
+    const a = apis[choice.value];
+    if (a && fill) { base.value = a.base_url; model.value = a.models[0]; }
+    base.disabled = Boolean(a);
+    // A saved key belongs to the base URL it was entered with and never follows a new one.
+    key.placeholder = chat.has_key && base.value === chat.base_url ? "saved; type to replace" : "paste your key";
+    models.replaceChildren(...(a ? a.models : []).map((m) => el("option", { value: m })));
+    help.replaceChildren(...(a ? [`${a.note} `, link(a.key_url, "Get a free key"), " · ", link(a.models_url, "current models")]
+      : ["Any API that serves /chat/completions the OpenAI way."]));
+  };
+  choice.addEventListener("change", () => pick(true));
+  base.addEventListener("input", () => pick(false));
+  pick(!chat.base_url);  // a first visit starts from the first free API
+  const save = (body) => api("/api/settings/external-chat", { method: "PUT", body }).then(refresh).then(renderProject)
+    .catch((error) => alert(error.message));
+  const using = chat.base_url ? `Using ${saved ? apis[saved].label : chat.base_url} · ${chat.model}` + (chat.has_key ? " · key saved" : " · no key")
+    : local ? `Using ${local.name} on this GPU` : "No language model yet: pick an API, paste your key and save.";
   return el("section", {},
-    el("h2", {}, "Models on this GPU"),
-    el("table", { class: "edit" }, s.models.map((m) => el("tr", {}, el("td", {}, el("b", {}, m.name)), el("td", {}, m.role),
-      el("td", { class: "note" }, m.bundle), el("td", {}, s.loaded.includes(m.name) ? el("span", { class: "badge ok" }, "loaded") : "")))),
-    el("h2", {}, "Optional external chat API for planning"),
-    el("p", { class: "note" }, "Leave empty to plan, write and revise with the local TRTMC model. The key is stored with mode 600 in the data directory and never shown again."),
-    el("div", { class: "row" }, el("label", {}, "Base URL", base), el("label", {}, "Model", model), el("label", {}, "API key", key)),
+    el("h2", {}, "Language model"),
+    el("p", { class: chat.base_url || local ? "note" : "error" }, using),
+    el("p", { class: "note" }, "It reads the story, plans the episodes, writes stories from ideas, reviews and revises. " +
+      "The story is sent to the API you choose; start the app with --llm local to keep it on this machine. " +
+      "The key is stored with mode 600 in the data directory and never shown again."),
+    el("div", { class: "row" }, el("label", {}, "API", choice), el("label", {}, "Base URL", base),
+      el("label", {}, "Model", model, models), el("label", {}, "API key", key)),
+    help,
     el("div", { class: "actions" },
       el("button", { class: "primary", onclick: () => save({ base_url: base.value, model: model.value, api_key: key.value || null }) }, "Save"),
-      el("button", { onclick: () => save({ base_url: "", model: "" }) }, "Use the local model")));
+      local ? el("button", { onclick: () => save({ base_url: "", model: "" }) }, `Use ${local.name} on this GPU`) : ""),
+    el("h2", {}, "Models on this GPU"),
+    el("table", { class: "edit" }, s.models.map((m) => el("tr", {}, el("td", {}, el("b", {}, m.name)), el("td", {}, m.role),
+      el("td", { class: "note" }, m.bundle), el("td", {}, s.loaded.includes(m.name) ? el("span", { class: "badge ok" }, "loaded") : "")))));
 }
 
 // ---- data ----
@@ -525,9 +559,9 @@ async function createProject(body) {
   try {
     const created = await api("/api/projects", { method: "POST", body });
     await refresh();
-    ui.tab = "plan";
+    ui.tab = ui.state.chat_ready ? "plan" : "settings";  // planning needs a language model first
     await openProject(created.id);
-    if (body.idea) await run("story");  // an idea project starts by writing its story
+    if (body.idea && ui.state.chat_ready) await run("story");  // an idea project starts by writing its story
   } catch (error) { alert(error.message); }
 }
 

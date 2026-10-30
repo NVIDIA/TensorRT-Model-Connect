@@ -151,6 +151,22 @@ def test_whisper_builds_from_a_view_that_forces_the_language(tmp_path: Path, mon
     assert command[3:5] == ["build", str(view)]
 
 
+def test_the_language_model_is_built_only_with_llm_local(tmp_path: Path, monkeypatch, capsys):
+    from trtmc_short_drama import cli
+
+    monkeypatch.setattr(cli.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(catalog, "gpus", lambda: [catalog.parse_gpu("1, NVIDIA GB300, 262144, 10.3")])
+    (tmp_path / "trtmc-server").touch()
+    common = ["up", "--dry-run", "--data", str(tmp_path / "data"), "--runtime-root", str(tmp_path)]
+    assert cli.main(common) == 0
+    printed = capsys.readouterr().out
+    assert "build llm" not in printed and "build video" in printed and "--llm local serves Qwen/Qwen3.6-27B" in printed
+    assert cli.main([*common, "--llm", "local"]) == 0
+    assert "build llm: " in capsys.readouterr().out
+    with pytest.raises(SystemExit, match="needs --llm local"):
+        cli.main([*common, "--bundle", f"llm={tmp_path / 'q.bundle'}"])
+
+
 def test_h3_is_built_through_the_family_command(tmp_path: Path):
     from trtmc_short_drama import cli
 

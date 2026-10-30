@@ -131,7 +131,7 @@ def origins(plan: dict[str, Any], novel: str) -> dict[str, str]:
 
 
 def progress(plan: dict[str, Any], stills: dict[str, Any], episodes: dict[str, dict[str, Any]], *,
-             novel: bool, problems: list[dict[str, str]]) -> list[dict[str, str]]:
+             novel: bool, problems: list[dict[str, str]], chat_ready: bool = True) -> list[dict[str, str]]:
     """The four stages with a short status and the next thing to do in each.
 
     `episodes` maps an episode number (as text) to its shot state with an "outdated" list per shot.
@@ -140,8 +140,9 @@ def progress(plan: dict[str, Any], stills: dict[str, Any], episodes: dict[str, d
     errors = sum(p["level"] == "error" for p in problems)
     shots = [(e["number"], s["id"]) for e in plan.get("episodes", []) for s in e.get("shots", [])]
     if not plan.get("episodes"):
-        stage = [stage_entry("plan", "todo", "no plan yet",
-                             "Plan the drama from the novel" if novel else "Write the story from the idea")]
+        todo = ("Plan the drama from the novel" if novel else "Write the story from the idea") if chat_ready \
+            else "Choose a language model in Settings"
+        stage = [stage_entry("plan", "todo", "no plan yet", todo)]
     else:
         cast = len(plan.get("characters", []))
         stage = [stage_entry("plan", "attention" if errors else "done",

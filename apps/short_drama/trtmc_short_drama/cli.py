@@ -30,6 +30,9 @@ def parser() -> argparse.ArgumentParser:
                     help="projects, bundles and settings (default: ./short-drama-data)")
     up.add_argument("--tier", choices=["auto", *catalog.TIERS], default="auto")
     up.add_argument("--gpu", type=int, help="GPU index (default: the one with the most memory)")
+    up.add_argument("--llm", choices=["api", "local"], default="api",
+                    help="api (default): plan with the chat API chosen in Settings, such as the free NVIDIA "
+                    "API catalog or OpenRouter; local: build and serve the tier's language model on this GPU")
     up.add_argument("--bundle", action="append", default=[], metavar="ROLE=PATH",
                     help="use an existing bundle for a role (llm, image, video, asr, tts)")
     up.add_argument("--runtime-root", type=Path, help="directory with trtmc-server and the runtime DSOs "
@@ -92,10 +95,16 @@ def build_command(model: catalog.Model, output: Path, runtime: Path, checkpoint:
             "-o", str(output), *model.build_args]
 
 
-def resolve_bundles(tier: catalog.Tier, gpu: catalog.Gpu, data: Path, overrides: dict[str, Path],
+def served_models(tier: catalog.Tier, llm: str) -> dict[str, catalog.Model]:
+    """The tier's models this GPU serves: all of them, but the language model only with --llm local."""
+
+    return {role: model for role, model in tier.models.items() if role != "llm" or llm == "local"}
+
+
+def resolve_bundles(models: dict[str, catalog.Model], gpu: catalog.Gpu, data: Path, overrides: dict[str, Path],
                     runtime: Path, *, dry_run: bool) -> dict[str, Path]:
     bundles = {}
-    for role, model in tier.models.items():
+    for role, model in models.items():
         path = overrides.get(role) or data / "bundles" / model.bundle_name(gpu.compute_capability)
         if not path.is_file():
             checkpoint = checkpoint_view(model, data, create=not dry_run)
@@ -129,15 +138,21 @@ def main(argv: list[str] | None = None) -> int:
     tier = catalog.pick_tier(gpu, args.tier)
     print(f"GPU {gpu.index}: {gpu.name}, {gpu.memory_gib:.0f} GiB, sm{gpu.compute_capability} -> "
           f"tier {tier.name.upper()} ({tier.summary})", flush=True)
+    wanted = served_models(tier, args.llm)
+    if args.llm == "api":
+        print(f"language model: the chat API chosen in Settings (the NVIDIA API catalog and OpenRouter have "
+              f"free tiers); --llm local serves {tier.models['llm'].checkpoint} on this GPU instead", flush=True)
     overrides = {}
     for value in args.bundle:
         role, _, path = value.partition("=")
-        if role not in tier.models or not path:
-            raise SystemExit(f"--bundle needs ROLE=PATH with ROLE in {', '.join(tier.models)}")
+        if role == "llm" and args.llm == "api":
+            raise SystemExit("--bundle llm=PATH needs --llm local")
+        if role not in wanted or not path:
+            raise SystemExit(f"--bundle needs ROLE=PATH with ROLE in {', '.join(wanted)}")
         overrides[role] = Path(path).expanduser().resolve()
     data = args.data.resolve()
     root = runtime_root(args.runtime_root)
-    bundles = resolve_bundles(tier, gpu, data, overrides, root, dry_run=args.dry_run)
+    bundles = resolve_bundles(wanted, gpu, data, overrides, root, dry_run=args.dry_run)
     if args.dry_run:
         return 0
 
@@ -150,7 +165,7 @@ def main(argv: list[str] | None = None) -> int:
                     cuda_device=str(gpu.index), python_path=[source] if source.is_dir() else [],
                     scratch=data / "tmp")
     models = {model.name: (role, Served(model.name, bundles[role], model.byok))
-              for role, model in tier.models.items()}
+              for role, model in wanted.items()}
     info = {"gpu": f"{gpu.name} ({gpu.memory_gib:.0f} GiB)", "tier": tier.name, "tier_summary": tier.summary}
     hosts = ["127.0.0.1", "localhost", "::1"] + ([args.host] if args.host not in {"0.0.0.0", "::"} else [])
     token = None if loopback(args.host) else secrets.token_urlsafe(24)
