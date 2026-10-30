@@ -17,6 +17,10 @@ PATHS = {"repo": "dir", "data_root": "dir", "runtime_root": "dir", "worker": "ex
          "aiperf": "exe", "bundle_root": "created", "hf_datasets_cache": "created",
          "reference_env_root": "created"}
 SERVE_PACKAGES = ("torch", "transformers", "accelerate", "fastapi", "uvicorn", "multipart", "soundfile", "PIL", "numpy")
+# One cuDNN convolution: an interpreter that mixes cuDNN versions imports fine but fails here, as would every
+# native reference with a convolution (vision, audio).
+CONVOLUTION_PROBE = ("import torch; torch.nn.functional.conv2d(torch.ones(1, 3, 8, 8, device='cuda'), "
+                     "torch.ones(4, 3, 3, 3, device='cuda')); print(torch.backends.cudnn.version())")
 
 
 def _value(values: Mapping[str, Any], key: str) -> Any:
@@ -52,7 +56,7 @@ def check_paths(environment: Environment) -> dict[str, str]:
 
 
 def check_serving(environment: Environment) -> dict[str, str]:
-    """Import the serving packages in serve_python and read its GPU fingerprint."""
+    """Import the serving packages in serve_python, read its GPU fingerprint, and run one cuDNN convolution."""
     from .services import _serve_env
 
     python = str(environment["serve_python"])
@@ -69,6 +73,12 @@ def check_serving(environment: Environment) -> dict[str, str]:
         checks["gpu"] = f"ok ({fingerprint.get('gpu_arch')}, torch {fingerprint.get('packages', {}).get('torch')})"
     else:
         checks["gpu"] = f"unavailable: {completed.stderr.strip()[-300:]}"
+        return checks
+    completed = subprocess.run([python, "-c", CONVOLUTION_PROBE], capture_output=True, text=True,
+                               env=_serve_env(environment), timeout=300)
+    checks["cudnn"] = (f"ok (cuDNN {(completed.stdout.split() or ['?'])[-1]})" if completed.returncode == 0 else
+                       "convolution failed (Jetson Thor: serve_env in config/environments/example.yaml): "
+                       + completed.stderr.strip()[-300:])
     return checks
 
 

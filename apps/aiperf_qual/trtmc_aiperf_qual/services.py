@@ -47,6 +47,8 @@ def _serve_env(environment: Environment) -> dict[str, str]:
         env["HF_HUB_CACHE"] = str(environment["hf_hub_cache"])
         # Remote-code modules are generated Python, separate from immutable checkpoint snapshots.
         env.setdefault("HF_MODULES_CACHE", str(Path(environment["hf_hub_cache"]).parent / "hf-modules"))
+    # The machine's own additions, for example the cuDNN a Jetson Thor's serving interpreter must load.
+    env.update({key: str(value) for key, value in (environment.values.get("serve_env") or {}).items()})
     return env
 
 
