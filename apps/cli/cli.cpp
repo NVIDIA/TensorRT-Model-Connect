@@ -1212,8 +1212,7 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
         io::write_wav(result, path);
         write_json(output, {{"output", path},
                             {"sample_rate", result.sample_rate},
-                            {"num_samples", result.num_samples},
-                            {"channels", result.channels}});
+                            {"num_samples", result.samples.size()}});
         return EXIT_SUCCESS;
     }
     case CommandKind::kTranscribe: {

@@ -555,9 +555,9 @@ AudioResult MinimaxMusic3TextToMusicPipeline::generate_audio(const std::string& 
 
     AudioResult result;
     result.sample_rate = config_.sampling_rate;
-    result.channels = config_.output_channels;
-    result.num_samples =
-        static_cast<int32_t>(samples.size() / static_cast<std::size_t>(config_.output_channels));
+    // Interleaved PCM: num_samples counts total scalar samples, not frames.
+    result.num_channels = config_.output_channels;
+    result.num_samples = static_cast<int32_t>(samples.size());
     result.samples = std::move(samples);
     return result;
 }

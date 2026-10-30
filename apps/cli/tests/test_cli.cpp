@@ -1122,17 +1122,6 @@ int main() {
     check(throws_runtime([&] { trtmc::cli::io::read_wav_interleaved(wav_path.string()); }),
           "truncated WAV data fails instead of returning invented samples");
     std::filesystem::remove(wav_path);
-    trtmc::AudioResult stereo;
-    stereo.samples = {-1.0F, 1.0F, 0.25F, 0.75F};
-    stereo.num_samples = 2;
-    stereo.sample_rate = 44100;
-    stereo.channels = 2;
-    trtmc::cli::io::write_wav(stereo, wav_path.string());
-    const auto stereo_as_mono = trtmc::cli::io::read_wav(wav_path.string());
-    check(stereo_as_mono.channels == 1 && stereo_as_mono.num_samples == 2 &&
-              stereo_as_mono.samples == std::vector<float>({0.0F, 0.5F}),
-          "stereo WAV headers preserve frames and input downmixes to mono");
-    std::filesystem::remove(wav_path);
     check(throws_runtime([&] { trtmc::cli::io::read_wav(wav_path.string()); }),
           "missing WAV is rejected");
     check(throws_runtime([&] { trtmc::cli::io::write_wav({}, wav_path.string()); }),

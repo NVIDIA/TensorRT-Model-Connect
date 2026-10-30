@@ -255,6 +255,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("MiniMax-Music3 does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("MiniMax-Music3 does not support fp32_layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("MiniMax-Music3 does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("minimax_music3 does not support dynamic_kv_cache")
     if any(
