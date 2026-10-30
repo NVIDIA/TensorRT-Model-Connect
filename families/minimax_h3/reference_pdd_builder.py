@@ -114,6 +114,7 @@ def build_projection_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     try:
         config = builder.create_builder_config()
+        config.builder_optimization_level = 3
         config.clear_flag(trt.BuilderFlag.TF32)
         op.configure_builder(config)
         op.configure_workspace(config, workspace_bytes, default_bytes=256 << 20)
