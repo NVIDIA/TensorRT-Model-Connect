@@ -24,6 +24,28 @@ VIDEO_POLL_SECONDS = 5.0
 STORAGE_RETRIES, STORAGE_RETRY_SECONDS = 40, 30.0
 
 
+def drop_page_cache(paths) -> None:
+    """Ask the kernel to drop the cached pages of bundle files once the server has read them.
+
+    trtmc-server reads each bundle once into GPU memory. Where GPU memory is a NUMA node of the
+    host (GB300, GH200), the cache of a 100 GB bundle can land there as memory no process owns,
+    and the next stage's model then fails to load.
+    """
+
+    if not hasattr(os, "posix_fadvise"):
+        return
+    for path in paths:
+        for file in [path] if path.is_file() else sorted(p for p in path.rglob("*") if p.is_file()):
+            try:
+                descriptor = os.open(file, os.O_RDONLY)
+            except OSError:
+                continue
+            try:
+                os.posix_fadvise(descriptor, 0, 0, os.POSIX_FADV_DONTNEED)
+            finally:
+                os.close(descriptor)
+
+
 @dataclass(frozen=True)
 class Served:
     """A bundle as trtmc-server registers it."""
@@ -101,6 +123,7 @@ class Engine:
             self.scratch.mkdir(parents=True, exist_ok=True)
             environment["TMPDIR"] = str(self.scratch)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        drop_page_cache(served.bundle for served in models)  # left over from earlier runs
         log.info("starting trtmc-server with %s", ", ".join(sorted(m.name for m in models)))
         with self.log_path.open("ab") as output:
             self._process = subprocess.Popen(self.command(models), stdout=output,
@@ -114,6 +137,7 @@ class Engine:
                 raise RuntimeError(f"trtmc-server exited while loading; see {self.log_path}")
             try:
                 if httpx.get(f"{self.url}/health/ready", timeout=5).status_code == 200:
+                    drop_page_cache(served.bundle for served in models)
                     return
             except httpx.HTTPError:
                 pass

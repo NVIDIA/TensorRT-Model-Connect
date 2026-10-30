@@ -110,6 +110,24 @@ def test_video_submission_waits_while_server_storage_is_full(tmp_path: Path, mon
     assert len(posts) == 2 and (tmp_path / "out.mp4").read_bytes() == b"mp4"
 
 
+def test_bundle_page_cache_is_dropped_file_by_file(tmp_path: Path, monkeypatch):
+    import os
+
+    from trtmc_short_drama import engine as engine_module
+
+    advised = []
+    monkeypatch.setattr(os, "posix_fadvise", lambda fd, offset, length, advice: advised.append(advice),
+                        raising=False)
+    single = tmp_path / "llm.bundle"
+    single.write_bytes(b"x")
+    directory = tmp_path / "h3.bundle"
+    (directory / "plans").mkdir(parents=True)
+    for name in ("manifest.json", "plans/dit.plan"):
+        (directory / name).write_bytes(b"x")
+    engine_module.drop_page_cache([single, directory, tmp_path / "missing.bundle"])
+    assert advised == [os.POSIX_FADV_DONTNEED] * 3
+
+
 def test_whisper_builds_from_a_view_that_forces_the_language(tmp_path: Path, monkeypatch):
     import json
 
