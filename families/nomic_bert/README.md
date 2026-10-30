@@ -21,6 +21,8 @@ combining-class ordering precedes nonspacing-mark removal and lowercase, while
 `strip_accents: false` preserves the original order. The Unicode notice is in
 `UNICODE_LICENSE.txt`; no extra runtime dependency is introduced.
 
+Native installation also carries the notice under `share/trtmc/families/nomic_bert`.
+
 The existing native tokenizer test retains prefix/framing assertions and adds
 distinct-vocabulary normalization cases, independent normalizer flags and
 punctuation boundaries. Matching unknown tokens cannot stand in for the expected
