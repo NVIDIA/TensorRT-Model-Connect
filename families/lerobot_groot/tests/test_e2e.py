@@ -275,7 +275,7 @@ EXPECTED_REJECTIONS = {
     "unknown_camera": "does not accept a camera",
     "missing_camera": "requires camera",
     "short_state": "state must have 8 values",
-    "non_ascii_text": "formalizes ASCII instructions only",
+    "non_ascii_text": "accepts ASCII instructions only",
     "long_text": "instruction exceeds 256 tokens",
     "huge_text": "instruction exceeds 4096 bytes",
     "wrong_image_size": "must be 256x256x3",

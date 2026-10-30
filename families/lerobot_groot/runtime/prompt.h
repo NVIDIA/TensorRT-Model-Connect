@@ -24,8 +24,9 @@ inline constexpr std::size_t kInstructionBytesPerToken = 16;
 // prepare_n1_7_language_batch as LeRobot's groot preprocessor applies it twice: the default
 // instruction for empty text, then, when `formalize`, Python's lower() and a filter keeping
 // isalnum(), isspace() and '_'; text that formalises to nothing becomes the default instruction
-// verbatim. Formalisation is implemented for ASCII text; other text is rejected rather than
-// approximated.
+// verbatim. Only ASCII text is accepted, formalised or not: other text would also need Python's
+// Unicode lower() and isalnum() and the tokenizer's NFC normalization, and is rejected rather
+// than approximated.
 std::string formalize_instruction(std::string_view text, bool formalize);
 
 // Token ids of the Qwen3-VL chat template's fixed pieces.

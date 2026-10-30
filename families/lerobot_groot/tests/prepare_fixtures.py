@@ -10,7 +10,8 @@
   noise in ``noise_seed0.f32`` (``official_reference.py``); ``*.alternate.*`` replaces the
   instruction to check that the bundle follows the text it is given.
 - ``tokenizer_golden.json``: LeRobot's full prompt ids for instructions chosen to stress the
-  formalisation and the tokenizer, produced by its groot preprocessor.
+  formalisation and the tokenizer, produced by its groot preprocessor, and for instructions it
+  passes verbatim when a checkpoint turns ``formalize_language`` off.
 
 Run it only to refresh the fixtures; besides ``lerobot[groot]`` it needs ``pyarrow``:
 
@@ -52,6 +53,15 @@ TOKENIZER_TEXTS = (
     "don't stop, it's fine",
     "    ",
     " ".join(["move the arm to the left and then down"] * 20),
+)
+# ASCII instructions a checkpoint with formalize_language off passes verbatim: case, punctuation
+# and whitespace stay, text of punctuation only stays, and empty text becomes the default.
+VERBATIM_TEXTS = (
+    "Keep Case and Punctuation!",
+    "Pick up the BLACK bowl, then place it on the plate.",
+    "  tabs\tand\nnewlines stay, as do (brackets) and 'quotes'  ",
+    "!!!",
+    "",
 )
 
 
@@ -109,14 +119,30 @@ def _image_config(model_dir: Path) -> dict:
                                          "crop_fraction", "letter_box_transform")}
 
 
-def _write_tokenizer_golden(out: Path, pre, frame: Path) -> None:
+def _preprocessor(model_dir: Path, tokenizer_dir: Path, *, formalize: bool):
+    """LeRobot's groot preprocessor on the CPU; ``formalize=False`` turns ``formalize_language`` off."""
+    from lerobot.policies.groot.configuration_groot import GrootConfig
+    from lerobot.policies.groot.processor_groot import make_groot_pre_post_processors_from_pretrained
+
+    overrides = {"groot_n1_7_vlm_encode_v1": {"model_name": str(tokenizer_dir)}, "device_processor": {"device": "cpu"}}
+    if not formalize:
+        overrides["groot_n1_7_pack_inputs_v1"] = {"formalize_language": False}
+    pre, _ = make_groot_pre_post_processors_from_pretrained(
+        GrootConfig.from_pretrained(str(model_dir)), str(model_dir), preprocessor_overrides=overrides)
+    return pre
+
+
+def _write_tokenizer_golden(out: Path, model_dir: Path, tokenizer_dir: Path, frame: Path) -> None:
     from official_reference import load_frame
 
     cases = []
-    for text in TOKENIZER_TEXTS:
-        batch = pre(load_frame(frame, text))
-        mask = batch["attention_mask"][0].bool()
-        cases.append({"text": text, "prompt_ids": batch["input_ids"][0][mask].tolist()})
+    for formalize, texts in ((True, TOKENIZER_TEXTS), (False, VERBATIM_TEXTS)):
+        pre = _preprocessor(model_dir, tokenizer_dir, formalize=formalize)
+        for text in texts:
+            batch = pre(load_frame(frame, text))
+            mask = batch["attention_mask"][0].bool()
+            case = {"text": text} if formalize else {"text": text, "formalize": False}
+            cases.append({**case, "prompt_ids": batch["input_ids"][0][mask].tolist()})
     image_token = 151655
     first = cases[0]["prompt_ids"]
     (out / "tokenizer_golden.json").write_text(json.dumps(
@@ -136,6 +162,7 @@ def main() -> None:
     args = parser.parse_args()
 
     frames = _write_frames(args.out, _image_config(args.model_dir))
+    _write_tokenizer_golden(args.out, args.model_dir, args.tokenizer_dir, frames[0])
     fixed_noise().astype("<f4").tofile(args.out / "noise_seed0.f32")
     reference = args.out / "reference"
     reference.mkdir(exist_ok=True)
@@ -143,8 +170,6 @@ def main() -> None:
     for precision in ("fp32", "bf16"):
         policy, pre, post = load_policy(args.model_dir, args.base_dir, args.tokenizer_dir,
                                         precision=precision, device=args.device)
-        if precision == "fp32":
-            _write_tokenizer_golden(args.out, pre, frames[0])
         for frame in frames:
             actions = run_reference(policy, pre, post, frame)
             np.ascontiguousarray(actions, dtype="<f4").tofile(reference / f"{frame.name}.{precision}.f32")

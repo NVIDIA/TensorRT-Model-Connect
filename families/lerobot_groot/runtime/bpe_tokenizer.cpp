@@ -207,11 +207,13 @@ inline bool is_digit(char32_t cp) {
     return (cp >= '0' && cp <= '9');
 }
 
+// Unicode White_Space, which `\s` matches in the tokenizers' pre-tokenizer patterns.
 inline bool is_whitespace(char32_t cp) {
-    return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' || cp == 0x0B || cp == 0x0C // VT, FF
-           || cp == 0xA0                   // non-breaking space
-           || cp == 0x2000 || cp == 0x200A // en space through hair space
-           || cp == 0x3000;                // ideographic space
+    return cp == ' ' || (cp >= 0x09 && cp <= 0x0D)     // tab, LF, VT, FF, CR
+           || cp == 0x85 || cp == 0xA0 || cp == 0x1680 // next line, no-break space, ogham space
+           || (cp >= 0x2000 && cp <= 0x200A)           // en quad through hair space
+           || cp == 0x2028 || cp == 0x2029             // line and paragraph separators
+           || cp == 0x202F || cp == 0x205F || cp == 0x3000; // narrow no-break, math, ideographic
 }
 
 // BLOOM punctuation set: .,!?...

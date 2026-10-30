@@ -51,6 +51,8 @@ int main() {
     check(formalize_instruction("Keep. Case!", false) == "Keep. Case!", "no formalisation");
     check(throws_invalid([] { formalize_instruction("caf\xc3\xa9", true); }),
           "non-ASCII is rejected");
+    check(throws_invalid([] { formalize_instruction("thin\xe2\x80\x89space", false); }),
+          "non-ASCII is rejected without formalisation too");
 
     TemplateTokens tokens{1, 2, 3, 4, 9, {5, 6}, {6}};
     const auto prompt = build_prompt({7, 8}, 2, 2, tokens);

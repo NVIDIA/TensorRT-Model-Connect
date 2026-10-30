@@ -8,9 +8,9 @@
 //   trtmc_lerobot_groot_preprocess_check --tokenizer tokenizer.json --golden tokenizer_golden.json
 //       [--image CAMERA.png=PROCESSED.png ...] --size N --crop N
 //
-// The golden lists instructions with the full prompt ids LeRobot's groot preprocessor produced;
-// PROCESSED.png is the camera after LeRobot's evaluation crop and INTER_AREA resize. Prints one
-// JSON object and exits non-zero on any mismatch.
+// The golden lists instructions with the full prompt ids LeRobot's groot preprocessor produced,
+// formalised unless a case says "formalize": false; PROCESSED.png is the camera after LeRobot's
+// evaluation crop and INTER_AREA resize. Prints one JSON object and exits non-zero on any mismatch.
 
 #include "families/lerobot_groot/runtime/image.h"
 #include "families/lerobot_groot/runtime/prompt.h"
@@ -99,8 +99,9 @@ int main(int argc, char** argv) {
         for (const auto& item : golden.at("cases")) {
             const auto text = item.at("text").get<std::string>();
             const auto expected = item.at("prompt_ids").get<std::vector<std::int32_t>>();
-            const auto prompt = build_prompt(tokenizer->encode(formalize_instruction(text, true)),
-                                             cameras, grid, tokens);
+            const auto formalize = item.value("formalize", true);
+            const auto prompt = build_prompt(
+                tokenizer->encode(formalize_instruction(text, formalize)), cameras, grid, tokens);
             if (prompt.token_ids == expected) {
                 ++matched;
             } else {

@@ -207,6 +207,19 @@ def test_config_refuses_image_processing_it_does_not_reproduce(tmp_path, vlm: di
         config_module.load_config(_model_dir(tmp_path / "ckpt", pre=pre))
 
 
+def test_config_refuses_cameras_off_the_image_token_grid(tmp_path) -> None:
+    # 240 pixels are 15 patches a side, which the 2x2 patch merger cannot pair up.
+    assert config_module.MERGED_PATCH == vision.PATCH * vision.MERGE
+    cameras = {camera: {"type": "VISUAL", "shape": [240, 240, 3]} for camera in CAMERAS}
+    config = _config(input_features={**_config()["input_features"], **cameras})
+    pre = [{"registry_name": "rename_observations_processor", "config": {"rename_map": {}}},
+           {"registry_name": "to_batch_processor", "config": {}}, _pack(),
+           _vlm(image_target_size=[240, 240], shortest_image_edge=240),
+           {"registry_name": "device_processor", "config": {}}]
+    with pytest.raises(NotImplementedError, match="multiple of 32"):
+        config_module.load_config(_model_dir(tmp_path / "ckpt", config=config, pre=pre))
+
+
 def test_config_refuses_other_processor_pipelines(tmp_path) -> None:
     pre = [{"registry_name": "rename_observations_processor", "config": {"rename_map": {}}},
            {"registry_name": "to_batch_processor", "config": {}},

@@ -26,6 +26,8 @@ BACKBONE = "nvidia/Cosmos-Reason2-2B"
 NATIVE_ACTION_HORIZON = 40
 MAX_DIM = 132
 LIBERO_DECODE = "libero"
+# Pixels a side of one image token: the vision tower merges 2x2 blocks of 16-pixel patches.
+MERGED_PATCH = 32
 
 _PREPROCESSOR_STEPS = (
     "rename_observations_processor",
@@ -194,6 +196,9 @@ def _image(step: dict[str, Any], height: int, width: int) -> ImageTransform:
         # Non-square cameras or a resize to another size are not implemented.
         raise NotImplementedError(
             f"LeRobot GR00T supports square cameras already at image_target_size {target}, got {height}x{width}")
+    if target_h % MERGED_PATCH:
+        raise NotImplementedError(
+            f"LeRobot GR00T needs image_target_size to be a multiple of {MERGED_PATCH}, got {target}")
     return ImageTransform(shortest_edge=shortest, crop_fraction=fraction, target_height=target_h, target_width=target_w)
 
 

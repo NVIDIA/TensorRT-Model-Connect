@@ -5,6 +5,7 @@
 
 #include "families/lerobot_groot/runtime/prompt.h"
 
+#include <algorithm>
 #include <stdexcept>
 
 namespace trtmc::lerobot_groot {
@@ -23,16 +24,17 @@ bool ascii_alnum(unsigned char c) {
 
 std::string formalize_instruction(std::string_view text, bool formalize) {
     const std::string_view source = text.empty() ? kDefaultInstruction : text;
+    if (std::any_of(source.begin(), source.end(),
+                    [](char c) { return static_cast<unsigned char>(c) >= 0x80; }))
+        throw std::invalid_argument(
+            "lerobot_groot accepts ASCII instructions only, as LeRobot's lower() and isalnum() "
+            "and the tokenizer's NFC normalization are not reproduced for other text");
     if (!formalize)
         return std::string(source);
     std::string out;
     out.reserve(source.size());
     for (const char raw : source) {
         const auto c = static_cast<unsigned char>(raw);
-        if (c >= 0x80)
-            throw std::invalid_argument(
-                "lerobot_groot formalizes ASCII instructions only, as LeRobot's lower() and "
-                "isalnum() are not reproduced for other text");
         if (ascii_alnum(c))
             out.push_back(static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c));
         else if (python_space(c) || c == '_')

@@ -35,7 +35,7 @@ Anything outside this list fails at build time with the offending field named.
 | Real-time chunking, relative actions, PEFT adapters | not supported (`use_relative_actions`, `use_peft` must be off; grouped `raw_stats`/`modality_config` are rejected) |
 | Processor steps | exactly the steps LeRobot 0.6.1 saves for an N1.7 policy; any other step is rejected |
 | Precision | `bf16` (default) and `fp32` |
-| Instruction | up to 256 tokens and 4096 bytes; formalised as LeRobot does (lower case, keep letters, digits, whitespace and `_`) for ASCII text, other text is rejected |
+| Instruction | ASCII, up to 256 tokens and 4096 bytes; formalised as LeRobot does (lower case, keep letters, digits, whitespace and `_`), or used verbatim when `formalize_language` is off |
 | Not claimed | GR00T N1.5, other backbones, Jetson targets, quantization, multi-GPU |
 
 ### Tokenizer
@@ -105,7 +105,8 @@ float32 and bfloat16 outputs for each and the reference's flow noise. One case a
 runs its images and state with another task's instruction, in between two runs with
 its own, to show that the bundle follows the text and keeps nothing between calls.
 `tokenizer_golden.json` holds LeRobot's prompt ids for 17 instructions chosen to
-stress the formalisation and the tokenizer, and each camera also has LeRobot's
+stress the formalisation and the tokenizer, and for 5 that a checkpoint with
+`formalize_language` off passes verbatim; each camera also has LeRobot's
 cropped and resized image, so the runtime's preprocessing is checked bit for bit.
 The manifests declare the commit-pinned public tokenizer copy in `external_files`.
 Internal CI downloads it into the directory `TRTMC_LEROBOT_GROOT_MODEL_DIR` names, and
@@ -167,8 +168,9 @@ against the eager LeRobot policy (TensorRT 11.4):
   and action sizes and chunk lengths build, but are not qualified.
 - Batch one, one observation step, square cameras at the target size; GR00T N1.5,
   relative actions, real-time chunking and PEFT adapters are rejected at build time.
-- Instructions are formalised for ASCII text only; LeRobot also lower-cases and filters
-  other Unicode text, which this runtime rejects rather than approximates.
+- Instructions must be ASCII. LeRobot also takes other text, which needs Python's Unicode
+  `lower()` and `isalnum()` and the tokenizer's NFC normalization; this runtime rejects it
+  rather than approximates them.
 - `n_action_steps` queueing stays in the caller.
 - The LeRobot side is not part of this repository. `lerobot-rollout` ships with LeRobot
   0.6.1, but `lerobot-export` does not, so the bundle has not been driven through either;
