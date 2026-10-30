@@ -8,6 +8,6 @@ from tensorrt_model_connect.model_support import family_support
 
 describe = family_support(
     model_types=("camembert", "roberta", "xlm-roberta"),
-    tasks=("embedding", "encoding", "reranking"),
+    tasks=("embedding", "encoding"),
     default_task="encoding",
 )
