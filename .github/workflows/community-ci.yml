@@ -1275,7 +1275,6 @@ jobs:
           echo "instance_name=$instance_name" >> "$GITHUB_OUTPUT"
           echo "lease_artifact_name=gpu-ci-lease-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
           echo "gpu_provider=$gpu_provider" >> "$GITHUB_OUTPUT"
-          echo "qualification_type=$qualification_type" >> "$GITHUB_OUTPUT"
           python3 -m tools.brev_exec provision --prepare-only \
             --instance "$instance_name" \
             --provider "$gpu_provider" "${allocation_args[@]}" \
@@ -1284,6 +1283,16 @@ jobs:
             --lease-file "$lease_file" \
             --timeout 2700 \
             --attempts 1
+          # tools.brev_exec falls back from the standard type to g6e.4xlarge
+          # when AWS has no g6.4xlarge capacity; read back which one the
+          # prepared lease actually selected so Reserve requests the same type.
+          if [ -z "$qualification_type" ]; then
+            resolved_type=$(jq -er '.sku' "$lease_file" 2>/dev/null || true)
+            if [ "$resolved_type" = g6e.4xlarge ]; then
+              qualification_type=g6e.4xlarge
+            fi
+          fi
+          echo "qualification_type=$qualification_type" >> "$GITHUB_OUTPUT"
 
       - name: Preserve the GPU allocation intent before creation
         id: intent

@@ -410,6 +410,13 @@ HOST_INSTANCE_TYPES = {
     "aws": {64: DEFAULT_INSTANCE_TYPE, 128: "g6.8xlarge"},
     "nebius": {64: NEBIUS_INSTANCE_TYPE, 128: "gpu-l40s-a.1gpu-32vcpu-128gb"},
 }
+# Same-provider capacity fallback: tried only after the primary type's own
+# catalog search is empty or duplicated for PREFLIGHT_ATTEMPTS rounds. g6e.4xlarge
+# is already a validated AWS type (the manual GPU_PROFILE=large qualification
+# lane in community-ci.yml), not a new, unverified SKU.
+INSTANCE_TYPE_FALLBACKS: dict[str, dict[str, str]] = {
+    "aws": {DEFAULT_INSTANCE_TYPE: "g6e.4xlarge"},
+}
 POLL_INTERVAL = 60.0
 CREATE_RATE_LIMIT_ATTEMPTS = 3
 CREATE_RATE_LIMIT_DELAY = 60.0
@@ -2009,6 +2016,52 @@ def _preflight(lookup, instance: str, deadline: float, start: float):
     return lookup()
 
 
+def _select_instance_with_fallback(
+    instance_type: str,
+    disk_gb: int,
+    provider: str,
+    deadline: float,
+    host_ram_gib: int | None,
+    instance: str,
+    start: float,
+) -> tuple[dict, str]:
+    """Select a candidate, retrying once with a known-good same-provider type.
+
+    _select_instance raises PreflightUnavailable when the catalog search itself
+    fails or the requested type has zero or more than one offer -- the two
+    "no capacity" shapes this fallback covers. A deterministic rejection (bad
+    disk, wrong provider, host-RAM mismatch) is a plain ProvisionError and is
+    not retried here or by _preflight.
+
+    The fallback type is looked up without host_ram_gib, matching how the
+    existing manual g6e.4xlarge GPU_PROFILE=large lane already bypasses the
+    single-GPU x86 host-RAM check in _select_instance.
+    """
+    fallback_type = INSTANCE_TYPE_FALLBACKS.get(provider, {}).get(instance_type)
+    try:
+        candidate = _preflight(
+            lambda: _select_instance(instance_type, disk_gb, provider, deadline, host_ram_gib),
+            instance,
+            deadline,
+            start,
+        )
+        return candidate, instance_type
+    except (PreflightUnavailable, InventoryError):
+        if not fallback_type or _remaining(deadline) <= 0:
+            raise
+        _log(
+            start,
+            f"{instance}: no {instance_type} capacity after retries; trying {fallback_type}",
+        )
+        candidate = _preflight(
+            lambda: _select_instance(fallback_type, disk_gb, provider, deadline, None),
+            instance,
+            deadline,
+            start,
+        )
+        return candidate, fallback_type
+
+
 def provision(
     instance: str,
     gpu: str = "",
@@ -2131,17 +2184,15 @@ def provision(
         _save_lease(path, lease)
         if _inventory(instance, deadline, start) is not None:
             raise ProvisionError("instance name already exists; refusing to reuse or delete it")
-        candidate = _preflight(
-            lambda: _select_instance(instance_type, disk_gb, provider, deadline, host_ram_gib),
-            instance,
-            deadline,
-            start,
+        candidate, instance_type = _select_instance_with_fallback(
+            instance_type, disk_gb, provider, deadline, host_ram_gib, instance, start
         )
         if prepare_only:
             # Upload this intent before permitting the create step. Once that
             # step could have run, its archived state must assume a possible
             # submission, even if a hard kill loses every later local write.
             lease.update(
+                sku=instance_type,
                 provider=candidate["provider"],
                 phase="prepared",
                 intent_prepared=True,
@@ -2152,6 +2203,7 @@ def provision(
             _publish_name(instance, instance_type, organization)
             return instance
         lease.update(
+            sku=instance_type,
             provider=candidate["provider"],
             phase="creating",
             allocation_pending=True,
