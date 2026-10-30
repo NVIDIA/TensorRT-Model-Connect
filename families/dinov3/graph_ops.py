@@ -12,7 +12,10 @@ import tensorrt as trt
 
 
 
-def new_network(verbose: bool):
+_DUAL_GEMM_KNOB = "peep:match_dual_gemm"
+
+
+def new_network(verbose: bool, quant_ctx=None):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(
@@ -23,6 +26,13 @@ def new_network(verbose: bool):
     config.avg_timing_iterations = 8
     config.max_aux_streams = 0
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+    if quant_ctx is not None:
+        # Keep layer names so the plan inspector shows which kernels run.
+        config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+        if quant_ctx.has_fp8_weights and _DUAL_GEMM_KNOB in getattr(config, "all_build_routes", ""):
+            # TensorRT's fused dual-GEMM kernel fails to compile with scalar-scale FP8.
+            # The route is set only when this TensorRT build lists the knob.
+            config.build_route = f"-{_DUAL_GEMM_KNOB}=off"
     return builder, network, config
 
 
@@ -73,8 +83,12 @@ def add_bias(network, tensor, bias: np.ndarray | None, dtype: np.dtype):
     return _elementwise(network, tensor, bias_tensor, trt.ElementWiseOperation.SUM)
 
 
-def linear_with_bias(network, tensor, weights, prefix: str, dtype: np.dtype):
-    tensor = linear(network, tensor, weights[f"{prefix}.weight"], dtype)
+def linear_with_bias(network, tensor, weights, prefix: str, dtype: np.dtype, quant=None):
+    """Projection ``prefix``; ``quant`` (a ``Dinov3QuantContext``) routes it through FP8 Q/DQ."""
+    if quant is not None and quant.should_quantize(prefix):
+        tensor = quant.matmul(network, tensor, prefix)
+    else:
+        tensor = linear(network, tensor, weights[f"{prefix}.weight"], dtype)
     return add_bias(network, tensor, weights.get(f"{prefix}.bias"), dtype)
 
 
