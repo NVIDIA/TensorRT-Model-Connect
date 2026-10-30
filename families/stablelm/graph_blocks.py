@@ -146,6 +146,7 @@ def add_attention_block(
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
     fp32_attention_accumulation: bool = False,
+    keep_fp16_attention_mask: bool = False,
 ) -> dict[str, trt.ITensor]:
     """Pre-norm -> QKV -> RoPE -> cache concat -> attention -> output proj.
 
@@ -275,6 +276,7 @@ def add_attention_block(
         mask=mask_4d,
         scale=attention_scale,
         fp32_accumulation=fp32_attention_accumulation,
+        fp16_mask_with_fp32_accumulation=keep_fp16_attention_mask,
     )
 
     # Output projection
