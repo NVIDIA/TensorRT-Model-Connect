@@ -280,7 +280,7 @@ def _nchw_layer_norm(network, tensor, channels: int, weight, bias, eps, dtype, g
     )
 
 
-def _add_block(network, tensor, weights, prefix, channels, cfg, dtype, graph_ops):
+def _add_block(network, tensor, weights, prefix, channels, cfg, dtype, graph_ops, quant=None):
     residual = tensor
     hidden = _add_conv2d(
         network,
@@ -305,9 +305,13 @@ def _add_block(network, tensor, weights, prefix, channels, cfg, dtype, graph_ops
         cfg["layer_norm_eps"],
         dtype,
     )
-    hidden = graph_ops.linear_with_bias(network, hidden, weights, f"{prefix}.pointwise1", dtype)
+    hidden = graph_ops.linear_with_bias(
+        network, hidden, weights, f"{prefix}.pointwise1", dtype, quant
+    )
     hidden = graph_ops.activation(network, hidden, cfg["hidden_act"], dtype)
-    hidden = graph_ops.linear_with_bias(network, hidden, weights, f"{prefix}.pointwise2", dtype)
+    hidden = graph_ops.linear_with_bias(
+        network, hidden, weights, f"{prefix}.pointwise2", dtype, quant
+    )
     hidden = graph_ops.multiply_last_dim(network, hidden, weights[f"{prefix}.gamma"], dtype)
     hidden = graph_ops.shuffle(
         network, hidden, first_transpose=trt.Permutation([0, 3, 1, 2])
@@ -324,6 +328,7 @@ def build_convnext_engine(
     *,
     precision: str = "fp32",
     verbose: bool = False,
+    quant_ctx=None,
 ) -> bytes:
     """Build a batch-1 DINOv3 ConvNeXt feature extractor with TensorRT APIs."""
     from . import graph_ops
@@ -331,7 +336,7 @@ def build_convnext_engine(
     cfg = resolve_convnext_config(config_or_raw)
     work_np_dtype = target_dtype(precision)
     work_trt_dtype = trt.float16 if precision == "fp16" else trt.float32
-    builder, network, builder_config = graph_ops.new_network(verbose)
+    builder, network, builder_config = graph_ops.new_network(verbose, quant_ctx)
 
     pixel_values = network.add_input(
         "pixel_values",
@@ -396,6 +401,7 @@ def build_convnext_engine(
                 cfg,
                 work_np_dtype,
                 graph_ops,
+                quant_ctx,
             )
 
     final_channels = cfg["output_dim"]
