@@ -757,6 +757,7 @@ int main() {
     audio_command.options.emplace("--output", audio_path.string());
     audio_command.options.emplace("--max-new-tokens", "9");
     audio_command.options.emplace("--seed", "17");
+    audio_command.options.emplace("--description", "warm acoustic backing");
     audio_command.options.emplace("--stream", "true");
     audio_command.options.emplace("--chunk-frames", "4");
     FakeStreamingAudio audio;
@@ -765,7 +766,8 @@ int main() {
           "streaming audio task dispatch succeeds");
     check(std::filesystem::file_size(audio_path) == 3 * sizeof(float),
           "streaming audio writes raw float32 samples");
-    check(audio.seen.max_new_tokens == 9 && audio.seen.seed == 17 && audio.seen_chunk_frames == 4,
+    check(audio.seen.max_new_tokens == 9 && audio.seen.seed == 17 &&
+              audio.seen.description == "warm acoustic backing" && audio.seen_chunk_frames == 4,
           "streaming audio options reach the Task API");
     check(audio_output.str().find("\"format\":\"float32le\"") != std::string::npos,
           "streaming audio output format is explicit");

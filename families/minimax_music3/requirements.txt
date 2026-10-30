@@ -1,0 +1,2 @@
+diffusers==0.40.0
+soundfile==0.14.0
