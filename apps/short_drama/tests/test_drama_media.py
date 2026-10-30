@@ -87,3 +87,52 @@ def test_media_never_writes_outside_the_project(project):
         media.inside(project, project.root / "stills" / ".." / ".." / "evil.png")
     assert media.inside(project, project.root / "stills" / "a.png") == project.root / "stills" / "a.png"
 
+
+class FakeImages:
+    def image(self, model, prompt, *, size, seed):
+        return b"png"
+
+
+def test_only_what_appears_in_a_shot_gets_a_still(project):
+    plan = project.plan
+    plan["characters"].append({"id": "wang", "name": "王胡", "look": "a bearded man"})
+    project.save_plan(plan)
+    project.save_stills({})
+    services = FakeServices()
+    services.engine = FakeImages()
+    media.run_stills(Context(project, {"seed": 3}, "img", None, services, progress=lambda _: None))
+    stills = project.stills
+    assert sorted(stills) == ["character:aq", "location:temple"]  # 王胡 is in no shot
+    assert stills["character:aq"]["model"] == "img" and stills["character:aq"]["seconds"] >= 0
+    assert media.usage(plan) == {"character:aq": ["e1s1"], "location:temple": ["e1s1"]}
+    assert media.average_seconds([{"model": "img", "seconds": 4}, {"model": "img", "seconds": 6},
+                                  {"model": "other", "seconds": 60}], "img") == 5.0
+
+
+def test_a_take_is_outdated_when_a_still_or_the_plan_behind_it_changes(project):
+    stills = project.stills
+    stills["location:temple"]["status"] = "approved"
+    project.save_stills(stills)
+    render(project, FakeServices())
+
+    def reasons():
+        plan = project.plan
+        episode = plan["episodes"][0]
+        return media.outdated(project, plan, episode, episode["shots"][0], project.shot_state(1)["e1s1"],
+                              use_previous=False)
+
+    assert reasons() == []
+    (project.root / "stills" / "character-aq-2.png").write_bytes(b"png")
+    stills["character:aq"]["file"] = "stills/character-aq-2.png"  # redrawn
+    project.save_stills(stills)
+    assert reasons() == ["references"]
+    plan = project.plan
+    plan["episodes"][0]["shots"][0]["line"] = "滚出去！"
+    project.save_plan(plan)
+    assert reasons() == ["references", "prompt"]
+    render(project, FakeServices(), only=["e1s1"])
+    assert reasons() == []
+    state = project.shot_state(1)
+    state["e1s1"].update(state["e1s1"]["takes"][0])  # back to take 1, rendered from the old still and line
+    project.save_shot_state(1, state)
+    assert reasons() == ["references", "prompt"]

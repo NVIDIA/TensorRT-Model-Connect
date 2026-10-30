@@ -14,6 +14,8 @@ import time
 from typing import Any
 
 PROJECT_ID = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+SNAPSHOT = re.compile(r"\d{8}-\d{6}-\d{3}\.json")
+KEEP_SNAPSHOTS = 50
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -64,12 +66,54 @@ class Project:
         path = self.root / "novel.txt"
         return path.read_text(encoding="utf-8") if path.is_file() else ""
 
+    def save_novel(self, text: str) -> None:
+        partial = self.root / f".novel.txt.{os.getpid()}.tmp"
+        partial.write_text(text, encoding="utf-8")
+        partial.replace(self.root / "novel.txt")
+
     @property
     def plan(self) -> dict[str, Any]:
         return read_json(self.root / "plan.json", {})
 
-    def save_plan(self, plan: dict[str, Any]) -> None:
+    def save_plan(self, plan: dict[str, Any], *, note: str = "") -> None:
+        """Save the plan; with a note, keep the plan it replaces as a snapshot first."""
+
+        if note and (self.root / "plan.json").is_file():
+            self.snapshot(note)
         write_json(self.root / "plan.json", plan)
+
+    def snapshot(self, note: str) -> str:
+        """Copy the current plan into history/, so a model edit or a restore can be undone."""
+
+        history = self.root / "history"
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        number = sum(1 for path in history.glob(f"{stamp}-*.json")) if history.is_dir() else 0
+        name = f"{stamp}-{number:03d}.json"
+        write_json(history / name, {"note": note[:120], "time": int(time.time()), "plan": self.plan})
+        for old in self.snapshots()[KEEP_SNAPSHOTS:]:
+            (history / old["name"]).unlink()
+        return name
+
+    def snapshots(self) -> list[dict[str, Any]]:
+        """Plan snapshots, newest first, without their plans."""
+
+        history = self.root / "history"
+        names = sorted((path.name for path in history.glob("*.json") if SNAPSHOT.fullmatch(path.name)),
+                       reverse=True) if history.is_dir() else []
+        return [{"name": name, **{key: value for key, value in read_json(history / name, {}).items()
+                                   if key != "plan"}} for name in names]
+
+    def restore(self, name: str) -> None:
+        if not SNAPSHOT.fullmatch(name) or not (self.root / "history" / name).is_file():
+            raise KeyError(name)
+        self.save_plan(read_json(self.root / "history" / name)["plan"], note=f"before restoring {name}")
+
+    @property
+    def review(self) -> dict[str, Any]:
+        return read_json(self.root / "review.json", {})
+
+    def save_review(self, review: dict[str, Any]) -> None:
+        write_json(self.root / "review.json", review)
 
     @property
     def stills(self) -> dict[str, Any]:
@@ -120,9 +164,12 @@ class Store:
             raise KeyError(project_id)
         return Project(root)
 
-    def create(self, title: str, novel: str, *, flow: str, episodes: int, max_seconds: int) -> Project:
-        if not novel.strip():
-            raise ValueError("the novel is empty")
+    def create(self, title: str, novel: str, *, flow: str, episodes: int, max_seconds: int,
+               idea: str = "") -> Project:
+        """A project starts from a novel, or from an idea the story step turns into one."""
+
+        if not novel.strip() and not idea.strip():
+            raise ValueError("paste a novel or describe an idea")
         base = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "drama"
         project_id, number = base, 1
         while (self.root / "projects" / project_id).exists():
@@ -133,5 +180,5 @@ class Store:
         (root / "novel.txt").write_text(novel, encoding="utf-8")
         project = Project(root)
         project.update_meta(title=title, flow=flow, episodes=episodes, max_seconds=max_seconds,
-                            created=int(time.time()))
+                            created=int(time.time()), **({"idea": idea.strip()} if idea.strip() else {}))
         return project

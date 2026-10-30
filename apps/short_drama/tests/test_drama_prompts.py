@@ -63,7 +63,11 @@ def test_video_prompt_numbers_pictures_in_upload_order_and_quotes_nothing():
 def test_a_line_from_someone_off_screen_becomes_a_voiceover():
     references = [("character", PLAN["characters"][1]), ("location", PLAN["locations"][0])]
     first, _ = prompts.video_prompts(PLAN, {**SHOT, "characters": ["wu"]}, references)
-    assert "off-screen voiceover: <d>[Chinese] 我和你困觉！</d>" in first
+    # 阿Q is heard, not seen (as on a phone): his voice, a speaker id, and closed lips on screen
+    assert "A hoarse male voice (S1) says in an off-screen voiceover: <d>[Chinese] 我和你困觉！</d>" in first
+    assert "keep their lips closed" in first
+    first, _ = prompts.video_prompts(PLAN, {**SHOT, "characters": ["wu"], "speaker": ""}, references)
+    assert "An off-screen narrator says in an off-screen voiceover: <d>[Chinese] 我和你困觉！</d>" in first
 
 
 def test_still_prompts_describe_each_kind():

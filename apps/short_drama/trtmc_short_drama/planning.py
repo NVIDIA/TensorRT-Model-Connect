@@ -32,6 +32,10 @@ def run(context: Context) -> None:
     shot_seconds = int(params.get("shot_seconds", 8))
 
     parts = prompts.chapters(project.novel)
+    if not parts:
+        raise ValueError("the project has no story yet; paste one or write it from the idea")
+    if project.plan:
+        project.snapshot("before planning again")
     notes = []
     for number, text in enumerate(parts, start=1):
         context.check()
@@ -144,7 +148,7 @@ def normalize_shots(value: Any, plan: dict[str, Any], episode: int, max_seconds:
         line = chinese(raw.get("line"))
         if not line:
             speaker = ""
-        elif speaker not in cast:
+        elif speaker not in characters:  # a cast member outside the shot speaks off screen, as on a phone
             speaker = cast[0] if cast else ""
         shot = {key: str(raw.get(key) or "") for key in ("summary", "camera", "action", "after", "then", "sound")}
         shot.update(id=f"e{episode}s{len(shots) + 1}", seconds=seconds, characters=cast,

@@ -94,6 +94,72 @@ Return a JSON array of shots with exactly these keys.
 Source text of this episode:
 {source}"""
 
+STORY_SYSTEM = "You write original Chinese stories that will be filmed as vertical live-action short dramas."
+
+STORY_PROMPT = """Write an original short story in Chinese from this idea. It will be filmed as a
+vertical live-action short drama in {episodes} episodes of at most {max_seconds} seconds each.
+
+Idea: {idea}
+
+- Build it on one person who wants something concrete, runs into an obstacle, acts, pays a price
+  and ends changed. Every chapter moves that line forward and ends on a turn.
+- Exactly {episodes} chapters. Start each with a heading line such as 第一章 <title>; 500 to 900
+  characters each.
+- Tell it through what can be filmed: actions, places, objects and short spoken lines in 「」.
+  No inner thoughts that cannot be seen or heard.
+- At most 6 named characters and 4 places in the whole story, so each can be cast and drawn once.
+Reply with the story only, without a title page, notes or markdown."""
+
+REVISE_SHOT_PROMPT = """Rewrite one shot of the vertical short drama "{title}" ({setting}) following
+the director's note. Change what the note asks for and what it requires; keep the rest of the shot.
+
+Director's note: {instruction}
+
+The shot now: {shot}
+The shot before it: {before}
+The shot after it: {after}
+What this episode adapts: {notes}
+Characters (use these ids): {characters}
+Locations (use these ids): {locations}
+Props (use these ids): {props}
+
+Keep the rules of the shot list: 4 to 9 seconds; at most one line of dialogue, in Chinese, under 16
+characters, spoken by a character in the shot; at most 3 characters; "summary", "camera", "action",
+"after", "then" and "sound" in English, naming people by their ids, never with double quotes. The
+shot must still follow from the shot before it and lead into the shot after it.
+
+Return the whole shot as one JSON object with the keys location, characters, props, seconds,
+summary, camera, action, speaker, line, after, then, sound."""
+
+REVISE_ITEM_PROMPT = """Rewrite one {kind} of the vertical short drama "{title}" ({setting}; {style})
+following the director's note. Change what the note asks for; keep the rest.
+
+Director's note: {instruction}
+
+The {kind} now: {item}
+
+Write "name"{role} in Chinese and {english} in English, one sentence each, never with double
+quotes. Return one JSON object with the keys {keys}."""
+
+REVIEW_PROMPT = """Review the shot list of episode {number} of the vertical short drama "{title}"
+before it is filmed. Each shot becomes one clip of at most 9 seconds from a video model that sees
+reference pictures of the characters, location and props in the shot, and nothing else.
+
+What this episode adapts (chapter notes): {notes}
+Characters: {characters}
+Locations: {locations}
+Props: {props}
+Shots, in order: {shots}
+
+Report only problems that would hurt the episode:
+- an important event or line from the notes that no shot shows, or an event the notes do not have;
+- continuity between neighbouring shots: a prop that appears, vanishes or changes hands, clothes or
+  injuries that change, people who jump to another position or place without a reason;
+- more action than one clip can show, or several things happening at once;
+- a line spoken by someone who is not in the shot, or too long for the shot.
+Return a JSON array of at most 6 problems, each {{"shot": "<shot id>", "problem": "<one sentence in
+Chinese>", "fix": "<the smallest change to that shot, in Chinese>"}}. Return [] when the shots are fine."""
+
 
 def chapters(novel: str, limit: int = 6000) -> list[str]:
     """Split on chapter headings (第…章/回/节); fall back to paragraphs packed up to `limit`."""
@@ -223,6 +289,10 @@ def video_prompts(plan: dict[str, Any], shot: dict[str, Any],
         manner = f"In {voice[speaker]}, " if voice.get(speaker) else ""
         body.append(f"{manner}{name(speaker)} (S1) says <d>[Chinese] {line}</d> "
                     "and then falls silent.")
+    elif line and voice.get(speaker):  # a cast member heard but not seen, as on a phone
+        heard = _clause(voice[speaker])
+        body.append(f"{heard[:1].upper()}{heard[1:]} (S1) says in an off-screen voiceover: "
+                    f"<d>[Chinese] {line}</d> The people on screen keep their lips closed.")
     elif line:
         body.append(f"An off-screen narrator says in an off-screen voiceover: <d>[Chinese] {line}</d> "
                     "The people on screen keep their lips closed.")

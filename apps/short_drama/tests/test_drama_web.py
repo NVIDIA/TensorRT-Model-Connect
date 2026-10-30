@@ -31,10 +31,20 @@ class FakeEngine:
         pass
 
 
+STORY = "第一章 手机\n" + "他捡起一部手机，屏幕亮了。" * 20
+
+
 class FakeChat:
+    def complete(self, system, user, **_):
+        return STORY
+
     def complete_json(self, system, user, **_):
         if user.startswith("Summarize"):
             return {"summary": "x"}
+        if user.startswith("Rewrite one shot"):
+            return {**PLAN_STEPS[0], "line": "你也配姓赵！"}
+        if user.startswith("Review"):
+            return [{"shot": "e1s1", "problem": "台词太凶", "fix": "语气缓和"}]
         return BIBLE if user.startswith("Plan") else PLAN_STEPS
 
 
@@ -197,3 +207,43 @@ def test_a_non_loopback_app_needs_its_token(tmp_path, monkeypatch):
         assert other.get("/api/state", headers={"X-Short-Drama-Token": "s3cret"}).status_code == 200
         assert other.get("/static/app.css").status_code == 200
 
+
+
+def test_an_idea_project_writes_its_story_then_plans_and_revises(tmp_path, monkeypatch):
+    client, _ = make_client(tmp_path, monkeypatch)
+    with client:
+        assert client.post("/api/projects", json={"title": "x"}).status_code == 400
+        created = client.post("/api/projects", json={"title": "手机", "idea": "外卖骑手捡到一部手机", "episodes": 1}).json()
+        url = f"/api/projects/{created['id']}"
+        project = client.get(url).json()
+        assert project["novel_chars"] == 0 and project["meta"]["idea"] == "外卖骑手捡到一部手机"
+        assert project["stages"][0]["next"] == "Write the story from the idea"
+        assert project["model_review"] is None  # the page tests it for truth
+        client.post(f"{url}/run", json={"step": "plan"})
+        assert "no story yet" in wait(client)[0]["error"]
+        client.post(f"{url}/run", json={"step": "story"})
+        assert wait(client)[0]["status"] == "done"
+        assert client.get(f"{url}/novel").json()["novel"] == STORY
+        client.post(f"{url}/run", json={"step": "plan"})
+        wait(client)
+
+        project = client.get(url).json()
+        assert project["origins"] == {"e1s1": "adapted"} and project["usage"]["location:temple"] == ["e1s1"]
+        assert project["stages"][1]["next"] == "Draw 2 stills" and project["estimates"] == {"still": None, "shot": None}
+        assert client.post(f"{url}/run", json={"step": "revise", "params": {"target": "shot:../x", "instruction": "a"}}
+                           ).status_code == 400
+        client.post(f"{url}/run", json={"step": "revise", "params": {"target": "shot:e1s1", "instruction": "换句台词",
+                                                                        "only": ["x"], "max_tokens": 1}})
+        assert wait(client)[0]["status"] == "done"
+        client.post(f"{url}/run", json={"step": "review"})
+        wait(client)
+        project = client.get(url).json()
+        assert project["plan"]["episodes"][0]["shots"][0]["line"] == "你也配姓赵！"
+        assert project["model_review"]["current"] and project["model_review"]["items"][0]["fix"] == "语气缓和"
+        assert project["history"][0]["note"].startswith("before revising shot e1s1")
+        name = project["history"][0]["name"]
+        assert client.post(f"{url}/history/{name}/restore").status_code == 200
+        assert client.post(f"{url}/history/..%2fplan.json/restore").status_code == 404
+        project = client.get(url).json()
+        assert project["plan"]["episodes"][0]["shots"][0]["line"] == "滚出去！" and not project["model_review"]["current"]
+        assert client.put(f"{url}/novel", json={"novel": " "}).status_code == 400
