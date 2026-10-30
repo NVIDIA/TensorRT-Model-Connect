@@ -6,19 +6,15 @@
 #include "fp32_fine_attention.cuh"
 #include "vsa_backend.h"
 
-#include <atomic>
 #include <cassert>
 #include <cfloat>
-#include <chrono>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <cublas_v2.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <iostream>
 #include <mutex>
-#include <string>
 #include <tvm/ffi/container/tensor.h>
 #include <tvm/ffi/extra/c_env_api.h>
 #include <tvm/ffi/function.h>
@@ -133,16 +129,14 @@ trtmc::minimax_h3::VsaBackend selected_backend(int device) {
 
     cudaDeviceProp properties{};
     check_cuda(cudaGetDeviceProperties(&properties, device), "device capability query");
-    const char* value = std::getenv("TRTMC_MINIMAX_H3_VSA_BACKEND");
-    const std::string request = value != nullptr ? value : "auto";
 #if defined(TRTMC_MINIMAX_H3_VSA_HAS_BLACKWELL)
     constexpr bool kHasBlackwellKernels = true;
 #else
     constexpr bool kHasBlackwellKernels = false;
 #endif
     try {
-        cached_backend = trtmc::minimax_h3::select_vsa_backend(
-            request, properties.major, properties.minor, kHasBlackwellKernels);
+        cached_backend = trtmc::minimax_h3::select_vsa_backend(properties.major, properties.minor,
+                                                               kHasBlackwellKernels);
     } catch (const std::exception& error) {
         TVM_FFI_THROW(RuntimeError) << error.what();
     }
@@ -354,29 +348,8 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::Ten
     auto* q2k_num =
         reinterpret_cast<int32_t*>(tensor_data<uint8_t>(workspace) + layout.count_offset);
     const auto* sizes = tensor_data<int32_t>(variable_block_sizes);
-    const char* trace_option = std::getenv("TRTMC_MINIMAX_H3_VSA_TRACE");
-    const bool trace = trace_option && std::string(trace_option) == "1";
-    static std::atomic<uint64_t> next_trace_id{0};
-    const uint64_t trace_id = trace ? next_trace_id.fetch_add(1, std::memory_order_relaxed) : 0;
-    const auto trace_start =
-        trace ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    const auto trace_stage = [&](const char* stage) {
-        if (!trace)
-            return;
-        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-                                 std::chrono::steady_clock::now() - trace_start)
-                                 .count();
-        const auto timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
-                                   std::chrono::system_clock::now().time_since_epoch())
-                                   .count();
-        std::cerr << "[MiniMax-H3 VSA trace] call=" << trace_id << " stage=" << stage
-                  << " heads=" << g.heads << " tiles=" << g.tiles << " rows=" << g.sequence
-                  << " regions=" << regions.shape()[0] << " host_elapsed_us=" << elapsed
-                  << " host_unix_us=" << timestamp << std::endl;
-    };
     constexpr int kThreads = 256;
     const int pool_blocks = static_cast<int>((g.pool_elements + kThreads - 1) / kThreads);
-    trace_stage("pooling_enter");
     mean_pool_tiles<<<pool_blocks, kThreads, 0, stream>>>(tensor_data<__nv_bfloat16>(query), sizes,
                                                           q_pool, g);
     mean_pool_tiles<<<pool_blocks, kThreads, 0, stream>>>(tensor_data<__nv_bfloat16>(key), sizes,
@@ -384,41 +357,30 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::Ten
     mean_pool_tiles<<<pool_blocks, kThreads, 0, stream>>>(tensor_data<__nv_bfloat16>(value), sizes,
                                                           v_pool, g);
     check_cuda(cudaGetLastError(), "OmniRef mean pooling");
-    trace_stage("pooling_enqueued");
-    trace_stage("routing_handle_enter");
     cublasHandle_t handle = get_cublas_handle(query.device().device_id, stream);
     check_cublas(cublasSetMathMode(handle, CUBLAS_PEDANTIC_MATH), "IEEE routing math mode");
     const float alpha = 1.0F / std::sqrt(static_cast<float>(kHeadDim));
     const float beta = 0.0F;
-    trace_stage("routing_gemm_enter");
     check_cublas(cublasSgemmStridedBatched(handle, CUBLAS_OP_T, CUBLAS_OP_N, g.tiles, g.tiles,
                                            kHeadDim, &alpha, k_pool, kHeadDim,
                                            g.pool_elements / g.heads, q_pool, kHeadDim,
                                            g.pool_elements / g.heads, &beta, scores, g.tiles,
                                            g.score_elements / g.heads, g.heads),
                  "OmniRef routing GEMM");
-    trace_stage("routing_gemm_enqueued");
-    trace_stage("routing_map_enter");
     build_block_map<<<g.heads * g.tiles, kThreads, 0, stream>>>(
         scores, sizes, tensor_data<int32_t>(regions), static_cast<int>(regions.shape()[0]), q2k_idx,
         q2k_num, g);
     check_cuda(cudaGetLastError(), "OmniRef per-region Top-K");
-    trace_stage("routing_map_enqueued");
     // Finish the independent compression branch before reusing its dead scratch.
-    trace_stage("compression_softmax_enter");
     softmax_scores(scores, sizes, g, stream);
     check_cuda(cudaGetLastError(), "OmniRef compression softmax");
-    trace_stage("compression_softmax_enqueued");
     const float compression_alpha = 1.0F;
-    trace_stage("compression_gemm_enter");
     check_cublas(cublasSgemmStridedBatched(handle, CUBLAS_OP_N, CUBLAS_OP_N, kHeadDim, g.tiles,
                                            g.tiles, &compression_alpha, v_pool, kHeadDim,
                                            g.pool_elements / g.heads, scores, g.tiles,
                                            g.score_elements / g.heads, &beta, q_pool, kHeadDim,
                                            g.pool_elements / g.heads, g.heads),
                  "OmniRef compression GEMM");
-    trace_stage("compression_gemm_enqueued");
-    trace_stage("fine_attention_enter");
     if (backend == trtmc::minimax_h3::VsaBackend::kBlackwell) {
 #if defined(TRTMC_MINIMAX_H3_VSA_HAS_BLACKWELL)
         BlockSparseVsaArgs args{};
@@ -449,14 +411,11 @@ void run_vsa(tvm::ffi::TensorView query, tvm::ffi::TensorView key, tvm::ffi::Ten
             tensor_data<__nv_bfloat16>(output), tensor_data<uint8_t>(workspace), layout, g.heads,
             g.tiles, handle, stream);
     }
-    trace_stage("fine_attention_enqueued");
     const int64_t elements = static_cast<int64_t>(g.heads) * g.sequence * kHeadDim;
     const int blocks = static_cast<int>((elements + kThreads - 1) / kThreads);
-    trace_stage("gated_add_enter");
     add_gate_compression<<<blocks, kThreads, 0, stream>>>(
         tensor_data<__nv_bfloat16>(output), tensor_data<__nv_bfloat16>(gate), q_pool, sizes, g);
     check_cuda(cudaGetLastError(), "OmniRef gated addcmul");
-    trace_stage("return_enqueued");
 }
 
 } // namespace

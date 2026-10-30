@@ -26,9 +26,8 @@ not change.
 
 The binding contains a generic SM80+ CUDA implementation. Enable
 `TRTMC_BUILD_MINIMAX_H3_OMNIREF_VSA_SM100A` to also embed optimized sm100a and
-sm103a cubins; runtime `auto` selects the optimized route when available.
-`TRTMC_MINIMAX_H3_VSA_BACKEND=generic` or `blackwell` forces a route for
-validation. An unavailable explicitly requested route fails.
+sm103a cubins; the binding then uses them on those GPUs and the generic route
+elsewhere. The route follows the compiled library and the active GPU only.
 
 The generic route scales FP32 Q and K separately before the QK product,
 retains FP32 scores/probabilities and PV, then rounds fine attention to BF16.
@@ -90,22 +89,3 @@ selection. See `reference_vsa.py` for the CPU geometry contract.
 This implementation is experimental. Source presence and successful
 compilation do not establish GPU numerical agreement, trained-model quality,
 or realtime performance.
-
-`TRTMC_MINIMAX_H3_VSA_TRACE=1` enables host-side diagnostic messages for each
-call's geometry and pooling, routing, fine-attention, compression and gated-add
-boundaries, including a host Unix timestamp to distinguish a stalled operation
-from setup time before the first call. It is off by default and does not change
-device computations or insert synchronization. An `enqueued` message does not establish GPU completion.
-For a separate bounded failure-localization run, `CUDA_LAUNCH_BLOCKING=1` can
-help identify the last entered operation; that setting changes execution
-scheduling and its host elapsed times are not benchmark evidence. Neither
-option changes the original correctness or full-model completion gates.
-
-For immutable saved operands from the interleaved-guide oracle case,
-`families.minimax_h3.tests.reference_vsa_rounding` observes only its existing
-failed coordinates on CPU. It compares FP64 attention with approximate FP32
-operation orders and rounds directly from FP64 to BF16 to avoid an extra
-FP32 midpoint rounding. Current native fine values remain conditionally
-inferred from the gated output and unchanged compression until directly
-recorded. This diagnostic never substitutes its output for the GPU reference
-or changes an acceptance threshold.
