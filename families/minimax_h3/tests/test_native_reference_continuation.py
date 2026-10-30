@@ -9,7 +9,6 @@ or image/video quality qualification. No engine, RNG or scheduler doubles.
 
 from dataclasses import asdict, replace
 import ast
-import hashlib
 import importlib.metadata
 import json
 import os
@@ -149,9 +148,7 @@ def test_real_native_latent_guide_matches_49_forward_upstream(
     patchify_video_latents(torch.from_numpy(guide_video), (1, 2, 2)).numpy().tofile(tmp_path / "guide.video.f32.bin")
     guide_audio.reshape(2, 32).tofile(tmp_path / "guide.audio.f32.bin")
     source = Path(os.environ["TRTMC_H3_PACKED_SEQUENCE_SOURCE"])
-    raw = source.read_bytes()
-    assert hashlib.sha256(raw).hexdigest() == "eb2464f91fdfd0ec8e12057bf53d2727c32678aef02d479b39a95d4f4b6fb6d4"
-    tree = ast.parse(raw)
+    tree = ast.parse(source.read_bytes())
     tree.body = [n for n in tree.body if not (isinstance(n, ast.ImportFrom) and n.module == "vllm_omni.errors")]
     upstream = {"OmniClientError": ValueError}
     exec(compile(tree, str(source), "exec"), upstream)

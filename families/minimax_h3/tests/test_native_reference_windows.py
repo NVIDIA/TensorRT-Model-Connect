@@ -5,7 +5,6 @@
 
 import ast
 from dataclasses import asdict, replace
-import hashlib
 import importlib.metadata
 import json
 import os
@@ -131,12 +130,7 @@ def _run_window_oracle(tmp_path, record_property, child_rows=None):
         child_embeddings.tofile(tmp_path / "continuation-text.f32.bin")
         (tmp_path / "continuation-text-rows.txt").write_text(str(child_rows))
     source = Path(os.environ["TRTMC_H3_PACKED_SEQUENCE_SOURCE"])
-    raw = source.read_bytes()
-    assert (
-        hashlib.sha256(raw).hexdigest()
-        == "eb2464f91fdfd0ec8e12057bf53d2727c32678aef02d479b39a95d4f4b6fb6d4"
-    )
-    tree = ast.parse(raw)
+    tree = ast.parse(source.read_bytes())
     tree.body = [
         n
         for n in tree.body

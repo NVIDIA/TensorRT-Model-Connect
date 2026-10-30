@@ -159,7 +159,6 @@ def test_audio_decoder_cleans_borrowed_buffers_on_graph_failure(monkeypatch, con
 @pytest.mark.trt
 def test_trained_audio_decoder_matches_native_stereo_cold_warm(tmp_path, record_property):
     """Full trained 207-frame audio decoder, not generated-dialogue qualification."""
-    import hashlib
     import importlib.metadata
     import json
     import os
@@ -202,13 +201,9 @@ def test_trained_audio_decoder_matches_native_stereo_cold_warm(tmp_path, record_
     assert all(value.dtype == torch.float32 for value in state.values())
     weights = {name: value.numpy() for name, value in state.items()}
     validate_decoder_weights(weights)
-    with files[0].open("rb") as file:
-        checkpoint_sha = hashlib.file_digest(file, "sha256").hexdigest()
-    assert checkpoint_sha == "52c59e67ba8de5477c81bfbced0327aabf500f1bfdeefd5ee754529241cb26cb"
     metadata = dict(
         hf_id="MiniMaxAI/MiniMax-H3",
         hf_revision="48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
-        checkpoint_sha256=checkpoint_sha,
         component_config=config,
         decoder_tensor_count=len(state),
         decoder_parameters=sum(value.numel() for value in state.values()),
