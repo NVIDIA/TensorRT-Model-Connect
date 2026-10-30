@@ -85,7 +85,9 @@ def test_media_references_load_their_weights_straight_onto_the_device(monkeypatc
     adapter = {"classify": media.Vision, "transcribe": media.SpeechRecognition,
                "generate_audio": media.SpeechSynthesis, "solve": media.TimeSeries}[operation]
     adapter(ReferenceSpec(operation=operation, model="checkpoint", device="cuda:1"))
-    assert [(model, kwargs["device_map"]) for model, kwargs in loads] == [("checkpoint", "cuda:1")]
+    # In the reference precision too: an FP32 checkpoint loaded as such would sit on the device at twice the size.
+    assert [(model, kwargs["device_map"], kwargs.get("dtype", kwargs.get("torch_dtype")))
+            for model, kwargs in loads] == [("checkpoint", "cuda:1", torch.float16)]
 
 
 

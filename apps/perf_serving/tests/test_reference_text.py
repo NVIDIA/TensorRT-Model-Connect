@@ -141,7 +141,8 @@ def test_text_references_load_their_weights_straight_onto_the_device(monkeypatch
     monkeypatch.setattr(transformers.AutoProcessor, "from_pretrained", lambda *_args, **_kwargs: object())
     monkeypatch.setattr(getattr(transformers, loader), "from_pretrained", load)
     getattr(text, adapter)(ReferenceSpec(operation=operation, model="checkpoint", device="cuda:1"))
-    assert [(model, kwargs["device_map"]) for model, kwargs in loads] == [("checkpoint", "cuda:1")]
+    assert [(model, kwargs["device_map"], kwargs.get("dtype", kwargs.get("torch_dtype")))
+            for model, kwargs in loads] == [("checkpoint", "cuda:1", torch.float16)]
 
 
 def test_a_bare_cuda_device_loads_onto_the_current_device(monkeypatch):
