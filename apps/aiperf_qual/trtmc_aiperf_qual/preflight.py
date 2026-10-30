@@ -16,7 +16,7 @@ from .config import Environment
 PATHS = {"repo": "dir", "data_root": "dir", "runtime_root": "dir", "worker": "exe", "serve_python": "exe",
          "aiperf": "exe", "bundle_root": "created", "hf_datasets_cache": "created",
          "reference_env_root": "created"}
-SERVE_PACKAGES = ("torch", "transformers", "fastapi", "uvicorn", "multipart", "soundfile", "PIL", "numpy")
+SERVE_PACKAGES = ("torch", "transformers", "accelerate", "fastapi", "uvicorn", "multipart", "soundfile", "PIL", "numpy")
 
 
 def _value(values: Mapping[str, Any], key: str) -> Any:

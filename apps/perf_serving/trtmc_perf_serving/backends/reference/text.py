@@ -108,7 +108,11 @@ class TextGeneration:
             model_cls = (transformers.AutoModelForSeq2SeqLM if config.is_encoder_decoder
                          else transformers.AutoModelForCausalLM)
         self.encoder_decoder = bool(config.is_encoder_decoder)
-        self.model = maybe_compile(model_cls.from_pretrained(spec.model, **kwargs).to(spec.device).eval(), spec)
+        # Load the weights straight onto the device. Building the model in host memory first needs a host copy
+        # as large as the model, and the aarch64 PyTorch allocator keeps much of it after the move (Transformers'
+        # loader threads allocated it): on Thor, where the CPU and GPU share memory, it may not fit next to the
+        # GPU reservation.
+        self.model = maybe_compile(model_cls.from_pretrained(spec.model, **kwargs, device_map=spec.device).eval(), spec)
         # The strong compiled baseline for causal LMs: a static KV cache (fixed shapes the compiled
         # forward reuses); models that cannot use one fall back to the dynamic cache.
         self.static_cache = spec.mode == "compile" and not self.encoder_decoder and self.processor is None

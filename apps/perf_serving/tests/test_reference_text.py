@@ -91,9 +91,6 @@ def test_an_image_text_reference_applies_its_processor_kwargs(monkeypatch):
     calls = []
 
     class Model:
-        def to(self, _device):
-            return self
-
         def eval(self):
             return self
 
@@ -112,3 +109,29 @@ def test_an_image_text_reference_applies_its_processor_kwargs(monkeypatch):
     TextGeneration(ReferenceSpec(operation="generate", model="vl", device="cpu"))
     assert calls == [("vl", {"trust_remote_code": False, "revision": "r", "max_pixels": 200704}),
                      ("vl", {"trust_remote_code": False})]
+
+
+def test_a_generation_reference_loads_its_weights_straight_onto_the_device(monkeypatch):
+    from types import SimpleNamespace
+
+    import transformers
+
+    from trtmc_perf_serving.backends.reference.common import ReferenceSpec
+    from trtmc_perf_serving.backends.reference.text import TextGeneration
+
+    loads = []
+
+    class Model:  # no ``to``: building the model in host memory and then moving it would fail here
+        def eval(self):
+            return self
+
+    def load(model, **kwargs):
+        loads.append((model, kwargs))
+        return Model()
+
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained",
+                        lambda *_args, **_kwargs: SimpleNamespace(is_encoder_decoder=False))
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(transformers.AutoModelForCausalLM, "from_pretrained", load)
+    TextGeneration(ReferenceSpec(operation="generate", model="lm", device="cuda:1"))
+    assert [(model, kwargs["device_map"]) for model, kwargs in loads] == [("lm", "cuda:1")]
