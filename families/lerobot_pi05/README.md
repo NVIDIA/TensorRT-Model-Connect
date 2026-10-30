@@ -104,8 +104,11 @@ float32 and bfloat16 outputs for each and the reference's flow noise, plus LeRob
 own prompt token ids for 22 instructions chosen to stress the tokenizer (whitespace,
 digits, punctuation, Unicode, byte fallback, special-looking text, truncation).
 The manifests declare the generation-pinned public tokenizer copy in `external_files`.
-The family CI image stages that file, and the E2E test overlays it on the unchanged
-checkpoint directory. `test_e2e.py` first checks that both are staged locally, then
+Internal CI downloads it into the directory `TRTMC_LEROBOT_PI05_MODEL_DIR` names, and
+the Community GPU image (`ci/Dockerfile.dependencies`) carries it under `/opt/trtmc-ci`.
+The E2E test overlays it on the unchanged checkpoint directory: the Hugging Face cache
+at the manifest's revision, or `TRTMC_LEROBOT_PI05_CHECKPOINT_DIR` if set.
+`test_e2e.py` first checks that both are staged locally, then
 builds the pinned checkpoint, runs each observation through the SDK
 and compares all 50x7 actions, checks the bundle's tokenizer against the 22 cases,
 and checks that the native runtime links no Python or PyTorch library. Thresholds are

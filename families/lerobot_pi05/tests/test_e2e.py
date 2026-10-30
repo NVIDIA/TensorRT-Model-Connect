@@ -34,6 +34,9 @@ TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
 MODEL_FILES = ("config.json", "model.safetensors", "policy_preprocessor.json", "policy_postprocessor.json")
+# CI stages the manifests' external_files (the public tokenizer copy) outside the checkpoint:
+# Internal CI in the directory this variable names, the Community GPU image under /opt/trtmc-ci.
+EXTERNAL_FILES_ENV = "TRTMC_LEROBOT_PI05_MODEL_DIR"
 CI_ASSET_DIR = Path("/opt/trtmc-ci")
 
 
@@ -95,11 +98,14 @@ def _required_path(value: str | None, name: str) -> Path:
     return path
 
 
-def _model_dir(manifest: dict) -> Path:
-    """The checkpoint directory: explicit, or the snapshot CI staged before this offline run."""
-    explicit = os.environ.get("TRTMC_LEROBOT_PI05_MODEL_DIR")
+def _checkpoint_dir(manifest: dict) -> Path:
+    """The checkpoint directory: explicit, or the snapshot CI staged before this offline run.
+
+    The override is not TRTMC_LEROBOT_PI05_MODEL_DIR, which CI points at the external files.
+    """
+    explicit = os.environ.get("TRTMC_LEROBOT_PI05_CHECKPOINT_DIR")
     if explicit:
-        return _required_path(explicit, "TRTMC_LEROBOT_PI05_MODEL_DIR")
+        return _required_path(explicit, "TRTMC_LEROBOT_PI05_CHECKPOINT_DIR")
     from huggingface_hub import snapshot_download
 
     return Path(
@@ -111,6 +117,15 @@ def _model_dir(manifest: dict) -> Path:
     )
 
 
+def _ci_tokenizer(manifest: dict) -> Path | None:
+    (asset,) = manifest["external_files"]
+    assert asset["path"] == TOKENIZER_FILE
+    for root in (os.environ.get(EXTERNAL_FILES_ENV), CI_ASSET_DIR):
+        if root and (Path(root) / asset["path"]).is_file():
+            return Path(root) / asset["path"]
+    return None
+
+
 @pytest.fixture(scope="module")
 def model_dirs(tmp_path_factory):
     """Overlay CI's public tokenizer on the unchanged staged checkpoint directory."""
@@ -119,11 +134,9 @@ def model_dirs(tmp_path_factory):
     def get(manifest: dict) -> Path:
         name = manifest["name"]
         if name not in resolved:
-            directory = _model_dir(manifest)
-            (asset,) = manifest["external_files"]
-            assert asset["path"] == TOKENIZER_FILE
-            ci_tokenizer = CI_ASSET_DIR / asset["path"]
-            if ci_tokenizer.is_file() and not (directory / TOKENIZER_FILE).is_file():
+            directory = _checkpoint_dir(manifest)
+            ci_tokenizer = _ci_tokenizer(manifest)
+            if ci_tokenizer is not None and not (directory / TOKENIZER_FILE).is_file():
                 overlay = tmp_path_factory.mktemp(f"{name}-with-tokenizer")
                 for path in directory.iterdir():
                     (overlay / path.name).symlink_to(path)
@@ -146,9 +159,9 @@ def _staged_state_files(directory: Path) -> list[str]:
 def test_pinned_assets_are_staged(case_name: str, model_dirs) -> None:
     """Fail before any build, with the asset named, when the build would not find an input.
 
-    Pytest runs this first. CI stages the manifest's checkpoint revision and its
-    public tokenizer into the family CI image, then runs offline. The checkpoint,
-    every statistics file its processors name, and the tokenizer must be local.
+    Pytest runs this first. CI stages the manifest's checkpoint revision and its public
+    tokenizer copy, then runs offline. The checkpoint, every statistics file its
+    processors name, and the tokenizer must be local.
     """
     manifest, _ = CASES[case_name]
     try:
@@ -166,8 +179,9 @@ def test_pinned_assets_are_staged(case_name: str, model_dirs) -> None:
         hf_hub_download(TOKENIZER_REPO, TOKENIZER_FILE, revision=TOKENIZER_REVISION,
                         local_files_only=True)
     except Exception as error:  # noqa: BLE001 - name the dependency that is not staged
-        pytest.fail(f"{TOKENIZER_FILE} of {TOKENIZER_REPO}@{TOKENIZER_REVISION} "
-                    f"is not staged locally: {error}")
+        pytest.fail(f"{TOKENIZER_FILE} is in neither the checkpoint, ${EXTERNAL_FILES_ENV} nor "
+                    f"{CI_ASSET_DIR}, and {TOKENIZER_REPO}@{TOKENIZER_REVISION} is not staged "
+                    f"locally: {error}")
 
 
 @pytest.fixture(scope="module")
