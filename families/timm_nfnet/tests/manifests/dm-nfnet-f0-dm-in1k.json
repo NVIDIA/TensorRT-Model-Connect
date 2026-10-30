@@ -4,7 +4,7 @@
   "hf_revision": "ca8e830961c2ebceffff7affff34acfe7a1da673",
   "bundle": "dm-nfnet-f0-dm-in1k.bundle",
   "family": "timm_nfnet",
-  "task": "classification",
+  "task": "image_to_class_scores",
   "precision": "fp16",
   "testcases": [
     {
