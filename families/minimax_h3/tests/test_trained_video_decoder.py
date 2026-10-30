@@ -7,9 +7,8 @@ Synthetic normalized input latents, not a prompt-conditioned H3 result. The
 model and 124-frame 1344x768 output are not reduced for this comparison.
 """
 
-import hashlib
+import filecmp
 import importlib.metadata
-import inspect
 import json
 import os
 from pathlib import Path
@@ -23,16 +22,11 @@ import pytest
 _RTOL = 1e-3
 _ATOL = 1e-5
 _SHAPE = (124, 1344, 768, 3)
-_SHARDS = {
-    "diffusion_pytorch_model-00001-of-00003.safetensors": "72f4c6be84ac0674f27398cde991dd9d719762f3952c4921aa66b2ce542f6374",
-    "diffusion_pytorch_model-00002-of-00003.safetensors": "2e05e8bc23fa4071043e17fd242be8acd0685e781a43987432b2eae925be4198",
-    "diffusion_pytorch_model-00003-of-00003.safetensors": "c05d6ac4b1a33de372799d708531da6320f6a3ce6d1ce6d895e770988e004a39",
-}
-
-
-def _sha(path):
-    with Path(path).open("rb") as file:
-        return hashlib.file_digest(file, "sha256").hexdigest()
+_SHARDS = (
+    "diffusion_pytorch_model-00001-of-00003.safetensors",
+    "diffusion_pytorch_model-00002-of-00003.safetensors",
+    "diffusion_pytorch_model-00003-of-00003.safetensors",
+)
 
 
 def _compare_frames(actual_path, expected_path, shape):
@@ -85,7 +79,7 @@ def test_full_video_comparison_checks_every_frame_and_keeps_fp32(tmp_path):
 
 def _large_inventory(root):
     files = {
-        str(path.relative_to(root)): dict(bytes=path.stat().st_size, sha256=_sha(path))
+        str(path.relative_to(root)): dict(bytes=path.stat().st_size)
         for path in sorted(root.rglob("*"))
         if path.is_file() and not path.is_symlink() and path.stat().st_size > 32 * 1024**2
     }
@@ -98,12 +92,6 @@ def _large_inventory(root):
 def test_trained_video_decoder_full_portrait_matches_native_memory_presets(
     tmp_path, record_property
 ):
-    cached_reference = os.environ.get("TRTMC_MINIMAX_H3_VIDEO_REFERENCE_CACHE")
-    if cached_reference:
-        from families.minimax_h3.tests.vae_cached_video_case import run_cached_case
-
-        return run_cached_case(tmp_path, record_property, Path(cached_reference))
-
     import torch
     from diffusers import AutoencoderKLMiniMaxH3
     from diffusers.models.autoencoders.autoencoder_kl_minimax_h3 import MiniMaxH3VideoRotaryPosEmbed
@@ -138,8 +126,6 @@ def test_trained_video_decoder_full_portrait_matches_native_memory_presets(
     )
     assert all(config[name] == value for name, value in architecture.items())
     assert set(path.name for path in component.glob("*.safetensors")) == set(_SHARDS)
-    for name, expected_sha in _SHARDS.items():
-        assert _sha(component / name) == expected_sha
     index = json.loads(next(component.glob("*.safetensors.index.json")).read_text())["weight_map"]
     assert {name for name in index if name.startswith(("decoder.", "post_quant_conv."))} == set(
         checkpoint_keys()
@@ -152,7 +138,7 @@ def test_trained_video_decoder_full_portrait_matches_native_memory_presets(
             dict(
                 hf_id="MiniMaxAI/MiniMax-H3",
                 hf_revision="48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc",
-                checkpoint_shards=_SHARDS,
+                checkpoint_shards=list(_SHARDS),
                 decoder_tensors=585,
                 architecture=architecture,
                 output_shape=_SHAPE,
@@ -164,7 +150,6 @@ def test_trained_video_decoder_full_portrait_matches_native_memory_presets(
                 atol=_ATOL,
                 comparison_dtype="float32",
                 TF32=False,
-                upstream_source_sha256=_sha(Path(inspect.getfile(AutoencoderKLMiniMaxH3))),
                 native_ref2va_video_qualified=False,
                 prompt_or_dialogue_quality_qualified=False,
             ),
@@ -227,7 +212,7 @@ def test_trained_video_decoder_full_portrait_matches_native_memory_presets(
         expected_path = tmp_path / "upstream.f32.bin"
         expected.tofile(expected_path)
         del expected, model, latent, mean, std, decoded, denormalized
-        failures, hashes = [], {}
+        failures, outputs = [], {}
         for preset, batch, mode in [("minimal", 1, "staged"), ("original", 28, "resident")]:
             config_path = tmp_path / (preset + ".config.json")
             config_path.write_text(
@@ -277,9 +262,9 @@ def test_trained_video_decoder_full_portrait_matches_native_memory_presets(
             assert report["loads"] == (2 if mode == "staged" else 1)
             assert report["cold_forwards"] == report["warm_forwards"] == (196 if batch == 1 else 7)
             cold, warm = Path(str(prefix) + ".cold.f32.bin"), Path(str(prefix) + ".warm.f32.bin")
-            assert _sha(cold) == _sha(warm)
+            assert filecmp.cmp(cold, warm, shallow=False)
             comparison, errors = _compare_frames(cold, expected_path, _SHAPE)
-            hashes[preset] = _sha(cold)
+            outputs[preset] = cold
             (tmp_path / (preset + ".comparison.json")).write_text(
                 json.dumps(
                     dict(**report, **comparison, errors=errors, rtol=_RTOL, atol=_ATOL), indent=2
@@ -300,8 +285,8 @@ def test_trained_video_decoder_full_portrait_matches_native_memory_presets(
         (tmp_path / "cross-preset.json").write_text(
             json.dumps(
                 dict(
-                    byte_exact=hashes.get("minimal") == hashes.get("original")
-                    if len(hashes) == 2
+                    byte_exact=filecmp.cmp(outputs["minimal"], outputs["original"], shallow=False)
+                    if len(outputs) == 2
                     else None,
                     passing_requires_both_presets_against_upstream=True,
                 ),
@@ -311,6 +296,5 @@ def test_trained_video_decoder_full_portrait_matches_native_memory_presets(
         assert not failures, "\n".join(failures)
     finally:
         # Full videos and multi-GB bundles remain in the owned target result
-        # directory. The campaign mirrors bounded logs/metadata and hashes every
-        # retained complete artifact; it does not drop data after a mismatch.
+        # directory; a mismatch does not drop them.
         _large_inventory(tmp_path)

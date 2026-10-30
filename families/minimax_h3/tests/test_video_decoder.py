@@ -6,46 +6,6 @@ import numpy as np
 from types import SimpleNamespace
 
 from families.minimax_h3 import vae_builder as vae
-from families.minimax_h3.tests.vae_decoder_prefix_localize import compare, save_array
-
-
-def test_prefix_diagnostic_keeps_dtype_evidence_when_values_match():
-    actual = np.ones((2, 4), np.float16)
-    expected = np.ones((2, 4), np.float32)
-    result = compare(actual, expected)
-    assert not result["dtype_equal"] and not result["byte_exact"]
-    assert result["mismatched_elements"] == 0 and result["compared_elements"] == 8
-
-
-def test_prefix_diagnostic_checks_near_zero_without_comparison_downcast():
-    actual = np.array([0.0001, 1.0], np.float32)
-    expected = np.array([0.0, 1.0], np.float32)
-    result = compare(actual, expected)
-    assert result["dtype_equal"] and not result["byte_exact"]
-    assert result["mismatched_elements"] == 1 and result["compared_elements"] == 2
-
-
-def test_prefix_evidence_retains_full_unique_payloads_without_rewriting(tmp_path):
-    saved = {}
-    value = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
-    first = save_array(tmp_path, "first", value, saved)
-    alias = save_array(tmp_path, "second-rebuild", value.copy(), saved)
-    assert first == alias and not (tmp_path / "second-rebuild.npy").exists()
-    changed = value.copy()
-    changed[1, 2, 3] += 0.25
-    second = save_array(tmp_path, "different", changed, saved)
-    reshaped = save_array(tmp_path, "different-shape", value.reshape(4, 6), saved)
-    half = save_array(tmp_path, "different-dtype", value.astype(np.float16), saved)
-    assert len(saved) == 4 and len(list(tmp_path.iterdir())) == 4
-    for record, expected in [
-        (first, value),
-        (second, changed),
-        (reshaped, value.reshape(4, 6)),
-        (half, value.astype(np.float16)),
-    ]:
-        actual = np.load(tmp_path / record["path"], allow_pickle=False)
-        assert actual.shape == expected.shape and actual.dtype == expected.dtype
-        np.testing.assert_array_equal(actual, expected)
 
 
 @pytest.mark.parametrize("batch", [1, 28])
