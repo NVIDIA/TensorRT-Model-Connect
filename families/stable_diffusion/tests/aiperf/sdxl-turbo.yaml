@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+request: {num_steps: 1, guidance_scale: 0.0, cfg_scale: 0.0}
+
+reference:
+  adapter: families/stable_diffusion/reference/adapter.py
+  latent_adapter: families/stable_diffusion/reference/adapter.py
