@@ -251,15 +251,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task not in {
-        "text_to_pooled_features",
-        "text_to_embedding",
-        "text_pair_to_relevance",
-    }:
-        raise ValueError(
-            "distilbert task must be text_to_pooled_features, text_to_embedding, "
-            "or text_pair_to_relevance"
-        )
+    if request.task not in {"text_to_pooled_features", "text_to_embedding"}:
+        raise ValueError("distilbert task must be text_to_pooled_features or text_to_embedding")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower() != "distilbert":
