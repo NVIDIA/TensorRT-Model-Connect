@@ -41,6 +41,7 @@ from .checkpoint_mapper import (
     _open_safetensors,
     _load_tensor,
     _has_tensor,
+    _target_np_dtype,
     _transpose_2d,
 )
 from . import graph_ops
@@ -54,11 +55,22 @@ if TYPE_CHECKING:
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
+def _shape_only(rows: int, cols: int, dtype) -> np.ndarray:
+    """A read-only ``[rows, cols]`` view with no backing memory.
+
+    Stands in for a weight whose real bytes come from the quantization context.
+    """
+    return np.broadcast_to(np.zeros((), dtype=dtype), (rows, cols))
+
+
 class _MixtralModel:
     def load_weights(
         self,
         model_dir: str,
         config: ModelConfig,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -69,6 +81,7 @@ class _MixtralModel:
         num_experts = config.raw.get("num_local_experts", 8)
         intermediate_size = config.intermediate_size
 
+        weight_dtype = _target_np_dtype(precision)
         weights = WeightDict()
 
         # Embedding
@@ -76,7 +89,7 @@ class _MixtralModel:
         assert embedding.shape == (vocab, hidden), (
             f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
         )
-        weights["embedding"] = embedding.astype(np.float32)
+        weights["embedding"] = embedding.astype(weight_dtype)
 
         attention_size = 0
 
@@ -92,40 +105,51 @@ class _MixtralModel:
             weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
             # Q/K/V/O projections (separate, no biases)
-            q_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.q_proj.weight")
-            k_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.k_proj.weight")
-            v_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.v_proj.weight")
-            o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
+            for stem, hf_stem in (
+                ("w_q", "q_proj"),
+                ("w_k", "k_proj"),
+                ("w_v", "v_proj"),
+                ("w_o", "o_proj"),
+            ):
+                name = f"{prefix}.{stem}"
+                if quant_ctx is not None and name in quant_ctx.dense:
+                    weights[name] = quant_ctx.dense_weight(name)
+                elif quant_ctx is not None and quant_ctx.should_quantize(name):
+                    # The engine reads the quantized bytes from quant_ctx; only
+                    # the [in, out] shape is needed here.
+                    entry = quant_ctx.scales[name]
+                    weights[name] = _shape_only(entry.in_features, entry.out_features, weight_dtype)
+                else:
+                    raw_weight = _load_tensor(readers, f"{hf_prefix}.self_attn.{hf_stem}.weight")
+                    weights[name] = _transpose_2d(raw_weight, hf_stem, precision=precision)
+                    del raw_weight
 
             if attention_size == 0:
-                attention_size = q_raw.shape[0]
-
-            q_t = _transpose_2d(q_raw, "q_proj")
-            k_t = _transpose_2d(k_raw, "k_proj")
-            v_t = _transpose_2d(v_raw, "v_proj")
-            o_t = _transpose_2d(o_raw, "o_proj")
-            del q_raw, k_raw, v_raw, o_raw
-
-            weights[f"{prefix}.w_q"] = q_t
-            weights[f"{prefix}.w_k"] = k_t
-            weights[f"{prefix}.w_v"] = v_t
-            weights[f"{prefix}.w_o"] = o_t
+                attention_size = weights[f"{prefix}.w_q"].shape[1]
 
             # Router weight
             router_raw = _load_tensor(readers, f"{hf_prefix}.block_sparse_moe.gate.weight")
-            weights[f"{prefix}.router"] = _transpose_2d(router_raw, "router")
+            weights[f"{prefix}.router"] = _transpose_2d(router_raw, "router", precision=precision)
             del router_raw
 
-            # Per-expert weights
+            # Per-expert weights. Quantized experts stay as FP8 bytes in quant_ctx.
+            if quant_ctx is not None and quant_ctx.should_quantize(f"{prefix}.experts.w_gate"):
+                continue
             for e in range(num_experts):
                 exp_prefix = f"{hf_prefix}.block_sparse_moe.experts.{e}"
                 w1_raw = _load_tensor(readers, f"{exp_prefix}.w1.weight")
                 w3_raw = _load_tensor(readers, f"{exp_prefix}.w3.weight")
                 w2_raw = _load_tensor(readers, f"{exp_prefix}.w2.weight")
 
-                weights[f"{prefix}.expert.{e}.w_gate"] = _transpose_2d(w1_raw, f"expert_{e}_gate")
-                weights[f"{prefix}.expert.{e}.w_up"] = _transpose_2d(w3_raw, f"expert_{e}_up")
-                weights[f"{prefix}.expert.{e}.w_down"] = _transpose_2d(w2_raw, f"expert_{e}_down")
+                weights[f"{prefix}.expert.{e}.w_gate"] = _transpose_2d(
+                    w1_raw, f"expert_{e}_gate", precision=precision
+                )
+                weights[f"{prefix}.expert.{e}.w_up"] = _transpose_2d(
+                    w3_raw, f"expert_{e}_up", precision=precision
+                )
+                weights[f"{prefix}.expert.{e}.w_down"] = _transpose_2d(
+                    w2_raw, f"expert_{e}_down", precision=precision
+                )
                 del w1_raw, w3_raw, w2_raw
 
         # Final norm
@@ -138,9 +162,13 @@ class _MixtralModel:
         # LM head
         lm_head_key = "lm_head.weight"
         if _has_tensor(readers, lm_head_key):
-            weights["w_out"] = _transpose_2d(_load_tensor(readers, lm_head_key), "lm_head")
+            weights["w_out"] = _transpose_2d(
+                _load_tensor(readers, lm_head_key), "lm_head", precision=precision
+            )
         else:
-            weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
+            weights["w_out"] = _transpose_2d(
+                embedding.copy(), "embedding_tied", precision=precision
+            )
 
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
         weights["_num_experts"] = num_experts  # type: ignore[assignment]
@@ -197,6 +225,12 @@ class _MixtralModel:
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 1
+        if quant_ctx is not None:
+            # Lets the engine inspector show which kernels the quantized matmuls use.
+            trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+            if quant_ctx.has_fp8_weights:
+                # Keeps TensorRT from fusing gate and up into one dual-GEMM kernel.
+                trt_config.build_route = "-peep:match_dual_gemm=off"
 
         if precision == "fp16":
             work_np_dtype = np.float16
@@ -319,6 +353,7 @@ class _MixtralModel:
                 moe_intermediate=moe_intermediate,
                 top_k=top_k,
                 dtype=layer_np_dtype,
+                quant_ctx=quant_ctx,
             )
 
             hidden_state = result["hidden"]
@@ -435,6 +470,7 @@ def _add_mixtral_moe_block(
     moe_intermediate: int,
     top_k: int = 2,
     dtype: np.dtype = np.float32,
+    quant_ctx=None,
 ) -> trt.ITensor:
     """Add Mixture of Experts block with standard top-k softmax routing.
 
@@ -445,6 +481,8 @@ def _add_mixtral_moe_block(
       4. Renormalize selected weights to sum to 1.0
       5. Compute ALL expert SwiGLU outputs -> [num_experts, hidden]
       6. Gather selected experts, scale, and sum -> [1, hidden]
+
+    With quantized experts, steps 5 and 6 run in ``quant_ctx.routed_experts``.
     """
     # 1. Router logits. HF's linear projection returns the model dtype; the
     # FP32 routing boundary starts after that output has been quantized.
@@ -475,6 +513,11 @@ def _add_mixtral_moe_block(
     norm_weights = network.add_elementwise(
         top_values, sum_val.get_output(0), trt.ElementWiseOperation.DIV
     )  # [1, top_k]
+
+    if quant_ctx is not None and quant_ctx.should_quantize(f"{prefix}.experts.w_gate"):
+        return quant_ctx.routed_experts(
+            network, inp, top_indices, norm_weights.get_output(0), prefix, hidden_size
+        )
 
     # 5. Compute ALL expert outputs and stack
     expert_outputs = []
@@ -560,6 +603,7 @@ def _add_mixtral_decoder_layer(
     moe_intermediate: int,
     top_k: int = 2,
     dtype: np.dtype = np.float32,
+    quant_ctx=None,
 ) -> dict[str, trt.ITensor]:
     """Add one decoder layer with Mixtral MoE MLP. Attention is standard."""
     attention_window = max_cache_length + 1
@@ -576,16 +620,20 @@ def _add_mixtral_decoder_layer(
         dtype=dtype,
     )
 
+    def matmul(lhs, lhs_width, rhs_width, stem):
+        name = f"{prefix}.{stem}"
+        if quant_ctx is None:
+            return graph_ops.add_matmul_rhs_constant(
+                network, lhs, lhs_width, rhs_width, weights[name], dtype=dtype
+            )
+        return quant_ctx.maybe_quantized_matmul(
+            network, lhs, lhs_width, rhs_width, weights[name], name, dtype=dtype
+        )
+
     # QKV projections (no biases)
-    q = graph_ops.add_matmul_rhs_constant(
-        network, norm1, hidden_size, attention_size, weights[f"{prefix}.w_q"], dtype=dtype
-    )
-    k = graph_ops.add_matmul_rhs_constant(
-        network, norm1, hidden_size, kv_attention_size, weights[f"{prefix}.w_k"], dtype=dtype
-    )
-    v = graph_ops.add_matmul_rhs_constant(
-        network, norm1, hidden_size, kv_attention_size, weights[f"{prefix}.w_v"], dtype=dtype
-    )
+    q = matmul(norm1, hidden_size, attention_size, "w_q")
+    k = matmul(norm1, hidden_size, kv_attention_size, "w_k")
+    v = matmul(norm1, hidden_size, kv_attention_size, "w_v")
 
     q = graph_ops.add_apply_rope_native(
         network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor, position_id, head_dim
@@ -625,9 +673,7 @@ def _add_mixtral_decoder_layer(
     )
 
     # Output projection (no bias)
-    attn_out = graph_ops.add_matmul_rhs_constant(
-        network, context_flat, attention_size, hidden_size, weights[f"{prefix}.w_o"], dtype=dtype
-    )
+    attn_out = matmul(context_flat, attention_size, hidden_size, "w_o")
 
     # Residual connection
     residual1 = network.add_elementwise(hidden, attn_out, trt.ElementWiseOperation.SUM)
@@ -655,6 +701,7 @@ def _add_mixtral_decoder_layer(
         moe_intermediate,
         top_k,
         dtype=dtype,
+        quant_ctx=quant_ctx,
     )
 
     # Residual connection
@@ -754,18 +801,32 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("Mixtral max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Mixtral quantization requires a family-owned qualified path")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(f"Mixtral does not support quantization={request.quantization!r}")
+    quantized = request.quantization == "fp8"
+    if quantized and (precision != "fp16" or request.fp32_layers):
+        raise NotImplementedError("quantized Mixtral builds need fp16 precision and no fp32 layers")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
     parallel.validate()
+    if quantized and parallel.enabled:
+        raise NotImplementedError("quantized Mixtral builds need tensor_parallel_size=1")
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_resolved_build_precision"] = precision
     config.raw["_parallel_build_enabled"] = parallel.enabled
-    config.raw["_quantized_build_requested"] = False
+    config.raw["_quantized_build_requested"] = quantized
     config.raw["_fp32_layers"] = sorted(set(request.fp32_layers))
-    weights = model.load_weights(str(model_dir), config)
+    quant_ctx = None
+    if quantized:
+        from .quantization import calibrate_mixtral
+
+        quant_ctx = calibrate_mixtral(model_dir, config, graph_ops, request.quantization)
+        weights = model.load_weights(
+            str(model_dir), config, precision=precision, quant_ctx=quant_ctx
+        )
+    else:
+        weights = model.load_weights(str(model_dir), config)
     writer.set_header(family="mixtral", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -787,7 +848,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,
