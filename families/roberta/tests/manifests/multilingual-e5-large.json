@@ -1,0 +1,24 @@
+{
+  "name": "multilingual-e5-large",
+  "hf_id": "intfloat/multilingual-e5-large",
+  "hf_revision": "3d7cfbdacd47fdda877c5cd8a79fbcc4f2a574f3",
+  "bundle": "multilingual-e5-large.bundle",
+  "family": "roberta",
+  "task": "embedding",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "multilingual-e5-large-query-en",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "query: What is artificial intelligence?"
+    },
+    {
+      "name": "multilingual-e5-large-passage-zh",
+      "reference_precision": "fp32",
+      "prompt": "passage: 人工智能是让机器执行通常需要人类智能的任务。"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 512
+}
