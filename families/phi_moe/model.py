@@ -46,6 +46,7 @@ from . import graph_ops
 from . import graph_blocks
 from .parallel import normalize_parallel_config
 from .default_decoder import _apply_norm, _mark_debug_output
+from .default_dual_profile_decoder import build_dual_profile_decoder_engine
 
 
 if TYPE_CHECKING:
@@ -420,6 +421,58 @@ class _PhiMoEModel:
 
         return bytes(plan)
 
+    def build_prefill_engine(
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        verbose: bool = False,
+    ) -> bytes:
+        """Build the batched prefill engine of a split bundle.
+
+        The whole prompt runs in one pass (dynamic Sq up to ``max_cache_length``);
+        decode is served by the single-token engine from ``build_engine``.
+        """
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(f"Unsupported Phi-MoE precision: {precision}")
+        num_experts: int = weights["_num_experts"]
+        top_k: int = weights["_num_experts_per_tok"]
+        jitter_eps = config.raw.get("router_jitter_noise", 0.01)
+
+        def moe_block(
+            network: trt.INetworkDefinition, inp: trt.ITensor, prefix: str
+        ) -> trt.ITensor:
+            return _add_prefill_moe_block(
+                network,
+                inp,
+                weights,
+                prefix,
+                config.hidden_size,
+                num_experts,
+                top_k,
+                jitter_eps,
+                work_np_dtype,
+                work_trt_dtype,
+            )
+
+        return build_dual_profile_decoder_engine(
+            config,
+            weights,
+            max_cache_length,
+            precision=precision,
+            norm_type="layernorm",
+            position_type="rope",
+            verbose=verbose,
+            profile_mode="prefill",
+            mlp_block=moe_block,
+        )
+
 
 def _expert_stack(
     weights: WeightDict,
@@ -446,7 +499,7 @@ def _sparsemixer_weight(
     dtype: np.dtype = np.float32,
     work_trt_dtype=None,
 ) -> tuple[trt.ITensor, trt.ITensor]:
-    """Compute one expert selection via SparseMixer (inference mode).
+    """Compute one expert selection per row via SparseMixer (inference mode).
 
     Replicates the HF ``sparsemixer()`` function for a single expert:
       1. max_val, max_ind = max(scores)
@@ -460,26 +513,26 @@ def _sparsemixer_weight(
     carries the unmasked router logits.
 
     Args:
-        scores: [1, num_experts] router logits (may contain -inf for
-                previously selected experts).
+        scores: [rows, num_experts] router logits (may contain -inf for
+                previously selected experts), one row per token.
         num_experts: Number of experts.
         jitter_eps: Router jitter epsilon from config.
         original_scores: Original unmasked router logits for factor/threshold.
                 If None, uses scores (first expert selection).
 
     Returns:
-        (weight, index) where weight uses the graph compute dtype and index is
-        [1, 1] int32.
+        (weight, index) per row, both [rows, 1]: weight uses the graph compute
+        dtype and index is int32.
     """
     if original_scores is None:
         original_scores = scores
     if work_trt_dtype is None:
         work_trt_dtype = trt.float32
 
-    # max_val [1, 1], max_ind [1, 1]  — from (potentially masked) scores
+    # max_val [rows, 1], max_ind [rows, 1]  — from (potentially masked) scores
     topk1 = network.add_topk(scores, trt.TopKOperation.MAX, 1, 1 << 1)
-    max_val = topk1.get_output(0)  # [1, 1]
-    max_ind = topk1.get_output(1)  # [1, 1]
+    max_val = topk1.get_output(0)  # [rows, 1]
+    max_ind = topk1.get_output(1)  # [rows, 1]
 
     # factor = clamp(|original_scores|, min=max_val)
     # HF uses original (unmasked) scores for abs(), not the masked scores.
@@ -517,13 +570,11 @@ def _sparsemixer_weight(
     # softmax over masked logits
     sm = network.add_softmax(masked.get_output(0))
     sm.axes = 1 << 1
-    sm_out = sm.get_output(0)  # [1, num_experts]
+    sm_out = sm.get_output(0)  # [rows, num_experts]
 
-    # Gather the weight at max_ind: reshape max_ind to scalar
-    idx_flat = network.add_shuffle(max_ind)
-    idx_flat.reshape_dims = (1,)
-    weight = network.add_gather(sm_out, idx_flat.get_output(0), 1)
-    # weight shape: [1, 1]
+    # Each row's weight at its own max_ind: [rows, 1]
+    weight = network.add_gather_v2(sm_out, max_ind, trt.GatherMode.ELEMENT)
+    weight.axis = 1
 
     return weight.get_output(0), max_ind
 
@@ -539,32 +590,28 @@ def _add_sparsemixer_top2(
     dtype: np.dtype,
     work_trt_dtype,
 ) -> tuple[trt.ITensor, trt.ITensor]:
-    """Route one token: returns ``(top_indices, top_weights)``, both ``[1, 2]``.
+    """Route every row (token): returns ``(top_indices, top_weights)``, both ``[rows, 2]``.
 
     ``top_indices`` is int32; ``top_weights`` uses the graph compute dtype.
     """
     # 1. Router logits
     router_logits = graph_ops.add_matmul_rhs_constant(
         network, inp, hidden_size, num_experts, weights[f"{prefix}.router"], dtype=dtype
-    )  # [1, num_experts]
+    )  # [rows, num_experts]
 
     # 2. SparseMixer expert 1 selection
     weight_1, idx_1 = _sparsemixer_weight(
         network, router_logits, num_experts, jitter_eps, dtype=dtype, work_trt_dtype=work_trt_dtype
     )
-    # weight_1: [1, 1], idx_1: [1, 1]
+    # weight_1: [rows, 1], idx_1: [rows, 1]
 
-    # 3. Mask out expert 1 for second selection
-    # Create one-hot of idx_1: [1, num_experts]
-    idx_1_flat = network.add_shuffle(idx_1)
-    idx_1_flat.reshape_dims = (1,)
+    # 3. Mask out each row's expert 1 for second selection
+    # One-hot of idx_1: [rows, num_experts]
     range_const = graph_ops.add_constant(
         network, (1, num_experts), np.arange(num_experts, dtype=dtype).reshape(1, -1), dtype=dtype
     )
-    idx_1_broadcast = network.add_shuffle(idx_1_flat.get_output(0))
-    idx_1_broadcast.reshape_dims = (1, 1)
     # Cast idx to float for comparison
-    idx_1_f = network.add_cast(idx_1_broadcast.get_output(0), work_trt_dtype)
+    idx_1_f = network.add_cast(idx_1, work_trt_dtype)
     # one_hot_mask: 1 where expert == idx_1, 0 elsewhere
     eq = network.add_elementwise(range_const, idx_1_f.get_output(0), trt.ElementWiseOperation.EQUAL)
     eq_f = network.add_cast(eq.get_output(0), work_trt_dtype)
@@ -672,6 +719,82 @@ def _add_moe_block(
         scaled.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=False
     )
     return moe_out.get_output(0)  # [1, hidden_size]
+
+
+def _add_prefill_moe_block(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    hidden_size: int,
+    num_experts: int,
+    top_k: int,
+    jitter_eps: float,
+    dtype: np.dtype,
+    work_trt_dtype,
+) -> trt.ITensor:
+    """Add the Mixture of Experts block of the batched prefill engine (top-2).
+
+    A prompt's tokens route to most experts, so every expert runs on every token
+    as one batched matmul per projection over the stacked expert constants (each
+    expert weight is read once per prefill). Each token then keeps the outputs of
+    its own two routed experts, weighted as in ``_add_moe_block``.
+
+    Steps:
+      1. Router logits and SparseMixer selection of two experts -> [Sq, 2]
+      2. Batched SwiGLU of every expert on every token -> [num_experts, Sq, hidden]
+      3. Gather each token's two routed outputs -> [Sq, 2, hidden]
+      4. Weighted sum over the two experts -> [Sq, hidden]
+    """
+    if top_k != 2:
+        raise NotImplementedError("Phi-MoE routing selects exactly two experts per token")
+
+    # 1. Router logits and SparseMixer selection of two experts: [Sq, 2]
+    top_indices, top_weights = _add_sparsemixer_top2(
+        network, inp, weights, prefix, hidden_size, num_experts, jitter_eps, dtype, work_trt_dtype
+    )
+
+    def stacked(name: str) -> trt.ITensor:
+        stack = _expert_stack(weights, prefix, name, num_experts, dtype)
+        return graph_ops.add_constant(network, stack.shape, stack, dtype=dtype)  # [E, in, out]
+
+    def reshape(tensor: trt.ITensor, dims: tuple[int, ...]) -> trt.ITensor:
+        shuffle = network.add_shuffle(tensor)
+        shuffle.reshape_dims = dims
+        return shuffle.get_output(0)
+
+    def batched_matmul(lhs: trt.ITensor, rhs: trt.ITensor) -> trt.ITensor:
+        return network.add_matrix_multiply(
+            lhs, trt.MatrixOperation.NONE, rhs, trt.MatrixOperation.NONE
+        ).get_output(0)
+
+    # 2. SwiGLU of every expert: [1, Sq, hidden] @ [E, hidden, inter] -> [E, Sq, inter]
+    tokens = reshape(inp, (1, -1, hidden_size))
+    gate = batched_matmul(tokens, stacked("w_gate"))
+    up = batched_matmul(tokens, stacked("w_up"))
+    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
+    swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+    down = batched_matmul(gated.get_output(0), stacked("w_down"))  # [E, Sq, hidden]
+
+    # 3. Each token's two routed outputs: [Sq, E, hidden] gathered by [Sq, 2, 1] -> [Sq, 2, hidden]
+    per_token = network.add_shuffle(down)
+    per_token.first_transpose = (1, 0, 2)
+    routed = network.add_gather_v2(
+        per_token.get_output(0), reshape(top_indices, (-1, top_k, 1)), trt.GatherMode.ND
+    )
+    routed.num_elementwise_dims = 1
+
+    # 4. Weighted sum over the two experts
+    scaled = network.add_elementwise(
+        routed.get_output(0),
+        reshape(top_weights, (-1, top_k, 1)),
+        trt.ElementWiseOperation.PROD,
+    )
+    moe_out = network.add_reduce(
+        scaled.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=False
+    )
+    return moe_out.get_output(0)  # [Sq, hidden_size]
 
 
 def _add_moe_decoder_layer(
@@ -905,7 +1028,20 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             parallel_config=parallel,
         )
         writer.add_bytes("engine.plan", plan)
-        layout = "single"
+        del plan
+        # The prompt runs through a batched prefill engine instead of one decode
+        # step per prompt token.
+        writer.add_bytes(
+            "prefill.plan",
+            model.build_prefill_engine(
+                config,
+                weights,
+                max_sequence_length,
+                precision=precision,
+                verbose=bool(request.verbose),
+            ),
+        )
+        layout = "split"
     writer.add_json(
         "runtime.json",
         _runtime_config(

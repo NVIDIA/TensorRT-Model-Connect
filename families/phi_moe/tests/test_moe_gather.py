@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Phi-MoE gathered-expert block: the engine must match a dense all-experts reference."""
+"""Phi-MoE expert blocks (decode gather, batched prefill): the engines must match a dense reference."""
 
 from __future__ import annotations
 
@@ -45,11 +45,11 @@ def _tokens(seed: int = 1) -> np.ndarray:
     return _round_fp16(np.random.RandomState(seed).randn(TOKENS, HIDDEN))
 
 
-def _compile(define, dtype):
-    """Build a one-input network ``x [1, HIDDEN]`` whose outputs ``define`` marks; return an engine."""
+def _compile(define, dtype, rows: int = 1):
+    """Build a one-input network ``x [rows, HIDDEN]`` whose outputs ``define`` marks; return an engine."""
     builder = trt.Builder(trt.Logger(trt.Logger.ERROR))
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    x = network.add_input("x", trt.float16 if dtype == np.float16 else trt.float32, (1, HIDDEN))
+    x = network.add_input("x", trt.float16 if dtype == np.float16 else trt.float32, (rows, HIDDEN))
     for name, tensor in define(network, x).items():
         tensor.name = name
         network.mark_output(tensor)
@@ -63,7 +63,8 @@ def _run(engine, tokens: np.ndarray, dtype) -> dict[str, np.ndarray]:
     names = [engine.get_tensor_name(i) for i in range(engine.num_io_tensors)]
     outputs = [n for n in names if engine.get_tensor_mode(n) == trt.TensorIOMode.OUTPUT]
     torch_dtype = torch.float16 if dtype == np.float16 else torch.float32
-    x = torch.zeros(1, HIDDEN, dtype=torch_dtype, device="cuda")
+    rows = engine.get_tensor_shape("x")[0]  # tokens per call
+    x = torch.zeros(rows, HIDDEN, dtype=torch_dtype, device="cuda")
     buffers = {
         name: torch.zeros(
             tuple(engine.get_tensor_shape(name)),
@@ -79,8 +80,8 @@ def _run(engine, tokens: np.ndarray, dtype) -> dict[str, np.ndarray]:
     for name, buffer in buffers.items():
         context.set_tensor_address(name, buffer.data_ptr())
     results: dict[str, list[np.ndarray]] = {name: [] for name in outputs}
-    for row in tokens:
-        x.copy_(torch.from_numpy(row[None]).to(torch_dtype))
+    for start in range(0, len(tokens), rows):
+        x.copy_(torch.from_numpy(tokens[start : start + rows]).to(torch_dtype))
         assert context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
         torch.cuda.synchronize()
         for name, buffer in buffers.items():
@@ -139,8 +140,22 @@ def _moe_block(weights: WeightDict, dtype):
     return define
 
 
+def _prefill_moe_block(weights: WeightDict, dtype):
+    work = trt.float16 if dtype == np.float16 else trt.float32
+
+    def define(network, x):
+        out = model._add_prefill_moe_block(
+            network, x, weights, PREFIX, HIDDEN, EXPERTS, 2, JITTER, dtype, work
+        )
+        return {"moe": out}
+
+    return define
+
+
+# One token per call (decode) or every token in one call (prefill).
+@pytest.mark.parametrize("rows", [1, TOKENS])
 @pytest.mark.parametrize("dtype", [np.float32, np.float16])
-def test_router_selects_the_same_two_experts(dtype) -> None:
+def test_router_selects_the_same_two_experts(dtype, rows: int) -> None:
     weights, tokens = _weights(), _tokens()
     work = trt.float16 if dtype == np.float16 else trt.float32
 
@@ -150,7 +165,7 @@ def test_router_selects_the_same_two_experts(dtype) -> None:
         )
         return {"indices": indices, "routing": routing}
 
-    engine, _ = _compile(define, dtype)
+    engine, _ = _compile(define, dtype, rows)
     got = _run(engine, tokens, dtype)
     expected_indices, _ = _dense_reference(weights, tokens)
     assert (got["indices"].astype(np.int64) == expected_indices).all()
@@ -174,3 +189,24 @@ def test_block_evaluates_two_experts_per_token() -> None:
     layers = [network.get_layer(i) for i in range(network.num_layers)]
     matmuls = [layer for layer in layers if layer.type == trt.LayerType.MATRIX_MULTIPLY]
     assert len(matmuls) == 4  # router, gate, up, down
+
+
+@pytest.mark.parametrize(("dtype", "minimum"), [(np.float32, 0.99999), (np.float16, 0.999)])
+def test_prefill_block_matches_dense_reference(dtype, minimum: float) -> None:
+    """Every token in one call, each keeping its own two routed experts."""
+    weights, tokens = _weights(), _tokens()
+    engine, _ = _compile(_prefill_moe_block(weights, dtype), dtype, rows=TOKENS)
+    got = _run(engine, tokens, dtype)["moe"]
+    _, expected = _dense_reference(weights, tokens)
+    assert got.shape == expected.shape
+    assert _cosine(got, expected) > minimum
+    assert all(_cosine(g, e) > minimum for g, e in zip(got, expected))
+
+
+def test_prefill_block_reads_every_expert_once() -> None:
+    """The router, then gate, up and down each as one batched matmul over all expert weights."""
+    _, network = _compile(_prefill_moe_block(_weights(), np.float16), np.float16, rows=TOKENS)
+    layers = [network.get_layer(i) for i in range(network.num_layers)]
+    matmuls = [layer for layer in layers if layer.type == trt.LayerType.MATRIX_MULTIPLY]
+    over_all_experts = [m for m in matmuls if tuple(m.get_input(1).shape)[0] == EXPERTS]
+    assert len(matmuls) == 4 and len(over_all_experts) == 3
