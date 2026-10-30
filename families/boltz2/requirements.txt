@@ -2,3 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 boltz==2.2.1
+# boltz 2.2.1 pins click==8.1.7, numpy<2 and wandb==0.18.7 (protobuf<6). Keep the
+# base packages that need newer versions at their newest releases that accept them.
+huggingface-hub==1.16.1
+ml-dtypes==0.5.4
+onnx==1.22.0
+typer==0.23.1
+typer-slim==0.23.1
