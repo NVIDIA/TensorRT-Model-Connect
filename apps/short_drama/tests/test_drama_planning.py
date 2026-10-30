@@ -38,6 +38,8 @@ def test_shots_keep_known_ids_clamp_seconds_and_fit_the_episode():
     assert [s["seconds"] for s in shots] == [9, 4, 9]
     assert shots[0]["characters"] == ["a_q"] and shots[0]["speaker"] == "a_q"
     assert shots[1]["location"] == "temple" and shots[1]["speaker"] == ""
+    phone = {"location": "temple", "characters": ["a_q"], "speaker": "zhao", "line": "回来！", "seconds": 6}
+    assert planning.normalize_shots([phone], plan, episode=1, max_seconds=24)[0]["speaker"] == "zhao"
     assert sum(s["seconds"] for s in shots) <= 24
 
 

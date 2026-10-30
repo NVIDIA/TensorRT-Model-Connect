@@ -53,6 +53,8 @@ class Step:
     scope: str = "project"
     description: str = ""
     source: str = "core"
+    # An action, not a stage of the flow: it runs with the model of the named flow step.
+    model_from: str | None = None
 
 
 class Steps:
@@ -76,7 +78,7 @@ class Steps:
                 if not isinstance(step, Step) or step.name in self.core:
                     raise TypeError("STEP must be a Step whose name differs from the core steps")
                 plugins[step.name] = Step(step.name, step.run, step.role, step.scope,
-                                          step.description, source=path.name)
+                                          step.description, source=path.name, model_from=step.model_from)
             except Exception as error:  # a broken plugin must not take the app down
                 errors[path.name] = f"{type(error).__name__}: {error}"
                 log.warning("plugin %s not loaded: %s", path.name, error)
@@ -87,7 +89,8 @@ class Steps:
 
     def describe(self) -> list[dict[str, Any]]:
         return [{"name": s.name, "role": s.role, "scope": s.scope, "description": s.description,
-                 "source": s.source} for s in [*self.core.values(), *self.plugins.values()]]
+                 "source": s.source, "model_from": s.model_from}
+                for s in [*self.core.values(), *self.plugins.values()]]
 
 
 def default_flow(models: dict[str, str]) -> dict[str, Any]:
