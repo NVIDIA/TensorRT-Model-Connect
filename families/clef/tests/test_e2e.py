@@ -135,7 +135,11 @@ def test_e2e(manifest, case, request, tmp_path):
         assert actual["option_ids"] == list(question.option_ids)
         probabilities = torch.tensor(reference).softmax(-1).numpy()
         np.testing.assert_allclose(actual["logits"], reference, atol=0.125, rtol=0.015)
-        np.testing.assert_allclose(actual["probabilities"], probabilities, atol=0.002, rtol=0.01)
+        # The BF16 reference is itself up to 0.006 from its FP32 forward (0.016 on the
+        # video cases), and TensorRT can land on the other side of the FP32 result, so a
+        # 0.002 gate rejects accurate engines. Logits, argmax and answers stay checked
+        # as before.
+        np.testing.assert_allclose(actual["probabilities"], probabilities, atol=0.015, rtol=0.01)
         assert int(np.argmax(actual["probabilities"])) == int(np.argmax(probabilities))
         assert first["response"]["answers"][question.question_id] == systemone_answer(
             record["questions"][question.question_id],

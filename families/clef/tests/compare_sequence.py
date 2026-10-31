@@ -113,7 +113,7 @@ def main():
                 score["logits"], wanted["logits"], atol=0.125, rtol=0.015, err_msg=label
             )
             np.testing.assert_allclose(
-                score["probabilities"], probabilities, atol=0.002, rtol=0.01, err_msg=label
+                score["probabilities"], probabilities, atol=0.015, rtol=0.01, err_msg=label
             )
             assert np.argmax(score["probabilities"]) == np.argmax(probabilities)
             assert actual["response"]["answers"][wanted["id"]] == systemone_answer(
