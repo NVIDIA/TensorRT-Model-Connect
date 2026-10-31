@@ -3,6 +3,8 @@
 
 FROM nvidia/cuda:13.4.3-devel-ubuntu24.04@sha256:5626a7d0ecafe3e7c115a452f6b05f20f214f8509346196a7835b205dc5b7fd9
 
+ARG ARCH=aarch64
+
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TORCH_CUDA_ARCH_LIST=10.0
 ENV OMPI_ALLOW_RUN_AS_ROOT=1
@@ -85,7 +87,7 @@ RUN python3.12 -m venv "$VIRTUAL_ENV" \
 ENV TRT_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tensorrt_libs
 ENV NCCL_LIB_DIR=/opt/venv/lib/python3.12/site-packages/nvidia/nccl/lib
 ENV TVM_FFI_LIB_DIR=/opt/venv/lib/python3.12/site-packages/tvm_ffi/lib
-ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu
+ENV TRT_INC_DIR=/usr/include/$ARCH-linux-gnu
 ENV LD_LIBRARY_PATH=$TRT_LIB_DIR:$NCCL_LIB_DIR:$TVM_FFI_LIB_DIR:/usr/local/cuda/lib64
 
 RUN python3.12 -c \
@@ -95,7 +97,7 @@ RUN python3.12 -c \
     && test -f "$TRT_LIB_DIR/libnvonnxparser.so.11" \
     && test -f "$NCCL_LIB_DIR/libnccl.so.2" \
     && test -f "$TVM_FFI_LIB_DIR/libtvm_ffi.so" \
-    && mpirun --tag-output -np 1 true
+    && HWLOC_COMPONENTS=-gl mpirun --tag-output -np 1 true
 
 WORKDIR /workspace/tensorrt-model-connect
 CMD ["bash"]
