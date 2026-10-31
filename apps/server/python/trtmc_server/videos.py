@@ -23,9 +23,15 @@ from starlette.datastructures import UploadFile
 from .errors import ModelNotFoundError, WorkerProtocolError, WorkerSaturatedError
 from .protocol import extract_task_timing
 from .schemas import ImageGenerationRequest
-from .uploads import create_uploaded_input
+from .uploads import ImagePixelLimitError, create_uploaded_input, image_file
 from trtmc_perf_serving.openai import image_generation
 from trtmc_perf_serving.video_media import encode
+
+# Reference-to-video requests (multipart: input_reference files plus these text fields).
+MAX_REFERENCE_IMAGES = 16
+REFERENCE_VIDEO_FIELDS = {"model", "prompt", "seed", "continuation_prompt"}
+# Native frames are unknown until the Task returns; reserve storage for a long clip.
+REFERENCE_VIDEO_RESERVE_BYTES = 2 * 1024**3
 
 
 class VideoRequest(ImageGenerationRequest):
@@ -99,9 +105,11 @@ class VideoJobs:
             if request.headers.get("content-type", "").split(";", 1)[0] == "application/json":
                 body = VideoRequest.model_validate(await request.json())
             else:
-                async with request.form(max_files=0, max_fields=24,
+                async with request.form(max_files=MAX_REFERENCE_IMAGES, max_fields=24,
                                         max_part_size=self.config.max_body_bytes) as form:
-                    if len(form.multi_items()) != len(form) or any(isinstance(v, UploadFile) for v in form.values()):
+                    if any(isinstance(v, UploadFile) for _, v in form.multi_items()):
+                        return await self.submit_references(request, form)
+                    if len(form.multi_items()) != len(form):
                         raise ValueError("video requests require unique text fields")
                     body = VideoRequest.from_form(dict(form))
             if len(body.prompt.encode()) > self.config.max_prompt_bytes:
@@ -173,6 +181,148 @@ class VideoJobs:
             self.setups -= 1
             if not self.setups:
                 self.setups_idle.set()
+
+    async def submit_references(self, request: Request, form) -> JSONResponse:
+        """Queue a reference-to-video job from multipart input_reference images and text fields."""
+        items = form.multi_items()
+        files = [value for _, value in items if isinstance(value, UploadFile)]
+        try:
+            if any(key != "input_reference" for key, value in items if isinstance(value, UploadFile)):
+                raise ValueError("reference images use the input_reference field")
+            fields = [(key, value) for key, value in items if not isinstance(value, UploadFile)]
+            names = [key for key, _ in fields]
+            if (len(names) != len(set(names)) or not set(names) <= REFERENCE_VIDEO_FIELDS
+                    or not {"model", "prompt"} <= set(names)):
+                raise ValueError("unsupported reference video fields")
+            values = dict(fields)
+            model, prompt = values["model"], values["prompt"]
+            if not prompt.strip() or not 1 <= len(files) <= MAX_REFERENCE_IMAGES:
+                raise ValueError("a prompt and 1 to 16 reference images are required")
+            if (len(prompt.encode()) > self.config.max_prompt_bytes or
+                    len(values.get("continuation_prompt", "").encode()) > self.config.max_prompt_bytes):
+                return self.error(413, "content_too_large", "prompt exceeds the server limit")
+            config: dict[str, Any] = {}
+            if "seed" in values:
+                if not values["seed"].isascii() or not values["seed"].isdecimal():
+                    raise ValueError("seed must be a non-negative integer")
+                config["seed"] = int(values["seed"])
+            if "continuation_prompt" in values:
+                config["continuation_prompt"] = values["continuation_prompt"]
+            if not self.registry.supports(model, "reference_video_generation"):
+                return self.error(400, "unsupported_task", "model does not support reference video generation")
+            reserved = REFERENCE_VIDEO_RESERVE_BYTES
+            if (len(self.jobs) >= self.config.max_video_jobs or
+                    sum(job["reserved"] for job in self.jobs.values()) + reserved > self.config.max_video_bytes):
+                return self.error(429, "video_storage_full", "video job storage is full; retry after expiry")
+            session = self.registry.acquire(model)
+        except ModelNotFoundError as error:
+            return self.error(404, error.code, str(error))
+        except WorkerSaturatedError:
+            return self.error(429, "server_busy", "all model worker replicas are busy")
+        except ValueError:
+            return self.error(400, "invalid_request", "invalid or unsupported reference video request")
+        except RuntimeError:
+            return self.error(503, "server_draining", "server is not accepting requests")
+        self.setups += 1
+        self.setups_idle.clear()
+        root = None
+        identifier = None
+        try:
+            root = Path(tempfile.mkdtemp(prefix="trtmc-video-"))
+            identifier = f"video-{uuid.uuid4().hex}"
+            job = {"id": identifier, "object": "video", "created_at": int(time.time()),
+                   "model": model, "status": "in_progress", "root": root,
+                   "reserved": reserved, "downloads": 0, "active": True,
+                   "size": None, "seconds": None, "num_frames": None, "fps": None}
+            # Hold the reservation before the first await so concurrent submissions see it.
+            self.jobs[identifier] = job
+            (root / "references").mkdir()
+            paths = []
+            pixels = 0
+            for index, upload in enumerate(files):
+                # The same RGB PNG/JPEG decode and pixel limit as image edits, for all references together.
+                data, suffix, metadata = await asyncio.to_thread(
+                    image_file, await upload.read(), self.config.max_image_pixels - pixels)
+                pixels += metadata["image_pixels"]
+                path = root / "references" / f"reference-{index:02d}{suffix}"
+                path.write_bytes(data)
+                paths.append(str(path))
+            request.state.timing.update(model=model, record_kind="video_submission", job_id=identifier)
+            payload = {"prompt": prompt, "config": config, "output_path": str(root / "frames"),
+                       "audio_path": str(root / "audio.wav"), "reference_paths": paths}
+            context = {**request.state.timing, "record_kind": "video_completion", "job_id": identifier,
+                       "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+                       "generation_config": {k: v for k, v in config.items() if k != "continuation_prompt"},
+                       "reference_count": len(paths)}
+            task = asyncio.create_task(self.run_references(job, request, payload, session, context))
+            self.tasks.add(task)
+            task.add_done_callback(self.tasks.discard)
+            return JSONResponse(self.view(job), status_code=202)
+        except ValueError as error:
+            session.close()
+            if root is not None:
+                self.jobs.pop(identifier, None)
+                shutil.rmtree(root)
+            if isinstance(error, ImagePixelLimitError):
+                return self.error(413, "content_too_large", "reference images exceed the pixel limit")
+            return self.error(400, "invalid_request", "invalid or unsupported reference video request")
+        except BaseException:
+            session.close()
+            if root is not None:
+                self.jobs.pop(identifier, None)
+                shutil.rmtree(root)
+            raise
+        finally:
+            self.setups -= 1
+            if not self.setups:
+                self.setups_idle.set()
+
+    async def run_references(self, job, request, payload, session, context):
+        started = time.monotonic()
+
+        def validate(result):
+            extract_task_timing(result)
+            if (not all(type(result.get(key)) is int and result[key] > 0 for key in ("width", "height", "num_frames"))
+                    or result.get("channels") != 3 or not isinstance(result.get("fps"), (int, float))):
+                raise WorkerProtocolError("native reference video result is incomplete")
+
+        try:
+            result = await self.execute(request, job["model"], "reference_video_generation", "generate_reference_video",
+                                        payload, validate, acquired_session=session, task_context=context)
+            if isinstance(result, JSONResponse):
+                context["status"] = result.status_code
+                job["status"] = "failed"
+                return
+            fps = round(result["fps"])
+            if fps < 1 or abs(result["fps"] - fps) > 1e-3:
+                raise ValueError("reference video frame rate is not an integer")
+            width, height, count = result["width"], result["height"], result["num_frames"]
+            if width * height * count * 3 > job["reserved"]:
+                raise ValueError("reference video output exceeds the job's storage reservation")
+            context.update(await asyncio.to_thread(encode, job["root"] / "frames", job["root"] / "video.mp4",
+                                                   width, height, count, fps, job["reserved"],
+                                                   Path(payload["audio_path"])))
+            job.update(size=f"{width}x{height}", seconds=format(count / fps, ".9g"), num_frames=count, fps=fps,
+                       model_call_ms=result["model_call_ms"], completed_at=int(time.time()),
+                       expires_at=int(time.time() + self.config.video_ttl_seconds))
+            job["status"] = "completed"
+            context["status"] = 200
+        except Exception:
+            logging.getLogger("uvicorn.error").exception("Reference video completion failed: %s", job["id"])
+            job["status"] = "failed"
+            context["status"] = 502
+        finally:
+            job["finished"] = time.monotonic()
+            context["completion_ms"] = (time.monotonic() - started) * 1000
+            try:
+                self.records.write(context)
+            finally:
+                for name in ("frames", "references"):
+                    await asyncio.to_thread(shutil.rmtree, job["root"] / name, True)
+                (job["root"] / "audio.wav").unlink(missing_ok=True)
+            video = job["root"] / "video.mp4"
+            job["reserved"] = video.stat().st_size if video.is_file() else 0
+            job["active"] = False
 
     async def run(self, job, request, payload, geometry, fps, session, media, context):
         started = time.monotonic()

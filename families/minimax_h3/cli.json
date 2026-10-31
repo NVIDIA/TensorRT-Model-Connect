@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build-omniref",
+      "help": "Build the experimental FastH3 OmniRef 8-step reference-to-video bundle: the original MiniMax-H3 two-window bundle first, then the student that reuses its common plans",
+      "executor": "python",
+      "handler": "cli:build_omniref",
+      "arguments": [
+        {"name": "output", "flags": ["-o", "--output"], "type": "path", "required": true},
+        {"name": "scratch", "flags": ["--scratch"], "type": "path", "required": true, "help": "Directory that keeps the original H3 bundle for reuse"},
+        {"name": "bridge", "flags": ["--bridge"], "type": "path", "required": true, "help": "The generic TVM-FFI bridge, libtrtmc_byok_tvm_ffi.so"},
+        {"name": "kernel_library", "flags": ["--kernel-library"], "type": "path", "required": true, "help": "This family's VSA kernel, libtrtmc_minimax_h3_omniref_vsa.so"},
+        {"name": "denoiser_workspace_gib", "flags": ["--denoiser-workspace-gib"], "type": "int", "default": 24, "help": "TensorRT tactic workspace for the VSA DiT; large VSA fusions need more than the 8 GiB default"},
+        {"name": "base", "flags": ["--base"], "type": "string", "default": "MiniMaxAI/MiniMax-H3", "help": "Hugging Face ID or local snapshot of the original checkpoint"},
+        {"name": "student", "flags": ["--student"], "type": "string", "default": "FastVideo/FastVideo-FastH3-Omni-8-Step-V1", "help": "Hugging Face ID or local snapshot of the FastH3 student"}
+      ]
+    }
+  ]
+}

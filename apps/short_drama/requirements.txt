@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# The short-drama app, on top of a TRTMC build with trtmc-server (pip install -e '.[serve]').
+fastapi
+httpx
+uvicorn

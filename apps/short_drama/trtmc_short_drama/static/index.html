@@ -1,0 +1,59 @@
+<!doctype html>
+<!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+     SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TRTMC Short Drama</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header class="bar">
+    <div class="brand"><span class="mark">TRTMC</span> Short Drama</div>
+    <div id="machine" class="machine"></div>
+    <div id="activity" class="activity"></div>
+  </header>
+  <div class="layout">
+    <aside class="side">
+      <h2>Projects</h2>
+      <ul id="projects" class="projects"></ul>
+      <details class="new" id="new-project" open>
+        <summary>New project</summary>
+        <label>Title <input id="new-title" value="阿Q正传"></label>
+        <div class="source" id="new-source">
+          <label class="check"><input type="radio" name="source" value="sample" checked> The sample novel (《阿Q正传》, public domain)</label>
+          <label class="check"><input type="radio" name="source" value="novel"> My novel</label>
+          <label class="check"><input type="radio" name="source" value="idea"> An idea</label>
+        </div>
+        <div id="source-novel" hidden>
+          <label>Paste a novel <textarea id="new-novel" rows="4" placeholder="第一章 …"></textarea></label>
+          <label>Or open a text file <input type="file" id="new-file" accept=".txt,text/plain"></label>
+        </div>
+        <div id="source-idea" hidden>
+          <label>One or two sentences <textarea id="new-idea" rows="3" placeholder="一个外卖骑手捡到一部手机，发现失主正被人跟踪……"></textarea></label>
+          <p class="note">The language model writes a short story from it first; edit the story before planning.</p>
+        </div>
+        <div class="row">
+          <label>Episodes <input id="new-episodes" type="number" min="1" max="20" value="4"></label>
+          <label>Max seconds <input id="new-seconds" type="number" min="10" max="600" value="60"></label>
+        </div>
+        <button id="create" class="primary">Create</button>
+      </details>
+    </aside>
+    <main id="main" class="main">
+      <section class="empty">
+        <h1>Novel in, vertical episodes out.</h1>
+        <p>Every step runs on your GPU through TensorRT Model Connect: a language model plans the drama,
+          an image model draws the cast and places, a video model films each shot with sound, and a speech
+          model times the subtitles.</p>
+        <div class="idea">
+          <textarea id="idea-box" rows="3" placeholder="No novel at hand? Start from an idea: 一个外卖骑手捡到一部手机……"></textarea>
+          <button id="idea-go" class="primary">Start from this idea</button>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

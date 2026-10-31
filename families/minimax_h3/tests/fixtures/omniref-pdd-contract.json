@@ -1,0 +1,31 @@
+{
+  "attention_backend": "VIDEO_SPARSE_ATTN_H3",
+  "audio_scheduler_shift": 3.0,
+  "base_model_revision": "hf://MiniMaxAI/MiniMax-H3@9bfb6693f2cf6de171db46d1aa586f67d773a1da",
+  "conditioning": "fixed_ordered_references_target_only_flow",
+  "grid_max_t": 0.999,
+  "guidance_scale": 1.0,
+  "model_type": "ref2va",
+  "num_inference_steps": 8,
+  "pdd_step_indices": [
+    0,
+    4,
+    8,
+    12,
+    16,
+    20,
+    24,
+    28,
+    32
+  ],
+  "pdd_steps": 32,
+  "schema": "fasth3-inference-contract-v1",
+  "schema_version": "fasth3-inference-contract-v1",
+  "transformer_component": "transformer_ref",
+  "transformer_forwards": 8,
+  "video_scheduler_shift": 12.0,
+  "vsa_ref_keep_rate": 0.1,
+  "vsa_ref_policy": "p2_multi_region",
+  "vsa_sparsity": 0.9,
+  "vsa_tile_size": 128
+}

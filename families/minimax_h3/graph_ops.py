@@ -121,11 +121,44 @@ def linear(
     *,
     bf16: bool = True,
     compute_dtype=None,
+    accumulation_dtype=None,
+    round_before_bias: bool = False,
 ):
-    """PyTorch ``[out, in]`` linear expressed as native TensorRT GEMM."""
+    """PyTorch ``[out, in]`` linear expressed as native TensorRT GEMM.
+
+    An explicit FP32 accumulator widens only the already-quantized operands.
+    Add the equally quantized bias before the single output rounding, as in
+    the autocast cuBLAS linear epilogue. ``round_before_bias`` preserves the
+    separate matmul/bias path for a noncontiguous reference input. TensorRT
+    owns cast fusion and tactics; the default path retains its existing types.
+    """
+
+    if accumulation_dtype is not None and accumulation_dtype != trt.float32:
+        raise ValueError("MiniMax-H3 linear only supports explicit FP32 accumulation")
+    if not isinstance(round_before_bias, bool) or (
+        round_before_bias and accumulation_dtype is None
+    ):
+        raise ValueError("MiniMax-H3 round_before_bias requires explicit FP32 accumulation")
+    if compute_dtype is None and bf16:
+        compute_dtype = trt.bfloat16
+    if compute_dtype is None:
+        compute_dtype = tensor.dtype
+    if accumulation_dtype is not None:
+        storage_dtype = {
+            trt.float16: np.float16,
+            trt.bfloat16: ml_dtypes.bfloat16,
+            trt.float32: np.float32,
+        }.get(compute_dtype)
+        if storage_dtype is None:
+            raise ValueError("MiniMax-H3 FP32 accumulation requires floating-point operands")
 
     tensor_rank = len(tuple(tensor.shape))
     rhs_value = np.asarray(weight)
+    if accumulation_dtype is not None:
+        # Store only the original autocast operand values. Starting from an
+        # FP32 constant and down/up-casting it can retain a full-width weight
+        # initializer even though the computation consumes half values.
+        rhs_value = np.ascontiguousarray(rhs_value, dtype=storage_dtype)
     if tensor_rank > 2:
         # TensorRT MatrixMultiply applies NumPy-style broadcast across the
         # leading dimensions only when both operands expose those dimensions.
@@ -133,23 +166,30 @@ def linear(
         # explicitly [1, out, in] instead of relying on implicit rank lift.
         rhs_value = rhs_value.reshape((1,) * (tensor_rank - 2) + rhs_value.shape)
     rhs = weight_constant(network, rhs_value)
-    if compute_dtype is None and bf16:
-        compute_dtype = trt.bfloat16
-    if compute_dtype is None:
-        compute_dtype = tensor.dtype
     tensor = cast(network, tensor, compute_dtype)
     rhs = cast(network, rhs, compute_dtype)
+    if accumulation_dtype is not None:
+        tensor = cast(network, tensor, accumulation_dtype)
+        rhs = cast(network, rhs, accumulation_dtype)
     output = network.add_matrix_multiply(
         tensor, trt.MatrixOperation.NONE, rhs, trt.MatrixOperation.TRANSPOSE
     ).get_output(0)
     if bias is not None:
+        if round_before_bias:
+            output = cast(network, output, compute_dtype)
+            output = cast(network, output, accumulation_dtype)
         shape = (1,) * (len(tuple(output.shape)) - 1) + (-1,)
-        bias_tensor = weight_constant(network, np.asarray(bias).reshape(shape))
+        bias_value = np.asarray(bias).reshape(shape)
+        if accumulation_dtype is not None:
+            bias_value = np.ascontiguousarray(bias_value, dtype=storage_dtype)
+        bias_tensor = weight_constant(network, bias_value)
+        if accumulation_dtype is not None:
+            bias_tensor = cast(network, bias_tensor, compute_dtype)
         bias_tensor = cast(network, bias_tensor, output.dtype)
         output = network.add_elementwise(
             output, bias_tensor, trt.ElementWiseOperation.SUM
         ).get_output(0)
-    return output
+    return cast(network, output, compute_dtype) if accumulation_dtype is not None else output
 
 
 def silu(network, tensor):
@@ -358,6 +398,25 @@ def partial_rope(
     result = network.add_concatenation((rotated, passthrough))
     result.axis = 3
     return heads_to_rows(network, result.get_output(0), rows, heads * head_dim)
+
+
+def emit_serialized_plan(plan, output=None):
+    """Keep the default bytes API or stream the native host buffer unchanged.
+
+    The streamed path avoids a second plan-sized Python bytes allocation.
+    The TensorRT IHostMemory owner stays alive until the final bounded write.
+    """
+    if output is None:
+        return bytes(plan)
+    with memoryview(plan).cast("B") as data:
+        offset = 0
+        while offset < len(data):
+            chunk = data[offset : offset + (1 << 20)]
+            written = output.write(chunk)
+            if type(written) is not int or not 0 < written <= len(chunk):
+                raise OSError("MiniMax-H3 serialized plan write made invalid progress")
+            offset += written
+    return None
 
 
 def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int, name: str):
