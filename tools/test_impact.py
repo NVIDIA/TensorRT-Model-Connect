@@ -19,6 +19,7 @@ from typing import Sequence
 DOC_PREFIXES = ("website/",)
 DOC_FILES = {
     "AGENTS.md",
+    "ASSET_LICENSES.md",
     "CODEOWNERS",
     "CONTRIBUTING.md",
     "README.md",
@@ -39,7 +40,6 @@ SHARED_FILES = {
     ".coderabbit.yaml",
     ".gitignore",
     ".pre-commit-config.yaml",
-    "ASSET_LICENSES.md",
     "CMakeLists.txt",
     "Dockerfile",
     "Dockerfile.community-cpu",
