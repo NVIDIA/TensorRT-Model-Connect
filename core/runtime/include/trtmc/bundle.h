@@ -5,14 +5,30 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <iosfwd>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 namespace trtmc {
+
+enum class PlanSeekOrigin { begin, current, end };
+
+// A bounded, seekable source of serialized engine bytes. Destinations are host
+// memory; a backend owns any device transfer required by its deserializer.
+class IPlanReader {
+  public:
+    virtual ~IPlanReader() = default;
+    virtual std::uint64_t size() const noexcept = 0;
+    // Return at most count bytes, or zero at EOF. Throw on an I/O failure.
+    virtual std::size_t read(void* destination, std::size_t count) = 0;
+    // Invalid seeks leave the cursor unchanged. I/O failures may throw.
+    virtual bool seek(std::int64_t offset, PlanSeekOrigin origin) = 0;
+};
 
 struct BundleSectionInfo {
     std::string name;
@@ -44,6 +60,10 @@ class BundleReader {
     const BundleInfo& info() const noexcept { return info_; }
     const BundleSectionInfo* find_section(std::string_view name) const noexcept;
     std::vector<char> read_section(std::string_view name) const;
+
+    // Open an independent bounded reader without allocating a section-sized
+    // buffer. The opened regular file must retain its identity while reading.
+    std::unique_ptr<IPlanReader> open_section(std::string_view name) const;
 
     /// Copy a named section to an output stream using bounded working memory.
     /// @param name Validated bundle section name.

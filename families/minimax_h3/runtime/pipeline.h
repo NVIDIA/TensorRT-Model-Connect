@@ -27,6 +27,9 @@ struct MiniMaxH3Schedule {
 };
 
 MiniMaxH3Schedule make_minimax_h3_schedule(int32_t grid_points, float shift);
+// The released OmniRef student evaluates eight blocks of the fixed 32-interval
+// grid. Its FP64 grid construction and FP32 score times are distinct boundaries.
+MiniMaxH3Schedule make_minimax_h3_pdd_schedule(float shift);
 std::vector<float> make_minimax_h3_position_ids(int32_t text_rows);
 void minimax_h3_scheduler_step(float* sample, const float* velocity, std::size_t count,
                                float timestep, float sigma, float sigma_next);

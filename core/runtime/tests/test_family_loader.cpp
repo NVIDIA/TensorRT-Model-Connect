@@ -84,6 +84,62 @@ void check_rtx_options(const std::filesystem::path& runtime_root,
     dlclose(handle);
 }
 
+#ifdef TRTMC_TEST_STREAM_BACKEND
+void check_stream_failure(trtmc::ITimeSeriesForecast* rtx_forecast, int (*streamed)(),
+                          int (*buffered)(), void (*support)(bool), void (*fail)(bool),
+                          int before) {
+    const float values[] = {1.0F, 2.0F, 3.0F};
+    const float mask[] = {1.0F, 1.0F, 1.0F};
+    support(true);
+    fail(true);
+    bool threw = false;
+    try {
+        (void)rtx_forecast->forecast({values, mask});
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    check(threw && streamed() == before + 1 && buffered() == 1,
+          "streamed load failure is not retried through the buffered backend");
+    fail(false);
+}
+
+bool check_stream_backend(const std::filesystem::path& runtime_root,
+                          const std::string& expected_cache_path,
+                          trtmc::ITimeSeriesForecast* rtx_forecast) {
+    const float values[] = {1.0F, 2.0F, 3.0F};
+    const float mask[] = {1.0F, 1.0F, 1.0F};
+    void* handle =
+        dlopen((runtime_root / "libtrtmc_backend_trt_rtx.so").c_str(), RTLD_NOW | RTLD_LOCAL);
+    check(handle != nullptr, "stream backend DSO remains loaded");
+    if (handle == nullptr || rtx_forecast == nullptr)
+        return false;
+    using Count = int (*)();
+    using Set = void (*)(bool);
+    const auto streamed =
+        reinterpret_cast<Count>(dlsym(handle, "trtmc_test_backend_streamed_calls"));
+    const auto buffered =
+        reinterpret_cast<Count>(dlsym(handle, "trtmc_test_backend_buffered_calls"));
+    const auto support =
+        reinterpret_cast<Set>(dlsym(handle, "trtmc_test_backend_stream_supported"));
+    const auto fail = reinterpret_cast<Set>(dlsym(handle, "trtmc_test_backend_stream_failure"));
+    const bool symbols_available = streamed && buffered && support && fail;
+    check(symbols_available, "stream backend probes are exported");
+    if (!symbols_available)
+        return false;
+    check(streamed() >= 3 && buffered() == 0,
+          "optional streaming crosses DSOs and the configured backend adapter");
+    const auto before = streamed();
+    support(false);
+    (void)rtx_forecast->forecast({values, mask});
+    check(streamed() == before && buffered() == 1,
+          "unsupported capability uses the legacy backend once");
+    check_rtx_options(runtime_root, expected_cache_path, true);
+    check_stream_failure(rtx_forecast, streamed, buffered, support, fail, before);
+    dlclose(handle);
+    return true;
+}
+#endif
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -142,6 +198,11 @@ int main(int argc, char** argv) {
     if (rtx_forecast != nullptr)
         (void)rtx_forecast->forecast({values, mask});
     check_rtx_options(runtime_root, expected_cache_path, true);
+
+#ifdef TRTMC_TEST_STREAM_BACKEND
+    if (!check_stream_backend(runtime_root, expected_cache_path, rtx_forecast))
+        return 1;
+#endif
 
     auto automatic_task = trtmc::load_task(bundle_path.string());
     check(dynamic_cast<trtmc::ITimeSeriesForecast*>(automatic_task.get()) != nullptr,

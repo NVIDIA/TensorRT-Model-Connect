@@ -53,16 +53,29 @@ def load_component_state_dict(component_dir: str | Path) -> dict[str, Any]:
 def load_selected_component_state_dict(
     component_dir: str | Path, names: Iterable[str]
 ) -> dict[str, Any]:
-    """Load only selected indexed tensors, avoiding unused H3 language/vision weights."""
+    """Load selected tensors from one indexed component or one unsharded file.
+
+    Original H3 audio uses a single safetensors file without an index. Inspect
+    its keys before reading any tensor; never materialize unused encoder data.
+    """
 
     from safetensors import safe_open
 
     root = Path(component_dir)
     indexes = sorted(root.glob("*.safetensors.index.json"))
+    requested = tuple(names)
+    if not indexes:
+        paths = sorted(root.glob("*.safetensors"))
+        if len(paths) != 1:
+            raise ValueError(f"Selective loading requires one unsharded safetensors file in {root}")
+        with safe_open(paths[0], framework="pt", device="cpu") as reader:
+            missing = sorted(set(requested) - set(reader.keys()))
+            if missing:
+                raise ValueError(f"MiniMax-H3 checkpoint is missing tensors: {missing}")
+            return {name: reader.get_tensor(name) for name in requested}
     if len(indexes) != 1:
         raise ValueError(f"Selective loading requires one safetensors index in {root}")
     weight_map = json.loads(indexes[0].read_text())["weight_map"]
-    requested = tuple(names)
     missing = sorted(set(requested) - set(weight_map))
     if missing:
         raise ValueError(f"MiniMax-H3 checkpoint is missing tensors: {missing}")

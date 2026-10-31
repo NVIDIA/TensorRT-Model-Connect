@@ -58,6 +58,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--kv-cache-size", type=positive)
     result.add_argument("--runtime-cache")
     result.add_argument("--cuda-graphs", action="store_true")
+    result.add_argument("--byok-library", help="bring-your-own kernel library registered before each bundle loads")
+    result.add_argument("--byok-function", help="entry function in --byok-library")
+    result.add_argument("--byok-name", help="kernel name the bundle refers to")
     result.add_argument("--startup-timeout", type=float, default=120.0)
     result.add_argument("--request-timeout", type=float, default=120.0)
     result.add_argument("--max-body-bytes", type=positive, default=1024 * 1024)
@@ -72,6 +75,18 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--access-log", action="store_true")
     result.add_argument("--worker-binary", type=Path, help=argparse.SUPPRESS)
     return result
+
+
+def byok_kernel(args: argparse.Namespace) -> tuple[str, str, str] | None:
+    values = (args.byok_library, args.byok_function, args.byok_name)
+    if not any(values):
+        return None
+    if not all(values):
+        raise ValueError("--byok-library, --byok-function and --byok-name go together")
+    library = Path(args.byok_library).expanduser().resolve()
+    if not library.is_file():
+        raise ValueError("--byok-library must be a file")
+    return str(library), args.byok_function, args.byok_name
 
 
 def model_assignment(value: str, replicas: int) -> tuple[str, Path, int]:
@@ -140,6 +155,7 @@ def main(argv: list[str] | None = None) -> int:
                 kv_cache_size_bytes=args.kv_cache_size,
                 runtime_cache=args.runtime_cache,
                 cuda_graphs=args.cuda_graphs,
+                byok_kernel=byok_kernel(args),
             ),
             startup_timeout=args.startup_timeout,
             request_timeout=args.request_timeout,
