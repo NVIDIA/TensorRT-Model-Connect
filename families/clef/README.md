@@ -152,9 +152,10 @@ original implementation. This includes the two model-card text examples,
 alternative answers, multilingual input, a receipt image, and video frames.
 The largest absolute option-probability difference is 0.002188. The BF16 gate
 now uses `atol=0.015, rtol=0.01` for probabilities, because the BF16 reference
-is itself a few thousandths from its FP32 forward, and `atol=0.125, rtol=0.015`
-for logits. A 16,384-token request also passes those gates. Reusing one native Task
-across text, image, video, and maximum-length requests preserves repeatability.
+is itself up to 0.006 from its FP32 forward (0.016 on the video cases), and
+`atol=0.125, rtol=0.015` for logits. A 16,384-token request also passes those
+gates. Reusing one native Task across text, image, video, and maximum-length
+requests preserves repeatability.
 
 Measured warm median Task latency is 41.5 ms for invoice, 42.3 ms for outage,
 42.7 ms for receipt, and 45.4 ms for video (five warmups and 30 samples each).
