@@ -11,6 +11,7 @@
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -48,6 +49,7 @@ class EncoderPipeline final : public IEmbedding, public IEncoding, public IReran
 
   private:
     std::unique_ptr<ITrtModule> encoder_;
+    std::size_t sequence_capacity_{0};
     std::string mode_; // "encoder_only", "embedding", "reranking"
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
