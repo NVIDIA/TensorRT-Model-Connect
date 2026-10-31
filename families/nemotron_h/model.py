@@ -762,6 +762,10 @@ class _NemotronHModel:
                 file=sys.stderr,
             )
 
+        # Every tensor the network needs is already embedded in it; drop the
+        # resident checkpoint before the engine build, which runs its own
+        # TensorRT workspace allocation on top of whatever weights hold.
+        weights.clear()
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
             raise RuntimeError("TensorRT engine build failed")
