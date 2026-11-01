@@ -35,6 +35,7 @@ install(TARGETS trtmc_model_wav2vec2
 if(TRTMC_BUILD_TESTS)
   add_executable(test_wav2vec2_ctc
     ${PROJECT_SOURCE_DIR}/families/wav2vec2/tests/cpp/test_ctc.cpp
+    ${PROJECT_SOURCE_DIR}/families/wav2vec2/tests/cpp/test_pipeline.cpp
   )
   target_include_directories(test_wav2vec2_ctc PRIVATE
     ${PROJECT_SOURCE_DIR}

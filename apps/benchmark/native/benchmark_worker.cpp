@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "audio_observation.h"
 #include "cli/io.h"
 #include "config.h"
 #include "task_runtime.h"
@@ -64,7 +65,7 @@ struct Timing {
 };
 
 using Image = trtmc::cli::io::LoadedImage;
-using Audio = trtmc::AudioResult; // Existing mono-only interfaces.
+using Audio = trtmc::AudioResult; // Legacy task interfaces.
 using trtmc::cli::io::read_wav;
 
 Arguments parse_arguments(int argc, char** argv) {
@@ -421,15 +422,9 @@ Json run_generate_audio(trtmc::ITask& task, const Json& request, const Timing& t
     return measure(
         timing, [&]() { return interface.generate_audio(prompt, config); },
         [&](const trtmc::AudioResult& result) {
-            const double seconds =
-                result.sample_rate > 0
-                    ? static_cast<double>(result.samples.size()) / result.sample_rate
-                    : 0.0;
-            return Json{{"output_samples", result.samples.size()},
-                        {"num_samples", result.samples.size()},
-                        {"output_audio_seconds", seconds},
-                        {"sample_rate", result.sample_rate},
-                        {"audio_artifact", write_audio(result)}};
+            auto output = audio_observation(result);
+            output["audio_artifact"] = write_audio(result);
+            return output;
         });
 }
 
@@ -463,16 +458,10 @@ Json run_speak(trtmc::ITask& task, const Json& request, const Timing& timing) {
                 static_cast<double>(audio.samples.size()) / audio.sample_rate};
         },
         [&](const auto& value) {
-            const auto& result = value.first;
-            return Json{{"input_audio_seconds", value.second},
-                        {"output_audio_seconds",
-                         result.sample_rate > 0
-                             ? static_cast<double>(result.samples.size()) / result.sample_rate
-                             : 0.0},
-                        {"output_samples", result.samples.size()},
-                        {"num_samples", result.samples.size()},
-                        {"sample_rate", result.sample_rate},
-                        {"audio_artifact", write_audio(result)}};
+            auto output = audio_observation(value.first);
+            output["input_audio_seconds"] = value.second;
+            output["audio_artifact"] = write_audio(value.first);
+            return output;
         });
 }
 

@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 # trtmc-perf-serve on top of the TRTMC runtime environment (which provides torch and transformers).
+# Transformers needs accelerate to load native references straight onto the GPU (device_map); 5.2 needs 1.1 or newer.
+accelerate>=1.1.0
 fastapi
 numpy
 pillow

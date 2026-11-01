@@ -108,7 +108,8 @@ class TextGeneration:
             model_cls = (transformers.AutoModelForSeq2SeqLM if config.is_encoder_decoder
                          else transformers.AutoModelForCausalLM)
         self.encoder_decoder = bool(config.is_encoder_decoder)
-        self.model = maybe_compile(model_cls.from_pretrained(spec.model, **kwargs).to(spec.device).eval(), spec)
+        self.model = maybe_compile(model_cls.from_pretrained(spec.model, **kwargs, device_map=spec.device_map).eval(),
+                                   spec)
         # The strong compiled baseline for causal LMs: a static KV cache (fixed shapes the compiled
         # forward reuses); models that cannot use one fall back to the dynamic cache.
         self.static_cache = spec.mode == "compile" and not self.encoder_decoder and self.processor is None
@@ -211,8 +212,8 @@ class TextEncoder:
         if config.model_type == "dpr" and config.architectures:
             # AutoModel maps every DPR checkpoint to the question encoder; use the declared encoder.
             model_cls = getattr(transformers, config.architectures[0])
-        model = model_cls.from_pretrained(spec.model, **spec.model_kwargs())
-        self.model = maybe_compile(model.to(spec.device).eval(), spec)
+        model = model_cls.from_pretrained(spec.model, **spec.model_kwargs(), device_map=spec.device_map)
+        self.model = maybe_compile(model.eval(), spec)
         # Remote-code embedding models may return a causal-LM output; they need hidden states requested.
         self.forward_kwargs: dict[str, Any] = {}
         # Longer inputs are cut at the model's position limit (an overflow is a device-side assert that
@@ -260,7 +261,7 @@ class Reranker:
         self.processor = transformers.AutoProcessor.from_pretrained(
             spec.model, **kwargs, **dict(spec.options.get("processor_kwargs", {})))
         self.model = maybe_compile(transformers.AutoModelForSequenceClassification.from_pretrained(
-            spec.model, **spec.model_kwargs()).to(spec.device).eval(), spec)
+            spec.model, **spec.model_kwargs(), device_map=spec.device_map).eval(), spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
         query = str(required(request, "query"))

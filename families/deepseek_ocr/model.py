@@ -60,6 +60,7 @@ from .prefill_config import (
 )
 from .parallel import ParallelConfig, normalize_parallel_config
 from .default_decoder import _apply_norm, _mark_debug_output
+from .quantization import calibrate_deepseek_ocr, configure_fp8_build
 
 
 if TYPE_CHECKING:
@@ -76,7 +77,14 @@ class _DeepseekOcrModel:
         config: ModelConfig,
         *,
         precision: str = "fp32",
+        quant_ctx=None,
     ) -> WeightDict:
+        """Load the decoder weights as ``[in, out]`` arrays in the build precision.
+
+        Projections owned by ``quant_ctx`` are not loaded: the engine consumes the FP8
+        bytes the context quantized itself, so the weight dict keeps a shape-only
+        placeholder for them.
+        """
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
 
@@ -111,6 +119,20 @@ class _DeepseekOcrModel:
 
         weights = WeightDict()
 
+        def quantized(name: str) -> bool:
+            return quant_ctx is not None and quant_ctx.should_quantize(name)
+
+        def placeholder(shape: tuple[int, ...]) -> np.ndarray:
+            return np.broadcast_to(np.zeros((), dtype=np.float32), shape)
+
+        def projection(name: str, hf_name: str, label: str, layer_precision: str) -> np.ndarray:
+            """One projection as ``[in, out]``, or a shape-only placeholder when quantized."""
+            if quantized(name):
+                weight = quant_ctx.scales[name].weight
+                return placeholder((weight.in_features, weight.out_features))
+            raw = _load_tensor(readers, f"{hf_name}.weight")
+            return _transpose_2d(raw, label, precision=layer_precision)
+
         # Weight key prefix: DeepSeek-VL2 stores language decoder weights
         # under "language.model.*" rather than bare "model.*".
         lang_prefix = ""
@@ -142,21 +164,23 @@ class _DeepseekOcrModel:
             weights[f"{prefix}.post_attn_norm"] = post_norm.astype(layer_np_dtype)
 
             # Standard Q/K/V/O attention projections (no biases)
-            q_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.q_proj.weight")
-            k_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.k_proj.weight")
-            v_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.v_proj.weight")
-            o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
+            q_t = projection(
+                f"{prefix}.w_q", f"{hf_prefix}.self_attn.q_proj", "q_proj", layer_precision
+            )
+            k_t = projection(
+                f"{prefix}.w_k", f"{hf_prefix}.self_attn.k_proj", "k_proj", layer_precision
+            )
+            v_t = projection(
+                f"{prefix}.w_v", f"{hf_prefix}.self_attn.v_proj", "v_proj", layer_precision
+            )
+            o_t = projection(
+                f"{prefix}.w_o", f"{hf_prefix}.self_attn.o_proj", "o_proj", layer_precision
+            )
 
             if attention_size == 0:
-                attention_size = q_raw.shape[0]
+                attention_size = q_t.shape[1]
             if kv_attention_size == 0:
-                kv_attention_size = k_raw.shape[0]
-
-            q_t = _transpose_2d(q_raw, "q_proj", precision=layer_precision)
-            k_t = _transpose_2d(k_raw, "k_proj", precision=layer_precision)
-            v_t = _transpose_2d(v_raw, "v_proj", precision=layer_precision)
-            o_t = _transpose_2d(o_raw, "o_proj", precision=layer_precision)
-            del q_raw, k_raw, v_raw, o_raw
+                kv_attention_size = k_t.shape[1]
 
             weights[f"{prefix}.w_q"] = q_t
             weights[f"{prefix}.w_k"] = k_t
@@ -176,65 +200,65 @@ class _DeepseekOcrModel:
 
                 # Pack the expert dimension once during checkpoint loading so
                 # routing can gather only the selected experts at runtime.
-                expert_gate_weights = []
-                expert_up_weights = []
-                expert_down_weights = []
-                for e in range(n_routed_experts):
-                    exp_hf = f"{hf_prefix}.mlp.experts.{e}"
-                    gate_raw = _load_tensor(readers, f"{exp_hf}.gate_proj.weight")
-                    up_raw = _load_tensor(readers, f"{exp_hf}.up_proj.weight")
-                    down_raw = _load_tensor(readers, f"{exp_hf}.down_proj.weight")
+                if quantized(f"{prefix}.experts.w_gate"):
+                    stacks = quant_ctx.experts[prefix]
+                    weights[f"{prefix}.experts.w_gate"] = placeholder(stacks.gate.shape)
+                    weights[f"{prefix}.experts.w_up"] = placeholder(stacks.up.shape)
+                    weights[f"{prefix}.experts.w_down"] = placeholder(stacks.down.shape)
+                else:
+                    expert_gate_weights = []
+                    expert_up_weights = []
+                    expert_down_weights = []
+                    for e in range(n_routed_experts):
+                        exp_hf = f"{hf_prefix}.mlp.experts.{e}"
+                        gate_raw = _load_tensor(readers, f"{exp_hf}.gate_proj.weight")
+                        up_raw = _load_tensor(readers, f"{exp_hf}.up_proj.weight")
+                        down_raw = _load_tensor(readers, f"{exp_hf}.down_proj.weight")
 
-                    expert_gate_weights.append(
-                        _transpose_2d(gate_raw, f"expert_{e}_gate", precision=layer_precision)
-                    )
-                    expert_up_weights.append(
-                        _transpose_2d(up_raw, f"expert_{e}_up", precision=layer_precision)
-                    )
-                    expert_down_weights.append(
-                        _transpose_2d(down_raw, f"expert_{e}_down", precision=layer_precision)
-                    )
-                    del gate_raw, up_raw, down_raw
+                        expert_gate_weights.append(
+                            _transpose_2d(gate_raw, f"expert_{e}_gate", precision=layer_precision)
+                        )
+                        expert_up_weights.append(
+                            _transpose_2d(up_raw, f"expert_{e}_up", precision=layer_precision)
+                        )
+                        expert_down_weights.append(
+                            _transpose_2d(down_raw, f"expert_{e}_down", precision=layer_precision)
+                        )
+                        del gate_raw, up_raw, down_raw
 
-                weights[f"{prefix}.experts.w_gate"] = np.stack(expert_gate_weights, axis=0)
-                expert_gate_weights.clear()
-                weights[f"{prefix}.experts.w_up"] = np.stack(expert_up_weights, axis=0)
-                expert_up_weights.clear()
-                weights[f"{prefix}.experts.w_down"] = np.stack(expert_down_weights, axis=0)
-                expert_down_weights.clear()
+                    weights[f"{prefix}.experts.w_gate"] = np.stack(expert_gate_weights, axis=0)
+                    expert_gate_weights.clear()
+                    weights[f"{prefix}.experts.w_up"] = np.stack(expert_up_weights, axis=0)
+                    expert_up_weights.clear()
+                    weights[f"{prefix}.experts.w_down"] = np.stack(expert_down_weights, axis=0)
+                    expert_down_weights.clear()
 
                 # Shared expert weights
                 shared_hf = f"{hf_prefix}.mlp.shared_experts"
-                s_gate_raw = _load_tensor(readers, f"{shared_hf}.gate_proj.weight")
-                s_up_raw = _load_tensor(readers, f"{shared_hf}.up_proj.weight")
-                s_down_raw = _load_tensor(readers, f"{shared_hf}.down_proj.weight")
-
-                weights[f"{prefix}.shared.w_gate"] = _transpose_2d(
-                    s_gate_raw, "shared_gate", precision=layer_precision
-                )
-                weights[f"{prefix}.shared.w_up"] = _transpose_2d(
-                    s_up_raw, "shared_up", precision=layer_precision
-                )
-                weights[f"{prefix}.shared.w_down"] = _transpose_2d(
-                    s_down_raw, "shared_down", precision=layer_precision
-                )
-                del s_gate_raw, s_up_raw, s_down_raw
+                for engine_key, hf_stem, label in (
+                    ("w_gate", "gate_proj", "shared_gate"),
+                    ("w_up", "up_proj", "shared_up"),
+                    ("w_down", "down_proj", "shared_down"),
+                ):
+                    weights[f"{prefix}.shared.{engine_key}"] = projection(
+                        f"{prefix}.shared.{engine_key}",
+                        f"{shared_hf}.{hf_stem}",
+                        label,
+                        layer_precision,
+                    )
             else:
                 # Dense SwiGLU MLP
-                gate_raw = _load_tensor(readers, f"{hf_prefix}.mlp.gate_proj.weight")
-                up_raw = _load_tensor(readers, f"{hf_prefix}.mlp.up_proj.weight")
-                down_raw = _load_tensor(readers, f"{hf_prefix}.mlp.down_proj.weight")
-
-                weights[f"{prefix}.w_gate"] = _transpose_2d(
-                    gate_raw, "gate_proj", precision=layer_precision
-                )
-                weights[f"{prefix}.w_up"] = _transpose_2d(
-                    up_raw, "up_proj", precision=layer_precision
-                )
-                weights[f"{prefix}.w_down"] = _transpose_2d(
-                    down_raw, "down_proj", precision=layer_precision
-                )
-                del gate_raw, up_raw, down_raw
+                for engine_key, hf_stem, label in (
+                    ("w_gate", "gate_proj", "gate_proj"),
+                    ("w_up", "up_proj", "up_proj"),
+                    ("w_down", "down_proj", "down_proj"),
+                ):
+                    weights[f"{prefix}.{engine_key}"] = projection(
+                        f"{prefix}.{engine_key}",
+                        f"{hf_prefix}.mlp.{hf_stem}",
+                        label,
+                        layer_precision,
+                    )
 
         # Final norm
         final_norm_key = f"{lang_prefix}model.norm.weight"
@@ -362,6 +386,7 @@ class _DeepseekOcrModel:
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 1
+        configure_fp8_build(trt_config, quant_ctx)
 
         # -----------------------------------------------------------
         # Inputs
@@ -535,6 +560,8 @@ class _DeepseekOcrModel:
                 routed_scaling_factor=routed_scaling_factor,
                 dtype=layer_np_dtype,
                 sequence_length=None,
+                quant_ctx=quant_ctx,
+                is_decode=is_decode,
             )
 
             hidden_state = result["hidden"]
@@ -697,6 +724,28 @@ class _DeepseekOcrModel:
 # ---------------------------------------------------------------------------
 
 
+def _matmul(
+    network: trt.INetworkDefinition,
+    lhs: trt.ITensor,
+    lhs_width: int,
+    rhs_width: int,
+    rhs_weights: np.ndarray,
+    name: str,
+    *,
+    dtype,
+    quant_ctx=None,
+    **options,
+) -> trt.ITensor:
+    """Constant-weight matmul; a projection owned by ``quant_ctx`` goes through FP8 Q/DQ."""
+    if quant_ctx is not None and quant_ctx.should_quantize(name):
+        return quant_ctx.maybe_quantized_matmul(
+            network, lhs, lhs_width, rhs_width, rhs_weights, name, dtype=dtype
+        )
+    return graph_ops.add_matmul_rhs_constant(
+        network, lhs, lhs_width, rhs_width, rhs_weights, dtype=dtype, **options
+    )
+
+
 def _add_swiglu_expert(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
@@ -706,39 +755,48 @@ def _add_swiglu_expert(
     w_up: np.ndarray,
     w_down: np.ndarray,
     dtype=np.float32,
+    quant_ctx=None,
+    name_prefix: str = "",
 ) -> trt.ITensor:
     """Compute a single SwiGLU expert: down(silu(gate(x)) * up(x))."""
-    gate = graph_ops.add_matmul_rhs_constant(
+    accumulation = {"fp32_accumulation": dtype == np.float32}
+    gate = _matmul(
         network,
         inp,
         hidden_size,
         intermediate_size,
         w_gate,
+        f"{name_prefix}.w_gate",
         dtype=dtype,
-        fp32_accumulation=dtype == np.float32,
+        quant_ctx=quant_ctx,
+        **accumulation,
     )
-    up = graph_ops.add_matmul_rhs_constant(
+    up = _matmul(
         network,
         inp,
         hidden_size,
         intermediate_size,
         w_up,
+        f"{name_prefix}.w_up",
         dtype=dtype,
-        fp32_accumulation=dtype == np.float32,
+        quant_ctx=quant_ctx,
+        **accumulation,
     )
 
     sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
     swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
     gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
 
-    down = graph_ops.add_matmul_rhs_constant(
+    down = _matmul(
         network,
         gated.get_output(0),
         intermediate_size,
         hidden_size,
         w_down,
+        f"{name_prefix}.w_down",
         dtype=dtype,
-        fp32_accumulation=dtype == np.float32,
+        quant_ctx=quant_ctx,
+        **accumulation,
     )
     return down
 
@@ -761,6 +819,8 @@ def _add_moe_with_shared_experts(
     norm_topk_prob: bool = False,
     routed_scaling_factor: float = 1.0,
     dtype=np.float32,
+    quant_ctx=None,
+    dense_experts: bool = False,
 ) -> trt.ITensor:
     """MoE block with shared experts (DeepSeek-V2 style).
 
@@ -804,21 +864,65 @@ def _add_moe_with_shared_experts(
     else:
         final_weights = top_values
 
-    # 5. Gather each token's selected expert weights before the three SwiGLU
-    # matmuls. The packed tensors are [experts, in, out], so this remains
-    # dynamic over the prefill sequence dimension without evaluating all 64.
-    result = graph_blocks.add_routed_swiglu_experts(
-        network,
-        inp,
-        top_indices,
-        final_weights,
-        hidden_size=hidden_size,
-        top_k=num_experts_per_tok,
-        w_gate=weights[f"{prefix}.experts.w_gate"],
-        w_up=weights[f"{prefix}.experts.w_up"],
-        w_down=weights[f"{prefix}.experts.w_down"],
-        dtype=dtype,
-    )
+    # 5. Decode gathers each token's selected expert weights before the three SwiGLU
+    # matmuls (the packed tensors are [experts, in, out]), so it reads only the top-k
+    # experts. Prefill (many tokens, nearly every expert selected) instead runs all
+    # experts as three plain matmuls: a per-token gather would copy top-k expert
+    # weights for every token (about 6 GB per projection for 155 tokens).
+    if (
+        dense_experts
+        and quant_ctx is not None
+        and quant_ctx.should_quantize(f"{prefix}.experts.w_gate")
+    ):
+        result = quant_ctx.routed_experts_dense(
+            network, inp, top_indices, final_weights, prefix, hidden_size, num_experts_per_tok
+        )
+    elif dense_experts:
+        w_gate, w_up, w_down = graph_blocks.dense_expert_layout(
+            weights[f"{prefix}.experts.w_gate"],
+            weights[f"{prefix}.experts.w_up"],
+            weights[f"{prefix}.experts.w_down"],
+        )
+
+        def expert_const(values):
+            tensor = graph_ops.add_constant(network, values.shape, values, dtype=dtype)
+            return (
+                tensor
+                if tensor.dtype == inp.dtype
+                else network.add_cast(tensor, inp.dtype).get_output(0)
+            )
+
+        result = graph_blocks.add_dense_routed_swiglu_experts(
+            network,
+            inp,
+            top_indices,
+            final_weights,
+            expert_const(w_gate),
+            expert_const(w_up),
+            expert_const(w_down),
+            hidden_size=hidden_size,
+            top_k=num_experts_per_tok,
+            num_experts=n_routed_experts,
+            inter_size=moe_intermediate,
+        )
+    elif quant_ctx is not None and quant_ctx.should_quantize(f"{prefix}.experts.w_gate"):
+        # FP8 expert stacks: dequantized after the gather, see quantization.py.
+        result = quant_ctx.routed_experts(
+            network, inp, top_indices, final_weights, prefix, hidden_size, num_experts_per_tok
+        )
+    else:
+        result = graph_blocks.add_routed_swiglu_experts(
+            network,
+            inp,
+            top_indices,
+            final_weights,
+            hidden_size=hidden_size,
+            top_k=num_experts_per_tok,
+            w_gate=weights[f"{prefix}.experts.w_gate"],
+            w_up=weights[f"{prefix}.experts.w_up"],
+            w_down=weights[f"{prefix}.experts.w_down"],
+            dtype=dtype,
+        )
 
     # 6. Shared expert output (always active, applied to original input)
     shared_out = _add_swiglu_expert(
@@ -830,6 +934,8 @@ def _add_moe_with_shared_experts(
         weights[f"{prefix}.shared.w_up"],
         weights[f"{prefix}.shared.w_down"],
         dtype=dtype,
+        quant_ctx=quant_ctx,
+        name_prefix=f"{prefix}.shared",
     )
 
     # 7. Combine: routed_output + shared_output
@@ -873,6 +979,8 @@ def _add_decoder_layer(
     routed_scaling_factor: float = 1.0,
     dtype=np.float32,
     sequence_length: int | None = 1,
+    quant_ctx=None,
+    is_decode: bool = False,
 ) -> dict[str, trt.ITensor]:
     """One decoder layer: standard MHA + (dense MLP or MoE with shared experts)."""
 
@@ -889,14 +997,35 @@ def _add_decoder_layer(
     )
 
     # QKV projections (no biases)
-    q = graph_ops.add_matmul_rhs_constant(
-        network, norm1, hidden_size, attention_size, weights[f"{prefix}.w_q"], dtype=dtype
+    q = _matmul(
+        network,
+        norm1,
+        hidden_size,
+        attention_size,
+        weights[f"{prefix}.w_q"],
+        f"{prefix}.w_q",
+        dtype=dtype,
+        quant_ctx=quant_ctx,
     )
-    k = graph_ops.add_matmul_rhs_constant(
-        network, norm1, hidden_size, kv_attention_size, weights[f"{prefix}.w_k"], dtype=dtype
+    k = _matmul(
+        network,
+        norm1,
+        hidden_size,
+        kv_attention_size,
+        weights[f"{prefix}.w_k"],
+        f"{prefix}.w_k",
+        dtype=dtype,
+        quant_ctx=quant_ctx,
     )
-    v = graph_ops.add_matmul_rhs_constant(
-        network, norm1, hidden_size, kv_attention_size, weights[f"{prefix}.w_v"], dtype=dtype
+    v = _matmul(
+        network,
+        norm1,
+        hidden_size,
+        kv_attention_size,
+        weights[f"{prefix}.w_v"],
+        f"{prefix}.w_v",
+        dtype=dtype,
+        quant_ctx=quant_ctx,
     )
 
     q = graph_ops.add_apply_rope_native(
@@ -954,7 +1083,9 @@ def _add_decoder_layer(
         q_seq=sequence_length,
         kv_seq=None if sequence_length is None else max_cache_length + 1,
         mask=mask_4d,
-        fp32_accumulation=dtype != np.float32,
+        # Decode (one query row) keeps fp16 Q/K/V: fp32 accumulation makes TensorRT read the
+        # whole cache as fp32 in a slow single-row kernel. Prefill keeps fp32 accumulation.
+        fp32_accumulation=dtype != np.float32 and not is_decode,
     )
 
     # Output projection
@@ -992,6 +1123,8 @@ def _add_decoder_layer(
             norm_topk_prob=norm_topk_prob,
             routed_scaling_factor=routed_scaling_factor,
             dtype=dtype,
+            quant_ctx=quant_ctx,
+            dense_experts=not is_decode,
         )
     else:
         mlp_out = graph_blocks.add_swiglu_mlp(
@@ -1002,6 +1135,7 @@ def _add_decoder_layer(
             hidden_size=hidden_size,
             mlp_size=dense_intermediate,
             dtype=dtype,
+            quant_ctx=quant_ctx,
         )
 
     # Residual
@@ -2013,8 +2147,18 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.task != "vision_language_generation":
         raise ValueError("deepseek_ocr supports only task=vision_language_generation")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("DeepSeek-OCR supports only non-quantized builds")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"DeepSeek-OCR does not support quantization={request.quantization!r}; "
+            "supported: none, fp8"
+        )
+    quantized = request.quantization == "fp8"
+    if quantized and str(request.precision).lower() != "fp16":
+        raise NotImplementedError("deepseek_ocr fp8 quantization requires precision fp16")
+    if quantized and int(request.tensor_parallel_size) != 1:
+        raise NotImplementedError(
+            "deepseek_ocr fp8 quantization does not support tensor parallelism"
+        )
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower() != "deepseek_vl_v2":
@@ -2026,7 +2170,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_fp32_layers"] = tuple(request.fp32_layers)
     model = _DeepseekOcrModel()
-    weights = model.load_weights(str(model_dir), config, precision=precision)
+    quant_ctx = calibrate_deepseek_ocr(model_dir, graph_ops, "fp8", config) if quantized else None
+    load_options = {"quant_ctx": quant_ctx} if quantized else {}
+    weights = model.load_weights(str(model_dir), config, precision=precision, **load_options)
     writer.set_header(family="deepseek_ocr", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -2037,7 +2183,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                     weights,
                     max_length,
                     precision=precision,
-                    quant_ctx=None,
+                    quant_ctx=quant_ctx,
                     verbose=request.verbose,
                     parallel_config=parallel.for_rank(rank),
                 ),
@@ -2049,7 +2195,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=request.verbose,
             parallel_config=parallel,
         )
@@ -2062,7 +2208,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=request.verbose,
             parallel_config=parallel,
         )

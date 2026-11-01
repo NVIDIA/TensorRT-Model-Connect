@@ -129,44 +129,11 @@ def family_plan(repository: Path, family: str) -> FamilyPlan:
     )
 
 
-# A checkpoint may point at code that lives in a different repository, spelled
-# "owner/repo--module.Class" in auto_map. Nothing else in the staging path
-# follows that reference, so an offline E2E that needs it fails to import the
-# model rather than failing an assertion.
-_CODE_REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*\Z")
-
-
-def _auto_map_repos(snapshot: Path) -> tuple[str, ...]:
-    """The other repositories a staged checkpoint's auto_map names, if any."""
-    repos: set[str] = set()
-    for name in ("config.json", "tokenizer_config.json"):
-        path = snapshot / name
-        if not path.is_file():
-            continue
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        auto_map = loaded.get("auto_map")
-        if not isinstance(auto_map, dict):
-            continue
-        for value in auto_map.values():
-            entries = value if isinstance(value, (list, tuple)) else (value,)
-            for entry in entries:
-                if not isinstance(entry, str) or "--" not in entry:
-                    continue
-                candidate = entry.split("--", 1)[0]
-                if _CODE_REPO.fullmatch(candidate):
-                    repos.add(candidate)
-    return tuple(sorted(repos))
-
-
 def _stage_checkpoints(plans: tuple[FamilyPlan, ...], cache_dir: Path) -> None:
     """Resolve and cache each selected Hugging Face revision before offline E2E."""
     from huggingface_hub import HfApi, snapshot_download
 
     api = HfApi()
-    staged_code: set[str] = set()
     for repo_id, requested_revision in sorted(
         {checkpoint for plan in plans for checkpoint in plan.checkpoints},
         key=lambda item: (item[0], item[1] or ""),
@@ -189,27 +156,6 @@ def _stage_checkpoints(plans: tuple[FamilyPlan, ...], cache_dir: Path) -> None:
         if not (snapshot / "config.json").is_file():
             raise CiError(f"staged checkpoint has no config.json: {repo_id}@{resolved}")
         print(f"Staged checkpoint {repo_id}@{resolved}")
-
-        for code_repo in _auto_map_repos(snapshot):
-            if code_repo in staged_code:
-                continue
-            staged_code.add(code_repo)
-            # Only the modules are needed, and a code repository is often a
-            # full model as well; pulling its weights would stage gigabytes
-            # that nothing reads.
-            code_snapshot = Path(
-                snapshot_download(
-                    repo_id=code_repo,
-                    cache_dir=cache_dir,
-                    allow_patterns=["*.py"],
-                )
-            )
-            if not any(code_snapshot.glob("*.py")):
-                raise CiError(f"remote code repository has no modules: {code_repo}")
-            # auto_map carries no revision, so this is whatever the repository
-            # currently holds. It is printed to keep the run's evidence honest
-            # about a dependency the manifest cannot pin.
-            print(f"Staged remote code {code_repo}@{code_snapshot.name}")
 
 
 def _install_family_requirements(context: CiContext, plans: tuple[FamilyPlan, ...]) -> None:

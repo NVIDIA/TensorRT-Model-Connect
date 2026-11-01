@@ -665,7 +665,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.out = arguments.out.parent / "smoke" / arguments.out.name
         record = run_one(environment, resolve_model(arguments.profile, environment), arguments.out)
         print(json.dumps({"report": str(arguments.out / "report.md"), **record}))
-        return 0 if record["category"] in ("pass", "smoke-pass") else 1
+        complete_measurement = (record["category"] == "measured" and record.get("acc") == "pass"
+                                and record.get("perf") == "measured")
+        return 0 if record["category"] in ("pass", "smoke-pass") or complete_measurement else 1
     except ConfigError as error:
         print(f"trtmc-aiperf-qual: {error}", file=sys.stderr)
         return 2

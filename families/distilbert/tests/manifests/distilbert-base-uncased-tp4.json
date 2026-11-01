@@ -4,7 +4,7 @@
   "hf_revision": "12040accade4e8a0f71eabdb258fecc2e7e948be",
   "bundle": "distilbert-base-uncased-tp4.bundle",
   "family": "distilbert",
-  "task": "encoding",
+  "task": "text_to_pooled_features",
   "testcases": [
     {
       "name": "distilbert-base-uncased-tp4",

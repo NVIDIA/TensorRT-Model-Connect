@@ -4,3 +4,4 @@
 # No torchaudio: this family reads the waveform directly and its only frontend
 # is a mean/variance normalisation, so there is no filter bank to agree with.
 transformers
+torch>=2.10.0

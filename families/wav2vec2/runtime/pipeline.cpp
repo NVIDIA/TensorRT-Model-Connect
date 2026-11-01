@@ -45,14 +45,6 @@ TextResult Wav2Vec2Pipeline::run(const internal::SpeechTranscriptionRequest& req
     if (audio.samples.data() == nullptr || audio.samples.empty())
         throw std::invalid_argument("wav2vec2 requires float32 PCM input");
 
-    // This family is English-only through its own character vocabulary, so a
-    // stated source language is accepted only when it names that language.
-    if (request.source_language.has_value()) {
-        const auto language = std::string(*request.source_language);
-        if (!language.empty() && language != "en" && language != "eng" && language != "english")
-            throw std::invalid_argument("wav2vec2 transcribes English, not " + language);
-    }
-
     // The convolution strides, the mel-free frontend and the normalisation are
     // all fixed to the rate the checkpoint was trained at. This family ships no
     // resampler; the caller supplies audio at the declared rate.

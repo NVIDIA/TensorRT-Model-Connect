@@ -115,10 +115,11 @@ def load_standard_weights(
     if embedding_key is None:
         embedding_key = f"{model_prefix}.embed_tokens.weight"
     embedding = _load_tensor(readers, embedding_key)
-    assert embedding.shape == (vocab, hidden), (
-        f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
-    )
+    if embedding.shape != (vocab, hidden):
+        raise ValueError(f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
     weights["embedding"] = embedding.astype(target_dtype)
+    # Jiaxin Deng: keep only the stored embedding while loading decoder layers.
+    del embedding
 
     def _load_layer(layer_idx: int) -> tuple[int, WeightDict, int, int]:
         prefix = f"layer.{layer_idx}"
@@ -239,7 +240,11 @@ def load_standard_weights(
         )
     else:
         # Tied embeddings
-        weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied", precision=precision)
+        weights["w_out"] = _transpose_2d(
+            weights["embedding"], "embedding_tied", precision=precision
+        )
+        if np.shares_memory(weights["w_out"], weights["embedding"]):
+            weights["w_out"] = weights["w_out"].copy()
 
     weights["_prepared_quantized"] = any(isinstance(value, PreparedLinear) for value in weights.values())
     weights["_attention_size"] = attention_size  # type: ignore[assignment]

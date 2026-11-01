@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+COPY requirements.txt /opt/trtmc-ci/family-requirements.txt
+RUN python -m pip install --disable-pip-version-check --no-cache-dir \
+        --no-build-isolation -r /opt/trtmc-ci/family-requirements.txt \
+    && python -m pip check
+
+# LeRobot uses the gated nvidia/Cosmos-Reason2-2B tokenizer. CI uses the public
+# Qwen/Qwen3-VL-2B-Instruct copy of the same file (identical Git blob at both pinned
+# revisions), pinned to its commit and checked by SHA-256.
+RUN python -c 'from hashlib import sha256; from pathlib import Path; from urllib.request import urlopen; data = urlopen("https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/tokenizer.json", timeout=60).read(); assert sha256(data).hexdigest() == "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"; Path("/opt/trtmc-ci/tokenizer.json").write_bytes(data)'

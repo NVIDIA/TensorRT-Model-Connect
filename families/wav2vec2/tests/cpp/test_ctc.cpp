@@ -126,11 +126,14 @@ void test_greedy_decode() {
 
 } // namespace
 
+int test_pipeline_language();
+
 int main() {
     test_normalize();
     test_mix_mono();
     test_feature_frames();
     test_greedy_decode();
+    failures += test_pipeline_language();
     if (failures != 0) {
         std::printf("wav2vec2 ctc: %d check(s) failed\n", failures);
         return EXIT_FAILURE;

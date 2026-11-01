@@ -1,0 +1,27 @@
+{
+  "name": "nemotron-omni-nvfp4-text-image",
+  "hf_id": "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4",
+  "hf_revision": "16993199e436da4ba75ddc410855f87e0d996ee6",
+  "bundle": "nemotron-omni-nvfp4-text-image.bundle",
+  "family": "nemotron_omni",
+  "task": "vision_language_generation",
+  "precision": "fp16",
+  "quantization": "nvfp4",
+  "max_sequence_length": 4096,
+  "tensor_parallel_size": 1,
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "nemotron-omni-nvfp4-text-image",
+      "premerge": false,
+      "reference_backend": "golden_snapshot",
+      "modalities": [
+        "text",
+        "image"
+      ],
+      "metadata": {
+        "golden_snapshot_path": "data/reference.json"
+      }
+    }
+  ]
+}

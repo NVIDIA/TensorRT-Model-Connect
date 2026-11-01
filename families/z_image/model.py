@@ -113,14 +113,21 @@ class _ZImageModel:
         verbose: bool = False,
         parallel_config=None,
         max_batch_size: int = 1,
+        quantization: str | None = None,
     ) -> dict:
-        """Build REAL TRT engines for all Z-Image components."""
+        """Build REAL TRT engines for all Z-Image components.
+
+        ``quantization="fp8"`` quantizes the DiT projections to FP8 (see ``quantization.py``);
+        the text encoder and the VAE stay as they are.
+        """
         from .timing import timed_trt_compile, timed_weight_loading
         from .qwen3_encoder_builder import build_qwen3_encoder_engine, load_qwen3_encoder_weights
         from .z_image_dit_builder import build_z_image_dit_engine, load_z_image_dit_weights
         from .z_image_dit_tp_builder import build_z_image_dit_engine as build_z_image_dit_tp_engine
         from .vae_2d_builder import build_vae_2d_decoder_engine
         from .parallel import normalize_parallel_config, validate_dit_tp
+        from .checkpoint_mapper import _open_safetensors
+        from .quantization import calibrate_z_image, is_quantized_checkpoint
 
         build_timing = None
         selected_fp32_components = frozenset(
@@ -245,6 +252,19 @@ class _ZImageModel:
                 num_refiner_layers=self._DIT_NUM_REFINER_LAYERS,
                 ffn_dim=self._DIT_FFN_DIM,
             )
+        quant_ctx = None
+        if quantization not in (None, "none"):
+            quant_ctx = calibrate_z_image(
+                dit_weights,
+                dim=self._DIT_DIM,
+                num_layers=self._DIT_NUM_LAYERS,
+                num_refiner_layers=self._DIT_NUM_REFINER_LAYERS,
+                ffn_dim=self._DIT_FFN_DIM,
+                quantization=quantization,
+                quantized_checkpoint=is_quantized_checkpoint(
+                    _open_safetensors(Path(transformer_dir))
+                ),
+            )
         dit_plan = None
         dit_rank_plans = None
         with timed_trt_compile(build_timing, "z_image_dit"):
@@ -292,6 +312,7 @@ class _ZImageModel:
                     verbose=verbose,
                     max_batch_size=dit_mbs,
                     opt_batch_size=dit_opt,
+                    quant_ctx=quant_ctx,
                 )
 
         # Retain only the serialized data needed by the runtime before loading VAE weights.
@@ -430,8 +451,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError("z_image supports only task=image_generation")
     if request.precision not in {"fp16", "fp32"}:
         raise ValueError("Z-Image supports only precision=fp16 or fp32")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Z-Image does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(f"Z-Image does not support quantization={request.quantization!r}")
+    if request.quantization == "fp8" and (
+        request.precision != "fp16"
+        or int(request.tensor_parallel_size) != 1
+        or int(request.max_batch_size) != 1
+    ):
+        raise NotImplementedError(
+            "Z-Image FP8 requires precision=fp16, tensor_parallel_size=1 and max_batch_size=1"
+        )
     height = int(request.image_height or 1024)
     width = int(request.image_width or 1024)
     if height % 16 or width % 16:
@@ -457,6 +486,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         verbose=request.verbose,
         parallel_config=parallel,
         max_batch_size=request.max_batch_size,
+        quantization=request.quantization,
     )
 
     writer.set_header(family="z_image", task=request.task, backend=request.backend)

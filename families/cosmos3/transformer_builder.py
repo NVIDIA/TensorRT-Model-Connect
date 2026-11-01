@@ -15,6 +15,7 @@ import tensorrt as trt
 from . import trt_ops as op
 from .checkpoint_mapper import load_transformer_state_dict
 from .model_config import COSMOS3_NANO, Cosmos3NanoConfig
+from .quantization import configure_build, is_fp8_state, load_fp8_projections
 
 
 def required_transformer_tensor_names(
@@ -80,6 +81,25 @@ def _array(state: Mapping[str, object], name: str) -> np.ndarray:
     return np.asarray(value, dtype=np.float32)
 
 
+def _linear(network, x, state: Mapping[str, object], name: str, quant_ctx):
+    """Projection ``name`` (without ``.weight``): an FP8 GEMM when the checkpoint quantizes it."""
+
+    if quant_ctx is not None and name in quant_ctx.weights:
+        if quant_ctx.should_quantize(name):
+            return quant_ctx.matmul(network, op.cast(network, x, trt.bfloat16), name)
+        return op.linear(network, x, quant_ctx.dequantized_weight(name))
+    return op.linear(network, x, _array(state, f"{name}.weight"))
+
+
+def _swiglu_mlp(network, x, state: Mapping[str, object], prefix: str, quant_ctx):
+    """SwiGLU MLP with the projections routed through ``_linear``."""
+
+    gate = op.silu(network, _linear(network, x, state, f"{prefix}.gate_proj", quant_ctx))
+    up = _linear(network, x, state, f"{prefix}.up_proj", quant_ctx)
+    gated = network.add_elementwise(gate, up, trt.ElementWiseOperation.PROD).get_output(0)
+    return _linear(network, gated, state, f"{prefix}.down_proj", quant_ctx)
+
+
 def _validate_context_parallel_size(size: int) -> int:
     if size not in (1, 2):
         raise ValueError("Cosmos3-Nano context_parallel_size must be 1 or 2")
@@ -93,9 +113,14 @@ def build_cosmos3_transformer_engine(
     *,
     profile: Cosmos3NanoConfig = COSMOS3_NANO,
     context_parallel_size: int = 1,
+    quantization: str | None = None,
     verbose: bool = False,
 ) -> bytes:
-    """Build one rank-dynamic SD or Ulysses CP denoiser plan."""
+    """Build one rank-dynamic SD or Ulysses CP denoiser plan.
+
+    ``quantization="fp8"`` lowers the checkpoint's ModelOpt FP8 projections to FP8 GEMMs;
+    it needs the FP8 checkpoint, and that checkpoint needs ``quantization="fp8"``.
+    """
 
     cp_size = _validate_context_parallel_size(context_parallel_size)
     text_length = profile.max_text_seq_len
@@ -107,11 +132,22 @@ def build_cosmos3_transformer_engine(
 
     state = load_transformer_state_dict(transformer_dir)
     validate_transformer_state_dict(state, profile)
+    quant_ctx = None
+    if quantization == "fp8":
+        if cp_size != 1:
+            raise ValueError("Cosmos3-Nano fp8 builds support context_parallel_size=1 only")
+        quant_ctx = load_fp8_projections(state, profile.num_hidden_layers)
+    elif quantization not in (None, "none"):
+        raise ValueError(f"Cosmos3-Nano does not support quantization={quantization!r}")
+    elif is_fp8_state(state):
+        raise ValueError("this checkpoint stores FP8 weights; build it with --quantization fp8")
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     build_config = builder.create_builder_config()
     build_config.builder_optimization_level = 1
+    if quant_ctx is not None:
+        configure_build(build_config)
     build_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 
@@ -207,9 +243,9 @@ def build_cosmos3_transformer_engine(
                 else ("to_q", "to_k", "to_v")
             )
             q_name, k_name, v_name = projection_names
-            q = op.linear(network, stream, _array(state, f"{prefix}.self_attn.{q_name}.weight"))
-            k = op.linear(network, stream, _array(state, f"{prefix}.self_attn.{k_name}.weight"))
-            v = op.linear(network, stream, _array(state, f"{prefix}.self_attn.{v_name}.weight"))
+            q = _linear(network, stream, state, f"{prefix}.self_attn.{q_name}", quant_ctx)
+            k = _linear(network, stream, state, f"{prefix}.self_attn.{k_name}", quant_ctx)
+            v = _linear(network, stream, state, f"{prefix}.self_attn.{v_name}", quant_ctx)
             q_norm_name = "norm_added_q" if generation else "norm_q"
             k_norm_name = "norm_added_k" if generation else "norm_k"
             q = op.rms_norm_per_head(
@@ -323,20 +359,12 @@ def build_cosmos3_transformer_engine(
         text = op.residual(
             network,
             text,
-            op.linear(
-                network,
-                text_context,
-                _array(state, f"{prefix}.self_attn.to_out.weight"),
-            ),
+            _linear(network, text_context, state, f"{prefix}.self_attn.to_out", quant_ctx),
         )
         vision = op.residual(
             network,
             vision,
-            op.linear(
-                network,
-                vision_context,
-                _array(state, f"{prefix}.self_attn.to_add_out.weight"),
-            ),
+            _linear(network, vision_context, state, f"{prefix}.self_attn.to_add_out", quant_ctx),
         )
         text_ffn_input = op.rms_norm(
             network,
@@ -355,24 +383,12 @@ def build_cosmos3_transformer_engine(
         text = op.residual(
             network,
             text,
-            op.swiglu_mlp(
-                network,
-                text_ffn_input,
-                _array(state, f"{prefix}.mlp.gate_proj.weight"),
-                _array(state, f"{prefix}.mlp.up_proj.weight"),
-                _array(state, f"{prefix}.mlp.down_proj.weight"),
-            ),
+            _swiglu_mlp(network, text_ffn_input, state, f"{prefix}.mlp", quant_ctx),
         )
         vision = op.residual(
             network,
             vision,
-            op.swiglu_mlp(
-                network,
-                vision_ffn_input,
-                _array(state, f"{prefix}.mlp_moe_gen.gate_proj.weight"),
-                _array(state, f"{prefix}.mlp_moe_gen.up_proj.weight"),
-                _array(state, f"{prefix}.mlp_moe_gen.down_proj.weight"),
-            ),
+            _swiglu_mlp(network, vision_ffn_input, state, f"{prefix}.mlp_moe_gen", quant_ctx),
         )
 
     vision = op.rms_norm(

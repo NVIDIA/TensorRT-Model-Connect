@@ -736,7 +736,17 @@ def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:
     assert "schedule" in events
     assert "workflow_dispatch" in events
     assert workflow["permissions"] == {}
-    assert "github.event.workflow_run.name == 'Community CI'" in ready["if"]
+    # Community CI sets a run-name, which becomes the run's name, so the gate must
+    # identify its pull-request runs by the title they are actually given.
+    assert "workflow_run.name" not in ready["if"]
+    gate = re.search(r"display_title, '([^']+)'", ready["if"]).group(1)
+    community_ci = yaml.safe_load(
+        (path.parent / "community-ci.yml").read_text(encoding="utf-8")
+    )
+    assert gate in community_ci["run-name"]
+    run_name_pattern = re.search(r"run_name_pattern='([^']+)'", source).group(1)
+    title = f"PR #7 \u00b7 community CI \u00b7 head {'a' * 40} \u00b7 merge {'b' * 40}"
+    assert re.match(run_name_pattern, title)
     assert "github.event.workflow_run.event == 'pull_request'" in ready["if"]
     assert "merge_revision_matches_tested" in source
     assert '[ "$current_base_sha" = "$tested_base_sha" ]' in source

@@ -27,6 +27,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import graph_ops
+from .quantization import configure_fp8_build, encoder_weight_name
 from .config import (
     MERGE_FACTOR,
     audio_encoder_config,
@@ -85,7 +86,7 @@ def _add_conv_gelu(
 
 
 def build_audio_encoder_engine(
-    config, weights, *, precision: str = "fp32", verbose: bool = False,
+    config, weights, *, precision: str = "fp32", quant_ctx=None, verbose: bool = False,
 ) -> bytes:
     """Serialize the encoder-plus-projector engine for one mel chunk."""
     encoder = audio_encoder_config(config.raw)
@@ -113,6 +114,7 @@ def build_audio_encoder_engine(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     builder_config = builder.create_builder_config()
     builder_config.builder_optimization_level = 1
+    configure_fp8_build(builder_config, quant_ctx)
 
     eps = graph_ops.add_constant(
         network, (1, 1),
@@ -156,10 +158,17 @@ def build_audio_encoder_engine(
         )
 
     def _project(source, key, in_features, out_features, *, bias=True):
-        out = graph_ops.add_matmul_rhs_constant(
-            network, source, in_features, out_features,
-            _rhs(weights, f"{key}.weight"), dtype=work_np_dtype,
-        )
+        name = encoder_weight_name(key)
+        if quant_ctx is not None and quant_ctx.should_quantize(name):
+            out = quant_ctx.maybe_quantized_matmul(
+                network, source, in_features, out_features, None, name,
+                dtype=work_np_dtype,
+            )
+        else:
+            out = graph_ops.add_matmul_rhs_constant(
+                network, source, in_features, out_features,
+                _rhs(weights, f"{key}.weight"), dtype=work_np_dtype,
+            )
         if not bias:
             return out
         return graph_ops.add_bias_sum(

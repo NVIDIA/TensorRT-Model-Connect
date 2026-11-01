@@ -23,6 +23,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import config as config_module, encoder_builder, fbank, graph as g
+from .quantization import calibrate_ast, configure_quantized_build
 
 _SUPPORTED_TASKS = ("audio_to_class_scores",)
 _PREFIX = "audio_spectrogram_transformer"
@@ -128,8 +129,9 @@ def _classify(network, hidden, weights, cfg, *, dtype):
                         weights["classifier.dense.bias"], dtype=dtype)
 
 
-def build_engine(weights, cfg, *, precision, verbose=False) -> bytes:
+def build_engine(weights, cfg, *, precision, quant_ctx=None, verbose=False) -> bytes:
     builder, network, config = _builder(precision, verbose)
+    configure_quantized_build(config, quant_ctx)
     work_np, work_trt = ((np.float16, trt.float16) if precision == "fp16"
                          else (np.float32, trt.float32))
     features = network.add_input("input_values", trt.float32,
@@ -138,7 +140,9 @@ def build_engine(weights, cfg, *, precision, verbose=False) -> bytes:
               else network.add_cast(features, work_trt).get_output(0))
 
     hidden = _embed_patches(network, source, weights, cfg, dtype=work_np)
-    hidden = encoder_builder.build_layers(network, hidden, weights, _PREFIX, cfg, dtype=work_np)
+    hidden = encoder_builder.build_layers(
+        network, hidden, weights, _PREFIX, cfg, dtype=work_np, quant_ctx=quant_ctx
+    )
     logits = _classify(network, hidden, weights, cfg, dtype=work_np)
 
     flat = network.add_shuffle(logits)
@@ -174,8 +178,7 @@ def build(request, writer) -> None:
     if request.image_height is not None or request.image_width is not None:
         # AST's patches are cut from a spectrogram, so there is no image to size.
         raise NotImplementedError("ast takes audio, not an image size")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("ast does not support quantization")
+    quantized = request.quantization not in {None, "none"}
     if request.fp32_layers:
         raise NotImplementedError("ast does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -184,11 +187,14 @@ def build(request, writer) -> None:
     precision = str(request.precision).lower()
     if precision not in {"fp16", "fp32"}:
         raise ValueError(f"Unsupported ast precision: {precision}")
+    if quantized and precision != "fp16":
+        raise ValueError("ast quantization requires precision=fp16")
 
     model_dir = Path(request.model_dir)
     weights, shapes = _load(model_dir)
     _require_weights(weights)
     cfg = config_module.resolve(model_dir, shapes)
+    quant_ctx = calibrate_ast(weights, cfg, g, request.quantization) if quantized else None
 
     if request.max_sequence_length is not None:
         if int(request.max_sequence_length) != cfg["max_length"]:
@@ -199,7 +205,7 @@ def build(request, writer) -> None:
 
     writer.set_header(family="ast", task=request.task, backend=request.backend)
     writer.add_bytes("model.plan", build_engine(
-        weights, cfg, precision=precision, verbose=bool(request.verbose)))
+        weights, cfg, precision=precision, quant_ctx=quant_ctx, verbose=bool(request.verbose)))
     writer.add_bytes("window.f32", fbank.hann_window(cfg["frame_length"]).tobytes())
     writer.add_bytes("mel_filters.f32", fbank.mel_filters(
         cfg["num_mel_bins"], cfg["n_fft"], float(cfg["sample_rate"]),

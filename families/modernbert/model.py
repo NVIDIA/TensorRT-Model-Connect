@@ -77,7 +77,10 @@ class _ModernBertModel:
 
         # Word embedding
         embedding = _load_tensor(readers, f"{hf_root}embeddings.tok_embeddings.weight")
-        assert embedding.shape == (config.vocab_size, hidden)
+        if embedding.shape != (config.vocab_size, hidden):
+            raise ValueError(
+                f"Embedding shape {embedding.shape} != ({config.vocab_size}, {hidden})"
+            )
         weights["embedding"] = embedding.astype(np.float32)
 
         # Embedding LayerNorm (no bias)
@@ -113,7 +116,8 @@ class _ModernBertModel:
 
             # Fused QKV: [3*hidden, hidden] -> split into Q, K, V
             wqkv = _load_tensor(readers, f"{hf_prefix}.attn.Wqkv.weight")
-            assert wqkv.shape == (3 * hidden, hidden)
+            if wqkv.shape != (3 * hidden, hidden):
+                raise ValueError(f"QKV weight shape {wqkv.shape} != ({3 * hidden}, {hidden})")
             q_w, k_w, v_w = np.split(wqkv, 3, axis=0)
             weights[f"{prefix}.w_q"] = np.ascontiguousarray(q_w.T.astype(np.float32))
             weights[f"{prefix}.w_k"] = np.ascontiguousarray(k_w.T.astype(np.float32))
@@ -130,7 +134,10 @@ class _ModernBertModel:
 
             # GeGLU MLP: Wi [2*intermediate, hidden] -> split into input, gate
             wi = _load_tensor(readers, f"{hf_prefix}.mlp.Wi.weight")
-            assert wi.shape == (2 * intermediate, hidden)
+            if wi.shape != (2 * intermediate, hidden):
+                raise ValueError(
+                    f"MLP input weight shape {wi.shape} != ({2 * intermediate}, {hidden})"
+                )
             input_w, gate_w = np.split(wi, 2, axis=0)
             weights[f"{prefix}.w_mlp_input"] = np.ascontiguousarray(input_w.T.astype(np.float32))
             weights[f"{prefix}.w_mlp_gate"] = np.ascontiguousarray(gate_w.T.astype(np.float32))
@@ -247,6 +254,11 @@ class _ModernBertModel:
         pos_slice = network.add_slice(all_pos_indices, start=(0,), shape=(1,), stride=(1,))
         pos_slice.set_input(2, sequence_shape)
         pos_indices = pos_slice.get_output(0)
+        sliding_mask = None
+        if any(layer in {"sliding_attention", "local_attention"} for layer in layer_types):
+            sliding_mask = graph_ops.add_bidirectional_window_mask(
+                network, pos_indices, pad_mask_4d.get_output(0), attention_contract.sliding_window
+            )
 
         # Embedding
         embed_table = graph_ops.add_constant(
@@ -270,8 +282,10 @@ class _ModernBertModel:
             lt = layer_types[layer_idx]
             if lt in ("full_attention", "global_attention"):
                 theta = full_theta
+                layer_mask = pad_mask_4d.get_output(0)
             else:
                 theta = sliding_theta
+                layer_mask = sliding_mask
             cos_table, sin_table = rope_tables[theta]
 
             # Pre-norm attention
@@ -332,7 +346,7 @@ class _ModernBertModel:
                 head_dim=head_dim,
                 q_seq=None,
                 kv_seq=None,
-                mask=pad_mask_4d.get_output(0),
+                mask=layer_mask,
             )
 
             attn_out = graph_ops.add_matmul_rhs_constant(
@@ -487,8 +501,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task not in {"encoding", "embedding", "reranking"}:
-        raise ValueError("modernbert task must be encoding, embedding, or reranking")
+    if request.task not in {"text_to_pooled_features", "text_to_embedding"}:
+        raise ValueError("modernbert task must be text_to_pooled_features or text_to_embedding")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if not str(config.model_type).lower().startswith("modernbert"):
@@ -545,6 +559,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         {
             **_tokenizer_runtime_contract(model_dir),
             "tensor_parallel_size": parallel.tp_size,
+            "vocab_size": config.vocab_size,
+            "max_sequence_length": max_sequence_length,
         },
     )
     for filename in _BUNDLE_FILES:

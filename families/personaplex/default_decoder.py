@@ -28,6 +28,7 @@ from . import graph_ops
 from . import graph_blocks
 from .config import ModelConfig
 from .default_dual_profile_decoder import build_dual_profile_decoder_engine
+from .quantization import configure_fp8_build
 from .utils import (
     BuilderContextFactory,
     const_in_work_dtype,
@@ -129,10 +130,7 @@ def build_standard_decoder_engine(
     #   - hidden_state_output=True     (speech / Bark hidden output)
     #
     _dual_profile_disabled_for = (
-        embed_input
-        or debug_layer_outputs
-        or hidden_state_output
-        or bool(fp32_layers)
+        embed_input or debug_layer_outputs or hidden_state_output or bool(fp32_layers)
     )
     if decoder_engine_role == "prefill" and _dual_profile_disabled_for:
         raise NotImplementedError(
@@ -185,6 +183,7 @@ def build_standard_decoder_engine(
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config
+    configure_fp8_build(trt_config, quant_ctx)
 
     # Precision configuration
     if precision == "fp16":
@@ -197,15 +196,12 @@ def build_standard_decoder_engine(
         work_np_dtype = np.float32
         work_trt_dtype = trt.float32
 
-
     # ---------------------------------------------------------------
     # Inputs
     # ---------------------------------------------------------------
     token_id = network.add_input("token_id", trt.int32, (1,))
     position_id = network.add_input("position_id", trt.int32, (1,))
-    attention_mask = network.add_input(
-        "attention_mask", trt.float32, (1, attention_window)
-    )
+    attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
 
     # Optional VL inputs: when embed_input=True, the decoder can accept
     # a pre-computed embedding vector instead of a token ID.
@@ -230,7 +226,6 @@ def build_standard_decoder_engine(
         )
         cache_k_inputs.append(ck)
         cache_v_inputs.append(cv)
-
 
     # Cast the attention mask so elementwise operands share the work dtype
     if work_trt_dtype != trt.float32:
@@ -381,7 +376,6 @@ def build_standard_decoder_engine(
 
     if debug_layer_outputs:
         _mark_debug_output(network, hidden_state, "debug_embed")
-
 
     # ---------------------------------------------------------------
     # Decoder layers

@@ -587,6 +587,10 @@ class _Qwen35Model:
         if quant_ctx is not None:
             # The plan inspector reads kernel names from the engine.
             trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+            if quant_ctx.has_fp8_weights:
+                # TensorRT's fused gate/up (dual GEMM) kernel fails to compile with
+                # scalar-scale FP8 inputs, so the fusion is turned off for FP8 builds.
+                trt_config.build_route = "-peep:match_dual_gemm=off"
 
         # --- Inputs ---
         token_id = network.add_input("token_id", trt.int32, (1,))
@@ -2260,15 +2264,20 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
         or (model_dir / "hf_quant_config.json").is_file()
     )
     quant_ctx = None
-    if not has_quant_metadata and request.quantization == "nvfp4" and not require_mtp and draft_dir is None:
+    if (not has_quant_metadata and request.quantization in {"nvfp4", "fp8"}
+            and not require_mtp and draft_dir is None):
+        # nvfp4: checkpoint already holds NVFP4 weights without ModelOpt metadata.
+        # fp8: the original BF16 checkpoint is quantized at build time.
         if precision != "fp16" or request.fp32_layers:
-            raise ValueError("Qwen3.5 nvfp4 builds require FP16 without FP32-layer overrides")
+            raise ValueError(
+                f"Qwen3.5 {request.quantization} builds require FP16 without FP32-layer overrides"
+            )
         quant_ctx = calibrate_qwen35(
-            model_dir, graph_ops, "nvfp4",
+            model_dir, graph_ops, request.quantization,
             layer_types=_parse_layer_types(text_config.get("layer_types", ["linear"] * config.num_hidden_layers)),
-            num_heads=config.num_attention_heads, head_dim=config.head_dim,
+            num_heads=config.num_attention_heads, head_dim=config.head_dim, config=config,
         )
-        quantization = "nvfp4"
+        quantization = request.quantization
     else:
         quantization = prepared_format(model_dir, config.raw, request.quantization)
         if quantization == "none" and is_nvfp4_checkpoint(model_dir):
@@ -2284,7 +2293,9 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
     if quantization != "none":
         if precision != "fp16" or request.fp32_layers:
             raise ValueError("Prepared Qwen3.5 requires FP16 compute without FP32-layer overrides")
-        config.raw["_prepared_quantization"] = quantization
+        if quant_ctx is None or quantization != "fp8":
+            # Build-time FP8 reads the original checkpoint; only prepared formats use the prepared reader.
+            config.raw["_prepared_quantization"] = quantization
 
     draft_config = None
     if draft_dir is not None:

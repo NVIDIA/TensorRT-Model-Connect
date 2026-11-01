@@ -1,0 +1,20 @@
+{
+  "name": "nemotron-embed-vl-1b-v2-fp8",
+  "hf_id": "nvidia/llama-nemotron-embed-vl-1b-v2-fp8",
+  "hf_revision": "b4751b329b7d797cb6abfe018e8bedf1051a80aa",
+  "bundle": "nemotron-embed-vl-1b-v2-fp8.bundle",
+  "family": "eagle_vlm",
+  "task": "embedding",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "nemotron-embed-vl-1b-v2-fp8",
+      "reference_precision": "fp32",
+      "prompt": "What is machine learning?",
+      "premerge": true
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 512,
+  "quantization": "fp8"
+}

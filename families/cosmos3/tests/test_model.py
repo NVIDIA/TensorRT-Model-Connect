@@ -167,7 +167,7 @@ def test_build_emits_only_the_exact_family_bundle_contract(
     assert calls[0] == (
         "denoiser",
         model_dir / "transformer",
-        {"context_parallel_size": 2, "verbose": False},
+        {"context_parallel_size": 2, "quantization": None, "verbose": False},
     )
     assert calls[1] == ("load-vae", model_dir / "vae")
     assert calls[2][0:2] == ("vae", calls[2][1])
@@ -185,7 +185,7 @@ def test_build_emits_only_the_exact_family_bundle_contract(
         ({"max_batch_size": 2}, "max_batch_size=1"),
         ({"tensor_parallel_size": 2}, "does not use tensor parallelism"),
         ({"context_parallel_size": 3}, "must be 1 or 2"),
-        ({"quantization": "fp8"}, "does not support quantization"),
+        ({"quantization": "nvfp4"}, "does not support quantization"),
         ({"fp32_layers": (0,)}, "does not support fp32_layers"),
         ({"max_sequence_length": 2048}, "max_sequence_length=4096"),
         ({"image_height": 704}, "fixed full-quality"),

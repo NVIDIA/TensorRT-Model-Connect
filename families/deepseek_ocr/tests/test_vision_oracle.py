@@ -20,7 +20,12 @@ from families.deepseek_ocr.tests.vision_oracle import (
 
 
 def test_every_deepseek_ocr_case_requires_the_vision_oracle() -> None:
-    assert set(CASES) == {"deepseek-ocr", "deepseek-ocr-l0", "deepseek-ocr-l0-tp2"}
+    assert set(CASES) == {
+        "deepseek-ocr",
+        "deepseek-ocr-l0",
+        "deepseek-ocr-l0-tp2",
+        "deepseek-ocr-fp8",
+    }
 
 
 def _bundle(path, sections: dict[str, bytes]) -> None:

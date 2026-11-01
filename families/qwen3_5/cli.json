@@ -78,7 +78,7 @@
             "int4_awq",
             "int8_sq"
           ],
-          "help": "Require the checkpoint prepared format; no calibration or format conversion"
+          "help": "Require the checkpoint prepared format; no calibration or format conversion. fp8 on an unquantized BF16 checkpoint quantizes it at build time with committed activation scales (Qwen3.5-0.8B, 2B, 4B, 9B); fp16 only"
         },
         {
           "name": "max_sequence_length",

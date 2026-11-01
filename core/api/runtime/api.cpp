@@ -408,7 +408,8 @@ void snapshot_tasks(ModelState& state, internal::IModel& metadata) {
         stream_task_bindings(),       features_task_bindings(),  audio_task_bindings(),
         numeric_task_bindings(),      video_task_bindings(),     perception_task_bindings(),
         language_task_bindings(),     tracking_task_bindings(),  speech_task_bindings(),
-        action_task_bindings(),       recurrent_task_bindings(), structure_task_bindings()};
+        action_task_bindings(),       recurrent_task_bindings(), structure_task_bindings(),
+        point_cloud_task_bindings()};
     state.tasks.reserve(declarations.size());
     for (const auto& declaration : declarations) {
         const auto key = declaration.key;

@@ -244,6 +244,11 @@ def build_dual_profile_decoder_engine(
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config
+    if quant_ctx is not None:
+        # Per-layer kernel names stay in the plan, so the FP8 / FP4 GEMMs can be checked.
+        trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+        if quant_ctx.disable_dual_gemm_fusion:
+            trt_config.build_route = "-peep:match_dual_gemm=off"
 
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16

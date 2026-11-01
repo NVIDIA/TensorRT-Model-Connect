@@ -1,0 +1,26 @@
+{
+  "name": "deepseek-ocr-fp8",
+  "hf_id": "deepseek-ai/DeepSeek-OCR-2",
+  "hf_revision": "aaa02f3811945a91062062994c5c4a3f4c0af2b0",
+  "bundle": "deepseek-ocr-fp8.bundle",
+  "family": "deepseek_ocr",
+  "task": "vision_language_generation",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "deepseek-ocr-fp8",
+      "premerge": true,
+      "prompt": "Extract the text from this image.",
+      "max_new_tokens": 220,
+      "test_image": "data/orc_test_img.jpeg",
+      "reference_precision": "fp16",
+      "reference_backend": "golden_snapshot",
+      "metadata": {
+        "golden_snapshot_path": "data/deepseek_ocr_l0_golden.json"
+      }
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 4096,
+  "quantization": "fp8"
+}

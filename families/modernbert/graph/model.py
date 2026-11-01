@@ -452,6 +452,28 @@ def _scalar_constant_for_trt_dtype(
     return const
 
 
+def add_bidirectional_window_mask(network, positions, padding_mask, window):
+    rows = network.add_shuffle(positions)
+    rows.reshape_dims = (1, 1, -1, 1)
+    columns = network.add_shuffle(positions)
+    columns.reshape_dims = (1, 1, 1, -1)
+    distance = network.add_elementwise(
+        rows.get_output(0), columns.get_output(0), trt.ElementWiseOperation.SUB
+    ).get_output(0)
+    distance = network.add_unary(distance, trt.UnaryOperation.ABS).get_output(0)
+    limit = add_constant(
+        network, (1, 1, 1, 1), np.array([window + 1], dtype=np.int32), dtype=np.int32
+    )
+    allowed = network.add_elementwise(distance, limit, trt.ElementWiseOperation.LESS).get_output(0)
+    zero = _scalar_constant_for_trt_dtype(network, (1, 1, 1, 1), 0.0, padding_mask.dtype)
+    penalty = -1e4 if padding_mask.dtype == trt.float16 else -1e10
+    blocked = _scalar_constant_for_trt_dtype(network, (1, 1, 1, 1), penalty, padding_mask.dtype)
+    local_mask = network.add_select(allowed, zero, blocked).get_output(0)
+    return network.add_elementwise(
+        local_mask, padding_mask, trt.ElementWiseOperation.SUM
+    ).get_output(0)
+
+
 def add_tanh_softcap(
     network: trt.INetworkDefinition,
     tensor: trt.ITensor,

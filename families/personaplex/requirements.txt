@@ -3,4 +3,6 @@
 
 # Match the tensor rearrangement dependency in the pinned official Moshi source.
 einops==0.7.0
+pyarrow==25.0.1
+scipy==1.15.3
 soundfile

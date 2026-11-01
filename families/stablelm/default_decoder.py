@@ -49,6 +49,20 @@ def _mark_debug_output(
     network.mark_output(out)
 
 
+# Listed by TensorRT 11.4 and later only; TensorRT 11.1 does not have it.
+_TENSORRT_11_4_KNOB = "-mha_fusion:gemv_mha_v2"
+
+
+def _keep_fp16_attention_mask(trt_config) -> bool:
+    """Keep the FP16 attention mask FP16 next to FP32-cast Q, K and V (TensorRT 11.4).
+
+    TensorRT 11.4 fails to build the decomposable attention when its mask is cast to
+    FP32: the optimizer keeps the scores in half and adds the FP32 mask to them, and
+    its type check rejects the mixed add. TensorRT 11.1 needs the FP32 mask.
+    """
+    return _TENSORRT_11_4_KNOB in getattr(trt_config, "all_build_routes", "")
+
+
 def _use_fp32_lm_head_accumulation(
     precision: str, num_layers: int, fp32_layers: frozenset[int]
 ) -> bool:
@@ -247,6 +261,7 @@ def build_standard_decoder_engine(
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config
+    keep_fp16_attention_mask = _keep_fp16_attention_mask(trt_config)
 
     # Precision configuration
     if precision == "fp16":
@@ -476,6 +491,7 @@ def build_standard_decoder_engine(
             rotary_embedding_dim=rotary_embedding_dim,
             interleaved_rope=interleaved_rope,
             fp32_attention_accumulation=fp32_attention_accumulation,
+            keep_fp16_attention_mask=keep_fp16_attention_mask,
         )
 
         hidden_state = _cast_work_dtype(result["hidden"])
@@ -597,6 +613,7 @@ def _add_decoder_layer(
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
     fp32_attention_accumulation: bool = False,
+    keep_fp16_attention_mask: bool = False,
     eps: float | None = None,
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
@@ -622,6 +639,7 @@ def _add_decoder_layer(
         rotary_embedding_dim=rotary_embedding_dim,
         interleaved_rope=interleaved_rope,
         fp32_attention_accumulation=fp32_attention_accumulation,
+        keep_fp16_attention_mask=keep_fp16_attention_mask,
     )
     attn_out = attn["attn_out"]
     present_k = attn["present_k"]

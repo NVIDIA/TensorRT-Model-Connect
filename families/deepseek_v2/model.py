@@ -83,6 +83,20 @@ def _use_fp32_mla_attention(dtype: np.dtype, head_dim: int) -> bool:
     return dtype == np.float16 and head_dim >= 16
 
 
+# Listed by TensorRT 11.4 and later only; TensorRT 11.1 does not have it.
+_TENSORRT_11_4_KNOB = "-mha_fusion:gemv_mha_v2"
+
+
+def _keep_fp16_attention_mask(trt_config) -> bool:
+    """Keep the FP16 attention mask FP16 next to FP32-cast Q, K and V (TensorRT 11.4).
+
+    TensorRT 11.4 fails to build the decomposable attention when its mask is cast to
+    FP32: the optimizer keeps the scores in half and adds the FP32 mask to them, and
+    its type check rejects the mixed add. TensorRT 11.1 needs the FP32 mask.
+    """
+    return _TENSORRT_11_4_KNOB in getattr(trt_config, "all_build_routes", "")
+
+
 if TYPE_CHECKING:
     from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
@@ -379,6 +393,7 @@ class _DeepSeekV2Model:
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 1
+        keep_fp16_attention_mask = _keep_fp16_attention_mask(trt_config)
 
         if precision == "fp16":
             work_np_dtype = np.float16
@@ -547,6 +562,7 @@ class _DeepSeekV2Model:
                 n_group=n_group,
                 topk_group=topk_group,
                 dtype=layer_np_dtype,
+                keep_fp16_attention_mask=keep_fp16_attention_mask,
             )
 
             hidden_state = result["hidden"]
@@ -658,6 +674,7 @@ def _add_mla_attention_block(
     attention_size: int,
     max_cache_length: int,
     dtype: np.dtype = np.float32,
+    keep_fp16_attention_mask: bool = False,
 ) -> dict[str, trt.ITensor]:
     """Multi-head Latent Attention (MLA) block with naive KV cache.
 
@@ -870,6 +887,7 @@ def _add_mla_attention_block(
         mask=mask_4d,
         scale=attn_scale,
         fp32_accumulation=_use_fp32_mla_attention(dtype, k_head_dim),
+        fp16_mask_with_fp32_accumulation=keep_fp16_attention_mask,
     )
 
     # Slice out only the v_head_dim portion (remove zero-padding)
@@ -1148,6 +1166,7 @@ def _add_deepseek_v2_decoder_layer(
     n_group: int = 1,
     topk_group: int = 1,
     dtype: np.dtype = np.float32,
+    keep_fp16_attention_mask: bool = False,
 ) -> dict[str, trt.ITensor]:
     """Add one DeepSeek-V2 decoder layer: MLA attention + (dense MLP or MoE)."""
 
@@ -1187,6 +1206,7 @@ def _add_deepseek_v2_decoder_layer(
         attention_size=attention_size,
         max_cache_length=max_cache_length,
         dtype=dtype,
+        keep_fp16_attention_mask=keep_fp16_attention_mask,
     )
     attn_out = attn["attn_out"]
 

@@ -180,6 +180,15 @@
       "architecture_source": "model_index._class_name"
     },
     {
+      "hf_id": "nvidia/gr00t17-lerobot-libero_spatial-640",
+      "revision": "32a6ec786d6509df31b40392b4e4dcdda78c0f11",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [],
+      "architecture_source": null
+    },
+    {
       "hf_id": "OpenGVLab/InternVL3-2B-hf",
       "revision": "cb57a075cb75a2e6d1b668b128d48bb00ae321d2",
       "revision_source": "resolved",
@@ -928,6 +937,15 @@
     {
       "hf_id": "lerobot/act_aloha_sim_transfer_cube_human",
       "revision": "ba73b2766f1371cdc133ca4efb97eb090d744625",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": null,
+      "architectures": [],
+      "architecture_source": null
+    },
+    {
+      "hf_id": "lerobot/pi05_libero_base",
+      "revision": "5fcf06fc42b6717e22ab885fd381a096574b12c7",
       "revision_source": "resolved",
       "metadata_file": "config.json",
       "model_type": null,

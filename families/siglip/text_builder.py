@@ -28,7 +28,7 @@ from . import encoder_builder, graph as g
 PREFIX = "text_model"
 
 
-def build_text_tower(network, input_ids, weights, cfg, *, dtype=np.float32):
+def build_text_tower(network, input_ids, weights, cfg, *, dtype=np.float32, quant=None):
     """``[seq]`` token ids to an unnormalised ``[1, projection_size]`` embedding."""
     width = cfg["hidden_size"]
     seq = int(input_ids.shape[0])
@@ -41,7 +41,8 @@ def build_text_tower(network, input_ids, weights, cfg, *, dtype=np.float32):
                                dtype=dtype)
     hidden = g.add_sum(network, hidden, positions)
 
-    hidden = encoder_builder.build_layers(network, hidden, weights, PREFIX, cfg, dtype=dtype)
+    hidden = encoder_builder.build_layers(network, hidden, weights, PREFIX, cfg, dtype=dtype,
+                                          quant=quant)
     hidden = g.add_layer_norm(network, hidden, weights[f"{PREFIX}.final_layer_norm.weight"],
                               weights[f"{PREFIX}.final_layer_norm.bias"], cfg["eps"])
 

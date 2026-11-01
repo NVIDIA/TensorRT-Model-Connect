@@ -422,6 +422,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/include/trtmc/internal/model.h",
         "core/runtime/include/trtmc/internal/numeric.h",
         "core/runtime/include/trtmc/internal/perception.h",
+        "core/runtime/include/trtmc/internal/point_cloud.h",
         "core/runtime/include/trtmc/internal/recurrent.h",
         "core/runtime/include/trtmc/internal/scores.h",
         "core/runtime/include/trtmc/internal/speech.h",
@@ -497,6 +498,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     for group in (
         "audio", "features", "numeric", "stream", "video", "perception",
         "language", "tracking", "speech", "action", "recurrent", "structure",
+        "point_cloud",
     ):
         expected_api.update(
             {
@@ -549,6 +551,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_new_ci.py",
         "tools/tests/test_model_benchmark.py",
         "tools/tests/test_pr_metadata.py",
+        "tools/tests/test_process_github_files.py",
         "tools/tests/test_public_source_hygiene.py",
     }
     expected_cmake = {

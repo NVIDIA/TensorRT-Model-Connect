@@ -63,9 +63,12 @@ def test_resolve_reads_the_supported_variant(tmp_path):
 
 
 @pytest.mark.parametrize("overrides, fragment", [
-    ({"do_stable_layer_norm": True}, "post-norm"),
-    ({"feat_extract_norm": "layer"}, "feat_extract_norm"),
-    ({"conv_bias": True}, "bias-free"),
+    ({"do_stable_layer_norm": "true"}, "boolean do_stable_layer_norm"),
+    ({"feat_extract_norm": "batch"}, "feat_extract_norm"),
+    ({"conv_bias": "true"}, "boolean conv_bias"),
+    ({"feat_extract_activation": "relu"}, "feature activation"),
+    ({"add_adapter": True}, "adapters"),
+    ({"adapter_attn_dim": 16}, "adapters"),
     ({"hidden_act": "gelu_new"}, "exact GELU"),
     ({"num_conv_pos_embeddings": 127}, "even num_conv_pos_embeddings"),
     ({"architectures": ["Wav2Vec2ForSequenceClassification"]}, "Wav2Vec2ForCTC"),

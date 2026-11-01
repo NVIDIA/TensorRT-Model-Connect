@@ -1,18 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Build a wav2vec2 bundle.
-
-One engine, waveform in and CTC logits out. There is no spectrogram: the
-feature encoder is seven strided convolutions over the raw samples, and the
-only frontend the runtime owns is a mean/variance normalisation of the clip.
-
-The engine's time axis is dynamic. That is forced rather than chosen: the
-feature encoder's first layer normalises per channel across time, so zero
-padding a clip to a fixed window shifts every frame's statistics and the
-trimmed result is not the unpadded one. The family measures that rather than
-asserting it, in ``tests/test_model.py``.
-"""
+"""Keep true clip lengths: group-normalized checkpoints change under padding."""
 
 from __future__ import annotations
 
@@ -38,8 +27,8 @@ def _open_safetensors(model_dir: Path):
 
 
 def _load(model_dir: Path):
-    handle = _open_safetensors(model_dir)
-    weights = {name: handle.get_tensor(name).astype(np.float32) for name in handle.keys()}
+    with _open_safetensors(model_dir) as handle:
+        weights = {name: handle.get_tensor(name).astype(np.float32) for name in handle.keys()}
     shapes = {name: tuple(value.shape) for name, value in weights.items()}
     return weights, shapes
 
@@ -51,11 +40,12 @@ def _require_weights(weights: dict, cfg: dict) -> None:
               _PREFIX + "encoder.pos_conv_embed.conv.weight_v",
               _PREFIX + "encoder.layer_norm.weight"]
     for index in range(len(cfg["conv_kernel"])):
-        needed.append(f"{_PREFIX}feature_extractor.conv_layers.{index}.conv.weight")
-    # Only the first feature-encoder layer carries a normalisation under
-    # feat_extract_norm='group'; a checkpoint that normalised every layer would
-    # be the 'layer' variant config.py already refuses.
-    needed.append(_PREFIX + "feature_extractor.conv_layers.0.layer_norm.weight")
+        base = f"{_PREFIX}feature_extractor.conv_layers.{index}."
+        needed.append(base + "conv.weight")
+        if cfg["conv_bias"]:
+            needed.append(base + "conv.bias")
+        if index == 0 or cfg["feat_extract_norm"] == "layer":
+            needed.extend((base + "layer_norm.weight", base + "layer_norm.bias"))
     for index in range(cfg["num_hidden_layers"]):
         needed.append(f"{_PREFIX}encoder.layers.{index}.attention.q_proj.weight")
         needed.append(f"{_PREFIX}encoder.layers.{index}.final_layer_norm.weight")
@@ -65,17 +55,15 @@ def _require_weights(weights: dict, cfg: dict) -> None:
 
 
 def _feature_encoder(network, audio, weights, cfg):
-    """Seven strided convolutions; only layer 0 is normalised."""
     hidden = audio
     for index, (kernel, stride) in enumerate(zip(cfg["conv_kernel"], cfg["conv_stride"])):
         base = f"{_PREFIX}feature_extractor.conv_layers.{index}."
-        hidden = g.add_conv1d(network, hidden, weights[base + "conv.weight"], stride=stride)
-        if index == 0:
-            # GroupNorm(num_groups=C, num_channels=C): the statistics are taken
-            # per channel over time (axis 3), while the affine term rides the
-            # channel axis (axis 1).
+        hidden = g.add_conv1d(network, hidden, weights[base + "conv.weight"], stride=stride,
+                              bias=weights[base + "conv.bias"] if cfg["conv_bias"] else None)
+        if cfg["feat_extract_norm"] == "layer" or index == 0:
+            axis = 1 if cfg["feat_extract_norm"] == "layer" else 3
             hidden = g.add_norm(network, hidden, weights[base + "layer_norm.weight"],
-                                weights[base + "layer_norm.bias"], cfg["eps"], 3,
+                                weights[base + "layer_norm.bias"], 1e-5, axis,
                                 param_axis=1)
         hidden = g.add_gelu(network, hidden)
     return hidden
@@ -107,24 +95,32 @@ def _positional(network, rows, weights, cfg):
 
 
 def _encoder_layers(network, hidden, weights, cfg):
-    """Twelve post-norm layers: the norms follow each residual, not precede it."""
     heads = cfg["num_attention_heads"]
     head_dim = cfg["hidden_size"] // heads
     for index in range(cfg["num_hidden_layers"]):
         base = f"{_PREFIX}encoder.layers.{index}."
-        query = g.add_linear(network, hidden, weights[base + "attention.q_proj.weight"],
+        attention_input = hidden
+        if cfg["do_stable_layer_norm"]:
+            attention_input = g.add_norm(network, hidden, weights[base + "layer_norm.weight"],
+                                         weights[base + "layer_norm.bias"], cfg["eps"], 1)
+        query = g.add_linear(network, attention_input, weights[base + "attention.q_proj.weight"],
                              weights[base + "attention.q_proj.bias"])
-        key = g.add_linear(network, hidden, weights[base + "attention.k_proj.weight"],
+        key = g.add_linear(network, attention_input, weights[base + "attention.k_proj.weight"],
                            weights[base + "attention.k_proj.bias"])
-        value = g.add_linear(network, hidden, weights[base + "attention.v_proj.weight"],
+        value = g.add_linear(network, attention_input, weights[base + "attention.v_proj.weight"],
                              weights[base + "attention.v_proj.bias"])
         attended = g.add_attention(network, query, key, value,
                                    num_heads=heads, head_dim=head_dim)
         attended = g.add_linear(network, attended, weights[base + "attention.out_proj.weight"],
                                 weights[base + "attention.out_proj.bias"])
         hidden = g.add_sum(network, hidden, attended)
-        hidden = g.add_norm(network, hidden, weights[base + "layer_norm.weight"],
-                            weights[base + "layer_norm.bias"], cfg["eps"], 1)
+        if not cfg["do_stable_layer_norm"]:
+            hidden = g.add_norm(network, hidden, weights[base + "layer_norm.weight"],
+                                weights[base + "layer_norm.bias"], cfg["eps"], 1)
+        residual = hidden
+        if cfg["do_stable_layer_norm"]:
+            hidden = g.add_norm(network, hidden, weights[base + "final_layer_norm.weight"],
+                                weights[base + "final_layer_norm.bias"], cfg["eps"], 1)
         inner = g.add_linear(network, hidden,
                              weights[base + "feed_forward.intermediate_dense.weight"],
                              weights[base + "feed_forward.intermediate_dense.bias"])
@@ -132,9 +128,22 @@ def _encoder_layers(network, hidden, weights, cfg):
         inner = g.add_linear(network, inner,
                              weights[base + "feed_forward.output_dense.weight"],
                              weights[base + "feed_forward.output_dense.bias"])
-        hidden = g.add_sum(network, hidden, inner)
-        hidden = g.add_norm(network, hidden, weights[base + "final_layer_norm.weight"],
-                            weights[base + "final_layer_norm.bias"], cfg["eps"], 1)
+        hidden = g.add_sum(network, residual, inner)
+        if not cfg["do_stable_layer_norm"]:
+            hidden = g.add_norm(network, hidden, weights[base + "final_layer_norm.weight"],
+                                weights[base + "final_layer_norm.bias"], cfg["eps"], 1)
+    return hidden
+
+
+def _encoder(network, projected, weights, cfg):
+    hidden = _positional(network, projected, weights, cfg)
+    if not cfg["do_stable_layer_norm"]:
+        hidden = g.add_norm(network, hidden, weights[_PREFIX + "encoder.layer_norm.weight"],
+                            weights[_PREFIX + "encoder.layer_norm.bias"], cfg["eps"], 1)
+    hidden = _encoder_layers(network, hidden, weights, cfg)
+    if cfg["do_stable_layer_norm"]:
+        hidden = g.add_norm(network, hidden, weights[_PREFIX + "encoder.layer_norm.weight"],
+                            weights[_PREFIX + "encoder.layer_norm.bias"], cfg["eps"], 1)
     return hidden
 
 
@@ -166,10 +175,7 @@ def build_engine(weights, cfg, *, max_samples, verbose=False) -> bytes:
                              weights[_PREFIX + "feature_projection.projection.weight"],
                              weights[_PREFIX + "feature_projection.projection.bias"])
 
-    hidden = _positional(network, projected, weights, cfg)
-    hidden = g.add_norm(network, hidden, weights[_PREFIX + "encoder.layer_norm.weight"],
-                        weights[_PREFIX + "encoder.layer_norm.bias"], cfg["eps"], 1)
-    hidden = _encoder_layers(network, hidden, weights, cfg)
+    hidden = _encoder(network, projected, weights, cfg)
 
     logits = g.add_linear(network, hidden, weights["lm_head.weight"], weights["lm_head.bias"])
     logits.name = "logits"

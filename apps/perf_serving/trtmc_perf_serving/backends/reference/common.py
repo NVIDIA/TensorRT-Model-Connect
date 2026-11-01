@@ -43,6 +43,17 @@ class ReferenceSpec:
     def dtype(self) -> torch.dtype:
         return DTYPES[self.precision]
 
+    @property
+    def device_map(self) -> str:
+        """``from_pretrained``'s ``device_map``: Transformers models load straight onto ``device``. Building one in
+        host memory first needs a host copy as large as the model, and the aarch64 PyTorch allocator keeps much of
+        it after the move (Transformers' loader threads allocated it): on Thor, where the CPU and GPU share memory,
+        it may not fit next to the GPU reservation. A bare ``"cuda"`` becomes the current device, where inputs moved
+        with ``.to("cuda")`` go (Transformers would read it as ``cuda:$LOCAL_RANK``)."""
+        if self.device == "cuda" and torch.cuda.is_available():
+            return f"cuda:{torch.cuda.current_device()}"
+        return self.device
+
     def pretrained_kwargs(self) -> dict[str, Any]:
         kwargs: dict[str, Any] = {"trust_remote_code": self.trust_remote_code}
         if self.revision:

@@ -348,6 +348,27 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     }
 
 
+def _golden_reference(case: dict) -> dict:
+    """Recorded answer of the unquantized model, for checkpoints transformers cannot load."""
+    text = str((case.get("metadata") or {}).get("golden_text") or "")
+    assert text, f"{case['name']} golden_snapshot reference requires metadata.golden_text"
+    return {"text": text}
+
+
+def test_golden_reference_requires_recorded_text() -> None:
+    assert _golden_reference({"name": "x", "metadata": {"golden_text": "Gray"}}) == {"text": "Gray"}
+    with pytest.raises(AssertionError, match="golden_text"):
+        _golden_reference({"name": "x"})
+
+
+def test_quantized_cases_use_the_golden_snapshot() -> None:
+    for name in ("qwen25vl-7b-fp8", "qwen25vl-7b-nvfp4"):
+        _, manifest, case = CASES[name]
+        assert manifest["quantization"] in {"fp8", "nvfp4"}
+        assert case["reference_backend"] == "golden_snapshot"
+        assert _golden_reference(case)["text"]
+
+
 def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
     del manifest, case
     actual_text = str(actual["text"])
@@ -494,7 +515,10 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     with evidence_stage("compare"):
         _assert_native_vision_health(native_vision_features(bundle, _asset(case["test_image"])))
     with evidence_stage("reference"):
-        expected = _official_reference(model_dir, manifest, case, tmp_path)
+        if case.get("reference_backend") == "golden_snapshot":
+            expected = _golden_reference(case)
+        else:
+            expected = _official_reference(model_dir, manifest, case, tmp_path)
     record_evidence("reference", expected)
     with evidence_stage("compare"):
         _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))

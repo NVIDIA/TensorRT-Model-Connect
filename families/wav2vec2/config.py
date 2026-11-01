@@ -1,16 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Read a wav2vec2 checkpoint's geometry and refuse what the graph cannot build.
-
-``wav2vec2`` is not one architecture. The same ``model_type`` covers two layer
-layouts that differ in where the normalisation sits, selected by
-``do_stable_layer_norm``, and two feature-encoder normalisations selected by
-``feat_extract_norm``. This family builds the post-norm, group-normalised
-variant that ``facebook/wav2vec2-base-960h`` uses. Every other combination is
-refused by name here rather than built wrongly, because the two layouts produce
-plausible output for each other's weights.
-"""
+"""Resolve wav2vec2 geometry while keeping each checkpoint's normalization layout."""
 
 from __future__ import annotations
 
@@ -48,16 +39,17 @@ def resolve(model_dir: Path, shapes: dict) -> dict:
     _require("Wav2Vec2ForCTC" in architectures,
              f"builds Wav2Vec2ForCTC, not {architectures or '(unstated)'}")
 
-    # The two layouts this family deliberately does not build. Each one is a
-    # different order of the same tensors, so building the wrong one is silent.
-    _require(cfg.get("do_stable_layer_norm") is False,
-             "builds the post-norm layout; do_stable_layer_norm=True is a different graph")
-    _require(cfg.get("feat_extract_norm") == "group",
-             "builds feat_extract_norm='group'; 'layer' normalises per frame instead")
-    _require(cfg.get("conv_bias") is False,
-             "builds a bias-free feature encoder; conv_bias=True carries extra tensors")
+    _require(isinstance(cfg.get("do_stable_layer_norm"), bool),
+             "needs a boolean do_stable_layer_norm")
+    _require(cfg.get("feat_extract_norm") in {"group", "layer"},
+             "needs feat_extract_norm='group' or 'layer'")
+    _require(isinstance(cfg.get("conv_bias"), bool), "needs a boolean conv_bias")
+    _require(not cfg.get("add_adapter", False) and cfg.get("adapter_attn_dim") is None,
+             "does not build adapters")
     _require(cfg.get("hidden_act") == "gelu",
              f"builds the exact GELU, not {cfg.get('hidden_act')!r}")
+    _require(cfg.get("feat_extract_activation", "gelu") == "gelu",
+             "builds the exact GELU feature activation")
 
     hidden = int(cfg["hidden_size"])
     heads = int(cfg["num_attention_heads"])
@@ -109,6 +101,9 @@ def resolve(model_dir: Path, shapes: dict) -> dict:
         "num_attention_heads": heads,
         "num_hidden_layers": int(cfg["num_hidden_layers"]),
         "eps": float(cfg["layer_norm_eps"]),
+        "feat_extract_norm": cfg["feat_extract_norm"],
+        "do_stable_layer_norm": cfg["do_stable_layer_norm"],
+        "conv_bias": cfg["conv_bias"],
         "conv_kernel": kernels,
         "conv_stride": strides,
         "conv_dim": dims,

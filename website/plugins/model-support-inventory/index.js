@@ -18,6 +18,7 @@ const TASKS = {
   monocular_depth: ['Depth estimation', 'Computer Vision', 'depth-estimation', 'depth'],
   monocular_geometry: ['Monocular geometry', 'Computer Vision', 'depth-estimation', 'geometry'],
   object_detection: ['Object detection', 'Computer Vision', 'object-detection', 'detect'],
+  points_to_semantic_segmentation: ['Point-cloud segmentation', 'Computer Vision', null, null],
   pose_hypothesis_refinement: ['Pose hypothesis refinement', 'Robotics', 'robotics', null],
   prompted_segmentation: ['Prompted segmentation', 'Computer Vision', 'mask-generation', 'segment'],
   reranking: ['Text ranking', 'Natural Language Processing', 'text-ranking', 'rerank'],
@@ -175,6 +176,7 @@ const TASKS = {
   rgbd_initialized_pose_to_tracked_pose: ['RGB-D and initialized pose to tracked pose', 'Robotics', null, null],
   image_state_to_action_chunk: ['Image and state to action chunk', 'Robotics', null, 'control'],
   image_state_action_queue: ['Image and state action queue', 'Robotics', null, null],
+  images_state_text_to_action_chunk: ['Images, state and text to action chunk', 'Robotics', null, null],
 
   recurrent_tokens_to_logits: ['Recurrent tokens to logits', 'Natural Language Processing', null, null],
   recurrent_embeddings_to_logits: ['Recurrent embeddings to logits', 'Natural Language Processing', null, null],

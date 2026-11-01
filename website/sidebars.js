@@ -46,6 +46,8 @@ module.exports = {
       label: 'Models & Recipes',
       link: {type: 'doc', id: 'models-recipes/overview'},
       items: [
+        'models-recipes/cosmos3-edge-llm',
+        'models-recipes/nemotron-omni-edge-llm',
         {
           type: 'category',
           label: 'Model Recipes',

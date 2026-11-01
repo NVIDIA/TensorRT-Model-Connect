@@ -53,6 +53,7 @@ def test_manifests_route_only_full_to_the_live_official_reference() -> None:
     routes = {name: case["reference_backend"] for name, (_, _, case) in CASES.items()}
     assert routes == {
         "personaplex-7b": "personaplex_official",
+        "personaplex-7b-fp8": "personaplex_official",
         "personaplex-7b-l0": "golden_snapshot",
         "personaplex-7b-l0-tp4": "golden_snapshot",
     }
@@ -227,7 +228,13 @@ def _run_json(
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
     record_evidence("commands", {"argv": getattr(completed, "args", None)})
-    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
+    record_evidence(
+        "native",
+        {
+            "stdout": getattr(completed, "stdout", None),
+            "stderr": getattr(completed, "stderr", None),
+        },
+    )
     payloads = []
     for line in completed.stdout.splitlines():
         if tp_size > 1:
@@ -346,7 +353,9 @@ def _native(
             frames.append([int(token) for token in match.group(1).split()])
     assert frames, "PersonaPlex native runtime emitted no output speech tokens"
     payload["speech_tokens"] = np.asarray(frames, dtype=np.int32)
-    record_evidence("native_artifacts", {"files": sorted(output.glob("*")) if output.is_dir() else [output]})
+    record_evidence(
+        "native_artifacts", {"files": sorted(output.glob("*")) if output.is_dir() else [output]}
+    )
     return payload
 
 
@@ -474,7 +483,14 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     model_dir = _model_dir(manifest)
-    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
@@ -489,4 +505,6 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     record_audio_views(actual, expected, tmp_path / "report-views")
     record_evidence("reference", expected)
     with evidence_stage("compare"):
-        _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+        _assert_parity(
+            actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name))
+        )

@@ -1,0 +1,51 @@
+{
+  "name": "groot-n17-libero-spatial-fp32",
+  "hf_id": "nvidia/gr00t17-lerobot-libero_spatial-640",
+  "hf_revision": "32a6ec786d6509df31b40392b4e4dcdda78c0f11",
+  "external_files": [
+    {
+      "path": "tokenizer.json",
+      "url": "https://huggingface.co/Qwen/Qwen3-VL-2B-Instruct/resolve/89644892e4d85e24eaac8bacfd4f463576704203/tokenizer.json"
+    }
+  ],
+  "bundle": "groot-n17-libero-spatial-fp32.bundle",
+  "family": "lerobot_groot",
+  "task": "images_state_text_to_action_chunk",
+  "precision": "fp32",
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "groot-n17-libero-spatial-fp32-ep1272-f000",
+      "premerge": false,
+      "inputs": {
+        "frame": "data/recorded_observation/ep1272_f000",
+        "noise": "data/noise_seed0.f32",
+        "reference_fp32": "data/reference/ep1272_f000.fp32.f32",
+        "reference_bf16": "data/reference/ep1272_f000.bf16.f32",
+        "reference_alternate_fp32": "data/reference/ep1272_f000.alternate.fp32.f32",
+        "reference_alternate_bf16": "data/reference/ep1272_f000.alternate.bf16.f32"
+      },
+      "alternate_task": "pick up the black bowl on the stove and place it on the plate"
+    },
+    {
+      "name": "groot-n17-libero-spatial-fp32-ep1262-f040",
+      "premerge": false,
+      "inputs": {
+        "frame": "data/recorded_observation/ep1262_f040",
+        "noise": "data/noise_seed0.f32",
+        "reference_fp32": "data/reference/ep1262_f040.fp32.f32",
+        "reference_bf16": "data/reference/ep1262_f040.bf16.f32"
+      }
+    },
+    {
+      "name": "groot-n17-libero-spatial-fp32-ep1267-f080",
+      "premerge": false,
+      "inputs": {
+        "frame": "data/recorded_observation/ep1267_f080",
+        "noise": "data/noise_seed0.f32",
+        "reference_fp32": "data/reference/ep1267_f080.fp32.f32",
+        "reference_bf16": "data/reference/ep1267_f080.bf16.f32"
+      }
+    }
+  ]
+}

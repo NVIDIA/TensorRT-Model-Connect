@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 import wave
 from pathlib import Path
 
@@ -123,6 +125,20 @@ def _runtime() -> tuple[Path, Path]:
 
 
 def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
+    if (model_dir / "model.safetensors").is_file():
+        _build_prepared(model_dir, bundle, manifest)
+        return
+    from families.wav2vec2.convert_checkpoint import convert
+
+    with tempfile.TemporaryDirectory(prefix="wav2vec2-checkpoint-") as temporary:
+        prepared = Path(temporary)
+        for name in ("config.json", "preprocessor_config.json", "vocab.json"):
+            shutil.copyfile(model_dir / name, prepared / name)
+        convert(model_dir / "pytorch_model.bin", prepared / "model.safetensors")
+        _build_prepared(prepared, bundle, manifest)
+
+
+def _build_prepared(model_dir: Path, bundle: Path, manifest: dict) -> None:
     build(
         BuildRequest(
             model_dir=model_dir,
@@ -191,6 +207,7 @@ def _asset(raw: str) -> Path:
 
 
 def _native(binary: Path, runtime_root: Path, bundle: Path, case: dict) -> dict:
+    language = ["--source-language", case["source_language"]] if case.get("source_language") else []
     return _run_json(
         binary,
         runtime_root,
@@ -199,6 +216,7 @@ def _native(binary: Path, runtime_root: Path, bundle: Path, case: dict) -> dict:
         "transcribe",
         "--input",
         str(_asset(case["test_input_audio"])),
+        *language,
     )
 
 

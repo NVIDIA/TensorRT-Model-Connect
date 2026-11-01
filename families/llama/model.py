@@ -283,6 +283,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 verbose=bool(request.verbose),
                 quant_ctx=quant_ctx,
             )
+            # Note (Jiaxin Deng): avoid retaining both plans during decode compilation.
+            writer.add_bytes("prefill.plan", prefill)
+            del prefill
             config.raw["_decoder_engine_role"] = "decode"
             decode = _build_engine(
                 config,
@@ -293,7 +296,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 quant_ctx=quant_ctx,
             )
             writer.add_bytes("engine.plan", decode)
-            writer.add_bytes("prefill.plan", prefill)
             layout = "split"
         config.raw.pop("_decoder_engine_role", None)
 

@@ -28,6 +28,7 @@ import tensorrt as trt
 
 from . import graph_ops
 from .checkpoint_mapper import WeightDict, _has_tensor, _load_tensor, _open_safetensors
+from .quantization import LTXQuantContext, configure_build
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -152,10 +153,16 @@ def build_ltx_dit_engine(
     eps: float = 1e-6,
     precision: str = "fp16",
     verbose: bool = False,
+    quant_ctx: LTXQuantContext | None = None,
 ) -> bytes:
-    """Build the LTX transformer denoiser as a TensorRT plan."""
+    """Build the LTX transformer denoiser as a TensorRT plan.
+
+    ``quant_ctx`` (optional) routes its projections through FP8 Q/DQ matmuls.
+    """
     if precision not in ("fp16", "fp32"):
         raise ValueError("LTX DiT raw builder currently supports fp16 or fp32")
+    if quant_ctx is not None and quant_ctx.has_fp8_weights and precision != "fp16":
+        raise NotImplementedError("LTX-Video fp8 builds require precision fp16")
 
     _ensure_trt()
     _ensure_graph_ops()
@@ -169,6 +176,8 @@ def build_ltx_dit_engine(
     config = builder.create_builder_config()
     config.builder_optimization_level = 1
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
+    if quant_ctx is not None and quant_ctx.has_fp8_weights:
+        configure_build(config)
 
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 
@@ -312,7 +321,7 @@ def build_ltx_dit_engine(
             dtype=np_dtype,
         )
         ff_norm = _modulate(network, ff_norm, scale_mlp, shift_mlp)
-        ff_out = _ffn(network, ff_norm, weights, p, dim, np_dtype)
+        ff_out = _ffn(network, ff_norm, weights, p, dim, np_dtype, quant_ctx)
         hidden = _residual_gated(network, hidden, ff_out, gate_mlp)
 
     shift, scale = _final_modulation(network, embedded_timestep, weights["scale_shift_table"], dim)
@@ -436,6 +445,22 @@ def _drop_batch(
     s = network.add_shuffle(tensor)
     s.reshape_dims = shape
     return s.get_output(0)
+
+
+def _matmul(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    in_dim: int,
+    out_dim: int,
+    weight: np.ndarray,
+    name: str,
+    dtype: np.dtype,
+    quant_ctx: LTXQuantContext | None,
+) -> trt.ITensor:
+    """``inp @ weight`` as an FP8 Q/DQ matmul when ``name`` is quantized, else a plain matmul."""
+    if quant_ctx is not None and quant_ctx.should_quantize(name):
+        return quant_ctx.matmul(network, inp, weight, name)
+    return graph_ops.add_matmul_rhs_constant(network, inp, in_dim, out_dim, weight, dtype=dtype)
 
 
 def _linear(
@@ -611,9 +636,7 @@ def _ltx_attention(
     v4 = _to_attention_4d(network, v, seq_len=kv_seq_len, num_heads=num_heads, head_dim=head_dim)
     if mask is not None:
         mask = _cast_back(network, mask, q4.dtype)
-    ctx4 = graph_ops.add_attention_core(
-        network, q4, k4, v4, causal=False, mask=mask
-    )
+    ctx4 = graph_ops.add_attention_core(network, q4, k4, v4, causal=False, mask=mask)
     ctx = _from_attention_4d(
         network, ctx4, seq_len=q_seq_len, num_heads=num_heads, head_dim=head_dim
     )
@@ -640,15 +663,23 @@ def _ffn(
     prefix: str,
     dim: int,
     dtype: np.dtype,
+    quant_ctx: LTXQuantContext | None = None,
 ) -> trt.ITensor:
     fc1_w = weights[f"{prefix}.ff.net.0.proj.weight"]
     ffn_dim = fc1_w.shape[1]
-    x = graph_ops.add_matmul_rhs_constant(network, hidden, dim, ffn_dim, fc1_w, dtype=dtype)
+    x = _matmul(network, hidden, dim, ffn_dim, fc1_w, f"{prefix}.ff.net.0.proj", dtype, quant_ctx)
     x = graph_ops.add_bias_sum(
         network, x, ffn_dim, weights[f"{prefix}.ff.net.0.proj.bias"], dtype=dtype
     )
     x = graph_ops.add_gelu_new(network, x, dtype=dtype)
-    x = graph_ops.add_matmul_rhs_constant(
-        network, x, ffn_dim, dim, weights[f"{prefix}.ff.net.2.weight"], dtype=dtype
+    x = _matmul(
+        network,
+        x,
+        ffn_dim,
+        dim,
+        weights[f"{prefix}.ff.net.2.weight"],
+        f"{prefix}.ff.net.2",
+        dtype,
+        quant_ctx,
     )
     return graph_ops.add_bias_sum(network, x, dim, weights[f"{prefix}.ff.net.2.bias"], dtype=dtype)
