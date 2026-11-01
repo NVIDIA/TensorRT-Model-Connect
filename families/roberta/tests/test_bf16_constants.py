@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ast
+import math
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -91,8 +92,13 @@ class _Network:
         return layer
 
     def add_activation(self, tensor, operation):
-        assert operation == "tanh"
-        return _layer(_Tensor(np.tanh(tensor.values), tensor.dtype))
+        if operation == "gelu_erf":
+            values = tensor.values
+            result = 0.5 * values * (1 + np.vectorize(math.erf)(values / np.sqrt(2.0)))
+        else:
+            assert operation == "tanh"
+            result = np.tanh(tensor.values)
+        return _layer(_Tensor(result, tensor.dtype))
 
     def mark_output(self, tensor):
         self.output = tensor
@@ -130,7 +136,7 @@ def graph():
         BuilderFlag=SimpleNamespace(TF32=1),
         ElementWiseOperation=SimpleNamespace(PROD="prod", SUM="sum", SUB="sub"),
         MatrixOperation=SimpleNamespace(NONE="none"),
-        ActivationType=SimpleNamespace(TANH="tanh"),
+        ActivationType=SimpleNamespace(TANH="tanh", GELU_ERF="gelu_erf"),
     )
     owner = Path(__file__).resolve().parents[1]
     ops = _source_functions(owner / "graph_ops.py", {"np": np, "trt": trt})
@@ -170,9 +176,12 @@ def _weights(values):
     return weights
 
 
+@pytest.mark.parametrize("activation", ["gelu", "gelu_new"])
 @pytest.mark.parametrize("precision", ["fp32", "fp16", "bf16"])
 @pytest.mark.parametrize("fp32_layers", [[], [1]])
-def test_encoder_constants_match_requested_graph_precision(graph, precision, fp32_layers):
+def test_encoder_constants_match_requested_graph_precision(
+    graph, precision, fp32_layers, activation
+):
     network, encoder = graph
     config = SimpleNamespace(
         hidden_size=4,
@@ -180,7 +189,7 @@ def test_encoder_constants_match_requested_graph_precision(graph, precision, fp3
         num_attention_heads=1,
         intermediate_size=4,
         rms_norm_eps=1e-5,
-        hidden_act="gelu_new",
+        hidden_act=activation,
         raw={"type_vocab_size": 1, "_fp32_layers": fp32_layers},
     )
     values = [2**20, -(2**20), 2**-30, -(2**-30)] if precision != "fp16" else [1, -1, 0.5, -0.5]
