@@ -50,7 +50,7 @@ class Tier:
 _WHISPER = Model("asr", "whisper", "openai/whisper-large-v3-turbo", language="zh")
 
 _I2V = "image-to-video for Wan2.2-TI2V-5B in TRTMC (its family renders from text only)"
-_TTS = "Chinese text-to-speech in TRTMC and a speech endpoint in trtmc-server"
+_TTS = "Chinese text-to-speech in TRTMC (Qwen3-TTS or CosyVoice3) and a speech endpoint in trtmc-server"
 
 # Every model here has a permissive license (Apache-2.0 or MIT) except MiniMax H3, whose community
 # license excludes some territories; see the README before shipping tier A.
@@ -87,9 +87,9 @@ TIERS = {
         "tts": Model("tts", "magpie-tts", "nvidia/magpie_tts_multilingual_357m"),
         "asr": _WHISPER,
     }, hardware="RTX 4090, RTX 5090, L40S",
-        video="an image model draws each shot's first frame; Wan2.2-TI2V-5B animates it",
+        video="FLUX.2 klein 4B draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it",
         speech="text-to-speech, one voice per character",
-        missing=(_I2V, _TTS, "a multi-reference keyframe model that fits 24 GB (FLUX.2 klein 4B is the candidate)"),
+        missing=(_I2V, _TTS, "FLUX.2 klein 4B in TRTMC, with reference pictures as input"),
         nominal_gb=24),
 }
 

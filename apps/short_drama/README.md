@@ -216,8 +216,8 @@ Jetson Thor) count their system memory. Settings shows the table below for the r
 | Tier | GPU memory | For example | Shots | Speech | Status |
 | --- | --- | --- | --- | --- | --- |
 | A | 140 GB or more | GB300, B200, H200 | MiniMax H3 films each shot from up to 6 reference pictures | native audio from the video model | runs end to end |
-| B | 80 GB or more | RTX PRO 6000, H100, DGX Spark | Qwen-Image-Edit draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it | text-to-speech, one voice per character | planned: needs image-to-video for Wan2.2-TI2V-5B and Chinese text-to-speech in TRTMC |
-| C | 24 GB or more | RTX 4090, RTX 5090, L40S | an image model draws each shot's first frame; Wan2.2-TI2V-5B animates it | text-to-speech, one voice per character | planned: as tier B, plus a multi-reference keyframe model that fits 24 GB |
+| B | 80 GB or more | RTX PRO 6000, H100, DGX Spark | Qwen-Image-Edit draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it | text-to-speech, one voice per character | planned: needs image-to-video for Wan2.2-TI2V-5B and Chinese text-to-speech (Qwen3-TTS or CosyVoice3) in TRTMC |
+| C | 24 GB or more | RTX 4090, RTX 5090, L40S | FLUX.2 klein 4B draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it | text-to-speech, one voice per character | planned: as tier B, plus FLUX.2 klein 4B with reference pictures in TRTMC |
 
 The models of tiers B and C are released under Apache-2.0 or MIT. MiniMax H3 and the FastH3
 student of tier A are released under the MiniMax H3 Community License, which limits the
