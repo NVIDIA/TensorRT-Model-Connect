@@ -311,7 +311,12 @@ def run_analyze(context: Context) -> None:
     vision = context.services.vision()
     result: dict[str, Any] = {"time": int(time.time()), "episode": number, "language": language,
                               "vision": vision.model if vision else None, "shots": {}, "cuts": [], "findings": []}
-    previous = (load(project, number) or {}).get("shots", {})
+    earlier = load(project, number) or {}
+    previous = earlier.get("shots", {})
+    # Findings about shots not analysed this time stay; a finding id starts with its shot, a cut's with
+    # the shot before the cut.
+    result["findings"] = [f for f in earlier.get("findings", []) if f["shot"] not in only
+                          and not any(f["id"].startswith(f"{shot}-") for shot in only)]
     loaded = False
     edges: dict[str, tuple[np.ndarray, np.ndarray, float | None]] = {}
     for index, shot in enumerate(shots, start=1):
@@ -348,7 +353,10 @@ def run_analyze(context: Context) -> None:
                                                       measures, before)
             except Exception as error:  # one unreadable reply must not lose the measurements
                 result.setdefault("vision_errors", []).append(f"{shot['id']}: {error}"[:300])
-    for before, after in zip(shots, shots[1:]):
+    rendered = {s["id"] for s in shots}
+    neighbours = [(a, b) for a, b in zip(episode["shots"], episode["shots"][1:])
+                  if a["id"] in rendered and b["id"] in rendered]
+    for before, after in neighbours:
         levels = (result["shots"].get(before["id"], {}).get("sound", {}).get("level_db"),
                   result["shots"].get(after["id"], {}).get("sound", {}).get("level_db"))
         result["cuts"].append({

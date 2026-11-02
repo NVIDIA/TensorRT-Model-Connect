@@ -142,3 +142,6 @@ def test_analysis_measures_every_shot_and_keeps_vision_findings_in_bounds(tmp_pa
     analysis.run_analyze(Context(project, {"only": ["e1s2"]}, "whisper", 1, FakeServices(), progress=lambda _: None))
     again = analysis.load(project, 1)
     assert again["shots"]["e1s1"] == result["shots"]["e1s1"] and again["vision"] is None
+    kept = {f["id"] for f in again["findings"]}
+    assert {"e1s1-black", "e1s1-unplanned", "e1s1-vision-1"} <= kept  # e1s1 was not analysed again
+    assert "e1s1-e1s2-jump" in kept and not any(f["id"].startswith("e1s2-vision") for f in again["findings"])
