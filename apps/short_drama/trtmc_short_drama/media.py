@@ -292,7 +292,8 @@ def cut_by_older_rule(entry: dict[str, Any]) -> bool:
 def recut(project, number: int, shot: dict[str, Any]) -> bool:
     """Cut the shot's chosen take again from its raw clip with the current rule, if an older one cut it.
 
-    The line's timing moves with the new start, so its subtitle stays in place without hearing it again.
+    The line's timing moves with the new start, so its subtitle stays in place without hearing it again;
+    what was heard on the old cut is dropped, so the analysis listens to the new one.
     """
 
     entry = project.shot_state(number).get(shot["id"], {})
@@ -311,7 +312,7 @@ def recut(project, number: int, shot: dict[str, Any]) -> bool:
     update = dict(cut)
     if entry.get("speech"):  # takes cut before lead-ins existed started at 0
         moved = lead_in - float(entry.get("lead_in", 0.0))
-        speech = entry["speech"]
+        speech = {key: value for key, value in entry["speech"].items() if key not in ("heard", "match")}
         update["speech"] = {**speech, "start": round(max(speech["start"] - moved, 0.0), 3),
                             "end": round(max(speech["end"] - moved, 0.0), 3)}
     state = project.shot_state(number)  # re-read: the user may pick another take meanwhile

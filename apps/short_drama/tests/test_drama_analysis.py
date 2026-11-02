@@ -158,3 +158,15 @@ def test_analysis_measures_every_shot_and_keeps_vision_findings_in_bounds(tmp_pa
     kept = {f["id"] for f in again["findings"]}
     assert {"e1s1-black", "e1s1-unplanned", "e1s1-vision-1"} <= kept  # e1s1 was not analysed again
     assert "e1s1-e1s2-jump" in kept and not any(f["id"].startswith("e1s2-vision") for f in again["findings"])
+    # a line timed before its take was cut again is heard again; a line heard on the current cut is not
+    state = project.shot_state(1)
+    state["e1s2"]["speech"] = {"start": 0.1, "end": 1.0}
+    project.save_shot_state(1, state)
+    recut = FakeServices()
+    analysis.run_analyze(Context(project, {"only": ["e1s2"]}, "whisper", 1, recut, progress=lambda _: None))
+    assert recut.engine.heard == ["whisper"] and analysis.load(project, 1)["shots"]["e1s2"]["speech"]["match"] >= 0.6
+    state["e1s2"]["speech"] = {"start": 0.1, "end": 1.0, "heard": "先排队", "match": 0.5}
+    project.save_shot_state(1, state)
+    timed = FakeServices()
+    analysis.run_analyze(Context(project, {"only": ["e1s2"]}, "whisper", 1, timed, progress=lambda _: None))
+    assert timed.engine.heard == [] and analysis.load(project, 1)["shots"]["e1s2"]["speech"]["match"] == 0.5

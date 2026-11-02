@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from trtmc_short_drama import media, video
+from trtmc_short_drama import editing, media, video
 from trtmc_short_drama.flow import Context
 from trtmc_short_drama.store import Store
 
@@ -237,9 +237,10 @@ def test_assembling_cuts_takes_of_an_older_rule_again(project, monkeypatch):
     frame = media.last_frame_path(project, 1, state["e1s1"])
     frame.write_bytes(b"old end")
     monkeypatch.setattr(video, "finish_clip", lambda raw, clip, seconds: 1.375)
-    shot = PLAN["episodes"][0]["shots"][0]
-    assert media.recut(project, 1, shot) and not media.recut(project, 1, shot)
+    phases = []
+    editing.recut_older(Context(project, {}, None, 1, FakeServices(), progress=phases.append), PLAN["episodes"][0])
+    assert phases == ["episode 1: cutting e1s1 again"] and not media.recut(project, 1, PLAN["episodes"][0]["shots"][0])
     entry = project.shot_state(1)["e1s1"]
     assert (entry["lead_in"], entry["cut"], entry["takes"][0]["lead_in"]) == (1.375, video.CUT_RULE, 1.375)
-    assert entry["speech"] == {"start": 0.0, "end": 1.375, "match": 1.0}  # moved by 1.125 s
+    assert entry["speech"] == {"start": 0.0, "end": 1.375}  # moved by 1.125 s; heard again by the analysis
     assert frame.read_bytes() == b"png"  # taken again from the new clip
