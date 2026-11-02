@@ -174,3 +174,16 @@ def test_h3_is_built_through_the_family_command(tmp_path: Path):
     assert command[1:5] == ["-m", "tensorrt_model_connect", "minimax_h3", "build-omniref"]
     assert command[command.index("--kernel-library") + 1] == str(tmp_path / "libtrtmc_minimax_h3_omniref_vsa.so")
     assert command[command.index("--bridge") + 1] == str(tmp_path / "libtrtmc_byok_tvm_ffi.so")
+
+
+def test_a_server_that_exits_while_loading_names_the_cause(tmp_path: Path):
+    server = tmp_path / "trtmc-server"
+    server.write_text("#!/bin/sh\necho 'trtmc-server: error: optional serving dependencies are unavailable'\nexit 2\n",
+                      encoding="utf-8")
+    server.chmod(0o755)
+    engine = Engine(server, tmp_path, 8701, tmp_path / "logs" / "server.log")
+    with pytest.raises(RuntimeError, match="exited while loading: trtmc-server: error: optional serving"):
+        engine.ensure([Served("v", tmp_path / "v.bundle")])
+    status = engine.status()
+    assert status["loaded"] == [] and status["loading"] == [] and "optional serving" in status["failure"]
+    assert engine.log_tail(1) == ["trtmc-server: error: optional serving dependencies are unavailable"]
