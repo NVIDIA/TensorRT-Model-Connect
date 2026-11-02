@@ -178,6 +178,18 @@ def test_the_language_model_is_built_only_with_llm_local(tmp_path: Path, monkeyp
         cli.main([*common, "--bundle", f"llm={tmp_path / 'q.bundle'}"])
 
 
+def test_a_planned_tier_says_what_is_missing_before_it_starts(tmp_path: Path, monkeypatch):
+    from trtmc_short_drama import cli
+
+    monkeypatch.setattr(cli.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(catalog, "gpus", lambda: [catalog.parse_gpu("0, RTX PRO 6000, 97887, 12.0")])
+    (tmp_path / "trtmc-server").touch()
+    start = ["up", "--data", str(tmp_path / "data"), "--runtime-root", str(tmp_path)]
+    with pytest.raises(SystemExit, match="tier B is planned; TRTMC still needs: image-to-video"):
+        cli.main(start)
+    assert cli.main([*start, "--dry-run"]) == 0
+
+
 def test_h3_is_built_through_the_family_command(tmp_path: Path):
     from trtmc_short_drama import cli
 

@@ -65,6 +65,7 @@ and the build commands without running them.
 | --- | --- |
 | `--data DIR` | projects, bundles, settings and logs (default `./short-drama-data`) |
 | `--tier a\|b\|c` | force a tier instead of choosing by GPU memory |
+| `--allow-planned` | start a tier that TRTMC cannot run end to end yet; without it `up` names what is missing and stops |
 | `--gpu N` | GPU index as `nvidia-smi` numbers it |
 | `--llm api\|local` | `api` (default): the chat API chosen in Settings; `local`: build and serve the tier's language model on this GPU |
 | `--bundle ROLE=PATH` | use an existing bundle for `llm` (with `--llm local`), `image`, `video`, `asr` or `tts` |
