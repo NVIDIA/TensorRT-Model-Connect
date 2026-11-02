@@ -82,6 +82,14 @@ def test_the_local_server_is_asked_once(monkeypatch):
     assert requests[0][1]["json"]["enable_thinking"] is False and requests[0][1]["headers"] == {}
 
 
+def test_pictures_go_in_one_user_message_with_the_system_text(monkeypatch):
+    requests, _ = replies(monkeypatch, httpx.Response(200, json=OK))
+    api_client().complete("look closely", "what is wrong?", max_tokens=10, temperature=0.1, images=(b"\xff\xd8jpeg",))
+    [message] = requests[0][1]["json"]["messages"]
+    assert message["role"] == "user" and message["content"][0] == {"type": "text", "text": "look closely\n\nwhat is wrong?"}
+    assert [part["image_url"]["url"][:23] for part in message["content"][1:]] == ["data:image/jpeg;base64,"]
+
+
 def test_free_apis_are_https_and_offer_a_default_model():
     for api in FREE_APIS.values():
         assert api.base_url.startswith("https://") and not api.base_url.endswith("/")

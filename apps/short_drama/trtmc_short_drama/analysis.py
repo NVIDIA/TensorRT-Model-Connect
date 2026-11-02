@@ -45,7 +45,9 @@ STILL = 1.5  # mean change between sampled frames (0-255) under which the pictur
 JUMP = 0.45  # picture change at a cut, 0 (same) to 1 (unrelated), above which a same-place cut jumps
 LEVEL_JUMP_DB = 8.0
 HEARD = 0.6  # share of the planned line speech recognition must find
-VISION_IMAGES = 4  # the frames, at most two reference pictures and the previous shot's last frame
+VISION_REFERENCES = 2  # reference pictures shown below the frames, before the previous shot's last frame
+BOARD_WIDTH, PICTURE_HEIGHT = 1440, 480  # the one picture a vision model gets: frames on top, pictures below
+VISION_TOKENS = 12000  # as for plans: models that think spend most of it before the JSON
 TARGET = re.compile(r"(shot|character|location|prop):([a-z0-9_]{1,40})")
 # What Whisper writes for music or quiet: subtitle credits and outros it learned from subtitled videos.
 HALLUCINATIONS = re.compile(r"字幕|字幕志愿者|请不吝点赞|订阅|谢谢观看|明镜与点点|amara\.org|thanks? (you )?for watching|"
@@ -99,7 +101,7 @@ People, places and props in it: {cast}
 Speech recognition heard: {heard}
 Measured on the clip: {measured}
 
-Image 1 shows {frames} frames of the clip from left to right over {seconds} s.{extra}
+The picture shows {frames} frames of the clip on top, from left to right over {seconds} s.{extra}
 
 Report only problems a viewer would notice, at most 5, each of one category:
 - "content": the action, the camera or the place does not match the plan;
@@ -111,7 +113,8 @@ Return a JSON array of {{"category": "<category>", "severity": "high|medium|low"
 "finding": "<one sentence in {language}>", "target": "shot:{shot}" or "character:<id>" or "location:<id>"
 or "prop:<id>", "action": "revise|retake|redraw", "suggestion": "<the smallest change, as a director's
 note in {language}>"}}. Use "redraw" for a character, place or prop whose picture is wrong, "revise" to
-change the plan, and "retake" when the plan is fine but the clip went wrong. Return [] when the clip is fine."""
+change the plan, and "retake" when the plan is fine but the clip went wrong. Return [] when the clip is fine.
+Write every "finding" and "suggestion" in {language}, even though these instructions are in English."""
 
 
 def _ffmpeg(*arguments: str) -> bytes:
@@ -120,7 +123,7 @@ def _ffmpeg(*arguments: str) -> bytes:
 
 
 def samples(clip: Path) -> np.ndarray:
-    return np.frombuffer(_ffmpeg("-i", str(clip), "-vn", "-ac", "1", "-ar", str(RATE), "-f", "f32le", "pipe:1"),
+    return np.frombuffer(_ffmpeg("-i", str(clip), "-vn", "-af", video.MONO_16K, "-f", "f32le", "pipe:1"),
                          dtype=np.float32)
 
 
@@ -233,9 +236,22 @@ def cut_findings(language: str, cuts: list[dict[str, Any]]) -> list[dict[str, An
     return found
 
 
-def _jpeg(path: Path, height: int = 384) -> bytes:
-    return _ffmpeg("-i", str(path), "-vf", f"scale=-2:{height}", "-frames:v", "1", "-q:v", "4",
-                   "-f", "image2", "-c:v", "mjpeg", "pipe:1")
+def board(sheet: Path, pictures: list[Path]) -> bytes:
+    """One JPEG: the contact sheet on top and the pictures below it, left to right. Many vision APIs,
+    trtmc-server among them, take one picture per request."""
+
+    top = f"[0]scale={BOARD_WIDTH}:-2,setsar=1,format=rgb24"
+    if not pictures:
+        graph = f"{top},format=yuvj420p"
+    else:
+        scaled = "".join(f"[{i + 1}]scale=-2:{PICTURE_HEIGHT},setsar=1,format=rgb24[p{i}];" for i in range(len(pictures)))
+        row = "".join(f"[p{i}]" for i in range(len(pictures)))
+        row += f"hstack=inputs={len(pictures)}" if len(pictures) > 1 else "null"
+        graph = (f"{top}[top];{scaled}{row},scale=w='min({BOARD_WIDTH},iw)':h=-2,"
+                 f"pad={BOARD_WIDTH}:ih+12:0:12:white[below];[top][below]vstack=inputs=2,format=yuvj420p")
+    inputs = [argument for path in [sheet, *pictures] for argument in ("-i", str(path))]
+    return _ffmpeg(*inputs, "-filter_complex", graph, "-frames:v", "1", "-q:v", "4", "-f", "image2", "-c:v", "mjpeg",
+                   "pipe:1")
 
 
 def vision_findings(chat, project, plan: dict[str, Any], shot: dict[str, Any], entry: dict[str, Any],
@@ -256,16 +272,14 @@ def vision_findings(chat, project, plan: dict[str, Any], shot: dict[str, Any], e
         still = project.stills.get(f"{kind}:{identifier}", {})
         if still.get("file") and (project.root / still["file"]).is_file():
             pictures.append((f"{kind}:{identifier}", project.root / still["file"]))
-    images, labels = [(project.root / entry["sheet"]).read_bytes()], []
-    for label, path in pictures[:VISION_IMAGES - 2]:
-        images.append(_jpeg(path))
-        labels.append(label)
-    extra = ""
-    if labels:
-        extra += f" Images 2 to {len(images)} are the reference pictures of {', '.join(labels)}, in that order."
+    shown = pictures[:VISION_REFERENCES]
+    below = [f"the reference picture of {label}" for label, _ in shown]
+    paths = [path for _, path in shown]
     if previous is not None and previous.is_file():
-        images.append(_jpeg(previous))
-        extra += f" Image {len(images)} is the last frame of the previous shot."
+        below.append("the last frame of the previous shot")
+        paths.append(previous)
+    extra = f" Below them, from left to right: {', '.join(below)}." if below else ""
+    image = board(project.root / entry["sheet"], paths)
     plan_fields = {key: shot.get(key) for key in ("summary", "camera", "action", "speaker", "line", "after",
                                                    "then", "sound")}
     reply = chat.complete_json(VISION_SYSTEM, VISION_PROMPT.format(
@@ -274,7 +288,7 @@ def vision_findings(chat, project, plan: dict[str, Any], shot: dict[str, Any], e
         heard=(measures.get("speech") or {}).get("heard") or "nothing", measured=json.dumps(
             {k: measures[k] for k in ("sound", "picture")}), frames=video.SHEET_TILES,
         seconds=entry.get("duration") or shot.get("seconds"), extra=extra, language=language),
-        max_tokens=2000, temperature=0.2, images=tuple(images))
+        max_tokens=VISION_TOKENS, temperature=0.2, images=(image,))
     known = {f"shot:{shot['id']}", *(c["target"] for c in cast)}
     found = []
     for index, item in enumerate(reply if isinstance(reply, list) else []):
