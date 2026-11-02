@@ -91,9 +91,20 @@ def time_line(transcribe: Callable[[bytes], str], wav: bytes, line: str) -> dict
     return {**result, "start": round(max(0.0, start), 2), "end": round(end, 2), "timing": "asr"}
 
 
+def recut_older(context: Context, episode: dict) -> None:
+    """Cut takes of an older video.CUT_RULE again, before their lines are timed or the clips joined."""
+
+    state = context.project.shot_state(episode["number"])
+    for shot in episode["shots"]:
+        if media.cut_by_older_rule(state.get(shot["id"], {})):
+            context.progress(f"episode {episode['number']}: cutting {shot['id']} again")
+            media.recut(context.project, episode["number"], shot)
+
+
 def run_subtitles(context: Context) -> None:
     project, number = context.project, context.episode
     episode = next(e for e in project.plan["episodes"] if e["number"] == number)
+    recut_older(context, episode)
     state = project.shot_state(number)
     spoken = [s for s in episode["shots"] if s.get("line") and state.get(s["id"], {}).get("file")]
     if spoken:
@@ -145,10 +156,7 @@ def run_assemble(context: Context) -> None:
     shots = [s for s in episode["shots"] if state.get(s["id"], {}).get("file")]
     if len(shots) != len(episode["shots"]):
         raise ValueError(f"render every shot of episode {number} first")
-    for shot in shots:
-        if media.cut_by_older_rule(state[shot["id"]]):
-            context.progress(f"episode {number}: cutting {shot['id']} again")
-            media.recut(project, number, shot)
+    recut_older(context, episode)
     state = project.shot_state(number)
     directory = project.episode_dir(number)
     clips = [project.root / state[s["id"]]["file"] for s in shots]

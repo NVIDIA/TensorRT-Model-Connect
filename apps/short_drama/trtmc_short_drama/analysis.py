@@ -342,7 +342,7 @@ def run_analyze(context: Context) -> None:
         measures = {"take": entry.get("take"), "file": entry["file"], "duration": seconds,
                     "sound": sound(samples(clip)), "picture": picture(frames(clip, seconds))}
         speech = entry.get("speech")
-        if speech is None:
+        if speech is None or "heard" not in speech:  # never heard, or heard before the take was cut again
             if not loaded:
                 context.services.load(context.model)  # speech recognition
                 loaded = True
