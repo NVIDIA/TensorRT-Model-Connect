@@ -14,7 +14,11 @@ import json
 import re
 from typing import Any
 
-SYSTEM = ("You adapt Chinese novels into vertical live-action short dramas. "
+# The plan's "style" alone names the look (live action, cartoon, ...); this is the look of a plan
+# without one.
+DEFAULT_STYLE = "realistic live-action drama with natural light"
+
+SYSTEM = ("You adapt Chinese novels into vertical short dramas. "
           "Reply with one JSON value and nothing else. Inside JSON strings, quote with 「」 and "
           "never use the double-quote character.")
 
@@ -34,10 +38,12 @@ each, adapted from the novel below (given as chapter notes).
 Return a JSON object with these keys:
 - "title": the drama title in Chinese.
 - "setting": era and place in English, for example "a small river town in Zhejiang, China, around 1911".
-- "style": the visual style in English, for example "realistic live-action period drama with soft natural light".
+- "style": the visual style in English that suits the story, for example "realistic live-action period
+  drama with soft natural light", or "bright 3D cartoon animation with soft rounded shapes" for a
+  story told to small children.
 - "characters": the 3 to 8 people who appear in the episodes, each {{"id": "<short lowercase ascii id>",
   "name": "<Chinese name from the novel>", "role": "<who they are, in Chinese>",
-  "look": "<English: age, build, face, hair and period clothing, one sentence>",
+  "look": "<English: age, build, face, hair and clothing, one sentence>",
   "voice": "<English: for example a hoarse middle-aged male voice>"}}.
 - "relationships": [{{"from": "<id>", "to": "<id>", "relation": "<in Chinese>"}}].
 - "locations": the 2 to 6 places where the episodes happen, each {{"id": "<ascii id>",
@@ -94,10 +100,10 @@ Return a JSON array of shots with exactly these keys.
 Source text of this episode:
 {source}"""
 
-STORY_SYSTEM = "You write original Chinese stories that will be filmed as vertical live-action short dramas."
+STORY_SYSTEM = "You write original Chinese stories that will be filmed as vertical short dramas."
 
 STORY_PROMPT = """Write an original short story in Chinese from this idea. It will be filmed as a
-vertical live-action short drama in {episodes} episodes of at most {max_seconds} seconds each.
+vertical short drama in {episodes} episodes of at most {max_seconds} seconds each.
 
 Idea: {idea}
 
@@ -225,15 +231,15 @@ def _line(text: str) -> str:
 
 
 def still_prompt(plan: dict[str, Any], kind: str, item: dict[str, Any]) -> str:
-    setting, style = _english(plan.get("setting")), _english(plan.get("style"))
+    setting, style = _english(plan.get("setting")), _english(plan.get("style")) or DEFAULT_STYLE
     look = _english(item.get("look"))
     if kind == "character":
         return (f"{style}, {setting}. Full-body portrait of {look}, standing and facing the camera "
                 "with a calm expression, plain light grey studio backdrop, soft even light, sharp "
-                "focus on the face, realistic live-action film still.")
+                f"focus on the face, {_clause(style)}.")
     if kind == "location":
-        return f"{style}, {setting}. {look}. An empty establishing view, realistic live-action film still."
-    return f"{look}, centered on a plain light grey backdrop, soft even light, realistic photograph."
+        return f"{style}, {setting}. {look}. An empty establishing view, {_clause(style)}."
+    return f"{look}, centered on a plain light grey backdrop, soft even light, {_clause(style)}."
 
 
 def video_prompts(plan: dict[str, Any], shot: dict[str, Any],
@@ -303,8 +309,8 @@ def video_prompts(plan: dict[str, Any], shot: dict[str, Any],
     sound = ("overall_soundscape:\n" + (_english(shot.get("sound")) or "Quiet ambience") + "." +
              "\n\nnon_diegetic_music:\nN/A")
     setting = f" set in {_clause(plan['setting'])}" if plan.get("setting") else ""
-    look = f", {_clause(plan['style'])}," if plan.get("style") else ""
-    style = (f"The target video uses a realistic live-action vertical short-drama style{setting}{look} "
+    look = _clause(plan.get("style") or DEFAULT_STYLE)
+    style = (f"The target video uses a vertical short-drama style{setting}, {look}, "
              "and a clean image without subtitles, captions or any on-screen text.")
     first = f"{head}\n\ndetailed_description:\n{style}\n[Shot 1] {' '.join(body)}\n\n{sound}"
     then = _sentence(mention(_english(shot.get("then")))) or "The people on screen keep moving naturally."
