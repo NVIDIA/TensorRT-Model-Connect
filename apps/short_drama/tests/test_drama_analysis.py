@@ -160,7 +160,7 @@ def test_analysis_measures_every_shot_and_keeps_vision_findings_in_bounds(tmp_pa
     (tmp_path / "board.jpg").write_bytes(board)
     size = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=width,height", "-of", "csv=p=0",
                            str(tmp_path / "board.jpg")], capture_output=True, text=True, check=True).stdout.strip()
-    assert size == "1440,806"  # the 1468x320 sheet scaled to 1440x314, a 12 px gap, three pictures 480 high
+    assert size == "1024,596"  # the 1468x320 sheet scaled to 1024x224, a 12 px gap, three pictures 360 high
     # a speech model built for Chinese does not judge the lines of an English project
     plan = project.plan
     project.save_plan({**plan, "language": "en"})
