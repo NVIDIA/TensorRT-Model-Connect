@@ -46,13 +46,10 @@ std::int32_t require_tensor_parallel_size(const nlohmann::json& config) {
 }
 
 std::string require_task(const BundleInfo& info) {
-    using trtmc::internal::ITextToEmbedding;
-    using trtmc::internal::ITextToPooledFeatures;
-    using trtmc::internal::ITextToTokenFeatures;
-    if (info.task == std::string(ITextToPooledFeatures::kTask) ||
-        info.task == std::string(ITextToTokenFeatures::kTask) ||
-        info.task == std::string(ITextToEmbedding::kTask) ||
-        info.task == "encoding") {
+    const std::string_view task = info.task;
+    if (task == internal::ITextToPooledFeatures::kTask ||
+        task == internal::ITextToTokenFeatures::kTask ||
+        task == internal::ITextToEmbedding::kTask || task == "encoding") {
         return info.task;
     }
     throw std::runtime_error("Albert does not implement task: " + info.task);
