@@ -104,7 +104,7 @@ def normalize_bible(bible: Any, ranges: list[list[int]]) -> dict[str, Any]:
     plan = {
         "title": chinese(bible.get("title")) or "短剧",
         "setting": str(bible.get("setting") or ""),
-        "style": str(bible.get("style") or "realistic live-action drama with natural light"),
+        "style": str(bible.get("style") or prompts.DEFAULT_STYLE),
         "characters": _items(bible.get("characters"), "c"),
         "locations": _items(bible.get("locations"), "place"),
         "props": _items(bible.get("props"), "prop"),

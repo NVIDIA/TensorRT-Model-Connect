@@ -53,7 +53,7 @@ def test_video_prompt_numbers_pictures_in_upload_order_and_quotes_nothing():
     assert "<Subject 1> kneels beside <Subject 2>" in first
     assert "In a hoarse male voice, <Subject 1> (S1) says <d>[Chinese] 我和你困觉！</d>" in first
     assert '"' not in first and "“" not in first
-    assert ("uses a realistic live-action vertical short-drama style set in a river town around 1911, "
+    assert ("uses a vertical short-drama style set in a river town around 1911, "
             "realistic live-action period drama, and a clean image without subtitles") in first
     assert first.index("subject_definitions:") < first.index("detailed_description:") < first.index("non_diegetic_music:")
     assert "[Shot 1 continued]" in continuation and "<d>" not in continuation
@@ -73,6 +73,21 @@ def test_a_line_from_someone_off_screen_becomes_a_voiceover():
 def test_still_prompts_describe_each_kind():
     assert "Full-body portrait of a thin man with a queue" in prompts.still_prompt(PLAN, "character", PLAN["characters"][0])
     assert "An empty establishing view" in prompts.still_prompt(PLAN, "location", PLAN["locations"][0])
+
+
+def test_the_plan_style_alone_sets_the_look():
+    cartoon = {**PLAN, "style": "bright 3D cartoon animation"}
+    references = [("character", PLAN["characters"][0]), ("location", PLAN["locations"][0])]
+    texts = [prompts.video_prompts(cartoon, SHOT, references)[0],
+             prompts.still_prompt(cartoon, "character", PLAN["characters"][0]),
+             prompts.still_prompt(cartoon, "location", PLAN["locations"][0]),
+             prompts.still_prompt(cartoon, "prop", {"look": "a red kite"})]
+    assert all("bright 3D cartoon animation" in text and "live-action" not in text and
+               "realistic" not in text for text in texts)
+    assert all("live-action" not in text for text in (prompts.SYSTEM, prompts.STORY_SYSTEM, prompts.STORY_PROMPT))
+    unstyled = {**PLAN, "style": ""}
+    assert prompts.DEFAULT_STYLE in prompts.video_prompts(unstyled, SHOT, references)[0]
+    assert prompts.DEFAULT_STYLE in prompts.still_prompt(unstyled, "prop", {"look": "a red kite"})
 
 
 def test_parse_json_ignores_fences_and_thinking():
