@@ -130,6 +130,20 @@ def test_files_stay_inside_the_project_and_keys_stay_private(tmp_path, monkeypat
         assert stat.S_IMODE((tmp_path / "secrets.json").stat().st_mode) == 0o600
 
 
+def test_a_vision_model_named_in_settings_comes_before_the_one_served_here(tmp_path):
+    services = Services(FakeEngine(), {"w": ("asr", Served("w", tmp_path / "w.bundle")),
+                                       "see": ("vision", Served("see", tmp_path / "see.bundle")),
+                                       "v": ("video", Served("v", tmp_path / "v.bundle"))}, tmp_path)
+    local = services.vision()
+    assert (local.model, local.local, services.vision_name()) == ("see", True, "see")
+    assert services.engine.ensured == [["see", "w"]]  # with speech recognition, which the analysis uses too
+    (tmp_path / "settings.json").write_text(json.dumps({"external_chat": {"base_url": "https://example.invalid/v1",
+                                                                           "model": "", "vision_model": "api-vl"}}))
+    remote = services.vision()
+    assert (remote.model, remote.local, services.vision_name()) == ("api-vl", False, "api-vl")
+    assert Services(FakeEngine(), {}, tmp_path / "none").vision() is None
+
+
 def test_choosing_a_take_switches_the_clip_and_drops_its_timing(tmp_path, monkeypatch):
     client, _ = make_client(tmp_path, monkeypatch)
     with client:

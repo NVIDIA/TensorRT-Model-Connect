@@ -173,8 +173,10 @@ running and queued steps of every project, recent steps with their errors, and t
 machine: a burst at the start, clipping, a nearly silent clip, the planned line against speech
 recognition, speech where the shot has no line, black or frozen frames, and how far the picture
 and the level jump at each cut. With a vision model set in Settings (any OpenAI-compatible model
-that reads pictures), each shot's contact sheet, up to two of its reference pictures and the
-previous shot's last frame also go to that model, which reports content that does not match the
+that reads pictures), or with `up --vision local` on tier A (Qwen3.5-9B built for pictures and
+served on this GPU, loaded next to speech recognition during the analysis), each shot's frames,
+up to two of its reference pictures and the previous shot's last frame go to that model as one
+picture (trtmc-server takes one picture per request), and it reports content that does not match the
 plan, text drawn on screen, continuity breaks, people or places that do not look like their
 pictures, and reference pictures that do not fit the plan. Each finding names the plan item it
 would change and suggests a change; edit the suggestion in any language, pick an action (revise

@@ -90,13 +90,26 @@ class Services:
         self.load(name)
         return ChatClient(self.engine.url, name)
 
-    def vision(self) -> ChatClient | None:
-        """The chat API's model that reads pictures, when Settings names one."""
+    def vision_name(self) -> str | None:
+        """The model that looks at the shots: the one Settings name, else the one served here (--vision local)."""
 
         external = self.external()
-        if not external.get("base_url") or not external.get("vision_model"):
+        if external.get("base_url") and external.get("vision_model"):
+            return external["vision_model"]
+        return next((name for name, (role, _) in self.models.items() if role == "vision"), None)
+
+    def vision(self) -> ChatClient | None:
+        """A client for the model that looks at the shots, if there is one. A local one is loaded with
+        speech recognition, which the analysis uses too, so the server is not restarted shot by shot."""
+
+        external = self.external()
+        if external.get("base_url") and external.get("vision_model"):
+            return ChatClient(external["base_url"], external["vision_model"], self.api_key(), local=False)
+        name = self.vision_name()
+        if name is None:
             return None
-        return ChatClient(external["base_url"], external["vision_model"], self.api_key(), local=False)
+        self.engine.ensure([served for role, served in self.models.values() if role in ("vision", "asr")])
+        return ChatClient(self.engine.url, name)
 
 
 def check_plan(plan: dict[str, Any]) -> None:
@@ -218,6 +231,7 @@ def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any]
                 "external_chat": {"base_url": external.get("base_url", ""), "model": external.get("model", ""),
                                   "vision_model": external.get("vision_model", ""),
                                   "has_key": bool(services.api_key())},
+                "vision_model": services.vision_name() or "",
                 "tiers": catalog.describe_tiers(),
                 "chat_ready": services.chat_ready(),
                 "free_apis": {key: vars(api) for key, api in FREE_APIS.items()},

@@ -77,7 +77,7 @@ class ChatClient:
                 *({"type": "image_url", "image_url": {"url": data_url(image)}} for image in images)]}]
         body: dict[str, Any] = {"model": self.model, "max_tokens": max_tokens, "temperature": temperature,
                                 "messages": messages}
-        if self.local:
+        if self.local and not images:  # trtmc-server takes no thinking switch with pictures
             body["enable_thinking"] = False
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         url = (f"{self.base_url.rstrip('/')}/v1/chat/completions" if self.local

@@ -63,6 +63,10 @@ TIERS = {
                        byok=("libtrtmc_minimax_h3_omniref_vsa.so", "run", "minimax_h3.omniref_vsa128"),
                        builder="minimax_h3"),
         "asr": _WHISPER,
+        # Served only with --vision local: looks at the shots during the analysis.
+        "vision": Model("vision", "qwen3.5-9b-vl", "Qwen/Qwen3.5-9B",
+                        ("--task", "vision_language_generation", "--precision", "fp16",
+                         "--max-sequence-length", "32768")),
     }, hardware="GB300, B200, H200", video="MiniMax H3 films each shot from up to 6 reference pictures",
         speech="native audio from the video model", nominal_gb=140),
     "b": Tier("b", 78, "keyframes from the reference pictures, Wan2.2-TI2V-5B image-to-video and text-to-speech", {

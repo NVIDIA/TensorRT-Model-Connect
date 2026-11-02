@@ -90,6 +90,14 @@ def test_pictures_go_in_one_user_message_with_the_system_text(monkeypatch):
     assert [part["image_url"]["url"][:23] for part in message["content"][1:]] == ["data:image/jpeg;base64,"]
 
 
+def test_the_local_server_gets_no_thinking_switch_with_pictures(monkeypatch):
+    requests, _ = replies(monkeypatch, httpx.Response(200, json=OK), httpx.Response(200, json=OK))
+    local = ChatClient("http://127.0.0.1:8701", "qwen-vl")
+    local.complete("s", "u", max_tokens=10, temperature=0.1, images=(b"\x89PNG\r\n\x1a\n",))
+    local.complete("s", "u", max_tokens=10, temperature=0.1)
+    assert "enable_thinking" not in requests[0][1]["json"] and requests[1][1]["json"]["enable_thinking"] is False
+
+
 def test_free_apis_are_https_and_offer_a_default_model():
     for api in FREE_APIS.values():
         assert api.base_url.startswith("https://") and not api.base_url.endswith("/")
