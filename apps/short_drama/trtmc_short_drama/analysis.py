@@ -102,12 +102,11 @@ VISION_PROMPT = """Check shot {shot} of the vertical short drama "{title}" (styl
 
 The plan of the shot: {plan}
 People, places and props in it: {cast}
-Speech recognition heard: {heard}
-Measured on the clip: {measured}
 
 The picture shows {frames} frames of the clip on top, from left to right over {seconds} s.{extra}
 
-Report only problems a viewer would notice, at most 5, each of one category:
+Judge only what the picture shows; the sound and the spoken line are checked separately. Report only
+problems a viewer would notice, at most 5, each of one category:
 - "content": the action, the camera or the place does not match the plan;
 - "text": letters, captions or garbled writing appear on screen;
 - "continuity": the clip does not open where the previous shot ended (positions, clothes, props, light);
@@ -259,8 +258,9 @@ def board(sheet: Path, pictures: list[Path]) -> bytes:
 
 
 def vision_findings(chat, project, plan: dict[str, Any], shot: dict[str, Any], entry: dict[str, Any],
-                    measures: dict[str, Any], previous: Path | None) -> list[dict[str, Any]]:
-    """Ask a model that reads pictures what it sees in one shot; [] when it sees nothing wrong."""
+                    previous: Path | None) -> list[dict[str, Any]]:
+    """Ask a model that reads pictures what it sees in one shot; [] when it sees nothing wrong. Sound and
+    speech stay out: the model cannot hear, and the measurements cover them."""
 
     language = prompts.words(plan.get("language", "zh"))["language"]
     groups = {"character": plan.get("characters", []), "location": plan.get("locations", []),
@@ -286,13 +286,12 @@ def vision_findings(chat, project, plan: dict[str, Any], shot: dict[str, Any], e
     extra = f" Below them, from left to right: {', '.join(below)}." if below else ""
     image = board(project.root / entry["sheet"], paths)
     plan_fields = {key: str(shot.get(key) or "")[:FIELD_CHARS] for key in ("summary", "camera", "action", "speaker",
-                                                                           "line", "after", "then", "sound")}
+                                                                           "line", "after", "then")}
     reply = chat.complete_json(VISION_SYSTEM, VISION_PROMPT.format(
         shot=shot["id"], title=plan.get("title", ""), style=str(plan.get("style") or "")[:FIELD_CHARS],
         plan=json.dumps(plan_fields, ensure_ascii=False), cast=json.dumps(cast, ensure_ascii=False),
-        heard=(measures.get("speech") or {}).get("heard") or "nothing", measured=json.dumps(
-            {k: measures[k] for k in ("sound", "picture")}), frames=video.SHEET_TILES,
-        seconds=entry.get("duration") or shot.get("seconds"), extra=extra, language=language),
+        frames=video.SHEET_TILES, seconds=entry.get("duration") or shot.get("seconds"), extra=extra,
+        language=language),
         max_tokens=VISION_TOKENS, temperature=0.2, images=(image,))
     known = {f"shot:{shot['id']}", *(c["target"] for c in cast)}
     found = []
@@ -380,7 +379,7 @@ def run_analyze(context: Context) -> None:
             before = media.ensure_last_frame(project, number, state.get(ids[position - 1], {})) if position else None
             try:
                 result["findings"] += vision_findings(vision, project, plan, shot, {**entry, "duration": seconds},
-                                                      measures, before)
+                                                      before)
             except Exception as error:  # one unreadable reply must not lose the measurements
                 result.setdefault("vision_errors", []).append(f"{shot['id']}: {error}"[:300])
     rendered = {s["id"] for s in shots}
