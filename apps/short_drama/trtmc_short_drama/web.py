@@ -85,6 +85,8 @@ class Services:
             return ChatClient(external["base_url"], external["model"], self.api_key(), local=False)
         if not self.chat_ready():
             raise ValueError(NO_CHAT)
+        # A flow saved while the app planned through an API names no model; use the one served here.
+        name = name if name in self.models else next(n for n, (role, _) in self.models.items() if role == "llm")
         self.load(name)
         return ChatClient(self.engine.url, name)
 
