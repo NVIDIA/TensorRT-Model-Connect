@@ -194,14 +194,52 @@ def test_a_clip_skips_the_lead_in_and_keeps_its_planned_length(monkeypatch, tmp_
     assert "afade=t=out:st=8.810:d=0.04" in calls[1][calls[1].index("-af") + 1]
 
 
+def joined(path: Path, *sources: str) -> Path:
+    inputs = [argument for source in sources for argument in ("-f", "lavfi", "-i", source)]
+    joins = "".join(f"[{index}]" for index in range(len(sources))) + f"concat=n={len(sources)}"
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", *inputs, "-filter_complex", joins,
+                    "-pix_fmt", "yuv420p", str(path)], check=True)
+    return path
+
+
+def still(colour: str, seconds: float) -> str:
+    return f"color=c={colour}:s=90x160:d={seconds}:r=24"
+
+
+MOVING = "color=c=black:s=90x160:d=1.5:r=24,geq=lum='mod(Y*2+N*6\\,256)':cb=128:cr=128"  # changes 10-15 a frame
+
+
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs FFmpeg")
-def test_a_clip_starts_after_a_held_reference_picture(tmp_path):
-    held = tmp_path / "held.mp4"
-    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=white:s=90x160:d=0.5:r=24",
-                    "-f", "lavfi", "-i", "color=c=0x202020:s=90x160:d=1.5:r=24", "-filter_complex", "[0][1]concat=n=2",
-                    "-pix_fmt", "yuv420p", str(held)], check=True)
-    assert video.opening(held) == 0.5  # the first frame after the cut
+def test_a_clip_starts_after_the_reference_pictures_it_holds(tmp_path):
+    assert video.opening(joined(tmp_path / "one.mp4", still("white", 0.5), still("0x202020", 1.5))) == 0.5
+    two = joined(tmp_path / "two.mp4", still("white", 0.5), still("0x202020", 0.5), MOVING)
+    assert video.opening(two) == 1.0  # a portrait, then a prop, then the shot
+    assert video.opening(joined(tmp_path / "long.mp4", still("white", 1.5), MOVING)) == 1.5  # the previous shot's end
+    moving_first = joined(tmp_path / "moves.mp4", MOVING, still("white", 0.5), MOVING)
+    assert video.opening(moving_first) == video.LEAD_IN  # a cut inside the shot is kept
     steady = tmp_path / "steady.mp4"
     subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=90x160:d=2:r=24",
                     "-pix_fmt", "yuv420p", str(steady)], check=True)
     assert video.opening(steady) == video.LEAD_IN
+
+
+def test_assembling_cuts_takes_of_an_older_rule_again(project, monkeypatch):
+    stills = project.stills
+    stills["location:temple"]["status"] = "approved"
+    project.save_stills(stills)
+    render(project, FakeServices())
+    state = project.shot_state(1)
+    assert state["e1s1"]["cut"] == video.CUT_RULE and not media.cut_by_older_rule(state["e1s1"])
+    old = {key: value for key, value in state["e1s1"].items() if key not in ("cut", "takes")}
+    state["e1s1"] = {**old, "speech": {"start": 1.0, "end": 2.5, "match": 1.0},
+                     "takes": [{k: v for k, v in t.items() if k != "cut"} for t in state["e1s1"]["takes"]]}
+    project.save_shot_state(1, state)
+    frame = media.last_frame_path(project, 1, state["e1s1"])
+    frame.write_bytes(b"old end")
+    monkeypatch.setattr(video, "finish_clip", lambda raw, clip, seconds: 1.375)
+    shot = PLAN["episodes"][0]["shots"][0]
+    assert media.recut(project, 1, shot) and not media.recut(project, 1, shot)
+    entry = project.shot_state(1)["e1s1"]
+    assert (entry["lead_in"], entry["cut"], entry["takes"][0]["lead_in"]) == (1.375, video.CUT_RULE, 1.375)
+    assert entry["speech"] == {"start": 0.0, "end": 1.375, "match": 1.0}  # moved by 1.125 s
+    assert frame.read_bytes() == b"png"  # taken again from the new clip

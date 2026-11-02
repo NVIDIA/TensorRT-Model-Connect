@@ -333,4 +333,5 @@ const ZH_PATTERNS = [
   [/^revising (\w+) (\w+)$/, "正在修改 $1 $2"], [/^reviewing episode (\d+)$/, "正在审阅第 $1 集"],
   [/^still (\d+) of (\d+): (.+)$/, "第 $1/$2 张参考图：$3"], [/^episode (\d+): timing line (\d+) of (\d+)$/, "第 $1 集：第 $2/$3 句台词定时"],
   [/^episode (\d+): joining (\d+) clips$/, "第 $1 集：拼接 $2 个片段"],
+  [/^episode (\d+): cutting (\w+) again$/, "第 $1 集：按新规则重剪 $2"],
 ];

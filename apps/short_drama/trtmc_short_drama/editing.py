@@ -11,7 +11,7 @@ import re
 from typing import Callable
 import wave
 
-from . import video
+from . import media, video
 from .flow import Context, Step
 
 STEP_SECONDS = 0.1
@@ -117,19 +117,24 @@ def srt_time(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{rest // 1000:02d},{rest % 1000:03d}"
 
 
-def subtitles(shots: list[dict], state: dict) -> str:
-    """SRT of the planned lines placed where the recognizer heard them."""
+def subtitles(shots: list[dict], state: dict, lengths: dict[str, float] | None = None) -> str:
+    """SRT of the planned lines placed where the recognizer heard them.
+
+    `lengths` are the clips' real durations by shot id: a clip skips its opening and can end up
+    shorter than planned.
+    """
 
     entries, offset = [], 0.0
     for shot in shots:
+        length = (lengths or {}).get(shot["id"], float(shot["seconds"]))
         speech = state.get(shot["id"], {}).get("speech")
         if shot.get("line") and speech:
             start = offset + speech["start"]
             end = offset + max(speech["end"], speech["start"] + 0.8)
-            end = min(end, offset + float(shot["seconds"]))
+            end = min(end, offset + length)
             text = re.sub(r"[\"“”]", "", shot["line"])
             entries.append(f"{len(entries) + 1}\n{srt_time(start)} --> {srt_time(end)}\n{text}\n")
-        offset += float(shot["seconds"])
+        offset += length
     return "\n".join(entries)
 
 
@@ -140,11 +145,18 @@ def run_assemble(context: Context) -> None:
     shots = [s for s in episode["shots"] if state.get(s["id"], {}).get("file")]
     if len(shots) != len(episode["shots"]):
         raise ValueError(f"render every shot of episode {number} first")
+    for shot in shots:
+        if media.cut_by_older_rule(state[shot["id"]]):
+            context.progress(f"episode {number}: cutting {shot['id']} again")
+            media.recut(project, number, shot)
+    state = project.shot_state(number)
     directory = project.episode_dir(number)
-    (directory / "episode.srt").write_text(subtitles(shots, state), encoding="utf-8")
+    clips = [project.root / state[s["id"]]["file"] for s in shots]
+    lengths = {s["id"]: video.probe(clip)["duration"] for s, clip in zip(shots, clips)}
+    (directory / "episode.srt").write_text(subtitles(shots, state, lengths), encoding="utf-8")
     output = directory / "episode.mp4"
     context.progress(f"episode {number}: joining {len(shots)} clips")
-    video.export_episode([project.root / state[s["id"]]["file"] for s in shots], directory / "episode.srt",
+    video.export_episode(clips, directory / "episode.srt",
                          output, max_seconds=float(project.meta.get("max_seconds", 60)),
                          font=params.get("font", "Noto Sans CJK SC"),
                          font_size=int(params.get("font_size", 12)), crf=int(params.get("crf", 18)))
