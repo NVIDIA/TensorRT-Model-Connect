@@ -11,6 +11,7 @@ const STEP_JOBS = { story: ["story"], plan: ["plan", "revise", "review"], pictur
   episodes: ["subtitles", "assemble"] };
 const KINDS = { character: "Character", location: "Place", prop: "Prop" };
 const STALE = { references: "a picture it used was redrawn or replaced",
+  previous: "the shot before it has a new take, so it no longer opens where that one ends",
   prompt: "its prompt changed since this take (the plan, a kept prompt or the app's template)" };
 
 const pid = () => encodeURIComponent(ui.project.id);
@@ -685,6 +686,13 @@ function shotsStep() {
       },
     }), `Use the last frame of episode ${episode.number - 1} as an extra reference for the first shot` +
       (state.use_previous_frame == null ? ` (default: ${state.continues ? "on, same place" : "off, the place changes"})` : "")) : "",
+    el("label", { class: "check" }, el("input", {
+      type: "checkbox", checked: state.chained !== false, onchange: async (e) => {
+        await api(`/api/projects/${pid()}/episodes/${episode.number}`, { method: "PUT", body: { chain_shots: e.target.checked } }).catch(fail);
+        await reloadProject();
+      },
+    }), "Open each shot where the shot before it ends (same place): its last frame becomes an extra reference. " +
+      "Render in order; a new take of a shot marks the next one outdated."),
     episode.shots.map((shot) => shotCard(episode, shot, state[shot.id] || {}, live === shot.id, ready(shot))));
 }
 
