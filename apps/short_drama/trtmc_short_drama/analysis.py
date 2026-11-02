@@ -46,7 +46,11 @@ JUMP = 0.45  # picture change at a cut, 0 (same) to 1 (unrelated), above which a
 LEVEL_JUMP_DB = 8.0
 HEARD = 0.6  # share of the planned line speech recognition must find
 VISION_REFERENCES = 2  # reference pictures shown below the frames, before the previous shot's last frame
-BOARD_WIDTH, PICTURE_HEIGHT = 1440, 480  # the one picture a vision model gets: frames on top, pictures below
+# The one picture a vision model gets: frames on top, pictures below. TRTMC's Qwen3.5 takes 2,048 tokens
+# of picture and text together; this picture is about 600 of them, and each plan field and look is cut
+# to FIELD_CHARS and LOOK_CHARS characters.
+BOARD_WIDTH, PICTURE_HEIGHT = 1024, 360
+FIELD_CHARS, LOOK_CHARS = 160, 100
 VISION_TOKENS = 12000  # as for plans: models that think spend most of it before the JSON
 TARGET = re.compile(r"(shot|character|location|prop):([a-z0-9_]{1,40})")
 # What Whisper writes for music or quiet: subtitle credits and outros it learned from subtitled videos.
@@ -268,7 +272,8 @@ def vision_findings(chat, project, plan: dict[str, Any], shot: dict[str, Any], e
         item = next((i for i in groups[kind] if i["id"] == identifier), None)
         if not item:
             continue
-        cast.append({"target": f"{kind}:{identifier}", "name": item.get("name", ""), "look": item.get("look", "")})
+        cast.append({"target": f"{kind}:{identifier}", "name": item.get("name", ""),
+                     "look": str(item.get("look") or "")[:LOOK_CHARS]})
         still = project.stills.get(f"{kind}:{identifier}", {})
         if still.get("file") and (project.root / still["file"]).is_file():
             pictures.append((f"{kind}:{identifier}", project.root / still["file"]))
@@ -280,10 +285,10 @@ def vision_findings(chat, project, plan: dict[str, Any], shot: dict[str, Any], e
         paths.append(previous)
     extra = f" Below them, from left to right: {', '.join(below)}." if below else ""
     image = board(project.root / entry["sheet"], paths)
-    plan_fields = {key: shot.get(key) for key in ("summary", "camera", "action", "speaker", "line", "after",
-                                                   "then", "sound")}
+    plan_fields = {key: str(shot.get(key) or "")[:FIELD_CHARS] for key in ("summary", "camera", "action", "speaker",
+                                                                           "line", "after", "then", "sound")}
     reply = chat.complete_json(VISION_SYSTEM, VISION_PROMPT.format(
-        shot=shot["id"], title=plan.get("title", ""), style=plan.get("style", ""),
+        shot=shot["id"], title=plan.get("title", ""), style=str(plan.get("style") or "")[:FIELD_CHARS],
         plan=json.dumps(plan_fields, ensure_ascii=False), cast=json.dumps(cast, ensure_ascii=False),
         heard=(measures.get("speech") or {}).get("heard") or "nothing", measured=json.dumps(
             {k: measures[k] for k in ("sound", "picture")}), frames=video.SHEET_TILES,
