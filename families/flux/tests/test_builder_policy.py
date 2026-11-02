@@ -35,51 +35,53 @@ def test_every_flux_builder_config_uses_optimization_level_one(
 
 
 @pytest.mark.parametrize("builder", ("flux2_dit_builder.py", "flux2_dit_tp_builder.py"))
-def test_flux2_fp8_builds_disable_quantize_propagation(builder: str) -> None:
+def test_flux2_fp8_attention_keeps_the_linear_quantize_outside(builder: str) -> None:
     source = (FAMILY_ROOT / builder).read_text(encoding="utf-8")
 
-    assert source.count("graph_ops.disable_quantize_propagation(config)") == 1
+    assert source.count("graph_ops.keep_quantize_out_of_attention(network, rows)") == 1
     assert (
-        "    if fp8_scales is not None:\n        graph_ops.disable_quantize_propagation(config)\n"
+        "    if _FP8_MODE:\n        graph_ops.keep_quantize_out_of_attention(network, rows)\n"
     ) in source
+    # A build route applies to the whole DiT; "-quantize_ppg=off" dropped every FP8 GEMM.
+    assert "build_route" not in source
 
 
-class _FakeBuilderConfig:
-    """Stands in for IBuilderConfig; only the build-route attributes."""
+class _FakeNetwork:
+    """Stands in for INetworkDefinition; records debug marks only."""
 
-    def __init__(self, all_build_routes: str) -> None:
-        self.all_build_routes = all_build_routes
-        self.build_route = ""
+    def __init__(self) -> None:
+        self.debug_tensors: list[object] = []
+
+    def mark_debug(self, tensor: object) -> bool:
+        self.debug_tensors.append(tensor)
+        return True
 
 
-@pytest.mark.parametrize(
-    ("routes", "expected"),
-    (('{"quantize_ppg": {}}', "-quantize_ppg=off"), ("", "")),
-)
-def test_quantize_propagation_route_is_set_only_when_listed(routes: str, expected: str) -> None:
+def test_attention_rows_are_marked_as_a_debug_tensor() -> None:
     pytest.importorskip("tensorrt")
     from families.flux import graph_ops
 
-    config = _FakeBuilderConfig(routes)
-    graph_ops.disable_quantize_propagation(config)
+    network, rows = _FakeNetwork(), object()
 
-    assert config.build_route == expected
+    assert graph_ops.keep_quantize_out_of_attention(network, rows) is rows
+    assert network.debug_tensors == [rows]
 
 
 @pytest.mark.trt
-def test_fp8_linear_after_attention_builds_with_the_dit_route() -> None:
+def test_fp8_linear_after_attention_builds_and_keeps_fp8_weights() -> None:
     """The FLUX.2 DiT pattern TensorRT 11.4 fails to build (issue #1920): an
-    unquantized IAttention whose output feeds an FP8 linear."""
+    unquantized IAttention whose output feeds an FP8 linear. It must build with
+    the attention rows marked, without a build route, and keep the FP8 weights;
+    the earlier ``-quantize_ppg=off`` route folded them into FP16."""
     trt = pytest.importorskip("tensorrt")
     import numpy as np
 
     from families.flux import graph_ops
 
-    heads, head_dim, seq = 2, 64, 256
+    heads, head_dim, seq = 16, 128, 256
     width = heads * head_dim
     builder = trt.Builder(trt.Logger(trt.Logger.ERROR))
     config = builder.create_builder_config()
-    graph_ops.disable_quantize_propagation(config)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     keep_alive = []
 
@@ -97,8 +99,9 @@ def test_fp8_linear_after_attention_builds_with_the_dit_route() -> None:
     rows = network.add_shuffle(attention.get_output(0))
     rows.first_transpose = (0, 2, 1, 3)
     rows.reshape_dims = (seq, width)
+    context = graph_ops.keep_quantize_out_of_attention(network, rows.get_output(0))
     activation_scale = scalar(0.05)
-    quantized = network.add_quantize(rows.get_output(0), activation_scale, trt.DataType.FP8)
+    quantized = network.add_quantize(context, activation_scale, trt.DataType.FP8)
     activation = network.add_dequantize(quantized.get_output(0), activation_scale, trt.float16)
     codes = np.full((width, width), 0x38, dtype=np.uint8)  # E4M3 1.0
     keep_alive.append(codes)
@@ -114,7 +117,12 @@ def test_fp8_linear_after_attention_builds_with_the_dit_route() -> None:
     )
     network.mark_output(output.get_output(0))
 
-    assert builder.build_serialized_network(network, config) is not None
+    plan = builder.build_serialized_network(network, config)
+
+    assert plan is not None
+    # The FP8 weight takes width * width bytes; folded into FP16 it alone would
+    # take twice that.
+    assert plan.nbytes < 2 * width * width
 
 
 def test_preprocessor_keeps_core_weights_required() -> None:
