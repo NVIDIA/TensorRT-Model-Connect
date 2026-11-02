@@ -18,11 +18,62 @@ from typing import Any
 # without one.
 DEFAULT_STYLE = "realistic live-action drama with natural light"
 
-SYSTEM = ("You adapt Chinese novels into vertical short dramas. "
-          "Reply with one JSON value and nothing else. Inside JSON strings, quote with 「」 and "
+SYSTEM = ("You adapt novels into vertical short dramas. "
+          "Reply with one JSON value and nothing else. Inside JSON strings, quote with 「」 or ‘’ and "
           "never use the double-quote character.")
 
-CHAPTER_PROMPT = """Summarize this chapter of a novel for a screenwriter, in Chinese.
+# A project writes its story, plan, lines and reviews in one language; the models' prompts carry
+# that text as it is. `words(language)` fills the parts of the templates that depend on it.
+LANGUAGES = {"zh": "Chinese", "en": "English"}
+
+_WORDS = {
+    "zh": {
+        "line_rule": "in Chinese, under 16 characters",
+        "heading": "第一章 <title>", "chapter_length": "500 to 900 characters",
+        "quote_marks": "「」",
+        "example_character": """{"id": "wangu", "name": "王胡", "role": "未庄的闲汉，满脸络腮胡子",
+  "look": "三十多岁的壮汉，满脸浓密的络腮胡，剃光的前额，拖着长辫，穿打补丁的灰色短褂",
+  "voice": "粗哑响亮的男声"}""",
+        "example_shot": """{"location": "office", "characters": ["linlan"], "props": ["phone"], "seconds": 6,
+  "summary": "linlan 在窗边接电话，听到惊人的消息",
+  "camera": "手持中近景，镜头缓缓推近",
+  "action": "linlan 把手机贴在耳边踱了一步，猛地停住，转向镜头",
+  "speaker": "linlan", "line": "你说什么？他回来了？",
+  "after": "linlan 放下手机，另一只手捂住嘴",
+  "then": "她回头望向办公室的门，呼吸急促，朝门口走去",
+  "sound": "安静的办公室环境声，远处的键盘敲击声"}""",
+    },
+    "en": {
+        "line_rule": "in English, under 12 words",
+        "heading": "Chapter 1: <title>", "chapter_length": "300 to 600 words",
+        "quote_marks": "‘’",
+        "example_character": """{"id": "wang", "name": "Wang Hu", "role": "an idler of the village with a full beard",
+  "look": "a burly man in his thirties with a thick full beard, a shaved forehead and a long queue, wearing a patched grey jacket",
+  "voice": "a gruff, loud male voice"}""",
+        "example_shot": """{"location": "office", "characters": ["linlan"], "props": ["phone"], "seconds": 6,
+  "summary": "linlan takes a call by the window and hears shocking news",
+  "camera": "A handheld medium close-up slowly pushes in",
+  "action": "linlan paces a step with the phone at her ear, stops short and turns toward the camera",
+  "speaker": "linlan", "line": "What did you say? He is back?",
+  "after": "linlan lowers the phone and presses her free hand to her mouth",
+  "then": "she glances back at the office door, breathing fast, and starts toward it",
+  "sound": "quiet office room tone, distant keyboard clicks"}""",
+    },
+}
+
+
+def language_of(meta: dict[str, Any]) -> str:
+    """The project's language code; projects made before languages existed are Chinese."""
+
+    return meta.get("language") if meta.get("language") in LANGUAGES else "zh"
+
+
+def words(language: str) -> dict[str, str]:
+    language = language if language in LANGUAGES else "zh"
+    return {"language": LANGUAGES[language], **_WORDS[language]}
+
+
+CHAPTER_PROMPT = """Summarize this chapter of a novel for a screenwriter, in {language}.
 Return a JSON object:
 {{"summary": "<the events in order, at most 300 characters>",
   "characters": ["<names that appear>"],
@@ -36,30 +87,28 @@ BIBLE_PROMPT = """Plan a vertical short drama in {episodes} episodes of at most 
 each, adapted from the novel below (given as chapter notes).
 
 Return a JSON object with these keys:
-- "title": the drama title in Chinese.
-- "setting": era and place in English, for example "a small river town in Zhejiang, China, around 1911".
-- "style": the visual style in English that suits the story, for example "realistic live-action period
+- "title": the drama title.
+- "setting": era and place, for example "a small river town in Zhejiang, China, around 1911".
+- "style": the visual style that suits the story, for example "realistic live-action period
   drama with soft natural light", or "bright 3D cartoon animation with soft rounded shapes" for a
   story told to small children.
 - "characters": the 3 to 8 people who appear in the episodes, each {{"id": "<short lowercase ascii id>",
-  "name": "<Chinese name from the novel>", "role": "<who they are, in Chinese>",
-  "look": "<English: age, build, face, hair and clothing, one sentence>",
-  "voice": "<English: for example a hoarse middle-aged male voice>"}}.
-- "relationships": [{{"from": "<id>", "to": "<id>", "relation": "<in Chinese>"}}].
+  "name": "<the name the novel uses>", "role": "<who they are>",
+  "look": "<age, build, face, hair and clothing, one sentence>",
+  "voice": "<for example a hoarse middle-aged male voice>"}}.
+- "relationships": [{{"from": "<id>", "to": "<id>", "relation": "<how they are related>"}}].
 - "locations": the 2 to 6 places where the episodes happen, each {{"id": "<ascii id>",
-  "name": "<Chinese name>", "look": "<English, one sentence>"}}.
-- "props": 0 to 4 objects that matter in the story, each {{"id": "<ascii id>", "name": "<Chinese name>",
-  "look": "<English>"}}.
-- "episodes": exactly {episodes} items in this order, each {{"number": <n>, "title": "<Chinese>",
-  "summary": "<what happens in its chapters, in Chinese, at most 150 characters>"}}.
+  "name": "<name>", "look": "<one sentence>"}}.
+- "props": 0 to 4 objects that matter in the story, each {{"id": "<ascii id>", "name": "<name>",
+  "look": "<one sentence>"}}.
+- "episodes": exactly {episodes} items in this order, each {{"number": <n>, "title": "<title>",
+  "summary": "<what happens in its chapters, at most 150 characters>"}}.
   {assignment}
 
 Include every person who speaks or acts in an episode's events, not only the lead.
-Use only people, places and events from the novel. Write every "look", "voice", "setting" and
-"style" in English, like this example:
-{{"id": "wangu", "name": "王胡", "role": "未庄的闲汉，满脸络腮胡子",
-  "look": "a burly man in his thirties with a thick full beard, a shaved forehead and a long queue, wearing a patched grey jacket",
-  "voice": "a gruff, loud male voice"}}
+Use only people, places and events from the novel. Write every value except the ids in {language},
+like this example:
+{example_character}
 
 Chapter notes, grouped by episode:
 {chapters}"""
@@ -80,8 +129,8 @@ Rules:
 - {min_shots} to {max_shots} shots that tell the events of these chapters from the source text below,
   in order. Do not bring in events, people or objects from other chapters.
 - "seconds" add up to at most {max_seconds}; each shot is 5 to 9 seconds.
-- At most one line of dialogue per shot, in Chinese, under 16 characters, spoken by a character in
-  the shot. Prefer lines from the source text. Use "" when nobody speaks.
+- At most one line of dialogue per shot, {line_rule}, spoken by a character in the shot. Prefer
+  lines from the source text. Use "" when nobody speaks.
 - Every shot keeps moving: an action before the line, the line early, a reaction after it.
 - One main action per shot. "after" and "then" carry that action on; they do not start a new event.
 - Neighbouring shots in the same place are one continuous scene: each opens where the shot before it
@@ -91,36 +140,29 @@ Rules:
   this episode's events.
 - "sound" is never empty: the same ambience for every shot of one scene, then the physical sounds of
   the action. No sound effect in the first second of a shot.
-- Write "camera", "action", "after", "then", "sound" and "summary" in English, and refer to people
-  by their ids (for example: aq slaps his own face). Never use double quotes inside them.
+- Write "camera", "action", "after", "then", "sound", "summary" and the line in {language}, and refer
+  to people by their ids (for example: aq slaps his own face). Never use double quotes inside them.
 
 Example of one shot from another drama (follow its form, not its content):
-{{"location": "office", "characters": ["linlan"], "props": ["phone"], "seconds": 6,
-  "summary": "linlan takes a call by the window and hears shocking news",
-  "camera": "A handheld medium close-up slowly pushes in",
-  "action": "linlan paces a step with the phone at her ear, stops short and turns toward the camera",
-  "speaker": "linlan", "line": "你说什么？他回来了？",
-  "after": "linlan lowers the phone and presses her free hand to her mouth",
-  "then": "she glances back at the office door, breathing fast, and starts toward it",
-  "sound": "quiet office room tone, distant keyboard clicks"}}
+{example_shot}
 
 Return a JSON array of shots with exactly these keys.
 
 Source text of this episode:
 {source}"""
 
-STORY_SYSTEM = "You write original Chinese stories that will be filmed as vertical short dramas."
+STORY_SYSTEM = "You write original stories that will be filmed as vertical short dramas."
 
-STORY_PROMPT = """Write an original short story in Chinese from this idea. It will be filmed as a
+STORY_PROMPT = """Write an original short story in {language} from this idea. It will be filmed as a
 vertical short drama in {episodes} episodes of at most {max_seconds} seconds each.
 
 Idea: {idea}
 
 - Build it on one person who wants something concrete, runs into an obstacle, acts, pays a price
   and ends changed. Every chapter moves that line forward and ends on a turn.
-- Exactly {episodes} chapters. Start each with a heading line such as 第一章 <title>; 500 to 900
-  characters each.
-- Tell it through what can be filmed: actions, places, objects and short spoken lines in 「」.
+- Exactly {episodes} chapters. Start each with a heading line such as {heading}; {chapter_length}
+  each.
+- Tell it through what can be filmed: actions, places, objects and short spoken lines in {quote_marks}.
   No inner thoughts that cannot be seen or heard.
 - At most 6 named characters and 4 places in the whole story, so each can be cast and drawn once.
 Reply with the story only, without a title page, notes or markdown."""
@@ -138,10 +180,10 @@ Characters (use these ids): {characters}
 Locations (use these ids): {locations}
 Props (use these ids): {props}
 
-Keep the rules of the shot list: 4 to 9 seconds; at most one line of dialogue, in Chinese, under 16
-characters, spoken by a character in the shot; at most 3 characters; "summary", "camera", "action",
-"after", "then" and "sound" in English, naming people by their ids, never with double quotes. The
-shot must still follow from the shot before it and lead into the shot after it.
+Keep the rules of the shot list: 4 to 9 seconds; at most one line of dialogue, {line_rule},
+spoken by a character in the shot; at most 3 characters; "summary", "camera", "action", "after",
+"then" and "sound" in {language}, naming people by their ids, never with double quotes. The shot
+must still follow from the shot before it and lead into the shot after it.
 
 Return the whole shot as one JSON object with the keys location, characters, props, seconds,
 summary, camera, action, speaker, line, after, then, sound."""
@@ -153,8 +195,8 @@ Director's note: {instruction}
 
 The {kind} now: {item}
 
-Write "name"{role} in Chinese and {english} in English, one sentence each, never with double
-quotes. Return one JSON object with the keys {keys}."""
+Write every value in {language}, one sentence each, never with double quotes. Return one JSON
+object with the keys {keys}."""
 
 REVIEW_PROMPT = """Review the shot list of episode {number} of the vertical short drama "{title}"
 before it is filmed. Each shot becomes one clip of at most 9 seconds from a video model that sees
@@ -173,13 +215,15 @@ Report only problems that would hurt the episode:
 - more action than one clip can show, or several things happening at once;
 - a line spoken by someone who is not in the shot, or too long for the shot.
 Return a JSON array of at most 6 problems, each {{"shot": "<shot id>", "problem": "<one sentence in
-Chinese>", "fix": "<the smallest change to that shot, in Chinese>"}}. Return [] when the shots are fine."""
+{language}>", "fix": "<the smallest change to that shot, in {language}>"}}. Return [] when the shots are
+fine."""
 
 
 def chapters(novel: str, limit: int = 6000) -> list[str]:
-    """Split on chapter headings (第…章/回/节); fall back to paragraphs packed up to `limit`."""
+    """Split on chapter headings (第…章/回/节, Chapter N); fall back to paragraphs packed up to `limit`."""
 
-    parts = re.split(r"\n(?=\s*第[0-9一二三四五六七八九十百零〇]+[章回节])", "\n" + novel.strip())
+    parts = re.split(r"\n(?=\s*(?:第[0-9一二三四五六七八九十百零〇]+[章回节]|Chapter\s+\w+))", "\n" + novel.strip(),
+                     flags=re.I)
     parts = [part.strip() for part in parts if part.strip()]
     packed: list[str] = []
     for part in parts:
@@ -304,17 +348,18 @@ def video_prompts(plan: dict[str, Any], shot: dict[str, Any],
 
     voice = {c["id"]: _english(c.get("voice")) for c in plan.get("characters", [])}
     speaker, line = shot.get("speaker") or "", _line(shot.get("line"))
+    tongue = "Chinese" if re.search(r"[\u4e00-\u9fff]", line) else "English"  # the line's own language
     body = [_sentence(shot.get("camera")), _sentence(mention(_english(shot.get("action"))))]
     if line and speaker in labels:
         manner = f"In {voice[speaker]}, " if voice.get(speaker) else ""
-        body.append(f"{manner}{name(speaker)} (S1) says <d>[Chinese] {line}</d> "
+        body.append(f"{manner}{name(speaker)} (S1) says <d>[{tongue}] {line}</d> "
                     "and then falls silent.")
     elif line and voice.get(speaker):  # a cast member heard but not seen, as on a phone
         heard = _clause(voice[speaker])
         body.append(f"{heard[:1].upper()}{heard[1:]} (S1) says in an off-screen voiceover: "
-                    f"<d>[Chinese] {line}</d> The people on screen keep their lips closed.")
+                    f"<d>[{tongue}] {line}</d> The people on screen keep their lips closed.")
     elif line:
-        body.append(f"An off-screen narrator says in an off-screen voiceover: <d>[Chinese] {line}</d> "
+        body.append(f"An off-screen narrator says in an off-screen voiceover: <d>[{tongue}] {line}</d> "
                     "The people on screen keep their lips closed.")
     body.append(_sentence(mention(_english(shot.get("after")))))
     head = ("subject_definitions:\n" + "\n".join(definitions) +

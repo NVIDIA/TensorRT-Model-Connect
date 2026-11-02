@@ -19,7 +19,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from . import assist, editing, media, planning, review
+from . import analysis, assist, catalog, editing, media, planning, prompts, review
 from .engine import Engine, Served
 from .flow import Context, Flows, Steps
 from .jobs import Job, Jobs
@@ -31,7 +31,7 @@ log = logging.getLogger(__name__)
 STATIC = Path(__file__).with_name("static")
 SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "ah_q_zheng_zhuan.txt"
 CORE_STEPS = [planning.STEP, media.STILLS, media.SHOTS, editing.SUBTITLES, editing.ASSEMBLE,
-              assist.STORY, assist.REVISE, assist.REVIEW]
+              assist.STORY, assist.REVISE, assist.REVIEW, analysis.ANALYZE]
 WRITE_HEADER = "x-short-drama"
 TOKEN_COOKIE, TOKEN_HEADER = "short_drama_token", "x-short-drama-token"
 PLAN_ID = re.compile(r"[a-z0-9_]{1,40}")
@@ -86,6 +86,14 @@ class Services:
             raise ValueError(NO_CHAT)
         self.load(name)
         return ChatClient(self.engine.url, name)
+
+    def vision(self) -> ChatClient | None:
+        """The chat API's model that reads pictures, when Settings names one."""
+
+        external = self.external()
+        if not external.get("base_url") or not external.get("vision_model"):
+            return None
+        return ChatClient(external["base_url"], external["vision_model"], self.api_key(), local=False)
 
 
 def check_plan(plan: dict[str, Any]) -> None:
@@ -205,7 +213,9 @@ def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any]
                 "steps": steps.describe(), "plugin_errors": steps.errors,
                 "flows": {name: flows.versions(name) for name in flows.names()},
                 "external_chat": {"base_url": external.get("base_url", ""), "model": external.get("model", ""),
+                                  "vision_model": external.get("vision_model", ""),
                                   "has_key": bool(services.api_key())},
+                "tiers": catalog.describe_tiers(),
                 "chat_ready": services.chat_ready(),
                 "free_apis": {key: vars(api) for key, api in FREE_APIS.items()},
                 "sample": SAMPLE.is_file()}
@@ -231,6 +241,7 @@ def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any]
         novel = SAMPLE.read_text(encoding="utf-8") if body.get("sample") else str(body.get("novel", ""))
         idea = "" if novel.strip() else str(body.get("idea") or "")
         style = str(body.get("style") or "")
+        language = body.get("language") if body.get("language") in prompts.LANGUAGES else "zh"
         if len(novel) > MAX_NOVEL or len(idea) > MAX_IDEA or len(style) > MAX_STYLE:
             raise HTTPException(413, f"novels are limited to {MAX_NOVEL:,}, ideas to {MAX_IDEA} "
                                 f"and styles to {MAX_STYLE} characters")
@@ -239,7 +250,7 @@ def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any]
             project = store.create(str(body.get("title") or "drama")[:80], novel, flow=reference,
                                    episodes=max(1, min(20, int(body.get("episodes", 4)))),
                                    max_seconds=max(10, min(600, int(body.get("max_seconds", 60)))),
-                                   idea=idea, style=style)
+                                   idea=idea, style=style, language=language)
         except (KeyError, ValueError) as error:
             raise HTTPException(400, str(error)) from None
         return {"id": project.id}
@@ -280,7 +291,8 @@ def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any]
                     state[shot["id"]]["outdated"] = media.outdated(project, plan, episode, shot, state[shot["id"]],
                                                                    use_previous=use_previous, chain=chain)
             episodes[str(episode["number"])] = {"continues": media.continues(plan, episode["number"]),
-                                                "chained": chain, **state}
+                                                "chained": chain, "analysis": analysis.load(project, episode["number"]),
+                                                **state}
         targets = media.still_targets(plan)
         outdated_stills = [key for key, kind, item in targets
                            if media.still_outdated(plan, kind, item, stills.get(key, {}))]
@@ -443,7 +455,8 @@ def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any]
         if base_url and not re.fullmatch(r"https?://[^\s]+", base_url):
             raise HTTPException(400, "the base URL must start with http:// or https://")
         settings = read_json(data / "settings.json", {})
-        settings["external_chat"] = {"base_url": base_url, "model": str(body.get("model", "")).strip()}
+        settings["external_chat"] = {"base_url": base_url, "model": str(body.get("model", "")).strip(),
+                                     "vision_model": str(body.get("vision_model") or "").strip()[:200]}
         write_json(data / "settings.json", settings)
         secrets = read_json(data / "secrets.json", {})
         if body.get("api_key"):

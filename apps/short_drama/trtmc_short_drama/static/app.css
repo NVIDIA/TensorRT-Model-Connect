@@ -276,6 +276,34 @@ textarea.flow { width: 100%; min-height: 360px; font: 12px/1.45 var(--mono); }
 .toast.bad { border-left-color: var(--bad); }
 .toast span { flex: 1; overflow-wrap: anywhere; }
 
+/* long text: the expand button over a textarea and the large editor */
+textarea { overflow-y: auto; }
+.expander { position: absolute; z-index: 30; padding: 1px 8px; font-size: 12px; line-height: 18px; border-radius: 10px;
+  background: var(--paper); border: 1px solid var(--line); color: var(--ink-2); opacity: 0.92; }
+.expander:hover { border-color: var(--green); color: var(--ink); opacity: 1; }
+dialog.editor { width: min(1100px, calc(100vw - 32px)); max-height: calc(100vh - 32px); padding: 18px 20px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--paper); color: var(--ink); box-shadow: 0 12px 48px var(--shade); }
+dialog.editor::backdrop { background: rgba(0, 0, 0, 0.45); }
+dialog.editor .section-title h2 { margin: 0; }
+.editor-area { width: 100%; height: min(68vh, 760px); resize: vertical; font-size: 15px; line-height: 1.6; }
+
+/* video analysis */
+.analysis { margin: 16px 0; }
+.analysis .title { display: flex; align-items: center; gap: 10px; }
+.analysis .title h3 { margin: 0; }
+ul.findings { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
+.finding { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; border: 1px solid var(--line);
+  border-left: 4px solid var(--line); border-radius: 6px; background: var(--paper); }
+.finding.high { border-left-color: var(--bad); }
+.finding.medium { border-left-color: var(--warn); }
+.finding .pick { margin-top: 2px; }
+.finding .grow { flex: 1; min-width: 0; }
+.finding .what { margin-bottom: 6px; overflow-wrap: anywhere; }
+.finding textarea { min-height: 44px; }
+.tile .findings { position: absolute; top: 6px; right: 6px; padding: 0 6px; border-radius: 9px; font-size: 12px;
+  background: var(--warn); color: #fff; }
+tr.current td { background: var(--rail); }
+
 @media (max-width: 900px) {
   .main { padding: 20px 16px 60px; }
   .bar { gap: 10px; padding: 0 12px; }

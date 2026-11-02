@@ -26,7 +26,7 @@ GROUPS = {"character": "characters", "location": "locations", "prop": "props"}
 FIELDS = {"character": ("name", "role", "look", "voice"), "location": ("name", "look"), "prop": ("name", "look")}
 SHOT_KEYS = ("location", "characters", "props", "seconds", "summary", "camera", "action", "speaker", "line",
              "after", "then", "sound")
-CHAPTER = re.compile(r"(^|\n)\s*第[0-9一二三四五六七八九十百零〇]+章")
+CHAPTER = re.compile(r"(^|\n)\s*(第[0-9一二三四五六七八九十百零〇]+章|Chapter\s+\w+)", re.I)
 
 
 def revision(params: dict[str, Any]) -> tuple[str, str, str]:
@@ -57,7 +57,8 @@ def run_story(context: Context) -> None:
     chat = context.services.chat(context.model)
     context.progress("writing the story")
     reply = chat.complete(prompts.STORY_SYSTEM, prompts.STORY_PROMPT.format(
-        idea=idea, episodes=int(meta.get("episodes", 4)), max_seconds=int(meta.get("max_seconds", 60))),
+        idea=idea, episodes=int(meta.get("episodes", 4)), max_seconds=int(meta.get("max_seconds", 60)),
+        **prompts.words(prompts.language_of(meta))),
         max_tokens=int(context.params.get("max_tokens", 6000)),
         temperature=float(context.params.get("temperature", 0.8)))
     project.save_novel(story_text(reply))
@@ -126,7 +127,8 @@ def revise_shot(chat, plan: dict[str, Any], identifier: str, note: str, max_seco
         notes=json.dumps(notes, ensure_ascii=False),
         characters=prompts.roster(plan.get("characters", []), "name", "role"),
         locations=prompts.roster(plan.get("locations", []), "name"),
-        props=prompts.roster(plan.get("props", []), "name")), max_tokens=3000, temperature=0.5)
+        props=prompts.roster(plan.get("props", []), "name"), **prompts.words(plan.get("language", "zh"))),
+        max_tokens=3000, temperature=0.5)
     if isinstance(reply, list):
         reply = reply[0] if reply else {}
     return {**normalize_shots([reply], plan, episode["number"], left)[0], "id": identifier}
@@ -142,7 +144,7 @@ def revise_item(chat, plan: dict[str, Any], kind: str, identifier: str, note: st
         kind=kind, title=plan.get("title", ""), setting=plan.get("setting", ""), style=plan.get("style", ""),
         instruction=note, item=json.dumps({f: item.get(f, "") for f in fields}, ensure_ascii=False),
         role=' and "role"' if "role" in fields else "", english=english,
-        keys=", ".join(fields)), max_tokens=1500, temperature=0.5)
+        keys=", ".join(fields), **prompts.words(plan.get("language", "zh"))), max_tokens=1500, temperature=0.5)
     if not isinstance(reply, dict):
         raise ValueError("the model did not return the revised item as a JSON object")
     changed = {f: str(reply[f]).strip() for f in fields
@@ -178,8 +180,8 @@ def review_episode(chat, plan: dict[str, Any], episode: dict[str, Any]) -> list[
         number=episode["number"], title=plan.get("title", ""), notes=json.dumps(notes, ensure_ascii=False),
         characters=prompts.roster(plan.get("characters", []), "name"),
         locations=prompts.roster(plan.get("locations", []), "name"),
-        props=prompts.roster(plan.get("props", []), "name"), shots=json.dumps(shots, ensure_ascii=False)),
-        max_tokens=2500, temperature=0.3)
+        props=prompts.roster(plan.get("props", []), "name"), shots=json.dumps(shots, ensure_ascii=False),
+        **prompts.words(plan.get("language", "zh"))), max_tokens=2500, temperature=0.3)
     if isinstance(reply, dict):
         reply = reply.get("problems", [])
     ids = {s["id"] for s in episode["shots"]}

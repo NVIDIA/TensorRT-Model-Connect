@@ -71,13 +71,24 @@ def test_server_command_registers_bundles_and_one_kernel(tmp_path: Path):
                                   Served("b", tmp_path / "b", ("y", "f", "k"))}))
 
 
-def test_tiers_follow_gpu_memory():
+def test_tiers_follow_gpu_memory(tmp_path: Path, monkeypatch):
     big = catalog.parse_gpu("1, NVIDIA GB300, 262144, 10.3")
     assert big.compute_capability == "10.3" and catalog.pick_tier(big).name == "a"
-    assert catalog.pick_tier(catalog.parse_gpu("0, RTX, 49152, 8.9")).name == "b"
+    assert catalog.pick_tier(catalog.parse_gpu("0, RTX PRO 6000, 97887, 12.0")).name == "b"
+    assert catalog.pick_tier(catalog.parse_gpu("0, RTX 4090, 24564, 8.9")).name == "c"  # 23.99 GiB
+    assert catalog.pick_tier(catalog.parse_gpu("0, H100, 81559, 9.0")).name == "b"
     assert catalog.pick_tier(big, "b").name == "b"
     with pytest.raises(ValueError):
         catalog.pick_tier(catalog.parse_gpu("0, small, 16384, 8.6"))
+    # DGX Spark and Jetson Thor report no GPU memory of their own; they use system memory
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal:       127535704 kB\nMemFree:  1 kB\n")
+    assert round(catalog.system_memory_gib(meminfo), 1) == 121.6
+    monkeypatch.setattr(catalog, "system_memory_gib", lambda: 121.6)
+    spark = catalog.parse_gpu("0, NVIDIA GB10, [N/A], 12.1")
+    assert spark.memory_gib == 121.6 and catalog.pick_tier(spark).name == "b"
+    tiers = catalog.describe_tiers()
+    assert [t["name"] for t in tiers] == ["a", "b", "c"] and tiers[0]["ready"] and not tiers[2]["ready"]
 
 
 def test_video_submission_waits_while_server_storage_is_full(tmp_path: Path, monkeypatch):
