@@ -308,6 +308,9 @@ def run_analyze(context: Context) -> None:
         raise ValueError(f"render the shots of episode {number} first")
     only = set(context.params.get("only") or [s["id"] for s in shots])
     language = plan.get("language", "zh")
+    # A speech model built for another language hears these lines wrongly: measure, but do not judge them.
+    hears = getattr(context.services, "languages", {}).get(context.model)
+    judge_speech = hears in (None, language)
     vision = context.services.vision()
     result: dict[str, Any] = {"time": int(time.time()), "episode": number, "language": language,
                               "vision": vision.model if vision else None, "shots": {}, "cuts": [], "findings": []}
@@ -339,10 +342,12 @@ def run_analyze(context: Context) -> None:
                 loaded = True
             heard = context.services.engine.transcribe(context.model, video.speech_wav(clip))
             speech = {"heard": heard, "match": round(editing.coverage(heard, shot.get("line") or ""), 2)}
-        measures["speech"] = {"heard": speech.get("heard", ""), "match": speech.get("match", 0.0)}
+        measures["speech"] = {"heard": speech.get("heard", ""), "match": speech.get("match", 0.0),
+                              **({} if judge_speech else {"unchecked": f"the speech model hears {hears}"})}
         result["shots"][shot["id"]] = measures
         edges[shot["id"]] = (edge(clip, last=False), edge(clip, last=True), measures["sound"]["level_db"])
-        result["findings"] += measured_findings(language, shot, measures)
+        result["findings"] += measured_findings(language, shot, measures if judge_speech else
+                                                {key: value for key, value in measures.items() if key != "speech"})
         if vision is not None:
             context.progress(f"asking {vision.model} about {shot['id']}")
             ids = [s["id"] for s in episode["shots"]]

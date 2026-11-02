@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hmac
 import logging
 from pathlib import Path
@@ -51,6 +51,7 @@ class Services:
     engine: Engine
     models: dict[str, tuple[str, Served]]  # name -> (role, served bundle)
     data: Path
+    languages: dict[str, str] = field(default_factory=dict)  # name -> the language a speech model hears
 
     def load(self, name: str | None) -> None:
         if name is None or name not in self.models:
