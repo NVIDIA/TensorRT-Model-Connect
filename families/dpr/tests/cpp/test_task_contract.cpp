@@ -295,6 +295,17 @@ void test_embedding_fails_loudly_on_an_unusable_engine_output() {
         "an engine output with no hidden dimension must be an error, not a fallback");
 }
 
+void test_pooled_features_fail_loudly_on_an_unusable_engine_output() {
+    RecordingModule* module = nullptr;
+    FakeTokenizer* tokenizer = nullptr;
+    auto pipeline = make_pipeline(std::string(trtmc::internal::ITextToPooledFeatures::kTask),
+                                  &module, &tokenizer);
+    module->reported_hidden = 0;
+    rejects<std::runtime_error>(
+        [&] { pipeline->run(trtmc::internal::TextToPooledFeaturesRequest{"ab"}, {}); },
+        "an engine output with no hidden dimension must be an error, not a mislabeled result");
+}
+
 void test_unsupported_config_and_empty_input() {
     RecordingModule* module = nullptr;
     FakeTokenizer* tokenizer = nullptr;
@@ -350,6 +361,7 @@ int main() {
         test_token_ids_must_index_the_vocabulary();
         test_each_mode_rejects_the_other_tasks();
         test_embedding_fails_loudly_on_an_unusable_engine_output();
+        test_pooled_features_fail_loudly_on_an_unusable_engine_output();
         test_unsupported_config_and_empty_input();
         test_constructor_validates_its_dependencies();
         return 0;

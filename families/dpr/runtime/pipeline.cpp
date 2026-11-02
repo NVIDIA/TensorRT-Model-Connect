@@ -183,8 +183,10 @@ EncoderPipeline::run(const internal::TextToPooledFeaturesRequest& request,
     // state matrix [max_seq, hidden]. Matches HF model(**inputs)
     // .last_hidden_state[0, 0] for encoder-only models (BERT, RoBERTa, etc.).
     const int32_t hidden = infer_output_hidden_dim(*encoder_);
-    if (hidden > 0 && dim > hidden)
-        data.resize(static_cast<std::size_t>(hidden));
+    if (hidden <= 0 || dim < hidden)
+        throw std::runtime_error(
+            "EncoderPipeline: engine output does not hold a hidden vector for the CLS token");
+    data.resize(static_cast<std::size_t>(hidden));
 
     internal::PooledFeaturesResult result;
     result.values = std::move(data);
