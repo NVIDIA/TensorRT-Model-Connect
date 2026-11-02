@@ -73,7 +73,7 @@ def build_encoder_engine(
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
     elif precision == "bf16":
-        work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
+        work_np_dtype, work_trt_dtype = np.float32, trt.bfloat16
     elif precision == "fp32":
         work_np_dtype, work_trt_dtype = np.float32, trt.float32
         requested_fp32_layers = frozenset()
@@ -108,15 +108,15 @@ def build_encoder_engine(
     # Shared constants (support embedding factorization: embedding_size != hidden)
     # -------------------------------------------------------------------
     embedding_size = weights["embedding"].shape[1]  # may differ from hidden (e.g. ALBERT 128 vs 768)
-    embedding_table = graph_ops.add_constant(
-        network, weights["embedding"].shape, weights["embedding"],
-        dtype=work_np_dtype)
-    position_embed_table = graph_ops.add_constant(
-        network, weights["position_embedding"].shape,
-        weights["position_embedding"], dtype=work_np_dtype)
-    token_type_table = graph_ops.add_constant(
-        network, (type_vocab_size, embedding_size),
-        weights["token_type_embedding"], dtype=work_np_dtype)
+    def work_constant(shape, values):
+        tensor = graph_ops.add_constant(network, shape, values, dtype=work_np_dtype)
+        return graph_ops._cast_back_to_trt_dtype(network, tensor, work_trt_dtype)
+
+    embedding_table = work_constant(weights["embedding"].shape, weights["embedding"])
+    position_embed_table = work_constant(
+        weights["position_embedding"].shape, weights["position_embedding"])
+    token_type_table = work_constant(
+        (type_vocab_size, embedding_size), weights["token_type_embedding"])
 
     graph_ops.add_constant(
         network, (1, 1), np.array([eps], dtype=work_np_dtype),
@@ -130,13 +130,9 @@ def build_encoder_engine(
     # attention_mask is [seq_len] with 1=real, 0=padding.
     # Convert to [1, 1, seq_len] additive mask: 0.0 for real, -1e10 for padding.
     mask_float = network.add_cast(attention_mask_input, work_trt_dtype)
-    ones_mask = graph_ops.add_constant(
-        network, (1,), np.array([1.0], dtype=work_np_dtype),
-        dtype=work_np_dtype)
+    ones_mask = work_constant((1,), np.array([1.0], dtype=work_np_dtype))
     mask_penalty = -1e4 if precision in {"fp16", "bf16"} else -1e10
-    neg_large = graph_ops.add_constant(
-        network, (1,), np.array([mask_penalty], dtype=work_np_dtype),
-        dtype=work_np_dtype)
+    neg_large = work_constant((1,), np.array([mask_penalty], dtype=work_np_dtype))
     inv_mask = network.add_elementwise(
         ones_mask, mask_float.get_output(0),
         trt.ElementWiseOperation.SUB)  # 0 for real, 1 for pad
