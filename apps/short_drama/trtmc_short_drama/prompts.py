@@ -350,6 +350,8 @@ def video_prompts(plan: dict[str, Any], shot: dict[str, Any],
     speaker, line = shot.get("speaker") or "", _line(shot.get("line"))
     tongue = "Chinese" if re.search(r"[\u4e00-\u9fff]", line) else "English"  # the line's own language
     body = [_sentence(shot.get("camera")), _sentence(mention(_english(shot.get("action"))))]
+    if references and references[0][0] == "previous" and references[0][1].get("scope") == "shot":
+        body.insert(0, "The shot opens exactly on the frame in <Picture 1> and continues from it without a cut.")
     if line and speaker in labels:
         manner = f"In {voice[speaker]}, " if voice.get(speaker) else ""
         body.append(f"{manner}{name(speaker)} (S1) says <d>[{tongue}] {line}</d> "

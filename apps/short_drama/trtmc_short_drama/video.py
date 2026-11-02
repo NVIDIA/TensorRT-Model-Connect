@@ -18,6 +18,12 @@ TIMEOUT = 1800
 # do not have, so clips start this much later. FADE (seconds) keeps cuts from clicking.
 LEAD_IN = 0.25
 FADE = 0.04
+# The FastH3 OmniRef student often holds one of the reference pictures still for 0.5 to 1 s and then
+# cuts into the shot. A clip starts after such a cut when it comes within OPENING seconds: frames
+# that change by less than HELD on average (grey levels, 0-255), then a change of at least CUT.
+OPENING = 1.2
+CUT = 40.0
+HELD = 6.0
 # One loudness for the whole episode, so the level does not jump at every cut.
 LOUDNESS = "loudnorm=I=-16:TP=-1.5:LRA=11"
 SHEET_TILES = 8  # frames in a contact sheet, left to right
@@ -38,14 +44,33 @@ def probe(path: Path) -> dict:
             "audio": any(s["codec_type"] == "audio" for s in info["streams"])}
 
 
-def finish_clip(raw: Path, clip: Path, *, seconds: float, lead_in: float = LEAD_IN) -> None:
-    """Skip the lead-in, trim to the planned length and scale to 1080x1920 at 24 fps.
+def opening(raw: Path) -> float:
+    """Where a clip starts: just after a held picture's cut in its first OPENING seconds, else LEAD_IN."""
+
+    width, height = 36, 64
+    grey = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-t", f"{OPENING}", "-i", str(raw),
+                           "-vf", f"fps={FPS},scale={width}:{height},format=gray", "-f", "rawvideo", "pipe:1"],
+                          capture_output=True, check=True, timeout=TIMEOUT).stdout
+    size = width * height
+    frames = [grey[i:i + size] for i in range(0, len(grey) - size + 1, size)]
+    changes = [sum(abs(a - b) for a, b in zip(before, after)) / size for before, after in zip(frames, frames[1:])]
+    for index, change in enumerate(changes):
+        held = changes[max(0, index - 6):index] or [0.0]
+        if change >= CUT and sum(held) / len(held) < HELD:  # fast motion is not a held picture
+            return max(LEAD_IN, round((index + 1) / FPS, 3))
+    return LEAD_IN
+
+
+def finish_clip(raw: Path, clip: Path, *, seconds: float, lead_in: float | None = None) -> float:
+    """Skip the opening, trim to the planned length and scale to 1080x1920 at 24 fps.
 
     The audio becomes 48 kHz stereo with short fades, so a cut between two clips does not click.
+    Returns where in the raw clip the finished clip starts.
     """
 
     clip.parent.mkdir(parents=True, exist_ok=True)
     partial = clip.with_name(f".{clip.name}")
+    lead_in = opening(raw) if lead_in is None else lead_in
     length = max(min(seconds, probe(raw)["duration"] - lead_in), 0.5)
     _run("-ss", f"{lead_in:.3f}", "-i", str(raw), "-t", f"{length:.3f}",
          "-vf", f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase:flags=lanczos,"
@@ -54,6 +79,7 @@ def finish_clip(raw: Path, clip: Path, *, seconds: float, lead_in: float = LEAD_
          "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-c:a", "aac", "-b:a", "192k",
          "-ar", "48000", "-ac", "2", "-movflags", "+faststart", "-f", "mp4", str(partial))
     partial.replace(clip)
+    return lead_in
 
 
 def contact_sheet(clip: Path, sheet: Path, *, tiles: int = SHEET_TILES) -> None:
