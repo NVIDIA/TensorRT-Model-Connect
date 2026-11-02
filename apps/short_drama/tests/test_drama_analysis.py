@@ -138,6 +138,17 @@ def test_analysis_measures_every_shot_and_keeps_vision_findings_in_bounds(tmp_pa
     garbled = next(f for f in seen if f["category"] == "text")
     assert garbled["action"] == "revise"  # an unknown target falls back to the shot, which cannot be redrawn
     assert vision.calls[1]["images"] == 4 and "last frame of the previous shot" in vision.calls[1]["user"]
+    # a speech model built for Chinese does not judge the lines of an English project
+    plan = project.plan
+    project.save_plan({**plan, "language": "en"})
+    english = FakeServices()
+    english.languages = {"whisper": "zh"}
+    analysis.run_analyze(Context(project, {"only": ["e1s1"]}, "whisper", 1, english, progress=lambda _: None))
+    checked = analysis.load(project, 1)
+    assert checked["shots"]["e1s1"]["speech"]["unchecked"] and "e1s1-unplanned" not in {f["id"] for f in checked["findings"]}
+    project.save_plan(plan)
+    analysis.run_analyze(Context(project, {"only": ["e1s1"]}, "whisper", 1, FakeServices(FakeVision()),
+                                 progress=lambda _: None))
     # analysing one shot again keeps the other shot's numbers
     analysis.run_analyze(Context(project, {"only": ["e1s2"]}, "whisper", 1, FakeServices(), progress=lambda _: None))
     again = analysis.load(project, 1)

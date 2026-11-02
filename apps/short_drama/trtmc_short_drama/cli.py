@@ -190,7 +190,8 @@ def main(argv: list[str] | None = None) -> int:
     info = {"gpu": f"{gpu.name} ({gpu.memory_gib:.0f} GiB)", "tier": tier.name, "tier_summary": tier.summary}
     hosts = ["127.0.0.1", "localhost", "::1"] + ([args.host] if args.host not in {"0.0.0.0", "::"} else [])
     token = None if loopback(args.host) else app_token(data)
-    app = create_app(Services(engine, models, data), plugins=args.plugins, info=info,
+    languages = {model.name: model.language for model in wanted.values() if model.language}
+    app = create_app(Services(engine, models, data, languages), plugins=args.plugins, info=info,
                      allowed_hosts=None if token else hosts, token=token)
     if token:
         print(f"listening beyond loopback; open http://{args.host}:{args.port}/?token={token}", flush=True)
