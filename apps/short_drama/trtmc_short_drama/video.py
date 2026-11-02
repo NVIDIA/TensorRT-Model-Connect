@@ -14,6 +14,12 @@ import wave
 
 WIDTH, HEIGHT, FPS = 1080, 1920, 24
 TIMEOUT = 1800
+# TRTMC's MiniMax-H3 opens every clip with a loud burst of about 0.15 s that the official samples
+# do not have, so clips start this much later. FADE (seconds) keeps cuts from clicking.
+LEAD_IN = 0.25
+FADE = 0.04
+# One loudness for the whole episode, so the level does not jump at every cut.
+LOUDNESS = "loudnorm=I=-16:TP=-1.5:LRA=11"
 
 
 def _run(*arguments: str, cwd: Path | None = None) -> None:
@@ -31,14 +37,19 @@ def probe(path: Path) -> dict:
             "audio": any(s["codec_type"] == "audio" for s in info["streams"])}
 
 
-def finish_clip(raw: Path, clip: Path, *, seconds: float) -> None:
-    """Trim to the planned length and scale to 1080x1920 at 24 fps with 48 kHz stereo audio."""
+def finish_clip(raw: Path, clip: Path, *, seconds: float, lead_in: float = LEAD_IN) -> None:
+    """Skip the lead-in, trim to the planned length and scale to 1080x1920 at 24 fps.
+
+    The audio becomes 48 kHz stereo with short fades, so a cut between two clips does not click.
+    """
 
     clip.parent.mkdir(parents=True, exist_ok=True)
     partial = clip.with_name(f".{clip.name}")
-    _run("-i", str(raw), "-t", f"{seconds:.3f}",
+    length = max(min(seconds, probe(raw)["duration"] - lead_in), 0.5)
+    _run("-ss", f"{lead_in:.3f}", "-i", str(raw), "-t", f"{length:.3f}",
          "-vf", f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase:flags=lanczos,"
                 f"crop={WIDTH}:{HEIGHT},fps={FPS},format=yuv420p",
+         "-af", f"afade=t=in:d={FADE},afade=t=out:st={length - FADE:.3f}:d={FADE}",
          "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-c:a", "aac", "-b:a", "192k",
          "-ar", "48000", "-ac", "2", "-movflags", "+faststart", "-f", "mp4", str(partial))
     partial.replace(clip)
@@ -85,8 +96,8 @@ def export_episode(clips: list[Path], subtitles: Path, output: Path, *, max_seco
     style = f"FontName={font},FontSize={int(font_size)},MarginV=40,Outline=1,Shadow=0"
     partial = output.with_name(f".{output.name}")
     _run("-f", "concat", "-safe", "0", "-i", listing.name,
-         "-vf", f"subtitles={subtitles.name}:force_style='{style}'",
+         "-vf", f"subtitles={subtitles.name}:force_style='{style}'", "-af", LOUDNESS,
          "-t", f"{max_seconds:.3f}", "-c:v", "libx264", "-crf", str(crf), "-pix_fmt", "yuv420p",
-         "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", "-f", "mp4", partial.name,
-         cwd=directory)
+         "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", "-f", "mp4",
+         partial.name, cwd=directory)
     partial.replace(output)

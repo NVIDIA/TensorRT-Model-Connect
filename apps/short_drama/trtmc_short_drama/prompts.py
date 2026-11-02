@@ -83,9 +83,14 @@ Rules:
 - At most one line of dialogue per shot, in Chinese, under 16 characters, spoken by a character in
   the shot. Prefer lines from the source text. Use "" when nobody speaks.
 - Every shot keeps moving: an action before the line, the line early, a reaction after it.
+- One main action per shot. "after" and "then" carry that action on; they do not start a new event.
+- Neighbouring shots in the same place are one continuous scene: each opens where the shot before it
+  ended, with the same people in the same positions, clothes, light and props in hand. Only the first
+  shot of a new place may cut away.
 - At most 3 characters per shot; list a prop only when it is visible in that shot and belongs to
   this episode's events.
-- "sound" is never empty: the ambience and the physical sounds of the action.
+- "sound" is never empty: the same ambience for every shot of one scene, then the physical sounds of
+  the action. No sound effect in the first second of a shot.
 - Write "camera", "action", "after", "then", "sound" and "summary" in English, and refer to people
   by their ids (for example: aq slaps his own face). Never use double quotes inside them.
 
@@ -273,6 +278,11 @@ def video_prompts(plan: dict[str, Any], shot: dict[str, Any],
             definitions.append(f"{subject} is the {_english(item.get('look'))} in {picture}.")
             retention.append(f"{subject} (appears in [Shot 1]): fully_preserved - its shape and "
                              "color are retained.")
+        elif item.get("scope") == "shot":
+            definitions.append(f"{subject} is the final frame of the previous shot in {picture}; "
+                               "this shot opens where it ends.")
+            retention.append(f"{subject} (appears in [Shot 1]): partially_preserved - the place, the "
+                             "light, the clothes and where each person stands continue from it.")
         else:
             definitions.append(f"{subject} is the final frame of the previous episode in {picture}, "
                                "which this shot continues from.")

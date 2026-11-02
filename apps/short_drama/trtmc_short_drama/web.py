@@ -267,17 +267,20 @@ def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any]
         entries = {entry["step"]: entry for entry in flow["steps"]}
         shots_entry = entries.get("shots", {})
         default_previous = bool(shots_entry.get("params", {}).get("previous_last_frame", True))
+        default_chain = bool(shots_entry.get("params", {}).get("chain_shots", True))
         episodes, previews = {}, {}  # previews: the video prompt each shot would get now
         for episode in plan.get("episodes", []):
             state = project.shot_state(episode["number"])
             use_previous = media.uses_previous_frame(project, plan, episode["number"], default_previous)
+            chain = media.chains_shots(project, episode["number"], default_chain)
             for shot in episode.get("shots", []):
                 previews[shot["id"]] = media.shot_inputs(project, plan, episode, shot, use_previous=use_previous,
-                                                         require_approval=False)[2]
+                                                         chain=chain, require_approval=False)[2]
                 if shot["id"] in state:
                     state[shot["id"]]["outdated"] = media.outdated(project, plan, episode, shot, state[shot["id"]],
-                                                                   use_previous=use_previous)
-            episodes[str(episode["number"])] = {"continues": media.continues(plan, episode["number"]), **state}
+                                                                   use_previous=use_previous, chain=chain)
+            episodes[str(episode["number"])] = {"continues": media.continues(plan, episode["number"]),
+                                                "chained": chain, **state}
         targets = media.still_targets(plan)
         outdated_stills = [key for key, kind, item in targets
                            if media.still_outdated(plan, kind, item, stills.get(key, {}))]
@@ -347,6 +350,8 @@ def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any]
         state = project.shot_state(number)
         if "use_previous_frame" in body:
             state["use_previous_frame"] = bool(body["use_previous_frame"])
+        if "chain_shots" in body:
+            state["chain_shots"] = bool(body["chain_shots"])
         for shot_id, prompt in (body.get("prompt_overrides") or {}).items():
             state.setdefault(shot_id, {})["prompt_override"] = str(prompt or "")
         for shot_id, take in (body.get("use_take") or {}).items():

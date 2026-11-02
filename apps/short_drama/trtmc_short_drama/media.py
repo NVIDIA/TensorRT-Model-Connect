@@ -87,10 +87,12 @@ def run_stills(context: Context) -> None:
 
 
 def shot_references(project, plan: dict[str, Any], shot: dict[str, Any], *, previous: Path | None,
-                    require_approval: bool = True) -> tuple[list[tuple[str, dict[str, Any]]], list[Path]]:
+                    require_approval: bool = True, previous_scope: str = "episode",
+                    ) -> tuple[list[tuple[str, dict[str, Any]]], list[Path]]:
     """Approved stills for what is in the shot, in Picture order, plus the continuity frame.
 
-    Without `require_approval` (prompt previews) every planned reference is listed.
+    The continuity frame ends the previous episode (`previous_scope` "episode") or the shot before
+    this one ("shot"). Without `require_approval` (prompt previews) every planned reference is listed.
     """
 
     stills = project.stills
@@ -107,10 +109,52 @@ def shot_references(project, plan: dict[str, Any], shot: dict[str, Any], *, prev
         paths.append(project.root / still.get("file", ""))
     if missing:
         raise ValueError(f"approve these reference stills first: {', '.join(missing)}")
-    if previous is not None and previous.is_file() and len(paths) < MAX_REFERENCES:
-        references.append(("previous", {}))
+    if previous is not None and previous.is_file():
+        if len(paths) >= MAX_REFERENCES:  # continuity matters more than the last prop
+            references, paths = references[:MAX_REFERENCES - 1], paths[:MAX_REFERENCES - 1]
+        references.append(("previous", {"scope": previous_scope}))
         paths.append(previous)
     return references[:MAX_REFERENCES], paths[:MAX_REFERENCES]
+
+
+def last_frame_path(project, number: int, entry: dict[str, Any]) -> Path | None:
+    """Where the last frame of the take an entry shows is kept, if it has a take."""
+
+    if not entry.get("file"):
+        return None
+    return project.episode_dir(number) / "frames" / f"{Path(entry['file']).stem}-last.png"
+
+
+def ensure_last_frame(project, number: int, entry: dict[str, Any]) -> Path | None:
+    """The last frame of the entry's take, extracted from its clip the first time it is needed."""
+
+    frame = last_frame_path(project, number, entry)
+    clip = project.root / entry["file"] if frame else None
+    if frame and not frame.is_file() and clip.is_file():
+        frame.parent.mkdir(parents=True, exist_ok=True)
+        video.last_frame(clip, inside(project, frame))
+    return frame
+
+
+def chains_shots(project, number: int, default: bool = True) -> bool:
+    """The episode's switch: each shot continues from the end of the shot before it in the same place."""
+
+    return bool(project.shot_state(number).get("chain_shots", default))
+
+
+def previous_frame(project, episode: dict[str, Any], shot: dict[str, Any], *, use_previous: bool,
+                   chain: bool) -> tuple[Path | None, str]:
+    """(continuity frame, scope) for a shot: the end of the previous episode for the first shot,
+    otherwise the end of the shot before it when both are in the same place."""
+
+    shots = episode.get("shots") or []
+    index = next((i for i, s in enumerate(shots) if s["id"] == shot["id"]), 0)
+    if index == 0:
+        return (project.episode_dir(episode["number"] - 1) / "last_frame.png" if use_previous else None), "episode"
+    before = shots[index - 1]
+    if not chain or before.get("location") != shot.get("location"):
+        return None, "shot"  # a new place is a cut
+    return last_frame_path(project, episode["number"], project.shot_state(episode["number"]).get(before["id"], {})), "shot"
 
 
 def continues(plan: dict[str, Any], number: int) -> bool:
@@ -130,13 +174,11 @@ def uses_previous_frame(project, plan: dict[str, Any], number: int, default: boo
 
 
 def shot_inputs(project, plan: dict[str, Any], episode: dict[str, Any], shot: dict[str, Any], *,
-                use_previous: bool, require_approval: bool = True):
+                use_previous: bool, chain: bool = True, require_approval: bool = True):
     """(references, upload paths, prompt, continuation) the shot would render with now."""
 
-    first = bool(episode.get("shots")) and episode["shots"][0]["id"] == shot["id"]
-    previous = (project.episode_dir(episode["number"] - 1) / "last_frame.png"
-                if use_previous and first else None)
-    references, paths = shot_references(project, plan, shot, previous=previous,
+    previous, scope = previous_frame(project, episode, shot, use_previous=use_previous, chain=chain)
+    references, paths = shot_references(project, plan, shot, previous=previous, previous_scope=scope,
                                         require_approval=require_approval)
     return (references, paths, *prompts.video_prompts(plan, shot, references))
 
@@ -146,10 +188,11 @@ def relative(project, path: Path) -> str:
 
 
 def outdated(project, plan: dict[str, Any], episode: dict[str, Any], shot: dict[str, Any],
-             entry: dict[str, Any], *, use_previous: bool) -> list[str]:
+             entry: dict[str, Any], *, use_previous: bool, chain: bool = True) -> list[str]:
     """Why the chosen take no longer matches what the shot would render with now.
 
     "references": a still it used was redrawn, or the shot shows other things now;
+    "previous": the shot before it has another take now, so it no longer starts where that one ends;
     "prompt": the plan or the kept prompt changed since the take.
     """
 
@@ -158,11 +201,21 @@ def outdated(project, plan: dict[str, Any], episode: dict[str, Any], shot: dict[
     take = next((t for t in entry.get("takes", []) if t.get("take") == entry.get("take")), {})
     latest = entry.get("take") == max([t.get("take", 0) for t in entry.get("takes", [])], default=0)
     used = {key: take.get(key, entry.get(key) if latest else None) for key in ("references", "prompt")}
-    _, paths, prompt, _ = shot_inputs(project, plan, episode, shot, use_previous=use_previous,
+    _, paths, prompt, _ = shot_inputs(project, plan, episode, shot, use_previous=use_previous, chain=chain,
                                       require_approval=False)
     reasons = []
-    if used["references"] is not None and sorted(relative(project, p) for p in paths) != sorted(used["references"]):
-        reasons.append("references")
+
+    def split(names) -> tuple[list[str], list[str]]:
+        frames = sorted(n for n in names if "/frames/" in f"/{n}")
+        return sorted(n for n in names if n not in frames), frames
+
+    if used["references"] is not None:
+        stills_now, frames_now = split([relative(project, p) for p in paths])
+        stills_used, frames_used = split(used["references"])
+        if stills_now != stills_used:
+            reasons.append("references")
+        if frames_now != frames_used:
+            reasons.append("previous")
     if used["prompt"] is not None and (entry.get("prompt_override") or prompt) != used["prompt"]:
         reasons.append("prompt")
     return reasons
@@ -184,6 +237,7 @@ def run_shots(context: Context) -> None:
     state = project.shot_state(number)
     directory = project.episode_dir(number)
     use_previous = uses_previous_frame(project, plan, number, bool(params.get("previous_last_frame", True)))
+    chain = chains_shots(project, number, bool(params.get("chain_shots", True)))
     only = params.get("only")
     todo = [s for s in episode["shots"] if (s["id"] in only if only else not state.get(s["id"], {}).get("file"))]
     if todo:
@@ -191,7 +245,11 @@ def run_shots(context: Context) -> None:
     for index, shot in enumerate(todo, start=1):
         context.check()
         context.progress(f"episode {number} shot {index} of {len(todo)} ({shot['id']})")
-        _, paths, prompt, continuation = shot_inputs(project, plan, episode, shot, use_previous=use_previous)
+        position = next(i for i, s in enumerate(episode["shots"]) if s["id"] == shot["id"])
+        if position:  # takes rendered before shots were chained have no saved last frame yet
+            ensure_last_frame(project, number, project.shot_state(number).get(episode["shots"][position - 1]["id"], {}))
+        _, paths, prompt, continuation = shot_inputs(project, plan, episode, shot, use_previous=use_previous,
+                                                     chain=chain)
         entry = project.shot_state(number).get(shot["id"], {})  # the user may edit during a run
         prompt = entry.get("prompt_override") or prompt
         take = max([t["take"] for t in entry.get("takes", [])] + [int(entry.get("take", 0))]) + 1
@@ -205,6 +263,7 @@ def run_shots(context: Context) -> None:
         video.finish_clip(raw, clip, seconds=float(shot["seconds"]))
         sheet = inside(project, directory / "sheets" / f"{shot['id']}-take{take}.jpg")
         video.contact_sheet(clip, sheet)
+        ensure_last_frame(project, number, {"file": str(clip.relative_to(project.root))})  # the next shot starts here
         # Each take keeps what it was rendered from, so a later edit shows which takes are outdated.
         rendered = {"take": take, "seed": seed, "file": str(clip.relative_to(project.root)),
                     "sheet": str(sheet.relative_to(project.root)), "raw": str(raw.relative_to(project.root)),
