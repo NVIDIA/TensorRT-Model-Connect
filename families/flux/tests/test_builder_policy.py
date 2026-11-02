@@ -68,11 +68,14 @@ def test_attention_rows_are_marked_as_a_debug_tensor() -> None:
 
 
 @pytest.mark.trt
-def test_fp8_linear_after_attention_builds_and_keeps_fp8_weights() -> None:
+@pytest.mark.parametrize("consumer", ("direct", "split", "concat"))
+def test_fp8_linear_after_attention_builds_and_keeps_fp8_weights(consumer: str) -> None:
     """The FLUX.2 DiT pattern TensorRT 11.4 fails to build (issue #1920): an
-    unquantized IAttention whose output feeds an FP8 linear. It must build with
-    the attention rows marked, without a build route, and keep the FP8 weights;
-    the earlier ``-quantize_ppg=off`` route folded them into FP16."""
+    unquantized IAttention whose output feeds an FP8 linear, directly, split into
+    text and image rows as in the double-stream blocks, or concatenated with the
+    MLP activation as in the single-stream blocks. It must build with the
+    attention rows marked, without a build route, and keep the FP8 weights; the
+    earlier ``-quantize_ppg=off`` route folded them into FP16."""
     trt = pytest.importorskip("tensorrt")
     import numpy as np
 
@@ -90,6 +93,24 @@ def test_fp8_linear_after_attention_builds_and_keeps_fp8_weights() -> None:
         keep_alive.append(weights)
         return network.add_constant((), trt.Weights(weights)).get_output(0)
 
+    def fp8_linear(activation, in_features: int) -> None:
+        activation_scale = scalar(0.05)
+        quantized = network.add_quantize(activation, activation_scale, trt.DataType.FP8)
+        dequantized = network.add_dequantize(quantized.get_output(0), activation_scale, trt.float16)
+        codes = np.full((width, in_features), 0x38, dtype=np.uint8)  # E4M3 1.0
+        keep_alive.append(codes)
+        weight = network.add_constant(
+            (width, in_features), trt.Weights(trt.DataType.FP8, codes.ctypes.data, codes.size)
+        )
+        weight_dq = network.add_dequantize(weight.get_output(0), scalar(0.01), trt.float16)
+        output = network.add_matrix_multiply(
+            dequantized.get_output(0),
+            trt.MatrixOperation.NONE,
+            weight_dq.get_output(0),
+            trt.MatrixOperation.TRANSPOSE,
+        )
+        network.mark_output(output.get_output(0))
+
     query, key, value = (
         network.add_input(name, trt.float16, (1, heads, seq, head_dim)) for name in ("q", "k", "v")
     )
@@ -100,29 +121,27 @@ def test_fp8_linear_after_attention_builds_and_keeps_fp8_weights() -> None:
     rows.first_transpose = (0, 2, 1, 3)
     rows.reshape_dims = (seq, width)
     context = graph_ops.keep_quantize_out_of_attention(network, rows.get_output(0))
-    activation_scale = scalar(0.05)
-    quantized = network.add_quantize(context, activation_scale, trt.DataType.FP8)
-    activation = network.add_dequantize(quantized.get_output(0), activation_scale, trt.float16)
-    codes = np.full((width, width), 0x38, dtype=np.uint8)  # E4M3 1.0
-    keep_alive.append(codes)
-    weight = network.add_constant(
-        (width, width), trt.Weights(trt.DataType.FP8, codes.ctypes.data, codes.size)
-    )
-    weight_dq = network.add_dequantize(weight.get_output(0), scalar(0.01), trt.float16)
-    output = network.add_matrix_multiply(
-        activation.get_output(0),
-        trt.MatrixOperation.NONE,
-        weight_dq.get_output(0),
-        trt.MatrixOperation.TRANSPOSE,
-    )
-    network.mark_output(output.get_output(0))
+    if consumer == "direct":
+        fp8_linear(context, width)
+    elif consumer == "split":
+        half = seq // 2
+        for start in (0, half):
+            fp8_linear(
+                network.add_slice(context, (start, 0), (half, width), (1, 1)).get_output(0), width
+            )
+    else:
+        mlp = network.add_input("mlp", trt.float16, (seq, width))
+        joined = network.add_concatenation([context, mlp])
+        joined.axis = 1
+        fp8_linear(joined.get_output(0), 2 * width)
 
     plan = builder.build_serialized_network(network, config)
 
     assert plan is not None
-    # The FP8 weight takes width * width bytes; folded into FP16 it alone would
-    # take twice that.
-    assert plan.nbytes < 2 * width * width
+    # FP8 weights take one byte per element; folded into FP16 the weights alone
+    # would take two.
+    weight_bytes = sum(codes.size for codes in keep_alive if codes.dtype == np.uint8)
+    assert plan.nbytes < 2 * weight_bytes
 
 
 def test_preprocessor_keeps_core_weights_required() -> None:
