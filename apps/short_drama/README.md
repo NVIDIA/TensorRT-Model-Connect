@@ -193,6 +193,10 @@ runs through the whole shot; the line in the first seconds inside `<d>[Chinese] 
 `[English]`, by the line's own language); a light
 camera move; and a second-window prompt that keeps the action going without new dialogue.
 Text in double quotes is drawn on screen by H3, so the app removes quotes from descriptions.
+H3 reads Chinese, Japanese or Korean prose in the description aloud, so when a plan is written in
+one of them (or edited in one), the shots step first asks the language model for the English of
+every such description and keeps it in the project's `translations.json`; the line itself stays
+as written. A shot without a line says that no one speaks.
 
 ## Customize
 

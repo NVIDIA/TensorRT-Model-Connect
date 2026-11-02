@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -83,6 +84,46 @@ def test_takes_are_numbered_after_every_existing_take(project):
     assert [call["seed"] for call in services.engine.calls] == [7, 8, 9]
     assert services.engine.calls[-1]["prompt"] == "my prompt"
     assert services.engine.calls[0]["references"] == ["character-aq.png", "location-temple.png"]
+
+
+class TranslatingServices(FakeServices):
+    """A chat model that 'translates' by prefixing EN and records what it was asked."""
+
+    def __init__(self):
+        super().__init__()
+        self.asked = []
+
+    def chat_ready(self):
+        return True
+
+    def chat(self, name):
+        asked = self.asked
+
+        class Chat:
+            def complete_json(self, system, user, **_):
+                texts = json.loads(user[user.index("{"):])
+                asked.append(sorted(texts.values()))
+                return {key: f"EN {value}" for key, value in texts.items()}
+
+        return Chat()
+
+
+def test_shots_reach_the_video_model_in_english_and_are_translated_once(project):
+    stills = project.stills
+    stills["location:temple"]["status"] = "approved"
+    project.save_stills(stills)
+    plan = project.plan
+    plan["episodes"][0]["shots"][0] = {**plan["episodes"][0]["shots"][0], "action": "阿Q 跪下", "sound": "风声"}
+    project.save_plan(plan)
+    services = TranslatingServices()
+    render(project, services)
+    prompt = services.engine.calls[0]["prompt"]
+    assert services.asked == [["阿Q 跪下", "风声"]]
+    assert "EN <Subject 1> 跪下." in prompt and "EN 风声." in prompt and "<d>[Chinese] 滚！</d>" in prompt
+    render(project, services, only=["e1s1"])
+    assert len(services.asked) == 1 and services.engine.calls[1]["prompt"] == prompt  # kept, not asked again
+    episode, shot = plan["episodes"][0], plan["episodes"][0]["shots"][0]
+    assert media.outdated(project, plan, episode, shot, project.shot_state(1)["e1s1"], use_previous=False) == []
 
 
 def test_media_never_writes_outside_the_project(project):
