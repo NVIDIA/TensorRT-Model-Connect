@@ -52,12 +52,12 @@ def _build_engine(
     *,
     precision: str,
     verbose: bool,
+    quant_ctx=None,
 ) -> bytes:
     capability = native_kv_build_capability(
         config,
         precision=precision,
         max_cache_length=max_sequence_length,
-        quantized=False,
         debug_layer_outputs=False,
     )
     if capability.eligible:
@@ -77,6 +77,7 @@ def _build_engine(
             verbose=verbose,
             profile_mode=role,
             native_kv_cache=True,
+            quant_ctx=quant_ctx,
         )
 
     config.raw.pop("_native_kv_cache_metadata", None)
@@ -86,6 +87,7 @@ def _build_engine(
         max_sequence_length,
         precision=precision,
         verbose=verbose,
+        quant_ctx=quant_ctx,
     )
 
 
@@ -159,8 +161,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError("SmolLM3 max_sequence_length exceeds checkpoint context capacity")
     if request.tensor_parallel_size != 1:
         raise NotImplementedError("SmolLM3 does not expose a tensor-parallel builder")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("SmolLM3 has no qualified family-owned quantized build")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(f"SmolLM3 does not support quantization={request.quantization!r}")
+    quantized = request.quantization == "fp8"
+    if quantized and precision not in {"fp16", "bf16"}:
+        raise NotImplementedError("SmolLM3 fp8 quantization requires precision fp16 or bf16")
+    if quantized and request.fp32_layers:
+        raise NotImplementedError("SmolLM3 fp8 quantization does not support fp32_layers")
+
+    if quantized and config.raw.get("quantization_config"):
+        raise ValueError("the checkpoint is already quantized; FP8 self-quantization needs BF16")
 
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_fp32_layers"] = list(request.fp32_layers)
@@ -171,6 +181,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         precision=precision,
         fp32_layers=request.fp32_layers,
     )
+    quant_ctx = None
+    if quantized:
+        from . import graph_ops
+        from .quantization import calibrate_smollm3_fp8
+
+        quant_ctx = calibrate_smollm3_fp8(config, weights, graph_ops)
 
     writer.set_header(family="smollm3", task=request.task, backend=request.backend)
     if request.fp32_layers:
@@ -181,6 +197,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             max_sequence_length,
             precision=precision,
             verbose=bool(request.verbose),
+            quant_ctx=quant_ctx,
         )
         writer.add_bytes("engine.plan", plan)
         layout = "dual_profile"
@@ -192,6 +209,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             max_sequence_length,
             precision=precision,
             verbose=bool(request.verbose),
+            quant_ctx=quant_ctx,
         )
         config.raw["_decoder_engine_role"] = "decode"
         decode = _build_engine(
@@ -200,6 +218,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             max_sequence_length,
             precision=precision,
             verbose=bool(request.verbose),
+            quant_ctx=quant_ctx,
         )
         writer.add_bytes("engine.plan", decode)
         writer.add_bytes("prefill.plan", prefill)
