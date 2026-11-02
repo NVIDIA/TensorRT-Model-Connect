@@ -18,12 +18,16 @@ TIMEOUT = 1800
 # do not have, so clips start this much later. FADE (seconds) keeps cuts from clicking.
 LEAD_IN = 0.25
 FADE = 0.04
-# The FastH3 OmniRef student often holds one of the reference pictures still for 0.5 to 1 s and then
-# cuts into the shot. A clip starts after such a cut when it comes within OPENING seconds: frames
-# that change by less than HELD on average (grey levels, 0-255), then a change of at least CUT.
-OPENING = 1.2
+# The FastH3 OmniRef student often opens on one or more reference pictures held still (a portrait,
+# or the previous shot's last frame for up to 1.4 s) and then cuts into the shot. A clip starts
+# after every such cut within OPENING seconds: frames that all change by less than STILL (grey
+# levels, 0-255; held pictures stay under 2.1, inserts and moving shots reach 4.5 and more), then a
+# change of at least CUT.
+OPENING = 2.5
 CUT = 40.0
-HELD = 6.0
+STILL = 3.0
+# Bump when the way a raw clip is cut changes: assembling an episode cuts older takes again.
+CUT_RULE = 2
 # One loudness for the whole episode, so the level does not jump at every cut.
 LOUDNESS = "loudnorm=I=-16:TP=-1.5:LRA=11"
 SHEET_TILES = 8  # frames in a contact sheet, left to right
@@ -45,7 +49,7 @@ def probe(path: Path) -> dict:
 
 
 def opening(raw: Path) -> float:
-    """Where a clip starts: just after a held picture's cut in its first OPENING seconds, else LEAD_IN."""
+    """Where a clip starts: after the held pictures it opens on, else LEAD_IN."""
 
     width, height = 36, 64
     grey = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-t", f"{OPENING}", "-i", str(raw),
@@ -54,11 +58,14 @@ def opening(raw: Path) -> float:
     size = width * height
     frames = [grey[i:i + size] for i in range(0, len(grey) - size + 1, size)]
     changes = [sum(abs(a - b) for a, b in zip(before, after)) / size for before, after in zip(frames, frames[1:])]
+    start = 0  # first frame of the picture being looked at
     for index, change in enumerate(changes):
-        held = changes[max(0, index - 6):index] or [0.0]
-        if change >= CUT and sum(held) / len(held) < HELD:  # fast motion is not a held picture
-            return max(LEAD_IN, round((index + 1) / FPS, 3))
-    return LEAD_IN
+        if change < CUT:
+            continue
+        if max(changes[start:index], default=0.0) >= STILL:  # it moves: the shot itself has begun
+            break
+        start = index + 1
+    return max(LEAD_IN, round(start / FPS, 3))
 
 
 def finish_clip(raw: Path, clip: Path, *, seconds: float, lead_in: float | None = None) -> float:

@@ -155,15 +155,19 @@ running and queued steps of every project, recent steps with their errors, and t
 4. **Shots.** Render a sample shot first, check the look, then render the rest; a batch first
    says how much GPU time it takes, from the times measured on this machine. The strip at the
    top shows every shot of the episode. A shot in the same place as the shot before it gets
-   that shot's last frame as an extra reference, so positions, clothes and light carry over
+   that shot's last frame as its first reference, so positions, clothes and light carry over
    (switch it off per episode); the last frame of an episode does the same for the first shot
    of the next one. Every take keeps its raw clip, a contact sheet, the exact prompt and the
    stills it used: when a still is redrawn, the shot before it gets a new take or the shot
    changes, the take is marked outdated and *Re-render outdated* renders only those shots.
-   Clips start 0.25 s into the raw video, because TRTMC's H3 opens every clip with a short loud
-   burst that MiniMax's own samples do not have, and fade their sound in and out.
-5. **Episodes.** Time the subtitles and assemble; play or download the MP4. The episode gets one
-   loudness, so the level does not jump at the cuts.
+   The FastH3 OmniRef student often opens on reference pictures held still (a portrait, or the
+   previous shot's last frame for up to 1.4 s) and then cuts into the shot, so a clip starts
+   after those pictures, and never before 0.25 s: TRTMC's H3 opens every clip with a short loud
+   burst that MiniMax's own samples do not have. Sound fades in and out at every cut.
+5. **Episodes.** Time the subtitles and assemble; play or download the MP4. Assembling cuts
+   takes made under an older version of these rules again from their raw clips (no GPU). The
+   episode is normalized to one loudness as a whole; a shot much quieter than its neighbours
+   stays quieter, and the analysis reports it.
 
 **Video analysis.** *Analyze the video* on the Shots step measures every rendered shot on this
 machine: a burst at the start, clipping, a nearly silent clip, the planned line against speech

@@ -67,7 +67,8 @@ MESSAGES = {
         "still": ("画面几乎不动", "给这个镜头一个清楚、连贯的主要动作"),
         "jump": ("从 {before} 切到 {after} 时画面变化很大（{score}），同一场景却不像接着拍的",
                  "从 {before} 结束的地方开始：人物位置、服装、道具和光线保持一致"),
-        "level": ("从 {before} 切到 {after} 时音量跳变 {db} dB", "拼接时已统一响度，一般不用处理"),
+        "level": ("从 {before} 切到 {after} 时音量跳变 {db} dB",
+                  "拼接只统一整集的总体响度，这里的落差仍在；较轻的一侧若有台词就重新渲染一条，只有环境声时可以不管"),
     },
     "en": {
         "burst": ("a loud burst in the first {seconds} s ({ratio}x the rest)", "Render another take"),
@@ -82,7 +83,9 @@ MESSAGES = {
         "still": ("the picture barely moves", "Give the shot one clear, continuous movement"),
         "jump": ("the picture changes a lot from {before} to {after} ({score}) although both are in one place",
                  "Open where {before} ends: the same positions, clothes, props and light"),
-        "level": ("the level jumps {db} dB from {before} to {after}", "Assembly evens out the level; usually nothing to do"),
+        "level": ("the level jumps {db} dB from {before} to {after}",
+                  "Assembly sets one loudness for the whole episode, so this step stays; if the quieter shot has "
+                  "a line, render another take, otherwise it can stay"),
     },
 }
 

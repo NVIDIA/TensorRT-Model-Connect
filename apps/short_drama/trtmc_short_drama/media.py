@@ -272,7 +272,8 @@ def run_shots(context: Context) -> None:
                     "sheet": str(sheet.relative_to(project.root)), "raw": str(raw.relative_to(project.root)),
                     "prompt": prompt, "continuation": continuation,
                     "references": [relative(project, p) for p in paths], "lead_in": lead_in,
-                    "model": context.model, "seconds": round(time.monotonic() - started, 1)}
+                    "cut": video.CUT_RULE, "model": context.model,
+                    "seconds": round(time.monotonic() - started, 1)}
         state = project.shot_state(number)
         entry = state.get(shot["id"], {})
         entry.pop("speech", None)  # the new take has new audio
@@ -280,6 +281,47 @@ def run_shots(context: Context) -> None:
         state.pop("assembled", None)
         project.save_shot_state(number, state)
         project.log(f"episode {number} {shot['id']} take {take} rendered")
+
+
+def cut_by_older_rule(entry: dict[str, Any]) -> bool:
+    """Whether the entry's take was cut from its raw clip by an older video.CUT_RULE."""
+
+    return bool(entry.get("file") and entry.get("raw")) and int(entry.get("cut", 1)) < video.CUT_RULE
+
+
+def recut(project, number: int, shot: dict[str, Any]) -> bool:
+    """Cut the shot's chosen take again from its raw clip with the current rule, if an older one cut it.
+
+    The line's timing moves with the new start, so its subtitle stays in place without hearing it again.
+    """
+
+    entry = project.shot_state(number).get(shot["id"], {})
+    raw = project.root / entry.get("raw", "")
+    if not cut_by_older_rule(entry) or not raw.is_file():
+        return False
+    clip = inside(project, project.root / entry["file"])
+    lead_in = video.finish_clip(inside(project, raw), clip, seconds=float(shot["seconds"]))
+    if entry.get("sheet"):
+        video.contact_sheet(clip, inside(project, project.root / entry["sheet"]))
+    frame = last_frame_path(project, number, entry)
+    if frame and frame.is_file():
+        frame.unlink()  # the clip ends elsewhere now
+    ensure_last_frame(project, number, entry)
+    cut = {"lead_in": lead_in, "cut": video.CUT_RULE}
+    update = dict(cut)
+    if entry.get("speech"):  # takes cut before lead-ins existed started at 0
+        moved = lead_in - float(entry.get("lead_in", 0.0))
+        speech = entry["speech"]
+        update["speech"] = {**speech, "start": round(max(speech["start"] - moved, 0.0), 3),
+                            "end": round(max(speech["end"] - moved, 0.0), 3)}
+    state = project.shot_state(number)  # re-read: the user may pick another take meanwhile
+    current = state.get(shot["id"], {})
+    takes = [{**t, **cut} if t.get("take") == entry.get("take") else t for t in current.get("takes", [])]
+    state[shot["id"]] = {**current, **(update if current.get("file") == entry["file"] else {}), "takes": takes}
+    state.pop("assembled", None)
+    project.save_shot_state(number, state)
+    project.log(f"episode {number} {shot['id']} take {entry.get('take')} cut again: starts at {lead_in} s")
+    return True
 
 
 STILLS = Step("stills", run_stills, role="image", scope="project",

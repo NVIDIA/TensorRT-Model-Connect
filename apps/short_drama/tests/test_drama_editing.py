@@ -71,6 +71,8 @@ def test_subtitles_follow_the_shots_on_the_timeline():
     srt = editing.subtitles(shots, state)
     assert srt.splitlines()[:3] == ["1", "00:00:00,400 --> 00:00:01,900", "第一句"]
     assert "00:00:11,200 --> 00:00:15,000\n第三句" in srt
+    shorter = editing.subtitles(shots, state, {"a": 5.0, "b": 4.9, "c": 3.5})  # b skipped a held picture
+    assert "00:00:10,100 --> 00:00:13,400\n第三句" in shorter
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="FFmpeg is not installed")
