@@ -29,7 +29,7 @@ second shot about 10 minutes (one H3 call renders 226 frames, 9.4 s, with audio)
 
 - An NVIDIA GPU and driver. Tier A needs about 140 GB of GPU memory (MiniMax H3 peaks near
   110 GB at 768x1344 and 226 frames); it was run on a GB300.
-  Tier B (24 to 48 GB) is planned; see [Tiers](#tiers).
+  Tiers B (80 GB, for example an RTX PRO 6000) and C (24 GB) are planned; see [Tiers](#tiers).
 - A TRTMC build with the server, bring-your-own kernels and the H3 sparse-attention kernel:
 
   ```bash
@@ -64,7 +64,7 @@ and the build commands without running them.
 | Option | Meaning |
 | --- | --- |
 | `--data DIR` | projects, bundles, settings and logs (default `./short-drama-data`) |
-| `--tier a\|b` | force a tier instead of choosing by GPU memory |
+| `--tier a\|b\|c` | force a tier instead of choosing by GPU memory |
 | `--gpu N` | GPU index as `nvidia-smi` numbers it |
 | `--llm api\|local` | `api` (default): the chat API chosen in Settings; `local`: build and serve the tier's language model on this GPU |
 | `--bundle ROLE=PATH` | use an existing bundle for `llm` (with `--llm local`), `image`, `video`, `asr` or `tts` |
@@ -115,10 +115,13 @@ disk and 100 GB of host memory while it builds, or pass an existing bundle with
 ## Use
 
 The page opens on *Projects*: one card per project with its progress through the five steps,
-what it does next and when it last changed; rename or delete a project from its card.
-*New project* asks four things: where the story comes from, the visual style, the length, and
-an optional title. It shows how many shots that makes and, once one has rendered on this
-machine, how much GPU time they take.
+what it does next and when it last changed; rename or delete a project from its card. The
+header switches the page between Chinese and English. *New project* asks five things: where the
+story comes from, the project's language, the visual style, the length, and an optional title.
+It shows how many shots that makes and, once one has rendered on this machine, how much GPU time
+they take. The language model writes the story, the plan, the lines and every review in the
+project's language; any field can be edited in any language, and a line is spoken in its own
+language. Every text box grows with its text and opens in a large editor (*Expand*).
 
 A project page shows the five steps below, and under them one card with the next thing to do
 and the button that does it. While a step runs, the card shows its current phase (for example
@@ -150,17 +153,36 @@ running and queued steps of every project, recent steps with their errors, and t
    shots that use it. Shots only use approved stills; a shot's render buttons wait for them.
 4. **Shots.** Render a sample shot first, check the look, then render the rest; a batch first
    says how much GPU time it takes, from the times measured on this machine. The strip at the
-   top shows every shot of the episode. The last frame of an episode is an extra reference for
-   the first shot of the next one; switch it off per episode. Every take keeps its raw clip, a
-   contact sheet, the exact prompt and the stills it used: when a still is redrawn or the shot
+   top shows every shot of the episode. A shot in the same place as the shot before it gets
+   that shot's last frame as an extra reference, so positions, clothes and light carry over
+   (switch it off per episode); the last frame of an episode does the same for the first shot
+   of the next one. Every take keeps its raw clip, a contact sheet, the exact prompt and the
+   stills it used: when a still is redrawn, the shot before it gets a new take or the shot
    changes, the take is marked outdated and *Re-render outdated* renders only those shots.
-5. **Episodes.** Time the subtitles and assemble; play or download the MP4.
+   Clips start 0.25 s into the raw video, because TRTMC's H3 opens every clip with a short loud
+   burst that MiniMax's own samples do not have, and fade their sound in and out.
+5. **Episodes.** Time the subtitles and assemble; play or download the MP4. The episode gets one
+   loudness, so the level does not jump at the cuts.
+
+**Video analysis.** *Analyze the video* on the Shots step measures every rendered shot on this
+machine: a burst at the start, clipping, a nearly silent clip, the planned line against speech
+recognition, speech where the shot has no line, black or frozen frames, and how far the picture
+and the level jump at each cut. With a vision model set in Settings (any OpenAI-compatible model
+that reads pictures), each shot's contact sheet, up to two of its reference pictures and the
+previous shot's last frame also go to that model, which reports content that does not match the
+plan, text drawn on screen, continuity breaks, people or places that do not look like their
+pictures, and reference pictures that do not fit the plan. Each finding names the plan item it
+would change and suggests a change; edit the suggestion in any language, pick an action (revise
+the plan with the language model, render another take, redraw a picture) or write your own
+note, then *Apply the selected changes*. Revised shots and pictures become outdated, and the
+next card offers to render them again; analyze again to check the result.
 
 ### How shots are prompted
 
 The language model only fills short fields per shot. The app writes the H3 prompt from them:
 subject definitions that bind each `<Picture N>` to a character, place or prop; an action that
-runs through the whole shot; the line in the first seconds inside `<d>[Chinese] …</d>`; a light
+runs through the whole shot; the line in the first seconds inside `<d>[Chinese] …</d>` (or
+`[English]`, by the line's own language); a light
 camera move; and a second-window prompt that keeps the action going without new dialogue.
 Text in double quotes is drawn on screen by H3, so the app removes quotes from descriptions.
 
@@ -178,8 +200,8 @@ Delete the file and reload to remove the step; a flow that still names it skips 
 message.
 
 **Actions.** Writing a story, revising one item and the model review are actions, not stages:
-they run on request with the model of the flow's `plan` step. A plugin step becomes an action
-with `model_from="plan"`.
+they run on request with the model of the flow's `plan` step. Video analysis runs with the
+model of the `subtitles` step. A plugin step becomes an action with `model_from="plan"`.
 
 **Chat API key.** The key entered in Settings is written to `secrets.json` (mode 600) in the
 data directory, only ever sent to the base URL it was entered with, and never logged or sent back
@@ -187,10 +209,19 @@ to the browser.
 
 ## Tiers
 
-| Tier | GPU memory | Video | Speech | Status |
-| --- | --- | --- | --- | --- |
-| A | 140 GB or more | MiniMax H3 reference-to-video, native audio | from the video model | runs end to end |
-| B | 24 to 48 GB | Wan2.2-TI2V-5B from the approved still | Magpie TTS | catalog entry only; needs a speech endpoint in `trtmc-server` |
+`up` picks the largest tier the GPU's memory holds; GPUs that share system memory (DGX Spark,
+Jetson Thor) count their system memory. Settings shows the table below for the running GPU.
+
+| Tier | GPU memory | For example | Shots | Speech | Status |
+| --- | --- | --- | --- | --- | --- |
+| A | 140 GB or more | GB300, B200, H200 | MiniMax H3 films each shot from up to 6 reference pictures | native audio from the video model | runs end to end |
+| B | 80 GB or more | RTX PRO 6000, H100, DGX Spark | Qwen-Image-Edit draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it | text-to-speech, one voice per character | planned: needs image-to-video for Wan2.2-TI2V-5B and Chinese text-to-speech in TRTMC |
+| C | 24 GB or more | RTX 4090, RTX 5090, L40S | an image model draws each shot's first frame; Wan2.2-TI2V-5B animates it | text-to-speech, one voice per character | planned: as tier B, plus a multi-reference keyframe model that fits 24 GB |
+
+The models of tiers B and C are released under Apache-2.0 or MIT. MiniMax H3 and the FastH3
+student of tier A are released under the MiniMax H3 Community License, which limits the
+territories where they may be used and asks products built on them to say so; read it before
+you use or ship tier A.
 
 ## Data layout
 
@@ -202,7 +233,7 @@ short-drama-data/
   flows/<name>/v<N>.json   flow versions
   projects/<id>/
     novel.txt  plan.json  stills.json  stills/  review.json  history/ (earlier plans)
-    episodes/<NN>/raw/ clips/ sheets/ shots.json episode.srt episode.mp4 last_frame.png
+    episodes/<NN>/raw/ clips/ sheets/ frames/ shots.json analysis.json episode.srt episode.mp4 last_frame.png
   logs/trtmc-server.log
 ```
 
@@ -212,4 +243,4 @@ short-drama-data/
 CUDA_VISIBLE_DEVICES= python -m pytest apps/short_drama/tests
 ```
 
-The tests use fake models; the FFmpeg test is skipped when FFmpeg is not installed.
+The tests use fake models; the tests that need FFmpeg are skipped when it is not installed.
