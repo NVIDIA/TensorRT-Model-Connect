@@ -305,6 +305,54 @@ def test_delete_on_pass_uses_the_benchmark_verdict(tmp_path, monkeypatch, acc, c
     assert ("bundle_deleted" in record) is delete
 
 
+@pytest.mark.parametrize("acc, complete, timed, expected_code", [
+    ("pass", True, True, 0),
+    ("pass", False, True, 1),
+    ("pass", True, False, 1),
+    ("inconclusive", True, True, 1),
+    ("fail", True, True, 1),
+])
+def test_run_cli_accepts_complete_benchmark_measurements_without_rewriting_verdict(
+        tmp_path, monkeypatch, capsys, acc, complete, timed, expected_code):
+    from trtmc_aiperf_qual import cli, judge, models, report
+
+    result = {"model": "m", "task": "text_generation", "provenance": {},
+              "performance_source": "quality", "accuracy": [{"suite": "mmlu-0shot", "status": acc}],
+              "performance": [{"kind": "natural_dataset", "request": "mmlu-0shot", "gate": False,
+                               "complete": complete, "candidate": {"p50_ms": 10 if timed else None},
+                               "reference": {"p50_ms": 12}}]}
+    result["verdict"] = judge.verdict(result, expected_suites=["mmlu-0shot"], expected_modes=0)
+
+    def qualify(model, environment, out):
+        report.write_report(out, result)
+        return result
+
+    deleted = _stub_phases(monkeypatch, qualify=qualify)
+    monkeypatch.setattr(campaign, "warm_selections", lambda *args: None)
+    environment = Environment({"retention": {"bundle": "delete_on_pass", "temporary_files": "delete_on_pass"}})
+    monkeypatch.setattr(cli, "load_environment", lambda path: environment)
+    monkeypatch.setattr(models, "resolve_model", lambda *args: _model("m", "org/m"))
+    out = tmp_path / "m"
+    scratch = out / "artifacts/native/scratch"
+    original_report = out / "report.json"
+
+    def build(environment, model, directory, python):
+        scratch.mkdir(parents=True)
+        (scratch / "output.npy").write_bytes(b"generated output")
+        return {"status": "built"}
+
+    monkeypatch.setattr(bundles, "ensure_bundle", build)
+    code = cli.main(["run", "--profile", "m", "--environment", str(tmp_path / "env.yaml"), "--out", str(out)])
+
+    assert code == expected_code
+    record = json.loads(capsys.readouterr().out)
+    assert {key: record[key] for key in ("category", "acc", "perf", "lights")} == result["verdict"]
+    assert json.loads(original_report.read_text())["verdict"] == result["verdict"]
+    assert campaign._finished(out) == result["verdict"]["category"]
+    assert deleted == (["m"] if expected_code == 0 else [])
+    assert scratch.exists() is (expected_code != 0)
+
+
 def test_run_one_records_build_failures_and_keeps_errored_bundles(tmp_path, monkeypatch):
     deleted = _stub_phases(monkeypatch, build="failed", qualify=lambda *a: pytest.fail("must not qualify"))
     environment = Environment({"retention": {"bundle": "delete_unless_error"}})
@@ -317,6 +365,29 @@ def test_run_one_records_build_failures_and_keeps_errored_bundles(tmp_path, monk
     deleted = _stub_phases(monkeypatch, qualify=crash)
     record = campaign.run_one(environment, _model("m", "org/m"), tmp_path / "m2")
     assert record["category"] == "error" and "reference environment failed" in record["reason"] and deleted == []
+
+
+@pytest.mark.parametrize("record, expected_code", [
+    ({"category": "pass"}, 0),
+    ({"category": "smoke-pass"}, 0),
+    ({"category": "measured"}, 1),
+    ({"category": "measured", "acc": "n/a", "perf": "measured"}, 1),
+    ({"category": "measured", "acc": "pass", "perf": "green"}, 1),
+    ({"category": "error", "acc": "pass", "perf": "measured"}, 1),
+    ({"category": "build-failed"}, 1),
+    ({"category": "smoke-fail"}, 1),
+    ({"category": "perf-issue"}, 1),
+])
+def test_run_cli_exit_codes_require_a_supported_success_outcome(tmp_path, monkeypatch, capsys, record, expected_code):
+    from trtmc_aiperf_qual import cli, models
+
+    monkeypatch.setattr(cli, "load_environment", lambda path: Environment({}))
+    monkeypatch.setattr(models, "resolve_model", lambda *args: _model("m", "org/m"))
+    monkeypatch.setattr(campaign, "run_one", lambda *args: record)
+
+    assert cli.main(["run", "--profile", "m", "--environment", str(tmp_path / "env.yaml"),
+                     "--out", str(tmp_path)]) == expected_code
+    assert json.loads(capsys.readouterr().out) == {"report": str(tmp_path / "report.md"), **record}
 
 
 def test_summary_merges_result_roots(tmp_path):
@@ -465,6 +536,31 @@ def test_preflight_reports_missing_paths_and_interpreters(tmp_path):
     assert preflight.problems(checks) == ["serve_python"]
     del environment.values["worker"]
     assert preflight.check_paths(environment)["worker"] == "missing key"
+
+
+@pytest.mark.parametrize("convolution, expected", [
+    ((0, "92300\n", ""), "ok (cuDNN 92300)"),
+    ((1, "", "RuntimeError: cudnn_status: CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH"), "convolution failed"),
+])
+def test_doctor_runs_one_cudnn_convolution_in_the_serving_interpreter(tmp_path, monkeypatch, convolution, expected):
+    from trtmc_aiperf_qual import preflight
+
+    fingerprint = {"fingerprint": {"gpu_arch": "sm110", "packages": {"torch": "2.12.0"}}}
+
+    def run(command, env, **_kwargs):
+        if command[1:3] == ["-m", "trtmc_perf_serving"]:
+            return subprocess.CompletedProcess(command, 0, json.dumps(fingerprint), "")
+        if command[-1] == preflight.CONVOLUTION_PROBE:
+            # The servers' interpreter and environment, serve_env included: the check is about those.
+            assert command[0] == "serve-python" and env["LD_PRELOAD"] == "/opt/cudnn/libcudnn.so.9"
+            return subprocess.CompletedProcess(command, *convolution)
+        return subprocess.CompletedProcess(command, 0, "[]", "")  # every serving package imports
+
+    monkeypatch.setattr(preflight.subprocess, "run", run)
+    checks = preflight.check_serving(Environment({"repo": str(tmp_path), "serve_python": "serve-python",
+                                                  "serve_env": {"LD_PRELOAD": "/opt/cudnn/libcudnn.so.9"}}))
+    assert checks["cudnn"].startswith(expected) and convolution[2][-40:] in checks["cudnn"]
+    assert preflight.problems(checks) == ([] if expected.startswith("ok") else ["cudnn"])
 
 
 def test_summary_fetches_remote_result_roots_over_ssh(tmp_path):

@@ -195,7 +195,10 @@ def test_e2e(manifest, case, request, tmp_path):
         probabilities = np.exp(expected - expected.max())
         probabilities /= probabilities.sum()
         np.testing.assert_allclose(actual["logits"], expected, atol=0.125, rtol=0.015)
-        np.testing.assert_allclose(actual["probabilities"], probabilities, atol=0.002, rtol=0.01)
+        # Equally valid BF16 runs of the reference (other SDPA backends, the FP32
+        # forward) differ by up to 0.008, so a 0.002 gate passes by luck. A wrong
+        # temperature still moves these probabilities by about 0.14.
+        np.testing.assert_allclose(actual["probabilities"], probabilities, atol=0.015, rtol=0.01)
         assert np.argmax(actual["probabilities"]) == np.argmax(probabilities)
     compare_native_response(result, reference, internal)
     (tmp_path / "native.json").write_text(json.dumps(native, indent=2))

@@ -161,6 +161,43 @@ def test_builders_apply_default_or_overridden_workspace(
     }
 
 
+def test_adaln_precompute_times_a_single_tactic(monkeypatch) -> None:
+    class NetworkStarted(Exception):
+        pass
+
+    class FakeConfig:
+        builder_optimization_level = None
+        max_num_tactics = -1
+        cleared = ()
+
+        def clear_flag(self, flag):
+            self.cleared += (flag,)
+
+    config = FakeConfig()
+
+    class FakeNetwork:
+        @staticmethod
+        def add_input(*_args):
+            raise NetworkStarted
+
+    class FakeBuilder:
+        @staticmethod
+        def create_network(_flags):
+            return FakeNetwork()
+
+        @staticmethod
+        def create_builder_config():
+            return config
+
+    monkeypatch.setattr(trt, "Builder", lambda _logger: FakeBuilder())
+    monkeypatch.setattr(op, "configure_builder", lambda _config: None)
+    monkeypatch.setattr(op, "configure_workspace", lambda *_args, **_kwargs: None)
+    with pytest.raises(NetworkStarted):
+        build_adaln_precompute_engine({}, SOL_ENGINE_1344X768_124F)
+    assert config.max_num_tactics == 1
+    assert config.cleared == (trt.BuilderFlag.TF32,)
+
+
 @pytest.mark.parametrize("value", [0, -1, True, 1.5, "8589934592"])
 def test_workspace_limit_rejects_non_positive_or_non_integer_values(value) -> None:
     with pytest.raises(ValueError, match="positive integer"):

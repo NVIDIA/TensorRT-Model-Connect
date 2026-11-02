@@ -53,7 +53,9 @@ class Vision:
             # processor_kwargs (for example use_fast=False) must match the family's accepted reference.
             self.processor = processor_cls.from_pretrained(spec.model, **spec.pretrained_kwargs(),
                                                            **dict(spec.options.get("processor_kwargs", {})))
-            model = loaders[spec.operation].from_pretrained(spec.model, **spec.pretrained_kwargs())
+            model = loaders[spec.operation].from_pretrained(spec.model, **spec.model_kwargs(),
+                                                            device_map=spec.device_map)
+        # The whole model in the reference precision, including modules Transformers keeps in FP32.
         self.model = maybe_compile(model.to(spec.device, spec.dtype).eval(), spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
@@ -123,7 +125,7 @@ class SpeechRecognition:
         self.spec = spec
         self.processor = transformers.AutoProcessor.from_pretrained(spec.model, **spec.pretrained_kwargs())
         self.model = maybe_compile(transformers.AutoModelForSpeechSeq2Seq.from_pretrained(
-            spec.model, **spec.model_kwargs()).to(spec.device).eval(), spec)
+            spec.model, **spec.model_kwargs(), device_map=spec.device_map).eval(), spec)
         self.sample_rate = int(self.processor.feature_extractor.sampling_rate)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
@@ -171,7 +173,7 @@ class SpeechSynthesis:
         self.spec = spec
         self.processor = transformers.AutoProcessor.from_pretrained(spec.model, **spec.pretrained_kwargs())
         self.model = transformers.BarkModel.from_pretrained(
-            spec.model, **spec.model_kwargs()).to(spec.device).eval()
+            spec.model, **spec.model_kwargs(), device_map=spec.device_map).eval()
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
         # Same generation as the accepted Bark reference: Bark's own (sampled) generation configs, a
@@ -309,7 +311,8 @@ class TimeSeries:
             raise BackendError(f"no time-series reference for model type {config.model_type!r}")
         suffix = "ForRegression" if spec.operation == "regress" else "ForPrediction"
         model_cls = _with_post_init(getattr(transformers, prefix + suffix))
-        self.model = maybe_compile(model_cls.from_pretrained(spec.model, **spec.pretrained_kwargs())
+        self.model = maybe_compile(model_cls.from_pretrained(spec.model, **spec.model_kwargs(),
+                                                             device_map=spec.device_map)
                                    .to(spec.device, spec.dtype).eval(), spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:

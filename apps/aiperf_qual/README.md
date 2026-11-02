@@ -245,6 +245,10 @@ uses the recorded graders and gates, and retains the original response exports a
 Corrected evidence is written to `accuracy_export.aligned.jsonl` and `execution.aligned.jsonl`.
 Missing or conflicting evidence fails recovery instead of producing an inferred score.
 
+`run` exits 0 for `pass`, `smoke-pass`, or `measured` with Acc `pass` and Perf `measured`; other
+verdicts exit 1. A complete benchmark measurement keeps its `measured` report category, without
+claiming repeated-run performance acceptance.
+
 `run-all` runs profiles one after another (profiles sharing a checkpoint back to back), appends one
 line per profile to `<out-root>/campaign.jsonl`, and skips profiles whose finished result has the same
 run key (configuration, harness, mode, and dependencies; `--rerun` keeps the old directory as

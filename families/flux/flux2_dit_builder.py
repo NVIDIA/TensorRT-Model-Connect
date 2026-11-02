@@ -289,6 +289,8 @@ def build_flux2_dit_engine(
         raise ValueError("FLUX.2 FP8 scales and an NVFP4 checkpoint cannot be combined")
     if fp8_scales is not None or has_nvfp4:
         config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+    if fp8_scales is not None:
+        graph_ops.disable_quantize_propagation(config)
 
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 
