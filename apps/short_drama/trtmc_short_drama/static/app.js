@@ -554,7 +554,7 @@ function renderSettings() {
   const base = el("input", { value: chat.base_url, placeholder: "https://…/v1" });
   const model = el("input", { value: chat.model, list: "chat-models" });
   const vision = el("input", { value: chat.vision_model || "", list: "chat-models",
-    placeholder: t("empty: the same model, when it reads pictures") });
+    placeholder: t("empty: measure only; or a model that reads pictures, such as the chat model above") });
   const models = el("datalist", { id: "chat-models" });
   const key = el("input", { type: "password" });
   const help = el("p", { class: "note" });

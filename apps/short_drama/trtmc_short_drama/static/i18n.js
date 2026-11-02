@@ -108,7 +108,7 @@ const ZH = {
   "Auto": "自动", "The planner picks a style that suits the story.": "由规划模型选一个适合故事的画风。",
   "Live action": "真人实拍", "3D cartoon": "3D 卡通", "Anime": "日式动画", "Ink painting": "水墨",
   // settings
-  "Another OpenAI-compatible API": "其他 OpenAI 兼容 API", "empty: the same model, when it reads pictures": "留空：沿用上面的模型（需能看图）",
+  "Another OpenAI-compatible API": "其他 OpenAI 兼容 API", "empty: measure only; or a model that reads pictures, such as the chat model above": "留空：只做本机测量；也可以填能看图的模型，比如上面的聊天模型",
   "saved; type to replace": "已保存；输入新值替换", "paste your key": "粘贴你的 key", "Get a free key": "获取免费 key", "current models": "当前模型",
   "Any API that serves /chat/completions the OpenAI way.": "任何按 OpenAI 方式提供 /chat/completions 的 API。",
   "Saved": "已保存", "Using {api} · {model}": "正在使用 {api} · {model}", "key saved": "已保存 key", "no key": "没有 key",
@@ -174,7 +174,7 @@ const ZH = {
   "A new title for this project": "这个项目的新标题",
   "Waiting for the GPU: “{title}” is busy with {step} first.": "等待 GPU：「{title}」正在{step}。", "Starting…": "正在启动…",
   "Loading {models} onto the GPU. A step first loads the models it needs; this takes a minute or more.": "正在把 {models} 加载到 GPU。每个步骤先加载需要的模型，通常要一分钟以上。",
-  "Running now": "正在运行", "usually {time}": "通常 {time}", "Activity and log": "活动和日志", "Failed": "失败",
+  "Running now": "正在运行", "usually {time}": "通常{time}", "Activity and log": "活动和日志", "Failed": "失败",
   "no reason was given": "没有给出原因", "Try again": "重试", "All done": "全部完成", "Next · step {n} of 5": "下一步 · 第 {n} 步，共 5 步",
   "Choose a language model": "选择语言模型",
   "It writes the story and plans the drama. The NVIDIA API catalog and OpenRouter have free tiers: pick one in Settings and paste a key.":
@@ -194,7 +194,7 @@ const ZH = {
   "Redraw {n}": "重画 {n} 张", "Look at them": "看一看", "Check and approve {pictures}": "检查并批准 {pictures}",
   "Shots use approved pictures only. Look at each one: approve it, or redraw it with a new seed or your own prompt.":
     "镜头只用已批准的图。逐张看：批准，或换种子、改提示词重画。",
-  "Approve all {n}": "全部批准（{n} 张）", "Look at them first": "先看一看", "{time} of GPU time.": "约需 {time} GPU 时间。",
+  "Approve all {n}": "全部批准（{n} 张）", "Look at them first": "先看一看", "{time} of GPU time.": "需要 {time} GPU 时间。",
   "The first shot also loads the video model; then each shot takes several minutes, and this card shows the time as it runs.":
     "第一个镜头还要加载视频模型；之后每个镜头需要几分钟，这张卡片会显示实时用时。",
   "Render a sample shot": "渲染一个样片",
@@ -253,7 +253,7 @@ const ZH = {
   // shots
   "rendering": "渲染中", "Shots come from the plan; plan the drama first.": "镜头来自规划；请先规划短剧。",
   "{pictures} still to approve: a shot renders once every picture it uses is approved.": "还有 {pictures}待批准：镜头用到的图全部批准后才能渲染。",
-  "Episode {n}: {title}": "第 {n} 集：{title}", "{done} of {all} rendered": "已渲染 {done}/{all}", "{time} of GPU time per shot here": "本机每个镜头约 {time} GPU 时间",
+  "Episode {n}: {title}": "第 {n} 集：{title}", "{done} of {all} rendered": "已渲染 {done}/{all}", "{time} of GPU time per shot here": "本机每个镜头 {time} GPU 时间",
   "Render a sample: {shot}": "渲染样片：{shot}", "Render the other {n}": "渲染其余 {n} 个", "Render all {n}": "全部渲染（{n} 个）",
   "Re-render {n} outdated": "重新渲染 {n} 个过期镜头",
   "Use the last frame of episode {n} as an extra reference for the first shot": "把第 {n} 集的最后一帧作为第一个镜头的额外参考",
