@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import time
 from typing import Any
 
@@ -60,6 +61,18 @@ class Project:
         meta = {**self.meta, **changes}
         write_json(self.root / "project.json", meta)
         return meta
+
+    @property
+    def updated(self) -> float:
+        """When the project last changed: steps log, and saves replace whole files."""
+
+        times = []
+        for path in [*self.root.iterdir(), *self.root.glob("episodes/*/shots.json")]:
+            try:
+                times.append(path.stat().st_mtime)
+            except FileNotFoundError:  # the temporary file of a save, renamed meanwhile
+                pass
+        return max(times, default=0.0)
 
     @property
     def novel(self) -> str:
@@ -153,8 +166,14 @@ class Store:
         found = []
         for path in sorted((self.root / "projects").iterdir()):
             if path.is_dir() and (path / "project.json").is_file():
-                found.append({"id": path.name, **Project(path).meta})
+                project = Project(path)
+                found.append({"id": path.name, **project.meta, "updated": project.updated})
         return found
+
+    def delete(self, project_id: str) -> None:
+        """Remove a project with everything it drew and rendered."""
+
+        shutil.rmtree(self.get(project_id).root)
 
     def get(self, project_id: str) -> Project:
         if not PROJECT_ID.fullmatch(project_id):
@@ -165,8 +184,11 @@ class Store:
         return Project(root)
 
     def create(self, title: str, novel: str, *, flow: str, episodes: int, max_seconds: int,
-               idea: str = "") -> Project:
-        """A project starts from a novel, or from an idea the story step turns into one."""
+               idea: str = "", style: str = "") -> Project:
+        """A project starts from a novel, or from an idea the story step turns into one.
+
+        A `style` chosen here is the plan's visual style; without one the planner picks it.
+        """
 
         if not novel.strip() and not idea.strip():
             raise ValueError("paste a novel or describe an idea")
@@ -180,5 +202,6 @@ class Store:
         (root / "novel.txt").write_text(novel, encoding="utf-8")
         project = Project(root)
         project.update_meta(title=title, flow=flow, episodes=episodes, max_seconds=max_seconds,
-                            created=int(time.time()), **({"idea": idea.strip()} if idea.strip() else {}))
+                            created=int(time.time()), **({"idea": idea.strip()} if idea.strip() else {}),
+                            **({"style": style.strip()} if style.strip() else {}))
         return project

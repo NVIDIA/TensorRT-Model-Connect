@@ -51,10 +51,15 @@ def run(context: Context) -> None:
                           for n, r in enumerate(ranges, start=1))
     grouped = [{"episode": n, "chapters": [note for note in notes if note["number"] in r]}
                for n, r in enumerate(ranges, start=1)]
-    bible = chat.complete_json(prompts.SYSTEM, prompts.BIBLE_PROMPT.format(
-        episodes=episodes, max_seconds=max_seconds, assignment=assignment,
-        chapters=json.dumps(grouped, ensure_ascii=False)), max_tokens=max_tokens, temperature=temperature)
+    request = prompts.BIBLE_PROMPT.format(episodes=episodes, max_seconds=max_seconds, assignment=assignment,
+                                          chapters=json.dumps(grouped, ensure_ascii=False))
+    style = str(meta.get("style") or "").strip()  # chosen with the project; the looks should suit it
+    if style:
+        request += prompts.CHOSEN_STYLE.format(style=style)
+    bible = chat.complete_json(prompts.SYSTEM, request, max_tokens=max_tokens, temperature=temperature)
     plan = normalize_bible(bible, ranges)
+    if style:
+        plan["style"] = style
     plan["chapters"] = notes
 
     for episode in plan["episodes"]:
