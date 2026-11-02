@@ -4,7 +4,7 @@
   "hf_revision": "b4751b329b7d797cb6abfe018e8bedf1051a80aa",
   "bundle": "nemotron-embed-vl-1b-v2-fp8.bundle",
   "family": "eagle_vlm",
-  "task": "embedding",
+  "task": "text_to_embedding",
   "precision": "fp16",
   "testcases": [
     {

@@ -1495,6 +1495,23 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
     }
 
 
+_TASKS = frozenset(
+    {"text_to_pooled_features", "text_to_embedding", "text_query_documents_to_relevance"}
+)
+
+
+def _positive_int(value: object, name: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a positive integer")
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{name} must be a positive integer") from error
+    if result < 1:
+        raise ValueError(f"{name} must be a positive integer")
+    return result
+
+
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Eagle encoder bundle."""
     if request.mtp_seq_len is not None:
@@ -1517,8 +1534,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task not in {"encoding", "embedding", "reranking"}:
-        raise ValueError("eagle_vlm task must be encoding, embedding, or reranking")
+    if request.task not in _TASKS:
+        raise ValueError(
+            "eagle_vlm task must be text_to_pooled_features, text_to_embedding, "
+            "or text_query_documents_to_relevance"
+        )
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if not str(config.model_type).lower().startswith("llama_nemotron_vl"):
@@ -1569,8 +1589,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 parallel_config=parallel,
             ),
         )
-    runtime = {"tensor_parallel_size": parallel.tp_size}
-    if request.task == "reranking":
+    runtime = {
+        "tensor_parallel_size": parallel.tp_size,
+        "vocab_size": _positive_int(config.vocab_size, "vocab_size"),
+    }
+    if request.task == "text_query_documents_to_relevance":
         runtime["pooling"] = config.raw["pooling"]
     runtime.update(_tokenizer_runtime_contract(model_dir))
     writer.add_json("runtime.json", runtime)
