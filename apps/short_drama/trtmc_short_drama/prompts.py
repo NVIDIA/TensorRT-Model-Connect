@@ -363,6 +363,8 @@ def video_prompts(plan: dict[str, Any], shot: dict[str, Any],
     elif line:
         body.append(f"An off-screen narrator says in an off-screen voiceover: <d>[{tongue}] {line}</d> "
                     "The people on screen keep their lips closed.")
+    else:  # H3 otherwise has the people on screen say something of its own
+        body.append("No one speaks; the people on screen keep their lips closed.")
     body.append(_sentence(mention(_english(shot.get("after")))))
     head = ("subject_definitions:\n" + "\n".join(definitions) +
             "\n\nsummary:\n[reference generation] " + mention(_english(shot.get("summary"))) + "." +
