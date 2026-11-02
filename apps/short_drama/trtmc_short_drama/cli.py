@@ -36,7 +36,8 @@ def parser() -> argparse.ArgumentParser:
                     "API catalog or OpenRouter; local: build and serve the tier's language model on this GPU")
     up.add_argument("--vision", choices=["api", "local"], default="api",
                     help="api (default): the video analysis shows frames to the vision model named in Settings, "
-                    "if any; local: build and serve the tier's vision model on this GPU for it (tier A)")
+                    "if any; local (experimental, slow): build and serve the tier's vision model on this GPU "
+                    "for it (tier A)")
     up.add_argument("--bundle", action="append", default=[], metavar="ROLE=PATH",
                     help="use an existing bundle for a role (llm, image, video, asr, tts, vision)")
     up.add_argument("--runtime-root", type=Path, help="directory with trtmc-server and the runtime DSOs "
