@@ -1172,16 +1172,18 @@ def add_attention_from_rows(
     )
 
 
-_QUANTIZE_PROPAGATION_KNOB = "quantize_ppg"
-
-
-def disable_quantize_propagation(config: trt.IBuilderConfig) -> None:
-    """Turn off TensorRT quantize propagation for an FP8 DiT build.
+def keep_quantize_out_of_attention(
+    network: trt.INetworkDefinition, rows: trt.ITensor
+) -> trt.ITensor:
+    """Stop TensorRT from moving an FP8 quantize into the IAttention before ``rows``.
 
     TensorRT 11.4 moves the FP8 input quantize of a linear that follows IAttention
     into the attention, where the softmax has no FP8 implementation, and the build
-    fails (issue #1920). The route covers the whole network and is set only when
-    this TensorRT build lists the knob.
+    fails (issue #1920). A debug tensor stays materialized, so marking the
+    attention output rows keeps that quantize after them while quantize
+    propagation, and with it every FP8 GEMM, stays on elsewhere. Pass the rows
+    from ``add_attention_from_rows``: marking the 4-D IAttention output instead
+    hits a TensorRT 11.4 code generator assertion.
     """
-    if _QUANTIZE_PROPAGATION_KNOB in getattr(config, "all_build_routes", ""):
-        config.build_route = f"-{_QUANTIZE_PROPAGATION_KNOB}=off"
+    network.mark_debug(rows)
+    return rows

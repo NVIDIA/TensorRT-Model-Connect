@@ -289,8 +289,6 @@ def build_flux2_dit_engine(
         raise ValueError("FLUX.2 FP8 scales and an NVFP4 checkpoint cannot be combined")
     if fp8_scales is not None or has_nvfp4:
         config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
-    if fp8_scales is not None:
-        graph_ops.disable_quantize_propagation(config)
 
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 
@@ -1000,7 +998,7 @@ def _attention_fp8_scales(prefix: str | None):
 
 def _mha(network, q, k, v, num_heads, head_dim, seq_len, prefix: str | None = None):
     """Multi-head attention via TRT native IAttention."""
-    return graph_ops.add_attention_from_rows(
+    rows = graph_ops.add_attention_from_rows(
         network,
         q,
         k,
@@ -1012,6 +1010,9 @@ def _mha(network, q, k, v, num_heads, head_dim, seq_len, prefix: str | None = No
         quant_scales=_attention_fp8_scales(prefix),
         tag=prefix,
     )
+    if _FP8_MODE:
+        graph_ops.keep_quantize_out_of_attention(network, rows)
+    return rows
 
 
 def _gate_1d(network, x, gate, seq_len):
