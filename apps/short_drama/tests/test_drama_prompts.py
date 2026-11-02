@@ -70,6 +70,19 @@ def test_a_line_from_someone_off_screen_becomes_a_voiceover():
     assert "An off-screen narrator says in an off-screen voiceover: <d>[Chinese] 我和你困觉！</d>" in first
 
 
+def test_descriptions_in_another_language_reach_the_video_model_in_english():
+    references = [("character", PLAN["characters"][0]), ("location", PLAN["locations"][0])]
+    shot = {**SHOT, "action": "aq 跪在地上", "sound": "风声", "summary": "阿Q 求爱"}
+    assert prompts.needs_english(shot["action"]) and not prompts.needs_english("aq kneels")
+    english = {"aq 跪在地上": "aq kneels on the floor", "风声": "Wind", "阿Q 求爱": "aq proposes"}.get
+    first, _ = prompts.video_prompts(PLAN, shot, references, lambda text: english(text, text))
+    assert "<Subject 1> kneels on the floor." in first and "overall_soundscape:\nWind." in first
+    assert "[reference generation] <Subject 1> proposes." in first
+    assert "<d>[Chinese] 我和你困觉！</d>" in first and "跪" not in first  # the line stays as written
+    untranslated, _ = prompts.video_prompts(PLAN, shot, references)
+    assert "<Subject 1> 跪在地上." in untranslated
+
+
 def test_a_shot_without_a_line_says_that_no_one_speaks():
     references = [("character", PLAN["characters"][0]), ("location", PLAN["locations"][0])]
     first, _ = prompts.video_prompts(PLAN, {**SHOT, "speaker": "", "line": ""}, references)

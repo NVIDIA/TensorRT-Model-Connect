@@ -12,7 +12,7 @@ from __future__ import annotations
 import itertools
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 
 # The plan's "style" alone names the look (live action, cartoon, ...); this is the look of a plan
 # without one.
@@ -295,13 +295,33 @@ def still_prompt(plan: dict[str, Any], kind: str, item: dict[str, Any]) -> str:
     return f"{look}, centered on a plain light grey backdrop, soft even light, {_clause(style)}."
 
 
-def video_prompts(plan: dict[str, Any], shot: dict[str, Any],
-                  references: list[tuple[str, dict[str, Any]]]) -> tuple[str, str]:
+def needs_english(text: str) -> bool:
+    """Whether a description is written in Chinese, Japanese or Korean: H3 reads such prose aloud."""
+
+    return bool(re.search(r"[぀-ヿ㐀-鿿가-힯豈-﫿]", str(text or "")))
+
+
+TRANSLATE_PROMPT = """Translate each value of this JSON object into plain English: they are descriptions for
+a video model (camera, action, sound, how people, places and things look and sound). Keep lowercase
+ids such as linwan and tags such as <Subject 2> exactly as they are, keep the meaning and the detail,
+and never use the double-quote character inside strings. Return one JSON object with the same keys.
+
+{texts}"""
+
+
+def video_prompts(plan: dict[str, Any], shot: dict[str, Any], references: list[tuple[str, dict[str, Any]]],
+                  english: Callable[[str], str] | None = None) -> tuple[str, str]:
     """Compose the first-window and continuation prompts of one shot.
 
     `references` lists (kind, item) in upload order; kind is character, location, prop or
     previous (the last frame of the previous episode). Picture N is the N-th upload.
+    `english` gives the English of a description written in another language: H3 takes English
+    prose and reads other text aloud. Names and the spoken line stay as written.
     """
+
+    def text_of(value: Any) -> str:
+        value = str(value or "").strip()
+        return english(value) if english and value else value
 
     labels: dict[str, str] = {}
     definitions, retention = [], []
@@ -311,15 +331,15 @@ def video_prompts(plan: dict[str, Any], shot: dict[str, Any],
         if kind == "character":
             labels[item["id"]] = subject
             definitions.append(f"{subject} is {item.get('name', '')} from {picture}, "
-                               f"{_english(item.get('look'))}.")
+                               f"{_english(text_of(item.get('look')))}.")
             retention.append(f"{subject} (appears in [Shot 1]): fully_preserved - the face, "
                              "hairstyle and clothing are retained.")
         elif kind == "location":
-            definitions.append(f"{subject} is the place in {picture}: {_english(item.get('look'))}.")
+            definitions.append(f"{subject} is the place in {picture}: {_english(text_of(item.get('look')))}.")
             retention.append(f"{subject} (appears in [Shot 1]): fully_preserved - the layout, "
                              "materials and light of the place are retained.")
         elif kind == "prop":
-            definitions.append(f"{subject} is the {_english(item.get('look'))} in {picture}.")
+            definitions.append(f"{subject} is the {_english(text_of(item.get('look')))} in {picture}.")
             retention.append(f"{subject} (appears in [Shot 1]): fully_preserved - its shape and "
                              "color are retained.")
         elif item.get("scope") == "shot":
@@ -346,10 +366,10 @@ def video_prompts(plan: dict[str, Any], shot: dict[str, Any],
                 text = re.sub(pattern, label, text)
         return text
 
-    voice = {c["id"]: _english(c.get("voice")) for c in plan.get("characters", [])}
+    voice = {c["id"]: _english(text_of(c.get("voice"))) for c in plan.get("characters", [])}
     speaker, line = shot.get("speaker") or "", _line(shot.get("line"))
     tongue = "Chinese" if re.search(r"[\u4e00-\u9fff]", line) else "English"  # the line's own language
-    body = [_sentence(shot.get("camera")), _sentence(mention(_english(shot.get("action"))))]
+    body = [_sentence(text_of(shot.get("camera"))), _sentence(mention(_english(text_of(shot.get("action")))))]
     if references and references[0][0] == "previous" and references[0][1].get("scope") == "shot":
         body.insert(0, "The shot opens exactly on the frame in <Picture 1> and continues from it without a cut.")
     if line and speaker in labels:
@@ -365,18 +385,18 @@ def video_prompts(plan: dict[str, Any], shot: dict[str, Any],
                     "The people on screen keep their lips closed.")
     else:  # H3 otherwise has the people on screen say something of its own
         body.append("No one speaks; the people on screen keep their lips closed.")
-    body.append(_sentence(mention(_english(shot.get("after")))))
+    body.append(_sentence(mention(_english(text_of(shot.get("after"))))))
     head = ("subject_definitions:\n" + "\n".join(definitions) +
-            "\n\nsummary:\n[reference generation] " + mention(_english(shot.get("summary"))) + "." +
+            "\n\nsummary:\n[reference generation] " + mention(_english(text_of(shot.get("summary")))) + "." +
             "\n\nretention_analysis:\n" + "\n".join(retention))
-    sound = ("overall_soundscape:\n" + (_english(shot.get("sound")) or "Quiet ambience") + "." +
+    sound = ("overall_soundscape:\n" + (_english(text_of(shot.get("sound"))) or "Quiet ambience") + "." +
              "\n\nnon_diegetic_music:\nN/A")
-    setting = f" set in {_clause(plan['setting'])}" if plan.get("setting") else ""
-    look = _clause(plan.get("style") or DEFAULT_STYLE)
+    setting = f" set in {_clause(text_of(plan['setting']))}" if plan.get("setting") else ""
+    look = _clause(text_of(plan.get("style")) or DEFAULT_STYLE)
     style = (f"The target video uses a vertical short-drama style{setting}, {look}, "
              "and a clean image without subtitles, captions or any on-screen text.")
     first = f"{head}\n\ndetailed_description:\n{style}\n[Shot 1] {' '.join(body)}\n\n{sound}"
-    then = _sentence(mention(_english(shot.get("then")))) or "The people on screen keep moving naturally."
+    then = _sentence(mention(_english(text_of(shot.get("then"))))) or "The people on screen keep moving naturally."
     continuation = (f"{head}\n\ndetailed_description:\n[Shot 1 continued] The same shot keeps "
                     f"drifting slowly. {then} Nobody speaks.\n\n{sound}")
     return first, continuation

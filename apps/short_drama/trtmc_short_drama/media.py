@@ -5,15 +5,23 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Callable
 
 from . import prompts, video
 from .flow import Context, Step
+from .store import read_json, write_json
+
+log = logging.getLogger(__name__)
 
 MAX_REFERENCES = 6
 STILL_SIZE = "928x1664"
+# English, for H3, of the descriptions a plan has in another language: {text as written: English}.
+TRANSLATIONS = "translations.json"
+TRANSLATE_BATCH = 40  # descriptions per request
 
 
 def inside(project, path: Path) -> Path:
@@ -176,6 +184,47 @@ def uses_previous_frame(project, plan: dict[str, Any], number: int, default: boo
                                                                 default and continues(plan, number)))
 
 
+def video_texts(plan: dict[str, Any], shots: list[dict[str, Any]]) -> list[str]:
+    """The descriptions the video prompts of these shots use that are not in English, as written."""
+
+    items = {kind: {item["id"]: item for item in plan.get(group) or []}
+             for kind, group in (("character", "characters"), ("location", "locations"), ("prop", "props"))}
+    texts = [plan.get("setting"), plan.get("style")]
+    for shot in shots:
+        texts += [shot.get(key) for key in ("camera", "action", "after", "then", "summary", "sound")]
+        for identifier in [*shot.get("characters", []), shot.get("speaker")]:
+            character = items["character"].get(identifier, {})
+            texts += [character.get("look"), character.get("voice")]
+        texts += [items["prop"].get(p, {}).get("look") for p in shot.get("props", [])]
+        texts.append(items["location"].get(shot.get("location"), {}).get("look"))
+    written = (str(text or "").strip() for text in texts)
+    return [text for text in dict.fromkeys(written) if text and prompts.needs_english(text)]
+
+
+def english_of(project) -> Callable[[str], str]:
+    """The English of a description from the project's translations, or the text itself."""
+
+    known = read_json(project.root / TRANSLATIONS, {})
+    return lambda text: known.get(text, text)
+
+
+def translate_for_video(project, chat, texts: list[str]) -> int:
+    """Ask the language model for the English of descriptions not translated yet; returns how many."""
+
+    known = read_json(project.root / TRANSLATIONS, {})
+    missing = [text for text in texts if text not in known]
+    for start in range(0, len(missing), TRANSLATE_BATCH):
+        batch = {str(index): text for index, text in enumerate(missing[start:start + TRANSLATE_BATCH], start=1)}
+        reply = chat.complete_json(prompts.SYSTEM, prompts.TRANSLATE_PROMPT.format(
+            texts=json.dumps(batch, ensure_ascii=False, indent=1)), max_tokens=6000, temperature=0.2)
+        for key, text in batch.items():
+            english = str(reply.get(key) or "").strip() if isinstance(reply, dict) else ""
+            if english:
+                known[text] = english
+    write_json(project.root / TRANSLATIONS, known)
+    return len(missing)
+
+
 def shot_inputs(project, plan: dict[str, Any], episode: dict[str, Any], shot: dict[str, Any], *,
                 use_previous: bool, chain: bool = True, require_approval: bool = True):
     """(references, upload paths, prompt, continuation) the shot would render with now."""
@@ -183,7 +232,7 @@ def shot_inputs(project, plan: dict[str, Any], episode: dict[str, Any], shot: di
     previous, scope = previous_frame(project, episode, shot, use_previous=use_previous, chain=chain)
     references, paths = shot_references(project, plan, shot, previous=previous, previous_scope=scope,
                                         require_approval=require_approval)
-    return (references, paths, *prompts.video_prompts(plan, shot, references))
+    return (references, paths, *prompts.video_prompts(plan, shot, references, english_of(project)))
 
 
 def relative(project, path: Path) -> str:
@@ -243,6 +292,15 @@ def run_shots(context: Context) -> None:
     chain = chains_shots(project, number, bool(params.get("chain_shots", True)))
     only = params.get("only")
     todo = [s for s in episode["shots"] if (s["id"] in only if only else not state.get(s["id"], {}).get("file"))]
+    texts = video_texts(plan, todo)
+    if texts and getattr(context.services, "chat_ready", lambda: False)():
+        # Before the video model loads: a local language model takes the GPU for a moment.
+        context.progress(f"episode {number}: putting the descriptions into English for the video model")
+        try:
+            translate_for_video(project, context.services.chat(None), texts)
+        except Exception as error:  # the shots still render, with the descriptions as written
+            log.warning("descriptions not translated: %s", error)
+            project.log(f"episode {number}: descriptions not translated for the video model ({error})"[:300])
     if todo:
         context.services.load(context.model)
     for index, shot in enumerate(todo, start=1):
