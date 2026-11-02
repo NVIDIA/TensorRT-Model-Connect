@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import io
 import shutil
 import subprocess
+import wave
 
 import numpy as np
 import pytest
@@ -25,6 +27,19 @@ def test_sound_finds_an_opening_burst_and_clipping():
     loud = np.clip(4 * np.sin(np.linspace(0, 2000, 3 * rate)), -1, 1).astype(np.float32)
     assert analysis.sound(loud)["clipping"] >= analysis.CLIPPING
     assert analysis.sound(np.zeros(100, dtype=np.float32))["level_db"] is None
+
+
+@needs_ffmpeg
+def test_loud_stereo_is_not_clipping(tmp_path):
+    stereo = tmp_path / "stereo.wav"  # the same 0.9 peak in both channels, as H3's audio often is
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i",
+                    "aevalsrc=0.9*sin(2*PI*300*t)|0.9*sin(2*PI*300*t):s=48000:d=1", "-c:a", "pcm_f32le", str(stereo)],
+                   check=True)
+    audio = analysis.samples(stereo)
+    assert abs(float(np.abs(audio).max()) - 0.9) < 0.02 and analysis.sound(audio)["clipping"] == 0.0
+    with wave.open(io.BytesIO(video.speech_wav(stereo))) as speech:
+        peak = np.abs(np.frombuffer(speech.readframes(speech.getnframes()), np.int16)).max()
+    assert abs(peak / 32768 - 0.9) < 0.02  # not pushed to full scale
 
 
 def test_picture_change_at_a_cut():
@@ -74,7 +89,7 @@ class FakeVision:
         self.calls = []
 
     def complete_json(self, system, user, *, max_tokens, temperature, images=()):
-        self.calls.append({"user": user, "images": len(images)})
+        self.calls.append({"user": user, "images": list(images)})
         return [{"category": "consistency", "severity": "high", "finding": "她的发型和参考图不同",
                  "target": "character:linwan", "action": "redraw", "suggestion": "参考图里把头发扎起来"},
                 {"category": "text", "finding": "门上有乱码文字", "target": "character:nobody", "action": "redraw",
@@ -139,7 +154,13 @@ def test_analysis_measures_every_shot_and_keeps_vision_findings_in_bounds(tmp_pa
     assert {f["target"] for f in seen} == {"character:linwan", "shot:e1s1", "shot:e1s2"}
     garbled = next(f for f in seen if f["category"] == "text")
     assert garbled["action"] == "revise"  # an unknown target falls back to the shot, which cannot be redrawn
-    assert vision.calls[1]["images"] == 4 and "last frame of the previous shot" in vision.calls[1]["user"]
+    [board] = vision.calls[1]["images"]  # one picture: frames on top, the pictures below
+    assert ("Below them, from left to right: the reference picture of character:linwan, the reference picture of "
+            "location:shop, the last frame of the previous shot." in vision.calls[1]["user"])
+    (tmp_path / "board.jpg").write_bytes(board)
+    size = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=width,height", "-of", "csv=p=0",
+                           str(tmp_path / "board.jpg")], capture_output=True, text=True, check=True).stdout.strip()
+    assert size == "1440,806"  # the 1468x320 sheet scaled to 1440x314, a 12 px gap, three pictures 480 high
     # a speech model built for Chinese does not judge the lines of an English project
     plan = project.plan
     project.save_plan({**plan, "language": "en"})

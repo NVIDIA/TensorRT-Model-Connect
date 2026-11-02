@@ -30,6 +30,9 @@ STILL = 3.0
 CUT_RULE = 2
 # One loudness for the whole episode, so the level does not jump at every cut.
 LOUDNESS = "loudnorm=I=-16:TP=-1.5:LRA=11"
+# Mono 16 kHz as the mean of the channels. FFmpeg's own downmix (-ac 1) adds them at 0.71 each, which
+# lifts loud stereo past full scale: speech recognition hears it clipped and the analysis calls it clipping.
+MONO_16K = "aresample=16000:rematrix_maxval=1,aformat=channel_layouts=mono"
 SHEET_TILES = 8  # frames in a contact sheet, left to right
 
 
@@ -102,8 +105,8 @@ def speech_wav(clip: Path) -> bytes:
     FFmpeg cannot fill in WAV sizes on a pipe, so read raw samples and write the header here.
     """
 
-    samples = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(clip), "-vn", "-ac", "1",
-                              "-ar", "16000", "-f", "s16le", "pipe:1"],
+    samples = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", str(clip), "-vn", "-af", MONO_16K,
+                              "-f", "s16le", "pipe:1"],
                              capture_output=True, check=True, timeout=TIMEOUT).stdout
     output = io.BytesIO()
     with wave.open(output, "wb") as audio:

@@ -64,16 +64,19 @@ class ChatClient:
 
     def complete(self, system: str, user: str, *, max_tokens: int, temperature: float,
                  images: tuple[bytes, ...] = ()) -> str:
-        """The reply to one request; `images` (JPEG or PNG) follow the text, for models that read them."""
+        """The reply to one request; `images` (JPEG or PNG) follow the text, for models that read them.
 
-        content: Any = user
+        A request with images is one user message that starts with the system text: some servers,
+        trtmc-server among them, take nothing else with pictures.
+        """
+
+        messages: list[dict[str, Any]] = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         if images:
-            content = [{"type": "text", "text": user}, *({"type": "image_url", "image_url": {"url": data_url(image)}}
-                                                       for image in images)]
-        body: dict[str, Any] = {
-            "model": self.model, "max_tokens": max_tokens, "temperature": temperature,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}],
-        }
+            messages = [{"role": "user", "content": [
+                {"type": "text", "text": f"{system}\n\n{user}"},
+                *({"type": "image_url", "image_url": {"url": data_url(image)}} for image in images)]}]
+        body: dict[str, Any] = {"model": self.model, "max_tokens": max_tokens, "temperature": temperature,
+                                "messages": messages}
         if self.local:
             body["enable_thinking"] = False
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
