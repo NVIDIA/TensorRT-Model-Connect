@@ -325,3 +325,10 @@ def test_the_page_token_survives_a_restart(tmp_path):
     token = app_token(tmp_path)
     assert app_token(tmp_path) == token and len(token) >= 32
     assert stat.S_IMODE((tmp_path / "app-token.json").stat().st_mode) == 0o600
+
+
+def test_a_flow_saved_in_api_mode_plans_with_the_local_model(tmp_path):
+    engine = FakeEngine()
+    services = Services(engine, {"q": ("llm", Served("q", tmp_path / "q.bundle"))}, tmp_path)
+    chat = services.chat(None)  # the flow's plan step names no model
+    assert chat.model == "q" and engine.ensured == [["q"]]
