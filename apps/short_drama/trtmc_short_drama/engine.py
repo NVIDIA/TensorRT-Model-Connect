@@ -14,6 +14,7 @@ import signal
 import subprocess
 import threading
 import time
+from typing import Any
 
 import httpx
 
@@ -73,11 +74,29 @@ class Engine:
         self.url = f"http://127.0.0.1:{port}"
         self._process: subprocess.Popen | None = None
         self._loaded: frozenset[Served] = frozenset()
+        self._loading: frozenset[Served] = frozenset()
+        self._since: float | None = None  # when the current load began or finished
+        self._failure = ""
         self._lock = threading.Lock()
 
     @property
     def loaded(self) -> list[str]:
         return sorted(served.name for served in self._loaded)
+
+    def status(self) -> dict[str, Any]:
+        """What the GPU holds, for the page; read without the lock, which a load holds for minutes."""
+
+        return {"loaded": self.loaded, "loading": sorted(served.name for served in self._loading),
+                "since": self._since, "failure": self._failure}
+
+    def log_tail(self, lines: int = 200) -> list[str]:
+        """The last lines of the server log (at most its last 256 KiB)."""
+
+        if not self.log_path.is_file():
+            return []
+        with self.log_path.open("rb") as file:
+            file.seek(max(0, file.seek(0, os.SEEK_END) - (256 << 10)))
+            return file.read().decode("utf-8", "replace").splitlines()[-lines:]
 
     def ensure(self, models: list[Served]) -> None:
         wanted = frozenset(models)
@@ -125,6 +144,16 @@ class Engine:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         drop_page_cache(served.bundle for served in models)  # left over from earlier runs
         log.info("starting trtmc-server with %s", ", ".join(sorted(m.name for m in models)))
+        self._loading, self._since, self._failure = models, time.time(), ""
+        try:
+            self._load(models, environment)
+        except Exception as error:
+            self._failure = str(error)
+            raise
+        finally:
+            self._loading, self._since = frozenset(), time.time()
+
+    def _load(self, models: frozenset[Served], environment: dict[str, str]) -> None:
         with self.log_path.open("ab") as output:
             self._process = subprocess.Popen(self.command(models), stdout=output,
                                              stderr=subprocess.STDOUT, env=environment,
@@ -134,7 +163,9 @@ class Engine:
         while time.monotonic() < deadline:
             if self._process.poll() is not None:
                 self._loaded = frozenset()
-                raise RuntimeError(f"trtmc-server exited while loading; see {self.log_path}")
+                # The last line usually names the cause, such as a missing module or bundle.
+                last = next((line for line in reversed(self.log_tail(20)) if line.strip()), "no output")
+                raise RuntimeError(f"trtmc-server exited while loading: {last.strip()} (log: {self.log_path})")
             try:
                 if httpx.get(f"{self.url}/health/ready", timeout=5).status_code == 200:
                     drop_page_cache(served.bundle for served in models)
