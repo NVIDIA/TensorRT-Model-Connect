@@ -12,13 +12,14 @@ your own GPU. The pictures, video and speech recognition run on TensorRT Model C
 | Step | What it does | Model (tier A) |
 | --- | --- | --- |
 | Plan | reads every chapter, writes the cast, relationships, places, props, episodes and a shot list per episode | a chat API chosen in Settings (free tiers: the NVIDIA API catalog, OpenRouter), or `Qwen/Qwen3.6-27B` with `--llm local` |
-| References | draws a still of each character, place and prop for you to approve or redraw | `Qwen/Qwen-Image` |
+| Reference pictures | draws a still of each character, place and prop for you to approve or redraw | `Qwen/Qwen-Image` |
 | Shots | films each shot from its approved stills, with dialogue and sound | `FastVideo/FastVideo-FastH3-Omni-8-Step-V1` (MiniMax H3 reference-to-video) |
 | Subtitles | checks every line by speech recognition and times its subtitle | `openai/whisper-large-v3-turbo` |
 | Assemble | joins the shots, burns in subtitles, exports 1080x1920 MP4 | FFmpeg |
 
-Everything the models write can be edited in the app before anything is rendered. The four
-stages at the top of a project show what is done and the next step in each.
+Everything the models write can be edited in the app before anything is rendered. The five
+steps at the top of a project (story, plan, reference pictures, shots, episodes) show what is
+done, and the card under them names the next thing to do.
 
 On one GB300, planning the bundled 9-chapter novel into 4 episodes with the local 27B model
 takes about 9 minutes (14 chat requests), a reference still about 10 seconds, and each 5 to 9
@@ -68,7 +69,7 @@ and the build commands without running them.
 | `--llm api\|local` | `api` (default): the chat API chosen in Settings; `local`: build and serve the tier's language model on this GPU |
 | `--bundle ROLE=PATH` | use an existing bundle for `llm` (with `--llm local`), `image`, `video`, `asr` or `tts` |
 | `--runtime-root DIR` | directory with `trtmc-server` and the runtime libraries (default `build/`) |
-| `--host`, `--port`, `--server-port` | where the app (8700) and `trtmc-server` (8701) listen; any host other than loopback prints a URL with a one-time `?token=` that the browser needs once |
+| `--host`, `--port`, `--server-port` | where the app (8700) and `trtmc-server` (8701) listen; any host other than loopback prints a URL with a `?token=` that the browser needs once. The token is kept in `app-token.json` (mode 600) in the data directory, so the link survives a restart; delete the file for a new one |
 
 The app starts one `trtmc-server` and loads only the bundles the current step needs, so the
 models never have to fit in memory together. Speech recognition stays loaded next to the video
@@ -113,10 +114,24 @@ disk and 100 GB of host memory while it builds, or pass an existing bundle with
 
 ## Use
 
-1. **Create a project.** Paste a novel, open a text file, use the bundled sample,
-   《阿Q正传》 by Lu Xun (public domain), or start from an idea: one or two sentences that the
-   language model turns into a short story with one chapter per episode, which you can edit
-   before planning. Set the number of episodes and their maximum length.
+The page opens on *Projects*: one card per project with its progress through the five steps,
+what it does next and when it last changed; rename or delete a project from its card.
+*New project* asks four things: where the story comes from, the visual style, the length, and
+an optional title. It shows how many shots that makes and, once one has rendered on this
+machine, how much GPU time they take.
+
+A project page shows the five steps below, and under them one card with the next thing to do
+and the button that does it. While a step runs, the card shows its current phase (for example
+*Loading fasth3 and whisper onto the GPU*, *Still 2 of 5*, *Episode 1 shot 1 of 3*), how long
+it has run and, from earlier runs on this machine, how long it usually takes. When a step
+fails, the card shows why, with *Try again* and the model server's log. The status in the
+header says what the GPU is doing; click it for the activity panel: the models loaded, the
+running and queued steps of every project, recent steps with their errors, and the end of
+`logs/trtmc-server.log`.
+
+1. **Story.** Paste a novel, open a text file, use the bundled sample, 《阿Q正传》 by Lu Xun
+   (public domain), or start from an idea: one or two sentences that the language model turns
+   into a short story with one chapter per episode, which you can edit before planning.
 2. **Plan.** One click, once a language model is chosen in Settings. Edit the cast (each character's `look` and `voice` feed the image and
    video prompts), places, props, episodes and every shot: place, characters, seconds, the
    line, and what happens before, during and after it.
@@ -129,9 +144,10 @@ disk and 100 GB of host memory while it builds, or pass an existing bundle with
    - *Revise with the model* rewrites one shot, character, place or prop from a note and leaves
      the rest of the plan alone. A re-plan, a revision, a save or a restore first keeps the plan
      it replaces under *Earlier versions*.
-3. **References.** Draw the stills, then approve each one or redraw it, optionally with your
-   own prompt. Only characters, places and props that appear in a shot get a still, and each
-   still lists the shots that use it. Shots only use approved stills.
+3. **Reference pictures.** Pick the visual style (or keep the one chosen with the project),
+   draw the stills, then approve each one or redraw it, optionally with your own prompt. Only
+   characters, places and props that appear in a shot get a still, and each still lists the
+   shots that use it. Shots only use approved stills; a shot's render buttons wait for them.
 4. **Shots.** Render a sample shot first, check the look, then render the rest; a batch first
    says how much GPU time it takes, from the times measured on this machine. The strip at the
    top shows every shot of the episode. The last frame of an episode is an extra reference for
@@ -150,7 +166,7 @@ Text in double quotes is drawn on screen by H3, so the app removes quotes from d
 
 ## Customize
 
-**Flow.** The Flow tab shows the steps, their order, the model of each step and its parameters
+**Flow.** *Flow (advanced)* on a project page shows the steps, their order, the model of each step and its parameters
 as JSON. Save edits as a new version (`default@2`, …) and select the version a project uses;
 earlier versions never change.
 
@@ -180,6 +196,8 @@ to the browser.
 
 ```text
 short-drama-data/
+  app-token.json           the page's token when the app listens beyond loopback (mode 600)
+  settings.json            the chat API; its key is in secrets.json (mode 600)
   bundles/                 built bundles, named <model>-sm<arch>.bundle
   flows/<name>/v<N>.json   flow versions
   projects/<id>/

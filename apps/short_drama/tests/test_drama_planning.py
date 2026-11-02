@@ -79,3 +79,13 @@ def test_plan_step_reads_every_chapter_then_writes_shots(tmp_path):
     assert [note["heading"] for note in plan["chapters"]] == ["第一章 序", "第二章 优胜"]
     assert plan["episodes"][0]["shots"][0]["line"] == "阿Q说：我们先前比你阔多啦！"
     assert "第一章 序" in services.client.prompts[-1]  # the shot list sees the source chapters
+
+
+def test_a_style_chosen_with_the_project_is_kept_and_shapes_the_looks(tmp_path):
+    project = Store(tmp_path).create("阿Q", "第一章 序\n甲", flow="default@1", episodes=1, max_seconds=24,
+                                     style="bright 3D cartoon animation")
+    services = FakeServices()
+    planning.run(Context(project, {}, "llm", None, services, progress=lambda _: None))
+    assert project.plan["style"] == "bright 3D cartoon animation"
+    request = next(p for p in services.client.prompts if p.startswith("Plan a vertical short drama"))
+    assert request.endswith('use "bright 3D cartoon animation" as "style" and write every "look" to suit it.')

@@ -11,6 +11,7 @@ import hmac
 import logging
 from pathlib import Path
 import re
+import time
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Request
@@ -36,6 +37,7 @@ TOKEN_COOKIE, TOKEN_HEADER = "short_drama_token", "x-short-drama-token"
 PLAN_ID = re.compile(r"[a-z0-9_]{1,40}")
 MAX_NOVEL = 400_000
 MAX_IDEA = 1000
+MAX_STYLE = 300
 # Job parameters a request may set; anything else comes from the flow.
 REQUEST_PARAMS = {"revise": {"target", "instruction"}}
 NO_CHAT = ("no language model yet: choose a chat API in Settings (NVIDIA and OpenRouter have free tiers), "
@@ -103,6 +105,27 @@ def check_plan(plan: dict[str, Any]) -> None:
                 raise HTTPException(400, "shot ids use a-z, 0-9 and _ (at most 40)")
 
 
+def summary(project: Project) -> dict[str, Any]:
+    """How far a project is, for its card: what each stage has, and a picture of the cast."""
+
+    plan, stills = project.plan, project.stills
+    needed = sorted(media.usage(plan))
+    drawn = [key for key in needed if stills.get(key, {}).get("file")]
+    numbers = [episode["number"] for episode in plan.get("episodes", [])]
+    states = {number: project.shot_state(number) for number in numbers}
+    shots = [(episode["number"], shot["id"]) for episode in plan.get("episodes", [])
+             for shot in episode.get("shots", [])]
+    pictures = [key for key in drawn if key.startswith("character:")] + drawn
+    return {"story": bool(project.novel.strip()), "planned": bool(numbers),
+            "stills": {"needed": len(needed), "drawn": len(drawn),
+                       "approved": sum(stills[key].get("status") == "approved" for key in drawn)},
+            "shots": {"total": len(shots),
+                      "rendered": sum(bool(states[number].get(shot, {}).get("file")) for number, shot in shots)},
+            "episodes": {"total": len(numbers),
+                         "assembled": sum(bool(states[number].get("assembled")) for number in numbers)},
+            "picture": stills[pictures[0]]["file"] if pictures else None}
+
+
 def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any],
                allowed_hosts: list[str] | None = None, token: str | None = None) -> FastAPI:
     data = services.data
@@ -122,12 +145,8 @@ def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any]
         entry = next((e for e in flow["steps"] if e["step"] == (step.model_from or job.step)),
                      {"params": {}, "model": None})
         params = {} if step.model_from else entry.get("params", {})  # an action keeps only the model
-
-        def progress(message: str) -> None:
-            job.message = message
-
         context = Context(project, {**params, **job.params}, entry.get("model"),
-                          job.episode, services, progress, job.cancelled)
+                          job.episode, services, job.say, job.cancelled)
         project.log(f"run {job.step}" + (f" episode {job.episode}" if job.episode else ""))
         step.run(context)
 
@@ -181,7 +200,8 @@ def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any]
         external = services.external()
         return {**info, "models": [{"name": n, "role": r, "bundle": s.bundle.name}
                                    for n, (r, s) in services.models.items()],
-                "loaded": services.engine.loaded, "projects": store.projects(), "jobs": jobs.views(),
+                "loaded": services.engine.loaded, "engine": services.engine.status(), "now": time.time(),
+                "projects": store.projects(), "jobs": jobs.views(),
                 "steps": steps.describe(), "plugin_errors": steps.errors,
                 "flows": {name: flows.versions(name) for name in flows.names()},
                 "external_chat": {"base_url": external.get("base_url", ""), "model": external.get("model", ""),
@@ -190,20 +210,54 @@ def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any]
                 "free_apis": {key: vars(api) for key, api in FREE_APIS.items()},
                 "sample": SAMPLE.is_file()}
 
+    @app.get("/api/projects")
+    def project_list() -> dict[str, Any]:
+        """Every project with how far it is, newest change first, and this machine's step times."""
+
+        found, stills, takes = [], [], []
+        for listed in store.projects():
+            project = store.get(listed["id"])
+            found.append({**listed, "progress": summary(project)})
+            stills += project.stills.values()
+            takes += [take for number in range(1, int(listed.get("episodes", 0)) + 1)
+                      for entry in project.shot_state(number).values() if isinstance(entry, dict)
+                      for take in entry.get("takes", [])]
+        found.sort(key=lambda listed: listed["updated"], reverse=True)
+        return {"projects": found, "estimates": {"still": media.average_seconds(stills, roles.get("image")),
+                                                 "shot": media.average_seconds(takes, roles.get("video"))}}
+
     @app.post("/api/projects")
     def create(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
         novel = SAMPLE.read_text(encoding="utf-8") if body.get("sample") else str(body.get("novel", ""))
         idea = "" if novel.strip() else str(body.get("idea") or "")
-        if len(novel) > MAX_NOVEL or len(idea) > MAX_IDEA:
-            raise HTTPException(413, f"novels are limited to {MAX_NOVEL:,} and ideas to {MAX_IDEA} characters")
+        style = str(body.get("style") or "")
+        if len(novel) > MAX_NOVEL or len(idea) > MAX_IDEA or len(style) > MAX_STYLE:
+            raise HTTPException(413, f"novels are limited to {MAX_NOVEL:,}, ideas to {MAX_IDEA} "
+                                f"and styles to {MAX_STYLE} characters")
         try:
             reference, _ = flows.load(str(body.get("flow") or "default"))
             project = store.create(str(body.get("title") or "drama")[:80], novel, flow=reference,
                                    episodes=max(1, min(20, int(body.get("episodes", 4)))),
-                                   max_seconds=max(10, min(600, int(body.get("max_seconds", 60)))), idea=idea)
+                                   max_seconds=max(10, min(600, int(body.get("max_seconds", 60)))),
+                                   idea=idea, style=style)
         except (KeyError, ValueError) as error:
             raise HTTPException(400, str(error)) from None
         return {"id": project.id}
+
+    @app.put("/api/projects/{project_id}/meta")
+    def rename(project_id: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        title = str(body.get("title") or "").strip()
+        if not title or len(title) > 80:
+            raise HTTPException(400, "a title has 1 to 80 characters")
+        return project_or_404(project_id).update_meta(title=title)
+
+    @app.delete("/api/projects/{project_id}")
+    def delete(project_id: str) -> dict[str, str]:
+        project = project_or_404(project_id)
+        if jobs.busy(project.id):
+            raise HTTPException(409, "this project has steps queued or running; wait for them or cancel them first")
+        store.delete(project.id)
+        return {"status": "deleted"}
 
     @app.get("/api/projects/{project_id}")
     def project_view(project_id: str) -> dict[str, Any]:
@@ -344,6 +398,12 @@ def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any]
     def cancel() -> dict[str, str]:
         jobs.cancel()
         return {"status": "cancelling"}
+
+    @app.get("/api/logs/server")
+    def server_log(lines: int = 200) -> dict[str, Any]:
+        """The end of the trtmc-server log: what the GPU process said while loading and serving."""
+
+        return {"lines": services.engine.log_tail(max(1, min(2000, lines)))}
 
     @app.get("/api/projects/{project_id}/files/{relative:path}")
     def file(project_id: str, relative: str) -> FileResponse:

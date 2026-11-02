@@ -27,6 +27,12 @@ class FakeEngine:
     def ensure(self, models):
         self.ensured.append(sorted(m.name for m in models))
 
+    def status(self):
+        return {"loaded": [], "loading": [], "since": None, "failure": ""}
+
+    def log_tail(self, lines=200):
+        return ["loading v", "ready"][-lines:]
+
     def stop(self):
         pass
 
@@ -270,3 +276,51 @@ def test_an_idea_project_writes_its_story_then_plans_and_revises(tmp_path, monke
         project = client.get(url).json()
         assert project["plan"]["episodes"][0]["shots"][0]["line"] == "滚出去！" and not project["model_review"]["current"]
         assert client.put(f"{url}/novel", json={"novel": " "}).status_code == 400
+
+
+def test_projects_are_listed_newest_first_renamed_and_deleted(tmp_path, monkeypatch):
+    client, _ = make_client(tmp_path, monkeypatch)
+    with client:
+        first = client.post("/api/projects", json={"title": "一", "novel": "第一章\n文本", "episodes": 1}).json()["id"]
+        second = client.post("/api/projects", json={"title": "二", "idea": "小熊猫种星星", "episodes": 1,
+                                                    "style": "bright 3D cartoon animation"}).json()["id"]
+        client.post(f"/api/projects/{first}/run", json={"step": "plan"})
+        wait(client)
+        listed = client.get("/api/projects").json()
+        assert [p["id"] for p in listed["projects"]] == [first, second]  # the plan changed the first one last
+        progress = listed["projects"][0]["progress"]
+        assert progress["story"] and progress["planned"] and progress["stills"] == {"needed": 2, "drawn": 0, "approved": 0}
+        assert progress["shots"] == {"total": 1, "rendered": 0} and progress["picture"] is None
+        assert listed["projects"][1]["progress"]["story"] is False and listed["estimates"] == {"still": None, "shot": None}
+        assert client.get(f"/api/projects/{second}").json()["meta"]["style"] == "bright 3D cartoon animation"
+
+        assert client.put(f"/api/projects/{first}/meta", json={"title": " 新名字 "}).json()["title"] == "新名字"
+        assert client.put(f"/api/projects/{first}/meta", json={"title": ""}).status_code == 400
+        monkeypatch.setattr(client.app.state.jobs, "busy", lambda project=None: True)
+        assert client.delete(f"/api/projects/{first}").status_code == 409
+        monkeypatch.undo()
+        assert client.delete(f"/api/projects/{first}").json() == {"status": "deleted"}
+        assert not (tmp_path / "projects" / first).exists()
+        assert client.delete("/api/projects/..%2f..%2fsettings").status_code == 404
+        assert [p["id"] for p in client.get("/api/state").json()["projects"]] == [second]
+
+
+def test_the_page_sees_the_gpu_its_server_log_and_each_phase(tmp_path, monkeypatch):
+    client, _ = make_client(tmp_path, monkeypatch)
+    with client:
+        state = client.get("/api/state").json()
+        assert state["engine"] == {"loaded": [], "loading": [], "since": None, "failure": ""}
+        assert client.get("/api/logs/server?lines=1").json() == {"lines": ["ready"]}
+        created = client.post("/api/projects", json={"title": "x", "novel": "第一章\n文本", "episodes": 1}).json()
+        client.post(f"/api/projects/{created['id']}/run", json={"step": "plan"})
+        job = wait(client)[0]
+        assert job["message"] == "writing the shots of episode 1" and job["phase_seconds"] is not None
+        assert job["params"] == {} and job["finished"] is not None
+
+
+def test_the_page_token_survives_a_restart(tmp_path):
+    from trtmc_short_drama.cli import app_token
+
+    token = app_token(tmp_path)
+    assert app_token(tmp_path) == token and len(token) >= 32
+    assert stat.S_IMODE((tmp_path / "app-token.json").stat().st_mode) == 0o600

@@ -64,6 +64,10 @@ Use only people, places and events from the novel. Write every "look", "voice", 
 Chapter notes, grouped by episode:
 {chapters}"""
 
+CHOSEN_STYLE = """
+
+The visual style is chosen already: use "{style}" as "style" and write every "look" to suit it."""
+
 SHOTS_PROMPT = """Write the shot list of episode {number} of the short drama "{title}".
 Setting: {setting}.
 This episode adapts these chapters, in order: {notes}

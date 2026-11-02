@@ -30,12 +30,21 @@ class Job:
     error: str = ""
     started: float | None = None
     finished: float | None = None
+    phase_started: float | None = None
     cancelled: threading.Event = field(default_factory=threading.Event)
 
+    def say(self, message: str) -> None:
+        """Start a new phase of the step, such as the next shot, so the page can time it."""
+
+        self.message, self.phase_started = message, time.time()
+
     def view(self) -> dict[str, Any]:
+        now = self.finished or time.time()
         return {"id": self.id, "project": self.project, "step": self.step, "episode": self.episode,
-                "status": self.status, "message": self.message, "error": self.error,
-                "seconds": round((self.finished or time.time()) - self.started, 1) if self.started else None}
+                "params": self.params, "status": self.status, "message": self.message, "error": self.error,
+                "seconds": round(now - self.started, 1) if self.started else None,
+                "phase_seconds": round(now - self.phase_started, 1) if self.phase_started else None,
+                "finished": self.finished}
 
 
 class Jobs:
@@ -68,9 +77,10 @@ class Jobs:
         with self._lock:
             return [job.view() for job in reversed(self._history)]
 
-    def busy(self) -> bool:
+    def busy(self, project: str | None = None) -> bool:
         with self._lock:
-            return any(job.status in {"queued", "running"} for job in self._history)
+            return any(job.status in {"queued", "running"} and project in {None, job.project}
+                       for job in self._history)
 
     def close(self) -> None:
         self.cancel()

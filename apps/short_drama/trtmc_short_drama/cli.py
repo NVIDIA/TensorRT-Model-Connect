@@ -18,6 +18,7 @@ import sys
 
 from . import catalog
 from .engine import Engine, Served
+from .store import read_json, write_secret
 
 REPOSITORY = Path(__file__).resolve().parents[3]
 
@@ -50,6 +51,20 @@ def loopback(host: str) -> bool:
         return host == "localhost" or ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+def app_token(data: Path) -> str:
+    """The page's token, kept with mode 600 in the data directory so links survive a restart.
+
+    Delete the file to make a new one.
+    """
+
+    path = data / "app-token.json"
+    token = (read_json(path, {}) or {}).get("token")
+    if not token:
+        token = secrets.token_urlsafe(24)
+        write_secret(path, {"token": token})
+    return token
 
 
 def runtime_root(argument: Path | None) -> Path:
@@ -168,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
               for role, model in wanted.items()}
     info = {"gpu": f"{gpu.name} ({gpu.memory_gib:.0f} GiB)", "tier": tier.name, "tier_summary": tier.summary}
     hosts = ["127.0.0.1", "localhost", "::1"] + ([args.host] if args.host not in {"0.0.0.0", "::"} else [])
-    token = None if loopback(args.host) else secrets.token_urlsafe(24)
+    token = None if loopback(args.host) else app_token(data)
     app = create_app(Services(engine, models, data), plugins=args.plugins, info=info,
                      allowed_hosts=None if token else hosts, token=token)
     if token:
