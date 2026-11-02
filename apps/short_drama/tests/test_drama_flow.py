@@ -176,6 +176,12 @@ def test_the_language_model_is_built_only_with_llm_local(tmp_path: Path, monkeyp
     assert "build llm: " in capsys.readouterr().out
     with pytest.raises(SystemExit, match="needs --llm local"):
         cli.main([*common, "--bundle", f"llm={tmp_path / 'q.bundle'}"])
+    assert "build vision" not in printed  # the analysis uses Settings' vision model unless --vision local
+    assert cli.main([*common, "--vision", "local"]) == 0
+    built = capsys.readouterr().out
+    assert "build vision: " in built and "--task vision_language_generation --precision fp16" in built
+    with pytest.raises(SystemExit, match="needs --vision local"):
+        cli.main([*common, "--bundle", f"vision={tmp_path / 'v.bundle'}"])
 
 
 def test_a_planned_tier_says_what_is_missing_before_it_starts(tmp_path: Path, monkeypatch):

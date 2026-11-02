@@ -145,7 +145,7 @@ const ZH = {
   "keyframes from reference pictures in the app (Qwen-Image-Edit-2511 is in TRTMC)": "应用里按参考图生成关键帧（TRTMC 已支持 Qwen-Image-Edit-2511）",
   "FLUX.2 klein 4B in TRTMC, with reference pictures as input": "TRTMC 支持 FLUX.2 klein 4B，并能输入参考图",
   // roles, scopes, statuses
-  "llm": "语言模型", "image": "画图", "video": "视频", "asr": "语音识别", "tts": "语音合成",
+  "llm": "语言模型", "image": "画图", "video": "视频", "asr": "语音识别", "tts": "语音合成", "vision": "看图",
   "project": "项目", "episode": "分集", "running": "运行中", "done": "完成", "failed": "失败", "cancelled": "已取消",
   "error": "错误", "warning": "提醒", "estimated": "估计", "the {role} model": "{role}模型",
   // steps

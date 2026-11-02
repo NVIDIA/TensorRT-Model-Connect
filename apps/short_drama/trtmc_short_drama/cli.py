@@ -34,8 +34,11 @@ def parser() -> argparse.ArgumentParser:
     up.add_argument("--llm", choices=["api", "local"], default="api",
                     help="api (default): plan with the chat API chosen in Settings, such as the free NVIDIA "
                     "API catalog or OpenRouter; local: build and serve the tier's language model on this GPU")
+    up.add_argument("--vision", choices=["api", "local"], default="api",
+                    help="api (default): the video analysis shows frames to the vision model named in Settings, "
+                    "if any; local: build and serve the tier's vision model on this GPU for it (tier A)")
     up.add_argument("--bundle", action="append", default=[], metavar="ROLE=PATH",
-                    help="use an existing bundle for a role (llm, image, video, asr, tts)")
+                    help="use an existing bundle for a role (llm, image, video, asr, tts, vision)")
     up.add_argument("--runtime-root", type=Path, help="directory with trtmc-server and the runtime DSOs "
                     "(default: TRTMC_RUNTIME_ROOT or <checkout>/build)")
     up.add_argument("--host", default="127.0.0.1", help="address the app listens on")
@@ -112,10 +115,12 @@ def build_command(model: catalog.Model, output: Path, runtime: Path, checkpoint:
             "-o", str(output), *model.build_args]
 
 
-def served_models(tier: catalog.Tier, llm: str) -> dict[str, catalog.Model]:
-    """The tier's models this GPU serves: all of them, but the language model only with --llm local."""
+def served_models(tier: catalog.Tier, llm: str, vision: str = "api") -> dict[str, catalog.Model]:
+    """The tier's models this GPU serves: all of them, but the language model only with --llm local
+    and the vision model only with --vision local."""
 
-    return {role: model for role, model in tier.models.items() if role != "llm" or llm == "local"}
+    chosen = {"llm": llm, "vision": vision}
+    return {role: model for role, model in tier.models.items() if chosen.get(role, "local") == "local"}
 
 
 def resolve_bundles(models: dict[str, catalog.Model], gpu: catalog.Gpu, data: Path, overrides: dict[str, Path],
@@ -159,7 +164,10 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"tier {tier.name.upper()} is planned; TRTMC still needs: " + "; ".join(tier.missing) +
                          ". Start it anyway with --allow-planned (stories, plans and pictures work; shots do not), "
                          "or use a GPU with more memory.")
-    wanted = served_models(tier, args.llm)
+    if args.vision == "local" and "vision" not in tier.models:
+        raise SystemExit(f"tier {tier.name.upper()} has no vision model to serve; name one from a chat API in "
+                         "Settings instead")
+    wanted = served_models(tier, args.llm, args.vision)
     if args.llm == "api":
         print(f"language model: the chat API chosen in Settings (the NVIDIA API catalog and OpenRouter have "
               f"free tiers); --llm local serves {tier.models['llm'].checkpoint} on this GPU instead", flush=True)
@@ -168,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
         role, _, path = value.partition("=")
         if role == "llm" and args.llm == "api":
             raise SystemExit("--bundle llm=PATH needs --llm local")
+        if role == "vision" and args.vision == "api":
+            raise SystemExit("--bundle vision=PATH needs --vision local")
         if role not in wanted or not path:
             raise SystemExit(f"--bundle needs ROLE=PATH with ROLE in {', '.join(wanted)}")
         overrides[role] = Path(path).expanduser().resolve()

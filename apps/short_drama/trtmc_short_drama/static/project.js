@@ -770,7 +770,7 @@ function targetOptions(episode) {
 function analysisPanel(episode, state, rendered) {
   const result = state.analysis;
   const analyzing = projectJobs().some((j) => j.step === "analyze" && j.episode === episode.number && (j.status === "running" || j.status === "queued"));
-  const vision = ui.state.external_chat?.vision_model;
+  const vision = ui.state.vision_model;
   const head = el("div", { class: "title" },
     el("h3", {}, t("Video analysis")),
     el("span", { class: "spacer", style: "flex:1" }),
