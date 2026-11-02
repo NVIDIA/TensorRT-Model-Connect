@@ -4,3 +4,4 @@
 fastapi
 httpx
 uvicorn
+numpy

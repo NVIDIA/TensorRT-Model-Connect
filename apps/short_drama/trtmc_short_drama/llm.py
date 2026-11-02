@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import base64
 from dataclasses import dataclass
 import json
 import re
@@ -61,10 +62,17 @@ class ChatClient:
     def __repr__(self) -> str:  # keep keys out of logs and tracebacks
         return f"ChatClient({self.base_url!r}, {self.model!r}, local={self.local})"
 
-    def complete(self, system: str, user: str, *, max_tokens: int, temperature: float) -> str:
+    def complete(self, system: str, user: str, *, max_tokens: int, temperature: float,
+                 images: tuple[bytes, ...] = ()) -> str:
+        """The reply to one request; `images` (JPEG or PNG) follow the text, for models that read them."""
+
+        content: Any = user
+        if images:
+            content = [{"type": "text", "text": user}, *({"type": "image_url", "image_url": {"url": data_url(image)}}
+                                                       for image in images)]
         body: dict[str, Any] = {
             "model": self.model, "max_tokens": max_tokens, "temperature": temperature,
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}],
         }
         if self.local:
             body["enable_thinking"] = False
@@ -88,7 +96,7 @@ class ChatClient:
             time.sleep(retry_after(response, waits.pop(0)))
 
     def complete_json(self, system: str, user: str, *, max_tokens: int, temperature: float,
-                      attempts: int = 2) -> Any:
+                      attempts: int = 2, images: tuple[bytes, ...] = ()) -> Any:
         """Ask for one JSON value; retry once with the parse error when the reply is not JSON."""
 
         reply = ""
@@ -96,12 +104,17 @@ class ChatClient:
             prompt = user if not reply else (
                 f"{user}\n\nYour previous reply was not valid JSON. Reply again with only the JSON value.")
             reply = self.complete(system, prompt, max_tokens=max_tokens,
-                                  temperature=temperature + 0.3 * attempt)
+                                  temperature=temperature + 0.3 * attempt, images=images)
             try:
                 return parse_json(reply)
             except ValueError:
                 continue
         raise ValueError(f"the chat model did not return JSON: {reply[:200]!r}")
+
+
+def data_url(image: bytes) -> str:
+    kind = "png" if image[:8] == b"\x89PNG\r\n\x1a\n" else "jpeg"
+    return f"data:image/{kind};base64,{base64.b64encode(image).decode()}"
 
 
 def answer(response: httpx.Response) -> str | None:

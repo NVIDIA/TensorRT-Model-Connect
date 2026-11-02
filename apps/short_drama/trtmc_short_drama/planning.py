@@ -27,6 +27,8 @@ def run(context: Context) -> None:
     meta = project.meta
     episodes, max_seconds = int(meta.get("episodes", 4)), int(meta.get("max_seconds", 60))
     chat = context.services.chat(context.model)
+    language = prompts.language_of(meta)
+    vocabulary = prompts.words(language)
     temperature = float(params.get("temperature", 0.7))
     max_tokens = int(params.get("max_tokens", 12000))
     shot_seconds = int(params.get("shot_seconds", 8))
@@ -40,7 +42,7 @@ def run(context: Context) -> None:
     for number, text in enumerate(parts, start=1):
         context.check()
         context.progress(f"reading chapter {number} of {len(parts)}")
-        note = chat.complete_json(prompts.SYSTEM, prompts.CHAPTER_PROMPT.format(text=text),
+        note = chat.complete_json(prompts.SYSTEM, prompts.CHAPTER_PROMPT.format(text=text, **vocabulary),
                                   max_tokens=2048, temperature=0.3)
         notes.append({"number": number, "heading": text.splitlines()[0][:40],
                       **(note if isinstance(note, dict) else {"summary": str(note)})})
@@ -52,12 +54,12 @@ def run(context: Context) -> None:
     grouped = [{"episode": n, "chapters": [note for note in notes if note["number"] in r]}
                for n, r in enumerate(ranges, start=1)]
     request = prompts.BIBLE_PROMPT.format(episodes=episodes, max_seconds=max_seconds, assignment=assignment,
-                                          chapters=json.dumps(grouped, ensure_ascii=False))
+                                          chapters=json.dumps(grouped, ensure_ascii=False), **vocabulary)
     style = str(meta.get("style") or "").strip()  # chosen with the project; the looks should suit it
     if style:
         request += prompts.CHOSEN_STYLE.format(style=style)
     bible = chat.complete_json(prompts.SYSTEM, request, max_tokens=max_tokens, temperature=temperature)
-    plan = normalize_bible(bible, ranges)
+    plan = normalize_bible(bible, ranges, language)
     if style:
         plan["style"] = style
     plan["chapters"] = notes
@@ -76,7 +78,7 @@ def run(context: Context) -> None:
             min_shots=max(2, most - 2), max_shots=most,
             characters=prompts.roster(plan["characters"], "name", "role"),
             locations=prompts.roster(plan["locations"], "name"),
-            props=prompts.roster(plan["props"], "name"), source=source),
+            props=prompts.roster(plan["props"], "name"), source=source, **vocabulary),
             max_tokens=max_tokens, temperature=temperature)
         episode["shots"] = normalize_shots(shots, plan, episode["number"], max_seconds)
         project.save_plan(plan)
@@ -103,11 +105,12 @@ def _items(value: Any, prefix: str) -> list[dict[str, Any]]:
     return items
 
 
-def normalize_bible(bible: Any, ranges: list[list[int]]) -> dict[str, Any]:
+def normalize_bible(bible: Any, ranges: list[list[int]], language: str = "zh") -> dict[str, Any]:
     if not isinstance(bible, dict):
         raise ValueError("the plan must be a JSON object")
     plan = {
-        "title": chinese(bible.get("title")) or "短剧",
+        "title": chinese(bible.get("title")) or ("短剧" if language == "zh" else "Short drama"),
+        "language": language,
         "setting": str(bible.get("setting") or ""),
         "style": str(bible.get("style") or prompts.DEFAULT_STYLE),
         "characters": _items(bible.get("characters"), "c"),
@@ -123,7 +126,8 @@ def normalize_bible(bible: Any, ranges: list[list[int]]) -> dict[str, Any]:
     plan["episodes"] = []
     for number, chapters in enumerate(ranges, start=1):
         entry = outline[number - 1] if number <= len(outline) else {}
-        plan["episodes"].append({"number": number, "title": chinese(entry.get("title")) or f"第{number}集",
+        fallback = f"第{number}集" if language == "zh" else f"Episode {number}"
+        plan["episodes"].append({"number": number, "title": chinese(entry.get("title")) or fallback,
                                  "summary": chinese(entry.get("summary")), "chapters": chapters,
                                  "shots": []})
     if not plan["characters"] or not plan["locations"]:

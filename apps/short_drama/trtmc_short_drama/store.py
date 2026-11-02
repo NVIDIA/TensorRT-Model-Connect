@@ -184,10 +184,11 @@ class Store:
         return Project(root)
 
     def create(self, title: str, novel: str, *, flow: str, episodes: int, max_seconds: int,
-               idea: str = "", style: str = "") -> Project:
+               idea: str = "", style: str = "", language: str = "zh") -> Project:
         """A project starts from a novel, or from an idea the story step turns into one.
 
-        A `style` chosen here is the plan's visual style; without one the planner picks it.
+        A `style` chosen here is the plan's visual style; without one the planner picks it. The
+        `language` (zh or en) is the one the story, plan, lines and reviews are written in.
         """
 
         if not novel.strip() and not idea.strip():
@@ -202,6 +203,7 @@ class Store:
         (root / "novel.txt").write_text(novel, encoding="utf-8")
         project = Project(root)
         project.update_meta(title=title, flow=flow, episodes=episodes, max_seconds=max_seconds,
-                            created=int(time.time()), **({"idea": idea.strip()} if idea.strip() else {}),
+                            created=int(time.time()), language=language,
+                            **({"idea": idea.strip()} if idea.strip() else {}),
                             **({"style": style.strip()} if style.strip() else {}))
         return project

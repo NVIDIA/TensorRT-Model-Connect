@@ -124,7 +124,8 @@ def test_files_stay_inside_the_project_and_keys_stay_private(tmp_path, monkeypat
         client.put("/api/settings/external-chat", json={"base_url": "https://example.invalid/v1",
                                                         "model": "m", "api_key": "secret-key"})
         state = client.get("/api/state").json()
-        assert state["external_chat"] == {"base_url": "https://example.invalid/v1", "model": "m", "has_key": True}
+        assert state["external_chat"] == {"base_url": "https://example.invalid/v1", "model": "m", "vision_model": "",
+                                          "has_key": True}
         assert "secret-key" not in json.dumps(state)
         assert stat.S_IMODE((tmp_path / "secrets.json").stat().st_mode) == 0o600
 

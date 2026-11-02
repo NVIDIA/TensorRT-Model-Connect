@@ -20,6 +20,7 @@ LEAD_IN = 0.25
 FADE = 0.04
 # One loudness for the whole episode, so the level does not jump at every cut.
 LOUDNESS = "loudnorm=I=-16:TP=-1.5:LRA=11"
+SHEET_TILES = 8  # frames in a contact sheet, left to right
 
 
 def _run(*arguments: str, cwd: Path | None = None) -> None:
@@ -55,7 +56,7 @@ def finish_clip(raw: Path, clip: Path, *, seconds: float, lead_in: float = LEAD_
     partial.replace(clip)
 
 
-def contact_sheet(clip: Path, sheet: Path, *, tiles: int = 8) -> None:
+def contact_sheet(clip: Path, sheet: Path, *, tiles: int = SHEET_TILES) -> None:
     sheet.parent.mkdir(parents=True, exist_ok=True)
     rate = tiles / max(probe(clip)["duration"], 0.1)
     _run("-i", str(clip), "-vf", f"fps={rate:.4f},scale=180:320,tile={tiles}x1:padding=4:color=white",
