@@ -70,6 +70,12 @@ def test_a_line_from_someone_off_screen_becomes_a_voiceover():
     assert "An off-screen narrator says in an off-screen voiceover: <d>[Chinese] 我和你困觉！</d>" in first
 
 
+def test_a_shot_without_a_line_says_that_no_one_speaks():
+    references = [("character", PLAN["characters"][0]), ("location", PLAN["locations"][0])]
+    first, _ = prompts.video_prompts(PLAN, {**SHOT, "speaker": "", "line": ""}, references)
+    assert "No one speaks; the people on screen keep their lips closed." in first and "<d>" not in first
+
+
 def test_still_prompts_describe_each_kind():
     assert "Full-body portrait of a thin man with a queue" in prompts.still_prompt(PLAN, "character", PLAN["characters"][0])
     assert "An empty establishing view" in prompts.still_prompt(PLAN, "location", PLAN["locations"][0])
