@@ -112,8 +112,11 @@ def shot_references(project, plan: dict[str, Any], shot: dict[str, Any], *, prev
     if previous is not None and previous.is_file():
         if len(paths) >= MAX_REFERENCES:  # continuity matters more than the last prop
             references, paths = references[:MAX_REFERENCES - 1], paths[:MAX_REFERENCES - 1]
-        references.append(("previous", {"scope": previous_scope}))
-        paths.append(previous)
+        if previous_scope == "shot":  # Picture 1: the student tends to open on its first picture
+            references, paths = [("previous", {"scope": previous_scope}), *references], [previous, *paths]
+        else:
+            references.append(("previous", {"scope": previous_scope}))
+            paths.append(previous)
     return references[:MAX_REFERENCES], paths[:MAX_REFERENCES]
 
 
@@ -260,7 +263,7 @@ def run_shots(context: Context) -> None:
         context.services.engine.video(context.model, prompt, paths, raw, seed=seed,
                                       continuation=continuation)
         clip = inside(project, directory / "clips" / f"{shot['id']}-take{take}.mp4")
-        video.finish_clip(raw, clip, seconds=float(shot["seconds"]))
+        lead_in = video.finish_clip(raw, clip, seconds=float(shot["seconds"]))
         sheet = inside(project, directory / "sheets" / f"{shot['id']}-take{take}.jpg")
         video.contact_sheet(clip, sheet)
         ensure_last_frame(project, number, {"file": str(clip.relative_to(project.root))})  # the next shot starts here
@@ -268,7 +271,7 @@ def run_shots(context: Context) -> None:
         rendered = {"take": take, "seed": seed, "file": str(clip.relative_to(project.root)),
                     "sheet": str(sheet.relative_to(project.root)), "raw": str(raw.relative_to(project.root)),
                     "prompt": prompt, "continuation": continuation,
-                    "references": [relative(project, p) for p in paths],
+                    "references": [relative(project, p) for p in paths], "lead_in": lead_in,
                     "model": context.model, "seconds": round(time.monotonic() - started, 1)}
         state = project.shot_state(number)
         entry = state.get(shot["id"], {})

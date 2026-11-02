@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from pathlib import Path
+import shutil
+import subprocess
 
 import pytest
 
@@ -37,8 +39,8 @@ class FakeServices:
 
 @pytest.fixture
 def project(tmp_path, monkeypatch):
-    monkeypatch.setattr(video, "finish_clip", lambda raw, clip, seconds: clip.parent.mkdir(parents=True, exist_ok=True)
-                        or clip.write_bytes(raw.read_bytes()))
+    monkeypatch.setattr(video, "finish_clip", lambda raw, clip, seconds: (clip.parent.mkdir(parents=True, exist_ok=True)
+                        or clip.write_bytes(raw.read_bytes())) and 0.25)
     monkeypatch.setattr(video, "contact_sheet", lambda clip, sheet: sheet.parent.mkdir(parents=True, exist_ok=True)
                         or sheet.write_bytes(b"jpg"))
     monkeypatch.setattr(video, "last_frame", lambda clip, image: image.write_bytes(b"png"))
@@ -155,8 +157,9 @@ def test_each_shot_opens_where_the_shot_before_it_ends_in_the_same_place(project
     render(project, services)
     first, second, third = services.engine.calls
     assert first["references"] == ["character-aq.png", "location-temple.png"]
-    assert second["references"] == ["character-aq.png", "location-temple.png", "e1s1-take1-last.png"]
-    assert "final frame of the previous shot in <Picture 3>" in second["prompt"]
+    assert second["references"] == ["e1s1-take1-last.png", "character-aq.png", "location-temple.png"]
+    assert "final frame of the previous shot in <Picture 1>" in second["prompt"]
+    assert "[Shot 1] The shot opens exactly on the frame in <Picture 1>" in second["prompt"]
     assert third["references"] == ["character-aq.png", "location-street.png"]  # a new place is a cut
 
     def reasons(shot_id):
@@ -178,13 +181,27 @@ def test_each_shot_opens_where_the_shot_before_it_ends_in_the_same_place(project
 def test_a_clip_skips_the_lead_in_and_keeps_its_planned_length(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(video, "probe", lambda path: {"duration": duration})
+    monkeypatch.setattr(video, "opening", lambda raw: video.LEAD_IN)
     monkeypatch.setattr(video, "_run", lambda *arguments, cwd=None: calls.append(arguments)
                         or Path(arguments[-1]).write_bytes(b"mp4"))
     duration = 9.42
-    video.finish_clip(tmp_path / "raw.mp4", tmp_path / "clip.mp4", seconds=9)
+    assert video.finish_clip(tmp_path / "raw.mp4", tmp_path / "clip.mp4", seconds=9) == video.LEAD_IN
     duration = 9.1  # too short to keep all 9 s after the lead-in
     video.finish_clip(tmp_path / "raw.mp4", tmp_path / "clip.mp4", seconds=9)
     starts = [arguments[arguments.index("-ss") + 1] for arguments in calls]
     lengths = [arguments[arguments.index("-t") + 1] for arguments in calls]
     assert starts == ["0.250", "0.250"] and lengths == ["9.000", "8.850"]
     assert "afade=t=out:st=8.810:d=0.04" in calls[1][calls[1].index("-af") + 1]
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs FFmpeg")
+def test_a_clip_starts_after_a_held_reference_picture(tmp_path):
+    held = tmp_path / "held.mp4"
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "color=c=white:s=90x160:d=0.5:r=24",
+                    "-f", "lavfi", "-i", "color=c=0x202020:s=90x160:d=1.5:r=24", "-filter_complex", "[0][1]concat=n=2",
+                    "-pix_fmt", "yuv420p", str(held)], check=True)
+    assert video.opening(held) == 0.5  # the first frame after the cut
+    steady = tmp_path / "steady.mp4"
+    subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=90x160:d=2:r=24",
+                    "-pix_fmt", "yuv420p", str(steady)], check=True)
+    assert video.opening(steady) == video.LEAD_IN
