@@ -331,5 +331,6 @@ const ZH_PATTERNS = [
   [/^reading chapter (\d+) of (\d+)$/, "正在读第 $1/$2 章"], [/^planning characters, places and episodes$/, "正在规划角色、场景和分集"],
   [/^writing the shots of episode (\d+)$/, "正在写第 $1 集的分镜"], [/^writing the story$/, "正在写故事"],
   [/^revising (\w+) (\w+)$/, "正在修改 $1 $2"], [/^reviewing episode (\d+)$/, "正在审阅第 $1 集"],
-  [/^drawing (.+)$/, "正在画 $1"], [/^timing (\w+)$/, "正在给 $1 定时"],
+  [/^still (\d+) of (\d+): (.+)$/, "第 $1/$2 张参考图：$3"], [/^episode (\d+): timing line (\d+) of (\d+)$/, "第 $1 集：第 $2/$3 句台词定时"],
+  [/^episode (\d+): joining (\d+) clips$/, "第 $1 集：拼接 $2 个片段"],
 ];

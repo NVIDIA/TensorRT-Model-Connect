@@ -175,7 +175,7 @@ function runningCard(active) {
     start = engineSince();
   } else {
     title = stepName(job);
-    phase = job.message ? capital(job.message) : t("Starting…");
+    phase = job.message ? capital(t(job.message)) : t("Starting…");
     start = since(job.phase_seconds ?? job.seconds);
     estimate = phaseEstimate(job);
   }

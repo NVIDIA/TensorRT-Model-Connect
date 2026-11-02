@@ -173,7 +173,7 @@ function renderStatus() {
     clockNode = timer(engineSince());
   } else if (job) {
     dot = "run";
-    text = `${stepName(job)}${job.message ? ` · ${job.message}` : ""}`;
+    text = `${stepName(job)}${job.message ? ` · ${t(job.message)}` : ""}`;
     clockNode = timer(since(job.phase_seconds ?? job.seconds));
   } else if (last && last.status === "failed" && !ui.dismissed.has(last.id)) {
     dot = "bad";
@@ -216,7 +216,7 @@ function jobItem(job) {
   const status = t(STATUS[job.status] || job.status);
   const time = job.status === "running" ? timer(since(job.seconds)) : job.seconds != null ? clock(job.seconds) : status;
   return el("li", {}, el("span", { class: `dot ${dot}` }), el("span", { class: "what" }, stepName(job)), el("span", { class: "faint" }, time),
-    el("span", { class: "sub" }, `${projectTitle(job.project)} · ${status}${job.message ? ` · ${job.message}` : ""}`),
+    el("span", { class: "sub" }, `${projectTitle(job.project)} · ${status}${job.message ? ` · ${t(job.message)}` : ""}`),
     job.error ? el("span", { class: "sub error" }, job.error) : "");
 }
 
