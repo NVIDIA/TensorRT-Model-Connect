@@ -279,11 +279,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         "text_to_pooled_features",
         "text_to_token_features",
         "text_to_embedding",
-        "text_pair_to_relevance",
+
     }:
         raise ValueError(
             "albert task must be encoding, text_to_pooled_features, text_to_token_features,"
-            " text_to_embedding, or text_pair_to_relevance"
+            " or text_to_embedding"
         )
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)

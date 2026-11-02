@@ -6,11 +6,10 @@
 #pragma once
 
 // EncoderPipeline: single-pass ALBERT models.
-// Implements IModel with four semantic Task interfaces:
+// Implements IModel with three semantic Task interfaces:
 //   text_to_pooled_features (primary; preserves legacy encoding CLS output)
 //   text_to_token_features  (full token hidden states)
 //   text_to_embedding       (mean pooled and L2 normalized)
-//   text_pair_to_relevance  (cross-encoder score)
 
 #include "families/albert/runtime/tokenizer.h"
 #include "trtmc/internal/features.h"
@@ -27,8 +26,7 @@ namespace trtmc {
 class EncoderPipeline final : public trtmc::internal::IModel,
                               public trtmc::internal::ITextToPooledFeatures,
                               public trtmc::internal::ITextToTokenFeatures,
-                              public trtmc::internal::ITextToEmbedding,
-                              public trtmc::internal::ITextPairToRelevance {
+                              public trtmc::internal::ITextToEmbedding {
   public:
     EncoderPipeline(std::unique_ptr<ITrtModule> encoder, std::string primary_task,
                     std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "");
@@ -57,11 +55,6 @@ class EncoderPipeline final : public trtmc::internal::IModel,
     trtmc::internal::SemanticEmbeddingResult
     run(const trtmc::internal::TextToEmbeddingRequest& request,
         trtmc::internal::ConfigView config) override;
-
-    // ITextPairToRelevance — was: reranking
-    // Concatenates "question:<query>   passage:<document>", returns first output scalar.
-    trtmc::internal::RelevanceResult run(const trtmc::internal::TextPairToRelevanceRequest& request,
-                                         trtmc::internal::ConfigView config) override;
 
     // Token-ID-based encoding helper (for unit tests and internal callers).
     std::vector<float> encode_ids(const std::vector<int32_t>& input_ids);

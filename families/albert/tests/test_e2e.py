@@ -254,7 +254,7 @@ def _native(
     case: dict,
     tmp_path: Path,
 ):
-    manifest["task"]
+    del model_dir, tmp_path
     return _run_json(
         binary, runtime_root, bundle, manifest, case, "encode", "--text", _case_text(case)
     )
@@ -318,7 +318,7 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
 
 
 def _assert_sdk_consumers(
-    runtime_root: Path, bundle: Path, case: dict, tmp_path: Path
+    runtime_root: Path, bundle: Path, manifest: dict, case: dict, tmp_path: Path
 ) -> None:
     del tmp_path
     native_build_str = os.environ.get("TRTMC_NATIVE_BUILD_DIR")
@@ -330,11 +330,31 @@ def _assert_sdk_consumers(
     env["LD_LIBRARY_PATH"] = ":".join(
         val for val in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if val
     )
+    tp_size = int(manifest.get("tensor_parallel_size", 1))
     for language in ("c", "cpp"):
         consumer = native_build / f"test_albert_sdk_{language}"
         assert consumer.is_file(), f"missing family SDK consumer: {consumer.name}"
+        rendezvous_file = bundle.with_suffix(f".sdk-{language}-nccl-rendezvous")
+        if rendezvous_file.exists():
+            rendezvous_file.unlink()
+        env["TRTMC_NCCL_RENDEZVOUS"] = str(rendezvous_file)
+        cmd = [str(consumer), str(bundle), str(runtime_root)]
+        if tp_size > 1:
+            mpirun = shutil.which("mpirun")
+            assert mpirun, "selected multi-GPU E2E requires mpirun"
+            cmd = [
+                mpirun,
+                "--tag-output",
+                "-x",
+                "LD_LIBRARY_PATH",
+                "-x",
+                "TRTMC_NCCL_RENDEZVOUS",
+                "-np",
+                str(tp_size),
+                *cmd,
+            ]
         completed = subprocess.run(
-            [str(consumer), str(bundle), str(runtime_root)],
+            cmd,
             check=True,
             capture_output=True,
             text=True,
@@ -363,4 +383,4 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     with evidence_stage("compare"):
         _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
     with evidence_stage("sdk"):
-        _assert_sdk_consumers(runtime_root, bundle, case, tmp_path)
+        _assert_sdk_consumers(runtime_root, bundle, manifest, case, tmp_path)

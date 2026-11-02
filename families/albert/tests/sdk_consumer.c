@@ -5,7 +5,7 @@
 
 /*
  * Minimal C SDK consumer for the albert family.
- * Exercises text_to_token_features, text_to_embedding, and text_pair_to_relevance
+ * Exercises text_to_pooled_features, text_to_token_features, and text_to_embedding
  * through the public C API (trtmc/trtmc.h + trtmc/features.h).
  *
  * Usage:
@@ -13,8 +13,6 @@
  *
  * Environment:
  *   TRTMC_ALBERT_TEXT       input text for token-features and embedding (default: "hello world")
- *   TRTMC_ALBERT_QUERY      query string for relevance test (default: "What is AI?")
- *   TRTMC_ALBERT_DOCUMENT   document string for relevance test (default: "AI is intelligence.")
  */
 
 #include <stdio.h>
@@ -55,14 +53,8 @@ int main(int argc, char** argv) {
     const char* runtime_root = argv[2];
 
     const char* text = getenv("TRTMC_ALBERT_TEXT");
-    const char* query = getenv("TRTMC_ALBERT_QUERY");
-    const char* document = getenv("TRTMC_ALBERT_DOCUMENT");
     if (!text)
         text = "hello world";
-    if (!query)
-        query = "What is AI?";
-    if (!document)
-        document = "AI is intelligence.";
 
     /* ── load API ─────────────────────────────────────────────────────────── */
     const trtmc_core_api_v1* api = NULL;
@@ -184,35 +176,6 @@ int main(int argc, char** argv) {
         printf("text_to_embedding: dim=%llu pooling=%.*s normalization=%.*s\n",
                (unsigned long long)view.count, (int)view.pooling.size, view.pooling.data,
                (int)view.normalization.size, view.normalization.data);
-        api->result_release(result);
-    }
-
-    /* ── text_pair_to_relevance ──────────────────────────────────────────── */
-    {
-        const trtmc_api_header* task_header = NULL;
-        check(api->model_get_task_api(model, sv(TRTMC_TASK_TEXT_PAIR_TO_RELEVANCE), 1, 0,
-                                      &task_header, &err),
-              api, &err, "get text_pair_to_relevance");
-
-        const trtmc_text_pair_to_relevance_api_v1* task =
-            (const trtmc_text_pair_to_relevance_api_v1*)task_header;
-
-        trtmc_text_pair_to_relevance_request_v1 req;
-        memset(&req, 0, sizeof(req));
-        req.query = sv(query);
-        req.document = sv(document);
-
-        trtmc_config_view_v1 cfg;
-        memset(&cfg, 0, sizeof(cfg));
-
-        trtmc_result* result = NULL;
-        check(task->run(model, &req, &cfg, &result, &err), api, &err, "relevance run");
-
-        trtmc_relevance_view_v1 view;
-        memset(&view, 0, sizeof(view));
-        check(task->result_view(result, &view, &err), api, &err, "relevance result_view");
-
-        printf("text_pair_to_relevance: score=%.6f\n", view.score);
         api->result_release(result);
     }
 

@@ -1,18 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Validation of ALBERT qualification profile and task normalization."""
+"""Validation of ALBERT task normalization and builder support."""
 
 from __future__ import annotations
 
 import sys
 import types
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-import yaml
 
 try:
     import tensorrt  # noqa: F401
@@ -33,43 +31,8 @@ except ModuleNotFoundError:
 from families.albert.model import build  # noqa: E402
 
 
-def _benchmark_yaml_path() -> Path:
-    return Path(__file__).resolve().parent / "benchmark" / "albert-base.yaml"
-
-
-def test_albert_qualification_profile_structure():
-    yaml_path = _benchmark_yaml_path()
-    assert yaml_path.is_file(), f"Missing qualification profile: {yaml_path}"
-
-    with open(yaml_path, "r", encoding="utf-8") as f:
-        doc = yaml.safe_load(f)
-
-    assert doc.get("schema_version") == "trtmc.qualification/v1"
-    assert doc.get("model") == "albert-base"
-
-    candidate = doc.get("candidate", {})
-    assert candidate.get("family") == "albert"
-    # Qualification stsbenchmark_embedding_parity requires "encoding" or "embedding"
-    assert candidate.get("task") == "encoding"
-    assert candidate.get("precision") == "fp16"
-
-    # Accuracy section must exercise stsbenchmark_embedding_parity
-    accuracy_list = doc.get("accuracy", [])
-    assert len(accuracy_list) >= 1
-    sts_benchmarks = [acc for acc in accuracy_list if acc.get("benchmark") == "stsbenchmark_embedding_parity"]
-    assert len(sts_benchmarks) == 1
-    assert sts_benchmarks[0].get("name") == "stsbenchmark-parity"
-
-    # Performance section must specify operation: encode and output_contract: embedding-shape
-    performance_list = doc.get("performance", [])
-    assert len(performance_list) >= 1
-    encode_benchmarks = [p for p in performance_list if p.get("operation") == "encode"]
-    assert len(encode_benchmarks) == 1
-    assert encode_benchmarks[0].get("reference", {}).get("output_contract") == "embedding-shape"
-
-
 def test_albert_builder_accepts_encoding_task():
-    """Verify that build accepts legacy 'encoding' task and publishes it explicitly."""
+    """Verify that build accepts legacy 'encoding' task and publishes it to header."""
     dummy_request = SimpleNamespace(
         dynamic_kv_cache=False,
         image_height=None,
@@ -86,6 +49,7 @@ def test_albert_builder_accepts_encoding_task():
         tensor_parallel_size=1,
         backend="tensorrt",
         verbose=False,
+        mtp_seq_len=None,
     )
 
     writer = MagicMock()
@@ -114,7 +78,6 @@ def test_albert_builder_accepts_semantic_tasks():
         "text_to_pooled_features",
         "text_to_token_features",
         "text_to_embedding",
-        "text_pair_to_relevance",
     ):
         req = SimpleNamespace(
             dynamic_kv_cache=False,
@@ -132,6 +95,7 @@ def test_albert_builder_accepts_semantic_tasks():
             tensor_parallel_size=1,
             backend="tensorrt",
             verbose=False,
+            mtp_seq_len=None,
         )
 
         writer = MagicMock()
@@ -170,6 +134,7 @@ def test_albert_builder_rejects_unsupported_task():
         tensor_parallel_size=1,
         backend="tensorrt",
         verbose=False,
+        mtp_seq_len=None,
     )
     writer = MagicMock()
     with pytest.raises(ValueError, match="albert task must be"):

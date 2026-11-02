@@ -5,18 +5,14 @@
 
 /*
  * Minimal C++ SDK consumer for the albert family.
- * Exercises text_to_pooled_features, text_to_token_features, text_to_embedding, and
- * text_pair_to_relevance through the public C++ convenience wrappers (trtmc/trtmc.hpp +
- * trtmc/features.hpp).
+ * Exercises text_to_pooled_features, text_to_token_features, and text_to_embedding
+ * through the public C++ convenience wrappers (trtmc/trtmc.hpp + trtmc/features.hpp).
  *
  * Usage:
  *   sdk_consumer_albert_cpp <bundle_path> <runtime_root>
  *
  * Environment:
  *   TRTMC_ALBERT_TEXT - Defaults to hello world.
- *   TRTMC_ALBERT_QUERY - Defaults to an AI
- * question.
- *   TRTMC_ALBERT_DOCUMENT - Defaults to an AI statement.
  */
 
 #include <cstdlib>
@@ -35,11 +31,7 @@ int main(int argc, char** argv) {
     const std::string runtime_root = argv[2];
 
     const char* env_text = std::getenv("TRTMC_ALBERT_TEXT");
-    const char* env_query = std::getenv("TRTMC_ALBERT_QUERY");
-    const char* env_document = std::getenv("TRTMC_ALBERT_DOCUMENT");
     const std::string text = env_text ? env_text : "hello world";
-    const std::string query = env_query ? env_query : "What is AI?";
-    const std::string document = env_document ? env_document : "AI is intelligence.";
 
     try {
         // ── load model ────────────────────────────────────────────────────
@@ -89,15 +81,6 @@ int main(int argc, char** argv) {
             std::cout << "text_to_embedding: dim=" << result.values().size()
                       << " pooling=" << result.pooling()
                       << " normalization=" << result.normalization() << "\n";
-        }
-
-        // ── text_pair_to_relevance ──────────────────────────────────────
-        {
-            auto rel_task = model.task<trtmc::TextPairToRelevance>();
-            trtmc::TextPairToRelevanceRequest req{query, document};
-            auto result = rel_task.run(req);
-
-            std::cout << "text_pair_to_relevance: score=" << result.score() << "\n";
         }
 
     } catch (const std::exception& ex) {

@@ -13,7 +13,6 @@ describe = family_support(
         "text_to_pooled_features",
         "text_to_token_features",
         "text_to_embedding",
-        "text_pair_to_relevance",
     ),
     default_task="text_to_pooled_features",
 )

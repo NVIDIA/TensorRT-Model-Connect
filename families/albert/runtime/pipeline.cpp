@@ -80,7 +80,6 @@ std::vector<trtmc::internal::TaskInstance> EncoderPipeline::task_bindings() {
         trtmc::internal::bind<trtmc::internal::ITextToPooledFeatures>(*this),
         trtmc::internal::bind<trtmc::internal::ITextToTokenFeatures>(*this),
         trtmc::internal::bind<trtmc::internal::ITextToEmbedding>(*this),
-        trtmc::internal::bind<trtmc::internal::ITextPairToRelevance>(*this),
     };
 }
 
@@ -176,28 +175,6 @@ EncoderPipeline::run(const trtmc::internal::TextToEmbeddingRequest& request,
     require_encoder_output(raw_floats, actual_len, hidden);
 
     result.values = mean_pool_and_normalize(raw_floats.data(), actual_len, hidden);
-    return result;
-}
-
-// ─── ITextPairToRelevance (was: reranking) ───
-// Combines query and document with the Nemotron rerank template, returns the
-// first output scalar as a relevance score.
-trtmc::internal::RelevanceResult
-EncoderPipeline::run(const trtmc::internal::TextPairToRelevanceRequest& request,
-                     trtmc::internal::ConfigView /*config*/) {
-    if (!tokenizer_)
-        throw std::runtime_error("EncoderPipeline: no tokenizer configured");
-
-    // Match the text-only reranking template documented by the supported
-    // Nemotron rerank cross-encoder model card.
-    std::string combined =
-        "question:" + std::string(request.query) + "   passage:" + std::string(request.document);
-    auto ids = tokenizer_->encode(combined);
-    const auto raw_floats = encode_ids(ids);
-
-    trtmc::internal::RelevanceResult result;
-    if (!raw_floats.empty())
-        result.score = raw_floats[0];
     return result;
 }
 

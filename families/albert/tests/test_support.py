@@ -20,7 +20,6 @@ def test_all_semantic_tasks_declared():
     assert "text_to_pooled_features" in support.tasks
     assert "text_to_token_features" in support.tasks
     assert "text_to_embedding" in support.tasks
-    assert "text_pair_to_relevance" in support.tasks
 
 
 def test_unrelated_model_type_is_not_claimed():
