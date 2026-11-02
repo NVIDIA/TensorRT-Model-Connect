@@ -43,6 +43,8 @@ def parser() -> argparse.ArgumentParser:
     up.add_argument("--server-port", type=int, default=8701)
     up.add_argument("--plugins", type=Path, default=Path(__file__).resolve().parents[1] / "plugins")
     up.add_argument("--dry-run", action="store_true", help="print the plan and the build commands only")
+    up.add_argument("--allow-planned", action="store_true",
+                    help="start a tier that TRTMC cannot run end to end yet (shots will fail)")
     return result
 
 
@@ -153,6 +155,10 @@ def main(argv: list[str] | None = None) -> int:
     tier = catalog.pick_tier(gpu, args.tier)
     print(f"GPU {gpu.index}: {gpu.name}, {gpu.memory_gib:.0f} GiB, sm{gpu.compute_capability} -> "
           f"tier {tier.name.upper()} ({tier.summary})", flush=True)
+    if tier.missing and not (args.allow_planned or args.dry_run):
+        raise SystemExit(f"tier {tier.name.upper()} is planned; TRTMC still needs: " + "; ".join(tier.missing) +
+                         ". Start it anyway with --allow-planned (stories, plans and pictures work; shots do not), "
+                         "or use a GPU with more memory.")
     wanted = served_models(tier, args.llm)
     if args.llm == "api":
         print(f"language model: the chat API chosen in Settings (the NVIDIA API catalog and OpenRouter have "
