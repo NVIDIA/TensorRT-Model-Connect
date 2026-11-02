@@ -49,6 +49,8 @@ def test_measured_findings_name_the_shot_and_what_to_do():
     unplanned = analysis.measured_findings("en", {"id": "e1s3", "line": ""},
                                            {**measures, "speech": {"heard": "who is there", "match": 0.0}})
     assert [f["id"] for f in unplanned] == ["e1s3-unplanned"] and unplanned[0]["finding"].startswith("someone speaks")
+    credits = {**measures, "speech": {"heard": "字幕志愿者 杨茜茜", "match": 0.0}}
+    assert analysis.measured_findings("zh", {"id": "e1s2", "line": ""}, credits) == []  # Whisper on quiet audio
     cuts = [{"from": "e1s1", "to": "e1s2", "same_place": True, "jump": 0.6, "level_jump_db": 12.0},
             {"from": "e1s2", "to": "e1s3", "same_place": False, "jump": 0.9, "level_jump_db": 1.0}]
     found = analysis.cut_findings("en", cuts)

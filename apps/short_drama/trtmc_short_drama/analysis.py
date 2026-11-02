@@ -47,6 +47,9 @@ LEVEL_JUMP_DB = 8.0
 HEARD = 0.6  # share of the planned line speech recognition must find
 VISION_IMAGES = 4  # the frames, at most two reference pictures and the previous shot's last frame
 TARGET = re.compile(r"(shot|character|location|prop):([a-z0-9_]{1,40})")
+# What Whisper writes for music or quiet: subtitle credits and outros it learned from subtitled videos.
+HALLUCINATIONS = re.compile(r"字幕|字幕志愿者|请不吝点赞|订阅|谢谢观看|明镜与点点|amara\.org|thanks? (you )?for watching|"
+                            r"subscribe", re.IGNORECASE)
 CATEGORIES = ("content", "text", "continuity", "consistency", "reference")
 ACTIONS = ("revise", "retake", "redraw")
 
@@ -202,7 +205,7 @@ def measured_findings(language: str, shot: dict[str, Any], measures: dict[str, A
         elif shot.get("line") and speech["match"] < HEARD:
             found.append(_finding(language, "partial", sid, "speech", "medium", "retake", target,
                                   match=round(100 * speech["match"]), heard=heard))
-        elif not shot.get("line") and len(editing.normalize(heard)) >= 4:
+        elif not shot.get("line") and len(editing.normalize(heard)) >= 4 and not HALLUCINATIONS.search(heard):
             found.append(_finding(language, "unplanned", sid, "speech", "medium", "revise", target, heard=heard))
     pic = measures["picture"]
     if pic["black"] >= 0.15:
