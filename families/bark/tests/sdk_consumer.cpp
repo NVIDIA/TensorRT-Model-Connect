@@ -37,11 +37,11 @@ int main(int argc, char** argv) {
         // ── load model ────────────────────────────────────────────────────
         trtmc::LoadOptions opts;
         opts.runtime_root = runtime_root;
-        auto model = trtmc::load_task(bundle_path, opts);
+        auto model = trtmc::Model::load(bundle_path, opts);
 
         // ── text_to_audio ─────────────────────────────────────────────────
         {
-            auto& audio_task = model->get<trtmc::TextToAudio>();
+            auto audio_task = model.task<trtmc::TextToAudio>();
             trtmc::TextToAudioRequest req{prompt};
             auto result = audio_task.run(req);
 

@@ -25,7 +25,12 @@
 static void check(trtmc_status status, const trtmc_core_api_v1* api, trtmc_error** err,
                   const char* label) {
     if (status != TRTMC_OK) {
-        fprintf(stderr, "%s failed: %s\n", label, api ? api->error_message(*err) : "(no api)");
+        if (api && *err) {
+            trtmc_string_view msg = api->error_message(*err);
+            fprintf(stderr, "%s failed: %.*s\n", label, (int)msg.size, msg.data ? msg.data : "");
+        } else {
+            fprintf(stderr, "%s failed: (no api or error)\n", label);
+        }
         if (api && *err)
             api->error_release(*err);
         exit(1);
@@ -35,7 +40,7 @@ static void check(trtmc_status status, const trtmc_core_api_v1* api, trtmc_error
 static trtmc_string_view sv(const char* s) {
     trtmc_string_view v;
     v.data = s;
-    v.length = strlen(s);
+    v.size = strlen(s);
     return v;
 }
 
@@ -58,6 +63,7 @@ int main(int argc, char** argv) {
     /* ── load model ───────────────────────────────────────────────────────── */
     trtmc_load_options_v1 opts;
     memset(&opts, 0, sizeof(opts));
+    opts.struct_size = sizeof(opts);
     opts.runtime_root = sv(runtime_root);
 
     trtmc_model* model = NULL;
