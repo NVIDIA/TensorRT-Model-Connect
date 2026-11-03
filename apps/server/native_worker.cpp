@@ -19,6 +19,7 @@
 #include "trtmc/stream.hpp"
 #include "trtmc/task.h"
 #include "trtmc/text.hpp"
+#include "trtmc/video.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -768,8 +769,144 @@ int run_existing_worker(ITask& task, std::istream& input, std::ostream& output,
     return run_text_worker(task, input, output);
 }
 
+constexpr std::size_t kMaxVideoReferences = 16;
+
+void write_le(std::ofstream& file, std::uint32_t value, int bytes) {
+    for (int index = 0; index < bytes; ++index)
+        file.put(static_cast<char>((value >> (8 * index)) & 0xFFU));
+}
+
+// 16-bit PCM WAV from the Task's borrowed interleaved float samples.
+Json write_wav(const std::filesystem::path& path, const AudioView& audio) {
+    if (!audio.sample_rate || *audio.sample_rate == 0 || audio.channels == 0 ||
+        audio.channels > 8 || audio.samples.size() % audio.channels != 0)
+        throw std::runtime_error("audio result lacks a sample rate or whole sample frames");
+    const std::uint64_t data_bytes = audio.samples.size() * 2U;
+    if (data_bytes > 0xFFFFFFFFULL - 36U)
+        throw std::runtime_error("audio result exceeds the WAV size limit");
+    const std::uint32_t rate = *audio.sample_rate;
+    const std::uint32_t channels = audio.channels;
+    std::ofstream file(path, std::ios::binary);
+    file.exceptions(std::ios::badbit | std::ios::failbit);
+    file.write("RIFF", 4);
+    write_le(file, static_cast<std::uint32_t>(36U + data_bytes), 4);
+    file.write("WAVEfmt ", 8);
+    write_le(file, 16, 4);
+    write_le(file, 1, 2);
+    write_le(file, channels, 2);
+    write_le(file, rate, 4);
+    write_le(file, rate * channels * 2U, 4);
+    write_le(file, channels * 2U, 2);
+    write_le(file, 16, 2);
+    file.write("data", 4);
+    write_le(file, static_cast<std::uint32_t>(data_bytes), 4);
+    for (const float sample : audio.samples) {
+        if (!std::isfinite(sample))
+            throw std::runtime_error("audio result contains non-finite samples");
+        const auto value =
+            static_cast<std::int16_t>(std::lround(std::clamp(sample, -1.0F, 1.0F) * 32767.0F));
+        write_le(file, static_cast<std::uint16_t>(value), 2);
+    }
+    return {{"audio_sample_rate", rate},
+            {"audio_channels", channels},
+            {"audio_samples", audio.samples.size() / channels}};
+}
+
+Json write_audio_video(const AudioVideoGenerationResult& result, const std::string& frame_directory,
+                       const std::string& audio_path, double wall_ms) {
+    const auto frames = result.frames();
+    if (frames.size() == 0 || frames[0].channels != 3 || frames[0].height == 0 ||
+        frames[0].width == 0)
+        throw std::runtime_error("reference video result has no RGB frames");
+    const auto height = frames[0].height;
+    const auto width = frames[0].width;
+    std::filesystem::create_directories(frame_directory);
+    for (std::size_t index = 0; index < frames.size(); ++index) {
+        const auto& frame = frames[index];
+        if (frame.height != height || frame.width != width || frame.channels != 3 ||
+            frame.pixel_count != std::uint64_t{height} * width * 3U)
+            throw std::runtime_error("reference video frames differ in geometry");
+        std::ostringstream name;
+        name << "frame-" << std::setw(6) << std::setfill('0') << index << ".png";
+        cli::io::save_png(
+            (std::filesystem::path(frame_directory) / name.str()).string(),
+            Span<const float>{frame.pixels, static_cast<std::size_t>(frame.pixel_count)},
+            static_cast<int>(width), static_cast<int>(height), 3);
+    }
+    const auto times = result.timestamps_seconds();
+    double fps = 0.0;
+    if (times.size() >= 2 && times[times.size() - 1] > times[0])
+        fps = static_cast<double>(times.size() - 1) / (times[times.size() - 1] - times[0]);
+    auto summary = write_wav(audio_path, result.audio());
+    summary.update(Json{{"width", width},
+                        {"height", height},
+                        {"channels", 3},
+                        {"num_frames", frames.size()},
+                        {"fps", fps},
+                        {"audio_start_seconds", result.audio_start_seconds()},
+                        {"model_call_ms", wall_ms},
+                        {"timing_scope", "public_task_call_wall"}});
+    return summary;
+}
+
+int run_reference_video_worker(const Model& model, std::istream& input, std::ostream& output) {
+    const auto task = model.task<ReferencesTextToAudioVideo>();
+    const auto fields = task.config_fields();
+    const Json ready{{"event", "ready"},
+                     {"protocol_version", 1},
+                     {"capabilities", Json::array({"reference_video_generation"})}};
+    return run_protocol(
+        ready,
+        {{"generate_reference_video",
+          [&](const Json& request) {
+              const auto prompt = string_field(request, "prompt");
+              const auto frame_directory = string_field(request, "output_path");
+              const auto audio_path = string_field(request, "audio_path");
+              const auto paths = request.value("reference_paths", Json::array());
+              if (!paths.is_array() || paths.empty() || paths.size() > kMaxVideoReferences)
+                  throw ProtocolError("reference_paths must list 1 to 16 images");
+              // The Task reads borrowed RGB uint8 pixels; keep every buffer alive until run
+              // returns.
+              std::vector<std::vector<std::uint8_t>> pixels;
+              pixels.reserve(paths.size());
+              ReferencesTextToAudioVideoRequest references{{}, prompt};
+              for (const auto& path : paths) {
+                  if (!path.is_string())
+                      throw ProtocolError("reference_paths must contain strings");
+                  cli::io::LoadedImage image;
+                  try {
+                      image = cli::io::read_image(path.get<std::string>());
+                  } catch (const std::exception&) {
+                      throw ProtocolError("reference must be a readable image file");
+                  }
+                  if (image.height <= 0 || image.width <= 0 || image.pixels.empty())
+                      throw ProtocolError("reference must contain RGB pixels");
+                  auto& bytes = pixels.emplace_back(image.pixels.size());
+                  std::transform(image.pixels.begin(), image.pixels.end(), bytes.begin(),
+                                 [](float value) {
+                                     return static_cast<std::uint8_t>(
+                                         std::lround(std::clamp(value, 0.0F, 1.0F) * 255.0F));
+                                 });
+                  references.references.emplace_back(
+                      ImageInput{Span<const std::uint8_t>{bytes.data(), bytes.size()},
+                                 static_cast<std::uint32_t>(image.height),
+                                 static_cast<std::uint32_t>(image.width)});
+              }
+              const auto config = parse_sdk_config(request, fields);
+              const auto started = std::chrono::steady_clock::now();
+              const auto result = task.run(references, config);
+              const auto wall_ms = std::chrono::duration<double, std::milli>(
+                                       std::chrono::steady_clock::now() - started)
+                                       .count();
+              return write_audio_video(result, frame_directory, audio_path, wall_ms);
+          }}},
+        input, output);
+}
+
 int run_model_worker(const Model& model, std::istream& input, std::ostream& output) {
     const auto primary = model.info().bundle_task;
+    if (primary == ReferencesTextToAudioVideo::kTask)
+        return run_reference_video_worker(model, input, output);
     if (primary == ImagesTextToImageEdit::kTask || primary == IImageEditing::kTask) {
         const auto task = model.task<ImagesTextToImageEdit>();
         const auto fields = task.config_fields();

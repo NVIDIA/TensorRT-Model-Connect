@@ -4,6 +4,7 @@
  */
 
 #include "server/native_worker.h"
+#include "trtmc/control.hpp"
 #include "trtmc/core.hpp"
 
 #include <array>
@@ -64,6 +65,9 @@ int worker_main(int argc, char** argv) {
     std::string runtime_cache;
     std::uint64_t kv_cache_size = 0;
     bool cuda_graphs = false;
+    std::string byok_library;
+    std::string byok_function;
+    std::string byok_name;
     for (int index = 3; index < argc; ++index) {
         const std::string option = argv[index];
         if (option == "--runtime-root")
@@ -74,9 +78,21 @@ int worker_main(int argc, char** argv) {
             kv_cache_size = positive_integer(value_after(argc, argv, index, option), option);
         else if (option == "--cuda-graphs")
             cuda_graphs = true;
+        else if (option == "--byok-library")
+            byok_library = value_after(argc, argv, index, option);
+        else if (option == "--byok-function")
+            byok_function = value_after(argc, argv, index, option);
+        else if (option == "--byok-name")
+            byok_name = value_after(argc, argv, index, option);
         else
             throw std::invalid_argument("unknown _serve-worker option: " + option);
     }
+    const bool byok = !byok_library.empty() || !byok_function.empty() || !byok_name.empty();
+    if (byok && (byok_library.empty() || byok_function.empty() || byok_name.empty()))
+        throw std::invalid_argument("--byok-library, --byok-function and --byok-name go together");
+    // A bring-your-own kernel must be registered before its bundle deserializes.
+    if (byok)
+        trtmc::load_byok_kernel(byok_library, byok_function, byok_name, runtime_root);
     const trtmc::LoadOptions options{runtime_root, kv_cache_size, runtime_cache, cuda_graphs};
     return trtmc::server::run_bundle_worker(bundle, options, std::cin, std::cout);
 }

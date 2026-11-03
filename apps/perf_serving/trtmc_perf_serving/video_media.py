@@ -41,7 +41,7 @@ def decoded_identity(path: Path, width: int, height: int, count: int, *,
     if fps is not None and Fraction(streams[0]["avg_frame_rate"]) != fps:
         raise ValueError("downloaded video FPS differs from the requested presentation")
     digest = hashlib.sha256()
-    process = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path),
+    process = subprocess.Popen(["ffmpeg", "-nostdin", "-v", "error", "-i", str(path), "-map", "0:v:0",
                                 "-threads", "1", "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1"],
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     try:
@@ -65,11 +65,14 @@ def decoded_identity(path: Path, width: int, height: int, count: int, *,
 
 
 def encode(directory: Path, path: Path, width: int, height: int, count: int,
-           fps: int, max_bytes: int) -> dict:
+           fps: int, max_bytes: int, audio: Path | None = None) -> dict:
+    """Encode the PNG frame sequence losslessly; mux a WAV track as AAC when given."""
     pixels = frame_identity(directory, width, height, count)
+    sound = (["-i", str(audio), "-map", "0:v:0", "-map", "1:a:0", "-c:a", "aac", "-b:a", "192k"]
+             if audio is not None else ["-an"])
     subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-framerate", str(fps),
-                    "-start_number", "0", "-i", str(directory / "frame-%06d.png"),
-                    "-frames:v", str(count), "-an", "-c:v", "libx264rgb", "-preset", "ultrafast",
+                    "-start_number", "0", "-i", str(directory / "frame-%06d.png"), *sound,
+                    "-frames:v", str(count), "-c:v", "libx264rgb", "-preset", "ultrafast",
                     "-threads", "1", "-crf", "0", "-pix_fmt", "rgb24", "-movflags", "+faststart",
                     "-fs", str(max_bytes), "-y", str(path)],
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=600)
@@ -79,4 +82,5 @@ def encode(directory: Path, path: Path, width: int, height: int, count: int,
         encoded_hash = hashlib.file_digest(file, "sha256").hexdigest()
     return {"output_width": width, "output_height": height, "output_frames": count,
             "output_pixels_sha256": pixels, "output_sha256": encoded_hash,
-            "output_bytes": path.stat().st_size, "fps": fps, "codec": "libx264rgb-crf0"}
+            "output_bytes": path.stat().st_size, "fps": fps, "codec": "libx264rgb-crf0",
+            "audio": audio is not None}
