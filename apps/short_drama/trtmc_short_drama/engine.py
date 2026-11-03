@@ -195,9 +195,19 @@ class Engine:
         _check(response)
         return base64.b64decode(response.json()["data"][0]["b64_json"])
 
+    def edit(self, model: str, prompt: str, picture: bytes, *, seed: int, steps: int, cfg_scale: float) -> bytes:
+        """A new picture drawn from one picture and an instruction, at the size the bundle renders."""
+
+        fields = {"model": model, "prompt": prompt, "seed": str(seed), "num_inference_steps": str(steps),
+                  "cfg_scale": str(cfg_scale), "negative_prompt": " "}
+        response = httpx.post(f"{self.url}/v1/images/edits", data=fields, timeout=CALL_TIMEOUT,
+                              files={"image": ("picture.png", picture, "image/png")})
+        _check(response)
+        return base64.b64decode(response.json()["data"][0]["b64_json"])
+
     def video(self, model: str, prompt: str, references: list[Path], output: Path, *,
               seed: int, continuation: str | None = None) -> None:
-        """Reference-to-video: submit, wait, and download the clip with its audio."""
+        """Reference-to-video, or image-to-video from one picture: submit, wait, and download the clip."""
 
         fields = {"model": model, "prompt": prompt, "seed": str(seed)}
         if continuation:

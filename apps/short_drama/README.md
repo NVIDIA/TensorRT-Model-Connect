@@ -29,7 +29,8 @@ second shot about 10 minutes (one H3 call renders 226 frames, 9.4 s, with audio)
 
 - An NVIDIA GPU and driver. Tier A needs about 140 GB of GPU memory (MiniMax H3 peaks near
   110 GB at 768x1344 and 226 frames); it was run on a GB300.
-  Tiers B (80 GB, for example an RTX PRO 6000) and C (24 GB) are planned; see [Tiers](#tiers).
+  Tier B (80 GB, for example an RTX PRO 6000) renders shots without voices on a TRTMC build that has
+  what it lists; tier C (24 GB) is planned. See [Tiers](#tiers).
 - A TRTMC build with the server, bring-your-own kernels and the H3 sparse-attention kernel:
 
   ```bash
@@ -227,8 +228,15 @@ Jetson Thor) count their system memory. Settings shows the table below for the r
 | Tier | GPU memory | For example | Shots | Speech | Status |
 | --- | --- | --- | --- | --- | --- |
 | A | 140 GB or more | GB300, B200, H200 | MiniMax H3 films each shot from up to 6 reference pictures | native audio from the video model | runs end to end |
-| B | 80 GB or more | RTX PRO 6000, H100, DGX Spark | Qwen-Image-Edit draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it | text-to-speech, one voice per character | planned: needs image-to-video for Wan2.2-TI2V-5B and Chinese text-to-speech (Qwen3-TTS or CosyVoice3) in TRTMC |
-| C | 24 GB or more | RTX 4090, RTX 5090, L40S | FLUX.2 klein 4B draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it | text-to-speech, one voice per character | planned: as tier B, plus FLUX.2 klein 4B with reference pictures in TRTMC |
+| B | 80 GB or more | RTX PRO 6000, H100, DGX Spark | Qwen-Image-Edit draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it | none yet: each line is a subtitle | runs end to end on a TRTMC build with image-to-video for Wan2.2-TI2V-5B and vertical Qwen-Image-Edit pictures; start it with `--allow-planned` until TRTMC main has both |
+| C | 24 GB or more | RTX 4090, RTX 5090, L40S | FLUX.2 klein 4B draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it | none yet: each line is a subtitle | planned: as tier B, plus FLUX.2 klein 4B with reference pictures in TRTMC |
+
+On tiers B and C a shot starts from one picture. A shot in the same place as the shot before it
+starts on that shot's last frame. Any other shot starts on a keyframe that the image-edit model
+draws from the reference pictures of its people (up to 3, stacked top to bottom) or, without
+people, of its place. Wan2.2-TI2V-5B then animates 121 frames, about 5 s, so a shot planned
+longer ends after 5 s. The clips have no sound: each line becomes a subtitle that starts with the
+speaker's name, and the analysis skips the sound and speech checks.
 
 The models of tiers B and C are released under Apache-2.0 or MIT. MiniMax H3 and the FastH3
 student of tier A are released under the MiniMax H3 Community License, which limits the

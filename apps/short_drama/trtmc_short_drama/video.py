@@ -74,15 +74,19 @@ def opening(raw: Path) -> float:
 def finish_clip(raw: Path, clip: Path, *, seconds: float, lead_in: float | None = None) -> float:
     """Skip the opening, trim to the planned length and scale to 1080x1920 at 24 fps.
 
-    The audio becomes 48 kHz stereo with short fades, so a cut between two clips does not click.
+    The audio becomes 48 kHz stereo with short fades, so a cut between two clips does not click; a
+    clip without sound gets a silent track, so the clips of an episode join the same way.
     Returns where in the raw clip the finished clip starts.
     """
 
     clip.parent.mkdir(parents=True, exist_ok=True)
     partial = clip.with_name(f".{clip.name}")
     lead_in = opening(raw) if lead_in is None else lead_in
-    length = max(min(seconds, probe(raw)["duration"] - lead_in), 0.5)
-    _run("-ss", f"{lead_in:.3f}", "-i", str(raw), "-t", f"{length:.3f}",
+    info = probe(raw)
+    length = max(min(seconds, info["duration"] - lead_in), 0.5)
+    silence = () if info["audio"] else ("-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-map", "0:v:0",
+                                        "-map", "1:a:0")
+    _run("-ss", f"{lead_in:.3f}", "-i", str(raw), *silence, "-t", f"{length:.3f}",
          "-vf", f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase:flags=lanczos,"
                 f"crop={WIDTH}:{HEIGHT},fps={FPS},format=yuv420p",
          "-af", f"afade=t=in:d={FADE},afade=t=out:st={length - FADE:.3f}:d={FADE}",
@@ -138,3 +142,11 @@ def export_episode(clips: list[Path], subtitles: Path, output: Path, *, max_seco
          "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", "-f", "mp4",
          partial.name, cwd=directory)
     partial.replace(output)
+
+
+def fit_picture(picture: Path, output: Path, *, width: int, height: int) -> None:
+    """A width x height PNG of a picture: scaled to cover that size, then cropped to its middle."""
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    _run("-i", str(picture), "-vf", f"scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,"
+         f"crop={width}:{height},format=rgb24", "-frames:v", "1", "-update", "1", str(output))

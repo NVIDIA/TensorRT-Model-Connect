@@ -102,3 +102,34 @@ def test_subtitle_fonts_cannot_inject_filters(tmp_path: Path):
     with pytest.raises(ValueError):
         video.export_episode([], tmp_path / "e.srt", tmp_path / "e.mp4", max_seconds=1,
                              font="x',drawtext=text='y", font_size=12, crf=18)
+
+
+def test_a_line_nobody_speaks_is_read_and_names_its_speaker():
+    assert editing.read_line(5.04, "先排队。蛋糕三十八。") == {"start": 0.3, "end": 2.54, "timing": "read"}
+    assert editing.read_line(5.04, "滚！")["end"] == 1.8  # long enough to read
+    assert editing.read_line(1.0, "先排队。蛋糕三十八。")["end"] == 1.0  # within the clip
+    shots = [{"id": "e1s1", "seconds": 5, "speaker": "linwan", "line": "先排队。"}]
+    timing = {"start": 0.3, "end": 1.8}
+    silent = editing.subtitles(shots, {"e1s1": {"silent": True, "speech": timing}}, names={"linwan": "林晚"})
+    assert "林晚：先排队。" in silent
+    assert "林晚" not in editing.subtitles(shots, {"e1s1": {"speech": timing}}, names={"linwan": "林晚"})
+
+
+def test_lines_of_takes_without_sound_are_timed_without_speech_recognition(tmp_path, monkeypatch):
+    from trtmc_short_drama.flow import Context
+    from trtmc_short_drama.store import Store
+
+    project = Store(tmp_path).create("t", "第一章\n文", flow="default@1", episodes=1, max_seconds=60)
+    shot = {"id": "e1s1", "seconds": 5, "location": "shop", "characters": ["linwan"], "props": [],
+            "speaker": "linwan", "line": "先排队。"}
+    project.save_plan({"title": "t", "characters": [{"id": "linwan", "name": "林晚"}], "locations": [], "props": [],
+                       "episodes": [{"number": 1, "title": "一", "summary": "", "shots": [shot]}]})
+    project.save_shot_state(1, {"e1s1": {"take": 1, "file": "episodes/01/clips/e1s1-take1.mp4", "silent": True}})
+    monkeypatch.setattr(video, "probe", lambda path: {"duration": 5.04, "audio": True})
+
+    class NoSpeechModel:
+        def load(self, model):
+            raise AssertionError("nothing to hear")
+
+    editing.run_subtitles(Context(project, {}, "whisper", 1, NoSpeechModel(), progress=lambda _: None))
+    assert project.shot_state(1)["e1s1"]["speech"] == {"start": 0.3, "end": 1.8, "timing": "read"}

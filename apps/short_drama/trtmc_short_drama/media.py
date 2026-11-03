@@ -19,6 +19,12 @@ log = logging.getLogger(__name__)
 
 MAX_REFERENCES = 6
 STILL_SIZE = "928x1664"
+# A video model that animates one first frame starts each shot on a keyframe that the edit model draws
+# from a picture of this size, the one its bundle is built for (--image-width, --image-height).
+KEYFRAME_PICTURE = (704, 1280)
+KEYFRAME_STEPS, KEYFRAME_CFG = 40, 4.0  # Qwen-Image-Edit-2511's own defaults
+# Only takes animated from one first frame have these; another take must not inherit them.
+FIRST_FRAME_KEYS = ("first_frame", "keyframe", "silent")
 # English, for H3, of the descriptions a plan has in another language: {text as written: English}.
 TRANSLATIONS = "translations.json"
 TRANSLATE_BATCH = 40  # descriptions per request
@@ -347,8 +353,12 @@ def run_shots(context: Context) -> None:
         except Exception as error:  # the shots still render, with the descriptions as written
             log.warning("descriptions not translated: %s", error)
             project.log(f"episode {number}: descriptions not translated for the video model ({error})"[:300])
-    if todo:
-        context.services.load(context.model)
+    if not todo:
+        return
+    if getattr(context.services, "first_frame", lambda _: False)(context.model):
+        animate_shots(context, episode, todo, use_previous=use_previous, chain=chain)
+        return
+    context.services.load(context.model)
     for index, shot in enumerate(todo, start=1):
         context.check()
         context.progress(f"episode {number} shot {index} of {len(todo)} ({shot['id']})")
@@ -360,7 +370,7 @@ def run_shots(context: Context) -> None:
         entry = project.shot_state(number).get(shot["id"], {})  # the user may edit during a run
         source = None if entry.get("prompt_override") else prompt_source(plan, shot, references)
         prompt = entry.get("prompt_override") or prompt
-        take = max([t["take"] for t in entry.get("takes", [])] + [int(entry.get("take", 0))]) + 1
+        take = next_take(entry)
         seed = int(params.get("seed", 7)) + take - 1
         raw = inside(project, directory / "raw" / f"{shot['id']}-take{take}.mp4")
         raw.parent.mkdir(parents=True, exist_ok=True)
@@ -379,13 +389,138 @@ def run_shots(context: Context) -> None:
                     "references": [relative(project, p) for p in paths], "lead_in": lead_in,
                     "cut": video.CUT_RULE, "model": context.model,
                     "seconds": round(time.monotonic() - started, 1)}
-        state = project.shot_state(number)
-        entry = state.get(shot["id"], {})
-        entry.pop("speech", None)  # the new take has new audio
-        state[shot["id"]] = {**entry, **rendered, "takes": [*entry.get("takes", []), rendered]}
-        state.pop("assembled", None)
-        project.save_shot_state(number, state)
-        project.log(f"episode {number} {shot['id']} take {take} rendered")
+        save_take(project, number, shot["id"], rendered)
+
+
+def next_take(entry: dict[str, Any]) -> int:
+    return max([t["take"] for t in entry.get("takes", [])] + [int(entry.get("take", 0))]) + 1
+
+
+def save_take(project, number: int, shot_id: str, rendered: dict[str, Any]) -> None:
+    """Make a new take the shot's chosen one, after the takes it already has."""
+
+    state = project.shot_state(number)  # re-read: the user may edit during a run
+    entry = {key: value for key, value in state.get(shot_id, {}).items() if key not in FIRST_FRAME_KEYS}
+    entry.pop("speech", None)  # the new take has new audio
+    state[shot_id] = {**entry, **rendered, "takes": [*entry.get("takes", []), rendered]}
+    state.pop("assembled", None)
+    project.save_shot_state(number, state)
+    project.log(f"episode {number} {shot_id} take {rendered['take']} rendered")
+
+
+def opens_on_previous(project, episode: dict[str, Any], shot: dict[str, Any], queued: set[str], *,
+                      use_previous: bool, chain: bool) -> bool:
+    """Whether a shot animated from one first frame starts on the last frame before it: the end of the
+    shot before it in the same place (rendered, or rendered earlier in this run) or of the previous episode."""
+
+    shots = episode["shots"]
+    index = next(i for i, s in enumerate(shots) if s["id"] == shot["id"])
+    if index == 0:
+        return use_previous and (project.episode_dir(episode["number"] - 1) / "last_frame.png").is_file()
+    before = shots[index - 1]
+    if not chain or before.get("location") != shot.get("location"):
+        return False
+    return before["id"] in queued or bool(project.shot_state(episode["number"]).get(before["id"], {}).get("file"))
+
+
+def keyframe_still(project, plan: dict[str, Any], shot: dict[str, Any]) -> tuple[tuple[str, dict[str, Any]], Path]:
+    """The still a shot's first frame is drawn from: its speaker's, else its first person's, else its place's.
+
+    The edit model takes one picture; stills stacked into one picture came out cropped and made it draw
+    panels. The other people in the shot are described in words.
+    """
+
+    references, paths = shot_references(project, plan, shot, previous=None)
+    pairs = list(zip(references, paths))
+    people = {reference[1]["id"]: (reference, path) for reference, path in pairs if reference[0] == "character"}
+    chosen = people.get(shot.get("speaker")) or next(iter(people.values()), None) or \
+        next(((reference, path) for reference, path in pairs if reference[0] == "location"), None)
+    if chosen is None:
+        raise ValueError(f"{shot['id']} shows no character or place to draw its first frame from")
+    return chosen
+
+
+def draw_keyframes(context: Context, shots: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """First frames for these shots, drawn by the served edit model from a picture of their stills."""
+
+    if not shots:
+        return {}
+    project, number = context.project, context.episode
+    editor = context.services.serving("edit")
+    if editor is None:
+        raise ValueError("no model draws first frames: start a tier that serves an edit model")
+    context.services.load(editor)
+    english, directory = english_of(project), project.episode_dir(number) / "keyframes"
+    directory.mkdir(parents=True, exist_ok=True)
+    drawn = {}
+    for index, shot in enumerate(shots, start=1):
+        context.check()
+        context.progress(f"episode {number}: first frame {index} of {len(shots)} ({shot['id']})")
+        pictured, still = keyframe_still(project, project.plan, shot)
+        take = next_take(project.shot_state(number).get(shot["id"], {}))
+        seed = int(context.params.get("seed", 7)) + take - 1
+        picture = inside(project, directory / f"{shot['id']}-take{take}-picture.png")
+        video.fit_picture(still, picture, width=KEYFRAME_PICTURE[0], height=KEYFRAME_PICTURE[1])
+        prompt = prompts.keyframe_prompt(project.plan, shot, pictured, english)
+        started = time.monotonic()
+        frame = inside(project, directory / f"{shot['id']}-take{take}.png")
+        frame.write_bytes(context.services.engine.edit(editor, prompt, picture.read_bytes(), seed=seed,
+                                                       steps=KEYFRAME_STEPS, cfg_scale=KEYFRAME_CFG))
+        drawn[shot["id"]] = {"file": relative(project, frame), "still": relative(project, still),
+                             "picture": relative(project, picture), "prompt": prompt, "seed": seed,
+                             "model": editor, "seconds": round(time.monotonic() - started, 1)}
+    return drawn
+
+
+def animate_shots(context: Context, episode: dict[str, Any], todo: list[dict[str, Any]], *,
+                  use_previous: bool, chain: bool) -> None:
+    """Shots from one first frame each, without sound.
+
+    A shot in the same place as the shot before it opens on that shot's last frame; any other shot
+    opens on a keyframe drawn from its stills. Keyframes come first, so each model loads once.
+    """
+
+    project, params, number = context.project, context.params, context.episode
+    plan, directory = project.plan, project.episode_dir(number)
+    queued = {s["id"] for s in todo}
+    keyframes = draw_keyframes(context, [s for s in todo if not opens_on_previous(
+        project, episode, s, queued, use_previous=use_previous, chain=chain)])
+    context.services.load(context.model)
+    english = english_of(project)
+    for index, shot in enumerate(todo, start=1):
+        context.check()
+        context.progress(f"episode {number} shot {index} of {len(todo)} ({shot['id']})")
+        position = next(i for i, s in enumerate(episode["shots"]) if s["id"] == shot["id"])
+        if position:
+            ensure_last_frame(project, number, project.shot_state(number).get(episode["shots"][position - 1]["id"], {}))
+        # The same references a filmed take keeps, so `outdated` judges both kinds of take alike.
+        references, paths, _, _ = shot_inputs(project, plan, episode, shot, use_previous=use_previous, chain=chain)
+        keyframe = keyframes.get(shot["id"])
+        first = project.root / keyframe["file"] if keyframe else \
+            previous_frame(project, episode, shot, use_previous=use_previous, chain=chain)[0]
+        if first is None or not first.is_file():
+            raise RuntimeError(f"{shot['id']} has no first frame to start from")
+        entry = project.shot_state(number).get(shot["id"], {})
+        source = None if entry.get("prompt_override") else prompt_source(plan, shot, references)
+        prompt = entry.get("prompt_override") or prompts.motion_prompt(plan, shot, english)
+        take = next_take(entry)
+        seed = int(params.get("seed", 7)) + take - 1
+        raw = inside(project, directory / "raw" / f"{shot['id']}-take{take}.mp4")
+        raw.parent.mkdir(parents=True, exist_ok=True)
+        started = time.monotonic()
+        context.services.engine.video(context.model, prompt, [first], raw, seed=seed)
+        clip = inside(project, directory / "clips" / f"{shot['id']}-take{take}.mp4")
+        video.finish_clip(raw, clip, seconds=float(shot["seconds"]), lead_in=0.0)
+        sheet = inside(project, directory / "sheets" / f"{shot['id']}-take{take}.jpg")
+        video.contact_sheet(clip, sheet)
+        ensure_last_frame(project, number, {"file": str(clip.relative_to(project.root))})  # the next shot starts here
+        save_take(project, number, shot["id"], {
+            "take": take, "seed": seed, "file": str(clip.relative_to(project.root)),
+            "sheet": str(sheet.relative_to(project.root)), "raw": str(raw.relative_to(project.root)),
+            "prompt": prompt, "continuation": None, "source": source,
+            "references": [relative(project, p) for p in paths], "lead_in": 0.0, "cut": video.CUT_RULE,
+            "model": context.model, "seconds": round(time.monotonic() - started, 1),
+            "first_frame": relative(project, first), "keyframe": keyframe, "silent": True})
 
 
 def cut_by_older_rule(entry: dict[str, Any]) -> bool:
@@ -406,7 +541,8 @@ def recut(project, number: int, shot: dict[str, Any]) -> bool:
     if not cut_by_older_rule(entry) or not raw.is_file():
         return False
     clip = inside(project, project.root / entry["file"])
-    lead_in = video.finish_clip(inside(project, raw), clip, seconds=float(shot["seconds"]))
+    lead_in = video.finish_clip(inside(project, raw), clip, seconds=float(shot["seconds"]),
+                                lead_in=0.0 if entry.get("first_frame") else None)
     if entry.get("sheet"):
         video.contact_sheet(clip, inside(project, project.root / entry["sheet"]))
     frame = last_frame_path(project, number, entry)
@@ -433,4 +569,4 @@ def recut(project, number: int, shot: dict[str, Any]) -> bool:
 STILLS = Step("stills", run_stills, role="image", scope="project",
               description="Draw a reference still for every character, place and prop")
 SHOTS = Step("shots", run_shots, role="video", scope="episode",
-             description="Render each shot from its approved reference stills, with sound")
+             description="Render each shot from its approved reference stills")

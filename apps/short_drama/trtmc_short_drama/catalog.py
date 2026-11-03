@@ -25,6 +25,9 @@ class Model:
     builder: str = "cli"
     # Speech recognition language baked into the bundle's decoder prompt (Whisper).
     language: str | None = None
+    # A video model that animates one first frame, without sound, instead of filming each shot from
+    # its reference pictures; the tier's "edit" model draws that frame from them.
+    first_frame: bool = False
 
     def bundle_name(self, compute_capability: str) -> str:
         language = f"-{self.language}" if self.language else ""
@@ -49,8 +52,14 @@ class Tier:
 
 _WHISPER = Model("asr", "whisper", "openai/whisper-large-v3-turbo", language="zh")
 
+# 121 frames: about 5 s at 24 fps, so a longer shot ends after 5 s.
+_WAN = Model("video", "wan2.2-ti2v-5b", "Wan-AI/Wan2.2-TI2V-5B",
+             ("--task", "initial_image_text_to_video", "--precision", "bf16", "--image-height", "1280",
+              "--image-width", "704", "--video-num-frames", "121"), first_frame=True)
+
 _I2V = "image-to-video for Wan2.2-TI2V-5B in TRTMC (its family renders from text only)"
-_TTS = "Chinese text-to-speech in TRTMC (Qwen3-TTS or CosyVoice3) and a speech endpoint in trtmc-server"
+_EDIT = "vertical pictures from Qwen-Image-Edit in TRTMC (its edit bundles render 1024x1024 only)"
+_SILENT = "none yet: each line is a subtitle until TRTMC has Chinese text-to-speech"
 
 # Every model here has a permissive license (Apache-2.0 or MIT) except MiniMax H3, whose community
 # license excludes some territories; see the README before shipping tier A.
@@ -58,7 +67,7 @@ TIERS = {
     "a": Tier("a", 140, "MiniMax H3 reference-to-video with native audio", {
         "llm": Model("llm", "qwen3.6-27b", "Qwen/Qwen3.6-27B", ("--max-sequence-length", "32768")),
         "image": Model("image", "qwen-image", "Qwen/Qwen-Image",
-                       ("--image-height", "1664", "--image-width", "928")),
+                       ("--precision", "bf16", "--image-height", "1664", "--image-width", "928")),
         "video": Model("video", "fasth3", "FastVideo/FastVideo-FastH3-Omni-8-Step-V1",
                        byok=("libtrtmc_minimax_h3_omniref_vsa.so", "run", "minimax_h3.omniref_vsa128"),
                        builder="minimax_h3"),
@@ -69,31 +78,26 @@ TIERS = {
                          "--max-sequence-length", "32768")),
     }, hardware="GB300, B200, H200", video="MiniMax H3 films each shot from up to 6 reference pictures",
         speech="native audio from the video model", nominal_gb=140),
-    "b": Tier("b", 78, "keyframes from the reference pictures, Wan2.2-TI2V-5B image-to-video and text-to-speech", {
+    "b": Tier("b", 78, "keyframes from the reference pictures and Wan2.2-TI2V-5B image-to-video, without voices", {
         "llm": Model("llm", "qwen3.5-4b", "Qwen/Qwen3.5-4B", ("--max-sequence-length", "32768")),
         "image": Model("image", "qwen-image", "Qwen/Qwen-Image",
-                       ("--image-height", "1664", "--image-width", "928")),
-        "video": Model("video", "wan2.2-ti2v-5b", "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
-                       ("--image-height", "1280", "--image-width", "704", "--video-num-frames", "121")),
-        "tts": Model("tts", "magpie-tts", "nvidia/magpie_tts_multilingual_357m"),
+                       ("--precision", "bf16", "--image-height", "1664", "--image-width", "928")),
+        "edit": Model("edit", "qwen-image-edit", "Qwen/Qwen-Image-Edit-2511",
+                      ("--task", "image_edit", "--precision", "bf16", "--image-height", "1280", "--image-width", "704")),
+        "video": _WAN,
         "asr": _WHISPER,
     }, hardware="RTX PRO 6000, H100, DGX Spark",
         video="Qwen-Image-Edit draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it",
-        speech="text-to-speech, one voice per character",
-        missing=(_I2V, _TTS, "keyframes from reference pictures in the app (Qwen-Image-Edit-2511 is in TRTMC)"),
-        nominal_gb=80),
-    "c": Tier("c", 23, "keyframes and Wan2.2-TI2V-5B image-to-video with text-to-speech", {
+        speech=_SILENT, missing=(_I2V, _EDIT), nominal_gb=80),
+    "c": Tier("c", 23, "keyframes and Wan2.2-TI2V-5B image-to-video, without voices", {
         "llm": Model("llm", "qwen3.5-4b", "Qwen/Qwen3.5-4B", ("--max-sequence-length", "32768")),
         "image": Model("image", "z-image-turbo", "Tongyi-MAI/Z-Image-Turbo",
                        ("--image-height", "1280", "--image-width", "720")),
-        "video": Model("video", "wan2.2-ti2v-5b", "Wan-AI/Wan2.2-TI2V-5B-Diffusers",
-                       ("--image-height", "1280", "--image-width", "704", "--video-num-frames", "121")),
-        "tts": Model("tts", "magpie-tts", "nvidia/magpie_tts_multilingual_357m"),
+        "video": _WAN,
         "asr": _WHISPER,
     }, hardware="RTX 4090, RTX 5090, L40S",
         video="FLUX.2 klein 4B draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it",
-        speech="text-to-speech, one voice per character",
-        missing=(_I2V, _TTS, "FLUX.2 klein 4B in TRTMC, with reference pictures as input"),
+        speech=_SILENT, missing=(_I2V, "FLUX.2 klein 4B in TRTMC, with reference pictures as input"),
         nominal_gb=24),
 }
 
@@ -110,7 +114,7 @@ def describe_tiers() -> list[dict]:
 STAGES = {
     "plan": ("llm",),
     "stills": ("image",),
-    "shots": ("video", "tts", "asr"),
+    "shots": ("edit", "video", "asr"),
     "subtitles": ("asr",),
 }
 
