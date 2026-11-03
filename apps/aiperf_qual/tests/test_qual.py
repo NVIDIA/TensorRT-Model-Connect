@@ -509,6 +509,60 @@ def test_quantized_candidates_get_the_benchmarks_quantization_gate():
         ("mmlu-0shot", {"margin": 2.0})]
 
 
+def test_a_quantized_profile_is_qualified_as_its_models_highest_precision_profile(tmp_path):
+    from types import SimpleNamespace
+
+    from trtmc_aiperf_qual.models import qualified_as
+
+    def entry(name, family="f", task="t", **manifest):
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps({"name": name, **manifest}))
+        return SimpleNamespace(model=SimpleNamespace(family=family, task=task, manifest_path=path))
+
+    entries = {"m-nvfp4": entry("m-nvfp4", precision="fp16", quantization="nvfp4"),
+               "m-fp8": entry("m-fp8", precision="fp16", quantization="fp8"),
+               "m": entry("m", precision="fp16"), "m-bf16": entry("m-bf16", precision="bf16"),
+               "m-topp": entry("m-topp", precision="fp32"),  # another model: its name differs beyond precision
+               "m-fp32": entry("m-fp32", task="other", precision="fp32"),  # another Task
+               "x-fp8": entry("x-fp8", precision="fp16", quantization="fp8"),
+               "y-nvfp4": entry("y-nvfp4", precision="fp16", quantization="nvfp4"),
+               "y-fp8": entry("y-fp8", precision="fp16", quantization="fp8")}
+    assert qualified_as("m-nvfp4", entries) == qualified_as("m-fp8", entries) == "m-bf16"
+    assert qualified_as("m", entries) == "m"  # not quantized: its own configuration
+    assert qualified_as("x-fp8", entries) == "x-fp8"  # nothing ranks higher
+    assert qualified_as("y-nvfp4", entries) == "y-fp8"  # the highest precision there is, quantized too
+
+
+def test_quantized_profiles_take_their_bases_native_reference_and_benchmarks():
+    from trtmc_aiperf_qual.models import resolve_model
+
+    environment = _environment()
+    # A pre-quantized checkpoint: the native reference loads the base's checkpoint, in the base's environment.
+    fp8, base = resolve_model("nemotron-h-nano-9b-fp8", environment), resolve_model("nemotron-h-nano-9b", environment)
+    manifest = json.loads((REPOSITORY / "families/nemotron_h/tests/manifests/nemotron-h-nano-9b.json").read_text())
+    assert fp8["qualified_as"] == "nemotron-h-nano-9b" and "qualified_as" not in base
+    assert (fp8["reference"]["model"], fp8["reference"]["revision"]) == (manifest["hf_id"], manifest["hf_revision"])
+    assert fp8["reference"]["requirements"] == base["reference"]["requirements"] and fp8["reference"]["trust_remote_code"]
+    assert fp8["candidate"]["checkpoint"] == "nvidia/NVIDIA-Nemotron-Nano-9B-v2-FP8"
+    assert [(item["suite"], item["endpoint"]) for item in fp8["absolute"]] == [
+        (item["suite"], item["endpoint"]) for item in base["absolute"]]
+    assert [item["gate"] for item in fp8["absolute"]] == [{"margin": 2.0}]  # the quantization gate
+    # The same checkpoint quantized by TRTMC: the base's own native pipeline on the profile's pinned checkpoint.
+    canary = resolve_model("canary-1b-v2-fp8", environment)
+    assert canary["qualified_as"] == "canary-1b-v2" and "model" not in canary["reference"]
+    assert canary["reference"]["adapter"] == "families/canary/reference/adapter.py"
+    assert canary["reference"]["revision"] == canary["candidate"]["revision"]
+    # The base's candidate settings stay its own: the variant builds its catalog bundle.
+    personaplex = resolve_model("personaplex-7b-fp8", environment)
+    assert personaplex["reference"]["adapter"] == resolve_model("personaplex-7b", environment)["reference"]["adapter"]
+    assert personaplex["candidate"]["bundle"] == "personaplex-7b-fp8/personaplex-7b-fp8.bundle"
+    assert "model_directory" not in personaplex["candidate"]
+    # Without an unquantized profile, the highest precision there is.
+    nvfp4 = resolve_model("llama-3.1-8b-nvfp4", environment)
+    assert (nvfp4["qualified_as"], nvfp4["reference"]["model"]) == ("llama-3.1-8b-fp8", "nvidia/Llama-3.1-8B-Instruct-FP8")
+    assert "qualified_as" not in resolve_model("llama-3.1-8b-fp8", environment)
+
+
 def test_stable_diffusion_uses_explicit_controls_on_its_actual_request(tmp_path):
     import sys
 

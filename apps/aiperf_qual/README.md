@@ -186,6 +186,17 @@ performance:
 service_metrics: {isl: 96, osl: 32, concurrency: [1, 4], requests: 32}
 ```
 
+### Quantized profiles
+
+A quantized profile (the catalog's `quantization`) is qualified as its model's highest-precision ready profile:
+of the profiles of its family and Task whose names differ only in precision and quantization tokens, the one
+ranked first by fp32, bf16, fp16, then a quantized checkpoint (`qwen35-9b` for `qwen35-9b-nvfp4`;
+`llama-3.1-8b-fp8` for `llama-3.1-8b-nvfp4`, as the catalog has no unquantized Llama 3.1 8B). The profile takes
+that configuration except `candidate` (benchmarks, requests, native adapter, requirements, `trust_remote_code`)
+under its own, and when its checkpoint is a separate pre-quantized repository, its native reference loads that
+profile's checkpoint. Its candidate stays its own bundle, held to the benchmarks' quantization gates;
+`qualified_as` in the plan names the profile it follows.
+
 ### Reference environments
 
 A model whose native reference needs more than the serving interpreter declares
