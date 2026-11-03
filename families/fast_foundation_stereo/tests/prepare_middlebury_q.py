@@ -38,12 +38,16 @@ SCENES = (
 )
 TARGET_HEIGHT = 700
 TARGET_WIDTH = 700
+# The Middlebury server answers Python's default User-Agent (Python-urllib) with 403 Forbidden.
+USER_AGENT = "trtmc-fast-foundation-stereo"
 
 
 def _download(url: str, destination: Path) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(destination.suffix + ".partial")
-    urllib.request.urlretrieve(url, temporary)
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request) as response, temporary.open("wb") as output:
+        shutil.copyfileobj(response, output)
     temporary.replace(destination)
     return destination
 

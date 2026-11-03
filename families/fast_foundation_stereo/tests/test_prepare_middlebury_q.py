@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import io
 import json
+import urllib.request
 import zipfile
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from families.fast_foundation_stereo.tests import prepare_middlebury_q
@@ -20,6 +23,19 @@ def test_archives_use_the_official_evaluation_download_directory() -> None:
     assert prepare_middlebury_q.GROUND_TRUTH_URL.startswith(
         "https://vision.middlebury.edu/stereo/submit3/zip/"
     )
+
+
+def test_download_names_its_user_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The server answers Python's default User-Agent with 403 Forbidden."""
+    agents = []
+
+    def urlopen(request: urllib.request.Request) -> io.BytesIO:
+        agents.append(request.get_header("User-agent"))
+        return io.BytesIO(b"archive")
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    path = prepare_middlebury_q._download(prepare_middlebury_q.DATA_URL, tmp_path / "data.zip")
+    assert path.read_bytes() == b"archive" and agents == [prepare_middlebury_q.USER_AGENT]
 
 
 def _write_pfm(path: Path, values: np.ndarray) -> None:
