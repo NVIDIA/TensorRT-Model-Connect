@@ -114,6 +114,30 @@ def _checkpoint(manifest: dict) -> Path:
     return path
 
 
+def _assert_native_tokenizer(model_dir: Path) -> None:
+    tokenizer = model_dir / "tokenizer.json"
+    assert tokenizer.is_file(), tokenizer
+    native_build_value = os.environ.get("TRTMC_NATIVE_BUILD_DIR")
+    assert native_build_value, "selected E2E requires TRTMC_NATIVE_BUILD_DIR"
+    native_build = Path(native_build_value)
+    assert (native_build / "CMakeCache.txt").is_file(), native_build
+    target = "test_lfm3_tokenizer_checkpoint"
+    command = ["cmake", "--build", str(native_build), "--target", target, "--parallel", "8"]
+    record_evidence("commands", {"argv": command})
+    subprocess.run(command, check=True, text=True, timeout=300)
+    executables = [path for path in native_build.rglob(target) if path.is_file()]
+    assert len(executables) == 1, executables
+    command = [str(executables[0])]
+    record_evidence("commands", {"argv": command})
+    subprocess.run(
+        command,
+        env={**os.environ, "TRTMC_LFM3_TOKENIZER_JSON": str(tokenizer)},
+        check=True,
+        text=True,
+        timeout=60,
+    )
+
+
 def _prompt(case: dict) -> str:
     if "prompt" in case:
         prompt = case["prompt"]
@@ -437,6 +461,8 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     tp_size = manifest["tensor_parallel_size"]
     binary, runtime_root, torch = _required_environment(tp_size)
     model_dir = _checkpoint(manifest)
+    with evidence_stage("compare"):
+        _assert_native_tokenizer(model_dir)
     record_evidence(
         "checkpoint",
         {

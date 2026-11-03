@@ -62,8 +62,10 @@ if(TRTMC_BUILD_TESTS)
       trtmc_core
       ${TRTMC_CUDART_LIBRARY}
     )
-    add_test(NAME ${test_name} COMMAND ${test_name})
+    # Note (Jiaxin Deng): E2E runs the checkpoint tokenizer after downloading its pinned assets.
+    if(NOT test_name STREQUAL "test_lfm3_tokenizer_checkpoint")
+      add_test(NAME ${test_name} COMMAND ${test_name})
+    endif()
   endforeach()
   set_tests_properties(test_lfm3_runtime PROPERTIES SKIP_RETURN_CODE 77)
-  set_tests_properties(test_lfm3_tokenizer_checkpoint PROPERTIES SKIP_RETURN_CODE 77)
 endif()

@@ -21,9 +21,11 @@ family topology or runtime metadata.
 The E2E manifest declares raw, chat and sliding-window boundary cases with exact
 greedy token-ID comparison to the pinned official reference. CPU tests exercise
 configuration, safetensors mapping and graph helpers; they do not prove device
-execution or checkpoint parity. The optional native tokenizer checkpoint test
-requires `TRTMC_LFM3_TOKENIZER_JSON` to point to that revision's `tokenizer.json`
-and returns an explicit skip when the asset is absent.
+execution or checkpoint parity. E2E requires `TRTMC_NATIVE_BUILD_DIR` and runs
+the native tokenizer checkpoint executable against the downloaded revision's
+`tokenizer.json` before building an engine. All 27 fixtures must pass; missing
+assets or a skipped executable fail E2E. For standalone execution, set
+`TRTMC_LFM3_TOKENIZER_JSON` to that tokenizer asset.
 
 Repository source retains its Apache-2.0 notices. Model weights are distributed
 by LiquidAI under the LFM Open License v1.0; users must obtain them separately
