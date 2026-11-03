@@ -17,6 +17,7 @@ from typing import Any, Callable
 # The plan's "style" alone names the look (live action, cartoon, ...); this is the look of a plan
 # without one.
 DEFAULT_STYLE = "realistic live-action drama with natural light"
+NO_ONE_SPEAKS = "No one speaks; the people on screen keep their lips closed."
 
 SYSTEM = ("You adapt novels into vertical short dramas. "
           "Reply with one JSON value and nothing else. Inside JSON strings, quote with 「」 or ‘’ and "
@@ -384,7 +385,7 @@ def video_prompts(plan: dict[str, Any], shot: dict[str, Any], references: list[t
         body.append(f"An off-screen narrator says in an off-screen voiceover: <d>[{tongue}] {line}</d> "
                     "The people on screen keep their lips closed.")
     else:  # H3 otherwise has the people on screen say something of its own
-        body.append("No one speaks; the people on screen keep their lips closed.")
+        body.append(NO_ONE_SPEAKS)
     body.append(_sentence(mention(_english(text_of(shot.get("after"))))))
     head = ("subject_definitions:\n" + "\n".join(definitions) +
             "\n\nsummary:\n[reference generation] " + mention(_english(text_of(shot.get("summary")))) + "." +
