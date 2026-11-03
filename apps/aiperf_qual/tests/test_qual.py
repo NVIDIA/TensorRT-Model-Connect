@@ -561,6 +561,10 @@ def test_quantized_profiles_take_their_bases_native_reference_and_benchmarks():
     nvfp4 = resolve_model("llama-3.1-8b-nvfp4", environment)
     assert (nvfp4["qualified_as"], nvfp4["reference"]["model"]) == ("llama-3.1-8b-fp8", "nvidia/Llama-3.1-8B-Instruct-FP8")
     assert "qualified_as" not in resolve_model("llama-3.1-8b-fp8", environment)
+    # The only profile of its model: its definition names the BF16 original and an environment that loads it.
+    muse = resolve_model("muse-glimmer-nvfp4", environment)
+    assert "qualified_as" not in muse and muse["reference"]["model"] == "meta-models/Muse-Glimmer-30B"
+    assert muse["reference"]["requirements"] == "families/muse_glimmer/tests/requirements.txt"
 
 
 def test_stable_diffusion_uses_explicit_controls_on_its_actual_request(tmp_path):
