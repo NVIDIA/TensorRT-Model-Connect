@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Llama FP8 / NVFP4 quantization: checkpoint reading, weight loading, engine build."""
+"""Llama FP8 / NVFP4 / INT4-AWQ quantization: checkpoint reading, weight loading, engine build."""
 
 from __future__ import annotations
 
@@ -16,15 +16,20 @@ trt = pytest.importorskip("tensorrt")
 torch = pytest.importorskip("torch")
 safetensors_torch = pytest.importorskip("safetensors.torch")
 
-from .. import graph_blocks, graph_ops  # noqa: E402
+from .. import calibrate_awq_scales, graph_blocks, graph_ops  # noqa: E402
 from ..build_request import BuildRequest, coerce_request  # noqa: E402
 from ..checkpoint_mapper import load_standard_weights  # noqa: E402
 from ..config import ModelConfig  # noqa: E402
 from ..quantization import (  # noqa: E402
     LlamaQuantContext,
+    _AWQWeight,
     _FP8Weight,
+    _LayerScales,
     _NVFP4Weight,
+    _open_raw_readers,
+    awq_identity,
     calibrate_llama,
+    quantize_awq_weight,
 )
 from ..standard_decoder_builder import build_standard_decoder_engine  # noqa: E402
 
@@ -95,6 +100,158 @@ def _write_checkpoint(
     return tensors
 
 
+_STEMS = (
+    ("self_attn.q_proj", "w_q"),
+    ("self_attn.k_proj", "w_k"),
+    ("self_attn.v_proj", "w_v"),
+    ("self_attn.o_proj", "w_o"),
+    ("mlp.gate_proj", "w_gate"),
+    ("mlp.up_proj", "w_up"),
+    ("mlp.down_proj", "w_down"),
+)
+
+
+def _write_awq_scales(checkpoint: Path, scales_dir: Path, skip: str | None = None) -> None:
+    """Write a smoothing-scale table keyed to ``checkpoint``'s identity tensors, like the calibration tool."""
+    gen = np.random.default_rng(0)
+    table = {}
+    for layer in range(LAYERS):
+        for stem, (_, in_f) in _PROJECTIONS.items():
+            name = f"layer.{layer}.{dict(_STEMS)[stem]}"
+            if name != skip:
+                table[name] = gen.uniform(0.5, 2.0, in_f).astype(np.float16)
+    scales_dir.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(
+        scales_dir / "tiny.npz",
+        **awq_identity(_open_raw_readers(checkpoint)),
+        **table,
+    )
+
+
+def _dequantize_awq(weight: _AWQWeight) -> np.ndarray:
+    """Unpack the INT4 codes and apply the block scales: the weight the engine multiplies by."""
+    low = (weight.packed & 15).astype(np.int8)
+    high = (weight.packed >> 4).astype(np.int8)
+    codes = np.empty((weight.out_features, weight.in_features), dtype=np.int8)
+    codes[:, 0::2] = np.where(low > 7, low - 16, low)
+    codes[:, 1::2] = np.where(high > 7, high - 16, high)
+    scale = np.repeat(weight.block_scale.astype(np.float32), 128, axis=1)
+    return codes.astype(np.float32) * scale
+
+
+def test_quantize_awq_weight_reproduces_group_int4() -> None:
+    """Codes round the smoothed weight with fp16 amax/7 block scales and stay in [-8, 7]."""
+    gen = np.random.default_rng(1)
+    weight = gen.standard_normal((8, 256)).astype(np.float32)
+    weight[3, :128] = 0.0  # an all-zero block
+    smooth = gen.uniform(0.5, 2.0, 256).astype(np.float16)
+    quantized = quantize_awq_weight(weight, smooth)
+
+    assert quantized.packed.shape == (8, 128)
+    assert quantized.block_scale.shape == (8, 2)
+    smoothed = weight / smooth.astype(np.float32)
+    expected_scale = (np.abs(smoothed.reshape(8, 2, 128)).max(axis=2) / 7).astype(np.float16)
+    expected_scale[3, 0] = 1.0
+    assert np.array_equal(quantized.block_scale, expected_scale)
+
+    restored = _dequantize_awq(quantized)
+    step = np.repeat(expected_scale.astype(np.float32), 128, axis=1)
+    # Round-to-nearest on the grid: at most half a step away, except clamped -8/+7 edges.
+    assert np.all(np.abs(restored - smoothed) <= 0.5 * step + 1e-6)
+    assert np.all(restored[3, :128] == 0.0)
+
+
+@pytest.mark.parametrize(
+    ("in_features", "smooth", "message"),
+    [(200, np.ones(200), "divisible by 128"), (128, np.zeros(128), "positive finite")],
+)
+def test_quantize_awq_weight_rejects_invalid_input(in_features, smooth, message) -> None:
+    """Shapes that do not split into 128-wide blocks and non-positive scales are refused."""
+    with pytest.raises(ValueError, match=message):
+        quantize_awq_weight(np.ones((4, in_features), dtype=np.float32), smooth)
+
+
+def test_calibrate_awq_quantizes_original_weights(tmp_path: Path) -> None:
+    """INT4-AWQ quantizes the 16-bit checkpoint with the scales keyed to its identity tensors."""
+    tensors = _write_checkpoint(tmp_path / "ckpt", "none")
+    _write_awq_scales(tmp_path / "ckpt", tmp_path / "scales")
+    ctx = calibrate_llama(
+        tmp_path / "ckpt", _config(), graph_ops, "int4_awq", awq_scales_dir=tmp_path / "scales"
+    )
+
+    assert len(ctx.scales) == LAYERS * len(_PROJECTIONS)
+    entry = ctx.scales["layer.1.w_down"]
+    assert entry.input_scale is None
+    assert isinstance(entry.weight, _AWQWeight)
+    source = tensors["model.layers.1.mlp.down_proj.weight"].float().numpy()
+    expected = quantize_awq_weight(source, entry.weight.pre_quant_scale)
+    assert np.array_equal(entry.weight.packed, expected.packed)
+    assert not ctx.disable_dual_gemm_fusion
+    assert ctx.builder_optimization_level == 3
+
+
+def test_calibrate_awq_rejects_scales_of_another_checkpoint(tmp_path: Path) -> None:
+    """A scale table calibrated for different weights is never applied."""
+    _write_checkpoint(tmp_path / "ckpt", "none")
+    _write_awq_scales(tmp_path / "ckpt", tmp_path / "scales")
+    other = _write_checkpoint(tmp_path / "other", "none")
+    other["model.norm.weight"] = other["model.norm.weight"] * 2
+    safetensors_torch.save_file(other, str(tmp_path / "other" / "model.safetensors"))
+    with pytest.raises(ValueError, match="no INT4-AWQ scales"):
+        calibrate_llama(
+            tmp_path / "other", _config(), graph_ops, "int4_awq",
+            awq_scales_dir=tmp_path / "scales",
+        )
+
+
+def test_calibrate_awq_rejects_missing_projection_scale(tmp_path: Path) -> None:
+    """A projection without a calibrated scale fails the build instead of staying unquantized."""
+    _write_checkpoint(tmp_path / "ckpt", "none")
+    _write_awq_scales(tmp_path / "ckpt", tmp_path / "scales", skip="layer.1.w_up")
+    with pytest.raises(ValueError, match="no layer.1.w_up"):
+        calibrate_llama(
+            tmp_path / "ckpt", _config(), graph_ops, "int4_awq",
+            awq_scales_dir=tmp_path / "scales",
+        )
+
+
+def test_calibration_tool_maps_projection_names() -> None:
+    """The tool keys each HF projection module by the weight stem the graph uses."""
+    match = calibrate_awq_scales._PROJECTION_NAME.search("model.layers.3.mlp.down_proj")
+    assert match is not None and match.group(1) == "3"
+    assert calibrate_awq_scales._WEIGHT_STEM[match.group(2)] == "w_down"
+    assert calibrate_awq_scales._PROJECTION_NAME.search("model.layers.3.mlp.down_proj.inner") is None
+
+
+def test_calibration_tool_detects_block_amax_drift() -> None:
+    """The tool accepts ModelOpt's plain block amax and rejects a clipped or mismatched one."""
+    gen = np.random.default_rng(3)
+    weight = gen.standard_normal((4, 256)).astype(np.float32)
+    smooth = gen.uniform(0.5, 2.0, 256).astype(np.float16)
+    amax = np.abs((weight / smooth.astype(np.float32)).reshape(4, 2, 128)).max(axis=2)
+    calibrate_awq_scales._check_block_amax("w", weight, smooth, torch.from_numpy(amax))
+    with pytest.raises(RuntimeError, match="recomputed block amax differs"):
+        calibrate_awq_scales._check_block_amax("w", weight, smooth, torch.from_numpy(amax * 0.9))
+
+
+def test_committed_awq_scales_are_complete() -> None:
+    """Every committed table names its checkpoint and covers each projection of its shape."""
+    from ..quantization import AWQ_IDENTITY_TENSORS, AWQ_SCALES_DIR
+
+    for path in sorted(AWQ_SCALES_DIR.glob("*.npz")):
+        with np.load(path, allow_pickle=False) as table:
+            for key in ("hf_id", "hf_revision", "algorithm"):
+                assert str(table[key]), (path.name, key)
+            for key in AWQ_IDENTITY_TENSORS:
+                assert table[f"identity.{key}"].size, (path.name, key)
+            layers = {name.split(".")[1] for name in table.files if name.startswith("layer.")}
+            for layer in layers:
+                for _, stem in _STEMS:
+                    smooth = table[f"layer.{layer}.{stem}"]
+                    assert smooth.dtype == np.float16 and smooth.ndim == 1
+                    assert np.isfinite(smooth).all() and np.all(smooth > 0)
+
+
 @pytest.mark.parametrize("quantization", ["fp8", "nvfp4"])
 def test_calibrate_reads_checkpoint_bytes(tmp_path: Path, quantization: str) -> None:
     """Weights and scales come from the checkpoint bytes, with no re-quantization."""
@@ -102,6 +259,7 @@ def test_calibrate_reads_checkpoint_bytes(tmp_path: Path, quantization: str) -> 
     ctx = calibrate_llama(tmp_path, _config(), graph_ops, quantization)
 
     assert len(ctx.scales) == LAYERS * len(_PROJECTIONS)
+    assert ctx.builder_optimization_level == 1
     entry = ctx.scales["layer.1.w_down"]
     out_f, in_f = _PROJECTIONS["mlp.down_proj"]
     assert (entry.weight.out_features, entry.weight.in_features) == (out_f, in_f)
@@ -184,7 +342,7 @@ def test_matmul_fn_routes_through_context() -> None:
     assert ctx.names == ["layer.0.w_q"]
 
 
-@pytest.mark.parametrize("value", [None, "none", "fp8", "nvfp4"])
+@pytest.mark.parametrize("value", [None, "none", "fp8", "nvfp4", "int4_awq"])
 def test_request_accepts_supported_quantization(value) -> None:
     """``BuildRequest`` carries the quantization setting through ``coerce_request``."""
     legacy = SimpleNamespace(
@@ -214,7 +372,49 @@ def test_request_accepts_supported_quantization(value) -> None:
 
 @pytest.mark.gpu
 @pytest.mark.trt
-@pytest.mark.parametrize("quantization", ["fp8", "nvfp4"])
+@pytest.mark.parametrize("dtype", ["fp16", "bf16"])
+def test_awq_matmul_matches_dequantized_reference(dtype: str) -> None:
+    """The INT4 constant, block Dequantize and smoothing compute the dequantized weight's matmul."""
+    gen = np.random.default_rng(2)
+    rows, n, k = 5, 64, 256
+    weight = quantize_awq_weight(
+        gen.standard_normal((n, k)).astype(np.float32) * 0.05,
+        gen.uniform(0.5, 2.0, k).astype(np.float16),
+    )
+    ctx = LlamaQuantContext(scales={"w": _LayerScales(None, weight)}, graph_ops=graph_ops)
+    trt_dtype = {"fp16": trt.float16, "bf16": trt.bfloat16}[dtype]
+    torch_dtype = {"fp16": torch.float16, "bf16": torch.bfloat16}[dtype]
+
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    x = network.add_input("x", trt_dtype, (rows, k))
+    out = ctx.maybe_quantized_matmul(network, x, k, n, None, "w")
+    out.name = "y"
+    network.mark_output(out)
+    plan = builder.build_serialized_network(network, builder.create_builder_config())
+    assert plan is not None
+    engine = trt.Runtime(logger).deserialize_cuda_engine(plan)
+    context = engine.create_execution_context()
+
+    activation = torch.from_numpy(gen.standard_normal((rows, k)).astype(np.float32))
+    activation = activation.to(torch_dtype).cuda()
+    result = torch.empty((rows, n), dtype=torch_dtype, device="cuda")
+    context.set_tensor_address("x", activation.data_ptr())
+    context.set_tensor_address("y", result.data_ptr())
+    stream = torch.cuda.Stream()
+    assert context.execute_async_v3(stream.cuda_stream)
+    stream.synchronize()
+
+    smoothed = activation.float().cpu().numpy() * weight.pre_quant_scale.astype(np.float32)
+    expected = smoothed @ _dequantize_awq(weight).T
+    tolerance = {"fp16": 2e-2, "bf16": 1e-1}[dtype]
+    np.testing.assert_allclose(result.float().cpu().numpy(), expected, rtol=0, atol=tolerance)
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+@pytest.mark.parametrize("quantization", ["fp8", "nvfp4", "int4_awq"])
 @pytest.mark.parametrize("decoder_role", ["dual_profile", "decode"])
 def test_engine_builds_with_packed_weights(
     tmp_path: Path, quantization: str, decoder_role: str
@@ -226,10 +426,17 @@ def test_engine_builds_with_packed_weights(
     """
     plain_dir, quant_dir = tmp_path / "plain", tmp_path / "quant"
     _write_checkpoint(plain_dir, "none")
-    _write_checkpoint(quant_dir, quantization)
     config = _config()
     config.raw["_decoder_engine_role"] = decoder_role
-    ctx = calibrate_llama(quant_dir, config, graph_ops, quantization)
+    if quantization == "int4_awq":
+        _write_checkpoint(quant_dir, "none")
+        _write_awq_scales(quant_dir, tmp_path / "scales")
+        ctx = calibrate_llama(
+            quant_dir, config, graph_ops, quantization, awq_scales_dir=tmp_path / "scales"
+        )
+    else:
+        _write_checkpoint(quant_dir, quantization)
+        ctx = calibrate_llama(quant_dir, config, graph_ops, quantization)
     assert isinstance(ctx, LlamaQuantContext)
 
     plain = build_standard_decoder_engine(
@@ -252,7 +459,8 @@ def test_engine_builds_with_packed_weights(
         assert engine.num_aux_streams == 0
     names = {engine.get_tensor_name(i) for i in range(engine.num_io_tensors)}
     assert {"token_id", "logits", "present_k_0"} <= names
-    # 7 projections x 2 layers: FP8 halves and FP4 quarters the fp16 projection bytes,
-    # so a plan that stored 16-bit weights again would miss these bounds.
-    bound = {"fp8": 0.6, "nvfp4": 0.4}[quantization]
+    # 7 projections x 2 layers: FP8 halves and FP4/INT4 quarter the fp16 projection bytes,
+    # so a plan that stored 16-bit weights again would miss these bounds. INT4-AWQ builds
+    # at optimization level 3, whose extra kernels weigh more in a plan this small.
+    bound = {"fp8": 0.6, "nvfp4": 0.4, "int4_awq": 0.6}[quantization]
     assert len(quantized) < bound * len(plain), (len(quantized), len(plain))
