@@ -397,6 +397,9 @@ A suite with media and neither `media_root` nor `hf_datasets_cache` configured i
   `benchmarks`, scored by `gold_metrics.py` or an AIPerf grader) and the Perf output check
   (`output_grader`, a comparator in `plugins/trtmc_aiperf_plugins/accuracy.py`).
 - Model needing a different input or reference option: `config/models/<profile>.yaml`.
+- Model that cannot be qualified as cataloged (for example a catalog testcase without a prompt):
+  `exclude: <reason>` in `families/<family>/tests/aiperf/<profile>.yaml`. Every machine's model list then
+  excludes it, and the run's `excluded.json` keeps the reason; `run-all --profile` still runs it.
 - Model whose native pipeline the generic adapters cannot run: `families/<family>/reference/adapter.py`
   (an `Adapter(spec, host)` with `invoke(request, artifact_base)`; it imports nothing from the applications and
   reaches the serving mechanics through `host`), named by `reference.adapter`.

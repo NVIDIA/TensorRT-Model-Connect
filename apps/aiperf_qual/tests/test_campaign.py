@@ -444,6 +444,17 @@ def test_machine_model_list_excludes_checkpoints_above_the_size_limit():
                          "reason": "checkpoint 54 GiB > models.max_checkpoint_gib 30"}]
 
 
+def test_a_profile_definition_excludes_the_profile_from_every_machines_list():
+    """``exclude: <reason>`` in a profile's own definition: a profile AIPerf cannot qualify as cataloged."""
+    reason = "its catalog testcase has no prompt or image, so no request can be built"
+    declared = selection.Profile("qwen35-moe-gptq-edge", "vision_language_generation", "Qwen/x", None, reason)
+    selected, excluded = selection.select({}, [*CATALOG, declared])
+    assert _names(selected) == _names(CATALOG)
+    assert excluded == [{"profile": "qwen35-moe-gptq-edge", "task": "vision_language_generation", "reason": reason}]
+    declared_here = {profile.name: profile.excluded for profile in selection.catalog(REPOSITORY)}
+    assert declared_here["qwen35-moe-gptq-edge"] == reason and declared_here["qwen3-0.6b-fp16"] is None
+
+
 @pytest.mark.parametrize("config, message", [
     ({"exclude": [{"profile": "flux-2-dev"}]}, "reason"),
     ({"include": ["qwen3-0.6b-fp61"]}, "matches no ready catalog profile"),

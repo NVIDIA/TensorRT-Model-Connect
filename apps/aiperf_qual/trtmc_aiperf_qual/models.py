@@ -139,7 +139,7 @@ def _absolute(names: list[Any], definitions: Mapping[str, Any], testcase: Mappin
     return items
 
 
-def _profile_override(profile: str, family: str, repository: Path, root: Path) -> dict[str, Any]:
+def profile_override(profile: str, family: str, repository: Path, root: Path = CONFIG_ROOT) -> dict[str, Any]:
     """A profile's own configuration: legacy config/models/<profile>.yaml, then the family's definition."""
     override_path = root / "models" / f"{profile}.yaml"
     override = configuration((yaml.safe_load(override_path.read_text()) if override_path.is_file() else None) or {})
@@ -192,10 +192,10 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     tasks = yaml.safe_load((root / "tasks.yaml").read_text())
     if catalog_model.task not in tasks["tasks"]:
         raise ConfigError(f"no Task defaults for {catalog_model.task!r} ({profile})")
-    override = _profile_override(profile, catalog_model.family, repository, root)
+    override = profile_override(profile, catalog_model.family, repository, root)
     base = qualified_as(profile, entries)
     if base != profile:  # the base's configuration under the profile's own; the candidate stays the profile's
-        inherited = _profile_override(base, catalog_model.family, repository, root)
+        inherited = profile_override(base, catalog_model.family, repository, root)
         inherited.pop("candidate", None)
         override = deep_merge(inherited, override)
     config = deep_merge(deep_merge(configuration(tasks["defaults"]),
