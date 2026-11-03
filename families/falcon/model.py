@@ -363,8 +363,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("Falcon max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Falcon has no qualified family-owned quantized build")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(f"Falcon does not support quantization={request.quantization!r}")
+    quantized = request.quantization == "fp8"
+    if quantized and precision != "fp16":
+        raise NotImplementedError("Falcon fp8 quantization requires precision fp16")
+    if quantized and request.tensor_parallel_size != 1:
+        raise NotImplementedError("Falcon fp8 quantization does not support tensor parallelism")
     if request.fp32_layers:
         raise NotImplementedError("Falcon does not expose mixed-precision layer selection")
     if request.mtp_seq_len is not None:
@@ -379,6 +384,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_resolved_build_precision"] = precision
     config.raw["_parallel_build_enabled"] = parallel.enabled
     weights = model.load_weights(str(model_dir), config)
+    quant_ctx = None
+    if quantized:
+        from . import graph_ops
+        from .quantization import calibrate_falcon_fp8
+
+        quant_ctx = calibrate_falcon_fp8(config, weights, graph_ops)
 
     writer.set_header(family="falcon", task=request.task, backend=request.backend)
     if parallel.enabled:
@@ -402,7 +413,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,
@@ -413,7 +424,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,
