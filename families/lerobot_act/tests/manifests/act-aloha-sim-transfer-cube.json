@@ -4,7 +4,7 @@
   "hf_revision": "ba73b2766f1371cdc133ca4efb97eb090d744625",
   "bundle": "act-aloha-sim-transfer-cube.bundle",
   "family": "lerobot_act",
-  "task": "robot_control",
+  "task": "image_state_to_action_chunk",
   "precision": "fp32",
   "tensor_parallel_size": 1,
   "testcases": [

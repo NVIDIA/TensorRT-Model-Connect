@@ -29,33 +29,48 @@ install(TARGETS trtmc_model_lerobot_act
 )
 
 if(TRTMC_BUILD_TESTS)
-  add_executable(test_lerobot_act_pipeline
-    ../tests/cpp/test_pipeline.cpp
+  add_executable(test_lerobot_act_task_contract
+    ../tests/cpp/test_task_contract.cpp
   )
-  target_include_directories(test_lerobot_act_pipeline PRIVATE
+  target_include_directories(test_lerobot_act_task_contract PRIVATE
     ${PROJECT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/core/runtime/include
   )
-  target_include_directories(test_lerobot_act_pipeline SYSTEM PRIVATE
+  target_include_directories(test_lerobot_act_task_contract SYSTEM PRIVATE
     ${TRTMC_CUDA_INCLUDE_DIR}
   )
-  target_link_libraries(test_lerobot_act_pipeline PRIVATE trtmc_model_lerobot_act)
-  target_compile_options(test_lerobot_act_pipeline PRIVATE -Wall -Wextra -Wpedantic)
-  add_test(NAME lerobot_act_pipeline COMMAND test_lerobot_act_pipeline)
-  set_tests_properties(lerobot_act_pipeline PROPERTIES LABELS cpu)
+  target_link_libraries(test_lerobot_act_task_contract PRIVATE trtmc_model_lerobot_act)
+  target_compile_options(test_lerobot_act_task_contract PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME lerobot_act_task_contract COMMAND test_lerobot_act_task_contract)
+  set_tests_properties(lerobot_act_task_contract PROPERTIES LABELS cpu)
+
+  # Public C and C++ SDK consumers for the family-owned E2E test.
+  foreach(_language IN ITEMS c cpp)
+    add_executable(test_lerobot_act_sdk_${_language}
+      ../tests/sdk_consumer.${_language}
+    )
+    target_link_libraries(test_lerobot_act_sdk_${_language} PRIVATE trtmc_c)
+    target_compile_options(test_lerobot_act_sdk_${_language} PRIVATE
+      -Wall -Wextra -Wpedantic -Werror
+    )
+    set_target_properties(test_lerobot_act_sdk_${_language} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    )
+  endforeach()
+  # stb_image's float conversions call libm, which a C link does not add.
+  target_link_libraries(test_lerobot_act_sdk_c PRIVATE m)
+  add_dependencies(test_lerobot_act_task_contract
+    test_lerobot_act_sdk_c test_lerobot_act_sdk_cpp
+  )
 
   add_executable(lerobot_act_qualification
     ../tests/cpp/qualification.cpp
-  )
-  target_include_directories(lerobot_act_qualification PRIVATE
-    ${PROJECT_SOURCE_DIR}
-    ${PROJECT_SOURCE_DIR}/core/runtime/include
   )
   target_include_directories(lerobot_act_qualification SYSTEM PRIVATE
     ${TRTMC_CUDA_INCLUDE_DIR}
   )
   target_link_libraries(lerobot_act_qualification PRIVATE
-    trtmc_runtime
+    trtmc_c
     nlohmann_json::nlohmann_json
     ${TRTMC_CUDART_LIBRARY}
   )

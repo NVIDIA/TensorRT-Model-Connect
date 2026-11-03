@@ -110,8 +110,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.dynamic_kv_cache:
         raise NotImplementedError("lerobot_act does not support dynamic_kv_cache")
 
-    if request.task != "robot_control":
-        raise ValueError("lerobot_act supports only task=robot_control")
+    if request.task != "image_state_to_action_chunk":
+        raise ValueError("lerobot_act supports only task=image_state_to_action_chunk")
     if request.precision.lower() != "fp32":
         raise ValueError("LeRobot ACT supports only fp32")
     if request.max_sequence_length is not None:
