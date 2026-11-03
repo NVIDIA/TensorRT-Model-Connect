@@ -196,6 +196,23 @@ def test_a_planned_tier_says_what_is_missing_before_it_starts(tmp_path: Path, mo
     assert cli.main([*start, "--dry-run"]) == 0
 
 
+def test_tier_b_builds_a_vertical_editor_and_wan_image_to_video(tmp_path: Path, monkeypatch, capsys):
+    from trtmc_short_drama import cli
+
+    monkeypatch.setattr(cli.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(catalog, "gpus", lambda: [catalog.parse_gpu("0, RTX PRO 6000, 97887, 12.0")])
+    (tmp_path / "trtmc-server").touch()
+    assert cli.main(["up", "--dry-run", "--data", str(tmp_path / "data"), "--runtime-root", str(tmp_path)]) == 0
+    built = {line.split(":")[0]: line for line in capsys.readouterr().out.splitlines() if line.startswith("build ")}
+    assert set(built) == {"build image", "build edit", "build video", "build asr"}
+    assert "Qwen/Qwen-Image-Edit-2511 -o" in built["build edit"] and \
+        "--task image_edit --precision bf16 --image-height 1280 --image-width 704" in built["build edit"]
+    assert "Qwen/Qwen-Image -o" in built["build image"] and "--precision bf16" in built["build image"]
+    assert "Wan-AI/Wan2.2-TI2V-5B -o" in built["build video"] and \
+        "--task initial_image_text_to_video --precision bf16" in built["build video"]
+    assert catalog.TIERS["b"].models["video"].first_frame and not catalog.TIERS["a"].models["video"].first_frame
+
+
 def test_h3_is_built_through_the_family_command(tmp_path: Path):
     from trtmc_short_drama import cli
 

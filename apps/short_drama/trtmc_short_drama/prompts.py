@@ -401,3 +401,73 @@ def video_prompts(plan: dict[str, Any], shot: dict[str, Any], references: list[t
     continuation = (f"{head}\n\ndetailed_description:\n[Shot 1 continued] The same shot keeps "
                     f"drifting slowly. {then} Nobody speaks.\n\n{sound}")
     return first, continuation
+
+
+def _named(text: str, names: dict[str, str]) -> str:
+    """A description with each character id replaced by the character's name."""
+
+    for identifier, name in names.items():
+        text = re.sub(rf"\b{re.escape(identifier)}\b", name, text)
+    return text
+
+
+def _scene(plan: dict[str, Any], text_of: Callable[[Any], str]) -> str:
+    setting = f" set in {_clause(text_of(plan['setting']))}" if plan.get("setting") else ""
+    return f"{setting}, {_clause(text_of(plan.get('style')) or DEFAULT_STYLE)}"
+
+
+def keyframe_prompt(plan: dict[str, Any], shot: dict[str, Any], pictured: tuple[str, dict[str, Any]],
+                    english: Callable[[str], str] | None = None) -> str:
+    """The instruction an image-edit model draws the first frame of a shot from.
+
+    `pictured` is (kind, item) of the still it edits: one person of the shot, whose look it keeps,
+    or the place. The others in the shot are described in words. The camera is left out: it says how
+    the shot moves, and a single frame drawn from it came out as panels. `english` works as in
+    `video_prompts`.
+    """
+
+    def text_of(value: Any) -> str:
+        value = str(value or "").strip()
+        return english(value) if english and value else value
+
+    names = {c["id"]: c.get("name") or c["id"] for c in plan.get("characters", [])}
+    looks = {c["id"]: _clause(text_of(c.get("look"))) for c in plan.get("characters", [])}
+    places = {item["id"]: item for item in plan.get("locations", [])}
+    place = _english(text_of(places.get(shot.get("location"), {}).get("look")))
+    kind, item = pictured
+    if kind == "character":
+        keep = (f"Use the person in the picture ({names.get(item['id'], item['id'])}, {looks.get(item['id'], '')}) "
+                "and keep the face, hairstyle and clothing exactly as shown.")
+        others = [c for c in shot.get("characters", []) if c != item["id"]]
+        company = ("Also in the shot: " + "; ".join(f"{names.get(c, c)}, {looks.get(c, '')}" for c in others) +
+                   f". Exactly {len(others) + 1} people, each of them once.") if others else ""
+        where = f"The place: {place}." if place else ""
+    else:
+        keep, company, where = "Use the place in the picture and keep its layout, materials and light.", "", ""
+    action = _clause(_named(_english(text_of(shot.get("action"))), names))
+    moment = f"It shows the moment this begins: {action}." if action else ""
+    return " ".join(part for part in (
+        f"A vertical film still from a short drama{_scene(plan, text_of)}.", keep, company, where, moment,
+        "One photograph that fills the frame, not a collage or a split screen; no text, captions or subtitles.")
+        if part)
+
+
+def motion_prompt(plan: dict[str, Any], shot: dict[str, Any], english: Callable[[str], str] | None = None) -> str:
+    """The prompt an image-to-video model animates a shot's first frame with; it makes no sound."""
+
+    def text_of(value: Any) -> str:
+        value = str(value or "").strip()
+        return english(value) if english and value else value
+
+    names = {c["id"]: c.get("name") or c["id"] for c in plan.get("characters", [])}
+    looks = {c["id"]: _clause(text_of(c.get("look"))) for c in plan.get("characters", [])}
+    people = [f"{names.get(c, c)} is {looks[c]}." for c in shot.get("characters", []) if looks.get(c)]
+    speaker = shot.get("speaker")
+    on_screen = shot.get("line") and speaker in shot.get("characters", [])
+    speaks = f"{names.get(speaker, speaker)} talks." if on_screen else ""
+    return " ".join(part for part in (
+        f"A vertical short-drama shot{_scene(plan, text_of)}.", _sentence(text_of(shot.get("camera"))), *people,
+        _sentence(_named(_english(text_of(shot.get("action"))), names)),
+        _sentence(_named(_english(text_of(shot.get("after"))), names)), speaks,
+        "Natural, steady motion and a clean image without subtitles, captions or any on-screen text.")
+        if part)

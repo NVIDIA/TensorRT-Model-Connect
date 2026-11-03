@@ -150,11 +150,25 @@ def test_choosing_a_take_switches_the_clip_and_drops_its_timing(tmp_path, monkey
         created = client.post("/api/projects", json={"title": "x", "novel": "文本"}).json()
         state_file = tmp_path / "projects" / created["id"] / "episodes" / "01" / "shots.json"
         state_file.parent.mkdir(parents=True)
-        takes = [{"take": 1, "file": "c1.mp4", "sheet": "s1.jpg"}, {"take": 2, "file": "c2.mp4", "sheet": "s2.jpg"}]
+        takes = [{"take": 1, "file": "c1.mp4", "sheet": "s1.jpg"},
+                 {"take": 2, "file": "c2.mp4", "sheet": "s2.jpg", "silent": True, "first_frame": "f.png", "keyframe": None}]
         state_file.write_text(json.dumps({"assembled": {}, "e1s1": {**takes[1], "takes": takes, "speech": {}}}))
         state = client.put(f"/api/projects/{created['id']}/episodes/1", json={"use_take": {"e1s1": 1}}).json()
         assert state["e1s1"]["file"] == "c1.mp4" and "speech" not in state["e1s1"] and "assembled" not in state
+        assert not {"silent", "first_frame", "keyframe"} & set(state["e1s1"])  # take 1 was filmed with sound
         assert client.put(f"/api/projects/{created['id']}/episodes/1", json={"use_take": {"e1s1": 3}}).status_code == 404
+
+
+def test_a_video_model_that_animates_a_first_frame_previews_its_motion_prompt(tmp_path, monkeypatch):
+    client, services = make_client(tmp_path, monkeypatch)
+    services.first_frames = frozenset({"v"})
+    with client:
+        created = client.post("/api/projects", json={"title": "AQ", "sample": True, "episodes": 1,
+                                                     "max_seconds": 30}).json()
+        assert client.post(f"/api/projects/{created['id']}/run", json={"step": "plan"}).status_code == 200
+        assert wait(client)[0]["status"] == "done"
+        preview = client.get(f"/api/projects/{created['id']}").json()["previews"]["e1s1"]
+        assert preview.startswith("A vertical short-drama shot") and "<d>" not in preview
 
 
 def test_previous_frame_is_used_only_when_the_place_continues():

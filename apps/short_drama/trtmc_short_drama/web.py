@@ -52,6 +52,7 @@ class Services:
     models: dict[str, tuple[str, Served]]  # name -> (role, served bundle)
     data: Path
     languages: dict[str, str] = field(default_factory=dict)  # name -> the language a speech model hears
+    first_frames: frozenset[str] = frozenset()  # video models that animate one first frame, without sound
 
     def load(self, name: str | None) -> None:
         if name is None or name not in self.models:
@@ -61,6 +62,14 @@ class Services:
         if role == "video":  # speech recognition is small; keep it with the video model
             wanted += [s for r, s in self.models.values() if r == "asr"]
         self.engine.ensure(wanted)
+
+    def first_frame(self, name: str | None) -> bool:
+        return name in self.first_frames
+
+    def serving(self, role: str) -> str | None:
+        """The name of the served model with this role, if there is one."""
+
+        return next((name for name, (served, _) in self.models.items() if served == role), None)
 
     def external(self) -> dict[str, str]:
         return read_json(self.data / "settings.json", {}).get("external_chat", {})
@@ -296,14 +305,16 @@ def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any]
         shots_entry = entries.get("shots", {})
         default_previous = bool(shots_entry.get("params", {}).get("previous_last_frame", True))
         default_chain = bool(shots_entry.get("params", {}).get("chain_shots", True))
+        animated = services.first_frame(shots_entry.get("model"))
         episodes, previews = {}, {}  # previews: the video prompt each shot would get now
         for episode in plan.get("episodes", []):
             state = project.shot_state(episode["number"])
             use_previous = media.uses_previous_frame(project, plan, episode["number"], default_previous)
             chain = media.chains_shots(project, episode["number"], default_chain)
             for shot in episode.get("shots", []):
-                previews[shot["id"]] = media.shot_inputs(project, plan, episode, shot, use_previous=use_previous,
-                                                         chain=chain, require_approval=False)[2]
+                previews[shot["id"]] = prompts.motion_prompt(plan, shot, media.english_of(project)) if animated \
+                    else media.shot_inputs(project, plan, episode, shot, use_previous=use_previous, chain=chain,
+                                           require_approval=False)[2]
                 if shot["id"] in state:
                     state[shot["id"]]["outdated"] = media.outdated(project, plan, episode, shot, state[shot["id"]],
                                                                    use_previous=use_previous, chain=chain)
@@ -387,7 +398,8 @@ def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any]
             chosen = next((t for t in state.get(shot_id, {}).get("takes", []) if t["take"] == take), None)
             if chosen is None:
                 raise HTTPException(404, f"{shot_id} has no take {take}")
-            state[shot_id].pop("speech", None)
+            for key in ("speech", *media.FIRST_FRAME_KEYS):
+                state[shot_id].pop(key, None)
             state[shot_id].update(chosen)
             state.pop("assembled", None)
         project.save_shot_state(number, state)

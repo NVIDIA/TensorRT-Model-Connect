@@ -191,3 +191,11 @@ def test_analysis_measures_every_shot_and_keeps_vision_findings_in_bounds(tmp_pa
     timed = FakeServices()
     analysis.run_analyze(Context(project, {"only": ["e1s2"]}, "whisper", 1, timed, progress=lambda _: None))
     assert timed.engine.heard == [] and analysis.load(project, 1)["shots"]["e1s2"]["speech"]["match"] == 0.5
+    # a take animated without sound has nothing to hear: no speech recognition, no sound or speech findings
+    state["e1s2"] = {key: value for key, value in state["e1s2"].items() if key != "speech"} | {"silent": True}
+    project.save_shot_state(1, state)
+    silent = FakeServices()
+    analysis.run_analyze(Context(project, {"only": ["e1s2"]}, "whisper", 1, silent, progress=lambda _: None))
+    measured = analysis.load(project, 1)
+    assert silent.loaded == [] and silent.engine.heard == [] and measured["shots"]["e1s2"]["silent"]
+    assert not [f for f in measured["findings"] if f["shot"] == "e1s2" and f["category"] in ("sound", "speech")]

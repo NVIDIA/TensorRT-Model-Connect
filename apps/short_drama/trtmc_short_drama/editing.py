@@ -17,6 +17,7 @@ from .flow import Context, Step
 STEP_SECONDS = 0.1
 HEARD = 0.8  # share of the full-clip match a cut must keep to still contain the line
 SECONDS_PER_CHARACTER = 0.18  # a subtitle stays up at least this long per character
+READING_SECONDS = 1.5  # a line that is read, not heard, stays up at least this long
 
 
 def normalize(text: str) -> str:
@@ -91,6 +92,13 @@ def time_line(transcribe: Callable[[bytes], str], wav: bytes, line: str) -> dict
     return {**result, "start": round(max(0.0, start), 2), "end": round(end, 2), "timing": "asr"}
 
 
+def read_line(length: float, line: str) -> dict:
+    """When a line nobody speaks is on screen: from 0.3 s for as long as it takes to read, within the clip."""
+
+    end = 0.3 + max(READING_SECONDS, 0.28 * len(normalize(line)))
+    return {"start": 0.3, "end": round(min(length, end), 2), "timing": "read"}
+
+
 def recut_older(context: Context, episode: dict) -> None:
     """Cut takes of an older video.CUT_RULE again, before their lines are timed or the clips joined."""
 
@@ -107,14 +115,17 @@ def run_subtitles(context: Context) -> None:
     recut_older(context, episode)
     state = project.shot_state(number)
     spoken = [s for s in episode["shots"] if s.get("line") and state.get(s["id"], {}).get("file")]
-    if spoken:
+    if any(not state[s["id"]].get("silent") for s in spoken):
         context.services.load(context.model)
     for index, shot in enumerate(spoken, start=1):
         context.check()
         context.progress(f"episode {number}: timing line {index} of {len(spoken)}")
         clip = state[shot["id"]]["file"]
-        timing = time_line(lambda audio: context.services.engine.transcribe(context.model, audio),
-                           video.speech_wav(project.root / clip), shot["line"])
+        if state[shot["id"]].get("silent"):  # animated without sound: the line is read, not heard
+            timing = read_line(video.probe(project.root / clip)["duration"], shot["line"])
+        else:
+            timing = time_line(lambda audio: context.services.engine.transcribe(context.model, audio),
+                               video.speech_wav(project.root / clip), shot["line"])
         state = project.shot_state(number)  # re-read: the user may pick another take meanwhile
         if state.get(shot["id"], {}).get("file") == clip:
             state[shot["id"]] = {**state[shot["id"]], "speech": timing}
@@ -128,11 +139,12 @@ def srt_time(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{rest // 1000:02d},{rest % 1000:03d}"
 
 
-def subtitles(shots: list[dict], state: dict, lengths: dict[str, float] | None = None) -> str:
+def subtitles(shots: list[dict], state: dict, lengths: dict[str, float] | None = None,
+              names: dict[str, str] | None = None) -> str:
     """SRT of the planned lines placed where the recognizer heard them.
 
     `lengths` are the clips' real durations by shot id: a clip skips its opening and can end up
-    shorter than planned.
+    shorter than planned. A line in a take without sound starts with its speaker's name from `names`.
     """
 
     entries, offset = [], 0.0
@@ -144,6 +156,9 @@ def subtitles(shots: list[dict], state: dict, lengths: dict[str, float] | None =
             end = offset + max(speech["end"], speech["start"] + 0.8)
             end = min(end, offset + length)
             text = re.sub(r"[\"“”]", "", shot["line"])
+            speaker = (names or {}).get(shot.get("speaker") or "")
+            if speaker and state.get(shot["id"], {}).get("silent"):  # nobody is heard saying it
+                text = f"{speaker}{'：' if re.search(r'[一-鿿]', text) else ': '}{text}"
             entries.append(f"{len(entries) + 1}\n{srt_time(start)} --> {srt_time(end)}\n{text}\n")
         offset += length
     return "\n".join(entries)
@@ -161,7 +176,8 @@ def run_assemble(context: Context) -> None:
     directory = project.episode_dir(number)
     clips = [project.root / state[s["id"]]["file"] for s in shots]
     lengths = {s["id"]: video.probe(clip)["duration"] for s, clip in zip(shots, clips)}
-    (directory / "episode.srt").write_text(subtitles(shots, state, lengths), encoding="utf-8")
+    names = {c["id"]: c.get("name", "") for c in project.plan.get("characters", [])}
+    (directory / "episode.srt").write_text(subtitles(shots, state, lengths, names), encoding="utf-8")
     output = directory / "episode.mp4"
     context.progress(f"episode {number}: joining {len(shots)} clips")
     video.export_episode(clips, directory / "episode.srt",

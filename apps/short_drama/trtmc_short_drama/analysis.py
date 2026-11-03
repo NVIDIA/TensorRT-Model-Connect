@@ -357,17 +357,20 @@ def run_analyze(context: Context) -> None:
             continue
         context.progress(f"measuring {shot['id']} ({index} of {len(shots)})")
         seconds = video.probe(clip)["duration"]
+        silent = bool(entry.get("silent"))  # animated without sound: no sound or speech findings
         measures = {"take": entry.get("take"), "file": entry["file"], "duration": seconds,
-                    "sound": sound(samples(clip)), "picture": picture(frames(clip, seconds))}
-        speech = entry.get("speech")
-        if speech is None or "heard" not in speech:  # never heard, or heard before the take was cut again
-            if not loaded:
-                context.services.load(context.model)  # speech recognition
-                loaded = True
-            heard = context.services.engine.transcribe(context.model, video.speech_wav(clip))
-            speech = {"heard": heard, "match": round(editing.coverage(heard, shot.get("line") or ""), 2)}
-        measures["speech"] = {"heard": speech.get("heard", ""), "match": speech.get("match", 0.0),
-                              **({} if judge_speech else {"unchecked": f"the speech model hears {hears}"})}
+                    "sound": {"level_db": None, "burst": 0.0, "clipping": 0.0} if silent else sound(samples(clip)),
+                    "picture": picture(frames(clip, seconds)), **({"silent": True} if silent else {})}
+        if not silent:
+            speech = entry.get("speech")
+            if speech is None or "heard" not in speech:  # never heard, or heard before the take was cut again
+                if not loaded:
+                    context.services.load(context.model)  # speech recognition
+                    loaded = True
+                heard = context.services.engine.transcribe(context.model, video.speech_wav(clip))
+                speech = {"heard": heard, "match": round(editing.coverage(heard, shot.get("line") or ""), 2)}
+            measures["speech"] = {"heard": speech.get("heard", ""), "match": speech.get("match", 0.0),
+                                  **({} if judge_speech else {"unchecked": f"the speech model hears {hears}"})}
         result["shots"][shot["id"]] = measures
         edges[shot["id"]] = (edge(clip, last=False), edge(clip, last=True), measures["sound"]["level_db"])
         result["findings"] += measured_findings(language, shot, measures if judge_speech else

@@ -48,7 +48,8 @@ def parser() -> argparse.ArgumentParser:
     up.add_argument("--plugins", type=Path, default=Path(__file__).resolve().parents[1] / "plugins")
     up.add_argument("--dry-run", action="store_true", help="print the plan and the build commands only")
     up.add_argument("--allow-planned", action="store_true",
-                    help="start a tier that TRTMC cannot run end to end yet (shots will fail)")
+                    help="start a tier that TRTMC main cannot run end to end yet (shots fail unless the "
+                         "TRTMC build has what the tier still needs)")
     return result
 
 
@@ -163,8 +164,8 @@ def main(argv: list[str] | None = None) -> int:
           f"tier {tier.name.upper()} ({tier.summary})", flush=True)
     if tier.missing and not (args.allow_planned or args.dry_run):
         raise SystemExit(f"tier {tier.name.upper()} is planned; TRTMC still needs: " + "; ".join(tier.missing) +
-                         ". Start it anyway with --allow-planned (stories, plans and pictures work; shots do not), "
-                         "or use a GPU with more memory.")
+                         ". Start it anyway with --allow-planned (stories, plans and pictures work; shots need a "
+                         "TRTMC build that has these), or use a GPU with more memory.")
     if args.vision == "local" and "vision" not in tier.models:
         raise SystemExit(f"tier {tier.name.upper()} has no vision model to serve; name one from a chat API in "
                          "Settings instead")
@@ -202,7 +203,8 @@ def main(argv: list[str] | None = None) -> int:
     hosts = ["127.0.0.1", "localhost", "::1"] + ([args.host] if args.host not in {"0.0.0.0", "::"} else [])
     token = None if loopback(args.host) else app_token(data)
     languages = {model.name: model.language for model in wanted.values() if model.language}
-    app = create_app(Services(engine, models, data, languages), plugins=args.plugins, info=info,
+    first_frames = frozenset(model.name for model in wanted.values() if model.first_frame)
+    app = create_app(Services(engine, models, data, languages, first_frames), plugins=args.plugins, info=info,
                      allowed_hosts=None if token else hosts, token=token)
     if token:
         print(f"listening beyond loopback; open http://{args.host}:{args.port}/?token={token}", flush=True)
