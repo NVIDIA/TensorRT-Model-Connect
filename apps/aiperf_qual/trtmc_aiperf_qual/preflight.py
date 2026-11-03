@@ -16,7 +16,10 @@ from .config import Environment
 PATHS = {"repo": "dir", "data_root": "dir", "runtime_root": "dir", "worker": "exe", "serve_python": "exe",
          "aiperf": "exe", "bundle_root": "created", "hf_datasets_cache": "created",
          "reference_env_root": "created"}
-SERVE_PACKAGES = ("torch", "transformers", "accelerate", "fastapi", "uvicorn", "multipart", "soundfile", "PIL", "numpy")
+# The TRTMC runtime (torch, transformers) and apps/perf_serving/requirements.txt: timm and diffusers serve the generic
+# timm/ classifier and image-generation references, which run without a family environment.
+SERVE_PACKAGES = ("torch", "transformers", "accelerate", "fastapi", "uvicorn", "multipart", "soundfile", "PIL", "numpy",
+                  "timm", "diffusers")
 # One cuDNN convolution: an interpreter that mixes cuDNN versions imports fine but fails here, as would every
 # native reference with a convolution (vision, audio).
 CONVOLUTION_PROBE = ("import torch; torch.nn.functional.conv2d(torch.ones(1, 3, 8, 8, device='cuda'), "
@@ -55,17 +58,25 @@ def check_paths(environment: Environment) -> dict[str, str]:
     return checks
 
 
+def missing_serve_packages(environment: Environment) -> list[str] | str:
+    """The serving packages serve_python cannot import ([] when it has them all), or why the probe failed."""
+    from .services import _serve_env
+
+    probe = ("import importlib, json; missing = [name for name in %r if importlib.util.find_spec(name) is None]; "
+             "print(json.dumps(missing))" % (SERVE_PACKAGES,))
+    completed = subprocess.run([str(environment["serve_python"]), "-c", "import importlib.util; " + probe],
+                               capture_output=True, text=True, env=_serve_env(environment), timeout=300)
+    missing = json.loads(completed.stdout.strip() or "null") if completed.returncode == 0 else None
+    return missing if isinstance(missing, list) else completed.stderr[-300:]
+
+
 def check_serving(environment: Environment) -> dict[str, str]:
     """Import the serving packages in serve_python, read its GPU fingerprint, and run one cuDNN convolution."""
     from .services import _serve_env
 
     python = str(environment["serve_python"])
-    probe = ("import importlib, json; missing = [name for name in %r if importlib.util.find_spec(name) is None]; "
-             "print(json.dumps(missing))" % (SERVE_PACKAGES,))
-    completed = subprocess.run([python, "-c", "import importlib.util; " + probe], capture_output=True, text=True,
-                               env=_serve_env(environment), timeout=300)
-    missing = json.loads(completed.stdout.strip() or "null") if completed.returncode == 0 else None
-    checks = {"serve_packages": "ok" if missing == [] else f"missing {missing or completed.stderr[-300:]}"}
+    missing = missing_serve_packages(environment)
+    checks = {"serve_packages": "ok" if missing == [] else f"missing {missing}"}
     completed = subprocess.run([python, "-m", "trtmc_perf_serving", "platform"], capture_output=True, text=True,
                                env=_serve_env(environment), cwd=environment.path("repo"), timeout=300)
     if completed.returncode == 0:

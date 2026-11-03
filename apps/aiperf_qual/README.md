@@ -208,6 +208,10 @@ cp config/environments/example.yaml config/environments/<machine>.yaml         #
 trtmc-aiperf-qual doctor --environment config/environments/<machine>.yaml       # paths, packages, GPU, model list
 ```
 
+`setup.sh` installs `apps/perf_serving/requirements.txt` into the serving interpreter, including timm and
+Diffusers for the generic `timm/` classifier and image-generation references. `doctor` reports a missing
+serving package, and `run-all` does not start without one.
+
 ## Commands
 
 ```bash

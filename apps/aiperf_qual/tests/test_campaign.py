@@ -563,6 +563,29 @@ def test_doctor_runs_one_cudnn_convolution_in_the_serving_interpreter(tmp_path, 
     assert preflight.problems(checks) == ([] if expected.startswith("ok") else ["cudnn"])
 
 
+def test_run_all_does_not_start_without_the_serving_packages(tmp_path, monkeypatch, capsys):
+    """timm and diffusers serve the generic timm/ classifier and image-generation references: without them each
+    such native reference would fail, hours into the campaign."""
+    from trtmc_aiperf_qual import cli, preflight
+
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    (tmp_path / "env.yaml").write_text(f"repo: {tmp_path}\nserve_python: {python}\n")
+    probed = []
+
+    def run(command, **_kwargs):
+        probed.append(command[0])
+        return subprocess.CompletedProcess(command, 0, json.dumps(["timm", "diffusers"]), "")
+
+    monkeypatch.setattr(preflight.subprocess, "run", run)
+    monkeypatch.setattr("trtmc_aiperf_qual.campaign.run_all", lambda *args, **kwargs: pytest.fail("the campaign started"))
+    assert cli.main(["run-all", "--environment", str(tmp_path / "env.yaml"), "--out-root", str(tmp_path / "out"),
+                     "--profile", "x"]) == 2
+    assert probed == [str(python)] and "['timm', 'diffusers']" in capsys.readouterr().err
+    assert {"timm", "diffusers"} <= set(preflight.SERVE_PACKAGES)
+
+
 def test_summary_fetches_remote_result_roots_over_ssh(tmp_path):
     fake_ssh = tmp_path / "fake-ssh"
     fake_ssh.write_text('#!/usr/bin/env bash\n# fake-ssh HOST COMMAND: run COMMAND locally\nexec bash -c "$2"\n')
