@@ -1,0 +1,403 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Planning prompts for the chat model and the prompts sent to the image and video models.
+
+The chat model returns structured fields; the app composes the video prompts itself, so a
+small local model only has to fill in short descriptions, not a strict long format.
+"""
+
+from __future__ import annotations
+
+import itertools
+import json
+import re
+from typing import Any, Callable
+
+# The plan's "style" alone names the look (live action, cartoon, ...); this is the look of a plan
+# without one.
+DEFAULT_STYLE = "realistic live-action drama with natural light"
+NO_ONE_SPEAKS = "No one speaks; the people on screen keep their lips closed."
+
+SYSTEM = ("You adapt novels into vertical short dramas. "
+          "Reply with one JSON value and nothing else. Inside JSON strings, quote with 「」 or ‘’ and "
+          "never use the double-quote character.")
+
+# A project writes its story, plan, lines and reviews in one language; the models' prompts carry
+# that text as it is. `words(language)` fills the parts of the templates that depend on it.
+LANGUAGES = {"zh": "Chinese", "en": "English"}
+
+_WORDS = {
+    "zh": {
+        "line_rule": "in Chinese, under 16 characters",
+        "heading": "第一章 <title>", "chapter_length": "500 to 900 characters",
+        "quote_marks": "「」",
+        "example_character": """{"id": "wangu", "name": "王胡", "role": "未庄的闲汉，满脸络腮胡子",
+  "look": "三十多岁的壮汉，满脸浓密的络腮胡，剃光的前额，拖着长辫，穿打补丁的灰色短褂",
+  "voice": "粗哑响亮的男声"}""",
+        "example_shot": """{"location": "office", "characters": ["linlan"], "props": ["phone"], "seconds": 6,
+  "summary": "linlan 在窗边接电话，听到惊人的消息",
+  "camera": "手持中近景，镜头缓缓推近",
+  "action": "linlan 把手机贴在耳边踱了一步，猛地停住，转向镜头",
+  "speaker": "linlan", "line": "你说什么？他回来了？",
+  "after": "linlan 放下手机，另一只手捂住嘴",
+  "then": "她回头望向办公室的门，呼吸急促，朝门口走去",
+  "sound": "安静的办公室环境声，远处的键盘敲击声"}""",
+    },
+    "en": {
+        "line_rule": "in English, under 12 words",
+        "heading": "Chapter 1: <title>", "chapter_length": "300 to 600 words",
+        "quote_marks": "‘’",
+        "example_character": """{"id": "wang", "name": "Wang Hu", "role": "an idler of the village with a full beard",
+  "look": "a burly man in his thirties with a thick full beard, a shaved forehead and a long queue, wearing a patched grey jacket",
+  "voice": "a gruff, loud male voice"}""",
+        "example_shot": """{"location": "office", "characters": ["linlan"], "props": ["phone"], "seconds": 6,
+  "summary": "linlan takes a call by the window and hears shocking news",
+  "camera": "A handheld medium close-up slowly pushes in",
+  "action": "linlan paces a step with the phone at her ear, stops short and turns toward the camera",
+  "speaker": "linlan", "line": "What did you say? He is back?",
+  "after": "linlan lowers the phone and presses her free hand to her mouth",
+  "then": "she glances back at the office door, breathing fast, and starts toward it",
+  "sound": "quiet office room tone, distant keyboard clicks"}""",
+    },
+}
+
+
+def language_of(meta: dict[str, Any]) -> str:
+    """The project's language code; projects made before languages existed are Chinese."""
+
+    return meta.get("language") if meta.get("language") in LANGUAGES else "zh"
+
+
+def words(language: str) -> dict[str, str]:
+    language = language if language in LANGUAGES else "zh"
+    return {"language": LANGUAGES[language], **_WORDS[language]}
+
+
+CHAPTER_PROMPT = """Summarize this chapter of a novel for a screenwriter, in {language}.
+Return a JSON object:
+{{"summary": "<the events in order, at most 300 characters>",
+  "characters": ["<names that appear>"],
+  "places": ["<places that appear>"],
+  "quotes": ["<up to 5 short lines of dialogue copied exactly from the text>"]}}
+
+Chapter:
+{text}"""
+
+BIBLE_PROMPT = """Plan a vertical short drama in {episodes} episodes of at most {max_seconds} seconds
+each, adapted from the novel below (given as chapter notes).
+
+Return a JSON object with these keys:
+- "title": the drama title.
+- "setting": era and place, for example "a small river town in Zhejiang, China, around 1911".
+- "style": the visual style that suits the story, for example "realistic live-action period
+  drama with soft natural light", or "bright 3D cartoon animation with soft rounded shapes" for a
+  story told to small children.
+- "characters": the 3 to 8 people who appear in the episodes, each {{"id": "<short lowercase ascii id>",
+  "name": "<the name the novel uses>", "role": "<who they are>",
+  "look": "<age, build, face, hair and clothing, one sentence>",
+  "voice": "<for example a hoarse middle-aged male voice>"}}.
+- "relationships": [{{"from": "<id>", "to": "<id>", "relation": "<how they are related>"}}].
+- "locations": the 2 to 6 places where the episodes happen, each {{"id": "<ascii id>",
+  "name": "<name>", "look": "<one sentence>"}}.
+- "props": 0 to 4 objects that matter in the story, each {{"id": "<ascii id>", "name": "<name>",
+  "look": "<one sentence>"}}.
+- "episodes": exactly {episodes} items in this order, each {{"number": <n>, "title": "<title>",
+  "summary": "<what happens in its chapters, at most 150 characters>"}}.
+  {assignment}
+
+Include every person who speaks or acts in an episode's events, not only the lead.
+Use only people, places and events from the novel. Write every value except the ids in {language},
+like this example:
+{example_character}
+
+Chapter notes, grouped by episode:
+{chapters}"""
+
+CHOSEN_STYLE = """
+
+The visual style is chosen already: use "{style}" as "style" and write every "look" to suit it."""
+
+SHOTS_PROMPT = """Write the shot list of episode {number} of the short drama "{title}".
+Setting: {setting}.
+This episode adapts these chapters, in order: {notes}
+
+Characters (use these ids): {characters}
+Locations (use these ids): {locations}
+Props (use these ids): {props}
+
+Rules:
+- {min_shots} to {max_shots} shots that tell the events of these chapters from the source text below,
+  in order. Do not bring in events, people or objects from other chapters.
+- "seconds" add up to at most {max_seconds}; each shot is 5 to 9 seconds.
+- At most one line of dialogue per shot, {line_rule}, spoken by a character in the shot. Prefer
+  lines from the source text. Use "" when nobody speaks.
+- Every shot keeps moving: an action before the line, the line early, a reaction after it.
+- One main action per shot. "after" and "then" carry that action on; they do not start a new event.
+- Neighbouring shots in the same place are one continuous scene: each opens where the shot before it
+  ended, with the same people in the same positions, clothes, light and props in hand. Only the first
+  shot of a new place may cut away.
+- At most 3 characters per shot; list a prop only when it is visible in that shot and belongs to
+  this episode's events.
+- "sound" is never empty: the same ambience for every shot of one scene, then the physical sounds of
+  the action. No sound effect in the first second of a shot.
+- Write "camera", "action", "after", "then", "sound", "summary" and the line in {language}, and refer
+  to people by their ids (for example: aq slaps his own face). Never use double quotes inside them.
+
+Example of one shot from another drama (follow its form, not its content):
+{example_shot}
+
+Return a JSON array of shots with exactly these keys.
+
+Source text of this episode:
+{source}"""
+
+STORY_SYSTEM = "You write original stories that will be filmed as vertical short dramas."
+
+STORY_PROMPT = """Write an original short story in {language} from this idea. It will be filmed as a
+vertical short drama in {episodes} episodes of at most {max_seconds} seconds each.
+
+Idea: {idea}
+
+- Build it on one person who wants something concrete, runs into an obstacle, acts, pays a price
+  and ends changed. Every chapter moves that line forward and ends on a turn.
+- Exactly {episodes} chapters. Start each with a heading line such as {heading}; {chapter_length}
+  each.
+- Tell it through what can be filmed: actions, places, objects and short spoken lines in {quote_marks}.
+  No inner thoughts that cannot be seen or heard.
+- At most 6 named characters and 4 places in the whole story, so each can be cast and drawn once.
+Reply with the story only, without a title page, notes or markdown."""
+
+REVISE_SHOT_PROMPT = """Rewrite one shot of the vertical short drama "{title}" ({setting}) following
+the director's note. Change what the note asks for and what it requires; keep the rest of the shot.
+
+Director's note: {instruction}
+
+The shot now: {shot}
+The shot before it: {before}
+The shot after it: {after}
+What this episode adapts: {notes}
+Characters (use these ids): {characters}
+Locations (use these ids): {locations}
+Props (use these ids): {props}
+
+Keep the rules of the shot list: 4 to 9 seconds; at most one line of dialogue, {line_rule},
+spoken by a character in the shot; at most 3 characters; "summary", "camera", "action", "after",
+"then" and "sound" in {language}, naming people by their ids, never with double quotes. The shot
+must still follow from the shot before it and lead into the shot after it.
+
+Return the whole shot as one JSON object with the keys location, characters, props, seconds,
+summary, camera, action, speaker, line, after, then, sound."""
+
+REVISE_ITEM_PROMPT = """Rewrite one {kind} of the vertical short drama "{title}" ({setting}; {style})
+following the director's note. Change what the note asks for; keep the rest.
+
+Director's note: {instruction}
+
+The {kind} now: {item}
+
+Write every value in {language}, one sentence each, never with double quotes. Return one JSON
+object with the keys {keys}."""
+
+REVIEW_PROMPT = """Review the shot list of episode {number} of the vertical short drama "{title}"
+before it is filmed. Each shot becomes one clip of at most 9 seconds from a video model that sees
+reference pictures of the characters, location and props in the shot, and nothing else.
+
+What this episode adapts (chapter notes): {notes}
+Characters: {characters}
+Locations: {locations}
+Props: {props}
+Shots, in order: {shots}
+
+Report only problems that would hurt the episode:
+- an important event or line from the notes that no shot shows, or an event the notes do not have;
+- continuity between neighbouring shots: a prop that appears, vanishes or changes hands, clothes or
+  injuries that change, people who jump to another position or place without a reason;
+- more action than one clip can show, or several things happening at once;
+- a line spoken by someone who is not in the shot, or too long for the shot.
+Return a JSON array of at most 6 problems, each {{"shot": "<shot id>", "problem": "<one sentence in
+{language}>", "fix": "<the smallest change to that shot, in {language}>"}}. Return [] when the shots are
+fine."""
+
+
+def chapters(novel: str, limit: int = 6000) -> list[str]:
+    """Split on chapter headings (第…章/回/节, Chapter N); fall back to paragraphs packed up to `limit`."""
+
+    parts = re.split(r"\n(?=\s*(?:第[0-9一二三四五六七八九十百零〇]+[章回节]|Chapter\s+\w+))", "\n" + novel.strip(),
+                     flags=re.I)
+    parts = [part.strip() for part in parts if part.strip()]
+    packed: list[str] = []
+    for part in parts:
+        while len(part) > limit:
+            cut = part.rfind("\n", 0, limit)
+            cut = cut if cut > limit // 2 else limit
+            packed.append(part[:cut].strip())
+            part = part[cut:].strip()
+        packed.append(part)
+    return packed
+
+
+def episode_chapters(lengths: list[int], episodes: int) -> list[list[int]]:
+    """Contiguous 1-based chapter ranges of about equal length, one per episode."""
+
+    count = len(lengths)
+    if episodes >= count:
+        return [[min(count, 1 + index * count // episodes)] for index in range(episodes)]
+    ends = list(itertools.accumulate(lengths))
+    ranges, start = [], 0
+    for index in range(1, episodes):
+        goal = ends[-1] * index / episodes
+        end = min(range(start + 1, count - (episodes - index) + 1), key=lambda e: abs(ends[e - 1] - goal))
+        ranges.append(list(range(start + 1, end + 1)))
+        start = end
+    ranges.append(list(range(start + 1, count + 1)))
+    return ranges
+
+
+def roster(items: list[dict[str, Any]], *fields: str) -> str:
+    return json.dumps([{key: item.get(key, "") for key in ("id", *fields)} for item in items],
+                      ensure_ascii=False)
+
+
+def _english(text: str) -> str:
+    """Double quotes make the video model draw text, so drop them from descriptions."""
+
+    return re.sub(r"[\"“”]", "", str(text or "")).strip().rstrip(".")
+
+
+def _clause(text: str) -> str:
+    """A description placed mid-sentence: no trailing period, a leading article in lower case."""
+
+    text = _english(text)
+    first = text.split(maxsplit=1)[0] if text else ""
+    return text[:1].lower() + text[1:] if first in {"A", "An", "The"} else text
+
+
+def _sentence(text: str) -> str:
+    """A description that starts a sentence: capitalized, with one closing period."""
+
+    text = _english(text)
+    return text[:1].upper() + text[1:] + "." if text else ""
+
+
+def _line(text: str) -> str:
+    return re.sub(r"[\"“”'‘’「」『』]", "", str(text or "")).strip()
+
+
+def still_prompt(plan: dict[str, Any], kind: str, item: dict[str, Any]) -> str:
+    setting, style = _english(plan.get("setting")), _english(plan.get("style")) or DEFAULT_STYLE
+    look = _english(item.get("look"))
+    if kind == "character":
+        return (f"{style}, {setting}. Full-body portrait of {look}, standing and facing the camera "
+                "with a calm expression, plain light grey studio backdrop, soft even light, sharp "
+                f"focus on the face, {_clause(style)}.")
+    if kind == "location":
+        return f"{style}, {setting}. {look}. An empty establishing view, {_clause(style)}."
+    return f"{look}, centered on a plain light grey backdrop, soft even light, {_clause(style)}."
+
+
+def needs_english(text: str) -> bool:
+    """Whether a description is written in Chinese, Japanese or Korean: H3 reads such prose aloud."""
+
+    return bool(re.search(r"[぀-ヿ㐀-鿿가-힯豈-﫿]", str(text or "")))
+
+
+TRANSLATE_PROMPT = """Translate each value of this JSON object into plain English: they are descriptions for
+a video model (camera, action, sound, how people, places and things look and sound). Keep lowercase
+ids such as linwan and tags such as <Subject 2> exactly as they are, keep the meaning and the detail,
+and never use the double-quote character inside strings. Return one JSON object with the same keys.
+
+{texts}"""
+
+
+def video_prompts(plan: dict[str, Any], shot: dict[str, Any], references: list[tuple[str, dict[str, Any]]],
+                  english: Callable[[str], str] | None = None) -> tuple[str, str]:
+    """Compose the first-window and continuation prompts of one shot.
+
+    `references` lists (kind, item) in upload order; kind is character, location, prop or
+    previous (the last frame of the previous episode). Picture N is the N-th upload.
+    `english` gives the English of a description written in another language: H3 takes English
+    prose and reads other text aloud. Names and the spoken line stay as written.
+    """
+
+    def text_of(value: Any) -> str:
+        value = str(value or "").strip()
+        return english(value) if english and value else value
+
+    labels: dict[str, str] = {}
+    definitions, retention = [], []
+    for number, (kind, item) in enumerate(references, start=1):
+        subject = f"<Subject {number}>"
+        picture = f"<Picture {number}>"
+        if kind == "character":
+            labels[item["id"]] = subject
+            definitions.append(f"{subject} is {item.get('name', '')} from {picture}, "
+                               f"{_english(text_of(item.get('look')))}.")
+            retention.append(f"{subject} (appears in [Shot 1]): fully_preserved - the face, "
+                             "hairstyle and clothing are retained.")
+        elif kind == "location":
+            definitions.append(f"{subject} is the place in {picture}: {_english(text_of(item.get('look')))}.")
+            retention.append(f"{subject} (appears in [Shot 1]): fully_preserved - the layout, "
+                             "materials and light of the place are retained.")
+        elif kind == "prop":
+            definitions.append(f"{subject} is the {_english(text_of(item.get('look')))} in {picture}.")
+            retention.append(f"{subject} (appears in [Shot 1]): fully_preserved - its shape and "
+                             "color are retained.")
+        elif item.get("scope") == "shot":
+            definitions.append(f"{subject} is the final frame of the previous shot in {picture}; "
+                               "this shot opens where it ends.")
+            retention.append(f"{subject} (appears in [Shot 1]): partially_preserved - the place, the "
+                             "light, the clothes and where each person stands continue from it.")
+        else:
+            definitions.append(f"{subject} is the final frame of the previous episode in {picture}, "
+                               "which this shot continues from.")
+            retention.append(f"{subject} (appears in [Shot 1]): partially_preserved - the scene "
+                             "and poses continue from it.")
+
+    def name(identifier: str) -> str:
+        return labels.get(identifier) or identifier
+
+    names = {c["id"]: c.get("name", "") for c in plan.get("characters", [])}
+
+    def mention(text: str) -> str:
+        for identifier, label in labels.items():
+            text = re.sub(rf"\b{re.escape(identifier)}\b", label, text)
+            if names.get(identifier):  # models sometimes write the Chinese name, even as 阿 Q
+                pattern = r"\s*".join(map(re.escape, names[identifier].replace(" ", "")))
+                text = re.sub(pattern, label, text)
+        return text
+
+    voice = {c["id"]: _english(text_of(c.get("voice"))) for c in plan.get("characters", [])}
+    speaker, line = shot.get("speaker") or "", _line(shot.get("line"))
+    tongue = "Chinese" if re.search(r"[\u4e00-\u9fff]", line) else "English"  # the line's own language
+    body = [_sentence(text_of(shot.get("camera"))), _sentence(mention(_english(text_of(shot.get("action")))))]
+    if references and references[0][0] == "previous" and references[0][1].get("scope") == "shot":
+        body.insert(0, "The shot opens exactly on the frame in <Picture 1> and continues from it without a cut.")
+    if line and speaker in labels:
+        manner = f"In {voice[speaker]}, " if voice.get(speaker) else ""
+        body.append(f"{manner}{name(speaker)} (S1) says <d>[{tongue}] {line}</d> "
+                    "and then falls silent.")
+    elif line and voice.get(speaker):  # a cast member heard but not seen, as on a phone
+        heard = _clause(voice[speaker])
+        body.append(f"{heard[:1].upper()}{heard[1:]} (S1) says in an off-screen voiceover: "
+                    f"<d>[{tongue}] {line}</d> The people on screen keep their lips closed.")
+    elif line:
+        body.append(f"An off-screen narrator says in an off-screen voiceover: <d>[{tongue}] {line}</d> "
+                    "The people on screen keep their lips closed.")
+    else:  # H3 otherwise has the people on screen say something of its own
+        body.append(NO_ONE_SPEAKS)
+    body.append(_sentence(mention(_english(text_of(shot.get("after"))))))
+    head = ("subject_definitions:\n" + "\n".join(definitions) +
+            "\n\nsummary:\n[reference generation] " + mention(_english(text_of(shot.get("summary")))) + "." +
+            "\n\nretention_analysis:\n" + "\n".join(retention))
+    sound = ("overall_soundscape:\n" + (_english(text_of(shot.get("sound"))) or "Quiet ambience") + "." +
+             "\n\nnon_diegetic_music:\nN/A")
+    setting = f" set in {_clause(text_of(plan['setting']))}" if plan.get("setting") else ""
+    look = _clause(text_of(plan.get("style")) or DEFAULT_STYLE)
+    style = (f"The target video uses a vertical short-drama style{setting}, {look}, "
+             "and a clean image without subtitles, captions or any on-screen text.")
+    first = f"{head}\n\ndetailed_description:\n{style}\n[Shot 1] {' '.join(body)}\n\n{sound}"
+    then = _sentence(mention(_english(text_of(shot.get("then"))))) or "The people on screen keep moving naturally."
+    continuation = (f"{head}\n\ndetailed_description:\n[Shot 1 continued] The same shot keeps "
+                    f"drifting slowly. {then} Nobody speaks.\n\n{sound}")
+    return first, continuation
