@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -48,6 +49,12 @@ def _download(url: str, destination: Path) -> Path:
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(request) as response, temporary.open("wb") as output:
         shutil.copyfileobj(response, output)
+        expected = response.headers.get("Content-Length")
+    # A connection closed early ends the copy without an error. As urlretrieve did, refuse the short file: later runs
+    # reuse an existing archive, so it must never become the destination.
+    received = temporary.stat().st_size
+    if expected is not None and received < int(expected):
+        raise urllib.error.ContentTooShortError(f"{url}: received {received} of {expected} bytes", None)
     temporary.replace(destination)
     return destination
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -25,17 +26,33 @@ def test_archives_use_the_official_evaluation_download_directory() -> None:
     )
 
 
+class _Response(io.BytesIO):
+    """An HTTP response body with its declared Content-Length."""
+
+    def __init__(self, body: bytes, length: int) -> None:
+        super().__init__(body)
+        self.headers = {"Content-Length": str(length)}
+
+
 def test_download_names_its_user_agent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The server answers Python's default User-Agent with 403 Forbidden."""
     agents = []
 
-    def urlopen(request: urllib.request.Request) -> io.BytesIO:
+    def urlopen(request: urllib.request.Request) -> _Response:
         agents.append(request.get_header("User-agent"))
-        return io.BytesIO(b"archive")
+        return _Response(b"archive", 7)
 
     monkeypatch.setattr(urllib.request, "urlopen", urlopen)
     path = prepare_middlebury_q._download(prepare_middlebury_q.DATA_URL, tmp_path / "data.zip")
     assert path.read_bytes() == b"archive" and agents == [prepare_middlebury_q.USER_AGENT]
+
+
+def test_an_incomplete_download_never_becomes_the_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A connection closed before Content-Length ends the copy without an error; later runs reuse the archive."""
+    monkeypatch.setattr(urllib.request, "urlopen", lambda request: _Response(b"arch", 7))
+    with pytest.raises(urllib.error.ContentTooShortError, match="received 4 of 7 bytes"):
+        prepare_middlebury_q._download(prepare_middlebury_q.DATA_URL, tmp_path / "data.zip")
+    assert not (tmp_path / "data.zip").exists()
 
 
 def _write_pfm(path: Path, values: np.ndarray) -> None:
