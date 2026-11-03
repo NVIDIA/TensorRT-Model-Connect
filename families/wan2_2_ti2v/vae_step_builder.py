@@ -30,6 +30,8 @@ from .checkpoint_mapper import VAE22_CONFIG, convert_vae_state_dict, load_native
 
 
 OFFICIAL_VAE_WORKSPACE_GIB = 64
+# Latent height x width of the L0, landscape 1280x704 and portrait 704x1280 profiles.
+QUALIFIED_LATENT_SIZES = {(24, 42), (44, 80), (80, 44)}
 
 
 @dataclass(frozen=True)
@@ -277,13 +279,10 @@ def build_vae_step_engine(
 
     from . import graph_blocks, graph_ops
 
-    if (profile.latent_height, profile.latent_width) not in {
-        (24, 42),
-        (44, 80),
-    }:
+    if (profile.latent_height, profile.latent_width) not in QUALIFIED_LATENT_SIZES:
         raise ValueError(
-            "Wan2.2 VAE step engines are qualified only for 24x42 and 44x80 latent spatial "
-            f"profiles, got {profile.latent_height}x{profile.latent_width}"
+            "Wan2.2 VAE step engines are qualified only for 24x42, 44x80 and 80x44 latent "
+            f"spatial profiles, got {profile.latent_height}x{profile.latent_width}"
         )
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.INFO)

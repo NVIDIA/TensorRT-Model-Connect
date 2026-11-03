@@ -4,9 +4,10 @@
 """Pure TensorRT component builder for Wan2.2 TI2V-5B.
 
 Python and PyTorch are build-time checkpoint readers only. Every component is
-built from the requested checkpoint. The resulting bundle contains four
-native TensorRT plans, the tokenizer and config; it contains no executable
-companion or custom plugin artifact.
+built from the requested checkpoint. The resulting bundle contains five
+native TensorRT plans (text encoder, DiT, two VAE decoder steps and the
+image-to-video first-frame VAE encoder), the tokenizer and config; it contains
+no executable companion or custom plugin artifact.
 """
 
 from __future__ import annotations
@@ -38,6 +39,18 @@ def build_vae_step_engine(*args, **kwargs):
 
 def load_vae_step_weights(*args, **kwargs):
     from .vae_step_builder import load_vae_step_weights as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def build_vae_encoder_engine(*args, **kwargs):
+    from .vae_encoder_builder import build_vae_encoder_engine as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def load_vae_encoder_weights(*args, **kwargs):
+    from .vae_encoder_builder import load_vae_encoder_weights as implementation
 
     return implementation(*args, **kwargs)
 
@@ -95,7 +108,7 @@ def build_wan22_components(
     fp8_scales: dict | None = None,
     **_kwargs,
 ) -> dict:
-    """Build all four plans for one qualified checkpoint profile."""
+    """Build all five plans for one qualified checkpoint profile."""
 
     if precision.lower() not in {"bf16", "bfloat16"}:
         raise ValueError("Wan2.2-TI2V-5B requires BF16 DiT/T5 precision")
@@ -142,6 +155,12 @@ def build_wan22_components(
         verbose=verbose,
     )
 
+    vae_encoder = build_vae_encoder_engine(
+        load_vae_encoder_weights(weights["_vae_checkpoint"]),
+        profile=vae_profile,
+        verbose=verbose,
+    )
+
     tokenizer_path = Path(weights["_tokenizer_dir"]) / "tokenizer.json"
     tokenizer_json = tokenizer_path.read_bytes()
     return {
@@ -149,5 +168,6 @@ def build_wan22_components(
         "denoiser": bytes(denoiser),
         "vae_decoder": bytes(vae_decoder),
         "vae_decoder_first_frame": bytes(vae_decoder_first_frame),
+        "vae_encoder": bytes(vae_encoder),
         "tokenizer_json": tokenizer_json,
     }
