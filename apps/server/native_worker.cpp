@@ -19,6 +19,7 @@
 #include "trtmc/stream.hpp"
 #include "trtmc/task.h"
 #include "trtmc/text.hpp"
+#include "trtmc/video.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -570,6 +571,23 @@ Json write_generated_image(const ImageResult& result, const std::string& path, d
             {"model_call_ms", wall_ms},    {"timing_scope", "public_task_call_wall"}};
 }
 
+void save_video_frame(const std::string& directory, int frame, std::vector<float> pixels,
+                      VideoGeometry geometry) {
+    std::ostringstream name;
+    name << "frame-" << std::setw(6) << std::setfill('0') << frame << ".png";
+    cli::io::save_png((std::filesystem::path(directory) / name.str()).string(), pixels,
+                      geometry.width, geometry.height);
+}
+
+Json video_frames_json(VideoGeometry geometry, double wall_ms) {
+    return {{"width", geometry.width},
+            {"height", geometry.height},
+            {"channels", 3},
+            {"num_frames", geometry.frames},
+            {"model_call_ms", wall_ms},
+            {"timing_scope", "public_task_call_wall"}};
+}
+
 Json write_video_frames(const ImageResult& result, const std::string& directory,
                         VideoGeometry geometry, double wall_ms) {
     if (result.width != geometry.width || result.height != geometry.height ||
@@ -582,20 +600,97 @@ Json write_video_frames(const ImageResult& result, const std::string& directory,
     std::filesystem::create_directories(directory);
     const auto frame_size = static_cast<std::size_t>(geometry.width) * geometry.height * 3U;
     for (int frame = 0; frame < geometry.frames; ++frame) {
-        std::ostringstream name;
-        name << "frame-" << std::setw(6) << std::setfill('0') << frame << ".png";
         const auto begin = result.pixels.begin() + static_cast<std::ptrdiff_t>(frame_size * frame);
-        cli::io::save_png(
-            (std::filesystem::path(directory) / name.str()).string(),
-            std::vector<float>(begin, begin + static_cast<std::ptrdiff_t>(frame_size)),
-            geometry.width, geometry.height);
+        save_video_frame(directory, frame,
+                         std::vector<float>(begin, begin + static_cast<std::ptrdiff_t>(frame_size)),
+                         geometry);
     }
-    return {{"width", geometry.width},
-            {"height", geometry.height},
-            {"channels", 3},
-            {"num_frames", geometry.frames},
-            {"model_call_ms", wall_ms},
-            {"timing_scope", "public_task_call_wall"}};
+    return video_frames_json(geometry, wall_ms);
+}
+
+Json write_video_frames(const VideoGenerationResult& result, const std::string& directory,
+                        VideoGeometry geometry, double wall_ms) {
+    const auto frames = result.frames();
+    if (frames.size() != static_cast<std::size_t>(geometry.frames))
+        throw std::runtime_error("video result differs from the built frame count");
+    std::filesystem::create_directories(directory);
+    for (std::size_t index = 0; index < frames.size(); ++index) {
+        const auto& frame = frames[index];
+        if (frame.width != static_cast<std::uint32_t>(geometry.width) ||
+            frame.height != static_cast<std::uint32_t>(geometry.height) || frame.channels != 3 ||
+            frame.pixel_count != std::uint64_t{frame.width} * frame.height * 3U ||
+            !std::all_of(frame.pixels, frame.pixels + frame.pixel_count,
+                         [](float v) { return std::isfinite(v); }))
+            throw std::runtime_error("video result differs from the built RGB THWC geometry");
+        save_video_frame(directory, static_cast<int>(index),
+                         std::vector<float>(frame.pixels, frame.pixels + frame.pixel_count),
+                         geometry);
+    }
+    return video_frames_json(geometry, wall_ms);
+}
+
+// Text- and image-to-video Task bundles serve the video protocol of image_generation video
+// bundles; a request with image_path selects the image-conditioned Task.
+int run_video_worker(const Model& model, VideoGeometry geometry, std::istream& input,
+                     std::ostream& output) {
+    if (geometry.frames < 2)
+        throw std::invalid_argument("a video Task bundle requires its built video geometry");
+    const bool text = model.supports<TextToVideo>();
+    const bool image = model.supports<InitialImageTextToVideo>();
+    auto capabilities = Json::array();
+    if (text)
+        capabilities.push_back("video_generation");
+    if (image)
+        capabilities.push_back("initial_image_video_generation");
+    const Json ready{{"event", "ready"},
+                     {"protocol_version", 1},
+                     {"capabilities", capabilities},
+                     {"video",
+                      {{"width", geometry.width},
+                       {"height", geometry.height},
+                       {"num_frames", geometry.frames}}}};
+    return run_protocol(
+        ready,
+        {{"generate_video",
+          [&](const Json& request) {
+              const auto prompt = string_field(request, "prompt");
+              const auto path = string_field(request, "output_path");
+              const auto started = std::chrono::steady_clock::now();
+              const auto elapsed = [&] {
+                  return std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - started)
+                      .count();
+              };
+              if (request.contains("image_path")) {
+                  if (!image)
+                      throw ProtocolError("this model does not take an initial image");
+                  cli::io::LoadedImage loaded;
+                  try {
+                      loaded = cli::io::read_image(string_field(request, "image_path"));
+                  } catch (const std::exception&) {
+                      throw ProtocolError("image must be a readable image file");
+                  }
+                  if (loaded.height <= 0 || loaded.width <= 0 || loaded.pixels.empty())
+                      throw ProtocolError("image must contain RGB pixels");
+                  const auto task = model.task<InitialImageTextToVideo>();
+                  const auto config = parse_sdk_config(request, task.config_fields());
+                  const auto result =
+                      task.run({ImageInput{{loaded.pixels.data(), loaded.pixels.size()},
+                                           static_cast<std::uint32_t>(loaded.height),
+                                           static_cast<std::uint32_t>(loaded.width)},
+                                prompt},
+                               config);
+                  return write_video_frames(result, path, geometry, elapsed());
+              }
+              if (!text)
+                  throw ProtocolError("this model requires an initial image");
+              const auto latents = image_latents(request);
+              const auto task = model.task<TextToVideo>();
+              const auto config = parse_sdk_config(request, task.config_fields());
+              const auto result = task.run({prompt, {latents.data(), latents.size()}}, config);
+              return write_video_frames(result, path, geometry, elapsed());
+          }}},
+        input, output);
 }
 
 int run_existing_worker(ITask& task, std::istream& input, std::ostream& output,
@@ -768,8 +863,11 @@ int run_existing_worker(ITask& task, std::istream& input, std::ostream& output,
     return run_text_worker(task, input, output);
 }
 
-int run_model_worker(const Model& model, std::istream& input, std::ostream& output) {
+int run_model_worker(const Model& model, std::istream& input, std::ostream& output,
+                     VideoGeometry geometry = {}) {
     const auto primary = model.info().bundle_task;
+    if (primary == TextToVideo::kTask || primary == InitialImageTextToVideo::kTask)
+        return run_video_worker(model, geometry, input, output);
     if (primary == ImagesTextToImageEdit::kTask || primary == IImageEditing::kTask) {
         const auto task = model.task<ImagesTextToImageEdit>();
         const auto fields = task.config_fields();
@@ -1140,7 +1238,8 @@ int run_bundle_worker(const std::string& bundle, const LoadOptions& options, std
                       std::ostream& output) {
     const auto primary = Bundle::open(bundle).info().task;
     VideoGeometry geometry;
-    if (primary == IImageGeneration::kTask) {
+    if (primary == IImageGeneration::kTask || primary == TextToVideo::kTask ||
+        primary == InitialImageTextToVideo::kTask) {
         const auto provenance = app::read_provenance(bundle);
         // Older image bundles and family-owned default dimensions do not need
         // core geometry. Enable video only for an explicit multi-frame build.
@@ -1169,26 +1268,28 @@ int run_bundle_worker(const std::string& bundle, const LoadOptions& options, std
         }
     }
     if (app::uses_existing_task_runtime(primary)) {
-        try {
-            const auto model = Model::load(bundle, options);
-            if (geometry.frames > 1)
-                throw std::invalid_argument("SDK image binding cannot serve a video bundle");
-            return run_model_worker(model, input, output);
-        } catch (const Error& error) {
-            // Only pre-SDK families may take this compatibility path. Never
-            // retry a malformed SDK binding or a failed Task operation.
-            if (error.code() != TRTMC_UNSUPPORTED ||
-                std::string(error.what())
-                        .find("family has not implemented the Task SDK model interface") ==
-                    std::string::npos)
-                throw;
+        // An image_generation video bundle keeps the existing video protocol even when its
+        // family also implements the Task SDK model interface (wan2_2_ti2v does).
+        if (geometry.frames == 1) {
+            try {
+                const auto model = Model::load(bundle, options);
+                return run_model_worker(model, input, output);
+            } catch (const Error& error) {
+                // Only pre-SDK families may take this compatibility path. Never
+                // retry a malformed SDK binding or a failed Task operation.
+                if (error.code() != TRTMC_UNSUPPORTED ||
+                    std::string(error.what())
+                            .find("family has not implemented the Task SDK model interface") ==
+                        std::string::npos)
+                    throw;
+            }
         }
         auto task = load_task(bundle, options.runtime_root, options.kv_cache_size_bytes,
                               options.runtime_cache_path, options.cuda_graphs);
         return run_existing_worker(*task, input, output, geometry);
     }
     const auto model = Model::load(bundle, options);
-    return run_model_worker(model, input, output);
+    return run_model_worker(model, input, output, geometry);
 }
 
 } // namespace trtmc::server

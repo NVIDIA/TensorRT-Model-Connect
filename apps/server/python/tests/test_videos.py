@@ -4,6 +4,7 @@ import asyncio
 import base64
 from concurrent.futures import Future
 import hashlib
+import io
 import json
 from pathlib import Path
 import shutil
@@ -16,9 +17,10 @@ from PIL import Image
 import pytest
 
 from trtmc_server.app import ServerConfig, create_app
-from trtmc_server.errors import WorkerSaturatedError
+from trtmc_server.errors import WorkerProtocolError, WorkerSaturatedError
 from trtmc_perf_serving.video_media import decoded_identity, encode, frame_identity
-from trtmc_server.videos import VideoJobs
+from trtmc_server.registry import ModelRegistry
+from trtmc_server.videos import VideoJobs, fit_initial_image
 
 
 class VideoWorker:
@@ -69,6 +71,36 @@ class VideoWorker:
         result = Future()
         result.set_result(None)
         return result
+
+
+class ImageVideoWorker(VideoWorker):
+    """A model that also starts a video from an initial image."""
+
+    def __init__(self):
+        super().__init__()
+        self.initial_images = []
+
+    def supports(self, model, capability):
+        return model == "video" and capability in {"video_generation", "initial_image_video_generation"}
+
+    def submit(self, operation, payload):
+        if "image_path" in payload:  # the job owns the file only until it finishes
+            with Image.open(payload["image_path"]) as image:
+                self.initial_images.append(image.convert("RGB").copy())
+        return super().submit(operation, payload)
+
+
+def png(image):
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def submit_image(client, *images, field="input_reference"):
+    files = [("model", (None, "video")), ("prompt", (None, "a cat turns its head")), ("seed", (None, "42")),
+             ("num_frames", (None, "3"))]
+    files += [(field, (f"start-{index}.png", data, "image/png")) for index, data in enumerate(images)]
+    return client.post("/v1/videos", files=files)
 
 
 def app_for(worker, records=None, **limits):
@@ -287,3 +319,75 @@ def test_shutdown_waits_for_in_progress_submission_setup(monkeypatch, tmp_path):
         assert media_paths and all(not path.exists() for path in media_paths)
 
     asyncio.run(scenario())
+
+
+def test_an_input_reference_starts_the_video_from_the_image_fitted_to_the_built_frame():
+    worker = ImageVideoWorker()
+    source = Image.new("RGB", (16, 16), "red")
+    source.paste(Image.new("RGB", (16, 8), "blue"), (0, 8))  # red top half, blue bottom half
+    with TestClient(app_for(worker)) as client:
+        response = submit_image(client, png(source))
+        assert response.status_code == 202
+        finished(client, response.json()["id"])
+        assert submit(client).status_code == 202  # text-to-video stays available
+    fitted, = worker.initial_images
+    assert fitted.size == (8, 4)  # scaled to 8x8 to cover 8x4, then center-cropped
+    top, bottom = fitted.getpixel((4, 0)), fitted.getpixel((4, 3))
+    assert top[0] > 200 > top[2] and bottom[2] > 200 > bottom[0]
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="external FFmpeg codec unavailable")
+def test_the_completion_record_names_the_initial_image(tmp_path):
+    records = tmp_path / "records.jsonl"
+    image = png(Image.new("RGB", (8, 4), "red"))
+    with TestClient(app_for(ImageVideoWorker(), records)) as client:
+        assert finished(client, submit_image(client, image).json()["id"])["status"] == "completed"
+    completion, = [r for r in map(json.loads, records.read_text().splitlines())
+                   if r.get("record_kind") == "video_completion"]
+    assert completion["initial_image_sha256"] == hashlib.sha256(image).hexdigest()
+
+
+def test_an_image_of_the_built_size_passes_unchanged():
+    image = Image.effect_noise((8, 4), 64).convert("RGB")
+    with Image.open(io.BytesIO(fit_initial_image(png(image), 8, 4))) as fitted:
+        assert list(fitted.convert("RGB").getdata()) == list(image.getdata())
+
+
+def test_fitting_matches_upstream_resize_then_crop_and_stays_bounded():
+    source = Image.effect_noise((50, 30), 64).convert("RGB")
+    scale = max(8 / 50, 6 / 30)
+    cover = source.resize((round(50 * scale), round(30 * scale)), Image.LANCZOS)  # upstream i2v
+    left, top = (cover.width - 8) // 2, (cover.height - 6) // 2
+    expected = cover.crop((left, top, left + 8, top + 6))
+    with Image.open(io.BytesIO(fit_initial_image(png(source), 8, 6))) as fitted:
+        difference = [abs(a - b) for pa, pb in zip(fitted.getdata(), expected.getdata()) for a, b in zip(pa, pb)]
+    assert max(difference) <= 1
+    sliver = png(Image.new("RGB", (1, 100_000), "red"))  # covering 704x1280 would be 704 x 70 million
+    started = time.monotonic()
+    with Image.open(io.BytesIO(fit_initial_image(sliver, 704, 1280))) as fitted:
+        assert fitted.size == (704, 1280) and fitted.getpixel((350, 640)) == (255, 0, 0)
+    assert time.monotonic() - started < 5
+
+
+def test_input_reference_needs_one_image_and_a_model_that_starts_from_one():
+    image = png(Image.new("RGB", (8, 4), "red"))
+    text_only = VideoWorker()
+    with TestClient(app_for(text_only)) as client:
+        assert submit_image(client, image).status_code == 400
+    assert not text_only.calls
+    worker = ImageVideoWorker()
+    with TestClient(app_for(worker)) as client:
+        assert submit_image(client, image, image).status_code == 400  # one initial image
+        assert submit_image(client, image, field="image").status_code == 400
+        assert submit_image(client, b"not an image").status_code == 400
+    assert not worker.calls
+
+
+def test_registry_accepts_image_to_video_with_its_geometry():
+    ready = {"event": "ready", "protocol_version": 1,
+             "capabilities": ["video_generation", "initial_image_video_generation"],
+             "video": {"width": 8, "height": 4, "num_frames": 3}}
+    ModelRegistry._validate_ready(ready)
+    ModelRegistry._validate_ready({**ready, "capabilities": ["initial_image_video_generation"]})
+    with pytest.raises(WorkerProtocolError):
+        ModelRegistry._validate_ready({**ready, "capabilities": ["initial_image_video_generation"], "video": {}})

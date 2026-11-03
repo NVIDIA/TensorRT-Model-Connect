@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
 import json
 import logging
 from pathlib import Path
@@ -23,7 +24,7 @@ from starlette.datastructures import UploadFile
 from .errors import ModelNotFoundError, WorkerProtocolError, WorkerSaturatedError
 from .protocol import extract_task_timing
 from .schemas import ImageGenerationRequest
-from .uploads import create_uploaded_input
+from .uploads import ImagePixelLimitError, create_uploaded_input, image_file
 from trtmc_perf_serving.openai import image_generation
 from trtmc_perf_serving.video_media import encode
 
@@ -44,6 +45,30 @@ class VideoRequest(ImageGenerationRequest):
                     raise ValueError(f"{key} must be an integer")
                 values[key] = int(raw)
         return super().from_form(values)
+
+
+def fit_initial_image(data: bytes, width: int, height: int) -> bytes:
+    """Scale an initial image to cover the built frame and center-crop it to a PNG.
+
+    This is upstream Wan i2v's preprocessing: resize to cover, then crop the center. Pillow
+    resamples only the source box that the crop keeps, straight to the built size, so an
+    extreme aspect ratio never allocates the uncropped cover. An image of the built size
+    passes unchanged.
+    """
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as source:
+        image = source.convert("RGB")
+    if image.size != (width, height):
+        scale = max(width / image.width, height / image.height)
+        cover_width, cover_height = round(image.width * scale), round(image.height * scale)
+        left, top = (cover_width - width) // 2, (cover_height - height) // 2
+        x_scale, y_scale = image.width / cover_width, image.height / cover_height
+        box = (left * x_scale, top * y_scale, (left + width) * x_scale, (top + height) * y_scale)
+        image = image.resize((width, height), Image.LANCZOS, box=box)
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
 
 
 class VideoJobs:
@@ -95,19 +120,28 @@ class VideoJobs:
         await self.expire()
         if not self.accepting:
             return self.error(503, "server_draining", "server is not accepting requests")
+        upload = reference = None  # multipart input_reference: the video's initial image
         try:
             if request.headers.get("content-type", "").split(";", 1)[0] == "application/json":
                 body = VideoRequest.model_validate(await request.json())
             else:
-                async with request.form(max_files=0, max_fields=24,
+                async with request.form(max_files=1, max_fields=24,
                                         max_part_size=self.config.max_body_bytes) as form:
-                    if len(form.multi_items()) != len(form) or any(isinstance(v, UploadFile) for v in form.values()):
-                        raise ValueError("video requests require unique text fields")
-                    body = VideoRequest.from_form(dict(form))
+                    items = form.multi_items()
+                    files = [value for _, value in items if isinstance(value, UploadFile)]
+                    if len(items) != len(form) or any(
+                            isinstance(value, UploadFile) and key != "input_reference" for key, value in items):
+                        raise ValueError("video requests take unique text fields and one input_reference image")
+                    body = VideoRequest.from_form({k: v for k, v in items if not isinstance(v, UploadFile)})
+                    if files:
+                        upload = await files[0].read()
             if len(body.prompt.encode()) > self.config.max_prompt_bytes:
                 return self.error(413, "content_too_large", "prompt exceeds the server limit")
-            if not self.registry.supports(body.model, "video_generation"):
+            capability = "video_generation" if upload is None else "initial_image_video_generation"
+            if not self.registry.supports(body.model, capability):
                 return self.error(400, "unsupported_task", "model does not support this endpoint")
+            if upload is not None:  # decode only for a model that takes it, off the event loop
+                reference, _, _ = await asyncio.to_thread(image_file, upload, self.config.max_image_pixels)
             geometry = self.registry.video_geometry(body.model)
             width, height, count = geometry["width"], geometry["height"], geometry["num_frames"]
             if body.num_frames not in (None, count) or body.size not in (None, f"{width}x{height}"):
@@ -128,6 +162,8 @@ class VideoJobs:
             return self.error(404, error.code, str(error))
         except WorkerSaturatedError:
             return self.error(429, "server_busy", "all model worker replicas are busy")
+        except ImagePixelLimitError:
+            return self.error(413, "content_too_large", "input_reference exceeds the server pixel limit")
         except (ValueError, ValidationError, json.JSONDecodeError):
             return self.error(400, "invalid_request", "invalid or unsupported video controls")
         except RuntimeError:
@@ -151,11 +187,16 @@ class VideoJobs:
             payload = {"prompt": mapped.pop("prompt"), "config": mapped, "output_path": str(root / "frames")}
             if noise:
                 payload["initial_latents_path"] = str(media.path)
+            if reference is not None:
+                fitted = await asyncio.to_thread(fit_initial_image, reference, width, height)
+                (root / "initial_image.png").write_bytes(fitted)
+                payload["image_path"] = str(root / "initial_image.png")
             context = {**request.state.timing, "record_kind": "video_completion", "job_id": identifier,
                        "prompt_sha256": hashlib.sha256(body.prompt.encode()).hexdigest(),
                        "negative_prompt_sha256": hashlib.sha256(body.negative_prompt.encode() if body.negative_prompt else b"").hexdigest(),
                        "generation_config": {k: v for k, v in mapped.items() if k != "negative_prompt"},
-                       "initial_latents_sha256": hashlib.sha256(noise).hexdigest() if noise else None}
+                       "initial_latents_sha256": hashlib.sha256(noise).hexdigest() if noise else None,
+                       "initial_image_sha256": hashlib.sha256(reference).hexdigest() if reference else None}
             task = asyncio.create_task(self.run(job, request, payload, geometry, body.fps, session, media, context))
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
