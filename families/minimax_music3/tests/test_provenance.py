@@ -41,7 +41,9 @@ def test_reference_lock_file_matches_the_pin() -> None:
         if line.strip() and not line.startswith("#")
     ]
 
-    assert lines == [provenance.reference_requirement()]
+    # The reference pin, then the audio reader the E2E uses to open the WAV.
+    # CI installs only this file, so the reader must be listed here.
+    assert lines == [provenance.reference_requirement(), "soundfile==0.14.0"]
 
 
 def test_reference_modules_cover_the_three_pipeline_pieces() -> None:
