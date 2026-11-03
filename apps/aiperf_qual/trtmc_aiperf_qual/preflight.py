@@ -20,6 +20,18 @@ PATHS = {"repo": "dir", "data_root": "dir", "runtime_root": "dir", "worker": "ex
 # timm/ classifier and image-generation references, which run without a family environment.
 SERVE_PACKAGES = ("torch", "transformers", "accelerate", "fastapi", "uvicorn", "multipart", "soundfile", "PIL", "numpy",
                   "timm", "diffusers")
+# Imports each package named on its command line (an installed package can still fail to import: a missing or
+# mismatched dependency) and prints, as its last line, the JSON list of those that fail, each with its error.
+IMPORT_PROBE = """\
+import importlib, json, sys
+failed = []
+for name in sys.argv[1:]:
+    try:
+        importlib.import_module(name)
+    except Exception as error:  # an ImportError, or the OSError of a missing shared library
+        failed.append(f"{name} ({type(error).__name__}: {error})"[:300])
+print(json.dumps(failed))
+"""
 # One cuDNN convolution: an interpreter that mixes cuDNN versions imports fine but fails here, as would every
 # native reference with a convolution (vision, audio).
 CONVOLUTION_PROBE = ("import torch; torch.nn.functional.conv2d(torch.ones(1, 3, 8, 8, device='cuda'), "
@@ -59,15 +71,20 @@ def check_paths(environment: Environment) -> dict[str, str]:
 
 
 def missing_serve_packages(environment: Environment) -> list[str] | str:
-    """The serving packages serve_python cannot import ([] when it has them all), or why the probe failed."""
+    """The serving packages serve_python cannot import, each with its error ([] when it imports them all), or why
+    the probe itself failed (never empty, so a caller cannot read a failed probe as success)."""
     from .services import _serve_env
 
-    probe = ("import importlib, json; missing = [name for name in %r if importlib.util.find_spec(name) is None]; "
-             "print(json.dumps(missing))" % (SERVE_PACKAGES,))
-    completed = subprocess.run([str(environment["serve_python"]), "-c", "import importlib.util; " + probe],
+    completed = subprocess.run([str(environment["serve_python"]), "-c", IMPORT_PROBE, *SERVE_PACKAGES],
                                capture_output=True, text=True, env=_serve_env(environment), timeout=300)
-    missing = json.loads(completed.stdout.strip() or "null") if completed.returncode == 0 else None
-    return missing if isinstance(missing, list) else completed.stderr[-300:]
+    lines = completed.stdout.strip().splitlines()
+    try:
+        missing = json.loads(lines[-1]) if completed.returncode == 0 and lines else None
+    except ValueError:
+        missing = None
+    if isinstance(missing, list):
+        return missing
+    return completed.stderr.strip()[-300:] or f"the import probe failed (exit status {completed.returncode})"
 
 
 def check_serving(environment: Environment) -> dict[str, str]:

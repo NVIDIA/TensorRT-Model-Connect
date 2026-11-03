@@ -117,10 +117,10 @@ def select(config: Mapping[str, Any], profiles: Sequence[Profile],
 
 def _exclusion(profile: Profile, include: Any, rules: Sequence[Mapping[str, Any]], limit: float | None,
                size_gib: Callable[[Profile], float | None]) -> str | None:
+    if profile.excluded:  # the profile's own reason, whatever a machine's list includes
+        return profile.excluded
     if include != "all" and not any(fnmatch.fnmatchcase(profile.name, pattern) for pattern in include):
         return "not in models.include"
-    if profile.excluded:
-        return profile.excluded
     for rule in rules:
         if fnmatch.fnmatchcase(profile.name, rule["profile"]):
             return str(rule["reason"]).strip()

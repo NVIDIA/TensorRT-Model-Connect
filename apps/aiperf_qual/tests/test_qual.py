@@ -280,6 +280,23 @@ def test_models_are_derived_from_the_catalog_and_task_defaults():
         assert resolve_model("sana-wm-bidirectional", environment, root=root)["reference"]["backend"] == "unsupported"
 
 
+def test_a_family_definition_is_merged_over_config_models(tmp_path):
+    """sana-wm-bidirectional: its native adapter in config/models, its reference build policy in the family's own
+    definition (families/sana_wm/tests/aiperf). The resolved reference has both."""
+    import shutil
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+    from trtmc_aiperf_qual.models import resolve_model
+
+    reference = resolve_model("sana-wm-bidirectional", _environment())["reference"]
+    assert reference["adapter"] == "families/sana_wm/reference/adapter.py" and reference["build_isolation"] is False
+    root = tmp_path / "config"
+    shutil.copytree(CONFIG_ROOT, root)
+    (root / "models/sana-wm-bidirectional.yaml").unlink()
+    alone = resolve_model("sana-wm-bidirectional", _environment(), root=root)["reference"]
+    assert "adapter" not in alone and alone["build_isolation"] is False
+
+
 def test_top1_near_tie_tolerance_is_opt_in():
     from trtmc_aiperf_plugins.accuracy import compare_top1
 
@@ -547,6 +564,10 @@ def test_quantized_profiles_take_their_bases_native_reference_and_benchmarks():
     assert [(item["suite"], item["endpoint"]) for item in fp8["absolute"]] == [
         (item["suite"], item["endpoint"]) for item in base["absolute"]]
     assert [item["gate"] for item in fp8["absolute"]] == [{"margin": 2.0}]  # the quantization gate
+    # Its own catalog request is a completion: it still answers the benchmarks on its base's chat route.
+    qwen = resolve_model("qwen3-0.6b-fp8", environment)
+    assert [item["endpoint"] for item in qwen["absolute"]] == [
+        item["endpoint"] for item in resolve_model("qwen3-0.6b-fp16", environment)["absolute"]] == ["chat"]
     # The same checkpoint quantized by TRTMC: the base's own native pipeline on the profile's pinned checkpoint.
     canary = resolve_model("canary-1b-v2-fp8", environment)
     assert canary["qualified_as"] == "canary-1b-v2" and "model" not in canary["reference"]
@@ -564,6 +585,7 @@ def test_quantized_profiles_take_their_bases_native_reference_and_benchmarks():
     # The only profile of its model: its definition names the BF16 original and an environment that loads it.
     muse = resolve_model("muse-glimmer-nvfp4", environment)
     assert "qualified_as" not in muse and muse["reference"]["model"] == "meta-models/Muse-Glimmer-30B"
+    assert muse["reference"]["revision"] == "cec94fcfd6512f2cfe708138c32533b346ea4f69"
     assert muse["reference"]["requirements"] == "families/muse_glimmer/tests/requirements.txt"
 
 

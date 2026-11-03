@@ -572,7 +572,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if serve_python and Path(str(serve_python)).is_file():
                 missing = preflight.missing_serve_packages(environment)
                 if missing:  # stop before the campaign: every native reference that needs one would fail
-                    print(f"trtmc-aiperf-qual: serve_python lacks serving packages: {missing}; install "
+                    print(f"trtmc-aiperf-qual: serve_python cannot import the serving packages: {missing}; install "
                           "apps/perf_serving/requirements.txt into it (apps/aiperf_qual/setup.sh)", file=sys.stderr)
                     return 2
             names, excluded = machine_list()

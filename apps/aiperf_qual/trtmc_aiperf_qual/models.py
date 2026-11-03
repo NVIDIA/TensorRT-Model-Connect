@@ -139,13 +139,22 @@ def _absolute(names: list[Any], definitions: Mapping[str, Any], testcase: Mappin
     return items
 
 
+def _definition(path: Path) -> Any:
+    """A definition file's YAML. One that cannot be read or parsed is a ConfigError: an error of its profile alone,
+    which the catalog listing (``selection.catalog``) and a campaign's other profiles survive."""
+    try:
+        return yaml.safe_load(path.read_text())
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as error:
+        raise ConfigError(f"{path}: {error}") from error
+
+
 def profile_override(profile: str, family: str, repository: Path, root: Path = CONFIG_ROOT) -> dict[str, Any]:
     """A profile's own configuration: legacy config/models/<profile>.yaml, then the family's definition."""
     override_path = root / "models" / f"{profile}.yaml"
-    override = configuration((yaml.safe_load(override_path.read_text()) if override_path.is_file() else None) or {})
+    override = configuration((_definition(override_path) if override_path.is_file() else None) or {})
     family_path = repository / "families" / family / "tests" / "aiperf" / f"{profile}.yaml"
     if family_path.is_file():
-        owned = yaml.safe_load(family_path.read_text())
+        owned = _definition(family_path)
         if not isinstance(owned, dict):
             raise ConfigError(f"{family_path} must contain a mapping")
         override = deep_merge(override, configuration(owned))
@@ -229,8 +238,11 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         build.setdefault("name", f"{profile}-qual")
 
     definitions = deep_merge(tasks.get("benchmarks", {}), config.get("benchmarks", {}))
-    absolute = _absolute(list(config.get("absolute") or []), definitions,
-                         (manifest.get("testcases") or [{}])[0], bool(quantization))
+    # A quantized profile answers the benchmarks on its base's route (chat or completions), as the base does; the
+    # sampling stays its own catalog request's, the request its server starts from.
+    testcase = {**(manifest.get("testcases") or [{}])[0],
+                "use_chat_template": (native_manifest.get("testcases") or [{}])[0].get("use_chat_template")}
+    absolute = _absolute(list(config.get("absolute") or []), definitions, testcase, bool(quantization))
     for item in absolute:  # gold suites: the suite definition, with the benchmark's request settings
         if item.get("metric"):
             suite = _suite(item["suite_definition"], profile, config.get("request"))

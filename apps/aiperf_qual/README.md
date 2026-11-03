@@ -193,7 +193,8 @@ of the profiles of its family and Task whose names differ only in precision and 
 ranked first by fp32, bf16, fp16, then a quantized checkpoint (`qwen35-9b` for `qwen35-9b-nvfp4`;
 `llama-3.1-8b-fp8` for `llama-3.1-8b-nvfp4`, as the catalog has no unquantized Llama 3.1 8B). The profile takes
 that configuration except `candidate` (benchmarks, requests, native adapter, requirements, `trust_remote_code`)
-under its own, and when its checkpoint is a separate pre-quantized repository, its native reference loads that
+under its own and answers the benchmarks on that profile's route (chat or completions; the sampling stays its own
+catalog request's), and when its checkpoint is a separate pre-quantized repository, its native reference loads that
 profile's checkpoint. Its candidate stays its own bundle, held to the benchmarks' quantization gates;
 `qualified_as` in the plan names the profile it follows.
 
@@ -220,8 +221,9 @@ trtmc-aiperf-qual doctor --environment config/environments/<machine>.yaml       
 ```
 
 `setup.sh` installs `apps/perf_serving/requirements.txt` into the serving interpreter, including timm and
-Diffusers for the generic `timm/` classifier and image-generation references. `doctor` reports a missing
-serving package, and `run-all` does not start without one.
+Diffusers for the generic `timm/` classifier and image-generation references. `doctor` reports a serving package
+that the serving interpreter cannot import (missing, or failing on a missing or mismatched dependency), and
+`run-all` does not start until all of them import.
 
 ## Commands
 
