@@ -8,7 +8,7 @@ import subprocess
 
 import pytest
 
-from trtmc_short_drama import editing, media, video
+from trtmc_short_drama import editing, media, prompts, video
 from trtmc_short_drama.flow import Context
 from trtmc_short_drama.store import Store
 
@@ -180,6 +180,68 @@ def test_a_take_is_outdated_when_a_still_or_the_plan_behind_it_changes(project):
     state["e1s1"].update(state["e1s1"]["takes"][0])  # back to take 1, rendered from the old still and line
     project.save_shot_state(1, state)
     assert reasons() == ["references", "prompt"]
+
+
+def test_new_prompt_wording_leaves_takes_and_stills_current_but_plan_edits_do_not(project, monkeypatch):
+    services = FakeServices()
+    services.engine = FakeImages()
+    media.run_stills(Context(project, {"seed": 3, "only": ["character:aq", "location:temple"]}, "img", None,
+                             services, progress=lambda _: None))
+    stills = project.stills
+    for still in stills.values():
+        still["status"] = "approved"
+    project.save_stills(stills)
+    render(project, FakeServices())
+
+    def outdated():
+        plan = project.plan
+        episode = plan["episodes"][0]
+        return (media.outdated(project, plan, episode, episode["shots"][0], project.shot_state(1)["e1s1"],
+                               use_previous=False),
+                [key for key, kind, item in media.still_targets(plan)
+                 if media.still_outdated(plan, kind, item, project.stills[key])])
+
+    written, drawn = prompts.video_prompts, prompts.still_prompt  # an app update writes prompts another way
+    monkeypatch.setattr(prompts, "video_prompts", lambda *args: tuple(f"{p} Calm." for p in written(*args)))
+    monkeypatch.setattr(prompts, "still_prompt", lambda *args: f"{drawn(*args)} Sharp.")
+    assert outdated() == ([], [])
+    plan = project.plan
+    plan["episodes"][0]["shots"][0]["action"] = "a, slowly"
+    plan["characters"][0]["look"] = "a thin man in rags"
+    project.save_plan(plan)
+    assert outdated() == (["prompt"], ["character:aq"])
+
+
+def test_takes_from_before_takes_kept_their_source_follow_the_plan(project):
+    stills = project.stills
+    stills["location:temple"]["status"] = "approved"
+    project.save_stills(stills)
+    plan = project.plan
+    plan["episodes"][0]["shots"][0] = {**plan["episodes"][0]["shots"][0], "speaker": "", "line": "",
+                                       "action": "aq 跪下"}
+    project.save_plan(plan)
+    render(project, FakeServices())
+    state = project.shot_state(1)
+    for record in (state["e1s1"], state["e1s1"]["takes"][0]):  # as an older app rendered it
+        del record["source"]
+        record["prompt"] = record["prompt"].replace(f" {prompts.NO_ONE_SPEAKS}", "")
+    project.save_shot_state(1, state)
+    (project.root / media.TRANSLATIONS).write_text(json.dumps({"aq 跪下": "aq kneels"}))  # put into English since
+
+    def reasons():
+        plan = project.plan
+        episode = plan["episodes"][0]
+        return media.outdated(project, plan, episode, episode["shots"][0], project.shot_state(1)["e1s1"],
+                              use_previous=False)
+
+    assert reasons() == []
+    plan["episodes"][0]["shots"][0]["action"] = "aq 站起"
+    project.save_plan(plan)
+    assert reasons() == ["prompt"]
+    state = project.shot_state(1)
+    state["e1s1"]["prompt_override"] = state["e1s1"]["prompt"]  # the user keeps the old prompt
+    project.save_shot_state(1, state)
+    assert reasons() == []
 
 
 def test_each_shot_opens_where_the_shot_before_it_ends_in_the_same_place(project):

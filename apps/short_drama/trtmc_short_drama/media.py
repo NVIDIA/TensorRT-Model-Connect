@@ -58,11 +58,25 @@ def usage(plan: dict[str, Any]) -> dict[str, list[str]]:
     return used
 
 
-def still_outdated(plan: dict[str, Any], kind: str, item: dict[str, Any], still: dict[str, Any]) -> bool:
-    """Whether the description changed after the still was drawn from it."""
+def source_plan(source: dict[str, Any]) -> dict[str, Any]:
+    """The plan-wide parts of a kept prompt source, shaped as a plan."""
 
-    return (bool(still.get("file")) and not still.get("prompt_override") and
-            still.get("prompt") != prompts.still_prompt(plan, kind, item))
+    return {key: source.get(key) for key in ("style", "setting")} | {"characters": source.get("characters") or []}
+
+
+def still_outdated(plan: dict[str, Any], kind: str, item: dict[str, Any], still: dict[str, Any]) -> bool:
+    """Whether the description changed after the still was drawn from it.
+
+    A still keeps the description it was drawn from, and both are written as prompts are written
+    now, so a change to the prompt wording alone does not mark it outdated.
+    """
+
+    if not still.get("file") or still.get("prompt_override"):
+        return False
+    now = prompts.still_prompt(plan, kind, item)
+    if still.get("source"):
+        return prompts.still_prompt(source_plan(still["source"]), kind, still["source"]["item"]) != now
+    return still.get("prompt") != now  # drawn before stills kept their source
 
 
 def run_stills(context: Context) -> None:
@@ -88,8 +102,10 @@ def run_stills(context: Context) -> None:
         (project.root / "stills").mkdir(exist_ok=True)
         inside(project, project.root / relative).write_bytes(png)
         stills = project.stills
+        source = None if previous.get("prompt_override") else {
+            "style": plan.get("style"), "setting": plan.get("setting"), "item": item}
         stills[key] = {**stills.get(key, {}), "file": relative, "seed": seed, "prompt": prompt,
-                       "status": "draft", "model": context.model,
+                       "source": source, "status": "draft", "model": context.model,
                        "seconds": round(time.monotonic() - started, 1)}
         project.save_stills(stills)
 
@@ -239,6 +255,36 @@ def relative(project, path: Path) -> str:
     return str(path.relative_to(project.root)) if path.is_relative_to(project.root) else path.name
 
 
+def prompt_source(plan: dict[str, Any], shot: dict[str, Any],
+                  references: list[tuple[str, dict[str, Any]]]) -> dict[str, Any]:
+    """The parts of the plan a shot's prompt is written from, kept with each take."""
+
+    return {"style": plan.get("style"), "setting": plan.get("setting"),
+            "characters": [{key: c.get(key) for key in ("id", "name", "voice")} for c in plan.get("characters", [])],
+            "shot": shot, "references": [[kind, item] for kind, item in references]}
+
+
+def prompt_changed(project, plan: dict[str, Any], shot: dict[str, Any], references: list[tuple[str, dict[str, Any]]],
+                   entry: dict[str, Any], used: dict[str, Any]) -> bool:
+    """Whether the plan, or the kept prompt, changed since the take.
+
+    The plan the take was rendered from and the plan now are both written as prompts are written
+    now, so a change to the prompt wording alone (an app update) does not mark the take outdated.
+    """
+
+    if entry.get("prompt_override"):
+        return entry["prompt_override"] != used["prompt"]
+    english = english_of(project)
+    now = prompts.video_prompts(plan, shot, references, english)[0]
+    source = used["source"]
+    if source:
+        return prompts.video_prompts(source_plan(source), source["shot"], source["references"], english)[0] != now
+    # Rendered with a kept prompt, or before takes kept their source: the descriptions were then
+    # written as they are in the plan, and a shot without a line did not yet say that no one speaks.
+    written = {prompts.video_prompts(plan, shot, references, words)[0] for words in (english, None)}
+    return used["prompt"] not in written | {text.replace(f" {prompts.NO_ONE_SPEAKS}", "") for text in written}
+
+
 def outdated(project, plan: dict[str, Any], episode: dict[str, Any], shot: dict[str, Any],
              entry: dict[str, Any], *, use_previous: bool, chain: bool = True) -> list[str]:
     """Why the chosen take no longer matches what the shot would render with now.
@@ -252,9 +298,9 @@ def outdated(project, plan: dict[str, Any], episode: dict[str, Any], shot: dict[
         return []
     take = next((t for t in entry.get("takes", []) if t.get("take") == entry.get("take")), {})
     latest = entry.get("take") == max([t.get("take", 0) for t in entry.get("takes", [])], default=0)
-    used = {key: take.get(key, entry.get(key) if latest else None) for key in ("references", "prompt")}
-    _, paths, prompt, _ = shot_inputs(project, plan, episode, shot, use_previous=use_previous, chain=chain,
-                                      require_approval=False)
+    used = {key: take.get(key, entry.get(key) if latest else None) for key in ("references", "prompt", "source")}
+    references, paths, _, _ = shot_inputs(project, plan, episode, shot, use_previous=use_previous, chain=chain,
+                                          require_approval=False)
     reasons = []
 
     def split(names) -> tuple[list[str], list[str]]:
@@ -268,7 +314,7 @@ def outdated(project, plan: dict[str, Any], episode: dict[str, Any], shot: dict[
             reasons.append("references")
         if frames_now != frames_used:
             reasons.append("previous")
-    if used["prompt"] is not None and (entry.get("prompt_override") or prompt) != used["prompt"]:
+    if used["prompt"] is not None and prompt_changed(project, plan, shot, references, entry, used):
         reasons.append("prompt")
     return reasons
 
@@ -309,9 +355,10 @@ def run_shots(context: Context) -> None:
         position = next(i for i, s in enumerate(episode["shots"]) if s["id"] == shot["id"])
         if position:  # takes rendered before shots were chained have no saved last frame yet
             ensure_last_frame(project, number, project.shot_state(number).get(episode["shots"][position - 1]["id"], {}))
-        _, paths, prompt, continuation = shot_inputs(project, plan, episode, shot, use_previous=use_previous,
-                                                     chain=chain)
+        references, paths, prompt, continuation = shot_inputs(project, plan, episode, shot,
+                                                              use_previous=use_previous, chain=chain)
         entry = project.shot_state(number).get(shot["id"], {})  # the user may edit during a run
+        source = None if entry.get("prompt_override") else prompt_source(plan, shot, references)
         prompt = entry.get("prompt_override") or prompt
         take = max([t["take"] for t in entry.get("takes", [])] + [int(entry.get("take", 0))]) + 1
         seed = int(params.get("seed", 7)) + take - 1
@@ -328,7 +375,7 @@ def run_shots(context: Context) -> None:
         # Each take keeps what it was rendered from, so a later edit shows which takes are outdated.
         rendered = {"take": take, "seed": seed, "file": str(clip.relative_to(project.root)),
                     "sheet": str(sheet.relative_to(project.root)), "raw": str(raw.relative_to(project.root)),
-                    "prompt": prompt, "continuation": continuation,
+                    "prompt": prompt, "continuation": continuation, "source": source,
                     "references": [relative(project, p) for p in paths], "lead_in": lead_in,
                     "cut": video.CUT_RULE, "model": context.model,
                     "seconds": round(time.monotonic() - started, 1)}
