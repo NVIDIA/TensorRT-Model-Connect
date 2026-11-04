@@ -35,7 +35,9 @@ class MiniMaxH3Pipeline final : public IImageGeneration {
   public:
     MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader, std::unique_ptr<ITokenizer> tokenizer,
                       std::string model_id, bool first_block_cache = false,
-                      float cache_threshold = 0.025F);
+                      float cache_threshold = 0.025F,
+                      std::shared_ptr<void> distributed_owner = nullptr,
+                      int32_t distributed_rank = 0, int32_t distributed_world_size = 1);
     ~MiniMaxH3Pipeline() override;
 
     ImageResult generate_image(const std::string& prompt,
@@ -52,6 +54,11 @@ class MiniMaxH3Pipeline final : public IImageGeneration {
     std::unique_ptr<ResidentState> resident_;
     bool first_block_cache_{false};
     float cache_threshold_{0.025F};
+    // Keeps the NCCL communicator alive; every rank runs the denoiser and VAE
+    // (they contain collectives) but only rank 0 returns pixels.
+    std::shared_ptr<void> distributed_owner_;
+    int32_t distributed_rank_{0};
+    int32_t distributed_world_size_{1};
 };
 
 } // namespace trtmc

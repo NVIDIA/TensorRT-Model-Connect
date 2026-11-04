@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/minimax_h3/runtime/distributed_runtime.h"
 #include "families/minimax_h3/runtime/pipeline.h"
 #include "families/minimax_h3/runtime/tokenizer.h"
 #include "trtmc/runtime/family_factory.h"
@@ -54,13 +55,24 @@ PlanMap load_plans(const BundleReader& bundle, bool first_block_cache) {
     return plans;
 }
 
-MiniMaxH3ModuleLoader make_loader(IBackend& backend, PlanMap plans) {
-    return [&backend, plans = std::move(plans)](const std::string& name, cudaStream_t stream) {
+// Plans that contain TensorRT distributed collectives and need the communicator.
+bool plan_is_distributed(const std::string& name) {
+    return name == "denoiser.plan" || name == "vae.plan";
+}
+
+MiniMaxH3ModuleLoader make_loader(IBackend& backend, PlanMap plans,
+                                  minimax_h3::DistributedRuntimeGroup group) {
+    return [&backend, plans = std::move(plans), group = std::move(group)](
+               const std::string& name, cudaStream_t stream) {
         const auto found = plans.find(name);
         if (found == plans.end())
             throw std::runtime_error("MiniMax-H3 requested undeclared plan: " + name);
         ModuleCreateOptions options{};
         options.stream = stream;
+        if (group.world_size > 1 && plan_is_distributed(name)) {
+            options.distributed_communicator = group.communicator;
+            options.distributed_owner = group.owner;
+        }
         auto module = backend.create_module(found->second.data(), found->second.size(), options);
         if (!module || !module->ok())
             throw std::runtime_error("MiniMax-H3 failed to load plan: " + name);
@@ -77,7 +89,9 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     using namespace trtmc;
     const auto& runtime = minimax_h3_factory::require_section(context.reader, "runtime.json");
     const auto config = nlohmann::json::parse(runtime.begin(), runtime.end());
-    if (config.at("context_parallel_size").get<std::int32_t>() != 1 ||
+    const auto cp = config.at("context_parallel_size").get<std::int32_t>();
+    if ((cp != 1 && cp != 2 && cp != 4 && cp != 8) ||
+        config.value("vae_cp_size", std::int32_t{1}) != cp ||
         config.at("padded_sequence_length").get<std::int32_t>() != 38247 ||
         config.at("vae_tile_batch").get<std::int32_t>() != 28) {
         throw std::runtime_error("MiniMax-H3 runtime.json declares an unsupported profile");
@@ -89,8 +103,15 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const float threshold = config.at("first_block_cache_threshold").get<float>();
     if (!std::isfinite(threshold) || threshold <= 0.0F)
         throw std::runtime_error("MiniMax-H3 cache threshold must be finite and positive");
+    // One process per rank; for cp == 1 this returns a trivial group.
+    auto group = minimax_h3::initialize_parallel_group(cp);
+    auto owner = group.owner;
+    const auto rank = group.rank;
+    const auto world = group.world_size;
     return new MiniMaxH3Pipeline(
         minimax_h3_factory::make_loader(context.backend,
-                                        minimax_h3_factory::load_plans(context.reader, cache)),
-        minimax_h3_factory::load_tokenizer(context.reader), "", cache, threshold);
+                                        minimax_h3_factory::load_plans(context.reader, cache),
+                                        std::move(group)),
+        minimax_h3_factory::load_tokenizer(context.reader), "", cache, threshold,
+        std::move(owner), rank, world);
 }

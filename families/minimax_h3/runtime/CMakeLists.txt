@@ -3,6 +3,7 @@
 
 add_library(trtmc_model_minimax_h3 SHARED
   bpe_tokenizer.cpp
+  distributed_runtime.cpp
   pipeline.cpp
   plugin.cpp
   torch_cuda_normal.cu
@@ -25,6 +26,7 @@ target_link_libraries(trtmc_model_minimax_h3 PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
 )
 target_compile_options(trtmc_model_minimax_h3 PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"

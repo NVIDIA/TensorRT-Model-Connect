@@ -1110,10 +1110,19 @@ void minimax_h3_scheduler_step(float* sample, const float* velocity, std::size_t
 
 MiniMaxH3Pipeline::MiniMaxH3Pipeline(MiniMaxH3ModuleLoader loader,
                                      std::unique_ptr<ITokenizer> tokenizer, std::string model_id,
-                                     bool first_block_cache, float cache_threshold)
+                                     bool first_block_cache, float cache_threshold,
+                                     std::shared_ptr<void> distributed_owner,
+                                     int32_t distributed_rank, int32_t distributed_world_size)
     : loader_(std::move(loader)), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id)),
       resident_(std::make_unique<ResidentState>()), first_block_cache_(first_block_cache),
-      cache_threshold_(cache_threshold) {
+      cache_threshold_(cache_threshold), distributed_owner_(std::move(distributed_owner)),
+      distributed_rank_(distributed_rank), distributed_world_size_(distributed_world_size) {
+    if (distributed_world_size_ < 1 || distributed_rank_ < 0 ||
+        distributed_rank_ >= distributed_world_size_)
+        throw std::invalid_argument("MiniMax-H3 distributed rank is outside its world size");
+    if (distributed_world_size_ > 1 && first_block_cache_)
+        throw std::invalid_argument(
+            "MiniMax-H3 first-block cache does not support context parallelism");
     if (!loader_ || !tokenizer_)
         throw std::invalid_argument("MiniMax-H3 pipeline requires a loader and tokenizer");
     if (!std::isfinite(cache_threshold_) || cache_threshold_ <= 0.0F)
@@ -1205,7 +1214,12 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
     result.width = kOutputWidth;
     result.channels = 3;
     result.num_frames = kOutputFrames;
-    result.pixels = std::move(pixels);
+    if (distributed_rank_ == 0) {
+        result.pixels = std::move(pixels);
+    } else {
+        std::cerr << "[minimax-h3] rank " << distributed_rank_ << "/" << distributed_world_size_
+                  << " finished; rank 0 returns the decoded video\n";
+    }
     return result;
 }
 
