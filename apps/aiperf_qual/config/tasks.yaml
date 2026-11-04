@@ -13,6 +13,9 @@
 # Optional service metrics (`service_metrics`) are opt-in reports, set per model.
 #
 # Suite "catalog" is the profile's catalog testcase request (model-specific shapes and settings).
+#
+# A Task renamed by a Task SDK migration (same operation and output) aliases its old entry. A ready catalog
+# profile whose Task has no entry is a configuration error that reports leave out.
 
 defaults:
   reference:
@@ -144,9 +147,10 @@ tasks:
     performance: {output_grader: parity_top1, output_grader_params: {tie_cosine: 0.999}}
   image_to_class_scores: *classify
 
-  encoding:
+  encoding: &encode
     absolute: [encoder_parity]
     performance: {output_grader: parity_vector}
+  text_to_pooled_features: *encode  # the migrated encoders pool the first token, as encode did
   embedding:
     absolute: [sts, retrieval]
     performance: {output_grader: parity_vector}
@@ -176,7 +180,7 @@ tasks:
     absolute: [librispeech_streaming]
 
   # Generative media are slow per request: fewer requests per run, still three runs for the CI.
-  audio_generation:
+  audio_generation: &generate_audio
     # Sampling models cannot be judged per sample, but what they say can: both sides speak 200 Seed-TTS
     # eval sentences, Whisper large-v3-turbo transcribes them, and TRTMC's corpus WER is judged against the
     # native model's (margin 2 points or 10%); every output must be valid audio (tts-validity).
@@ -184,6 +188,7 @@ tasks:
                      asr_revision: 41f01f3fe87f28c78e2fbf8b568835947dd65ed9,
                      gate: {margin: 2.0, relative_margin: 0.10}}]
     performance: {output_grader: parity_audio, measurement: {settle_s: 0, warmup: 1, requests: 3, runs: 3}}
+  text_to_audio: *generate_audio
   speech_to_speech:
     absolute: [speech_parity]
     performance: {output_grader: parity_audio, measurement: {settle_s: 0, warmup: 1, requests: 3, runs: 3}}

@@ -297,6 +297,43 @@ def test_a_family_definition_is_merged_over_config_models(tmp_path):
     assert "adapter" not in alone and alone["build_isolation"] is False
 
 
+def test_task_sdk_migrations_keep_their_tasks_qualification():
+    """Encoders migrated to text_to_pooled_features and Bark to text_to_audio keep encode's and audio
+    generation's benchmarks, and a profile's own suites still replace them (dpr-ctx-encoder)."""
+    from trtmc_aiperf_qual.models import resolve_model
+
+    for profile in ("fnet-base", "deberta-base", "distilbert-base-uncased"):
+        model = resolve_model(profile, _environment())
+        assert (model["task"], model["operation"]) == ("text_to_pooled_features", "encode")
+        assert [item["suite"] for item in model["absolute"]] == ["encoder-parity"]
+    dpr = resolve_model("dpr-ctx-encoder", _environment())
+    assert [item["suite"] for item in dpr["absolute"]] == ["scifact-retrieval", "stsb"]
+    bark = resolve_model("bark-small", _environment())
+    assert (bark["task"], bark["operation"]) == ("text_to_audio", "generate_audio")
+    assert [item["check"] for item in bark["supplementary"]] == ["tts_intelligibility"]
+    assert bark["performance"]["output_grader"] == "parity_audio"
+
+
+def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():
+    """A ready profile whose Task has no defaults is a configuration error that reports leave out, so a Task SDK
+    rename drops its profiles without a trace: alias the old entry in config/tasks.yaml, or state the gap here."""
+    import yaml
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+    from trtmc_aiperf_qual.selection import catalog
+
+    not_qualified = {  # Tasks no generic native reference or benchmark serves yet
+        "structured_decision": "no generic native adapter for decide",
+        "image_text_to_boxes": "no generic native adapter for detect_prompted",
+        "text_to_token_features": "the generic encode reference returns the first token's features only",
+        "image_to_token_and_pooled_features": "no image feature benchmark outside the families that state one",
+        "text_to_embedding": "query and document roles; the generic embed reference mean-pools",
+        "speech_transcription": "the generic transcribe reference loads Whisper-style speech-seq2seq models only",
+    }
+    tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
+    assert {profile.task for profile in catalog(REPOSITORY)} - set(tasks) == set(not_qualified)
+
+
 def test_top1_near_tie_tolerance_is_opt_in():
     from trtmc_aiperf_plugins.accuracy import compare_top1
 
