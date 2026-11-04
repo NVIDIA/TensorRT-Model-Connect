@@ -398,6 +398,9 @@ A suite with media and neither `media_root` nor `hf_datasets_cache` configured i
 - New Task: one entry in `config/tasks.yaml`: its gold-labelled benchmarks (`absolute`, defined under
   `benchmarks`, scored by `gold_metrics.py` or an AIPerf grader) and the Perf output check
   (`output_grader`, a comparator in `plugins/trtmc_aiperf_plugins/accuracy.py`).
+- Task renamed by a Task SDK migration (same operation and output): an alias of its old entry in
+  `config/tasks.yaml` (`text_to_pooled_features: *encode`). A ready profile whose Task has no entry is a
+  configuration error that only `plan.json` lists: reports leave it out.
 - Model needing a different input or reference option: `config/models/<profile>.yaml`.
 - Model that cannot be qualified as cataloged (for example a catalog testcase without a prompt):
   `exclude: <reason>` in `families/<family>/tests/aiperf/<profile>.yaml`. Every machine's model list then
