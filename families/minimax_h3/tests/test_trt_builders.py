@@ -10,7 +10,7 @@ import numpy as np
 import pytest
 
 
-trt = pytest.importorskip("tensorrt")
+trt = pytest.importorskip("families.minimax_h3._trt").trt
 
 from families.minimax_h3.adaln_builder import (  # noqa: E402
     build_adaln_precompute_engine,
@@ -225,7 +225,7 @@ def test_tiny_native_h3_graphs_serialize() -> None:
         num_layers=1,
         num_refiner_layers=1,
         num_heads=4,
-        head_dim=8,
+        head_dim=64,
         ffn_dim=16,
         video_in_channels=2,
         audio_in_channels=2,

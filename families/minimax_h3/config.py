@@ -72,6 +72,9 @@ def resolve_workspace_bytes(workspace_bytes: int | None, *, default_bytes: int) 
     return resolved
 
 
+SUPPORTED_CONTEXT_PARALLEL_SIZES = (1, 2, 4, 8)
+
+
 @dataclass(frozen=True)
 class MiniMaxH3Config:
     hidden_size: int = 5376
@@ -121,6 +124,18 @@ class MiniMaxH3Config:
         return self.video_in_channels * pt * ph * pw
 
     @property
+    def local_video_rows(self) -> int:
+        """Video rows owned by one context-parallel rank."""
+
+        return self.video_rows // self.context_parallel_size
+
+    @property
+    def local_heads(self) -> int:
+        """Attention heads owned by one rank between the Ulysses exchanges."""
+
+        return self.num_heads // self.context_parallel_size
+
+    @property
     def attention_size(self) -> int:
         return self.num_heads * self.head_dim
 
@@ -131,8 +146,17 @@ class MiniMaxH3Config:
     def validate(self) -> None:
         if self.hidden_size <= 0 or self.num_layers <= 0:
             raise ValueError("MiniMax-H3 hidden_size and num_layers must be positive")
-        if self.context_parallel_size != 1:
-            raise ValueError("MiniMax-H3 native runtime currently requires context_parallel_size=1")
+        if self.context_parallel_size not in SUPPORTED_CONTEXT_PARALLEL_SIZES:
+            raise ValueError(
+                "MiniMax-H3 context_parallel_size must be one of "
+                f"{SUPPORTED_CONTEXT_PARALLEL_SIZES}, got {self.context_parallel_size}"
+            )
+        if self.num_heads % self.context_parallel_size:
+            raise ValueError("MiniMax-H3 num_heads must be divisible by context_parallel_size")
+        if self.video_rows % self.context_parallel_size:
+            raise ValueError("MiniMax-H3 video_rows must be divisible by context_parallel_size")
+        if self.context_parallel_size > 1 and self.first_block_cache:
+            raise ValueError("MiniMax-H3 first_block_cache does not support context parallelism yet")
         if self.attention_size <= self.hidden_size:
             raise ValueError("MiniMax-H3 attention width must exceed its residual width")
         if not 1 <= self.min_text_rows <= self.opt_text_rows <= self.text_rows:

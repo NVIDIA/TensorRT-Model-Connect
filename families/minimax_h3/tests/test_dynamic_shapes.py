@@ -10,7 +10,7 @@ import pytest
 
 def _trt_available() -> bool:
     try:
-        import tensorrt  # noqa: F401
+        from families.minimax_h3._trt import trt  # noqa: F401
         from cuda.bindings import runtime as cudart
 
         status, count = cudart.cudaGetDeviceCount()
@@ -23,7 +23,7 @@ def _trt_available() -> bool:
 @pytest.mark.trt
 @pytest.mark.skipif(not _trt_available(), reason="TensorRT + CUDA not available")
 def test_dynamic_row_slices_build_and_infer_runtime_shapes() -> None:
-    import tensorrt as trt
+    from families.minimax_h3._trt import trt
 
     from families.minimax_h3 import graph_ops as op
 

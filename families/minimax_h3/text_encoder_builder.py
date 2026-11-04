@@ -16,7 +16,7 @@ import sys
 
 import numpy as np
 
-import tensorrt as trt
+from ._trt import trt
 
 from . import graph_ops as op
 from .config import TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES

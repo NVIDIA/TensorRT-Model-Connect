@@ -11,8 +11,9 @@ import sys
 
 import numpy as np
 
-import tensorrt as trt
+from ._trt import trt
 
+from . import cp_ops
 from . import graph_ops as op
 from .config import (
     DENOISER_DEFAULT_WORKSPACE_BYTES,
@@ -207,16 +208,21 @@ def _attention_block(
             head_dim=profile.head_dim,
             rotary_dim=rotary_dim,
         )
-        attended = op.native_attention(
-            network,
-            q,
-            k,
-            v,
-            rows=rows,
-            heads=profile.num_heads,
-            head_dim=profile.head_dim,
-            name=f"{prefix}.attn.native_attention",
-        )
+        if profile.context_parallel_size > 1:
+            attended = cp_ops.ulysses_attention(
+                network, q, k, v, profile=profile, name=f"{prefix}.attn.native_attention"
+            )
+        else:
+            attended = op.native_attention(
+                network,
+                q,
+                k,
+                v,
+                rows=rows,
+                heads=profile.num_heads,
+                head_dim=profile.head_dim,
+                name=f"{prefix}.attn.native_attention",
+            )
     else:
         attended = _native_attention(
             network,
@@ -407,6 +413,36 @@ def _mark_sliced_velocity_outputs(network, hidden, weights, profile: MiniMaxH3Co
     network.mark_output(audio)
 
 
+def _mark_cp_velocity_outputs(network, hidden, weights, profile: MiniMaxH3Config):
+    """Context-parallel outputs: audio is replicated, video is gathered from the shards."""
+
+    local = profile.local_video_rows
+    audio_hidden = op.slice_rows_from_end(
+        network, hidden, offset=profile.audio_rows + local, rows=profile.audio_rows
+    )
+    video_hidden = op.slice_rows_from_end(network, hidden, offset=local, rows=local)
+    video_local = op.linear(
+        network, video_hidden, weights["proj_out.weight"], weights["proj_out.bias"], bf16=False
+    )
+    audio = op.linear(
+        network,
+        audio_hidden,
+        weights["audio_proj_out.weight"],
+        weights["audio_proj_out.bias"],
+        bf16=False,
+    )
+    video = cp_ops.add_collective(
+        network, video_local, trt.CollectiveOperation.ALL_GATHER, profile.context_parallel_size
+    )
+    network.mark_output(_named(video, "video_velocity"))
+    network.mark_output(_named(audio, "audio_velocity"))
+
+
+def _named(tensor, name: str):
+    tensor.name = name
+    return tensor
+
+
 def _native_builder(verbose: bool, workspace_bytes: int | None):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -483,15 +519,18 @@ def _serialize(
     return bytes(plan)
 
 
-def build_dit_engine(
+def construct_dit_network(
     weights: dict,
     profile: MiniMaxH3Config,
     *,
     verbose: bool = False,
-    consume_weights: bool = False,
     workspace_bytes: int | None = None,
-) -> bytes:
-    """Build the full-sequence single-device H3 TensorRT plan."""
+):
+    """Construct (without building) the full-sequence H3 DiT network.
+
+    Returns ``(logger, builder, network, config)``. Needs no GPU, so the graph
+    structure, including the context-parallel collectives, is unit-testable.
+    """
 
     profile.validate()
     if profile.first_block_cache:
@@ -527,12 +566,23 @@ def build_dit_engine(
     final_modulation = network.add_input(
         "final_modulation", trt.bfloat16, (profile.max_timestep_count, 2, profile.hidden_size)
     )
-    # The public single-device FL2VA profile is packed as text | audio | video.
-    # Projection, text refinement, packing, and full-sequence attention all
-    # remain native TensorRT operations on one device.
+    # The public FL2VA profile is packed as text | audio | video. Projection,
+    # text refinement, packing, and attention all remain native TensorRT
+    # operations. With context parallelism only the video rows are sharded;
+    # text and audio stay replicated (see cp_ops).
+    cp = profile.context_parallel_size
+    if cp > 1:
+        video = cp_ops.shard_replicated_rows(network, video, cp)
     hidden = _packed_hidden(network, video, audio, text, weights, profile)
 
-    cos, sin = _rope_tables(network, positions, profile, rows)
+    if cp > 1:
+        positions_local = cp_ops.local_packed_rows(network, positions, profile)
+        adaln_local = cp_ops.local_packed_rows(network, adaln_indices, profile, integer=True)
+        timestep_local = cp_ops.local_packed_rows(network, timestep_indices, profile, integer=True)
+    else:
+        positions_local, adaln_local, timestep_local = positions, adaln_indices, timestep_indices
+
+    cos, sin = _rope_tables(network, positions_local, profile, rows)
     # The dynamic packed sequence contains live rows only, like Diffusers, so
     # its attention mask remains None for every supported prompt length.
     for index in range(profile.num_layers):
@@ -540,7 +590,7 @@ def build_dit_engine(
             network,
             hidden,
             block_modulations[index],
-            adaln_indices,
+            adaln_local,
             cos,
             sin,
             weights,
@@ -548,20 +598,40 @@ def build_dit_engine(
             index,
         )
 
-    hidden = _final_hidden(network, hidden, timestep_indices, final_modulation, weights, profile)
-    _mark_sliced_velocity_outputs(network, hidden, weights, profile)
+    hidden = _final_hidden(network, hidden, timestep_local, final_modulation, weights, profile)
+    if cp > 1:
+        _mark_cp_velocity_outputs(network, hidden, weights, profile)
+    else:
+        _mark_sliced_velocity_outputs(network, hidden, weights, profile)
 
     op.validate_native_network(
         network,
         expected_attentions=profile.num_refiner_layers + profile.num_layers,
         label="DiT",
+        expected_collectives=cp_ops.expected_collectives(profile),
     )
 
     print(
         f"[minimax-h3] building native DiT: layers={profile.num_layers}, "
         f"packed={profile.min_sequence_length}..{profile.sequence_length} "
-        f"(opt={profile.opt_sequence_length}), devices=1",
+        f"(opt={profile.opt_sequence_length}), devices={cp}",
         file=sys.stderr,
+    )
+    return logger, builder, network, config
+
+
+def build_dit_engine(
+    weights: dict,
+    profile: MiniMaxH3Config,
+    *,
+    verbose: bool = False,
+    consume_weights: bool = False,
+    workspace_bytes: int | None = None,
+) -> bytes:
+    """Build the full-sequence H3 TensorRT plan (one plan serves every CP rank)."""
+
+    logger, builder, network, config = construct_dit_network(
+        weights, profile, verbose=verbose, workspace_bytes=workspace_bytes
     )
     return _serialize(
         logger=logger,

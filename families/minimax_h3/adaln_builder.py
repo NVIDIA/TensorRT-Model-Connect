@@ -13,7 +13,7 @@ from __future__ import annotations
 import gc
 import sys
 
-import tensorrt as trt
+from ._trt import trt
 
 from . import graph_ops as op
 from .config import (

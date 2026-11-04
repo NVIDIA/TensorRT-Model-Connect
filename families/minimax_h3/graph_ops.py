@@ -15,7 +15,7 @@ import math
 import ml_dtypes
 import numpy as np
 
-import tensorrt as trt
+from ._trt import trt
 
 from .config import resolve_workspace_bytes
 
@@ -47,19 +47,25 @@ def configure_workspace(config, workspace_bytes: int | None, *, default_bytes: i
     return applied
 
 
-def validate_native_network(network, *, expected_attentions: int, label: str) -> dict[str, int]:
-    """Fail closed if a native H3 graph gains plugins or collectives."""
+def validate_native_network(
+    network, *, expected_attentions: int, label: str, expected_collectives: int = 0
+) -> dict[str, int]:
+    """Fail closed if a native H3 graph gains plugins or unexpected collectives.
+
+    Single-device graphs contain no distributed layer. Context-parallel graphs
+    must contain exactly ``expected_collectives`` of them.
+    """
 
     counts = Counter(network.get_layer(index).type for index in range(network.num_layers))
     expected = {
         trt.LayerType.ATTENTION_INPUT: expected_attentions,
         trt.LayerType.ATTENTION_OUTPUT: expected_attentions,
+        trt.LayerType.DIST_COLLECTIVE: expected_collectives,
     }
     forbidden = (
         trt.LayerType.PLUGIN,
         trt.LayerType.PLUGIN_V2,
         trt.LayerType.PLUGIN_V3,
-        trt.LayerType.DIST_COLLECTIVE,
     )
     violations = {
         str(kind): counts[kind] for kind, wanted in expected.items() if counts[kind] != wanted
@@ -73,7 +79,7 @@ def validate_native_network(network, *, expected_attentions: int, label: str) ->
         "plugin": 0,
         "plugin_v2": 0,
         "plugin_v3": 0,
-        "dist_collective": 0,
+        "dist_collective": counts[trt.LayerType.DIST_COLLECTIVE],
     }
 
 
@@ -360,12 +366,13 @@ def partial_rope(
     return heads_to_rows(network, result.get_output(0), rows, heads * head_dim)
 
 
-def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int, name: str):
-    """Full-sequence single-device fused TensorRT attention."""
+def attention_core(network, q, k, v, *, head_dim: int, name: str):
+    """Fused attention on ``[1, heads, rows, head_dim]`` BF16 tensors.
 
-    q = rows_to_heads(network, q, rows, heads, head_dim)
-    k = rows_to_heads(network, k, rows, heads, head_dim)
-    v = rows_to_heads(network, v, rows, heads, head_dim)
+    Shared by the single-device path and the Ulysses path, which only differ in
+    how many heads and rows each rank holds. Returns BF16 ``[1, heads, rows, head_dim]``.
+    """
+
     # TensorRT's fused FP16 attention has three additional mantissa bits over
     # BF16. Keep the surrounding block in checkpoint-native BF16 while
     # reducing recurrent numerical drift across 49 denoising evaluations.
@@ -385,5 +392,14 @@ def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int, 
     layer.metadata = f"trtmc.native_op=IAttention;source={name}"
     layer.get_output(0).name = f"{name}.output"
     layer.decomposable = False
-    context = cast(network, layer.get_output(0), trt.bfloat16)
+    return cast(network, layer.get_output(0), trt.bfloat16)
+
+
+def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int, name: str):
+    """Full-sequence single-device fused TensorRT attention."""
+
+    q = rows_to_heads(network, q, rows, heads, head_dim)
+    k = rows_to_heads(network, k, rows, heads, head_dim)
+    v = rows_to_heads(network, v, rows, heads, head_dim)
+    context = attention_core(network, q, k, v, head_dim=head_dim, name=name)
     return heads_to_rows(network, context, rows, heads * head_dim)

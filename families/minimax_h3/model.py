@@ -19,6 +19,7 @@ from .checkpoint import (
 )
 from .config import (
     SOL_ENGINE_1344X768_124F,
+    SUPPORTED_CONTEXT_PARALLEL_SIZES,
     default_workspace_limit_bytes,
 )
 
@@ -44,6 +45,7 @@ def _fixed_profile(raw: dict):
     }
     if mismatches:
         raise ValueError(f"Unsupported MiniMax-H3 packed-row profile: {mismatches}")
+    cp = int(raw.get("context_parallel_size", 1))
     explicit_flag = raw.get("first_block_cache")
     mode = raw.get(
         "denoiser_cache_mode",
@@ -56,9 +58,9 @@ def _fixed_profile(raw: dict):
     mode_flag = mode == "first_block"
     if explicit_flag is not None and explicit_flag != mode_flag:
         raise ValueError("MiniMax-H3 cache mode and first_block_cache flag disagree")
-    if not mode_flag:
-        return SOL_ENGINE_1344X768_124F
-    return replace(SOL_ENGINE_1344X768_124F, first_block_cache=True)
+    return replace(
+        SOL_ENGINE_1344X768_124F, first_block_cache=mode_flag, context_parallel_size=cp
+    )
 
 
 class _MiniMaxH3Model:
@@ -231,6 +233,7 @@ class _MiniMaxH3Model:
             verbose=verbose,
             consume_weights=True,
             workspace_bytes=workspace_limits["vae_tile_decoder.plan"],
+            cp_size=profile.context_parallel_size,
         )
         tokenizer_json = (Path(weights["_tokenizer_dir"]) / "tokenizer.json").read_bytes()
 
@@ -257,8 +260,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.max_sequence_length is not None:
         raise NotImplementedError("minimax_h3 does not support max_sequence_length")
 
-    if request.context_parallel_size != 1:
-        raise ValueError("this family does not support context parallelism")
+    if request.context_parallel_size not in SUPPORTED_CONTEXT_PARALLEL_SIZES:
+        raise ValueError(
+            "MiniMax-H3 context_parallel_size must be one of "
+            f"{SUPPORTED_CONTEXT_PARALLEL_SIZES}, got {request.context_parallel_size}"
+        )
 
     if request.task != "image_generation":
         raise ValueError("minimax_h3 supports only task=image_generation")
@@ -277,7 +283,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if int(request.video_num_frames or 124) != 124:
         raise ValueError("MiniMax-H3 requires video_num_frames=124")
 
-    config = SimpleNamespace(raw={})
+    config = SimpleNamespace(raw={"context_parallel_size": int(request.context_parallel_size)})
     model_dir = Path(request.model_dir)
     model = _MiniMaxH3Model()
     weights = model.load_weights(str(model_dir), config)
@@ -320,6 +326,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "max_timestep_count": profile.max_timestep_count,
             "context_parallel_size": profile.context_parallel_size,
             "vae_tile_batch": 28,
+            "vae_cp_size": profile.context_parallel_size,
             "vae_tile_size": 256,
             "vae_tile_overlap": 64,
         },
