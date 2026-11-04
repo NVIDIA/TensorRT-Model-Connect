@@ -17,6 +17,10 @@ capacity covers the longest question, reply window and system prompt. Original
 weights remain in the shared HF cache; the prepared model directory contains
 symlinks, one config overlay and small derived prompt files.
 
+`personaplex-7b-fp8` is qualified the same way, against the same Native
+reference. Its bundle is built from the same prepared model directory, with the
+temporal transformer quantized to FP8 at build time.
+
 Native applies the pinned official `step_system_prompts` implementation. TRTMC
 replays the same input embeddings through its temporal engine, restores the
 official delayed-token state, and then processes the user stream. Every stream
