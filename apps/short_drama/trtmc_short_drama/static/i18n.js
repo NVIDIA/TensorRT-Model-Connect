@@ -134,16 +134,15 @@ const ZH = {
   // tiers from the server
   "MiniMax H3 reference-to-video with native audio": "MiniMax H3 参考图生视频，自带声音",
   "keyframes from the reference pictures and Wan2.2-TI2V-5B image-to-video, without voices": "按参考图生成关键帧，Wan2.2-TI2V-5B 图生视频，暂无配音",
-  "keyframes and Wan2.2-TI2V-5B image-to-video, without voices": "关键帧加 Wan2.2-TI2V-5B 图生视频，暂无配音",
+  "Wan2.2-TI2V-5B image-to-video straight from the reference pictures, without voices": "直接用参考图做 Wan2.2-TI2V-5B 图生视频，暂无配音",
   "MiniMax H3 films each shot from up to 6 reference pictures": "MiniMax H3 用最多 6 张参考图拍出每个镜头",
   "native audio from the video model": "视频模型自带声音",
   "Qwen-Image-Edit draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it": "Qwen-Image-Edit 按参考图画出每个镜头的首帧，Wan2.2-TI2V-5B 让它动起来",
-  "FLUX.2 klein 4B draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it": "FLUX.2 klein 4B 按参考图画出每个镜头的首帧，Wan2.2-TI2V-5B 让它动起来",
+  "Wan2.2-TI2V-5B animates each shot from its speaker's reference picture": "Wan2.2-TI2V-5B 直接从说话人的参考图开始生成每个镜头",
   "none yet: each line is a subtitle until TRTMC has Chinese text-to-speech": "暂无：TRTMC 支持中文语音合成之前，台词只以字幕显示",
   "image-to-video for Wan2.2-TI2V-5B in TRTMC (its family renders from text only)": "TRTMC 的 Wan2.2-TI2V-5B 还不支持图生视频（目前只能文生视频）",
   "vertical pictures from Qwen-Image-Edit in TRTMC (its edit bundles render 1024x1024 only)": "TRTMC 的 Qwen-Image-Edit 输出竖图（目前编辑 bundle 只能输出 1024x1024）",
-  "FLUX.2 klein 4B in TRTMC, with reference pictures as input": "TRTMC 支持 FLUX.2 klein 4B，并能输入参考图",
-  // roles, scopes, statuses
+  "Z-Image-Turbo pictures within 24 GB in TRTMC (fp16 renders white, fp32 needs about 31 GiB)": "TRTMC 的 Z-Image-Turbo 在 24 GB 内出图（fp16 出的是白图，fp32 约需 31 GiB）",  // roles, scopes, statuses
   "llm": "语言模型", "image": "画图", "video": "视频", "asr": "语音识别", "tts": "语音合成", "vision": "看图",
   "project": "项目", "episode": "分集", "running": "运行中", "done": "完成", "failed": "失败", "cancelled": "已取消",
   "error": "错误", "warning": "提醒", "estimated": "估计", "the {role} model": "{role}模型",
