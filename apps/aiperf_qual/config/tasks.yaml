@@ -158,9 +158,10 @@ tasks:
   image_features:
     performance: {output_grader: parity_numeric, output_grader_params: {min_cosine: 0.99}}
 
-  object_detection:
+  object_detection: &detect
     absolute: [coco]
     performance: {output_grader: parity_boxes}
+  image_to_boxes: *detect  # the migrated YOLO families still detect and return boxes
 
   segmentation:
     absolute: [ade20k]
@@ -254,9 +255,10 @@ tasks:
     absolute: [etth1]
     # The catalog testcases are a few values, not the models' context: Perf times the first ETTh1 window.
     performance: {suite: {from_benchmark: etth1-mse}, output_grader: parity_numeric}
-  reranking:
+  reranking: &rerank_documents
     absolute: [rerank]
     performance: {output_grader: parity_scores}
+  text_query_documents_to_relevance: *rerank_documents  # eagle_vlm (#1939) still reranks and returns scores
 
   robot_control: &control
     absolute: [action_parity]
