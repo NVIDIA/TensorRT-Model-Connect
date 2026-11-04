@@ -70,9 +70,9 @@ _WAN = Model("video", "wan2.2-ti2v-5b", "Wan-AI/Wan2.2-TI2V-5B",
 _I2V = "image-to-video for Wan2.2-TI2V-5B in TRTMC (its family renders from text only)"
 _EDIT = "vertical pictures from Qwen-Image-Edit in TRTMC (its edit bundles render 1024x1024 only)"
 _SILENT = "none yet: each line is a subtitle until TRTMC has Chinese text-to-speech"
-# On an RTX PRO 6000 with TensorRT 11.4, TRTMC's fp16 Z-Image-Turbo renders white pictures, also at
-# its tested 1024x1024; fp32 renders, but needs about 31 GiB even with one engine loaded at a time.
-_ZIMAGE = "Z-Image-Turbo pictures within 24 GB in TRTMC (fp16 renders white, fp32 needs about 31 GiB)"
+# TRTMC main builds Z-Image-Turbo in fp16 or fp32 only: fp16 renders white pictures (an RTX PRO 6000,
+# TensorRT 11.4) and fp32 does not fit 24 GB. Its bf16 build matches the reference and peaks at 22 GiB.
+_ZIMAGE = "bf16 Z-Image-Turbo in TRTMC (its fp16 build renders white pictures)"
 
 # Every model here has a permissive license (Apache-2.0 or MIT) except MiniMax H3, whose community
 # license excludes some territories; see the README before shipping tier A.
@@ -107,11 +107,8 @@ TIERS = {
     # reference pictures for it.
     "c": Tier("c", 23, "Wan2.2-TI2V-5B image-to-video straight from the reference pictures, without voices", {
         "llm": Model("llm", "qwen3.5-4b", "Qwen/Qwen3.5-4B", ("--max-sequence-length", "32768")),
-        # fp16 with the layers TRTMC's own Z-Image test keeps in fp32: the VAE, the noise refiners and
-        # the first two blocks.
         "image": Model("image", "z-image-turbo", "Tongyi-MAI/Z-Image-Turbo",
-                       ("--precision", "fp16", "--fp32-layer", "2", "--fp32-layer", "3", "--fp32-layer", "4",
-                        "--fp32-layer", "7", "--fp32-layer", "8", "--image-height", "1280", "--image-width", "720")),
+                       ("--precision", "bf16", "--image-height", "1280", "--image-width", "720")),
         "video": _WAN,
         "asr": _WHISPER,
     }, hardware="RTX 4090, RTX 5090, L40S",
