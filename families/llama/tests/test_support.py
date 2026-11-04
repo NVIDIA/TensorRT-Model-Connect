@@ -435,22 +435,29 @@ def test_default_length_follows_selected_route(
 
 
 @pytest.mark.parametrize(
-    "overrides,config_updates,suggests_bf16",
+    "overrides,config_updates,suggests_bf16,suggests_dynamic",
     [
-        ({"precision": "fp16", "max_sequence_length": 131072}, {}, True),
-        ({"precision": "bf16", "max_sequence_length": 65536}, {}, True),
-        ({"precision": "fp16", "max_sequence_length": 32769}, {}, True),
+        ({"precision": "fp16", "max_sequence_length": 131072}, {}, True, True),
+        ({"precision": "bf16", "max_sequence_length": 65536}, {}, True, True),
+        ({"precision": "fp16", "max_sequence_length": 32769}, {}, True, True),
+        # Quantized builds take neither the native route nor a runtime-sized KV cache.
         (
             {"precision": "bf16", "quantization": "fp8", "max_sequence_length": 131072},
             {},
-            True,
+            False,
+            False,
         ),
         # No native route for this architecture, so BF16 is not offered as a fix.
-        ({"precision": "fp16", "max_sequence_length": 131072}, {"num_attention_heads": 4}, False),
+        (
+            {"precision": "fp16", "max_sequence_length": 131072},
+            {"num_attention_heads": 4},
+            False,
+            True,
+        ),
     ],
 )
 def test_unloadable_dense_mask_is_rejected_before_weights_load(
-    monkeypatch, request_and_writer, overrides, config_updates, suggests_bf16
+    monkeypatch, request_and_writer, overrides, config_updates, suggests_bf16, suggests_dynamic
 ):
     model, request, writer = request_and_writer
     config = dict(_NATIVE_ELIGIBLE_CONFIG, **config_updates)
@@ -460,8 +467,9 @@ def test_unloadable_dense_mask_is_rejected_before_weights_load(
     assert loads == [], "weights must not load before the rejection"
     message = str(error.value)
     assert f"max_sequence_length={overrides['max_sequence_length']}" in message
-    assert "--dynamic-kv-cache" in message
     assert ("--precision bf16" in message) == suggests_bf16
+    assert ("--dynamic-kv-cache" in message) == suggests_dynamic
+    assert "--max-sequence-length" in message
 
 
 @pytest.mark.parametrize(
@@ -478,6 +486,41 @@ def test_bounded_explicit_lengths_still_build(monkeypatch, request_and_writer, o
         monkeypatch, model, request, writer, _NATIVE_ELIGIBLE_CONFIG, **overrides
     )
     assert {length for _, length, _ in engines} == {overrides["max_sequence_length"]}
+
+
+def test_prepared_checkpoint_sidecar_takes_the_dense_route(monkeypatch, request_and_writer):
+    """A ModelOpt checkpoint that declares FP8 only in hf_quant_config.json is not native."""
+    model, request, writer = request_and_writer
+    sidecar = {"producer": {"name": "modelopt"}, "quantization": {"quant_algo": "FP8"}}
+    (request.model_dir / "hf_quant_config.json").write_text(json.dumps(sidecar))
+    engines = _resolve_build(
+        monkeypatch, model, request, writer, _NATIVE_ELIGIBLE_CONFIG, max_sequence_length=None
+    )
+    assert {length for _, length, _ in engines} == {256}
+    loads = []
+    with pytest.raises(ValueError, match="attention_mask profile maximum"):
+        _resolve_build(
+            monkeypatch,
+            model,
+            request,
+            writer,
+            _NATIVE_ELIGIBLE_CONFIG,
+            loads=loads,
+            max_sequence_length=131072,
+        )
+    assert loads == []
+
+
+def test_runtime_sized_kv_cache_is_never_native():
+    """BF16 with --dynamic-kv-cache (now the default precision) builds the runtime-sized route."""
+    from ..build_routing import native_kv_build_capability
+
+    config = ModelConfig.from_json(json.dumps(_NATIVE_ELIGIBLE_CONFIG))
+    assert native_kv_build_capability(config, precision="bf16").eligible
+    config.raw["dynamic_kv_cache"] = True
+    capability = native_kv_build_capability(config, precision="bf16")
+    assert not capability.eligible
+    assert "runtime-sized KV cache" in capability.reason
 
 
 def test_dense_attention_mask_bound():

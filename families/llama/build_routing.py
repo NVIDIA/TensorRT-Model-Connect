@@ -289,6 +289,8 @@ def native_kv_build_capability(
         reasons.append("native Llama does not support quantized builds")
     if raw.get("_fp32_layers"):
         reasons.append("native Llama does not support FP32 layer overrides")
+    if raw.get("dynamic_kv_cache"):
+        reasons.append("native Llama does not support a runtime-sized KV cache")
     if debug_layer_outputs:
         reasons.append("native Llama does not support debug layer outputs")
     try:
