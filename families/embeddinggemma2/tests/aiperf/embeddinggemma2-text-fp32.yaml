@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Transformers knows the embedding_gemma2 model type from 5.19.0; the family's requirements pin a commit with it.
+reference:
+  requirements: families/embeddinggemma2/requirements.txt

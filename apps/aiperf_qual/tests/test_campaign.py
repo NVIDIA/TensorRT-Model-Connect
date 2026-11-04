@@ -444,6 +444,31 @@ def test_machine_model_list_excludes_checkpoints_above_the_size_limit():
                          "reason": "checkpoint 54 GiB > models.max_checkpoint_gib 30"}]
 
 
+def test_a_profile_definition_excludes_the_profile_from_every_machines_list():
+    """``exclude: <reason>`` in a profile's own definition: a profile AIPerf cannot qualify as cataloged."""
+    reason = "its catalog testcase has no prompt or image, so no request can be built"
+    declared = selection.Profile("qwen35-moe-gptq-edge", "vision_language_generation", "Qwen/x", None, reason)
+    selected, excluded = selection.select({}, [*CATALOG, declared])
+    assert _names(selected) == _names(CATALOG)
+    assert excluded == [{"profile": "qwen35-moe-gptq-edge", "task": "vision_language_generation", "reason": reason}]
+    # A machine whose list does not include it still records the profile's own reason.
+    _, excluded = selection.select({"include": ["qwen3-0.6b-fp16"]}, [*CATALOG, declared])
+    assert {item["profile"]: item["reason"] for item in excluded}["qwen35-moe-gptq-edge"] == reason
+    declared_here = {profile.name: profile.excluded for profile in selection.catalog(REPOSITORY)}
+    assert declared_here["qwen35-moe-gptq-edge"] == reason and declared_here["qwen3-0.6b-fp16"] is None
+
+
+def test_an_unreadable_profile_definition_is_an_error_of_that_profile_alone(tmp_path):
+    """A malformed definition raises ConfigError, which the catalog listing and a campaign's other profiles survive."""
+    from trtmc_aiperf_qual.models import profile_override
+
+    definition = tmp_path / "families/f/tests/aiperf/p.yaml"
+    definition.parent.mkdir(parents=True)
+    definition.write_text("reference: [unclosed\n")
+    with pytest.raises(ConfigError, match="p.yaml"):
+        profile_override("p", "f", tmp_path, root=tmp_path / "config")
+
+
 @pytest.mark.parametrize("config, message", [
     ({"exclude": [{"profile": "flux-2-dev"}]}, "reason"),
     ({"include": ["qwen3-0.6b-fp61"]}, "matches no ready catalog profile"),
@@ -561,6 +586,45 @@ def test_doctor_runs_one_cudnn_convolution_in_the_serving_interpreter(tmp_path, 
                                                   "serve_env": {"LD_PRELOAD": "/opt/cudnn/libcudnn.so.9"}}))
     assert checks["cudnn"].startswith(expected) and convolution[2][-40:] in checks["cudnn"]
     assert preflight.problems(checks) == ([] if expected.startswith("ok") else ["cudnn"])
+
+
+@pytest.mark.parametrize("probe, message", [
+    ((0, json.dumps(["timm", "diffusers"]), ""), "['timm', 'diffusers']"),
+    ((-9, "", ""), "the import probe failed (exit status -9)"),  # killed without a word: still no campaign
+])
+def test_run_all_does_not_start_without_the_serving_packages(tmp_path, monkeypatch, capsys, probe, message):
+    """timm and diffusers serve the generic timm/ classifier and image-generation references: without them each
+    such native reference would fail, hours into the campaign."""
+    from trtmc_aiperf_qual import cli, preflight
+
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    (tmp_path / "env.yaml").write_text(f"repo: {tmp_path}\nserve_python: {python}\n")
+    probed = []
+
+    def run(command, **_kwargs):
+        probed.append(command[0])
+        return subprocess.CompletedProcess(command, *probe)
+
+    monkeypatch.setattr(preflight.subprocess, "run", run)
+    monkeypatch.setattr("trtmc_aiperf_qual.campaign.run_all", lambda *args, **kwargs: pytest.fail("the campaign started"))
+    assert cli.main(["run-all", "--environment", str(tmp_path / "env.yaml"), "--out-root", str(tmp_path / "out"),
+                     "--profile", "x"]) == 2
+    assert probed == [str(python)] and message in capsys.readouterr().err
+    assert {"timm", "diffusers"} <= set(preflight.SERVE_PACKAGES)
+
+
+def test_a_serving_package_that_fails_to_import_counts_as_missing(tmp_path, monkeypatch):
+    """Installed is not enough: a package whose dependency is missing or mismatched fails on import."""
+    from trtmc_aiperf_qual import preflight
+
+    (tmp_path / "brokenpkg").mkdir()  # the repository root is on the serving PYTHONPATH
+    (tmp_path / "brokenpkg/__init__.py").write_text("raise ImportError('torchvision is incompatible')\n")
+    monkeypatch.setattr(preflight, "SERVE_PACKAGES", ("json", "brokenpkg", "absentpkg"))
+    missing = preflight.missing_serve_packages(Environment({"repo": str(tmp_path), "serve_python": sys.executable}))
+    assert missing == ["brokenpkg (ImportError: torchvision is incompatible)",
+                       "absentpkg (ModuleNotFoundError: No module named 'absentpkg')"]
 
 
 def test_summary_fetches_remote_result_roots_over_ssh(tmp_path):

@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The FP8 bundle calibrates with ModelOpt (the family's requirements): it builds in that environment, as in CI.
+reference:
+  requirements: families/qwen/requirements.txt
