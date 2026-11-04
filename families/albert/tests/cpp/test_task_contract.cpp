@@ -27,15 +27,9 @@ class FakeTokenizer final : public trtmc::ITokenizer {
         }
         return ids;
     }
-    std::string decode(const std::vector<std::int32_t>&) const override {
-        return {};
-    }
-    std::int32_t id_for_token(std::string_view) const override {
-        return 0;
-    }
-    std::string token_for_id(std::int32_t) const override {
-        return {};
-    }
+    std::string decode(const std::vector<std::int32_t>&) const override { return {}; }
+    std::int32_t id_for_token(std::string_view) const override { return 0; }
+    std::string token_for_id(std::int32_t) const override { return {}; }
 
     mutable int calls{0};
 };
@@ -62,25 +56,15 @@ class RecordingModule final : public trtmc::ITrtModule {
                   trtmc::DType::kFloat32}}};
     }
 
-    trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override {
-        return {};
-    }
+    trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
     void forward_device_async(const trtmc::DeviceTensorMap&) override {}
     void forward_async(const trtmc::TensorMap&) override {}
     void sync() override {}
-    cudaStream_t stream() const override {
-        return nullptr;
-    }
+    cudaStream_t stream() const override { return nullptr; }
     void enable_cuda_graph() override {}
-    bool cuda_graph_active() const override {
-        return false;
-    }
-    bool cuda_graph_captured() const override {
-        return false;
-    }
-    int32_t profile_idx() const override {
-        return 0;
-    }
+    bool cuda_graph_active() const override { return false; }
+    bool cuda_graph_captured() const override { return false; }
+    int32_t profile_idx() const override { return 0; }
     std::vector<trtmc::TensorInfo> input_info() const override {
         return {{"input_ids", {-1}, trtmc::DType::kInt32, true},
                 {"attention_mask", {-1}, trtmc::DType::kInt32, true}};
@@ -91,38 +75,22 @@ class RecordingModule final : public trtmc::ITrtModule {
     bool has_input(const std::string& name) const override {
         return name == "input_ids" || name == "attention_mask";
     }
-    bool has_output(const std::string& name) const override {
-        return name == "hidden_states";
-    }
-    trtmc::DType tensor_dtype(const std::string&) const override {
-        return trtmc::DType::kFloat32;
-    }
-    std::vector<int64_t> tensor_shape(const std::string&) const override {
-        return {-1, hidden};
-    }
+    bool has_output(const std::string& name) const override { return name == "hidden_states"; }
+    trtmc::DType tensor_dtype(const std::string&) const override { return trtmc::DType::kFloat32; }
+    std::vector<int64_t> tensor_shape(const std::string&) const override { return {-1, hidden}; }
     std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
                                              trtmc::ProfileShapeSelector) const override {
         return {512};
     }
-    int32_t optimization_profile_count() const override {
-        return 1;
-    }
-    void* device_ptr(const std::string&) const override {
-        return nullptr;
-    }
+    int32_t optimization_profile_count() const override { return 1; }
+    void* device_ptr(const std::string&) const override { return nullptr; }
     void bind_external(const std::string&, void*) override {}
     void bind_external(const std::string&, void*, const std::vector<int64_t>&) override {}
-    int32_t input_rank(const std::string&) const override {
-        return 1;
-    }
-    bool input_is_dynamic(const std::string&) const override {
-        return true;
-    }
+    int32_t input_rank(const std::string&) const override { return 1; }
+    bool input_is_dynamic(const std::string&) const override { return true; }
     void reset_execution_context() override {}
     void set_timing_label(std::string) override {}
-    bool ok() const override {
-        return true;
-    }
+    bool ok() const override { return true; }
     void keep_alive(std::shared_ptr<void>) override {}
 
     int calls{0};
@@ -188,8 +156,8 @@ void test_task_bindings_and_primary_task() {
             has_embed = true;
         }
     }
-    require(has_pooled && has_token && has_embed,
-            "bindings must include text_to_pooled_features, text_to_token_features, and text_to_embedding");
+    require(has_pooled && has_token && has_embed, "bindings must include text_to_pooled_features, "
+                                                  "text_to_token_features, and text_to_embedding");
 }
 
 void test_pooled_features_cls_extraction() {
@@ -251,9 +219,8 @@ void test_embedding_mean_pools_and_normalizes() {
 }
 
 void test_missing_tokenizer_and_invalid_inputs() {
-    auto no_tok_pipeline =
-        std::make_unique<trtmc::EncoderPipeline>(std::make_unique<RecordingModule>(),
-                                                 "text_to_pooled_features", nullptr);
+    auto no_tok_pipeline = std::make_unique<trtmc::EncoderPipeline>(
+        std::make_unique<RecordingModule>(), "text_to_pooled_features", nullptr);
     rejects<std::runtime_error>(
         [&] { no_tok_pipeline->run(trtmc::internal::TextToPooledFeaturesRequest{"text"}, {}); },
         "missing tokenizer must reject plain-text request");
@@ -284,7 +251,8 @@ void test_result_lifetime() {
         result = pipeline->run(trtmc::internal::TextToPooledFeaturesRequest{temp_prompt}, {});
     }
     require(result.values.size() == 2, "result data must outlive the request scope");
-    require(near(result.values[0], 1.0F), "result values must remain valid after request destroyed");
+    require(near(result.values[0], 1.0F),
+            "result values must remain valid after request destroyed");
 }
 
 } // namespace
