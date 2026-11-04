@@ -4,7 +4,7 @@
   "hf_revision": "d89b6fad3cf5384848b783dc480f9685f49d008c",
   "bundle": "fnet-base.bundle",
   "family": "fnet",
-  "task": "encoding",
+  "task": "text_to_pooled_features",
   "precision": "fp16",
   "reference_precision": "fp32",
   "testcases": [

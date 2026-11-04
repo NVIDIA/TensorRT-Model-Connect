@@ -253,11 +253,12 @@ tasks:
     absolute: [rerank]
     performance: {output_grader: parity_scores}
 
-  robot_control:
+  robot_control: &control
     absolute: [action_parity]
     # Perf only checks that both sides computed the same output: counts may differ slightly across
     # precisions (for example valid pixels), which is the Acc checks' concern.
     performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}
+  image_state_to_action_chunk: *control
   stereo_disparity:
     absolute: [disparity_parity]
     performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}

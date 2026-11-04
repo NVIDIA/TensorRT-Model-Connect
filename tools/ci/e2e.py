@@ -24,6 +24,21 @@ from .process import CiError
 
 _E2E_CASE_NAME = re.compile(r"^test_.*e2e\[(?P<case>.+)\]$")
 _JUNIT_OPTIONS = ("--junitxml", "--junit-xml")
+SDK_CONSUMER_LANGUAGES = ("c", "cpp")
+
+
+def sdk_consumer_targets(repository: Path, families: tuple[str, ...]) -> list[str]:
+    """Name the public SDK consumers that each family's E2E executes.
+
+    A family source ``tests/sdk_consumer.<language>`` builds the CMake target
+    ``test_<family>_sdk_<language>``.
+    """
+    return sorted(
+        f"test_{family}_sdk_{language}"
+        for family in families
+        for language in SDK_CONSUMER_LANGUAGES
+        if (repository / "families" / family / "tests" / f"sdk_consumer.{language}").is_file()
+    )
 
 
 def _pytest_addopts_junit(repository: Path, value: str) -> Path | None:
@@ -445,21 +460,19 @@ class E2ERunner:
                 if name.startswith("test_")
                 else f"test_{name}"
             )
+        # Build SDK consumers by name: premerge loads a prebuilt model library,
+        # so a consumer that only the model target depends on is never built.
+        targets = sorted(
+            set(targets) | set(sdk_consumer_targets(self.context.repository, families))
+        )
+        if targets:
+            self.context.run(
+                ["cmake", "--build", build, "--parallel", "8", "--target", *targets],
+                limit=self.context.env.get("CPP_BUILD_TIMEOUT", "30m"),
+            )
         if not selected:
             print("No family-owned C++ tests selected")
             return
-        self.context.run(
-            [
-                "cmake",
-                "--build",
-                build,
-                "--parallel",
-                "8",
-                "--target",
-                *sorted(set(targets)),
-            ],
-            limit=self.context.env.get("CPP_BUILD_TIMEOUT", "30m"),
-        )
         expression = "^(" + "|".join(re.escape(name) for name in sorted(selected)) + ")$"
         junit = build / "trtmc-family-ctest.xml"
         self.context.run(

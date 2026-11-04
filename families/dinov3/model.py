@@ -21,6 +21,7 @@ import tensorrt as trt
 
 from . import graph_ops
 from .config import ModelConfig
+from .quantization import calibrate_dinov3
 from .checkpoint_mapper import (
     WeightDict,
     as_weight,
@@ -355,10 +356,11 @@ def build_vit_engine(
     *,
     precision: str,
     verbose: bool,
+    quant_ctx=None,
 ) -> bytes:
     cfg = config.raw.get("_dinov3_config") or resolve_vit_config(config.raw)
     work_dtype, work_trt_dtype = _work_types(precision)
-    builder, network, builder_config = graph_ops.new_network(verbose)
+    builder, network, builder_config = graph_ops.new_network(verbose, quant_ctx)
 
     image_h = cfg["image_h"]
     image_w = cfg["image_w"]
@@ -429,7 +431,7 @@ def build_vit_engine(
 
         def project(group: str, name: str, tensor):
             return graph_ops.linear_with_bias(
-                network, tensor, weights, f"{prefix}.{group}.{name}", work_dtype
+                network, tensor, weights, f"{prefix}.{group}.{name}", work_dtype, quant_ctx
             )
 
         def normalize(name: str, tensor):
@@ -453,11 +455,14 @@ def build_vit_engine(
         normalized = normalize("norm1", hidden)
         # A single wide GEMM matches the source checkpoint and avoids three
         # small projection launches on fixed-shape image tokens.
-        qkv_weight = np.concatenate(
-            [weights[f"{prefix}.attention.{name}_proj.weight"] for name in ("q", "k", "v")],
-            axis=1,
-        )
-        qkv = graph_ops.linear(network, normalized, qkv_weight, work_dtype)
+        if quant_ctx is not None and quant_ctx.should_quantize(f"{prefix}.attention.qkv"):
+            qkv = quant_ctx.matmul(network, normalized, f"{prefix}.attention.qkv")
+        else:
+            qkv_weight = np.concatenate(
+                [weights[f"{prefix}.attention.{name}_proj.weight"] for name in ("q", "k", "v")],
+                axis=1,
+            )
+            qkv = graph_ops.linear(network, normalized, qkv_weight, work_dtype)
         qkv_biases = [
             weights.get(f"{prefix}.attention.{name}_proj.bias") for name in ("q", "k", "v")
         ]
@@ -604,16 +609,18 @@ class _Dinov3Model:
     ) -> bytes:
         del max_cache_length
         _normalize_timm_dinov3_vit_config(config)
-        if quant_ctx is not None:
-            raise ValueError("DINOv3 native image encoders do not support quantization yet")
         if parallel_config is not None and getattr(parallel_config, "enabled", False):
             raise ValueError("DINOv3 native image encoders do not support tensor parallelism")
         if config.model_type == "dinov3_vit":
-            return build_vit_engine(config, weights, precision=precision, verbose=verbose)
+            return build_vit_engine(
+                config, weights, precision=precision, verbose=verbose, quant_ctx=quant_ctx
+            )
         if config.model_type == "dinov3_convnext":
             from .convnext_builder import build_convnext_engine
 
-            return build_convnext_engine(config, weights, precision=precision, verbose=verbose)
+            return build_convnext_engine(
+                config, weights, precision=precision, verbose=verbose, quant_ctx=quant_ctx
+            )
         raise ValueError(f"Unsupported DINOv3 model_type: {config.model_type!r}")
 
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
@@ -694,6 +701,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("dinov3 does not support video_num_frames")
 
     if request.max_batch_size != 1:
+        # The engines have a fixed batch of one and the native runtime API returns the
+        # features of one image per call, so a larger batch has no consumer yet.
         raise NotImplementedError("dinov3 does not support max_batch_size")
 
     if request.context_parallel_size != 1:
@@ -711,8 +720,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError(f"DINOv3 does not support model_type={config.model_type!r}")
     precision = str(request.precision).lower()
     max_sequence_length = _positive_int(request.max_sequence_length or 1, "max_sequence_length")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("DINOv3 does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"DINOv3 supports quantization fp8 or none; got {request.quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("DINOv3 does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -721,13 +732,29 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("DINOv3 does not support tensor parallelism")
     model = _Dinov3Model()
     weights = model.load_weights(str(model_dir), config, precision=precision)
+    quant_ctx = None
+    if request.quantization == "fp8":
+        # The projections are quantized from the original checkpoint; the weights above
+        # stay in the work precision and only the Q/DQ constants of quantized
+        # projections are new.
+        if "quantization_config" in config.raw:
+            raise ValueError("fp8 self-quantization needs the original, unquantized checkpoint")
+        if config.model_type == "dinov3_vit":
+            resolved = config.raw.get("_dinov3_config") or resolve_vit_config(config.raw)
+        else:
+            from .convnext_builder import resolve_convnext_config
+
+            resolved = resolve_convnext_config(config)
+        quant_ctx = calibrate_dinov3(
+            config.model_type, resolved, weights, "fp8", precision=precision
+        )
     writer.set_header(family="dinov3", task=request.task, backend=request.backend)
     plan = model.build_engine(
         config,
         weights,
         max_sequence_length,
         precision=precision,
-        quant_ctx=None,
+        quant_ctx=quant_ctx,
         verbose=bool(request.verbose),
         parallel_config=None,
     )

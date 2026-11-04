@@ -3,13 +3,15 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 from tensorrt_model_connect.model_support import ModelMetadata, resolve_family
 
 from ..builder import _position_embedding_2d
 from ..checkpoint import load_checkpoint
-from ..model import _validate_initial_policy
+from ..model import _validate_initial_policy, build
 from ..support import describe
 
 
@@ -42,11 +44,17 @@ def test_initial_policy_contract_and_support() -> None:
     _validate_initial_policy(raw)
     support = describe(ModelMetadata(config=raw, model_index={}))
     assert support is not None
-    assert support.tasks == ("robot_control",)
-    assert support.default_task == "robot_control"
+    assert support.tasks == ("image_state_to_action_chunk",)
+    assert support.default_task == "image_state_to_action_chunk"
     family, resolved = resolve_family(ModelMetadata(config=raw, model_index={}))
     assert family == "lerobot_act"
     assert resolved == support
+
+
+def test_build_refuses_the_retired_robot_control_task() -> None:
+    request = SimpleNamespace(mtp_seq_len=None, dynamic_kv_cache=False, task="robot_control")
+    with pytest.raises(ValueError, match="image_state_to_action_chunk"):
+        build(request, writer=None)
 
 
 @pytest.mark.parametrize(

@@ -565,8 +565,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             return [profile.name for profile in selected], excluded
 
         if arguments.command == "run-all":
+            from . import preflight
             from .campaign import exit_code, parse_shard, run_all, shard, write_exclusions, write_plan
 
+            serve_python = environment.values.get("serve_python")
+            if serve_python and Path(str(serve_python)).is_file():
+                missing = preflight.missing_serve_packages(environment)
+                if missing:  # stop before the campaign: every native reference that needs one would fail
+                    print(f"trtmc-aiperf-qual: serve_python cannot import the serving packages: {missing}; install "
+                          "apps/perf_serving/requirements.txt into it (apps/aiperf_qual/setup.sh)", file=sys.stderr)
+                    return 2
             names, excluded = machine_list()
             if arguments.smoke and arguments.out_root.name != "smoke":  # never mixed with formal results
                 arguments.out_root = arguments.out_root / "smoke"

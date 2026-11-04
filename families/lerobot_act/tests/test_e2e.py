@@ -22,6 +22,7 @@ from families.lerobot_act.model import ACTION_MAX, ACTION_MIN
 
 
 FAMILY = "lerobot_act"
+TASK = "image_state_to_action_chunk"
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
@@ -34,7 +35,7 @@ def _cases() -> dict[str, tuple[dict, dict]]:
     for path in sorted(MANIFEST_ROOT.glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == FAMILY
-        assert manifest["task"] == "robot_control"
+        assert manifest["task"] == TASK
         assert manifest["tensor_parallel_size"] == 1
         for case in manifest["testcases"]:
             assert case["name"] not in result
@@ -123,6 +124,8 @@ def _qualification_binary() -> tuple[Path, Path]:
             "8",
             "--target",
             "lerobot_act_qualification",
+            "test_lerobot_act_sdk_c",
+            "test_lerobot_act_sdk_cpp",
             "trtmc_backend_trt",
             "trtmc_model_lerobot_act",
         ],
@@ -132,6 +135,47 @@ def _qualification_binary() -> tuple[Path, Path]:
     binary = build_dir / "families" / FAMILY / "lerobot_act_qualification"
     assert binary.is_file(), f"selected {FAMILY} qualification binary is missing: {binary}"
     return binary, build_dir
+
+
+def _run_sdk_consumer(
+    root: Path, language: str, bundle: Path, case: dict, environment: dict
+) -> tuple[dict, np.ndarray]:
+    """Run the public C or C++ SDK consumer: one chunk, then a full queue replay."""
+    consumer = root / f"test_lerobot_act_sdk_{language}"
+    assert consumer.is_file(), f"selected {FAMILY} SDK consumer is missing: {consumer}"
+    completed = subprocess.run(
+        [
+            str(consumer),
+            str(bundle),
+            str(root),
+            str(_asset(case, "image")),
+            str(_asset(case, "state")),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+        env=environment,
+        timeout=1800,
+    )
+    payloads = [line for line in completed.stdout.splitlines() if line.startswith("{")]
+    assert len(payloads) == 1, f"SDK {language} consumer must return one result"
+    result = json.loads(payloads[0])
+    record_evidence(
+        f"sdk_{language}", {key: value for key, value in result.items() if key != "actions"}
+    )
+    assert result["task"] == TASK
+    assert result["image_format"] == ("uint8" if language == "c" else "float32")
+    assert (result["rows"], result["columns"]) == (100, 14)
+    # Every queued step replayed the chunk, then one refill and one step after reset.
+    assert result["queue_steps"] == result["rows"] + 2
+    assert result["schema"] == {
+        "domain": "lerobot.act",
+        "normalization": "unnormalized",
+        "component_names": 0,
+        "units": 0,
+    }
+    assert result["timestamps"] == 0 and result["frame_spans"] == 0
+    return result, np.asarray(result["actions"], dtype=np.float32).reshape(100, 14)
 
 
 def _run_native(binary: Path, runtime_root: Path, bundle: Path, case: dict, tmp_path: Path):
@@ -160,7 +204,8 @@ def _run_native(binary: Path, runtime_root: Path, bundle: Path, case: dict, tmp_
             "native_process",
             {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
         )
-        summary = json.loads(completed.stdout)
+        cli = json.loads(completed.stdout)
+        summary = dict(cli)
         actions = np.fromfile(output, dtype="<f4").reshape(100, 14)
 
     with evidence_stage("build"):
@@ -198,8 +243,19 @@ def _run_native(binary: Path, runtime_root: Path, bundle: Path, case: dict, tmp_
         )
         summary.update(json.loads(completed.stdout))
         qualification_actions = np.fromfile(qualification_output, dtype="<f4").reshape(100, 14)
+    with evidence_stage("sdk"):
+        sdk = {
+            language: _run_sdk_consumer(qualification_root, language, bundle, case, environment)
+            for language in ("c", "cpp")
+        }
     with evidence_stage("compare"):
+        assert cli["task"] == TASK
+        assert cli["schema"]["domain"] == "lerobot.act"
+        assert cli["schema"]["normalization"] == "unnormalized"
         assert np.array_equal(actions, qualification_actions)
+        for language, (result, sdk_actions) in sdk.items():
+            assert np.array_equal(sdk_actions, actions), language
+            assert result["within_training_bounds"] == cli["within_training_bounds"], language
         assert summary["num_actions"] == 100
         assert summary["action_dim"] == 14
     return summary, actions
@@ -407,7 +463,7 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
                 model_dir=model_dir,
                 output_path=bundle,
                 family=FAMILY,
-                task="robot_control",
+                task=TASK,
                 precision=manifest["precision"],
             )
         )
