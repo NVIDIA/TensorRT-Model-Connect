@@ -269,6 +269,8 @@ def build_flux2_dit_engine(
     config = builder.create_builder_config()
     config.builder_optimization_level = 1
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 128 << 30)
+    if fp8_scales is not None:
+        graph_ops.disable_quantize_propagation(config)
 
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 
@@ -1163,12 +1165,9 @@ def _apply_native_rope_from_full_cache(
 
 def _mha(network, q, k, v, num_heads, head_dim, seq_len):
     """Multi-head attention via TRT native IAttention."""
-    rows = graph_ops.add_attention_from_rows(
+    return graph_ops.add_attention_from_rows(
         network, q, k, v, num_heads=num_heads, head_dim=head_dim, q_seq=seq_len, kv_seq=seq_len
     )
-    if _FP8_MODE:
-        graph_ops.keep_quantize_out_of_attention(network, rows)
-    return rows
 
 
 def _gate_1d(network, x, gate, seq_len):
