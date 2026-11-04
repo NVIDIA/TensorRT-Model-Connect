@@ -22,6 +22,7 @@ from tools.ci.container import CiContainer
 from tools.ci.docker_image import DockerImageManager
 from tools.ci.e2e import (
     E2ERunner,
+    SDK_CONSUMER_LANGUAGES,
     _require_e2e_junit,
     _require_e2e_process_result,
     _require_passing_junit,
@@ -45,6 +46,7 @@ class RecordingContext:
         self.calls = []
         self.runtime_snapshots = []
         self.skip_ctest = False
+        self.no_family_ctests = False
         self.no_cpu_family_tests = False
         self.missing_e2e_testcases = set()
 
@@ -55,6 +57,8 @@ class RecordingContext:
             self.runtime_snapshots.append(
                 tuple(sorted(path.name for path in Path(runtime_root).iterdir()))
             )
+        if "--show-only=json-v1" in command and self.no_family_ctests:
+            return SimpleNamespace(stdout=json.dumps({"tests": []}))
         if "--show-only=json-v1" in command:
             return SimpleNamespace(
                 stdout=json.dumps(
@@ -306,6 +310,61 @@ def test_family_cpp_skip_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(CiError, match=r"family C\+\+ tests skipped"):
         E2ERunner(context)._run_family_ctests(build, ("beta",))
+
+
+def _write_sdk_consumers(repository: Path, family: str, languages: tuple[str, ...]) -> None:
+    tests = repository / "families" / family / "tests"
+    tests.mkdir(parents=True, exist_ok=True)
+    for language in languages:
+        (tests / f"sdk_consumer.{language}").write_text("int main(void) { return 0; }\n")
+
+
+def _built_targets(context: RecordingContext) -> list[list[str]]:
+    return [
+        command[command.index("--target") + 1 :]
+        for command, _ in context.calls
+        if command[:2] == ["cmake", "--build"]
+    ]
+
+
+def test_family_sdk_consumers_build_with_the_family_ctests(tmp_path: Path) -> None:
+    build = tmp_path / "native-build"
+    build.mkdir()
+    _write_sdk_consumers(tmp_path, "beta", SDK_CONSUMER_LANGUAGES)
+    context = RecordingContext(tmp_path, {"TRTMC_NATIVE_BUILD_DIR": str(build)})
+
+    E2ERunner(context)._run_family_ctests(build, ("beta",))
+
+    assert _built_targets(context) == [
+        ["test_beta_runtime", "test_beta_sdk_c", "test_beta_sdk_cpp"]
+    ]
+    assert any("--output-junit" in command for command, _ in context.calls)
+
+
+def test_family_sdk_consumers_build_without_family_ctests(tmp_path: Path) -> None:
+    """Premerge loads a prebuilt model library; nothing else builds the consumers."""
+    build = tmp_path / "native-build"
+    build.mkdir()
+    _write_sdk_consumers(tmp_path, "beta", ("c",))
+    context = RecordingContext(tmp_path, {"TRTMC_NATIVE_BUILD_DIR": str(build)})
+    context.no_family_ctests = True
+
+    E2ERunner(context)._run_family_ctests(build, ("beta",))
+
+    assert _built_targets(context) == [["test_beta_sdk_c"]]
+    assert not any("--output-junit" in command for command, _ in context.calls)
+
+
+def test_family_without_ctests_or_sdk_consumers_builds_nothing(tmp_path: Path) -> None:
+    build = tmp_path / "native-build"
+    build.mkdir()
+    (tmp_path / "families/beta/tests").mkdir(parents=True)
+    context = RecordingContext(tmp_path, {"TRTMC_NATIVE_BUILD_DIR": str(build)})
+    context.no_family_ctests = True
+
+    E2ERunner(context)._run_family_ctests(build, ("beta",))
+
+    assert _built_targets(context) == []
 
 
 def test_family_hardware_skip_fails_closed(tmp_path: Path) -> None:

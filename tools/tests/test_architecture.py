@@ -9,6 +9,8 @@ import json
 import re
 from pathlib import Path
 
+from tools.ci.e2e import SDK_CONSUMER_LANGUAGES
+
 
 REPO = Path(__file__).resolve().parents[2]
 FAMILIES = REPO / "families"
@@ -2135,3 +2137,19 @@ def test_builder_config_policy_guard_rejects_control_flow_gaps() -> None:
     assert all(
         _builder_config_policy_violations(source, "adversarial.py") for source in adversarial
     )
+
+
+def test_family_sdk_consumers_define_the_targets_ci_builds() -> None:
+    """CI builds ``tests/sdk_consumer.<language>`` as ``test_<family>_sdk_<language>``."""
+    violations: list[str] = []
+    for family in family_dirs():
+        cmake = family / "runtime/CMakeLists.txt"
+        text = cmake.read_text(encoding="utf-8") if cmake.is_file() else ""
+        for language in SDK_CONSUMER_LANGUAGES:
+            if not (family / "tests" / f"sdk_consumer.{language}").is_file():
+                continue
+            # Accept a literal target or the shared foreach(_language IN ITEMS c cpp) form.
+            target = rf"add_executable\(\s*test_{re.escape(family.name)}_sdk_(?:{language}\b|\$\{{)"
+            if not re.search(target, text):
+                violations.append(f"{family.name}:test_{family.name}_sdk_{language}")
+    assert violations == []
