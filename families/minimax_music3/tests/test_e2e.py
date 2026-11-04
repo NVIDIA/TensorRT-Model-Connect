@@ -68,7 +68,7 @@ def _read_float_wav(path: Path) -> tuple[np.ndarray, int, int]:
 
 
 @pytest.mark.gpu
-def test_minimax_music3_native_audio(case_name, request, tmp_path: Path) -> None:
+def test_minimax_music3_native_audio_e2e(case_name, request, tmp_path: Path) -> None:
     if not _selected(request.config):
         pytest.skip("direct E2E requires an explicit MiniMax-Music3 selector")
     case = next(case for case in MANIFEST["testcases"] if case["name"] == case_name)
