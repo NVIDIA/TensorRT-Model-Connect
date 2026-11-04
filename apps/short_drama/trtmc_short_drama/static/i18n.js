@@ -142,7 +142,7 @@ const ZH = {
   "none yet: each line is a subtitle until TRTMC has Chinese text-to-speech": "暂无：TRTMC 支持中文语音合成之前，台词只以字幕显示",
   "image-to-video for Wan2.2-TI2V-5B in TRTMC (its family renders from text only)": "TRTMC 的 Wan2.2-TI2V-5B 还不支持图生视频（目前只能文生视频）",
   "vertical pictures from Qwen-Image-Edit in TRTMC (its edit bundles render 1024x1024 only)": "TRTMC 的 Qwen-Image-Edit 输出竖图（目前编辑 bundle 只能输出 1024x1024）",
-  "Z-Image-Turbo pictures within 24 GB in TRTMC (fp16 renders white, fp32 needs about 31 GiB)": "TRTMC 的 Z-Image-Turbo 在 24 GB 内出图（fp16 出的是白图，fp32 约需 31 GiB）",  // roles, scopes, statuses
+  "bf16 Z-Image-Turbo in TRTMC (its fp16 build renders white pictures)": "TRTMC 的 bf16 Z-Image-Turbo（fp16 版出的是白图）",  // roles, scopes, statuses
   "llm": "语言模型", "image": "画图", "video": "视频", "asr": "语音识别", "tts": "语音合成", "vision": "看图",
   "project": "项目", "episode": "分集", "running": "运行中", "done": "完成", "failed": "失败", "cancelled": "已取消",
   "error": "错误", "warning": "提醒", "estimated": "估计", "the {role} model": "{role}模型",

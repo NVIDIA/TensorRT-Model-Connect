@@ -222,8 +222,8 @@ def test_tier_c_builds_z_image_turbo_and_wan_without_an_edit_model(tmp_path: Pat
     assert cli.main(["up", "--dry-run", "--data", str(tmp_path / "data"), "--runtime-root", str(tmp_path)]) == 0
     built = {line.split(":")[0]: line for line in capsys.readouterr().out.splitlines() if line.startswith("build ")}
     assert set(built) == {"build image", "build video", "build asr"}  # no edit model fits beside them
-    assert "Tongyi-MAI/Z-Image-Turbo -o" in built["build image"] and "--precision fp16 --fp32-layer 2 --fp32-layer 3 " \
-        "--fp32-layer 4 --fp32-layer 7 --fp32-layer 8 --image-height 1280 --image-width 720" in built["build image"]
+    assert "Tongyi-MAI/Z-Image-Turbo -o" in built["build image"]
+    assert "--precision bf16 --image-height 1280 --image-width 720" in built["build image"]
     assert catalog.TIERS["c"].models["image"].picture_size == "720x1280"
     assert catalog.TIERS["b"].models["image"].picture_size == "928x1664"
     assert catalog.TIERS["c"].missing == (catalog._I2V, catalog._ZIMAGE)
