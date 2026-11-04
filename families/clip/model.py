@@ -27,6 +27,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import config as config_module, text_builder, vision_builder
+from .quantization import calibrate_clip
 
 _SUPPORTED_TASKS = ("image_to_embedding", "text_to_embedding", "text_image_to_relevance")
 
@@ -62,7 +63,10 @@ def _require_weights(weights: dict) -> None:
         raise KeyError("clip checkpoint is missing expected tensors: " + ", ".join(missing))
 
 
-def _builder(precision, verbose):
+_DUAL_GEMM_KNOB = "peep:match_dual_gemm"
+
+
+def _builder(precision, verbose, quant_ctx=None):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -72,6 +76,13 @@ def _builder(precision, verbose):
         # TF32 caps a conv-and-matmul graph near 0.99998 cosine by default,
         # which hides real graph error behind a plausible-looking number.
         config.clear_flag(trt.BuilderFlag.TF32)
+    if quant_ctx is not None:
+        # Keep layer names so the plan inspector shows which kernels run.
+        config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+        if quant_ctx.has_fp8_weights and _DUAL_GEMM_KNOB in getattr(config, "all_build_routes", ""):
+            # TensorRT's fused dual-GEMM kernel fails to compile with scalar-scale FP8.
+            # The route is set only when this TensorRT build lists the knob.
+            config.build_route = f"-{_DUAL_GEMM_KNOB}=off"
     return builder, network, config
 
 
@@ -82,8 +93,9 @@ def _serialize(builder, network, config, what):
     return bytes(plan)
 
 
-def build_vision_engine(weights, cfg, *, image_size, precision, verbose=False) -> bytes:
-    builder, network, config = _builder(precision, verbose)
+def build_vision_engine(weights, cfg, *, image_size, precision, verbose=False,
+                        quant_ctx=None) -> bytes:
+    builder, network, config = _builder(precision, verbose, quant_ctx)
     work_np, work_trt = ((np.float16, trt.float16) if precision == "fp16"
                          else (np.float32, trt.float32))
     pixels = network.add_input("pixel_values", trt.float32, (1, 3, image_size, image_size))
@@ -91,7 +103,7 @@ def build_vision_engine(weights, cfg, *, image_size, precision, verbose=False) -
               else network.add_cast(pixels, work_trt).get_output(0))
     embeds = vision_builder.build_vision_tower(
         network, source, weights, cfg["vision"], weights["visual_projection.weight"],
-        dtype=work_np)
+        dtype=work_np, quant_ctx=quant_ctx)
     out = (embeds if embeds.dtype == trt.float32
            else network.add_cast(embeds, trt.float32).get_output(0))
     out.name = "image_embeds"
@@ -99,14 +111,16 @@ def build_vision_engine(weights, cfg, *, image_size, precision, verbose=False) -
     return _serialize(builder, network, config, "vision")
 
 
-def build_text_engine(weights, cfg, *, max_text_len, precision, verbose=False) -> bytes:
-    builder, network, config = _builder(precision, verbose)
+def build_text_engine(weights, cfg, *, max_text_len, precision, verbose=False,
+                      quant_ctx=None) -> bytes:
+    builder, network, config = _builder(precision, verbose, quant_ctx)
     work_np = np.float16 if precision == "fp16" else np.float32
     input_ids = network.add_input("input_ids", trt.int32, (max_text_len,))
     eos_index = network.add_input("eos_index", trt.int32, (1,))
     embeds = text_builder.build_text_tower(
         network, input_ids, eos_index, weights, cfg["text"],
-        weights["text_projection.weight"], dtype=work_np)
+        weights["text_projection.weight"], dtype=work_np,
+        quant_ctx=quant_ctx)
     out = (embeds if embeds.dtype == trt.float32
            else network.add_cast(embeds, trt.float32).get_output(0))
     out.name = "text_embeds"
@@ -130,8 +144,9 @@ def build(request, writer) -> None:
         raise NotImplementedError("clip does not support context parallelism")
     if request.video_num_frames is not None:
         raise NotImplementedError("clip does not support video_num_frames")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("clip does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"clip supports quantization fp8 or none; got {request.quantization!r}")
     if request.fp32_layers:
         raise NotImplementedError("clip does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -171,13 +186,19 @@ def build(request, writer) -> None:
     # keeps log scale (4.60517) and every use is exp() of it.
     logit_scale = float(math.exp(float(np.asarray(weights["logit_scale"]).reshape(()))))
 
+    # fp8: the projections are quantized from the original checkpoint, so the weights
+    # above stay in the work precision and only the Q/DQ constants are new.
+    quant_ctx = None
+    if request.quantization == "fp8":
+        quant_ctx = calibrate_clip(weights, cfg, "fp8", precision=precision)
+
     writer.set_header(family="clip", task=request.task, backend=request.backend)
     writer.add_bytes("vision.plan", build_vision_engine(
         weights, cfg, image_size=image_size, precision=precision,
-        verbose=bool(request.verbose)))
+        verbose=bool(request.verbose), quant_ctx=quant_ctx))
     writer.add_bytes("text.plan", build_text_engine(
         weights, cfg, max_text_len=max_text_len, precision=precision,
-        verbose=bool(request.verbose)))
+        verbose=bool(request.verbose), quant_ctx=quant_ctx))
     writer.add_bytes("tokenizer.json", tokenizer.read_bytes())
     writer.add_json(
         "runtime.json",
