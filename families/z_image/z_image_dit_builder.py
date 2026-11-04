@@ -218,10 +218,15 @@ def build_z_image_dit_engine(
         raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "bf16":
+        # numpy has no bf16: weights are stored as fp16 constants and cast to bf16 in the graph.
+        work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
     elif precision == "fp32":
         work_np_dtype, work_trt_dtype = np.float32, trt.float32
     else:
-        raise ValueError(f"Unsupported Z-Image DiT precision {precision!r}; expected fp32 or fp16")
+        raise ValueError(
+            f"Unsupported Z-Image DiT precision {precision!r}; expected fp32, fp16 or bf16"
+        )
     selected_fp32_layers = frozenset(int(layer) for layer in fp32_layers)
     final_layer_selector = 2 * num_refiner_layers + num_layers
     invalid_fp32_layers = sorted(
@@ -238,7 +243,9 @@ def build_z_image_dit_engine(
         raise NotImplementedError("Z-Image FP8 requires precision=fp16 and max_batch_size=1")
     if max_batch_size > 1:
         if precision != "fp32":
-            raise NotImplementedError("FP16 Z-Image DiT currently supports max_batch_size=1")
+            raise NotImplementedError(
+                f"{precision.upper()} Z-Image DiT currently supports max_batch_size=1"
+            )
         return _build_z_image_dit_engine_batched(
             weights,
             dim=dim,
@@ -291,8 +298,14 @@ def build_z_image_dit_engine(
     # this as a Python scalar so the explicit FP32 attention path does not try
     # to materialize an ITensor as a numpy constant.
     scale_t = attn_scale
-    ones_t = graph_ops.add_constant(
-        network, (1, 1), np.array([1.0], dtype=work_np_dtype), dtype=work_np_dtype
+    # The AdaLN "1 + scale" adds this straight to block tensors, so it takes their dtype; eps_t
+    # only reaches RMSNorms, which compute in fp32.
+    ones_t = graph_ops._cast_back_to_trt_dtype(
+        network,
+        graph_ops.add_constant(
+            network, (1, 1), np.array([1.0], dtype=work_np_dtype), dtype=work_np_dtype
+        ),
+        work_trt_dtype,
     )
     fp32_eps_t = None
     fp32_ones_t = None
