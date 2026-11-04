@@ -204,6 +204,21 @@ def test_calibrate_awq_rejects_scales_of_another_checkpoint(tmp_path: Path) -> N
         )
 
 
+def test_calibrate_awq_rejects_checkpoint_with_changed_projection(tmp_path: Path) -> None:
+    """Matching norms are not enough: a checkpoint with one changed projection is refused."""
+    _write_checkpoint(tmp_path / "ckpt", "none")
+    _write_awq_scales(tmp_path / "ckpt", tmp_path / "scales")
+    tuned = _write_checkpoint(tmp_path / "tuned", "none")
+    key = "model.layers.1.self_attn.v_proj.weight"
+    tuned[key] = tuned[key] + 0.01
+    safetensors_torch.save_file(tuned, str(tmp_path / "tuned" / "model.safetensors"))
+    with pytest.raises(ValueError, match="no INT4-AWQ scales"):
+        calibrate_llama(
+            tmp_path / "tuned", _config(), graph_ops, "int4_awq",
+            awq_scales_dir=tmp_path / "scales",
+        )
+
+
 def test_calibrate_awq_rejects_missing_projection_scale(tmp_path: Path) -> None:
     """A projection without a calibrated scale fails the build instead of staying unquantized."""
     _write_checkpoint(tmp_path / "ckpt", "none")

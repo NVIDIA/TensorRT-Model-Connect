@@ -56,6 +56,9 @@ AWQ_SCALES_DIR = Path(__file__).parent / "awq_scales"
 # Small per-checkpoint tensors whose exact bytes identify the checkpoint an AWQ scale file
 # belongs to; the scale file stores them as ``identity.<name>``.
 AWQ_IDENTITY_TENSORS = ("model.norm.weight", "model.layers.0.input_layernorm.weight")
+# Leading values of every decoder projection's first row, also stored as identity bytes, so
+# a checkpoint that changes any projection (e.g. a merged fine-tune) never matches.
+AWQ_PROJECTION_IDENTITY_VALUES = 64
 
 # HF projection stem -> internal weight-dict stem used by graph_blocks.
 _PROJECTIONS = (
@@ -391,12 +394,19 @@ def quantize_awq_weight(weight: np.ndarray, pre_quant_scale: np.ndarray) -> _AWQ
 
 
 def awq_identity(tensors: dict[str, Any]) -> dict[str, np.ndarray]:
-    """Raw bytes of the tensors that identify an AWQ checkpoint, keyed as in the scale file."""
+    """Raw bytes that identify an AWQ checkpoint, keyed as in the scale file: the norm tensors
+    in full and the leading values of every decoder projection."""
     identity = {}
     for key in AWQ_IDENTITY_TENSORS:
         if key not in tensors:
             raise ValueError(f"INT4-AWQ checkpoint identity needs {key}")
         identity[f"identity.{key}"] = _raw_bytes(tensors, key).reshape(-1)
+    suffixes = tuple(f".{stem}.weight" for stem, _ in _PROJECTIONS)
+    for key in sorted(k for k in tensors if k.startswith("model.layers.") and k.endswith(suffixes)):
+        head = tensors[key].get_slice(key)[0:1, :AWQ_PROJECTION_IDENTITY_VALUES]
+        identity[f"identity.{key}"] = np.ascontiguousarray(
+            head.contiguous().view(torch.uint8).numpy().reshape(-1)
+        )
     return identity
 
 
