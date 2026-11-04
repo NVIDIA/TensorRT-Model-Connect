@@ -204,8 +204,10 @@ def main(argv: list[str] | None = None) -> int:
     token = None if loopback(args.host) else app_token(data)
     languages = {model.name: model.language for model in wanted.values() if model.language}
     first_frames = frozenset(model.name for model in wanted.values() if model.first_frame)
-    app = create_app(Services(engine, models, data, languages, first_frames), plugins=args.plugins, info=info,
-                     allowed_hosts=None if token else hosts, token=token)
+    still_sizes = {model.name: model.picture_size for model in wanted.values()
+                   if model.role == "image" and model.picture_size}
+    app = create_app(Services(engine, models, data, languages, first_frames, still_sizes), plugins=args.plugins,
+                     info=info, allowed_hosts=None if token else hosts, token=token)
     if token:
         print(f"listening beyond loopback; open http://{args.host}:{args.port}/?token={token}", flush=True)
     else:

@@ -95,6 +95,8 @@ def run_stills(context: Context) -> None:
                if (t[0] in only if only else t[0] in used and not stills.get(t[0], {}).get("file"))]
     if targets:
         context.services.load(context.model)
+    # The size the served bundle renders; a bundle is built for one size.
+    size = params.get("size") or getattr(context.services, "still_size", lambda _: None)(context.model) or STILL_SIZE
     for number, (key, kind, item) in enumerate(targets, start=1):
         context.check()
         context.progress(f"still {number} of {len(targets)}: {item.get('name', item['id'])}")
@@ -102,8 +104,7 @@ def run_stills(context: Context) -> None:
         seed = int(previous["seed"]) + 1 if "seed" in previous else int(params.get("seed", 11))
         prompt = previous.get("prompt_override") or prompts.still_prompt(plan, kind, item)
         started = time.monotonic()
-        png = context.services.engine.image(context.model, prompt, size=params.get("size", STILL_SIZE),
-                                            seed=seed)
+        png = context.services.engine.image(context.model, prompt, size=size, seed=seed)
         relative = f"stills/{kind}-{item['id']}-{seed}.png"
         (project.root / "stills").mkdir(exist_ok=True)
         inside(project, project.root / relative).write_bytes(png)
@@ -441,15 +442,17 @@ def keyframe_still(project, plan: dict[str, Any], shot: dict[str, Any]) -> tuple
 
 
 def draw_keyframes(context: Context, shots: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """First frames for these shots, drawn by the served edit model from a picture of their stills."""
+    """First frames for these shots, drawn by the served edit model from a picture of their stills.
+
+    Without an edit model (24 GB), the picture itself is the first frame.
+    """
 
     if not shots:
         return {}
     project, number = context.project, context.episode
     editor = context.services.serving("edit")
-    if editor is None:
-        raise ValueError("no model draws first frames: start a tier that serves an edit model")
-    context.services.load(editor)
+    if editor is not None:
+        context.services.load(editor)
     english, directory = english_of(project), project.episode_dir(number) / "keyframes"
     directory.mkdir(parents=True, exist_ok=True)
     drawn = {}
@@ -461,6 +464,10 @@ def draw_keyframes(context: Context, shots: list[dict[str, Any]]) -> dict[str, d
         seed = int(context.params.get("seed", 7)) + take - 1
         picture = inside(project, directory / f"{shot['id']}-take{take}-picture.png")
         video.fit_picture(still, picture, width=KEYFRAME_PICTURE[0], height=KEYFRAME_PICTURE[1])
+        if editor is None:
+            drawn[shot["id"]] = {"file": relative(project, picture), "still": relative(project, still),
+                                 "picture": relative(project, picture), "model": None}
+            continue
         prompt = prompts.keyframe_prompt(project.plan, shot, pictured, english)
         started = time.monotonic()
         frame = inside(project, directory / f"{shot['id']}-take{take}.png")
@@ -477,7 +484,8 @@ def animate_shots(context: Context, episode: dict[str, Any], todo: list[dict[str
     """Shots from one first frame each, without sound.
 
     A shot in the same place as the shot before it opens on that shot's last frame; any other shot
-    opens on a keyframe drawn from its stills. Keyframes come first, so each model loads once.
+    opens on a keyframe drawn from its stills, or on one of them where no edit model is served.
+    Keyframes come first, so each model loads once.
     """
 
     project, params, number = context.project, context.params, context.episode

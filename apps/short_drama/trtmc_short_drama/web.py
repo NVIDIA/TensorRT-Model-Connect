@@ -53,18 +53,24 @@ class Services:
     data: Path
     languages: dict[str, str] = field(default_factory=dict)  # name -> the language a speech model hears
     first_frames: frozenset[str] = frozenset()  # video models that animate one first frame, without sound
+    still_sizes: dict[str, str] = field(default_factory=dict)  # image model -> WIDTHxHEIGHT its bundle renders
 
     def load(self, name: str | None) -> None:
         if name is None or name not in self.models:
             raise ValueError(f"model {name!r} is not served; see the Models list in Settings")
         role, served = self.models[name]
         wanted = [served]
-        if role == "video":  # speech recognition is small; keep it with the video model
+        # Speech recognition is small; keep it with a video model that speaks. A silent one leaves
+        # nothing to hear, and on a 24 GB card the two would not fit together.
+        if role == "video" and name not in self.first_frames:
             wanted += [s for r, s in self.models.values() if r == "asr"]
         self.engine.ensure(wanted)
 
     def first_frame(self, name: str | None) -> bool:
         return name in self.first_frames
+
+    def still_size(self, name: str | None) -> str | None:
+        return self.still_sizes.get(name)
 
     def serving(self, role: str) -> str | None:
         """The name of the served model with this role, if there is one."""

@@ -26,12 +26,22 @@ class Model:
     # Speech recognition language baked into the bundle's decoder prompt (Whisper).
     language: str | None = None
     # A video model that animates one first frame, without sound, instead of filming each shot from
-    # its reference pictures; the tier's "edit" model draws that frame from them.
+    # its reference pictures; the tier's "edit" model draws that frame from them, and a tier without
+    # one starts the shot on a reference picture itself.
     first_frame: bool = False
 
     def bundle_name(self, compute_capability: str) -> str:
         language = f"-{self.language}" if self.language else ""
         return f"{self.name}{language}-sm{compute_capability.replace('.', '')}.bundle"
+
+    @property
+    def picture_size(self) -> str | None:
+        """WIDTHxHEIGHT from the build arguments: what an image bundle renders (an edit bundle: takes)."""
+
+        arguments = list(self.build_args)
+        if "--image-width" not in arguments or "--image-height" not in arguments:
+            return None
+        return f"{arguments[arguments.index('--image-width') + 1]}x{arguments[arguments.index('--image-height') + 1]}"
 
 
 @dataclass(frozen=True)
@@ -60,6 +70,9 @@ _WAN = Model("video", "wan2.2-ti2v-5b", "Wan-AI/Wan2.2-TI2V-5B",
 _I2V = "image-to-video for Wan2.2-TI2V-5B in TRTMC (its family renders from text only)"
 _EDIT = "vertical pictures from Qwen-Image-Edit in TRTMC (its edit bundles render 1024x1024 only)"
 _SILENT = "none yet: each line is a subtitle until TRTMC has Chinese text-to-speech"
+# On an RTX PRO 6000 with TensorRT 11.4, TRTMC's fp16 Z-Image-Turbo renders white pictures, also at
+# its tested 1024x1024; fp32 renders, but needs about 31 GiB even with one engine loaded at a time.
+_ZIMAGE = "Z-Image-Turbo pictures within 24 GB in TRTMC (fp16 renders white, fp32 needs about 31 GiB)"
 
 # Every model here has a permissive license (Apache-2.0 or MIT) except MiniMax H3, whose community
 # license excludes some territories; see the README before shipping tier A.
@@ -89,16 +102,21 @@ TIERS = {
     }, hardware="RTX PRO 6000, H100, DGX Spark",
         video="Qwen-Image-Edit draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it",
         speech=_SILENT, missing=(_I2V, _EDIT), nominal_gb=80),
-    "c": Tier("c", 23, "keyframes and Wan2.2-TI2V-5B image-to-video, without voices", {
+    # No edit model fits beside the others in 24 GB (Qwen-Image-Edit holds about 65 GB), so a shot
+    # starts on its reference picture; FLUX.2 klein 4B could draw first frames once TRTMC takes
+    # reference pictures for it.
+    "c": Tier("c", 23, "Wan2.2-TI2V-5B image-to-video straight from the reference pictures, without voices", {
         "llm": Model("llm", "qwen3.5-4b", "Qwen/Qwen3.5-4B", ("--max-sequence-length", "32768")),
+        # fp16 with the layers TRTMC's own Z-Image test keeps in fp32: the VAE, the noise refiners and
+        # the first two blocks.
         "image": Model("image", "z-image-turbo", "Tongyi-MAI/Z-Image-Turbo",
-                       ("--image-height", "1280", "--image-width", "720")),
+                       ("--precision", "fp16", "--fp32-layer", "2", "--fp32-layer", "3", "--fp32-layer", "4",
+                        "--fp32-layer", "7", "--fp32-layer", "8", "--image-height", "1280", "--image-width", "720")),
         "video": _WAN,
         "asr": _WHISPER,
     }, hardware="RTX 4090, RTX 5090, L40S",
-        video="FLUX.2 klein 4B draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it",
-        speech=_SILENT, missing=(_I2V, "FLUX.2 klein 4B in TRTMC, with reference pictures as input"),
-        nominal_gb=24),
+        video="Wan2.2-TI2V-5B animates each shot from its speaker's reference picture",
+        speech=_SILENT, missing=(_I2V, _ZIMAGE), nominal_gb=24),
 }
 
 

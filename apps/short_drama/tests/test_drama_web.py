@@ -130,6 +130,15 @@ def test_files_stay_inside_the_project_and_keys_stay_private(tmp_path, monkeypat
         assert stat.S_IMODE((tmp_path / "secrets.json").stat().st_mode) == 0o600
 
 
+def test_speech_recognition_loads_with_a_speaking_video_model_only(tmp_path):
+    models = {"w": ("asr", Served("w", tmp_path / "w.bundle")), "v": ("video", Served("v", tmp_path / "v.bundle"))}
+    speaking = Services(FakeEngine(), models, tmp_path)
+    speaking.load("v")
+    silent = Services(FakeEngine(), models, tmp_path, first_frames=frozenset({"v"}))
+    silent.load("v")  # on a 24 GB card Wan2.2 and Whisper would not fit together
+    assert speaking.engine.ensured == [["v", "w"]] and silent.engine.ensured == [["v"]]
+
+
 def test_a_vision_model_named_in_settings_comes_before_the_one_served_here(tmp_path):
     services = Services(FakeEngine(), {"w": ("asr", Served("w", tmp_path / "w.bundle")),
                                        "see": ("vision", Served("see", tmp_path / "see.bundle")),

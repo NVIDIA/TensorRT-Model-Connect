@@ -133,7 +133,11 @@ def test_media_never_writes_outside_the_project(project):
 
 
 class FakeImages:
+    def __init__(self):
+        self.sizes = []
+
     def image(self, model, prompt, *, size, seed):
+        self.sizes.append(size)
         return b"png"
 
 
@@ -147,10 +151,20 @@ def test_only_what_appears_in_a_shot_gets_a_still(project):
     media.run_stills(Context(project, {"seed": 3}, "img", None, services, progress=lambda _: None))
     stills = project.stills
     assert sorted(stills) == ["character:aq", "location:temple"]  # 王胡 is in no shot
+    assert services.engine.sizes == [media.STILL_SIZE] * 2
     assert stills["character:aq"]["model"] == "img" and stills["character:aq"]["seconds"] >= 0
     assert media.usage(plan) == {"character:aq": ["e1s1"], "location:temple": ["e1s1"]}
     assert media.average_seconds([{"model": "img", "seconds": 4}, {"model": "img", "seconds": 6},
                                   {"model": "other", "seconds": 60}], "img") == 5.0
+
+
+def test_stills_take_the_size_the_served_image_bundle_renders(project):
+    project.save_stills({})
+    services = FakeServices()
+    services.engine = FakeImages()
+    services.still_size = {"img": "720x1280"}.get
+    media.run_stills(Context(project, {"seed": 3}, "img", None, services, progress=lambda _: None))
+    assert services.engine.sizes == ["720x1280"] * 2
 
 
 def test_a_take_is_outdated_when_a_still_or_the_plan_behind_it_changes(project):
@@ -427,14 +441,22 @@ def test_an_animated_shot_opens_on_a_keyframe_or_where_the_shot_before_it_ends(p
     assert not any(key in entry for key in media.FIRST_FRAME_KEYS) and reasons("e1s2") == ["previous"]
 
 
-def test_an_animated_shot_needs_a_model_that_draws_its_first_frame(project):
+def test_without_an_edit_model_an_animated_shot_opens_on_its_reference_picture(project, monkeypatch):
+    monkeypatch.setattr(video, "finish_clip", lambda raw, clip, seconds, lead_in=None: (
+        clip.parent.mkdir(parents=True, exist_ok=True) or clip.write_bytes(b"clip")) and 0.0)
+    monkeypatch.setattr(video, "fit_picture", lambda picture, output, width, height: output.write_bytes(b"picture"))
     stills = project.stills
     stills["location:temple"]["status"] = "approved"
     project.save_stills(stills)
     services = FirstFrameServices()
-    services.serving = lambda role: None
-    with pytest.raises(ValueError, match="no model draws first frames"):
-        render(project, services)
+    services.serving = lambda role: None  # a 24 GB tier: no edit model
+    render(project, services)
+    assert services.loaded == ["v"] and services.engine.edits == []
+    assert services.engine.calls[0]["references"] == ["e1s1-take1-picture.png"]
+    picture = "episodes/01/keyframes/e1s1-take1-picture.png"
+    entry = project.shot_state(1)["e1s1"]
+    assert entry["keyframe"] == {"file": picture, "still": "stills/character-aq.png", "picture": picture, "model": None}
+    assert entry["first_frame"] == picture and entry["silent"]
 
 
 def test_keyframe_and_motion_prompts_name_the_people_and_never_quote():

@@ -213,6 +213,22 @@ def test_tier_b_builds_a_vertical_editor_and_wan_image_to_video(tmp_path: Path, 
     assert catalog.TIERS["b"].models["video"].first_frame and not catalog.TIERS["a"].models["video"].first_frame
 
 
+def test_tier_c_builds_z_image_turbo_and_wan_without_an_edit_model(tmp_path: Path, monkeypatch, capsys):
+    from trtmc_short_drama import cli
+
+    monkeypatch.setattr(cli.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(catalog, "gpus", lambda: [catalog.parse_gpu("0, RTX 4090, 24564, 8.9")])
+    (tmp_path / "trtmc-server").touch()
+    assert cli.main(["up", "--dry-run", "--data", str(tmp_path / "data"), "--runtime-root", str(tmp_path)]) == 0
+    built = {line.split(":")[0]: line for line in capsys.readouterr().out.splitlines() if line.startswith("build ")}
+    assert set(built) == {"build image", "build video", "build asr"}  # no edit model fits beside them
+    assert "Tongyi-MAI/Z-Image-Turbo -o" in built["build image"] and "--precision fp16 --fp32-layer 2 --fp32-layer 3 " \
+        "--fp32-layer 4 --fp32-layer 7 --fp32-layer 8 --image-height 1280 --image-width 720" in built["build image"]
+    assert catalog.TIERS["c"].models["image"].picture_size == "720x1280"
+    assert catalog.TIERS["b"].models["image"].picture_size == "928x1664"
+    assert catalog.TIERS["c"].missing == (catalog._I2V, catalog._ZIMAGE)
+
+
 def test_h3_is_built_through_the_family_command(tmp_path: Path):
     from trtmc_short_drama import cli
 
