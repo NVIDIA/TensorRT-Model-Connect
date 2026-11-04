@@ -5,8 +5,11 @@
 
 #include "families/z_image/runtime/gpu_matmul.h"
 #include "families/z_image/runtime/pipeline.h"
+#include "families/z_image/runtime/staged_module.h"
 
 #include <iostream>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -59,6 +62,43 @@ void test_zimage_attention_mask() {
           "Z-Image attention mask hides unused fixed caption slots");
 }
 
+void test_zimage_staged_module() {
+    struct Engine {
+        std::string section;
+    };
+    std::vector<std::string> loaded;
+    const trtmc::StagedModule<Engine>::Loader load = [&loaded](const std::string& section) {
+        loaded.push_back(section);
+        return std::make_unique<Engine>(Engine{section});
+    };
+    std::unique_ptr<Engine> slot;
+    {
+        const trtmc::StagedModule<Engine> stage(load, slot, trtmc::kZImageDenoiserPlan);
+        check(slot && slot->section == "denoiser.plan",
+              "a staged module is in place for its stage");
+    }
+    check(!slot && loaded == std::vector<std::string>{"denoiser.plan"},
+          "a staged module is released when its stage ends");
+
+    auto resident = std::make_unique<Engine>(Engine{"resident"});
+    Engine* const kept = resident.get();
+    {
+        const trtmc::StagedModule<Engine> stage({}, resident, trtmc::kZImageVaePlan);
+    }
+    check(resident.get() == kept && loaded.size() == 1, "a resident module is left in place");
+
+    const trtmc::StagedModule<Engine>::Loader fails = [](const std::string&) {
+        return std::unique_ptr<Engine>();
+    };
+    bool threw = false;
+    try {
+        const trtmc::StagedModule<Engine> stage(fails, slot, trtmc::kZImageTextEncoderPlan);
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    check(threw && !slot, "a stage whose module does not load fails");
+}
+
 void test_zimage_gpu_matmul_policy() {
     check(trtmc::z_image_should_use_gpu_matmul(4096, 64, 3840),
           "Z-Image 1024px patch embedding uses GPU matmul");
@@ -76,6 +116,7 @@ int main() {
     test_zimage_initial_latent_contract();
     test_zimage_text_encoder_input_shape();
     test_zimage_attention_mask();
+    test_zimage_staged_module();
     test_zimage_gpu_matmul_policy();
     if (failures > 0) {
         std::cerr << failures << " z-image pipeline test(s) FAILED\n";

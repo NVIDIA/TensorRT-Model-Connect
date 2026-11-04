@@ -8,6 +8,7 @@
 // ZImagePipeline: Z-Image diffusion pipeline with Qwen3 text encoder,
 // denoiser, and VAE. Uses ITrtModule::forward() for all GPU work.
 
+#include "families/z_image/runtime/staged_module.h"
 #include "families/z_image/runtime/tokenizer.h"
 #include "families/z_image/runtime/z_image_diffusion_types.h"
 #include "trtmc/runtime/trt_module.h"
@@ -21,6 +22,15 @@
 namespace trtmc {
 
 class ZImageGpuMatmul;
+
+/// Loads one engine of the bundle by its section name, for a pipeline that loads its modules
+/// per stage.
+using ZImageModuleLoader = StagedModule<ITrtModule>::Loader;
+
+/// The bundle sections a pipeline that loads its modules per stage asks for (one GPU).
+inline constexpr const char* kZImageTextEncoderPlan = "text_encoder.0.plan";
+inline constexpr const char* kZImageDenoiserPlan = "denoiser.plan";
+inline constexpr const char* kZImageVaePlan = "vae.plan";
 
 /// Internal layout descriptor for Z-Image (latent grid, patches, dims).
 /// Declared here so that ``ZImagePipeline`` private helpers can refer to it
@@ -67,6 +77,13 @@ class ZImagePipeline final : public IImageGeneration, public IImageBatchGenerati
                    ZImagePreprocessorWeights z_weights, std::shared_ptr<ITokenizer> tokenizer,
                    std::string model_id_str, std::shared_ptr<void> distributed_owner = {},
                    int32_t tensor_parallel_rank = 0, int32_t tensor_parallel_size = 1);
+
+    /// A pipeline that loads the text encoder, the DiT and the VAE for their stage of every
+    /// request and releases each one afterwards, for a GPU that cannot hold the three at once.
+    /// One GPU only.
+    ZImagePipeline(ZImageModuleLoader loader, ZImageDiffusionConfig config,
+                   ZImagePreprocessorWeights z_weights, std::shared_ptr<ITokenizer> tokenizer,
+                   std::string model_id_str);
 
     ~ZImagePipeline() override;
 
@@ -181,6 +198,11 @@ class ZImagePipeline final : public IImageGeneration, public IImageBatchGenerati
     ZImagePreprocessorWeights z_weights_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
+    // Set when the modules load per stage. Chunks are planned before the DiT stage, so how the
+    // DiT batches is read once, when the pipeline is made.
+    ZImageModuleLoader loader_;
+    bool staged_dit_batched_{false};
+    int32_t staged_dit_cap_{1};
 };
 
 } // namespace trtmc

@@ -218,6 +218,21 @@ ZImagePipeline::ZImagePipeline(std::unique_ptr<ITrtModule> text_encoder,
               << ")\n";
 }
 
+ZImagePipeline::ZImagePipeline(ZImageModuleLoader loader, ZImageDiffusionConfig config,
+                               ZImagePreprocessorWeights z_weights,
+                               std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
+    : ZImagePipeline(nullptr, nullptr, nullptr, std::move(config), std::move(z_weights),
+                     std::move(tokenizer), std::move(model_id_str)) {
+    if (!loader)
+        throw std::invalid_argument("Z-Image per-stage loading needs a module loader");
+    loader_ = std::move(loader);
+    const StagedModule<ITrtModule> denoiser(loader_, denoiser_, kZImageDenoiserPlan);
+    staged_dit_batched_ = denoiser_->input_rank("hidden_states") == 3;
+    staged_dit_cap_ = resolve_batch_cap(staged_dit_batched_);
+    std::cerr << "[z-image] The text encoder, the DiT and the VAE load for their stage of each "
+                 "request\n";
+}
+
 ZImagePipeline::~ZImagePipeline() = default;
 
 // ---------------------------------------------------------------------------
@@ -779,13 +794,14 @@ ZImagePipeline::generate_image_batch(const std::vector<std::string>& prompts,
         std::cerr << "[z-image] No tokenizer available\n";
         return {};
     }
-    if (!vae_) {
+    if (!vae_ && !loader_) {
         std::cerr << "[z-image] No VAE decoder module\n";
         return {};
     }
 
-    const bool engine_is_batched = denoiser_ && denoiser_->input_rank("hidden_states") == 3;
-    const int32_t cap = resolve_batch_cap(engine_is_batched);
+    const bool engine_is_batched =
+        loader_ ? staged_dit_batched_ : denoiser_ && denoiser_->input_rank("hidden_states") == 3;
+    const int32_t cap = loader_ ? staged_dit_cap_ : resolve_batch_cap(engine_is_batched);
     const auto chunks = z_image_batch::plan_chunks(static_cast<int>(prompts.size()), cap);
 
     std::vector<ImageResult> results;
@@ -854,20 +870,27 @@ std::vector<ImageResult> ZImagePipeline::generate_image_batch_chunk(
                                         static_cast<std::size_t>(total_seq));
     std::vector<float> latents(static_cast<std::size_t>(batch) * latent_size);
 
-    if (!run_qwen3_encoder_for_chunk(prompts, resolved_seeds, prompt_offset, batch, layout,
-                                     caption_projected_b, rope_cos_b, rope_sin_b, attention_mask_b,
-                                     latents, supplied_initial_latents)) {
-        return {};
+    // Each stage holds only its own module when the modules load per stage.
+    {
+        const StagedModule<ITrtModule> text_encoder(loader_, text_encoder_, kZImageTextEncoderPlan);
+        if (!run_qwen3_encoder_for_chunk(prompts, resolved_seeds, prompt_offset, batch, layout,
+                                         caption_projected_b, rope_cos_b, rope_sin_b,
+                                         attention_mask_b, latents, supplied_initial_latents)) {
+            return {};
+        }
     }
-
-    if (!run_denoise_loop_for_chunk(batch, num_inference_steps, freq_dim, engine_is_batched,
-                                    prompt_offset, layout, caption_projected_b, rope_cos_b,
-                                    rope_sin_b, attention_mask_b, latents)) {
-        return {};
+    {
+        const StagedModule<ITrtModule> denoiser(loader_, denoiser_, kZImageDenoiserPlan);
+        if (!run_denoise_loop_for_chunk(batch, num_inference_steps, freq_dim, engine_is_batched,
+                                        prompt_offset, layout, caption_projected_b, rope_cos_b,
+                                        rope_sin_b, attention_mask_b, latents)) {
+            return {};
+        }
     }
 
     std::vector<ImageResult> out;
     out.reserve(static_cast<std::size_t>(batch));
+    const StagedModule<ITrtModule> vae(loader_, vae_, kZImageVaePlan);
     decode_chunk_vae_per_sample(batch, layout, latents, out);
     return out;
 }
