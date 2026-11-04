@@ -20,6 +20,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import config as config_module, encoder_builder, graph as g
+from .quantization import calibrate_vit
 
 _SUPPORTED_TASKS = ("image_to_class_scores",)
 
@@ -53,7 +54,10 @@ def _require_weights(weights: dict, prefix: str) -> None:
         raise KeyError("vit checkpoint is missing expected tensors: " + ", ".join(missing))
 
 
-def _builder(verbose):
+_DUAL_GEMM_KNOB = "peep:match_dual_gemm"
+
+
+def _builder(verbose, quant_ctx=None):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -62,11 +66,18 @@ def _builder(verbose):
     # TF32 caps a conv-and-matmul graph near 0.99998 cosine by default,
     # which hides real graph error behind a plausible-looking number.
     config.clear_flag(trt.BuilderFlag.TF32)
+    if quant_ctx is not None:
+        # Keep layer names so the plan inspector shows which kernels run.
+        config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+        if quant_ctx.has_fp8_weights and _DUAL_GEMM_KNOB in getattr(config, "all_build_routes", ""):
+            # TensorRT's fused dual-GEMM kernel fails to compile with scalar-scale FP8.
+            # The route is set only when this TensorRT build lists the knob.
+            config.build_route = f"-{_DUAL_GEMM_KNOB}=off"
     return builder, network, config
 
 
-def build_engine(weights, cfg, *, verbose=False) -> bytes:
-    builder, network, config = _builder(verbose)
+def build_engine(weights, cfg, *, verbose=False, quant_ctx=None) -> bytes:
+    builder, network, config = _builder(verbose, quant_ctx)
     # fp32 throughout. build() refuses every other precision and records the
     # measurement behind that refusal.
     work_np = np.float32
@@ -102,7 +113,8 @@ def build_engine(weights, cfg, *, verbose=False) -> bytes:
     hidden = g.add_sum(network, hidden,
                        g.add_constant(network, table.shape, table, dtype=work_np))
 
-    hidden = encoder_builder.build_layers(network, hidden, weights, cfg, dtype=work_np)
+    hidden = encoder_builder.build_layers(network, hidden, weights, cfg, dtype=work_np,
+                                          quant=quant_ctx)
     hidden = g.add_layer_norm(network, hidden, weights[f"{prefix}layernorm.weight"],
                               weights[f"{prefix}layernorm.bias"], cfg["eps"])
 
@@ -137,8 +149,9 @@ def build(request, writer) -> None:
         raise NotImplementedError("vit does not support context parallelism")
     if request.video_num_frames is not None:
         raise NotImplementedError("vit does not support video_num_frames")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("vit does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"vit supports quantization fp8 or none; got {request.quantization!r}")
     if request.fp32_layers:
         raise NotImplementedError("vit does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -176,9 +189,15 @@ def build(request, writer) -> None:
         raise NotImplementedError(
             f"vit input size is fixed at the checkpoint's {cfg['image_size']}")
 
+    # fp8: the projections are quantized from the original checkpoint, so the weights
+    # above stay float32 and only the Q/DQ constants of quantized projections are new.
+    quant_ctx = None
+    if request.quantization == "fp8":
+        quant_ctx = calibrate_vit(weights, cfg, "fp8")
+
     writer.set_header(family="vit", task=request.task, backend=request.backend)
     writer.add_bytes("model.plan", build_engine(
-        weights, cfg, verbose=bool(request.verbose)))
+        weights, cfg, verbose=bool(request.verbose), quant_ctx=quant_ctx))
     writer.add_json(
         "runtime.json",
         {
