@@ -31,6 +31,9 @@ set_target_properties(trtmc_model_nomic_bert PROPERTIES
 install(TARGETS trtmc_model_nomic_bert
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../UNICODE_LICENSE.txt
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/trtmc/families/nomic_bert
+)
 
 if(TRTMC_BUILD_TESTS)
   add_executable(test_nomic_bert_tokenizer
