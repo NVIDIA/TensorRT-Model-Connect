@@ -1543,6 +1543,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config = ModelConfig.from_dir(model_dir)
     if not str(config.model_type).lower().startswith("llama_nemotron_vl"):
         raise ValueError(f"Eagle does not support model_type={config.model_type!r}")
+    # The engine kind follows the checkpoint, so the advertised Task must agree with it.
+    if (request.task == "text_query_documents_to_relevance") != _is_reranker(config):
+        raise ValueError(
+            f"eagle_vlm task {request.task!r} does not match this checkpoint "
+            f"(model_type={config.model_type!r})"
+        )
     if request.quantization not in {None, "none", "fp8"}:
         raise NotImplementedError(f"Eagle does not support quantization={request.quantization!r}")
     if request.fp32_layers:

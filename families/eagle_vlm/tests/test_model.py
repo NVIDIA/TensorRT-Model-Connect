@@ -22,12 +22,12 @@ from families.eagle_vlm import model  # noqa: E402
 from tensorrt_model_connect import BuildRequest  # noqa: E402
 
 
-def _checkpoint(tmp_path: Path) -> Path:
+def _checkpoint(tmp_path: Path, reranker: bool = True) -> Path:
     tmp_path.mkdir(parents=True, exist_ok=True)
     (tmp_path / "config.json").write_text(
         json.dumps(
             {
-                "model_type": "llama_nemotron_vl_rerank",
+                "model_type": "llama_nemotron_vl_rerank" if reranker else "llama_nemotron_vl",
                 "vocab_size": 100,
                 "hidden_size": 32,
                 "intermediate_size": 64,
@@ -70,11 +70,13 @@ def _patch_build(monkeypatch) -> None:
     )
 
 
-def _build(tmp_path: Path, task: str) -> _Writer:
+def _build(tmp_path: Path, task: str, reranker: bool | None = None) -> _Writer:
+    if reranker is None:
+        reranker = task == "text_query_documents_to_relevance"
     writer = _Writer()
     model.build(
         BuildRequest(
-            model_dir=_checkpoint(tmp_path),
+            model_dir=_checkpoint(tmp_path, reranker),
             output_path=tmp_path / "unused.bundle",
             family="eagle_vlm",
             task=task,
@@ -125,3 +127,20 @@ def test_build_rejects_an_unrelated_task(tmp_path: Path, monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="text_query_documents_to_relevance"):
         _build(tmp_path, "classification")
+
+
+@pytest.mark.parametrize(
+    ("task", "reranker"),
+    [
+        ("text_to_embedding", True),
+        ("text_to_pooled_features", True),
+        ("text_query_documents_to_relevance", False),
+    ],
+)
+def test_build_rejects_a_task_that_does_not_match_the_checkpoint(
+    tmp_path: Path, monkeypatch, task: str, reranker: bool
+) -> None:
+    _patch_build(monkeypatch)
+
+    with pytest.raises(ValueError, match="does not match this checkpoint"):
+        _build(tmp_path, task, reranker)

@@ -10,7 +10,6 @@ _TASKS = (
     "text_to_embedding",
     "text_to_pooled_features",
     "text_query_documents_to_relevance",
-    "text_pair_to_relevance",
 )
 _EMBED = family_support(
     model_types=("llama_nemotron_vl",),
