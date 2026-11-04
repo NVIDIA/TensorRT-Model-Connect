@@ -348,3 +348,175 @@ def test_tied_output_allocation_does_not_copy_input(tmp_path, monkeypatch):
         tracemalloc.stop()
     assert weights["w_out"].nbytes == 2 * 4096 * 256
     assert peak < weights["w_out"].nbytes * 1.5
+
+
+# Issue #1414: default precision and length must resolve to a loadable route.
+_NATIVE_ELIGIBLE_CONFIG = {
+    "model_type": "llama",
+    "architectures": ["LlamaForCausalLM"],
+    "hidden_size": 256,
+    "intermediate_size": 16,
+    "num_hidden_layers": 1,
+    "num_attention_heads": 2,
+    "num_key_value_heads": 1,
+    "vocab_size": 32,
+    "hidden_act": "silu",
+    "rms_norm_eps": 1e-5,
+    "rope_theta": 500000.0,
+    "max_position_embeddings": 131072,
+    "eos_token_id": 2,
+}
+
+
+def _resolve_build(monkeypatch, model, request, writer, config, loads=None, **overrides):
+    """Run the real family build with compilation stubbed; return the routes used."""
+    from dataclasses import replace
+
+    (request.model_dir / "config.json").write_text(json.dumps(config))
+    loads = [] if loads is None else loads
+    engines = []
+
+    def load_weights(*args, **kwargs):
+        loads.append(kwargs["precision"])
+        return {}
+
+    def build_engine(config, weights, max_sequence_length, *, precision, **kwargs):
+        engines.append((config.raw["_decoder_engine_role"], max_sequence_length, precision))
+        return b"plan"
+
+    # Quantized builds calibrate before loading weights; the route is decided before that.
+    calibration = types.ModuleType("families.llama.quantization")
+    calibration.calibrate_llama = lambda *args, **kwargs: None
+    monkeypatch.setitem(sys.modules, calibration.__name__, calibration)
+    monkeypatch.setattr(model, "load_standard_weights", load_weights)
+    monkeypatch.setattr(model, "_build_engine", build_engine)
+    model.build(replace(request, **overrides), writer)
+    return engines
+
+
+def test_support_defaults_llama_to_native_precision():
+    from tensorrt_model_connect.model_support import ModelMetadata
+
+    from ..support import describe
+
+    support = describe(ModelMetadata(config={"model_type": "llama"}, model_index={}))
+    assert support.default_task == "text_generation"
+    assert support.default_precision == "bf16"
+
+
+@pytest.mark.parametrize(
+    "overrides,config_updates,expected_length",
+    [
+        # BF16 takes the native KV route: full context, unchanged from before.
+        ({"precision": "bf16"}, {}, 131072),
+        # FP16 (and FP32) take the dense route: a full-context mask cannot load.
+        ({"precision": "fp16"}, {}, 256),
+        # Quantized builds take the dense route too; before #1414 they got 131072.
+        ({"precision": "bf16", "quantization": "fp8"}, {}, 256),
+        # Runtime-sized KV and FP32 layer overrides bound the prefill mask.
+        ({"precision": "fp16", "dynamic_kv_cache": True}, {}, 131072),
+        ({"precision": "fp16", "fp32_layers": (0,)}, {}, 131072),
+        # A dense full-context mask that fits keeps the full-context default.
+        ({"precision": "fp16"}, {"max_position_embeddings": 8192}, 8192),
+        # Architectures outside the native contract keep the short fallback.
+        ({"precision": "bf16"}, {"num_attention_heads": 4}, 256),
+    ],
+)
+def test_default_length_follows_selected_route(
+    monkeypatch, request_and_writer, overrides, config_updates, expected_length
+):
+    model, request, writer = request_and_writer
+    config = dict(_NATIVE_ELIGIBLE_CONFIG, **config_updates)
+    engines = _resolve_build(
+        monkeypatch, model, request, writer, config, max_sequence_length=None, **overrides
+    )
+    assert engines
+    assert {length for _, length, _ in engines} == {expected_length}
+
+
+@pytest.mark.parametrize(
+    "overrides,config_updates,suggests_bf16",
+    [
+        ({"precision": "fp16", "max_sequence_length": 131072}, {}, True),
+        ({"precision": "bf16", "max_sequence_length": 65536}, {}, True),
+        ({"precision": "fp16", "max_sequence_length": 32769}, {}, True),
+        (
+            {"precision": "bf16", "quantization": "fp8", "max_sequence_length": 131072},
+            {},
+            True,
+        ),
+        # No native route for this architecture, so BF16 is not offered as a fix.
+        ({"precision": "fp16", "max_sequence_length": 131072}, {"num_attention_heads": 4}, False),
+    ],
+)
+def test_unloadable_dense_mask_is_rejected_before_weights_load(
+    monkeypatch, request_and_writer, overrides, config_updates, suggests_bf16
+):
+    model, request, writer = request_and_writer
+    config = dict(_NATIVE_ELIGIBLE_CONFIG, **config_updates)
+    loads = []
+    with pytest.raises(ValueError, match="attention_mask profile maximum") as error:
+        _resolve_build(monkeypatch, model, request, writer, config, loads=loads, **overrides)
+    assert loads == [], "weights must not load before the rejection"
+    message = str(error.value)
+    assert f"max_sequence_length={overrides['max_sequence_length']}" in message
+    assert "--dynamic-kv-cache" in message
+    assert ("--precision bf16" in message) == suggests_bf16
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"precision": "fp16", "max_sequence_length": 32768},
+        {"precision": "bf16", "max_sequence_length": 131072},
+        {"precision": "fp16", "max_sequence_length": 131072, "dynamic_kv_cache": True},
+    ],
+)
+def test_bounded_explicit_lengths_still_build(monkeypatch, request_and_writer, overrides):
+    model, request, writer = request_and_writer
+    engines = _resolve_build(
+        monkeypatch, model, request, writer, _NATIVE_ELIGIBLE_CONFIG, **overrides
+    )
+    assert {length for _, length, _ in engines} == {overrides["max_sequence_length"]}
+
+
+def test_dense_attention_mask_bound():
+    from ..build_routing import dense_attention_mask_profile_error
+
+    assert dense_attention_mask_profile_error(32768, 32768) is None
+    assert dense_attention_mask_profile_error(64, 131072) is None
+    assert "[131072, 262144]" in dense_attention_mask_profile_error(131072, 131072)
+    assert "128.0 GiB" in dense_attention_mask_profile_error(131072, 131072)
+    assert dense_attention_mask_profile_error(32769, 32769) is not None
+    with pytest.raises(ValueError):
+        dense_attention_mask_profile_error(0, 16)
+
+
+def test_dense_builder_rejects_unbounded_prefill_profile():
+    pytest.importorskip("tensorrt")
+    from ..dual_profile_decoder_builder import build_dual_profile_decoder_engine
+
+    config = ModelConfig.from_json(json.dumps(_NATIVE_ELIGIBLE_CONFIG))
+    weights = {"embedding": np.zeros((32, 256), np.float16), "final_norm": np.ones(256)}
+    with pytest.raises(ValueError, match="attention_mask profile maximum"):
+        build_dual_profile_decoder_engine(config, weights, 131072, precision="fp16")
+
+
+@pytest.mark.parametrize("entry", ["family", "shared"])
+def test_cli_entry_points_default_to_bf16(tmp_path, monkeypatch, entry):
+    from families.llama import cli as owner
+    from tensorrt_model_connect import build_cli, family_cli
+
+    source = tmp_path / "checkpoint"
+    source.mkdir()
+    (source / "config.json").write_text(json.dumps(_NATIVE_ELIGIBLE_CONFIG))
+    captured = []
+    monkeypatch.setattr(owner, "build_bundle", lambda request, output: captured.append(request))
+    monkeypatch.setattr(build_cli, "build", captured.append)
+    args = [str(source), "-o", str(tmp_path / "model.bundle")]
+    if entry == "family":
+        assert family_cli.main(["llama", "build", *args]) == 0
+    else:
+        assert build_cli.main(["build", *args, "--family", "llama"]) == 0
+    assert [request.precision for request in captured] == ["bf16"]
+    assert captured[0].max_sequence_length is None

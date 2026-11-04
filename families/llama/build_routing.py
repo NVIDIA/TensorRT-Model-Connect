@@ -303,3 +303,32 @@ def native_kv_build_capability(
     except ValueError as exc:
         reasons.append(str(exc))
     return _result(reasons=reasons)
+
+
+# The dense (non-native-KV) prefill graph takes a float32 ``attention_mask`` of
+# shape [Sq, cache + Sq], and the runtime allocates it at the profile maximum
+# when the bundle loads. Keep that one buffer within 2**31 elements (8 GiB), a
+# device-independent bound that admits every unchunked dense build up to a
+# 32768-row cache.
+DENSE_ATTENTION_MASK_MAX_ELEMENTS = 1 << 31
+
+
+def dense_attention_mask_profile_error(
+    max_prefill_length: int,
+    max_cache_length: int,
+) -> str | None:
+    """Describe why a dense prefill mask profile is too large, or return None."""
+
+    rows = _integer(max_prefill_length, "max_prefill_length")
+    cache = _integer(max_cache_length, "max_cache_length")
+    if rows <= 0 or cache <= 0:
+        raise ValueError("dense attention_mask profile dimensions must be positive")
+    columns = cache + rows
+    elements = rows * columns
+    if elements <= DENSE_ATTENTION_MASK_MAX_ELEMENTS:
+        return None
+    return (
+        f"dense Llama prefill attention_mask profile maximum [{rows}, {columns}] "
+        f"needs {elements * 4 / (1 << 30):.1f} GiB of float32 and exceeds the "
+        f"{DENSE_ATTENTION_MASK_MAX_ELEMENTS * 4 >> 30} GiB dense-mask bound"
+    )
