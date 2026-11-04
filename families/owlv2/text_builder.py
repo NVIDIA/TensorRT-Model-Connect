@@ -24,7 +24,7 @@ from . import graph as g
 PREFIX = "owlv2.text_model"
 
 
-def build_query(network, input_ids, eos_index, weights, cfg, *, dtype=np.float32):
+def build_query(network, input_ids, eos_index, weights, cfg, *, dtype=np.float32, quant=None):
     """``input_ids [seq]`` and ``eos_index [1]`` to one query embedding ``[1, dim]``."""
     width = cfg["hidden_size"]
     seq = int(input_ids.shape[0])
@@ -38,7 +38,7 @@ def build_query(network, input_ids, eos_index, weights, cfg, *, dtype=np.float32
     hidden = g.add_sum(network, hidden, positions)
     mask = encoder_builder.causal_mask(network, seq, dtype=dtype)
     hidden = encoder_builder.build_layers(network, hidden, weights, PREFIX, cfg,
-                                          mask=mask, dtype=dtype)
+                                          mask=mask, dtype=dtype, quant=quant)
     hidden = g.add_layer_norm(network, hidden, weights[f"{PREFIX}.final_layer_norm.weight"],
                               weights[f"{PREFIX}.final_layer_norm.bias"], cfg["eps"])
 
