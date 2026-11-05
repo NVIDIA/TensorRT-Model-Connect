@@ -26,6 +26,7 @@ import tensorrt as trt
 
 from . import graph
 from .checkpoint import Checkpoint
+from .quantization import calibrate_timm_swin, configure_fp8_build
 
 
 if TYPE_CHECKING:
@@ -180,14 +181,20 @@ def _weights(checkpoint: Checkpoint, depths: list[int], dtype: np.dtype):
     return result
 
 
-def _linear(network, tensor, weights, prefix: str, dtype):
+def _linear(network, tensor, weights, prefix: str, dtype, quant=None):
     return graph.matmul_constant(
-        network, tensor, weights[f"{prefix}.weight"], weights.get(f"{prefix}.bias"), dtype=dtype
+        network,
+        tensor,
+        weights[f"{prefix}.weight"],
+        weights.get(f"{prefix}.bias"),
+        dtype=dtype,
+        quant=quant,
+        module=prefix,
     )
 
 
 def _window_attention(
-    network, tensor, weights, prefix: str, dtype, *, height, width, channels, window
+    network, tensor, weights, prefix: str, dtype, *, height, width, channels, window, quant=None
 ):
     """Window attention over an NHWC map whose sides divide the window."""
     windows_h, windows_w = height // window, width // window
@@ -213,7 +220,7 @@ def _window_attention(
         (0, 2, 1, 3, 4),
         (num_windows, area, channels),
     )
-    qkv = _linear(network, tokens, weights, f"{prefix}.attn.qkv", dtype)
+    qkv = _linear(network, tokens, weights, f"{prefix}.attn.qkv", dtype, quant)
     qkv = graph.permute(
         network, qkv, (num_windows, area, 3, heads, head_dim), (2, 0, 3, 1, 4), None
     )
@@ -226,6 +233,7 @@ def _window_attention(
     )
     context = graph.attention(network, parts[0], parts[1], parts[2], bias_tensor, dtype=dtype)
     merged = graph.permute(network, context, None, (0, 2, 1, 3), (num_windows, area, channels))
+    # attn.proj stays fp16: TensorRT 11.4 cannot compile an FP8 Quantize after fused attention.
     merged = _linear(network, merged, weights, f"{prefix}.attn.proj", dtype)
     return graph.permute(
         network, merged,
@@ -235,7 +243,9 @@ def _window_attention(
     )
 
 
-def _block(network, tensor, weights, prefix: str, dtype, *, height, width, channels, window):
+def _block(
+    network, tensor, weights, prefix: str, dtype, *, height, width, channels, window, quant=None
+):
     shift = window // 2 if f"{prefix}.attn_mask" in weights else 0
     residual = tensor
     hidden = graph.layer_norm(
@@ -246,7 +256,7 @@ def _block(network, tensor, weights, prefix: str, dtype, *, height, width, chann
         hidden = graph.roll(network, hidden, (-shift, -shift), (1, 2))
     hidden = _window_attention(
         network, hidden, weights, prefix, dtype,
-        height=height, width=width, channels=channels, window=window,
+        height=height, width=width, channels=channels, window=window, quant=quant,
     )
     if shift:
         hidden = graph.roll(network, hidden, (shift, shift), (1, 2))
@@ -257,13 +267,15 @@ def _block(network, tensor, weights, prefix: str, dtype, *, height, width, chann
         network, tensor, weights[f"{prefix}.norm2.weight"], weights[f"{prefix}.norm2.bias"],
         epsilon=_LAYER_NORM_EPSILON, dtype=dtype,
     )
-    hidden = _linear(network, hidden, weights, f"{prefix}.mlp.fc1", dtype)
+    hidden = _linear(network, hidden, weights, f"{prefix}.mlp.fc1", dtype, quant)
     hidden = graph.gelu(network, hidden, dtype=dtype)
-    hidden = _linear(network, hidden, weights, f"{prefix}.mlp.fc2", dtype)
+    hidden = _linear(network, hidden, weights, f"{prefix}.mlp.fc2", dtype, quant)
     return graph.add(network, residual, hidden)
 
 
-def _patch_merging(network, tensor, weights, prefix: str, dtype, *, height, width, channels):
+def _patch_merging(
+    network, tensor, weights, prefix: str, dtype, *, height, width, channels, quant=None
+):
     """Fold each 2x2 patch into the channel axis, then project it down.
 
     The four positions are interleaved column-inner-then-row-inner, which is the
@@ -280,7 +292,13 @@ def _patch_merging(network, tensor, weights, prefix: str, dtype, *, height, widt
         epsilon=_LAYER_NORM_EPSILON, dtype=dtype,
     )
     return graph.matmul_constant(
-        network, folded, weights[f"{prefix}.weight"], None, dtype=dtype
+        network,
+        folded,
+        weights[f"{prefix}.weight"],
+        None,
+        dtype=dtype,
+        quant=quant,
+        module=f"{prefix}.reduction",
     )
 
 
@@ -289,6 +307,7 @@ def _build_engine(
     checkpoint: Checkpoint,
     precision: str,
     verbose: bool,
+    quantization: str | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     if precision == "fp16":
         numpy_dtype, tensor_dtype = np.float16, trt.float16
@@ -299,6 +318,19 @@ def _build_engine(
     config = _preprocess_config(raw)
     depths = _layout(checkpoint)
     weights = _weights(checkpoint, depths, numpy_dtype)
+    quant_ctx = None
+    if quantization == "fp8":
+        if "quantization_config" in raw:
+            raise ValueError("fp8 self-quantization needs the original, unquantized checkpoint")
+        # The projections are quantized from the original checkpoint; the weights above stay
+        # fp16 and only the Q/DQ constants of quantized projections are new.
+        quant_ctx = calibrate_timm_swin(
+            depths,
+            (config["image_height"], config["image_width"]),
+            weights,
+            "fp8",
+            precision=precision,
+        )
     if weights["head.weight"].shape[0] != config["num_classes"]:
         raise ValueError("Swin classifier dimensions do not match config.json")
 
@@ -331,6 +363,7 @@ def _build_engine(
     builder_config.max_aux_streams = 0
     builder_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+    configure_fp8_build(builder_config, quant_ctx)
 
     pixels = network.add_input(
         "pixel_values", trt.float32, (1, 3, config["image_height"], config["image_width"])
@@ -359,7 +392,7 @@ def _build_engine(
         if f"{downsample}.weight" in weights:
             hidden = _patch_merging(
                 network, hidden, weights, downsample, numpy_dtype,
-                height=height, width=width, channels=channels,
+                height=height, width=width, channels=channels, quant=quant_ctx,
             )
             height, width = height // 2, width // 2
             channels = int(weights[f"{downsample}.weight"].shape[0])
@@ -368,7 +401,7 @@ def _build_engine(
                 network, hidden, weights, f"layers.{layer}.blocks.{index}", numpy_dtype,
                 height=height, width=width, channels=channels,
                 # The last stage is one window wide, so it cannot shift.
-                window=min(window, height, width),
+                window=min(window, height, width), quant=quant_ctx,
             )
 
     hidden = graph.layer_norm(
@@ -418,8 +451,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_swin does not support context parallelism")
     if request.task != "image_to_class_scores":
         raise ValueError("timm_swin supports only task=image_to_class_scores")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("timm_swin does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"timm_swin supports quantization fp8 or none; got {request.quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("timm_swin does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -432,6 +467,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         Checkpoint.open(model_dir),
         str(request.precision).lower(),
         bool(request.verbose),
+        None if request.quantization in {None, "none"} else request.quantization,
     )
     vocabulary_id = raw.get("vocabulary_id", "")
     labels = raw.get("label_names", [])
