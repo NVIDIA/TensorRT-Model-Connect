@@ -121,6 +121,182 @@ and actual source timestamps. Text/image cases generate at most 64 tokens;
 video/mixed cases at most 96. The owning test module contains the exact prompts
 and preparation code.
 
+## FP8 quantization study (not shipped)
+
+FP8 for the language model was built and measured on TensorRT 11.4 and 11.1. It
+is not shipped: the decoder is only 1.08x to 1.17x faster than fp16 and the
+outputs drift far from the reference. This section records the recipe, the
+method and the numbers, so that the study does not have to be repeated. The FP8
+code was not merged; this family still rejects `--quantization`.
+
+### Summary and decision
+
+| Item | fp16 (native) | FP8 | Change |
+|---|---|---|---|
+| Decode step, B200 / B300 | 2.726 / 2.505 ms | 2.322 / 2.320 ms | 1.17x / 1.08x |
+| Prefill 1024 tokens, B200 / B300 | 12.09 / 11.69 ms | 10.38 / 10.76 ms | 1.17x / 1.09x |
+| Bundle (decoder plan) | 5.43 GB (3.13 GiB) | 4.05 GB (1.84 GiB) | -25% (-41%) |
+| Chat answers, KL vs HF / top-1 | 8e-6 / 100% | 0.030 / 96.9% | 3700x |
+| Image and video answers, KL vs HF / top-1 | 4e-5 / 99.4% | 0.013 / 94.1% | 300x |
+| 64-token greedy answers equal to HF, chat / media | 12 of 12 / 20 of 26 | 5 of 12 / 0 of 26 | |
+| WikiText-2, KL vs HF / top-1 | 1.3e-4 / 99.2% | 0.244 / 70.1% | |
+
+Decision: do not ship FP8 for Cosmos3-Edge.
+
+- Quality: the official FP8 checkpoint gives a chat KL of 0.03 and an image and
+  video KL of 0.013 against the HF model; no media answer stays equal to HF for
+  64 tokens, and the FP8 and fp16 engines agree for 22 tokens on average. No
+  tested subset of projections, scale set or weight source comes close to the
+  fp16 floor (see ablations).
+- Speed: the decode step is not weight-bandwidth bound. Removing 1.3 GB of
+  weight reads saves 0.2 to 0.4 ms of 2.5 to 2.7 ms; the rest is the fixed-cost
+  explicit attention, norms and launches of 394 TensorRT layers.
+- The clear gain is size: the decoder plan is 41% smaller.
+
+### Recipe that was tried
+
+- Checkpoint: the official ModelOpt FP8 export `nvidia/Cosmos3-Edge-FP8`,
+  revision `cc6b7d7144f9c08b73c38bf2cc0755397fe0bfe6` (ModelOpt 0.44, `FP8`,
+  static per-tensor input scales, max calibration). Its reasoning tensors are
+  the same model as the BF16 checkpoint: embeddings, norms, `lm_head`, vision
+  tower and projector are bit-identical, every weight scale is amax / 448 of
+  the BF16 weights, and 93% to 98% of the FP8 bytes of the projections with
+  their own weight scale equal a fresh quantization of the BF16 weights.
+- Quantized: `to_q`, `to_k`, `to_v`, `to_out`, `mlp.up_proj` and `mlp.down_proj`
+  of all 28 layers (168 projections). The export shares one weight scale and one
+  input scale across `to_q`, `to_k` and `to_v` of a layer. Its ignore list keeps
+  `lm_head`, `visual*` and `projector*` in BF16; the build kept the vision tower,
+  projector, embeddings, norms, attention matmuls and `lm_head` in fp16.
+- Outlier rule: `layers.1.mlp.down_proj` has an input scale 25x the median of
+  its kind and stayed 16-bit (FP8 values dequantized at build time).
+- Graph: `activation -> Quantize -> Dequantize -> MatMul`, FP8 weight constant
+  through Dequantize, both Dequantize layers in fp16, one FP8 GEMM per
+  projection. `to_out` builds as FP8 on TensorRT 11.4 and 11.1 here, because the
+  decoder attention is explicit matmul and softmax, not a fused attention.
+  The dual-GEMM knob was turned off when TensorRT listed it.
+- The checkpoint was calibrated on video-generation captions
+  (`quantization_metadata.json`). On reasoning inputs the activation maxima are
+  up to 2.7x larger than its scales (layer 9 `down_proj`, q/k/v of layers 0, 1,
+  26 and 27).
+
+### Method
+
+- One SLURM job per GPU type; all variants of that job built and timed in one
+  process with TensorRT 11.4.0.106, capacity 1024 (the manifest value), fp16.
+  Decode: one-token step of the decoder plan replayed as a CUDA graph, cache
+  filled, CUDA events, median of 11 interleaved rounds of 50 steps. Prefill:
+  10 runs per round, empty cache. This times the decoder engine only; the
+  family runtime and the visual engine (identical in both bundles) are not
+  included.
+- Quality: B200, TensorRT 11.4, reference Transformers FP32 (SDPA, TF32 off) of
+  `nvidia/Cosmos3-Edge` at the manifest revision. The engines receive the HF
+  input embeddings and MRoPE cosines and sines of the same sequence, so the
+  visual features come from PyTorch and only the decoder is compared.
+  - WikiText-2 test: 40 windows of 1024 tokens, teacher forced.
+  - Chat: 12 held-out Nemotron-Post-Training-Dataset-v1 prompts (chat, code,
+    math, stem) with the chat template, HF greedy answer of 64 tokens; KL and
+    top-1 over the answer positions, and engine greedy decoding compared with
+    HF.
+  - Media: 24 ADE20K (`scene_parse_150` validation) images at up to 640 pixels
+    with three describe/list/where questions, and the family's video asset
+    (4 frames) with two prompts; same metrics.
+- Ablations ran as fake quantization in the HF model (the same FP8 cast on the
+  projection inputs and weights); it reproduces the engine: WikiText KL 0.238
+  vs 0.235, chat 0.039 vs 0.030 on the same samples.
+
+### Speed (TensorRT 11.4, capacity 1024, ms)
+
+| GPU | Variant | Decode step | Prefill 128 | Prefill 512 | Prefill 1024 |
+|---|---|---|---|---|---|
+| B200 | fp16 | 2.726 | 3.130 | 6.563 | 12.092 |
+| B200 | FP8 (fp16 Dequantize) | 2.322 (1.17x) | 2.808 (1.11x) | 5.698 (1.15x) | 10.379 (1.17x) |
+| B200 | FP8, fp32 Dequantize | 2.424 | 2.810 | 6.146 | 11.324 |
+| B200 | NVFP4 MLP, FP8 attention | 2.445 | 2.977 | 5.610 | 10.294 |
+| B300 | fp16 | 2.505 | 3.102 | 6.437 | 11.689 |
+| B300 | FP8 (fp16 Dequantize) | 2.320 (1.08x) | 2.723 (1.14x) | 5.977 (1.08x) | 10.757 (1.09x) |
+| B300 | FP8, fp32 Dequantize | 2.351 | 2.765 | 5.933 | 10.741 |
+| B300 | NVFP4 MLP, FP8 attention | 2.311 | 2.966 | 5.614 | 10.102 |
+
+Both plans have 394 layers; 223 layers of the FP8 plan run e4m3 kernels. The
+unquantized decoder graph was unchanged by the FP8 code (1894 network layers
+before and after, same plan size within 3 KB).
+
+### Quality (B200, TensorRT 11.4, against Transformers FP32)
+
+| Variant | WikiText KL / top-1 / PPL (HF 339.7) | Chat KL / top-1 / greedy equal | Media KL / top-1 / greedy equal |
+|---|---|---|---|
+| fp16 | 0.00013 / 99.2% / 340.2 | 8e-6 / 100% / 12 of 12 | 4e-5 / 99.4% / 20 of 26 |
+| FP8, official scales | 0.244 / 70.1% / 332.3 | 0.030 / 96.9% / 5 of 12 | 0.013 / 94.1% / 0 of 26 |
+| FP8, `layers.1.mlp.down_proj` also FP8 | 0.249 / 70.6% / 340.2 | 0.037 / 95.5% / 1 of 12 | - |
+| NVFP4 MLP, FP8 attention | 0.409 / 61.6% / 361.7 | 0.146 / 91.5% / 0 of 12 | - |
+
+The model gives a perplexity of about 340 on raw WikiText even in FP32: it is a
+reasoning model used with its chat template (see the raw continuation note
+above). The WikiText rows measure agreement with HF, not language-model quality.
+
+Engine ablations (second B200 job, 12 WikiText windows; fp16 floor in that
+build 0.0018 / 97.7%):
+
+| Variant | WikiText KL / top-1 | Chat KL | Media KL / top-1 |
+|---|---|---|---|
+| FP8, official scales and weights | 0.235 / 70.5% | 0.030 | 0.013 / 94.1% |
+| FP8, fp32 Dequantize | 0.236 / 70.3% | 0.031 | 0.013 / 94.9% |
+| FP8, scales recalibrated on reasoning data | 0.305 / 70.5% | 0.047 | 0.010 / 94.6% |
+| FP8, own per-projection weight scales from BF16, recalibrated scales | 0.187 / 71.7% | 0.033 | 0.009 / 95.7% |
+| FP8, own weight scales, official input scales | 0.168 / 72.8% | 0.032 | 0.012 / 94.7% |
+
+Recalibration used 154 held-apart inputs (72 Nemotron v1 prompts, 32
+CNN/DailyMail articles, 48 ADE20K images, 2 video prompts) with 32 generated
+tokens each, maximum of the absolute input per projection. Larger scales did
+not help, so clipping is not the cause.
+
+Fake-quantization ablations (6 WikiText windows, 12 chat answers; all FP8 =
+0.238 / 0.039):
+
+| Quantized | WikiText KL | Chat KL |
+|---|---|---|
+| Weights only (W8A16), all projections | 0.087 | 0.011 |
+| Activations only, all projections | 0.094 | 0.017 |
+| Only `to_q` / `to_k` / `to_v` | 0.013 / 0.015 / 0.050 | 0.002 / 0.002 / 0.002 |
+| Only `to_out` | 0.118 | 0.004 |
+| Only `up_proj` / `down_proj` | 0.039 / 0.100 | 0.026 / 0.007 |
+| Only layer 0 / 1 / 5 / 10 | 0.150 / 0.043 / 0.013 / 0.032 | 0.002 / 0.001 / 0.001 / 0.001 |
+| Only one other layer | 0.001 to 0.004 | 0.0004 to 0.0023 |
+| All except layers 0 and 1 | 0.079 | 0.017 |
+| All except layers 0, 1, 5, 10 and every `to_out` | 0.035 | 0.015 |
+| All except layers 0, 1 and every `down_proj` | 0.047 | 0.028 |
+
+The error is spread over every projection kind and over the first layers; even
+FP8 weights alone (W8A16) give a chat KL of 0.011. Excluding enough layers and
+projections to approach the floor would leave little of the already small
+speedup.
+
+### NVFP4
+
+Measured, not shipped. MLP projections in NVFP4 (weights from the BF16
+checkpoint, input scale = FP8 input scale / 6, `layers.1.mlp.down_proj` in
+16-bit) with FP8 attention: decoder plan 1.42 GiB (FP8 1.84 GiB), decode not
+faster than FP8 (B200 2.445 vs 2.322 ms, B300 2.311 vs 2.320 ms), prefill 1024
+1% to 6% faster, KL 1.7x (WikiText) to 4.9x (chat) worse than FP8.
+
+### Other findings
+
+- The default capacity (2048) gives a visual profile of 8192 patches. Its
+  unquantized fp16 visual plan does not build on TensorRT 11.4 or 11.1 (no
+  tactic fits the 2 GiB workspace for the fp32 attention scores); 4096 patches
+  (capacity 1024) builds. This is independent of FP8.
+- No NaN or Inf appeared in the FP8 logits in the quality runs (about 80
+  sequences with 64 decode steps each, plus 40 WikiText windows); the fp16
+  Dequantize did not overflow. A separate 200-input scan was not run.
+
+### When to revisit
+
+- A Cosmos3-Edge FP8 checkpoint calibrated for reasoning, or a recipe with
+  finer weight or activation scales (per channel, per token) that TensorRT can
+  run as FP8 GEMMs.
+- A decoder whose decode step is weight-bandwidth bound (fused attention, fewer
+  layers per step), which would raise the FP8 share of the time.
+
 ## Owning tests
 
 ```sh
