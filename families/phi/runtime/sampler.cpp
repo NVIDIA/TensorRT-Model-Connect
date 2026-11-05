@@ -22,9 +22,16 @@
 
 namespace trtmc {
 
+static bool is_eos_token(int32_t token_id, const PhiSamplingParams& params) {
+    if (params.eos_token_ids.empty())
+        return token_id == params.eos_token_id;
+    return std::find(params.eos_token_ids.begin(), params.eos_token_ids.end(), token_id) !=
+           params.eos_token_ids.end();
+}
+
 // Host argmax uses the first maximum, matching deterministic greedy decoding.
 static PhiSampleResult argmax_over_logits(const float* logits, int32_t vocab_size,
-                                          int32_t eos_token_id) {
+                                          const PhiSamplingParams& params) {
     PhiSampleResult result;
     const float* best = logits;
     for (int32_t i = 1; i < vocab_size; ++i) {
@@ -32,7 +39,7 @@ static PhiSampleResult argmax_over_logits(const float* logits, int32_t vocab_siz
             best = logits + i;
     }
     result.token_id = static_cast<int32_t>(best - logits);
-    result.is_eos = (result.token_id == eos_token_id);
+    result.is_eos = is_eos_token(result.token_id, params);
     return result;
 }
 
@@ -173,11 +180,11 @@ class GreedySampler final : public PhiISampler {
         if (vocab_size <= 0 || logits == nullptr) {
             PhiSampleResult result;
             result.token_id = 0;
-            result.is_eos = (0 == params.eos_token_id);
+            result.is_eos = is_eos_token(0, params);
             return result;
         }
 
-        return argmax_over_logits(logits, vocab_size, params.eos_token_id);
+        return argmax_over_logits(logits, vocab_size, params);
     }
 };
 
@@ -198,12 +205,12 @@ class TopKSampler final : public PhiISampler {
 
         if (vocab_size <= 0 || logits == nullptr) {
             result.token_id = 0;
-            result.is_eos = (0 == params.eos_token_id);
+            result.is_eos = is_eos_token(0, params);
             return result;
         }
 
         if (greedy_equivalent(params))
-            return argmax_over_logits(logits, vocab_size, params.eos_token_id);
+            return argmax_over_logits(logits, vocab_size, params);
 
         const FilteredDistribution dist = build_filtered_distribution(logits, vocab_size, params);
 
@@ -219,13 +226,13 @@ class TopKSampler final : public PhiISampler {
             cumulative += dist.probs[static_cast<std::size_t>(i)];
             if (u < cumulative) {
                 result.token_id = dist.indices[static_cast<std::size_t>(i)];
-                result.is_eos = (result.token_id == params.eos_token_id);
+                result.is_eos = is_eos_token(result.token_id, params);
                 return result;
             }
         }
 
         result.token_id = dist.indices[static_cast<std::size_t>(dist.keep - 1)];
-        result.is_eos = (result.token_id == params.eos_token_id);
+        result.is_eos = is_eos_token(result.token_id, params);
         return result;
     }
 
@@ -241,7 +248,8 @@ class TopKSampler final : public PhiISampler {
 // ─────────────────────────────────────────────────────────────
 
 PhiSamplingParams phi_sampling_params_from_config(const TextGenerationConfig& cfg,
-                                                  int32_t default_eos) {
+                                                  int32_t default_eos,
+                                                  const std::vector<int32_t>& default_eos_ids) {
     PhiSamplingParams p;
     p.temperature = cfg.temperature;
     p.top_k = cfg.top_k;
@@ -249,6 +257,8 @@ PhiSamplingParams phi_sampling_params_from_config(const TextGenerationConfig& cf
     p.min_p = cfg.min_p;
     p.seed = cfg.seed;
     p.eos_token_id = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : default_eos;
+    p.eos_token_ids =
+        (cfg.eos_token_id >= 0) ? std::vector<int32_t>{cfg.eos_token_id} : default_eos_ids;
     return p;
 }
 
