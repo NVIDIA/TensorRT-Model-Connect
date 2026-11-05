@@ -92,10 +92,11 @@ def _build_condition_plan(cfg, weights, *, precision: str, verbose: bool = False
     causal = network.add_input("causal_bias", trt.float32, (1, 1, -1, -1))
     state = network.add_input("state", trt.float32, (1, cfg.max_state_dim))
 
-    # The vision tower runs in float32 in either precision: in bfloat16 it is the largest error
-    # source (image tokens off by 3-6% of their range), and float32 halves the action error.
+    # The vision tower runs in the build precision, as LeRobot's bfloat16 autocast runs it (the
+    # fine-tune keeps the base model's bfloat16 vision weights); only its query/key/value
+    # projection stays float32 (see vision.build_vision).
     tokens, deepstack = vision.build_vision(
-        network, pixels, weights, images=len(cfg.cameras), grid_h=grid, grid_w=grid, dtype=trt.float32)
+        network, pixels, weights, images=len(cfg.cameras), grid_h=grid, grid_w=grid, dtype=dtype)
     hidden = backbone.build_backbone(
         network, weights, token_ids=ids["token_ids"], image_index=ids["image_index"], image_mask=ids["image_mask"],
         position_ids=positions, causal_bias=causal, image_tokens=tokens, deepstack=deepstack, dtype=dtype)
