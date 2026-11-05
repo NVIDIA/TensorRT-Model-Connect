@@ -40,6 +40,17 @@ def test_build_uses_the_catalog_manifest_or_a_descriptor_with_build_overrides(tm
     image = Path(descriptor["testcases"][0]["test_image"])
     assert image.is_absolute() and image.is_file()  # catalog assets stay reachable from the descriptor
 
+    # A model directory prepared in the reference environment replaces only the checkpoint: PersonaPlex FP8 builds
+    # its own FP8 manifest from its base's prepared directory.
+    prepared = tmp_path / "env/trtmc-reference/personaplex-model"
+    prepared.mkdir(parents=True)
+    fp8 = resolve_model("personaplex-7b-fp8", environment)
+    command = bundles.build_command(environment, fp8, tmp_path / "fp8", str(tmp_path / "env/bin/python"))
+    descriptor = json.loads(Path(command[command.index("--model") + 1]).read_text())
+    assert (descriptor["name"], descriptor["quantization"], descriptor["precision"]) == (
+        "personaplex-7b-fp8", "fp8", "fp16")
+    assert (descriptor["hf_id"], descriptor["hf_revision"]) == (str(prepared.resolve()), "")
+
 
 def test_ensure_bundle_lets_trtmc_bench_decide_reuse_by_its_build_receipt(tmp_path, monkeypatch):
     environment = Environment({"repo": str(tmp_path), "bundle_root": str(tmp_path / "engines"),

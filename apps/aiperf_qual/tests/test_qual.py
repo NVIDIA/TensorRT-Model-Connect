@@ -625,11 +625,13 @@ def test_quantized_profiles_take_their_bases_native_reference_and_benchmarks():
     assert canary["qualified_as"] == "canary-1b-v2" and "model" not in canary["reference"]
     assert canary["reference"]["adapter"] == "families/canary/reference/adapter.py"
     assert canary["reference"]["revision"] == canary["candidate"]["revision"]
-    # The base's candidate settings stay its own: the variant builds its catalog bundle.
-    personaplex = resolve_model("personaplex-7b-fp8", environment)
-    assert personaplex["reference"]["adapter"] == resolve_model("personaplex-7b", environment)["reference"]["adapter"]
+    # The base's candidate settings stay its own. PersonaPlex FP8 quantizes its base's checkpoint at build time and
+    # names the base's prepared model directory itself, so both bundles hold the benchmark's system prompt.
+    personaplex, base = resolve_model("personaplex-7b-fp8", environment), resolve_model("personaplex-7b", environment)
+    assert personaplex["reference"]["adapter"] == base["reference"]["adapter"]
     assert personaplex["candidate"]["bundle"] == "personaplex-7b-fp8/personaplex-7b-fp8.bundle"
-    assert "model_directory" not in personaplex["candidate"]
+    assert personaplex["candidate"]["model_directory"] == base["candidate"]["model_directory"]
+    assert personaplex["candidate"]["quantization"] == "fp8"
     # Without an unquantized profile, the highest precision there is.
     nvfp4 = resolve_model("llama-3.1-8b-nvfp4", environment)
     assert (nvfp4["qualified_as"], nvfp4["reference"]["model"]) == ("llama-3.1-8b-fp8", "nvidia/Llama-3.1-8B-Instruct-FP8")

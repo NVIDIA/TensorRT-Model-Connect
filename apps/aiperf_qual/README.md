@@ -196,7 +196,9 @@ that configuration except `candidate` (benchmarks, requests, native adapter, req
 under its own and answers the benchmarks on that profile's route (chat or completions; the sampling stays its own
 catalog request's), and when its checkpoint is a separate pre-quantized repository, its native reference loads that
 profile's checkpoint. Its candidate stays its own bundle, held to the benchmarks' quantization gates;
-`qualified_as` in the plan names the profile it follows.
+`qualified_as` in the plan names the profile it follows. When the base builds from a prepared
+`candidate.model_directory` that the benchmark depends on, a profile that quantizes the same checkpoint at build
+time names that directory in its own definition (`personaplex-7b-fp8`: the bundle holds the VoiceBench system prompt).
 
 ### Reference environments
 
