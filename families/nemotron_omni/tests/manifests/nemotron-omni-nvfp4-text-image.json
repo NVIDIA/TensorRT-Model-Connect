@@ -14,6 +14,9 @@
     {
       "name": "nemotron-omni-nvfp4-text-image",
       "premerge": false,
+      "prompt": "List the colors of the three small vases on the table, from left to right. Reply only with the colors separated by commas.",
+      "max_new_tokens": 96,
+      "test_image": "data/example_reasoning_input.png",
       "reference_backend": "golden_snapshot",
       "modalities": [
         "text",
