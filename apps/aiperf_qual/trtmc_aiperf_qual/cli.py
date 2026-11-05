@@ -566,7 +566,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if arguments.command == "run-all":
             from . import preflight
-            from .campaign import exit_code, parse_shard, run_all, shard, write_exclusions, write_plan
+            from .campaign import exit_code, parse_shard, run_all, set_aside, shard, write_exclusions, write_plan
 
             serve_python = environment.values.get("serve_python")
             if serve_python and Path(str(serve_python)).is_file():
@@ -588,6 +588,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 except ConfigError as error:
                     config_errors.append({"profile": name, "reason": str(error)})
                     print(json.dumps({"profile": name, "category": "config-error", "reason": str(error)}), flush=True)
+                    # An older result must not stand in for a profile that no longer configures: the summary
+                    # takes a result directory over the plan's configuration error.
+                    set_aside(arguments.out_root / name)
             if arguments.shard:
                 models = shard(models, *parse_shard(arguments.shard))
             extra = None
