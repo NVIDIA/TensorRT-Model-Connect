@@ -27,7 +27,7 @@ def _cases() -> dict[str, tuple[dict, dict]]:
     for path in sorted(MANIFEST_ROOT.glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == FAMILY
-        assert manifest["task"] == "object_detection"
+        assert manifest["task"] == "image_to_boxes"
         for case in manifest["testcases"]:
             name = str(case["name"])
             assert name not in result
@@ -103,6 +103,75 @@ def _asset(case: dict) -> Path:
     return path
 
 
+def _assert_matches_reference(
+    actual: dict, kept: np.ndarray, scale: float, pad_x: float, pad_y: float
+) -> None:
+    """The original native-vs-PyTorch oracle, applied unchanged to every path."""
+    assert len(kept), "the reference found nothing above the threshold to compare against"
+    assert len(actual["scores"]) == len(kept), (
+        f"engine returned {len(actual['scores'])} detections, reference {len(kept)}"
+    )
+    for index, row in enumerate(kept):
+        x0, y0, x1, y1, score, label = row
+        assert int(actual["classes"][index]) == int(label)
+        assert abs(float(actual["scores"][index]) - float(score)) < 5e-3
+        # The engine reports source-image pixels, so the reference box has to
+        # come back out of the letterbox before they can be compared.
+        expected = (
+            (float(x0) - pad_x) / scale,
+            (float(y0) - pad_y) / scale,
+            (float(x1) - pad_x) / scale,
+            (float(y1) - pad_y) / scale,
+        )
+        for axis, want in enumerate(expected):
+            # Each path writes the boxes as one flat array, four per detection.
+            assert abs(float(actual["boxes"][index * 4 + axis]) - want) < 1.0
+
+
+def _sdk_detections(runtime_root: Path, bundle: Path, image: Path, tmp_path: Path) -> list[dict]:
+    """Run the public C and C++ consumers on the reference's own decoded pixels."""
+    from PIL import Image
+
+    native_build = _required_path(
+        os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR"
+    )
+    pixels = np.asarray(Image.open(image).convert("RGB"), dtype=np.float32) / np.float32(255.0)
+    raw = tmp_path / "sdk-input.rgb.f32"
+    np.ascontiguousarray(pixels).tofile(raw)
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = os.pathsep.join(
+        value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value
+    )
+    outputs = []
+    for language in ("c", "cpp"):
+        consumer = native_build / f"test_yolov8_sdk_{language}"
+        assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
+        completed = subprocess.run(
+            [
+                str(consumer),
+                str(bundle),
+                str(runtime_root),
+                str(raw),
+                str(pixels.shape[0]),
+                str(pixels.shape[1]),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=600,
+        )
+        payloads = [line for line in completed.stdout.splitlines() if line.startswith("{")]
+        assert len(payloads) == 1, f"the {language} consumer must print one result"
+        result = json.loads(payloads[0])
+        assert result["task"] == "image_to_boxes"
+        assert (result["image_height"], result["image_width"]) == pixels.shape[:2]
+        outputs.append(result)
+    # Same pixels, same bundle, same runtime: the two public bindings agree exactly.
+    assert outputs[0] == outputs[1], "the C and C++ SDK consumers disagree"
+    return outputs
+
+
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     manifest, case = CASES[case_name]
     binary = _required_path(os.environ.get("TRTMC_BINARY"), "TRTMC_BINARY")
@@ -150,23 +219,8 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     with np.load(reference_output, allow_pickle=False) as result:
         kept = result["kept"]
         scale, pad_x, pad_y = (float(result[name]) for name in ("scale", "pad_x", "pad_y"))
-
-    assert len(kept), "the reference found nothing above the threshold to compare against"
-    assert len(actual["scores"]) == len(kept), (
-        f"engine returned {len(actual['scores'])} detections, reference {len(kept)}"
-    )
-    for index, row in enumerate(kept):
-        x0, y0, x1, y1, score, label = row
-        assert int(actual["classes"][index]) == int(label)
-        assert abs(float(actual["scores"][index]) - float(score)) < 5e-3
-        # The engine reports source-image pixels, so the reference box has to
-        # come back out of the letterbox before they can be compared.
-        expected = (
-            (float(x0) - pad_x) / scale,
-            (float(y0) - pad_y) / scale,
-            (float(x1) - pad_x) / scale,
-            (float(y1) - pad_y) / scale,
-        )
-        for axis, want in enumerate(expected):
-            # The CLI writes the boxes as one flat array, four per detection.
-            assert abs(float(actual["boxes"][index * 4 + axis]) - want) < 1.0
+    _assert_matches_reference(actual, kept, scale, pad_x, pad_y)
+    # The public SDK reads the same pixels the reference decoded, so it is held to
+    # the same oracle; the CLI's own JPEG decoder is not claimed bitwise equal.
+    for sdk in _sdk_detections(runtime_root, bundle, image, tmp_path):
+        _assert_matches_reference(sdk, kept, scale, pad_x, pad_y)
