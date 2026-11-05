@@ -18,6 +18,7 @@ from .native_kv_attention_builder import (
 )
 from .checkpoint_mapper import WeightDict, load_lfm3_weights
 from .config import DenseLfm3Config, validate_dense_lfm3_config
+from .quantization import Lfm3QuantContext, calibrate_lfm3_fp8, configure_fp8_build
 
 if TYPE_CHECKING:
     from tensorrt_model_connect.build import BuildRequest
@@ -75,6 +76,8 @@ def _matmul(
     storage_dtype: np.dtype,
     work_dtype: trt.DataType,
     name: str,
+    quant_ctx: Lfm3QuantContext | None = None,
+    weight_name: str | None = None,
 ) -> trt.ITensor:
     array = np.asarray(rhs)
     expected = (lhs_width, rhs_width)
@@ -82,6 +85,8 @@ def _matmul(
         raise ValueError(
             f"mapped LFM3 weight {name} must have shape {expected}, got {tuple(array.shape)}"
         )
+    if quant_ctx is not None and weight_name is not None and quant_ctx.should_quantize(weight_name):
+        return quant_ctx.quantized_matmul(network, lhs, weight_name, name=name)
     rhs_tensor = _work_constant(
         network, expected, array, storage_dtype=storage_dtype, work_dtype=work_dtype
     )
@@ -333,6 +338,7 @@ def _add_conv_layer(
     config: DenseLfm3Config,
     storage_dtype: np.dtype,
     work_dtype: trt.DataType,
+    quant_ctx: Lfm3QuantContext | None = None,
 ) -> tuple[trt.ITensor, trt.ITensor]:
     hidden = config.hidden_size
     projected = _matmul(
@@ -344,6 +350,8 @@ def _add_conv_layer(
         storage_dtype=storage_dtype,
         work_dtype=work_dtype,
         name=f"{prefix}.conv.in_proj",
+        quant_ctx=quant_ctx,
+        weight_name=f"{prefix}.conv_in",
     )
     projected = _bias(
         network,
@@ -405,6 +413,8 @@ def _add_conv_layer(
         storage_dtype=storage_dtype,
         work_dtype=work_dtype,
         name=f"{prefix}.conv.out_proj",
+        quant_ctx=quant_ctx,
+        weight_name=f"{prefix}.conv_out",
     )
     output = _bias(
         network,
@@ -426,6 +436,7 @@ def _add_swiglu(
     config: DenseLfm3Config,
     storage_dtype: np.dtype,
     work_dtype: trt.DataType,
+    quant_ctx: Lfm3QuantContext | None = None,
 ) -> trt.ITensor:
     left = _matmul(
         network,
@@ -436,6 +447,8 @@ def _add_swiglu(
         storage_dtype=storage_dtype,
         work_dtype=work_dtype,
         name=f"{prefix}.feed_forward.w1",
+        quant_ctx=quant_ctx,
+        weight_name=f"{prefix}.w1",
     )
     right = _matmul(
         network,
@@ -446,6 +459,8 @@ def _add_swiglu(
         storage_dtype=storage_dtype,
         work_dtype=work_dtype,
         name=f"{prefix}.feed_forward.w3",
+        quant_ctx=quant_ctx,
+        weight_name=f"{prefix}.w3",
     )
     gated = network.add_elementwise(
         _silu(network, left), right, trt.ElementWiseOperation.PROD
@@ -459,6 +474,8 @@ def _add_swiglu(
         storage_dtype=storage_dtype,
         work_dtype=work_dtype,
         name=f"{prefix}.feed_forward.w2",
+        quant_ctx=quant_ctx,
+        weight_name=f"{prefix}.w2",
     )
 
 
@@ -493,6 +510,7 @@ def build_lfm3_engine(
     precision: str = "bf16",
     verbose: bool = False,
     debug_layer_outputs: bool = False,
+    quant_ctx: Lfm3QuantContext | None = None,
 ) -> bytes:
     """Build a static one-token LFM3 engine with native TensorRT KV updates."""
     cfg = validate_dense_lfm3_config(config)
@@ -511,6 +529,7 @@ def build_lfm3_engine(
     builder_config = builder.create_builder_config()
     builder_config.builder_optimization_level = 1
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
+    configure_fp8_build(builder_config, quant_ctx)
     token_id = network.add_input("token_id", trt.int32, (1,))
     position_id = network.add_input("position_id", trt.int32, (1,))
     cache_write_indices = network.add_input("cache_write_indices", trt.int32, (1,))
@@ -595,6 +614,7 @@ def build_lfm3_engine(
                 config=cfg,
                 storage_dtype=storage_dtype,
                 work_dtype=work_dtype,
+                quant_ctx=quant_ctx,
             )
             present_conv_outputs.append(present_conv)
             conv_index += 1
@@ -609,6 +629,8 @@ def build_lfm3_engine(
                 storage_dtype=storage_dtype,
                 work_dtype=work_dtype,
                 name=f"{prefix}.self_attn.q_proj",
+                quant_ctx=quant_ctx,
+                weight_name=f"{prefix}.w_q",
             )
             k = _matmul(
                 network,
@@ -619,6 +641,8 @@ def build_lfm3_engine(
                 storage_dtype=storage_dtype,
                 work_dtype=work_dtype,
                 name=f"{prefix}.self_attn.k_proj",
+                quant_ctx=quant_ctx,
+                weight_name=f"{prefix}.w_k",
             )
             v = _matmul(
                 network,
@@ -629,6 +653,8 @@ def build_lfm3_engine(
                 storage_dtype=storage_dtype,
                 work_dtype=work_dtype,
                 name=f"{prefix}.self_attn.v_proj",
+                quant_ctx=quant_ctx,
+                weight_name=f"{prefix}.w_v",
             )
             q = _per_head_rms_norm(
                 network,
@@ -705,6 +731,8 @@ def build_lfm3_engine(
                 storage_dtype=storage_dtype,
                 work_dtype=work_dtype,
                 name=f"{prefix}.self_attn.out_proj",
+                quant_ctx=quant_ctx,
+                weight_name=f"{prefix}.w_o",
             )
             present_k_outputs.append(native["present_k"])
             present_v_outputs.append(native["present_v"])
@@ -737,6 +765,7 @@ def build_lfm3_engine(
             config=cfg,
             storage_dtype=storage_dtype,
             work_dtype=work_dtype,
+            quant_ctx=quant_ctx,
         )
         if cfg.use_sandwich_norm:
             ffn_output = _rms_norm(
@@ -786,7 +815,7 @@ def build_lfm3_engine(
         network.mark_output(tensor)
     if verbose:
         print(
-            f"[trtmc build] Building LFM3 native hybrid engine (layers={cfg.num_hidden_layers}, conv={cfg.num_conv_layers}, attention={cfg.num_attention_layers}, hidden={cfg.hidden_size}, cache={max_cache_length}, precision={precision}, ) ...",
+            f"[trtmc build] Building LFM3 native hybrid engine (layers={cfg.num_hidden_layers}, conv={cfg.num_conv_layers}, attention={cfg.num_attention_layers}, hidden={cfg.hidden_size}, cache={max_cache_length}, precision={precision}, fp8_projections={0 if quant_ctx is None else len(quant_ctx.scales)}) ...",
             file=sys.stderr,
         )
     plan = builder.build_serialized_network(network, builder_config)
@@ -889,7 +918,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         )
     if request.tensor_parallel_size != 1:
         raise NotImplementedError("dense LFM3 does not support tensor-parallel builds")
-    if request.quantization not in {None, "none"}:
+    if request.quantization not in {None, "none", "fp8"}:
         raise NotImplementedError(
             f"dense LFM3 does not support quantization={request.quantization!r}"
         )
@@ -898,6 +927,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.mtp_seq_len is not None:
         raise NotImplementedError("dense LFM3 does not support MTP speculative decoding")
     weights = load_lfm3_weights(str(model_dir), config, precision=precision)
+    quant_ctx = calibrate_lfm3_fp8(resolved, weights) if request.quantization == "fp8" else None
     plan = build_lfm3_engine(
         config,
         weights,
@@ -905,6 +935,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         precision=precision,
         verbose=bool(request.verbose),
         debug_layer_outputs=False,
+        quant_ctx=quant_ctx,
     )
     runtime_config = _runtime_config(
         model_dir,
