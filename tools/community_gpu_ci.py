@@ -1969,8 +1969,10 @@ def run_containers(
     runner = Path(__file__).resolve()
     run_id = uuid.uuid4().hex
     failures = []
-    # Reserve a quarter of host RAM and two CPUs for Docker, SSH and the coordinator.
-    memory_limit = int(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") * 0.75)
+    # Reserve 4 GiB of host RAM and two CPUs for Docker, SSH and the coordinator.
+    memory_limit = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") - 4 * 1024**3
+    if memory_limit <= 0:
+        raise CommunityGpuError("The GPU host must have more than 4 GiB of RAM")
     cpu_limit = max(1, (os.cpu_count() or 2) - 2)
     try:
         for family in active:

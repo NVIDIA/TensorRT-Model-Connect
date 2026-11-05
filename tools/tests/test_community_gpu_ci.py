@@ -1616,15 +1616,22 @@ def test_explicit_checkpoint_authority_cannot_override_the_protected_catalog(
 
 @pytest.mark.parametrize("failed_family", [None, "alpha"])
 @pytest.mark.parametrize("shared_store", [None, "classic", "containerd"])
+@pytest.mark.parametrize("host_ram_gib", [4, 64, 128])
 def test_containers_are_sequential_and_failures_do_not_skip_families(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failed_family: str | None,
     shared_store: str | None,
+    host_ram_gib: int,
 ) -> None:
     """Each execution is removed before the next family starts, including failures."""
     events = []
     staged = []
+    monkeypatch.setattr(
+        community_gpu_ci.os,
+        "sysconf",
+        lambda key: {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": host_ram_gib * 1024**3 // 4096}[key],
+    )
     _planned_owners(tmp_path, "alpha", "beta", "gamma")
     image = "sha256:" + "a" * 64
     catalog = None
@@ -1672,6 +1679,9 @@ def test_containers_are_sequential_and_failures_do_not_skip_families(
             # Retain exit/OOM state until inspection, then explicitly remove it.
             assert "--rm" not in command
             assert "--memory" in command and "--memory-swap" in command
+            expected_memory = str((host_ram_gib - 4) * 1024**3)
+            assert command[command.index("--memory") + 1] == expected_memory
+            assert command[command.index("--memory-swap") + 1] == expected_memory
             assert f"{tmp_path}:/src:ro" in command
             assert (
                 f"{Path(community_gpu_ci.__file__).resolve()}:/opt/community_gpu_ci.py:ro"
@@ -1703,6 +1713,11 @@ def test_containers_are_sequential_and_failures_do_not_skip_families(
         "TRTMC_GPU_DIRECT_FAMILIES": '["alpha","beta","gamma"]',
         "TRTMC_GPU_ADDED_FAMILIES": "[]",
     }
+    if host_ram_gib <= 4:
+        with pytest.raises(CiError, match="more than 4 GiB"):
+            community_gpu_ci.run_containers(tmp_path, env, "test-image", dependency_catalog=catalog)
+        assert not events and not staged
+        return
     if failed_family:
         with pytest.raises(CiError, match="alpha: container exited 17"):
             community_gpu_ci.run_containers(tmp_path, env, "test-image", dependency_catalog=catalog)
