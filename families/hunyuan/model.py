@@ -37,12 +37,14 @@ def _build_engine(
     *,
     precision: str,
     verbose: bool,
+    quant_ctx=None,
 ) -> bytes:
     return build_standard_decoder_engine(
         config,
         weights,
         max_sequence_length,
         precision=precision,
+        quant_ctx=quant_ctx,
         norm_type="rmsnorm",
         mlp_type="swiglu",
         position_type="rope",
@@ -141,14 +143,25 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             raise ValueError("Hunyuan max_sequence_length exceeds checkpoint context capacity")
         if request.tensor_parallel_size != 1:
             raise NotImplementedError("Hunyuan does not expose a tensor-parallel builder")
-        if request.quantization not in {None, "none"}:
-            raise NotImplementedError("Hunyuan has no qualified family-owned quantized build")
+        if request.quantization not in {None, "none", "fp8"}:
+            raise NotImplementedError(
+                f"Hunyuan does not support quantization={request.quantization!r}"
+            )
+        quantized = request.quantization == "fp8"
+        if quantized and precision not in {"fp16", "bf16"}:
+            raise NotImplementedError("Hunyuan fp8 quantization requires precision fp16 or bf16")
         if request.fp32_layers:
             raise NotImplementedError("Hunyuan does not expose mixed-precision layer selection")
 
         config.raw["_model_dir"] = str(model_dir)
         config.raw["_resolved_build_precision"] = precision
         weights = load_standard_weights(str(model_dir), config, precision=precision)
+        quant_ctx = None
+        if quantized:
+            from . import graph_ops
+            from .quantization import calibrate_hunyuan_fp8
+
+            quant_ctx = calibrate_hunyuan_fp8(config, weights, graph_ops)
         config.raw["_decoder_engine_role"] = "prefill"
         prefill = _build_engine(
             config,
@@ -156,6 +169,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             max_sequence_length,
             precision=precision,
             verbose=bool(request.verbose),
+            quant_ctx=quant_ctx,
         )
         config.raw["_decoder_engine_role"] = "decode"
         decode = _build_engine(
@@ -164,6 +178,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             max_sequence_length,
             precision=precision,
             verbose=bool(request.verbose),
+            quant_ctx=quant_ctx,
         )
         config.raw.pop("_decoder_engine_role", None)
 
