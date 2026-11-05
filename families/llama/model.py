@@ -240,9 +240,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         # Default to the full context only when the route this request takes at
         # that length keeps its prefill mask bounded; otherwise keep the short
         # dense fallback instead of emitting a bundle with an oversized mask.
+        # A runtime-sized KV cache bounds prefill on every architecture, so
+        # only the native route needs the native architecture contract.
         default_length = (
             full_context
-            if architecture.eligible
+            if (architecture.eligible or request.dynamic_kv_cache)
             and _dense_mask_error(config, request, precision, full_context, dense_only) is None
             else min(full_context, 256)
         )

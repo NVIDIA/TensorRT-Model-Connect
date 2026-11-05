@@ -420,6 +420,8 @@ def test_support_defaults_llama_to_native_precision():
         ({"precision": "fp16"}, {"max_position_embeddings": 8192}, 8192),
         # Architectures outside the native contract keep the short fallback.
         ({"precision": "bf16"}, {"num_attention_heads": 4}, 256),
+        # ...unless a runtime-sized KV cache bounds prefill.
+        ({"precision": "fp16", "dynamic_kv_cache": True}, {"num_attention_heads": 4}, 131072),
     ],
 )
 def test_default_length_follows_selected_route(
@@ -543,6 +545,20 @@ def test_dense_builder_rejects_unbounded_prefill_profile():
     weights = {"embedding": np.zeros((32, 256), np.float16), "final_norm": np.ones(256)}
     with pytest.raises(ValueError, match="attention_mask profile maximum"):
         build_dual_profile_decoder_engine(config, weights, 131072, precision="fp16")
+
+
+def test_dense_builder_skips_the_mask_check_for_decode_only_profiles():
+    """A decode-only build emits one fixed row, so a long cache is not a prefill mask."""
+    pytest.importorskip("tensorrt")
+    from ..dual_profile_decoder_builder import build_dual_profile_decoder_engine
+
+    config = ModelConfig.from_json(json.dumps(_NATIVE_ELIGIBLE_CONFIG))
+    weights = {"embedding": np.zeros((32, 256), np.float16), "final_norm": np.ones(256)}
+    with pytest.raises(Exception) as error:  # the stub weights stop the build later
+        build_dual_profile_decoder_engine(
+            config, weights, 131072, precision="fp16", profile_mode="decode"
+        )
+    assert "attention_mask profile maximum" not in str(error.value)
 
 
 @pytest.mark.parametrize("entry", ["family", "shared"])
