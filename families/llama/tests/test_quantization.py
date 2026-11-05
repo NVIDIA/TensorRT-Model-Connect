@@ -215,7 +215,10 @@ def test_request_accepts_supported_quantization(value) -> None:
 @pytest.mark.gpu
 @pytest.mark.trt
 @pytest.mark.parametrize("quantization", ["fp8", "nvfp4"])
-def test_engine_builds_with_packed_weights(tmp_path: Path, quantization: str) -> None:
+@pytest.mark.parametrize("decoder_role", ["dual_profile", "decode"])
+def test_engine_builds_with_packed_weights(
+    tmp_path: Path, quantization: str, decoder_role: str
+) -> None:
     """The quantized engine builds and is smaller than the unquantized one.
 
     Both engines are built from the production weight loader, so the quantized
@@ -225,6 +228,7 @@ def test_engine_builds_with_packed_weights(tmp_path: Path, quantization: str) ->
     _write_checkpoint(plain_dir, "none")
     _write_checkpoint(quant_dir, quantization)
     config = _config()
+    config.raw["_decoder_engine_role"] = decoder_role
     ctx = calibrate_llama(quant_dir, config, graph_ops, quantization)
     assert isinstance(ctx, LlamaQuantContext)
 
@@ -244,6 +248,8 @@ def test_engine_builds_with_packed_weights(tmp_path: Path, quantization: str) ->
 
     engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(quantized)
     assert engine is not None
+    if decoder_role == "decode" and quantization == "nvfp4":
+        assert engine.num_aux_streams == 0
     names = {engine.get_tensor_name(i) for i in range(engine.num_io_tensors)}
     assert {"token_id", "logits", "present_k_0"} <= names
     # 7 projections x 2 layers: FP8 halves and FP4 quarters the fp16 projection bytes,
