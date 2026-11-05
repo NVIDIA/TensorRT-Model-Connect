@@ -21,7 +21,7 @@ from . import graph as g
 PREFIX = "owlv2.vision_model"
 
 
-def build_features(network, pixels, weights, cfg, *, dtype=np.float32):
+def build_features(network, pixels, weights, cfg, *, dtype=np.float32, quant=None):
     """Pixels ``[1, 3, size, size]`` to per-patch features ``[num_patches, width]``."""
     width = cfg["hidden_size"]
     count = cfg["num_patches"]
@@ -44,7 +44,7 @@ def build_features(network, pixels, weights, cfg, *, dtype=np.float32):
     hidden = g.add_layer_norm(network, hidden, weights[f"{PREFIX}.pre_layernorm.weight"],
                               weights[f"{PREFIX}.pre_layernorm.bias"], cfg["eps"])
     hidden = encoder_builder.build_layers(network, hidden, weights, PREFIX, cfg,
-                                          mask=None, dtype=dtype)
+                                          mask=None, dtype=dtype, quant=quant)
     # The whole sequence, not just the pooled row.
     hidden = g.add_layer_norm(network, hidden, weights[f"{PREFIX}.post_layernorm.weight"],
                               weights[f"{PREFIX}.post_layernorm.bias"], cfg["eps"])

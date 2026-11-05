@@ -39,34 +39,30 @@ def box_bias(grid: int) -> np.ndarray:
     return np.concatenate([centre_bias, size_bias], axis=-1).astype(np.float32)
 
 
-def _mlp(network, feats, weights, prefix, *, dtype):
-    hidden = g.add_linear(network, feats, weights[f"{prefix}.dense0.weight"],
-                          weights[f"{prefix}.dense0.bias"], dtype=dtype)
+def _mlp(network, feats, weights, prefix, *, dtype, quant=None):
+    hidden = g.add_projection(network, feats, weights, f"{prefix}.dense0", dtype, quant=quant)
     hidden = network.add_activation(hidden, trt.ActivationType.GELU_ERF).get_output(0)
-    hidden = g.add_linear(network, hidden, weights[f"{prefix}.dense1.weight"],
-                          weights[f"{prefix}.dense1.bias"], dtype=dtype)
+    hidden = g.add_projection(network, hidden, weights, f"{prefix}.dense1", dtype, quant=quant)
     hidden = network.add_activation(hidden, trt.ActivationType.GELU_ERF).get_output(0)
-    return g.add_linear(network, hidden, weights[f"{prefix}.dense2.weight"],
-                        weights[f"{prefix}.dense2.bias"], dtype=dtype)
+    return g.add_projection(network, hidden, weights, f"{prefix}.dense2", dtype, quant=quant)
 
 
-def build_boxes(network, feats, weights, *, grid, dtype=np.float32):
+def build_boxes(network, feats, weights, *, grid, dtype=np.float32, quant=None):
     """Per-patch boxes as normalised ``cxcywh`` in ``[0, 1]``, shape ``[patches, 4]``."""
-    raw = _mlp(network, feats, weights, "box_head", dtype=dtype)
+    raw = _mlp(network, feats, weights, "box_head", dtype=dtype, quant=quant)
     biased = g.add_sum(network, raw, g.add_constant(network, (grid * grid, 4), box_bias(grid),
                                                     dtype=dtype))
     return network.add_activation(biased, trt.ActivationType.SIGMOID).get_output(0)
 
 
-def build_class_terms(network, feats, weights, *, dtype=np.float32):
+def build_class_terms(network, feats, weights, *, dtype=np.float32, quant=None):
     """The three per-patch tensors the runtime needs to score any set of queries.
 
     Returns normalised class embeddings ``[patches, query_dim]``, a shift
     ``[patches, 1]`` and a strictly positive scale ``[patches, 1]``. Keeping
     them apart is what lets the prompt stay out of the engine.
     """
-    embeds = g.add_linear(network, feats, weights["class_head.dense0.weight"],
-                          weights["class_head.dense0.bias"], dtype=dtype)
+    embeds = g.add_projection(network, feats, weights, "class_head.dense0", dtype, quant=quant)
     embeds = g.add_l2_normalise_eps(network, embeds)
     shift = g.add_linear(network, feats, weights["class_head.logit_shift.weight"],
                          weights["class_head.logit_shift.bias"], dtype=dtype)
