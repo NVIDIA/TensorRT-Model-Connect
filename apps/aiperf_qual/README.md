@@ -72,6 +72,8 @@ A suite with `base: catalog` overrides the profile's catalog request with its da
 For a profile with `candidate.benchmark_sequence_length`, the build counts the prepared
 gold-suite prompts with its pinned tokenizer and uses their maximum length plus the configured
 `extra_tokens`. Qwen3-Embedding reserves one token for EOS and four for runtime tokenizer count differences.
+EmbeddingGemma2 reserves none: its runtime tokenizer counts every benchmark prompt as Transformers does, BOS and
+EOS included.
 The evidence is written to
 `artifacts/build/benchmark-capacity.json`; request truncation and accuracy tolerances do not change.
 Dataset or tokenizer failures stop capacity planning rather than falling back to the catalog size.

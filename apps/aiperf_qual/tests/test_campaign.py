@@ -507,15 +507,18 @@ def test_summary_omits_exclusions_but_keeps_an_actual_result_from_another_host(t
     assert len(json.loads((root / campaign.EXCLUSIONS).read_text())) == 2
 
 
-def test_build_capacity_covers_prepared_benchmark_requests_and_extra_tokens(tmp_path, monkeypatch):
+@pytest.mark.parametrize("profile, extra_tokens", [
+    ("qwen3-embedding-0.6b", 5), ("embeddinggemma2-text-bf16", 0), ("embeddinggemma2-text-fp32", 0)])
+def test_build_capacity_covers_prepared_benchmark_requests_and_extra_tokens(tmp_path, monkeypatch, profile,
+                                                                             extra_tokens):
     from trtmc_aiperf_qual import absolute
     from trtmc_aiperf_qual.models import resolve_model
 
     environment = Environment({"repo": str(REPOSITORY), "bundle_root": str(tmp_path / "engines"),
                                "runtime_root": "/rt", "worker": "/rt/worker", "serve_python": "/py"})
-    model = resolve_model("qwen3-embedding-0.6b", environment)
+    model = resolve_model(profile, environment)
     plans = {"stsb": [{"request": {"prompt": "short"}}],
-             "scifact-retrieval": [{"request": {"prompt": "x" * 256}}]}
+             "scifact-retrieval": [{"request": {"prompt": "x" * 258}}]}  # over the catalog's 256 tokens
     monkeypatch.setattr(absolute, "plan", lambda environment, model, item: plans[item["suite"]])
 
     class Tokenizer:
@@ -526,11 +529,11 @@ def test_build_capacity_covers_prepared_benchmark_requests_and_extra_tokens(tmp_
     monkeypatch.setattr(absolute, "_candidate_tokenizer", lambda model: Tokenizer())
     command = bundles.build_command(environment, model, tmp_path / "build")
     descriptor = json.loads(Path(command[command.index("--model") + 1]).read_text())
-    assert descriptor["max_sequence_length"] == model["candidate"]["max_sequence_length"] == 261
-    assert model["candidate"]["bundle"].startswith("qwen3-embedding-0.6b-benchmark/")
-    assert plans["scifact-retrieval"][0]["request"]["prompt"] == "x" * 256
+    assert descriptor["max_sequence_length"] == model["candidate"]["max_sequence_length"] == 258 + extra_tokens
+    assert model["candidate"]["bundle"].startswith(f"{profile}-benchmark/")
+    assert plans["scifact-retrieval"][0]["request"]["prompt"] == "x" * 258
     evidence = json.loads((tmp_path / "build/benchmark-capacity.json").read_text())
-    assert evidence["required_sequence_length"] == 261 and evidence["extra_tokens"] == 5
+    assert evidence["required_sequence_length"] == 258 + extra_tokens and evidence["extra_tokens"] == extra_tokens
 
 
 def test_benchmark_capacity_planning_failure_prevents_a_catalog_fallback(tmp_path, monkeypatch):
