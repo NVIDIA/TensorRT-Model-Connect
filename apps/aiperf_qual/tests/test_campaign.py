@@ -709,6 +709,25 @@ def test_summary_counts_every_planned_profile(tmp_path):
     assert len(json.loads((root / campaign.PLAN).read_text())["config_errors"]) == 2
 
 
+def test_run_all_sets_aside_the_older_result_of_a_profile_that_no_longer_configures(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual import cli, models
+
+    def broken(name, environment):
+        raise ConfigError(f"unknown benchmark 'typo' ({name})")
+
+    monkeypatch.setattr(cli, "load_environment", lambda path: Environment({}))
+    monkeypatch.setattr(models, "resolve_model", broken)
+    out = tmp_path / "gb300-1"
+    (out / "m").mkdir(parents=True)
+    (out / "m/report.json").write_text(json.dumps({"task": "t", "started": 1.0, "verdict": {"category": "pass"}}))
+
+    assert cli.main(["run-all", "--profile", "m", "--environment", str(tmp_path / "env.yaml"),
+                     "--out-root", str(out)]) == 2
+    text, counts = campaign.summary([out])
+    assert counts == {"config-error": 1} and "unknown benchmark 'typo'" in text
+    assert [path.name for path in out.iterdir() if campaign.KEPT_ASIDE.search(path.name)] != []
+
+
 def test_run_all_exit_code_reports_harness_failures():
     assert campaign.exit_code([{"category": "pass"}, {"category": "acc-issue"}], []) == 0
     assert campaign.exit_code([{"category": "error"}], []) == 1
