@@ -11,10 +11,12 @@ from __future__ import annotations
 
 from collections import Counter
 import math
+import os
 
 import ml_dtypes
 import numpy as np
 
+from . import _trt
 from ._trt import trt
 
 from .config import resolve_workspace_bytes
@@ -273,9 +275,17 @@ def gated_residual(network, residual, update, gate):
     # Preserve PyTorch's BF16 product rounding before the residual sum. The
     # zero-add remains in TensorRT's native fused kernel but prevents it from
     # contracting this sequence into a single-rounding multiply-add.
-    zero = constant(network, np.zeros((1,) * len(tuple(update.shape)), dtype=np.float32))
-    zero = cast(network, zero, update.dtype)
-    update = network.add_elementwise(update, zero, trt.ElementWiseOperation.SUM).get_output(0)
+    #
+    # TRT-RTX 1.7.1 workaround: on sm_120 the runtime-fused cuDNN
+    # matMul+pointwise kernel issues a 16-byte load of this 2-byte BF16 scalar
+    # constant at a 2-byte-aligned address (compute-sanitizer: "Access is
+    # misaligned", CUDA error 716) once the packed sequence exceeds ~10k rows.
+    # Skip the scalar there until the backend is fixed; the only effect is that
+    # the epilogue may contract the product and sum into one rounding.
+    if not _trt.IS_RTX or os.environ.get("MINIMAX_H3_RTX_KEEP_ZERO_ADD"):
+        zero = constant(network, np.zeros((1,) * len(tuple(update.shape)), dtype=np.float32))
+        zero = cast(network, zero, update.dtype)
+        update = network.add_elementwise(update, zero, trt.ElementWiseOperation.SUM).get_output(0)
     update = cast(network, update, residual.dtype)
     return network.add_elementwise(residual, update, trt.ElementWiseOperation.SUM).get_output(0)
 
