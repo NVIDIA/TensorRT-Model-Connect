@@ -12,6 +12,8 @@ class Graph:
         self.weights = weights
         self.keep = []
         self.fp32_sigmoid = fp32_sigmoid
+        # Projection name -> static FP8 activation scale (FP8 builds only).
+        self.fp8_scales = {}
 
     def cast(self, x, dtype):
         return x if x.dtype == dtype else self.n.add_cast(x, dtype).get_output(0)
@@ -93,6 +95,12 @@ class Graph:
         weight = self.weights[name + ".weight"] if weight is None else weight
         if bias is None:
             bias = self.weights.get(name + ".bias")
+        if name in self.fp8_scales:
+            if bias is not None:
+                raise ValueError(f"FP8 projection {name} must not have a bias")
+            from .quantization import fp8_linear
+
+            return fp8_linear(self, x, weight, self.fp8_scales[name])
         w = self.const(weight, x.dtype)
         if len(x.shape) > 2:
             w = self.reshape(w, (1,) * (len(x.shape) - 2) + tuple(w.shape))

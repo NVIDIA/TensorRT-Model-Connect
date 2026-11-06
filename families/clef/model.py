@@ -169,15 +169,29 @@ def build_head(weights, config, *, max_sequence_length=16384, max_questions=64, 
 
 
 def build_decoder_layer(
-    weights, config, index, *, max_sequence_length=16384, debug=False, timing_cache=None
+    weights,
+    config,
+    index,
+    *,
+    max_sequence_length=16384,
+    debug=False,
+    timing_cache=None,
+    fp8_scales=None,
 ):
+    """One decoder layer; ``fp8_scales`` maps projection names to FP8 activation scales."""
     from .backbone import decoder_layer
 
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     _graph = decoder_layer(
-        network, weights, config, index, debug=debug, fp32_sigmoid=_fp32_sigmoid(config)
+        network,
+        weights,
+        config,
+        index,
+        debug=debug,
+        fp32_sigmoid=_fp32_sigmoid(config),
+        fp8_scales=fp8_scales,
     )
     profile = builder.create_optimization_profile()
     for i in range(network.num_inputs):
@@ -189,6 +203,10 @@ def build_decoder_layer(
     settings.add_optimization_profile(profile)
     settings.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
     settings.clear_flag(trt.BuilderFlag.TF32)
+    if fp8_scales:
+        from .quantization import configure_fp8_build
+
+        configure_fp8_build(settings)
     if timing_cache is not None:
         settings.set_timing_cache(settings.create_timing_cache(bytes(timing_cache)), False)
     plan = builder.build_serialized_network(network, settings)
@@ -225,9 +243,22 @@ def build_final_norm(weight, config, max_sequence_length):
     return bytes(plan)
 
 
-def build_backbone(checkpoint, config, max_sequence_length):
-    """One execution context shares workspace across all decoder blocks."""
+def build_backbone(checkpoint, config, max_sequence_length, quantization=None):
+    """One execution context shares workspace across all decoder blocks.
+
+    ``quantization="fp8"`` self-quantizes the backbone projections (see quantization.py).
+    """
     from .backbone import decoder_block
+    from .quantization import (
+        checkpoint_scale_key,
+        is_fp8,
+        layer_scales,
+        load_activation_scales,
+    )
+
+    scales = None
+    if is_fp8(quantization):
+        scales = load_activation_scales(checkpoint_scale_key(checkpoint, config))
 
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -241,6 +272,8 @@ def build_backbone(checkpoint, config, max_sequence_length):
     for index in range(config["num_hidden_layers"]):
         print(f"Adding Clef backbone block {index + 1}/{config['num_hidden_layers']}", flush=True)
         graph.weights = checkpoint.select(f"model.language_model.layers.{index}.")
+        if scales is not None:
+            graph.fp8_scales = layer_scales(scales, config, index)
         x = decoder_block(graph, x, config, index, cos, sin)
         # Materialize the BF16 residual at each block boundary, as the original
         # module does. These device outputs are not copied to the host by the
@@ -258,6 +291,10 @@ def build_backbone(checkpoint, config, max_sequence_length):
     settings.add_optimization_profile(profile)
     settings.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 8 << 30)
     settings.clear_flag(trt.BuilderFlag.TF32)
+    if scales is not None:
+        from .quantization import configure_fp8_build
+
+        configure_fp8_build(settings)
     print("Compiling Clef backbone", flush=True)
     plan = builder.build_serialized_network(network, settings)
     if plan is None:
@@ -332,7 +369,10 @@ def build(request, writer):
         with writer.open_section(section) as out:
             out.write(weight.view(torch.int16).numpy().tobytes())
         del weight
-    writer.add_bytes("backbone.plan", build_backbone(checkpoint, text, request.max_sequence_length))
+    writer.add_bytes(
+        "backbone.plan",
+        build_backbone(checkpoint, text, request.max_sequence_length, request.quantization),
+    )
     weight = checkpoint.select("model.language_model.norm.weight")[
         "model.language_model.norm.weight"
     ]
