@@ -316,7 +316,7 @@ def test_fp8_build_options_keep_layer_names(tiny) -> None:
 
 
 def test_build_requires_float32_for_fp8(tmp_path: Path) -> None:
-    """fp8 keeps the family's float32 rule: fp16 is refused with or without quantization."""
+    """fp8 builds stay float32: fp16 with fp8 is refused (fp16 alone is accepted)."""
     from tensorrt_model_connect import BuildRequest
 
     request = BuildRequest(
