@@ -80,9 +80,8 @@ DetrObjectDetectionPipeline::run(const internal::ImageToBoxesRequest& request,
                   static_cast<std::int32_t>(image.width));
 }
 
-internal::DetectedBoxesResult DetrObjectDetectionPipeline::detect(const float* pixels,
-                                                                  std::int32_t height,
-                                                                  std::int32_t width) {
+internal::DetectedBoxesResult
+DetrObjectDetectionPipeline::detect(const float* pixels, std::int32_t height, std::int32_t width) {
     auto pixel_values = preprocess_detr_image(pixels, height, width, preprocess_config_);
     const auto image_shape = compute_detr_resize_shape(height, width, preprocess_config_);
 

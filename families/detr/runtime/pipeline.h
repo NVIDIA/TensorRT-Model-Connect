@@ -16,8 +16,7 @@
 
 namespace trtmc {
 
-class DetrObjectDetectionPipeline final : public internal::IModel,
-                                         public internal::IImageToBoxes {
+class DetrObjectDetectionPipeline final : public internal::IModel, public internal::IImageToBoxes {
   public:
     explicit DetrObjectDetectionPipeline(std::unique_ptr<ITrtModule> model,
                                          DetrPreprocessConfig preprocess_config);

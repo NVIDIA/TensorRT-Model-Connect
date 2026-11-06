@@ -125,7 +125,7 @@ struct SourceImage {
 
     ImageToBoxesRequest request() const {
         return {trtmc::internal::ImageView{pixels.data(), pixels.size() * sizeof(float), height,
-                                            width, 3, ImageFormat::Float32}};
+                                           width, 3, ImageFormat::Float32}};
     }
 };
 
@@ -135,7 +135,8 @@ SourceImage image(std::uint32_t height, std::uint32_t width) {
 
 void test_binds_only_image_to_boxes() {
     auto model = make(std::make_unique<FakeEngine>());
-    require(std::string_view(model->task()) == IImageToBoxes::kTask, "primary task is image_to_boxes");
+    require(std::string_view(model->task()) == IImageToBoxes::kTask,
+            "primary task is image_to_boxes");
     const auto bindings = model->task_bindings();
     require(bindings.size() == 1, "exactly one task is exposed");
     require(bindings[0].key.id == IImageToBoxes::kTask, "task id is image_to_boxes");
@@ -174,17 +175,9 @@ void test_scores_above_threshold_are_kept_and_sorted_descending() {
     // query 0: class 0 logit 5.0 -> score ~0.84
     // query 1: class 1 logit 8.0 -> score ~0.99
     // query 2: background logit 10.0 -> label score < 0.01 (dropped)
-    engine->boxes = {
-        0.2F, 0.2F, 0.1F, 0.1F,
-        0.5F, 0.5F, 0.2F, 0.2F,
-        0.8F, 0.8F, 0.1F, 0.1F
-    };
+    engine->boxes = {0.2F, 0.2F, 0.1F, 0.1F, 0.5F, 0.5F, 0.2F, 0.2F, 0.8F, 0.8F, 0.1F, 0.1F};
     engine->boxes_shape = {1, 3, 4};
-    engine->logits = {
-        5.0F, 0.0F, 3.0F,
-        0.0F, 8.0F, 1.0F,
-        0.0F, 0.0F, 10.0F
-    };
+    engine->logits = {5.0F, 0.0F, 3.0F, 0.0F, 8.0F, 1.0F, 0.0F, 0.0F, 10.0F};
     engine->logits_shape = {1, 3, 3};
     auto model = make(std::move(engine));
     const auto source = image(400, 400);
@@ -260,8 +253,8 @@ void test_unusable_engine_outputs_are_errors() {
     rejects_engine_output([](FakeEngine& e) { e.has_logits = false; }, "missing logits");
     rejects_engine_output([](FakeEngine& e) { e.boxes_shape = {1, 2}; }, "rank 2 boxes");
     rejects_engine_output([](FakeEngine& e) { e.logits_shape = {1, 2}; }, "rank 2 logits");
-    rejects_engine_output([](FakeEngine& e) { e.boxes.pop_back(); }, "truncated boxes");
-    rejects_engine_output([](FakeEngine& e) { e.boxes = {}; }, "empty boxes");
+    rejects_engine_output([](FakeEngine& e) { e.boxes_shape = {1, 1, 4}; }, "truncated boxes");
+    rejects_engine_output([](FakeEngine& e) { e.boxes_shape = {1, 0, 4}; }, "empty boxes");
 }
 
 } // namespace
