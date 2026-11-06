@@ -13,6 +13,34 @@ trt = pytest.importorskip("tensorrt")
 from families.gemma import graph_ops  # noqa: E402
 
 
+@pytest.mark.parametrize(("algorithm", "moe", "hidden", "layers", "experts", "top_k", "expected"), [
+    (None, False, 5376, 60, None, None, -1),
+    ("FP8", False, 5376, 60, None, None, -1),
+    ("NVFP4", False, 5376, 60, None, None, 0),
+    ("NVFP4", True, 2816, 30, 128, 8, -1),
+    ("NVFP4", True, 1024, 12, 64, 4, -1),
+    ("NVFP4", True, 2816, 30, 64, 8, -1),
+])
+def test_nvfp4_aux_stream_default_changes_only_dense_gemma4(
+    algorithm, moe, hidden, layers, experts, top_k, expected
+):
+    from types import SimpleNamespace
+
+    from families.gemma.gemma4_quant import configure_aux_streams
+    from families.gemma.gemma4_text import text_config
+
+    raw = {"text_config": {"enable_moe_block": moe, "hidden_size": hidden,
+                           "num_hidden_layers": layers, "num_experts": experts,
+                           "top_k_experts": top_k}}
+    if algorithm is not None:
+        raw["quantization_config"] = {"quant_algo": algorithm}
+    config = SimpleNamespace(max_aux_streams=-1)
+
+    configure_aux_streams(config, text_config(SimpleNamespace(raw=raw)))
+
+    assert config.max_aux_streams == expected
+
+
 class _Tensor:
     def __init__(self, dtype, shape=(1, 8)):
         self.dtype = dtype

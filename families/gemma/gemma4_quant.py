@@ -13,6 +13,13 @@ import numpy as np
 import tensorrt as trt
 
 
+def configure_aux_streams(build_config, raw):
+    """Disable auxiliary streams for prepared dense NVFP4 text graphs."""
+    if ((raw.get("quantization_config") or {}).get("quant_algo") == "NVFP4"
+            and not raw.get("enable_moe_block")):
+        build_config.max_aux_streams = 0
+
+
 def validate_source(source: Path, raw, readers):
     """Admit prepared experts or dense MLPs with original-precision attention/cache."""
     quant = raw.get("quantization_config") or {}
