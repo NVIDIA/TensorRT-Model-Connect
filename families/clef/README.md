@@ -56,6 +56,23 @@ capacity. As in the reference encoder, the complete schema is retained and the
 state is truncated to the remaining capacity. An oversized schema is rejected.
 `--max-state-tokens` can impose an additional state limit at inference time.
 
+## FP8 build
+
+`--quantization fp8` quantizes the BF16 backbone projections to FP8 at build
+time: DeltaNet `in_proj_qkv`, `in_proj_z` and `out_proj`, full-attention `q_proj`,
+`k_proj`, `v_proj` and `o_proj`, and every MLP projection. FP8 weights are not
+stored; the static activation scales of both pinned checkpoints are in
+`fp8_activation_scales.json` (calibrated with `calibrate_fp8_scales.py`). The
+embeddings, norms, DeltaNet `in_proj_a`/`in_proj_b`, `conv1d` and recurrence,
+attention, vision encoder and joint schema head stay BF16, as does the last
+layer's `down_proj` (an activation outlier). Another checkpoint raises until it
+is calibrated. Measured with TensorRT 11.4 at batch 1, the backbone is 1.09x to
+1.17x (Clef-Flash) and 1.18x to 1.25x (Clef) faster from 256 to 8,192 tokens,
+the bundle is 36% and 44% smaller, and 797 and 801 of 807 held-out decisions
+select the same option as the BF16 reference (806 for the BF16 engine). FP8
+probabilities differ from the reference by up to 0.077, more than the BF16 E2E
+gate allows, so the E2E cases cover only BF16 bundles.
+
 ## Images and video
 
 The CLI accepts image filenames in `images` and ordered arrays of frame
