@@ -33,11 +33,16 @@ def toolchain_identity(repository: Path) -> dict[str, object]:
     Comparing this identity between two revisions tells whether the TensorRT
     or CUDA toolchain changed. ``image`` is the default CI image tag.
     """
-    pyproject = (repository / "pyproject.toml").read_text(encoding="utf-8")
+    from .process import CiError
+
+    try:
+        pyproject = (repository / "pyproject.toml").read_text(encoding="utf-8")
+        dockerfile = (repository / "Dockerfile").read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise CiError(f"cannot read the toolchain files: {error}") from error
     pinned = _TENSORRT_PIN.search(pyproject)
     if pinned is None:
-        raise ValueError("pyproject.toml does not pin tensorrt==<version>")
-    dockerfile = (repository / "Dockerfile").read_text(encoding="utf-8")
+        raise CiError("pyproject.toml does not pin tensorrt==<version>")
     tensorrt = sorted(
         {match.group(1) for pattern in _DOCKERFILE_TENSORRT for match in pattern.finditer(dockerfile)}
     )
