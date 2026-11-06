@@ -187,3 +187,12 @@ def test_covers_variant_marks_the_test_without_changing_it() -> None:
 
     assert marked is test_case
     assert marked.trtmc_variant == ("fp16", "nvfp4")
+
+
+def test_unknown_family_is_an_error_not_a_clean_report(tmp_path: Path, capsys) -> None:
+    repo = _repo(tmp_path)
+    _family(repo, "alpha", model=_MODEL_FP8)
+
+    assert variant_coverage.main(["--repo-root", str(repo), "report", "--family", "alpah"]) == 2
+    assert variant_coverage.main(["--repo-root", str(repo), "bootstrap", "alpah"]) == 2
+    assert "unknown family: alpah" in capsys.readouterr().err

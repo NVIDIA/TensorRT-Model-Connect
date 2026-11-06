@@ -268,9 +268,16 @@ class Report:
         return sum(item.gaps for item in self.families) + len(self.toolchain)
 
 
+def family_root(repo: Path, family: str) -> Path:
+    """The directory of one existing family; a mistyped name is an error, not a clean report."""
+    if family not in test_impact.inventory(repo):
+        raise ValueError(f"unknown family: {family}")
+    return repo / "families" / family
+
+
 def build_report(repo: Path, families: Sequence[str] = ()) -> Report:
     selected = families or test_impact.inventory(repo)
-    reports = [family_report(repo / "families" / family) for family in selected]
+    reports = [family_report(family_root(repo, family)) for family in selected]
     return Report(reports, toolchain_mismatches(repo))
 
 
@@ -331,7 +338,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     repo = args.repo_root.resolve()
     try:
         if args.command == "bootstrap":
-            print(bootstrap(repo / "families" / args.family))
+            print(bootstrap(family_root(repo, args.family)))
             return 0
         report = build_report(repo, tuple(args.family))
     except (OSError, ValueError, SyntaxError) as error:
