@@ -4,6 +4,7 @@
 # The native weights (351 GB) exceed the GPU: the native pipeline offloads idle components to host memory,
 # and its Perf is against that offloaded baseline.
 reference:
+  mode: eager  # torch.compile: Dynamo fails on the CPU-offloaded transformer (InternalTorchDynamoError)
   adapter: families/minimax_h3/reference/adapter.py  # Diffusers' ModularPipeline (t2va), as the family's E2E reference
   options: {cpu_offload: true}
   requirements: families/minimax_h3/requirements.txt  # the family's dependencies, layered on the serving interpreter

@@ -16,8 +16,7 @@ import torch
 
 from ..base import BackendError, Invocation
 from .common import (
-    ReferenceSpec, invocation, load_audio, load_image, maybe_compile, reject_compile, required,
-    tensor_observation, timed,
+    ReferenceSpec, invocation, load_audio, load_image, maybe_compile, required, tensor_observation, timed,
 )
 
 
@@ -164,16 +163,19 @@ class DecodeSteps:
 
 
 class SpeechSynthesis:
-    """``generate_audio`` from ``prompt`` (Bark-style text-to-speech)."""
+    """``generate_audio`` from ``prompt`` (Bark-style text-to-speech). ``BarkModel.generate`` runs its three
+    token models in turn, never ``BarkModel.forward``: compile mode compiles those three."""
 
     def __init__(self, spec: ReferenceSpec) -> None:
         import transformers
 
-        reject_compile(spec, "text-to-speech")
         self.spec = spec
         self.processor = transformers.AutoProcessor.from_pretrained(spec.model, **spec.pretrained_kwargs())
         self.model = transformers.BarkModel.from_pretrained(
             spec.model, **spec.model_kwargs(), device_map=spec.device_map).eval()
+        if spec.mode == "compile":
+            for stage in (self.model.semantic, self.model.coarse_acoustics, self.model.fine_acoustics):
+                maybe_compile(stage, spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
         # Same generation as the accepted Bark reference: Bark's own (sampled) generation configs, a

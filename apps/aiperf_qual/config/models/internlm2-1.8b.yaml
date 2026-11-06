@@ -8,4 +8,5 @@ absolute:
   - {name: gsm8k, max_new_tokens: 160}
 
 reference:
+  mode: eager  # torch.compile: the remote-code generation recompiles past Dynamo's limit
   requirements: families/internlm/requirements.txt  # the family's dependencies, layered on the serving interpreter

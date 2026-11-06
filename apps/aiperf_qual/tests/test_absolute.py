@@ -497,6 +497,42 @@ def test_the_native_side_tries_the_next_precision(tmp_path):
     assert started[-1] == ("reference", "fp32", 1)  # smoke mode: one copy
 
 
+@pytest.mark.parametrize("compiles", [True, False])
+def test_the_native_side_answers_compiled_or_else_eager_in_its_place(tmp_path, monkeypatch, compiles):
+    from contextlib import contextmanager
+
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.services import ServiceError
+
+    started, superseded = [], []
+
+    @contextmanager
+    def serving_replicas(environment, model, backend, out, *, mode, precision, compile_fallback=None, **kwargs):
+        started.append((out.name, mode, compile_fallback))
+        yield {"replicas": 1}
+        if mode == "compile" and not compiles:  # as serving() does when the server stopped serving
+            raise ServiceError("the torch.compile reference stopped serving: FailOnRecompileLimitHit")
+
+    monkeypatch.setattr(absolute, "serving_replicas", serving_replicas)
+    monkeypatch.setattr(absolute, "run_side", lambda *args: {"records": {"greedy": {0: {"passed": True}}}, "failed": {}})
+    monkeypatch.setattr(absolute.execution, "supersede", lambda start: superseded.append(start))
+    model = {"absolute": [{"suite": "s"}], "reference": {"mode": "compile", "perf_precision": "fp16", "precision": "fp32"}}
+    native = absolute.run_native(Environment({"native_replicas": 1}), model, "python", {"s": [{}]}, tmp_path)
+    assert native["precision"] == "fp16" and "fallback_from" not in native
+    if compiles:
+        assert native["mode"] == "compile" and "compile_fallback" not in native and not superseded
+        assert started == [("absolute-native-server-compile-fp16", "compile", None)]
+        return
+    assert native["mode"] == "eager" and "FailOnRecompileLimitHit" in native["compile_fallback"] and superseded
+    assert [call[:2] for call in started] == [("absolute-native-server-compile-fp16", "compile"),
+                                             ("absolute-native-server-eager-fp16", "eager")]
+    assert started[1][2] == native["compile_fallback"]  # the eager server's evidence says what it replaced
+    monkeypatch.setattr(absolute, "judge_in_capacity", lambda *args: {"status": "pass"})
+    entry, = absolute.entries(model, {"s": [{}]}, {"s": {}}, native, None)
+    assert entry["native"]["mode"] == "eager" and "FailOnRecompileLimitHit" in entry["native"]["compile_fallback"]
+    assert any(note.startswith("native torch.compile failed") for note in entry["notes"])
+
+
 def test_native_copies_fit_the_free_gpu_memory():
     from trtmc_aiperf_qual.services import replicas_that_fit
 
