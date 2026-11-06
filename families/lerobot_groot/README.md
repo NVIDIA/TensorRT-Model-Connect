@@ -55,7 +55,7 @@ of any other size, or with other chat-template token ids, is refused.
 
 | Section | Content |
 | --- | --- |
-| `condition.plan` | vision tower (float32 in either precision), DeepStack, the 16 kept text layers, the action head's vision-language layers, the state token, and the keys/values of every DiT cross-attention block; the prompt length is dynamic |
+| `condition.plan` | vision tower (in the build precision; its query/key/value projections in float32), DeepStack, the 16 kept text layers, the action head's vision-language layers, the state token, and the keys/values of every DiT cross-attention block; the prompt length is dynamic |
 | `denoise.plan` | one flow-matching step: action encoder, DiT, action decoder and the Euler update |
 | `tokenizer.json` | the Qwen3-VL byte-level BPE |
 | `runtime.json` | camera names and order, crop, dimensions, step count, instruction rules, normalization |
@@ -143,10 +143,29 @@ alternate instruction in brackets):
 | Bundle size | 6.5 GB | 11.3 GB |
 
 For comparison, LeRobot's eager PyTorch policy takes about 203 ms per chunk on the same
-GPU with its default bfloat16 autocast (163 ms in float32). The vision tower runs in
-float32 in either bundle: in bfloat16 it is the largest error source, and keeping it in
-float32 lowers the first observation's error from 1.7e-2 to 9.6e-3 for about 7 ms per
-chunk. Three bf16 builds gave identical actions on this GPU.
+GPU with its default bfloat16 autocast (163 ms in float32). Three bf16 builds gave
+identical actions on this GPU. The bf16 column above was measured with the vision tower
+in float32.
+
+The bf16 bundle now runs the vision tower in bfloat16, as LeRobot's autocast does (the
+fine-tune keeps the base model's bfloat16 vision weights), with only the query/key/value
+projection of each block in float32. Measured with a Python harness that runs the two
+plans as the runtime does (GPU time of the condition plan and four denoising steps),
+TensorRT 11.4.0.106, on the three observations above and on 200 held-out LIBERO-spatial
+observations (mean absolute error of the six arm dimensions against LeRobot float32;
+LeRobot bfloat16 has 9.3e-4):
+
+| | B200, vision float32 | B200 | B300, vision float32 | B300 |
+| --- | --- | --- | --- | --- |
+| Policy step | 19.1 ms | 12.1 ms | 17.8 ms | 11.6 ms |
+| Vision tower alone | 10.4 ms | 3.5 ms | 9.3 ms | 3.3 ms |
+| Max abs error vs LeRobot fp32 | 3.6e-3 / 2.9e-3 / 8.7e-3 | 3.6e-3 / 3.3e-3 / 7.4e-3 | 2.7e-3 / 2.3e-3 / 7.8e-3 | 3.6e-3 / 3.3e-3 / 7.4e-3 |
+| Held-out mean arm error | 6.8e-4 | 8.5e-4 | 6.7e-4 | 8.5e-4 |
+| Bundle size | 6.5 GB | 5.8 GB | 6.5 GB | 5.8 GB |
+
+A tower fully in bfloat16 is 1.8 ms faster again on B200 at the same held-out error
+(9.1e-4), but its maximum error on the second observation, 6.2e-3, is past that case's
+5.1e-3 threshold; the float32 query/key/value projection keeps all three inside.
 
 ### Other `lerobot-train` outputs
 
