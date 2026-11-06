@@ -30,6 +30,8 @@ appears) and avoids carrying the rank as an engine input.
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 
 from . import graph_ops as op
@@ -38,11 +40,25 @@ from .config import MiniMaxH3Config
 
 
 def add_collective(network, tensor, operation, cp_size: int):
+    """Add a DIST_COLLECTIVE layer.
+
+    Debug option: MINIMAX_H3_CP_WIRE_DTYPE=float32 carries 2-byte payloads in
+    FP32 on the wire (not needed once contexts are materialized, see
+    ``_materialize``).
+    """
+
+    original = tensor.dtype
+    widen = original in (trt.bfloat16, trt.float16) and (
+        os.environ.get("MINIMAX_H3_CP_WIRE_DTYPE", "native") == "float32"
+    )
+    if widen:
+        tensor = op.cast(network, tensor, trt.float32)
     layer = network.add_dist_collective(tensor, operation, trt.ReduceOperation.NONE, -1, [])
     if layer is None:
         raise RuntimeError(f"TensorRT failed to add MiniMax-H3 {operation} collective")
     layer.num_ranks = int(cp_size)
-    return layer.get_output(0)
+    result = layer.get_output(0)
+    return op.cast(network, result, original) if widen else result
 
 
 def collectives_per_attention() -> int:
@@ -184,32 +200,70 @@ def _my_head_block(network, rows, profile: MiniMaxH3Config):
     return heads.get_output(0)
 
 
+def _materialize(network, context, head_dim: int):
+    """Fusion barrier: multiply ``[1, h, rows, D]`` by an exact identity ``[D, D]``.
+
+    TRT-RTX 1.7.1 (sm_120) fuses an IAttention output straight into the
+    shuffle/collective chain that follows it and then returns wrong data
+    (relL2 ~1.1; correct, relL2 ~2e-3, once the context is materialized, e.g.
+    as a network output). The identity GEMM keeps the values bit-exact and costs
+    ~2*rows*h*D*D FLOPs.
+    """
+
+    eye = op.weight_constant(network, np.eye(head_dim, dtype=np.float32).reshape(1, 1, head_dim, head_dim))
+    eye = op.cast(network, eye, context.dtype)
+    return network.add_matrix_multiply(
+        context, trt.MatrixOperation.NONE, eye, trt.MatrixOperation.NONE
+    ).get_output(0)
+
+
 def ulysses_attention(network, q, k, v, *, profile: MiniMaxH3Config, name: str):
     """Context-parallel attention over local ``[head|video/N]`` q/k/v rows.
 
     Returns the attention output as local ``[head|video/N, H*D]`` rows.
+
+    The head-segment and video queries run as two attentions over the same full
+    K/V, so each context goes straight from its IAttention output into its
+    return collective. Slicing one shared attention output with a dynamic start
+    and feeding the views to collectives returns wrong data on TRT-RTX 1.7.1
+    (sm_120), whereas a collective that consumes the attention output directly
+    is exact.
     """
 
     n, h, d = profile.context_parallel_size, profile.local_heads, profile.head_dim
     video_rows = profile.video_rows
     local = profile.local_video_rows
 
-    head_parts, full_inputs = [], []
+    head_blocks, video_blocks = [], []
     for tensor in (q, k, v):
         head = head_rows(network, tensor, local)
         video = op.slice_rows_from_end(network, tensor, offset=local, rows=local)
-        head_parts.append(head)
-        merged = network.add_concatenation(
-            (_my_head_block(network, head, profile), _seq_to_heads(network, video, profile))
-        )
+        head_blocks.append(_my_head_block(network, head, profile))
+        video_blocks.append(_seq_to_heads(network, video, profile))
+
+    full_kv = []
+    for head_block, video_block in zip(head_blocks[1:], video_blocks[1:]):
+        merged = network.add_concatenation((head_block, video_block))
         merged.axis = 2
-        full_inputs.append(merged.get_output(0))
+        full_kv.append(merged.get_output(0))
 
-    context = op.attention_core(network, *full_inputs, head_dim=d, name=name)
+    video_context = op.attention_core(
+        network, video_blocks[0], *full_kv, head_dim=d, name=f"{name}.video"
+    )
+    head_context = op.attention_core(
+        network, head_blocks[0], *full_kv, head_dim=d, name=f"{name}.head"
+    )
 
-    head_count = _dim_minus(network, context, 2, video_rows)
-    head_context = _slice(network, context, (0, 0, 0, 0), (1, h, head_count, d))
-    video_context = _slice(network, context, (0, 0, head_count, 0), (1, h, video_rows, d))
+    barrier = os.environ.get("MINIMAX_H3_CP_BARRIER", "gemm")
+    if barrier == "gemm":
+        video_context = _materialize(network, video_context, d)
+        head_context = _materialize(network, head_context, d)
+
+    if os.environ.get("MINIMAX_H3_CP_DEBUG_OUTPUTS"):  # test hook: expose contexts
+        for tag, t in (("dbg_ctx_video", video_context), ("dbg_ctx_head", head_context)):
+            c = network.add_identity(op.cast(network, t, trt.float32)).get_output(0)
+            c.name = tag
+            network.mark_output(c)
 
     video_out = _heads_to_seq(network, video_context, profile)
 

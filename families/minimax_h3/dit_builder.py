@@ -606,7 +606,8 @@ def construct_dit_network(
 
     op.validate_native_network(
         network,
-        expected_attentions=profile.num_refiner_layers + profile.num_layers,
+        expected_attentions=profile.num_refiner_layers
+        + profile.num_layers * (2 if cp > 1 else 1),  # CP: head-segment + video queries
         label="DiT",
         expected_collectives=cp_ops.expected_collectives(profile),
     )
