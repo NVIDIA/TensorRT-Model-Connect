@@ -56,6 +56,36 @@ identity field, write a small `describe(metadata)` function that checks its
 exact family-owned root JSON shape or declare a minimal set of exact sentinel
 files; do not match the repository name.
 
+`support.py` may also declare the precision and quantization combinations the
+family builds:
+
+```python
+from tensorrt_model_connect.model_support import Variant, family_support
+
+describe = family_support(
+    model_types=("my_model",),
+    tasks=("text_continuation",),
+    default_task="text_continuation",
+    default_precision="bf16",
+    variants=(
+        Variant(precision="bf16"),
+        Variant(precision="bf16", quantization="fp8"),
+        Variant(precision="bf16", quantization="nvfp4", status="experimental"),
+    ),
+)
+```
+
+A `supported` variant (the default) is expected to have a manifest testcase
+with that `precision` and `quantization` and a hardware test marked with
+`tools.variant_coverage.covers_variant(precision=..., quantization=...)`. An
+`experimental` variant builds without that coverage. When a variant is covered
+only by specific manifests, for example a profile-restricted one, list them with
+`manifests=("<manifest name>",)`. `python -m tools.variant_coverage report`
+lists the gaps between the declaration, the quantizations `model.py` accepts,
+the manifests and the hardware tests; `python -m tools.variant_coverage
+bootstrap <family>` prints a draft declaration. The report is informational and
+does not gate pull requests yet.
+
 `model.py` must expose exactly one plain function. Any helper it calls is
 implemented in this file or elsewhere in the same family directory:
 
