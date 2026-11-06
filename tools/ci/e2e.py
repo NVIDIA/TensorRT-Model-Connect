@@ -261,6 +261,9 @@ class E2ERunner:
         if unknown:
             raise CiError("unknown E2E families: " + ", ".join(unknown))
         self._run_family_ctests(native_build, selected_families)
+        stop_after = self.context.env.get(STOP_AFTER_ENV, "")
+        # A stop-after sweep reports every case: one failure must not hide the rest.
+        fail_fast = () if stop_after else ("-x",)
         for family in selected_families:
             family_tests = self.context.repository / "families" / family / "tests"
             ordinary_paths = [
@@ -317,6 +320,7 @@ class E2ERunner:
                     for marker in ("pytest.mark.gpu", "pytest.mark.trt")
                 )
             ]
+            hardware_error: CiError | None = None
             if hardware_tests:
                 hardware_junit = native_build / f"trtmc-{family}-hardware-junit.xml"
                 self.context.run(
@@ -328,7 +332,7 @@ class E2ERunner:
                         "-m",
                         "gpu or trt",
                         "-q",
-                        "-x",
+                        *fail_fast,
                         "-p",
                         "no:cacheprovider",
                         "--junitxml",
@@ -336,9 +340,16 @@ class E2ERunner:
                     ],
                     updates={"PYTHONDONTWRITEBYTECODE": "1"},
                     unset=("PYTEST_ADDOPTS",),
+                    check=not stop_after,
                     limit=self.context.env.get("TRTMC_E2E_TIMEOUT", "12h"),
                 )
-                _require_passing_junit(hardware_junit, "family hardware tests")
+                try:
+                    _require_passing_junit(hardware_junit, "family hardware tests")
+                except CiError as error:
+                    if not stop_after:
+                        raise
+                    # The sweep still builds and loads every case; report both.
+                    hardware_error = error
             requested_testcases = testcases or self._family_testcases(family)
             test = f"families/{family}/tests/test_e2e.py"
             # Protected runners historically own the evidence path through
@@ -365,7 +376,7 @@ class E2ERunner:
                 command.extend(
                     (
                         "-q",
-                        "-x",
+                        *fail_fast,
                         "-p",
                         "no:cacheprovider",
                         "-o",
@@ -385,13 +396,20 @@ class E2ERunner:
                     check=False,
                     limit=self.context.env.get("TRTMC_E2E_TIMEOUT", "12h"),
                 )
-            _require_e2e_process_result(
-                e2e_junit,
-                family,
-                tuple(requested_testcases),
-                completed.returncode,
-                stop_after=self.context.env.get(STOP_AFTER_ENV, ""),
-            )
+            try:
+                _require_e2e_process_result(
+                    e2e_junit,
+                    family,
+                    tuple(requested_testcases),
+                    completed.returncode,
+                    stop_after=stop_after,
+                )
+            except CiError as error:
+                if hardware_error is not None:
+                    raise CiError(f"{hardware_error}; {error}") from error
+                raise
+            if hardware_error is not None:
+                raise hardware_error
 
     def _family_testcases(self, family: str) -> tuple[str, ...]:
         manifests = self.context.repository / "families" / family / "tests/manifests"
