@@ -98,9 +98,11 @@ has passed its `evidence_stage("native")` is skipped with the reason
 `trtmc-e2e-stopped-after:native` as soon as it enters any other stage, so the
 reference and comparison stages after `native` do not run. Stages entered
 before `native`, including a comparison, run normally, and a testcase that never
-enters it runs to completion. The CI E2E
-runner counts such a skip as a stopped testcase only while the same variable is
-set. This mode checks build and load; it is not correctness evidence.
+enters it runs to completion. The CI E2E runner counts such a skip as a stopped
+testcase only while the same variable is set, and in this mode it runs every
+selected testcase and the family hardware tests without stopping at the first
+failure, then reports all failures. This mode checks build and load; it is not
+correctness evidence.
 
 ## 5. Save and read correctness evidence
 

@@ -49,6 +49,7 @@ class RecordingContext:
         self.no_family_ctests = False
         self.no_cpu_family_tests = False
         self.missing_e2e_testcases = set()
+        self.failing_hardware = False
 
     def run(self, command, **kwargs):
         self.calls.append((list(command), kwargs))
@@ -91,7 +92,10 @@ class RecordingContext:
         if "--junitxml" in command:
             report = Path(command[command.index("--junitxml") + 1])
             empty = self.no_cpu_family_tests and "-unit-junit.xml" in report.name
+            failing = self.failing_hardware and "-hardware-junit.xml" in report.name
             testcases = "" if empty else '<testcase name="hardware" />'
+            if failing:
+                testcases = '<testcase name="hardware"><failure /></testcase>'
             if any(str(item).endswith("/test_e2e.py") for item in command):
                 family = str(command[3]).split("/")[1]
                 if "--e2e-testcase" in command:
@@ -114,6 +118,8 @@ class RecordingContext:
             )
             if empty:
                 return SimpleNamespace(stdout="", returncode=5)
+            if failing:
+                return SimpleNamespace(stdout="", returncode=1)
         return SimpleNamespace(stdout="", returncode=0)
 
 
@@ -295,6 +301,85 @@ def test_family_with_only_hardware_tests_accepts_exact_empty_cpu_result(
         "pytest",
         "families/beta/tests/test_e2e.py",
     ]
+
+
+def _hardware_family(tmp_path: Path, env: dict[str, str]) -> RecordingContext:
+    family = tmp_path / "families/beta"
+    (family / "tests/manifests").mkdir(parents=True)
+    (family / "model.py").write_text("def build(request, writer): pass\n")
+    (family / "tests/test_e2e.py").write_text("def test_e2e(): pass\n")
+    (family / "tests/manifests/case.json").write_text(
+        json.dumps({"testcases": [{"name": "beta-case"}]}), encoding="utf-8"
+    )
+    (family / "tests/test_gpu.py").write_text(
+        "import pytest\n\n@pytest.mark.gpu\ndef test_gpu(): pass\n", encoding="utf-8"
+    )
+    binary = tmp_path / "trtmc"
+    binary.write_text("")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    for name in (
+        "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
+        "libtrtmc_backend_trt.so",
+        "libtrtmc_model_beta.so",
+    ):
+        (runtime / name).write_text("")
+    native_build = tmp_path / "native-build"
+    native_build.mkdir()
+    (native_build / "CTestTestfile.cmake").write_text("")
+    context = RecordingContext(
+        tmp_path,
+        {
+            "TRTMC_BINARY": str(binary),
+            "TRTMC_RUNTIME_ROOT": str(runtime),
+            "TRTMC_NATIVE_BUILD_DIR": str(native_build),
+            **env,
+        },
+    )
+    context.failing_hardware = True
+    return context
+
+
+def _pytest_calls(context: RecordingContext, marker: str) -> list[list]:
+    return [
+        command
+        for command, _ in context.calls
+        if command[:3] == ["python", "-m", "pytest"] and any(marker in str(item) for item in command)
+    ]
+
+
+def test_hardware_failure_stops_the_family_by_default(tmp_path: Path) -> None:
+    context = _hardware_family(tmp_path, {})
+
+    with pytest.raises(CiError, match="family hardware tests"):
+        E2ERunner(context)._run(("beta",))
+
+    assert _pytest_calls(context, "test_e2e.py") == []
+    assert "-x" in _pytest_calls(context, "test_gpu.py")[-1]
+
+
+def test_stop_after_sweep_runs_every_case_and_still_reports_hardware_failure(
+    tmp_path: Path,
+) -> None:
+    context = _hardware_family(tmp_path, {"TRTMC_E2E_STOP_AFTER": "native"})
+
+    with pytest.raises(CiError, match="family hardware tests"):
+        E2ERunner(context)._run(("beta",))
+
+    hardware = [
+        (command, options)
+        for command, options in context.calls
+        if "-hardware-junit.xml" in str(command[-1])
+    ]
+    assert len(hardware) == 1
+    assert "-x" not in hardware[0][0]
+    assert hardware[0][1]["check"] is False
+    e2e = _pytest_calls(context, "test_e2e.py")
+    assert len(e2e) == 1
+    assert "-x" not in e2e[0]
 
 
 def test_family_cpp_skip_fails_closed(tmp_path: Path) -> None:
