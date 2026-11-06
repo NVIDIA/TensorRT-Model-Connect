@@ -77,5 +77,66 @@ def test_support_resolves_facebook_detr_model(tmp_path: Path):
     support = describe(metadata)
 
     assert support is not None
-    assert support.tasks == ("object_detection",)
-    assert support.default_task == "object_detection"
+    assert support.tasks == ("image_to_boxes",)
+    assert support.default_task == "image_to_boxes"
+
+
+class _Writer:
+    def __init__(self) -> None:
+        self.sections: dict[str, object] = {}
+
+    def set_header(self, **header) -> None:
+        self.sections["header"] = header
+
+    def add_bytes(self, name: str, value: bytes) -> None:
+        self.sections[name] = value
+
+    def add_json(self, name: str, value: object) -> None:
+        self.sections[name] = value
+
+
+def _request(tmp_path: Path, task: str):
+    from tensorrt_model_connect.build import BuildRequest
+
+    return BuildRequest(
+        model_dir=tmp_path,
+        output_path=tmp_path / "detr.bundle",
+        family="detr",
+        task=task,
+        precision="fp16",
+    )
+
+
+def test_build_rejects_the_retired_task(tmp_path: Path) -> None:
+    """The old task name is not an alias for the new one."""
+    from families.detr import model
+
+    with pytest.raises(ValueError, match="detr supports only task=image_to_boxes"):
+        model.build(_request(tmp_path, "object_detection"), _Writer())
+
+
+def test_build_records_the_semantic_task(tmp_path: Path, monkeypatch) -> None:
+    from families.detr import model
+
+    _write_config(tmp_path)
+    monkeypatch.setattr(model._DetrModel, "load_weights", lambda *args, **kwargs: {})
+    monkeypatch.setattr(model._DetrModel, "build_engine", lambda *args, **kwargs: b"plan")
+    writer = _Writer()
+    model.build(_request(tmp_path, "image_to_boxes"), writer)
+    assert writer.sections["header"] == {
+        "family": "detr",
+        "task": "image_to_boxes",
+        "backend": "trt",
+    }
+    assert writer.sections["engine.plan"] == b"plan"
+    assert writer.sections["runtime.json"] == {
+        "input_image_h": 800,
+        "input_image_w": 800,
+        "dynamic_image_shapes": True,
+        "shortest_edge": 800,
+        "longest_edge": 1333,
+        "image_mean": [0.485, 0.456, 0.406],
+        "image_std": [0.229, 0.224, 0.225],
+        "num_queries": 100,
+        "num_labels": 91,
+    }
