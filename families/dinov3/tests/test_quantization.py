@@ -488,3 +488,14 @@ def test_fp8_build_options_keep_layer_names() -> None:
     assert config.profiling_verbosity == trt.ProfilingVerbosity.DETAILED
     _, _, plain = graph_ops.new_network(False)
     assert plain.profiling_verbosity != trt.ProfilingVerbosity.DETAILED
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_unquantized_builds_use_tensorrt_default_optimization_level() -> None:
+    """Unquantized builds time tactics at TensorRT's default level; FP8 builds keep level 1."""
+    _, _, plain = graph_ops.new_network(False)
+    assert plain.builder_optimization_level == 3
+    ctx = quantization_module.Dinov3QuantContext(scales={"x": object()})
+    _, _, fp8 = graph_ops.new_network(False, ctx)
+    assert fp8.builder_optimization_level == 1
