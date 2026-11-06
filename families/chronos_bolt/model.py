@@ -716,8 +716,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task != "time_series_forecast":
-        raise ValueError("Chronos-Bolt supports only time_series_forecast")
+    if request.task != "series_to_quantile_forecast":
+        raise ValueError("Chronos-Bolt supports only series_to_quantile_forecast")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     raw = config.raw

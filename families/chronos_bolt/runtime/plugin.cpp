@@ -13,6 +13,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace trtmc::chronos_bolt {
 namespace {
@@ -33,15 +34,31 @@ std::int32_t require_positive_int(const nlohmann::json& json, const char* key) {
     return static_cast<std::int32_t>(value);
 }
 
-RuntimeConfig parse_runtime_config(const std::vector<char>& data) {
-    const auto json = nlohmann::json::parse(data.begin(), data.end());
-    if (!json.is_object() || !json.contains("quantiles") || !json.at("quantiles").is_array() ||
+std::vector<double> require_quantile_levels(const nlohmann::json& json) {
+    if (!json.contains("quantiles") || !json.at("quantiles").is_array() ||
         json.at("quantiles").empty()) {
         throw std::runtime_error("Chronos-Bolt runtime.json requires a nonempty quantiles array");
     }
+    std::vector<double> levels;
+    for (const auto& entry : json.at("quantiles")) {
+        if (!entry.is_number())
+            throw std::runtime_error("Chronos-Bolt runtime.json quantiles must be numbers");
+        const auto level = entry.get<double>();
+        if (!(level >= 0.0 && level <= 1.0) || (!levels.empty() && level <= levels.back()))
+            throw std::runtime_error(
+                "Chronos-Bolt runtime.json quantiles must ascend strictly within [0, 1]");
+        levels.push_back(level);
+    }
+    return levels;
+}
+
+RuntimeConfig parse_runtime_config(const std::vector<char>& data) {
+    const auto json = nlohmann::json::parse(data.begin(), data.end());
+    if (!json.is_object())
+        throw std::runtime_error("Chronos-Bolt runtime.json must be an object");
     return RuntimeConfig{require_positive_int(json, "context_length"),
                          require_positive_int(json, "prediction_length"),
-                         static_cast<std::int32_t>(json.at("quantiles").size()),
+                         require_quantile_levels(json),
                          require_positive_int(json, "tensor_parallel_size")};
 }
 
@@ -80,5 +97,5 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
                                     : "engine.rank" + std::to_string(rank) + ".plan";
     const auto& plan = trtmc::chronos_bolt::require_section(context.reader, section.c_str());
     auto engine = trtmc::chronos_bolt::load_engine(context.backend, plan);
-    return new trtmc::chronos_bolt::Pipeline(std::move(engine), config);
+    return new trtmc::chronos_bolt::Pipeline(std::move(engine), std::move(config));
 }

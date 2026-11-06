@@ -33,8 +33,19 @@ install(TARGETS trtmc_model_chronos_bolt
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_chronos_bolt_c_api_consumer ../tests/sdk_consumer.c)
+  add_executable(test_chronos_bolt_cpp_api_consumer ../tests/sdk_consumer.cpp)
+  foreach(consumer test_chronos_bolt_c_api_consumer test_chronos_bolt_cpp_api_consumer)
+    target_link_libraries(${consumer} PRIVATE trtmc::c)
+    target_compile_options(${consumer} PRIVATE -Wall -Wextra -Wpedantic)
+    set_target_properties(${consumer} PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  endforeach()
+
   add_executable(test_chronos_bolt_forecast_contract
     ../tests/cpp/test_forecast_contract.cpp
+  )
+  add_dependencies(test_chronos_bolt_forecast_contract
+    test_chronos_bolt_c_api_consumer test_chronos_bolt_cpp_api_consumer
   )
   target_include_directories(test_chronos_bolt_forecast_contract PRIVATE
     ${PROJECT_SOURCE_DIR}
