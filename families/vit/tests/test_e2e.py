@@ -91,8 +91,12 @@ def _selected_cases(config) -> tuple[list[str], bool]:
 
 
 def pytest_generate_tests(metafunc) -> None:
-    if "case_name" in metafunc.fixturenames:
+    for fixture in ("case_name", "fp16_case_name"):
+        if fixture not in metafunc.fixturenames:
+            continue
         names, enabled = _selected_cases(metafunc.config)
+        if fixture == "fp16_case_name":
+            names = [name for name in names if CASES[name][1]["precision"] == "fp16"]
         parameters = names
         if not enabled:
             parameters = [
@@ -104,7 +108,7 @@ def pytest_generate_tests(metafunc) -> None:
                 )
                 for name in names
             ]
-        metafunc.parametrize("case_name", parameters, ids=names)
+        metafunc.parametrize(fixture, parameters, ids=names)
 
 
 def _required_path(value: str | None, label: str) -> Path:
@@ -227,16 +231,42 @@ _LOGIT_TOLERANCE = 2e-3
 # Kept only to fail early and loudly on a gross error.
 _COSINE_FLOOR = 0.999
 
+# fp16 cannot use the tolerance above. Measured on this case (B200 and B300,
+# TensorRT 11.1 and 11.4, several builds each), a correct fp16 engine is 5.2e-03 to
+# 1.3e-02 off the reference and a tanh-GELU fp16 engine 1.6e-02 to 2.5e-02,
+# so no logit tolerance sits clearly between the two. fp16 is gated twice:
+#
+# * a logit tolerance set from the fp16 noise: 3e-02 is 2.3x above the worst
+#   correct build and 13x below the bicubic-resize row of the table above,
+#   so it still catches the resize and classifier-row errors. It is not what
+#   catches the tanh GELU.
+# * the tanh-GELU check. The reference is computed a second time with the
+#   tanh GELU, and the engine must be closer to the exact reference than to
+#   that one: the share of the defect it carries,
+#   (engine - exact) . (tanh - exact) / |tanh - exact|^2, must stay below 0.5.
+#   It uses all 1000 logits rather than the single worst one, so the fp16
+#   noise mostly cancels. Measured on the same builds: correct fp16 -0.25
+#   to 0.10, tanh-GELU fp16 0.87 to 1.02, tanh-GELU fp32 1.00.
+#
+# test_fp16_gate_rejects_a_tanh_gelu_build builds both and checks this.
+_FP16_LOGIT_TOLERANCE = 3e-2
+_TANH_SHARE_LIMIT = 0.5
 
-def _reference(model_dir: Path, case: dict):
-    """The reference's own logits, computed the way the reference computes them."""
+
+def _reference(model_dir: Path, case: dict, hidden_act: str | None = None):
+    """The reference's own logits, computed the way the reference computes them.
+
+    ``hidden_act`` overrides the checkpoint's activation, which is how the
+    tanh-GELU reference of the fp16 check is made.
+    """
     import torch
     from PIL import Image
     from transformers import AutoImageProcessor, AutoModelForImageClassification
 
     image = Image.open(_asset(case["test_image"])).convert("RGB")
+    overrides = {} if hidden_act is None else {"hidden_act": hidden_act}
     model = AutoModelForImageClassification.from_pretrained(
-        str(model_dir), dtype=torch.float32).eval()
+        str(model_dir), dtype=torch.float32, **overrides).eval()
     # use_fast=False is required, not a preference: the fast processor resizes
     # with torchvision and the slow one with Pillow, and this family
     # reproduces Pillow's bilinear coefficient for coefficient.
@@ -256,6 +286,38 @@ def _cosine(left: list[float], right: list[float]) -> float:
     return dot / (left_norm * right_norm)
 
 
+def _tanh_share(scores: list[float], reference: list[float],
+                tanh_reference: list[float]) -> float:
+    """How much of the tanh-GELU defect the scores carry: 0 for none, 1 for all of it."""
+    defect = [t - r for t, r in zip(tanh_reference, reference)]
+    error = [s - r for s, r in zip(scores, reference)]
+    size = sum(d * d for d in defect)
+    assert size > 0.0, "the tanh-GELU reference does not differ from the exact one"
+    return sum(e * d for e, d in zip(error, defect)) / size
+
+
+def _check_logits(scores: list[float], reference: list[float], precision: str,
+                  tanh_reference: list[float] | None = None) -> tuple[float, float]:
+    """Assert the gate of ``precision``; return the max abs difference and the cosine."""
+    assert len(scores) == len(reference), (
+        f"{FAMILY} returned {len(scores)} scores, reference {len(reference)}"
+    )
+    worst = max(abs(a - b) for a, b in zip(scores, reference))
+    cosine = _cosine(scores, reference)
+    assert cosine >= _COSINE_FLOOR, f"{FAMILY} logit cosine {cosine}"
+    tolerance = _FP16_LOGIT_TOLERANCE if precision == "fp16" else _LOGIT_TOLERANCE
+    assert worst <= tolerance, (
+        f"{FAMILY} {precision} logits differ from the reference by {worst}"
+    )
+    if precision == "fp16":
+        assert tanh_reference is not None, "the fp16 gate needs the tanh-GELU reference"
+        share = _tanh_share(scores, reference, tanh_reference)
+        assert share < _TANH_SHARE_LIMIT, (
+            f"{FAMILY} fp16 logits carry {share:.2f} of the tanh-GELU defect"
+        )
+    return worst, cosine
+
+
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     model_dir = _model_dir(manifest)
@@ -264,21 +326,15 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _build(model_dir, bundle, manifest)
 
     reference, reference_labels = _reference(model_dir, case)
+    tanh_reference = None
+    if manifest["precision"] == "fp16":
+        tanh_reference, _ = _reference(model_dir, case, hidden_act="gelu_pytorch_tanh")
     payload = _run_json(binary, runtime_root, bundle, case, "classify", "--task",
                         "image_to_class_scores", "--image",
                         str(_asset(case["test_image"])))
 
     scores = [float(value) for value in payload["scores"]]
-    assert len(scores) == len(reference), (
-        f"{FAMILY} returned {len(scores)} scores, reference {len(reference)}"
-    )
-
-    worst = max(abs(a - b) for a, b in zip(scores, reference))
-    cosine = _cosine(scores, reference)
-    assert cosine >= _COSINE_FLOOR, f"{FAMILY} logit cosine {cosine}"
-    assert worst <= _LOGIT_TOLERANCE, (
-        f"{FAMILY} logits differ from the reference by {worst}"
-    )
+    worst, cosine = _check_logits(scores, reference, manifest["precision"], tanh_reference)
 
     # The head emits logits; nothing in the runtime softmaxes them, and the
     # Task reports which kind they are rather than leaving it to the caller.
@@ -299,4 +355,126 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     print(
         f"{FAMILY} parity: {len(scores)} classes, logit maxabs {worst:.3e}, "
         f"cosine {cosine:.8f}, top-1 {top} ({labels[top]!r})"
+    )
+
+
+def _synthetic(seed: int, share: float, noise: float) -> tuple[list, list, list]:
+    """Scores that carry ``share`` of a tanh-like defect plus random noise of size ``noise``."""
+    import random
+
+    rng = random.Random(seed)
+    reference = [rng.gauss(0.0, 3.0) for _ in range(1000)]
+    defect = [rng.gauss(0.0, 4e-3) for _ in range(1000)]
+    tanh_reference = [r + d for r, d in zip(reference, defect)]
+    scores = [r + share * d + rng.gauss(0.0, noise) for r, d in zip(reference, defect)]
+    return scores, reference, tanh_reference
+
+
+def test_tanh_share_measures_the_defect_not_the_noise() -> None:
+    """Noise of the fp16 size leaves the share near 0; the defect moves it to 1."""
+    for seed in range(5):
+        scores, reference, tanh_reference = _synthetic(seed, 0.0, 2e-3)
+        assert abs(_tanh_share(scores, reference, tanh_reference)) < 0.1
+        scores, reference, tanh_reference = _synthetic(seed, 1.0, 2e-3)
+        assert abs(_tanh_share(scores, reference, tanh_reference) - 1.0) < 0.1
+
+
+def test_fp16_gate_fails_a_defect_inside_the_fp16_tolerance() -> None:
+    """The fp16 gate does not rest on its logit tolerance to catch the tanh GELU."""
+    scores, reference, tanh_reference = _synthetic(0, 0.0, 2e-3)
+    _check_logits(scores, reference, "fp16", tanh_reference)
+    scores, reference, tanh_reference = _synthetic(0, 1.0, 2e-3)
+    assert max(abs(a - b) for a, b in zip(scores, reference)) < _FP16_LOGIT_TOLERANCE
+    with pytest.raises(AssertionError, match="tanh-GELU defect"):
+        _check_logits(scores, reference, "fp16", tanh_reference)
+    with pytest.raises(AssertionError, match="tanh-GELU reference"):
+        _check_logits(scores, reference, "fp16")
+
+
+def test_fp32_gate_is_unchanged() -> None:
+    """fp32 keeps its own tolerance and needs no second reference."""
+    scores, reference, _ = _synthetic(0, 0.0, 1e-5)
+    _check_logits(scores, reference, "fp32")
+    shifted = list(scores)
+    shifted[0] += 2.5e-3
+    with pytest.raises(AssertionError, match="differ from the reference"):
+        _check_logits(shifted, reference, "fp32")
+
+
+def _tanh_gelu(network, inp, dtype=None):
+    """The defect under test: the tanh approximation in place of the exact GELU."""
+    import numpy as np
+    import tensorrt as trt
+
+    from .. import graph
+
+    dtype = np.float32 if dtype is None else dtype
+    ones = tuple([1] * len(inp.shape))
+
+    def constant(value):
+        return graph.add_constant(network, ones, np.full((1,), value), dtype=dtype)
+
+    def op(left, right, kind):
+        return network.add_elementwise(left, right, kind).get_output(0)
+
+    prod, total = trt.ElementWiseOperation.PROD, trt.ElementWiseOperation.SUM
+    cube = op(op(inp, inp, prod), inp, prod)
+    inner = op(constant(math.sqrt(2.0 / math.pi)),
+               op(inp, op(constant(0.044715), cube, prod), total), prod)
+    tanh = network.add_activation(inner, trt.ActivationType.TANH).get_output(0)
+    return op(op(constant(0.5), inp, prod), op(constant(1.0), tanh, total), prod)
+
+
+def test_fp16_gate_rejects_a_tanh_gelu_build(fp16_case_name: str, monkeypatch) -> None:
+    """A correct fp16 engine passes the fp16 gate and a tanh-GELU fp16 engine fails it.
+
+    Both engines are built from the case checkpoint and run in this process on
+    the case image, preprocessed the way the reference preprocesses it.
+    """
+    import numpy as np
+    import tensorrt as trt
+    import torch
+    from PIL import Image
+    from transformers import AutoImageProcessor
+
+    from .. import config as config_module, graph, model
+
+    _, manifest, case = CASES[fp16_case_name]
+    assert manifest["precision"] == "fp16"
+    model_dir = _model_dir(manifest)
+    assert torch.cuda.is_available(), f"selected {FAMILY} E2E requires CUDA"
+    reference, _ = _reference(model_dir, case)
+    tanh_reference, _ = _reference(model_dir, case, hidden_act="gelu_pytorch_tanh")
+    processor = AutoImageProcessor.from_pretrained(str(model_dir), use_fast=False)
+    image = Image.open(_asset(case["test_image"])).convert("RGB")
+    pixels = processor(images=image, return_tensors="pt")["pixel_values"]
+    pixels = pixels.to(device="cuda", dtype=torch.float32).contiguous()
+    weights = model._open_checkpoint(model_dir)
+    cfg = config_module.resolve(model_dir, weights)
+
+    def run(plan: bytes) -> list[float]:
+        engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
+        context = engine.create_execution_context()
+        out = torch.empty(tuple(engine.get_tensor_shape("logits")), device="cuda")
+        context.set_tensor_address("pixel_values", pixels.data_ptr())
+        context.set_tensor_address("logits", out.data_ptr())
+        context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+        torch.cuda.synchronize()
+        return [float(value) for value in out.reshape(-1).tolist()]
+
+    correct = run(model.build_engine(weights, cfg, dtype=np.float16))
+    worst, _ = _check_logits(correct, reference, "fp16", tanh_reference)
+    correct_share = _tanh_share(correct, reference, tanh_reference)
+
+    monkeypatch.setattr(graph, "add_gelu", _tanh_gelu)
+    broken = run(model.build_engine(weights, cfg, dtype=np.float16))
+    broken_share = _tanh_share(broken, reference, tanh_reference)
+    # The share check alone fails it, whatever its logit distance.
+    assert broken_share >= _TANH_SHARE_LIMIT, broken_share
+    with pytest.raises(AssertionError):
+        _check_logits(broken, reference, "fp16", tanh_reference)
+    print(
+        f"{FAMILY} fp16 gate: correct maxabs {worst:.3e} share {correct_share:.2f}; "
+        f"tanh GELU maxabs {max(abs(a - b) for a, b in zip(broken, reference)):.3e} "
+        f"share {broken_share:.2f}"
     )

@@ -56,6 +56,12 @@ def _require_weights(weights: dict, prefix: str) -> None:
 
 _DUAL_GEMM_KNOB = "peep:match_dual_gemm"
 
+# Work precision per build precision. fp16 keeps float32 engine I/O and
+# float32 layer-norm statistics; the largest activation measured on 2000
+# ImageNet validation images (the residual stream, 1.8e+03) is 36x below the
+# fp16 limit, and the layer norm squares it only after the float32 cast.
+_WORK_DTYPES = {"fp32": np.float32, "fp16": np.float16}
+
 
 def _builder(verbose, quant_ctx=None):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -76,20 +82,25 @@ def _builder(verbose, quant_ctx=None):
     return builder, network, config
 
 
-def build_engine(weights, cfg, *, verbose=False, quant_ctx=None) -> bytes:
+def build_engine(weights, cfg, *, verbose=False, quant_ctx=None, dtype=np.float32) -> bytes:
     builder, network, config = _builder(verbose, quant_ctx)
-    # fp32 throughout. build() refuses every other precision and records the
-    # measurement behind that refusal.
-    work_np = np.float32
+    # The work precision of every layer: float32, or float16 for precision=fp16.
+    # Layer-norm statistics are taken in float32 either way (graph.add_layer_norm).
+    work_np = np.dtype(dtype).type
     prefix = cfg["prefix"]
     width = cfg["hidden_size"]
     patch = cfg["patch_size"]
     grid = cfg["grid"]
     size = cfg["image_size"]
 
+    # The engine I/O stays float32 at every precision, so the runtime and the
+    # bundle contract do not change; only the network between them narrows.
     source = network.add_input("pixel_values", trt.float32, (1, 3, size, size))
+    pixels = source
+    if work_np != np.float32:
+        pixels = network.add_cast(source, trt.float16).get_output(0)
 
-    patches = g.add_conv2d(network, source,
+    patches = g.add_conv2d(network, pixels,
                            weights[f"{prefix}embeddings.patch_embeddings.projection.weight"],
                            weights[f"{prefix}embeddings.patch_embeddings.projection.bias"],
                            stride=(patch, patch), dtype=work_np)
@@ -123,6 +134,8 @@ def build_engine(weights, cfg, *, verbose=False, quant_ctx=None) -> bytes:
     class_row = network.add_slice(hidden, start=(0, 0), shape=(1, width), stride=(1, 1))
     logits = g.add_linear(network, class_row.get_output(0), weights["classifier.weight"],
                           weights["classifier.bias"], dtype=work_np)
+    if logits.dtype != trt.float32:
+        logits = network.add_cast(logits, trt.float32).get_output(0)
 
     logits.name = "logits"
     network.mark_output(logits)
@@ -161,18 +174,18 @@ def build(request, writer) -> None:
         # the image size and is not a free parameter.
         raise NotImplementedError("vit derives its sequence length from the image size")
 
-    # fp32 only. fp16 is refused rather than built unqualified, because
-    # measured on this checkpoint it cannot be gated. Against the reference a
-    # correct fp32 engine is 1.0e-05 off, an all-fp16 one is 6.9e-03, and the
-    # weakest defect the E2E gate catches - the tanh GELU - is 1.9e-02. An
-    # fp16 tolerance would have to sit above its own noise and below that
-    # break, which leaves under 3x of room. Taking the attention softmax in
-    # fp32 does not recover it: measured, 6.9e-03 either way, so the loss is
-    # in the matmuls themselves and not in a reduction done too narrowly.
+    # fp32 (the default) or fp16. An fp16 engine is too noisy for the fp32
+    # logit tolerance alone to catch the weakest defect, the tanh GELU:
+    # measured on the E2E image it is 5.2e-03 to 1.3e-02 off the reference,
+    # and a tanh-GELU fp16 build 1.6e-02 to 2.5e-02. So the fp16 E2E case
+    # adds a check that does not depend on that margin (test_e2e.py).
     precision = str(request.precision).lower()
-    if precision != "fp32":
+    if precision not in _WORK_DTYPES:
         raise NotImplementedError(
-            f"vit builds fp32 only; {precision} is not qualified for this family")
+            f"vit builds fp32 or fp16; {precision} is not qualified for this family")
+    if request.quantization == "fp8" and precision != "fp32":
+        # The FP8 graph and its measurements are float32 (fp32 Dequantize).
+        raise NotImplementedError(f"vit fp8 builds fp32 only; got precision {precision}")
 
     model_dir = Path(request.model_dir)
     weights = _open_checkpoint(model_dir)
@@ -197,7 +210,8 @@ def build(request, writer) -> None:
 
     writer.set_header(family="vit", task=request.task, backend=request.backend)
     writer.add_bytes("model.plan", build_engine(
-        weights, cfg, verbose=bool(request.verbose), quant_ctx=quant_ctx))
+        weights, cfg, verbose=bool(request.verbose), quant_ctx=quant_ctx,
+        dtype=_WORK_DTYPES[precision]))
     writer.add_json(
         "runtime.json",
         {
