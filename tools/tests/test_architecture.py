@@ -526,6 +526,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/model_benchmark.py",
         "tools/pr_metadata.py",
         "tools/test_impact.py",
+        "tools/variant_coverage.py",
         "tools/ci/__init__.py",
         "tools/ci/__main__.py",
         "tools/ci/container.py",
@@ -555,6 +556,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_pr_metadata.py",
         "tools/tests/test_process_github_files.py",
         "tools/tests/test_public_source_hygiene.py",
+        "tools/tests/test_variant_coverage.py",
     }
     expected_cmake = {
         "cmake/trtmcConfig.cmake.in",
