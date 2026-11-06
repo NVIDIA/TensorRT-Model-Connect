@@ -1090,7 +1090,12 @@ def test_toolchain_identity_requires_a_tensorrt_pin(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("dependencies = []\n")
     (tmp_path / "Dockerfile").write_text("FROM scratch\n")
 
-    with pytest.raises(ValueError, match="does not pin tensorrt"):
+    with pytest.raises(CiError, match="does not pin tensorrt"):
+        toolchain_identity(tmp_path)
+
+
+def test_toolchain_identity_reports_missing_files_as_ci_errors(tmp_path: Path) -> None:
+    with pytest.raises(CiError, match="cannot read the toolchain files"):
         toolchain_identity(tmp_path)
 
 

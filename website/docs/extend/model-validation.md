@@ -96,8 +96,9 @@ A toolchain sweep that only needs every bundle to build and load can stop each
 testcase after one stage: with `TRTMC_E2E_STOP_AFTER=native`, a testcase that
 has passed its `evidence_stage("native")` is skipped with the reason
 `trtmc-e2e-stopped-after:native` as soon as it enters any other stage, so the
-reference and comparison stages do not run. Stages before the named one run
-normally, and a testcase that never enters it runs to completion. The CI E2E
+reference and comparison stages after `native` do not run. Stages entered
+before `native`, including a comparison, run normally, and a testcase that never
+enters it runs to completion. The CI E2E
 runner counts such a skip as a stopped testcase only while the same variable is
 set. This mode checks build and load; it is not correctness evidence.
 
