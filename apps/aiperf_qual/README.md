@@ -72,6 +72,8 @@ A suite with `base: catalog` overrides the profile's catalog request with its da
 For a profile with `candidate.benchmark_sequence_length`, the build counts the prepared
 gold-suite prompts with its pinned tokenizer and uses their maximum length plus the configured
 `extra_tokens`. Qwen3-Embedding reserves one token for EOS and four for runtime tokenizer count differences.
+EmbeddingGemma2 reserves none: its runtime tokenizer counts every benchmark prompt as Transformers does, BOS and
+EOS included.
 The evidence is written to
 `artifacts/build/benchmark-capacity.json`; request truncation and accuracy tolerances do not change.
 Dataset or tokenizer failures stop capacity planning rather than falling back to the catalog size.
@@ -196,7 +198,9 @@ that configuration except `candidate` (benchmarks, requests, native adapter, req
 under its own and answers the benchmarks on that profile's route (chat or completions; the sampling stays its own
 catalog request's), and when its checkpoint is a separate pre-quantized repository, its native reference loads that
 profile's checkpoint. Its candidate stays its own bundle, held to the benchmarks' quantization gates;
-`qualified_as` in the plan names the profile it follows.
+`qualified_as` in the plan names the profile it follows. When the base builds from a prepared
+`candidate.model_directory` that the benchmark depends on, a profile that quantizes the same checkpoint at build
+time names that directory in its own definition (`personaplex-7b-fp8`: the bundle holds the VoiceBench system prompt).
 
 ### Reference environments
 

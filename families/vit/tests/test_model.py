@@ -172,21 +172,32 @@ def test_non_contiguous_layer_indices_are_refused(tmp_path: Path) -> None:
         config_module.resolve(_model_dir(tmp_path), weights)
 
 
-def test_fp16_is_refused(tmp_path: Path) -> None:
-    """fp16 is refused at build time, not merely left out of the manifests.
-
-    Measured against the reference, an all-fp16 engine is 6.9e-03 off where a
-    correct fp32 one is 1.0e-05, and the weakest defect the E2E gate catches
-    is 1.9e-02. A bundle built at a precision whose own error is within 3x of
-    the break is a bundle nothing meaningfully checks. model.build carries the
-    numbers.
-    """
-    request = BuildRequest(
+def _request(tmp_path: Path, precision: str, **extra) -> BuildRequest:
+    return BuildRequest(
         model_dir=tmp_path,
         output_path=tmp_path / "vit.bundle",
         family="vit",
         task="image_to_class_scores",
-        precision="fp16",
+        precision=precision,
+        **extra,
     )
-    with pytest.raises(NotImplementedError, match="fp32 only"):
-        model_module.build(request, writer=None)
+
+
+def test_bf16_is_refused(tmp_path: Path) -> None:
+    """fp32 and fp16 are the qualified precisions; bf16 is refused at build time."""
+    with pytest.raises(NotImplementedError, match="fp32 or fp16"):
+        model_module.build(_request(tmp_path, "bf16"), writer=None)
+
+
+def test_fp16_is_accepted(tmp_path: Path) -> None:
+    """fp16 passes the precision check and goes on to read the checkpoint."""
+    with pytest.raises(FileNotFoundError, match="safetensors"):
+        model_module.build(_request(tmp_path, "fp16"), writer=None)
+
+
+def test_the_default_precision_is_fp32() -> None:
+    from families.vit.support import describe
+    from tensorrt_model_connect.model_support import ModelMetadata
+
+    support = describe(ModelMetadata(config={"model_type": "vit"}, model_index={}))
+    assert support.default_precision == "fp32"

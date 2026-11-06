@@ -298,8 +298,9 @@ def test_a_family_definition_is_merged_over_config_models(tmp_path):
 
 
 def test_task_sdk_migrations_keep_their_tasks_qualification():
-    """Encoders migrated to text_to_pooled_features and Bark to text_to_audio keep encode's and audio
-    generation's benchmarks, and a profile's own suites still replace them (dpr-ctx-encoder)."""
+    """Encoders migrated to text_to_pooled_features, Bark to text_to_audio and the eagle_vlm reranker to
+    text_query_documents_to_relevance keep their old benchmarks, and a profile's own suites still replace them
+    (dpr-ctx-encoder)."""
     from trtmc_aiperf_qual.models import resolve_model
 
     for profile in ("fnet-base", "deberta-base", "distilbert-base-uncased"):
@@ -312,6 +313,20 @@ def test_task_sdk_migrations_keep_their_tasks_qualification():
     assert (bark["task"], bark["operation"]) == ("text_to_audio", "generate_audio")
     assert [item["check"] for item in bark["supplementary"]] == ["tts_intelligibility"]
     assert bark["performance"]["output_grader"] == "parity_audio"
+    rerank = resolve_model("nemotron-rerank-vl-1b-v2", _environment())
+    assert (rerank["task"], rerank["operation"]) == ("text_query_documents_to_relevance", "rerank")
+    assert [item["suite"] for item in rerank["absolute"]] == ["scifact-rerank"]
+    assert rerank["performance"]["output_grader"] == "parity_scores"
+
+
+def test_image_to_boxes_keeps_object_detection_qualification():
+    """The YOLO families migrate object_detection to image_to_boxes; detect and its benchmarks stay the same."""
+    import yaml
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+
+    tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
+    assert tasks["image_to_boxes"] == tasks["object_detection"]
 
 
 def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():
@@ -610,11 +625,13 @@ def test_quantized_profiles_take_their_bases_native_reference_and_benchmarks():
     assert canary["qualified_as"] == "canary-1b-v2" and "model" not in canary["reference"]
     assert canary["reference"]["adapter"] == "families/canary/reference/adapter.py"
     assert canary["reference"]["revision"] == canary["candidate"]["revision"]
-    # The base's candidate settings stay its own: the variant builds its catalog bundle.
-    personaplex = resolve_model("personaplex-7b-fp8", environment)
-    assert personaplex["reference"]["adapter"] == resolve_model("personaplex-7b", environment)["reference"]["adapter"]
+    # The base's candidate settings stay its own. PersonaPlex FP8 quantizes its base's checkpoint at build time and
+    # names the base's prepared model directory itself, so both bundles hold the benchmark's system prompt.
+    personaplex, base = resolve_model("personaplex-7b-fp8", environment), resolve_model("personaplex-7b", environment)
+    assert personaplex["reference"]["adapter"] == base["reference"]["adapter"]
     assert personaplex["candidate"]["bundle"] == "personaplex-7b-fp8/personaplex-7b-fp8.bundle"
-    assert "model_directory" not in personaplex["candidate"]
+    assert personaplex["candidate"]["model_directory"] == base["candidate"]["model_directory"]
+    assert personaplex["candidate"]["quantization"] == "fp8"
     # Without an unquantized profile, the highest precision there is.
     nvfp4 = resolve_model("llama-3.1-8b-nvfp4", environment)
     assert (nvfp4["qualified_as"], nvfp4["reference"]["model"]) == ("llama-3.1-8b-fp8", "nvidia/Llama-3.1-8B-Instruct-FP8")

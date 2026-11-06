@@ -173,6 +173,9 @@ def build_standard_decoder_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
+    if decoder_engine_role == "decode" and quant_ctx is not None and quant_ctx.has_nvfp4_weights:
+        # Reuse fallback dequantization buffers while both split engines remain resident.
+        trt_config.max_aux_streams = 0
     if quant_ctx is not None and quant_ctx.disable_dual_gemm_fusion:
         trt_config.build_route = "-peep:match_dual_gemm=off"
 

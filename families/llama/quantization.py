@@ -185,6 +185,11 @@ class LlamaQuantContext:
         return weight_name in self.scales
 
     @property
+    def has_nvfp4_weights(self) -> bool:
+        """Whether any projection uses packed NVFP4 weights."""
+        return any(isinstance(entry.weight, _NVFP4Weight) for entry in self.scales.values())
+
+    @property
     def disable_dual_gemm_fusion(self) -> bool:
         """True for FP8: TensorRT's fused gate/up (dual-GEMM) kernel fails to compile
         with scalar-scale FP8 Q/DQ inputs ('arith.divf' type mismatch), so the builders

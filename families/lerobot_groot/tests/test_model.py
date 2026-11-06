@@ -335,6 +335,44 @@ def test_build_rejects_unsupported_requests_before_any_heavy_work(
     assert stubbed_build == []
 
 
+class _Network:
+    def add_input(self, name, dtype, shape):
+        return (name, dtype, shape)
+
+
+@pytest.mark.parametrize(("precision", "expected"), [("bf16", "bfloat16"), ("fp32", "float32")])
+def test_condition_vision_tower_runs_in_the_build_precision(tmp_path, monkeypatch, precision, expected) -> None:
+    """The vision tower, the backbone and the action head share the build precision; fp32 stays fp32."""
+    import tensorrt as trt
+
+    dtypes: dict[str, object] = {}
+
+    def vision_stub(network, pixels, weights, *, images, grid_h, grid_w, dtype):
+        dtypes["vision"] = dtype
+        assert pixels[1] == trt.float32 and (images, grid_h, grid_w) == (2, 16, 16)
+        return "tokens", ["deepstack"]
+
+    def backbone_stub(network, weights, *, image_tokens, deepstack, dtype, **_):
+        dtypes["backbone"] = dtype
+        assert (image_tokens, deepstack) == ("tokens", ["deepstack"])
+        return "hidden"
+
+    def condition_stub(network, weights, hidden, state, *, dtype, **_):
+        dtypes["action_head"] = dtype
+        return None, "state_features", "cross_k", "cross_v"
+
+    monkeypatch.setattr(model_module, "_builder", lambda verbose: (None, _Network(), None))
+    monkeypatch.setattr(model_module, "_profile", lambda *a: None)
+    monkeypatch.setattr(model_module, "_serialize", lambda *a: b"C")
+    monkeypatch.setattr(vision, "build_vision", vision_stub)
+    monkeypatch.setattr(backbone, "build_backbone", backbone_stub)
+    monkeypatch.setattr(action_head, "build_condition", condition_stub)
+    monkeypatch.setattr(graph, "mark_output", lambda *a, **k: None)
+    cfg = config_module.load_config(_model_dir(tmp_path / "ckpt"))
+    assert model_module._build_condition_plan(cfg, {}, precision=precision) == b"C"
+    assert dtypes == dict.fromkeys(("vision", "backbone", "action_head"), getattr(trt, expected))
+
+
 def test_checkpoint_loading_and_shape_checks(tmp_path) -> None:
     with pytest.raises(FileNotFoundError, match="model.safetensors"):
         load_checkpoint(tmp_path)

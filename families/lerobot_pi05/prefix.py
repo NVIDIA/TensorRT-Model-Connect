@@ -45,7 +45,8 @@ def build_prefix(network, weights, cfg, *, dtype, debug=False):
     positions = network.add_input("position_ids", trt.int32, (prefix,))
     bias = network.add_input("attention_bias", trt.float32, (prefix, prefix))
 
-    images = vision.build_vision(network, pixels, weights, height=cfg.camera_height, width=cfg.camera_width)
+    images = vision.build_vision(
+        network, pixels, weights, height=cfg.camera_height, width=cfg.camera_width, dtype=dtype)
     images = graph.shuffle(network, images, reshape=(slots * vision.TOKENS, WIDTH))
 
     table = require(weights, embedding_key(weights), (VOCAB, WIDTH))

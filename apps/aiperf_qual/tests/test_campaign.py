@@ -40,6 +40,17 @@ def test_build_uses_the_catalog_manifest_or_a_descriptor_with_build_overrides(tm
     image = Path(descriptor["testcases"][0]["test_image"])
     assert image.is_absolute() and image.is_file()  # catalog assets stay reachable from the descriptor
 
+    # A model directory prepared in the reference environment replaces only the checkpoint: PersonaPlex FP8 builds
+    # its own FP8 manifest from its base's prepared directory.
+    prepared = tmp_path / "env/trtmc-reference/personaplex-model"
+    prepared.mkdir(parents=True)
+    fp8 = resolve_model("personaplex-7b-fp8", environment)
+    command = bundles.build_command(environment, fp8, tmp_path / "fp8", str(tmp_path / "env/bin/python"))
+    descriptor = json.loads(Path(command[command.index("--model") + 1]).read_text())
+    assert (descriptor["name"], descriptor["quantization"], descriptor["precision"]) == (
+        "personaplex-7b-fp8", "fp8", "fp16")
+    assert (descriptor["hf_id"], descriptor["hf_revision"]) == (str(prepared.resolve()), "")
+
 
 def test_ensure_bundle_lets_trtmc_bench_decide_reuse_by_its_build_receipt(tmp_path, monkeypatch):
     environment = Environment({"repo": str(tmp_path), "bundle_root": str(tmp_path / "engines"),
@@ -496,15 +507,18 @@ def test_summary_omits_exclusions_but_keeps_an_actual_result_from_another_host(t
     assert len(json.loads((root / campaign.EXCLUSIONS).read_text())) == 2
 
 
-def test_build_capacity_covers_prepared_benchmark_requests_and_extra_tokens(tmp_path, monkeypatch):
+@pytest.mark.parametrize("profile, extra_tokens", [
+    ("qwen3-embedding-0.6b", 5), ("embeddinggemma2-text-bf16", 0), ("embeddinggemma2-text-fp32", 0)])
+def test_build_capacity_covers_prepared_benchmark_requests_and_extra_tokens(tmp_path, monkeypatch, profile,
+                                                                             extra_tokens):
     from trtmc_aiperf_qual import absolute
     from trtmc_aiperf_qual.models import resolve_model
 
     environment = Environment({"repo": str(REPOSITORY), "bundle_root": str(tmp_path / "engines"),
                                "runtime_root": "/rt", "worker": "/rt/worker", "serve_python": "/py"})
-    model = resolve_model("qwen3-embedding-0.6b", environment)
+    model = resolve_model(profile, environment)
     plans = {"stsb": [{"request": {"prompt": "short"}}],
-             "scifact-retrieval": [{"request": {"prompt": "x" * 256}}]}
+             "scifact-retrieval": [{"request": {"prompt": "x" * 258}}]}  # over the catalog's 256 tokens
     monkeypatch.setattr(absolute, "plan", lambda environment, model, item: plans[item["suite"]])
 
     class Tokenizer:
@@ -515,11 +529,11 @@ def test_build_capacity_covers_prepared_benchmark_requests_and_extra_tokens(tmp_
     monkeypatch.setattr(absolute, "_candidate_tokenizer", lambda model: Tokenizer())
     command = bundles.build_command(environment, model, tmp_path / "build")
     descriptor = json.loads(Path(command[command.index("--model") + 1]).read_text())
-    assert descriptor["max_sequence_length"] == model["candidate"]["max_sequence_length"] == 261
-    assert model["candidate"]["bundle"].startswith("qwen3-embedding-0.6b-benchmark/")
-    assert plans["scifact-retrieval"][0]["request"]["prompt"] == "x" * 256
+    assert descriptor["max_sequence_length"] == model["candidate"]["max_sequence_length"] == 258 + extra_tokens
+    assert model["candidate"]["bundle"].startswith(f"{profile}-benchmark/")
+    assert plans["scifact-retrieval"][0]["request"]["prompt"] == "x" * 258
     evidence = json.loads((tmp_path / "build/benchmark-capacity.json").read_text())
-    assert evidence["required_sequence_length"] == 261 and evidence["extra_tokens"] == 5
+    assert evidence["required_sequence_length"] == 258 + extra_tokens and evidence["extra_tokens"] == extra_tokens
 
 
 def test_benchmark_capacity_planning_failure_prevents_a_catalog_fallback(tmp_path, monkeypatch):
@@ -693,6 +707,25 @@ def test_summary_counts_every_planned_profile(tmp_path):
     assert "| White | b | - | gb300-1 |" in text and "unknown benchmark 'typo'" in text
     assert "| White | c |" not in text and "no Task defaults" not in text
     assert len(json.loads((root / campaign.PLAN).read_text())["config_errors"]) == 2
+
+
+def test_run_all_sets_aside_the_older_result_of_a_profile_that_no_longer_configures(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual import cli, models
+
+    def broken(name, environment):
+        raise ConfigError(f"unknown benchmark 'typo' ({name})")
+
+    monkeypatch.setattr(cli, "load_environment", lambda path: Environment({}))
+    monkeypatch.setattr(models, "resolve_model", broken)
+    out = tmp_path / "gb300-1"
+    (out / "m").mkdir(parents=True)
+    (out / "m/report.json").write_text(json.dumps({"task": "t", "started": 1.0, "verdict": {"category": "pass"}}))
+
+    assert cli.main(["run-all", "--profile", "m", "--environment", str(tmp_path / "env.yaml"),
+                     "--out-root", str(out)]) == 2
+    text, counts = campaign.summary([out])
+    assert counts == {"config-error": 1} and "unknown benchmark 'typo'" in text
+    assert [path.name for path in out.iterdir() if campaign.KEPT_ASIDE.search(path.name)] != []
 
 
 def test_run_all_exit_code_reports_harness_failures():

@@ -96,6 +96,8 @@ def _matmul(
     work_dtype: trt.DataType,
     constant_keepalive: list[np.ndarray],
     name: str,
+    quant_ctx=None,
+    weight_name: str | None = None,
 ) -> trt.ITensor:
     expected = (lhs_width, rhs_width)
     if tuple(np.asarray(rhs).shape) != expected:
@@ -103,6 +105,8 @@ def _matmul(
             f"mapped K2-Horizon weight {name} must have shape {expected}, "
             f"got {tuple(np.asarray(rhs).shape)}"
         )
+    if quant_ctx is not None and weight_name is not None and quant_ctx.should_quantize(weight_name):
+        return quant_ctx.quantized_matmul(network, lhs, weight_name, name=name)
     rhs_tensor = _work_constant(
         network,
         expected,
@@ -389,8 +393,13 @@ def build_engine(
     *,
     precision: str = "bf16",
     verbose: bool = False,
+    quant_ctx=None,
 ) -> bytes:
-    """Build the qualified single-token BF16 engine with native KV updates."""
+    """Build the qualified single-token BF16 engine with native KV updates.
+
+    With ``quant_ctx`` (``quantization.calibrate_k2_horizon_fp8``) the projections it holds run as
+    FP8 GEMMs; without it every projection is the BF16 matmul.
+    """
 
     cfg = validate_config(config)
     if precision != "bf16":
@@ -413,6 +422,10 @@ def build_engine(
     builder_config = builder.create_builder_config()
     builder_config.builder_optimization_level = 1
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
+    if quant_ctx is not None:
+        from .quantization import configure_fp8_build
+
+        configure_fp8_build(builder_config, quant_ctx)
 
     token_id = network.add_input("token_id", trt.int32, (1,))
     position_id = network.add_input("position_id", trt.int32, (1,))
@@ -491,6 +504,8 @@ def build_engine(
             work_dtype=work_dtype,
             constant_keepalive=constant_keepalive,
             name=f"{prefix}.self_attn.q_proj",
+            quant_ctx=quant_ctx,
+            weight_name=f"{prefix}.w_q",
         )
         k = _matmul(
             network,
@@ -501,6 +516,8 @@ def build_engine(
             work_dtype=work_dtype,
             constant_keepalive=constant_keepalive,
             name=f"{prefix}.self_attn.k_proj",
+            quant_ctx=quant_ctx,
+            weight_name=f"{prefix}.w_k",
         )
         v = _matmul(
             network,
@@ -511,6 +528,8 @@ def build_engine(
             work_dtype=work_dtype,
             constant_keepalive=constant_keepalive,
             name=f"{prefix}.self_attn.v_proj",
+            quant_ctx=quant_ctx,
+            weight_name=f"{prefix}.w_v",
         )
         q = _apply_rope(
             network,
@@ -551,6 +570,8 @@ def build_engine(
             work_dtype=work_dtype,
             constant_keepalive=constant_keepalive,
             name=f"{prefix}.self_attn.o_proj",
+            quant_ctx=quant_ctx,
+            weight_name=f"{prefix}.w_o",
         )
         hidden_state = network.add_elementwise(
             hidden_state,
@@ -576,6 +597,8 @@ def build_engine(
             work_dtype=work_dtype,
             constant_keepalive=constant_keepalive,
             name=f"{prefix}.mlp.gate_proj",
+            quant_ctx=quant_ctx,
+            weight_name=f"{prefix}.w_gate",
         )
         up = _matmul(
             network,
@@ -586,6 +609,8 @@ def build_engine(
             work_dtype=work_dtype,
             constant_keepalive=constant_keepalive,
             name=f"{prefix}.mlp.up_proj",
+            quant_ctx=quant_ctx,
+            weight_name=f"{prefix}.w_up",
         )
         gated = network.add_elementwise(
             _silu(network, gate),
@@ -601,6 +626,8 @@ def build_engine(
             work_dtype=work_dtype,
             constant_keepalive=constant_keepalive,
             name=f"{prefix}.mlp.down_proj",
+            quant_ctx=quant_ctx,
+            weight_name=f"{prefix}.w_down",
         )
         hidden_state = network.add_elementwise(
             hidden_state,
@@ -645,7 +672,8 @@ def build_engine(
         print(
             "[trtmc build] Building K2-Horizon native BF16 engine "
             f"(layers={cfg.num_hidden_layers}, hidden={cfg.hidden_size}, "
-            f"cache={max_cache_length}) ...",
+            f"cache={max_cache_length}, "
+            f"fp8_projections={0 if quant_ctx is None else len(quant_ctx.scales)}) ...",
             file=sys.stderr,
         )
     try:
@@ -747,7 +775,7 @@ def _runtime_config(
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
-    """Build the qualified K2-Horizon BF16 bundle."""
+    """Build the qualified K2-Horizon BF16 bundle (FP8 projections with ``quantization=fp8``)."""
     if request.dynamic_kv_cache:
         raise NotImplementedError("k2_horizon does not support dynamic_kv_cache")
 
@@ -765,8 +793,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError("K2-Horizon supports only task=text_generation")
     if str(request.precision).lower() != "bf16":
         raise ValueError("K2-Horizon currently supports only BF16 builds")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("K2-Horizon does not support quantized builds")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"K2-Horizon does not support quantization={request.quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("K2-Horizon does not support mixed-FP32 layers")
     if request.mtp_seq_len is not None:
@@ -782,12 +812,18 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if max_cache_length > config.max_position_embeddings:
         raise ValueError("K2-Horizon max_sequence_length exceeds checkpoint capacity")
     weights = load_standard_weights(model_dir, source_config, precision="bf16")
+    quant_ctx = None
+    if request.quantization == "fp8":
+        from .quantization import calibrate_k2_horizon_fp8
+
+        quant_ctx = calibrate_k2_horizon_fp8(source_config, weights)
     plan = build_engine(
         source_config,
         weights,
         max_cache_length,
         precision="bf16",
         verbose=bool(request.verbose),
+        quant_ctx=quant_ctx,
     )
 
     writer.set_header(family="k2_horizon", task=request.task, backend=request.backend)

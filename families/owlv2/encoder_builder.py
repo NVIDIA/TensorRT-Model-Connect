@@ -15,8 +15,12 @@ import numpy as np
 from . import graph as g
 
 
-def build_layers(network, hidden, weights, prefix, cfg, *, mask=None, dtype=np.float32):
-    """Run ``cfg["num_layers"]`` pre-norm encoder layers over rows ``[seq, width]``."""
+def build_layers(network, hidden, weights, prefix, cfg, *, mask=None, dtype=np.float32,
+                 quant=None):
+    """Run ``cfg["num_layers"]`` pre-norm encoder layers over rows ``[seq, width]``.
+
+    ``quant`` (an ``Owlv2QuantContext``) routes its projections through FP8 Q/DQ.
+    """
     width = cfg["hidden_size"]
     for index in range(cfg["num_layers"]):
         layer = f"{prefix}.encoder.layers.{index}"
@@ -26,25 +30,20 @@ def build_layers(network, hidden, weights, prefix, cfg, *, mask=None, dtype=np.f
                                   weights[f"{layer}.layer_norm1.bias"], cfg["eps"])
         projections = []
         for name in ("q_proj", "k_proj", "v_proj"):
-            projections.append(g.add_linear(network, normed,
-                                            weights[f"{layer}.self_attn.{name}.weight"],
-                                            weights[f"{layer}.self_attn.{name}.bias"],
-                                            dtype=dtype))
+            projections.append(g.add_projection(network, normed, weights,
+                                                f"{layer}.self_attn.{name}", dtype, quant=quant))
         attention = g.add_attention(network, *projections, num_heads=cfg["num_heads"],
                                     head_dim=cfg["head_dim"], mask=mask)
-        attention = g.add_linear(network, attention,
-                                 weights[f"{layer}.self_attn.out_proj.weight"],
-                                 weights[f"{layer}.self_attn.out_proj.bias"], dtype=dtype)
+        attention = g.add_projection(network, attention, weights,
+                                     f"{layer}.self_attn.out_proj", dtype, quant=quant)
         hidden = g.add_sum(network, hidden, attention)
 
         normed = g.add_layer_norm(network, hidden,
                                   weights[f"{layer}.layer_norm2.weight"],
                                   weights[f"{layer}.layer_norm2.bias"], cfg["eps"])
-        inner = g.add_linear(network, normed, weights[f"{layer}.mlp.fc1.weight"],
-                             weights[f"{layer}.mlp.fc1.bias"], dtype=dtype)
+        inner = g.add_projection(network, normed, weights, f"{layer}.mlp.fc1", dtype, quant=quant)
         inner = g.add_quick_gelu(network, inner, dtype=dtype)
-        inner = g.add_linear(network, inner, weights[f"{layer}.mlp.fc2.weight"],
-                             weights[f"{layer}.mlp.fc2.bias"], dtype=dtype)
+        inner = g.add_projection(network, inner, weights, f"{layer}.mlp.fc2", dtype, quant=quant)
         hidden = g.add_sum(network, hidden, inner)
         assert int(hidden.shape[-1]) == width
     return hidden

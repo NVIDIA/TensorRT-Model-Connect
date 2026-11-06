@@ -59,26 +59,35 @@ def matmul_constant(
     bias: np.ndarray | None,
     *,
     dtype: np.dtype,
+    quant=None,
+    module: str | None = None,
 ):
-    """A Linear layer: `tensor @ weight.T`, plus an optional bias."""
+    """A Linear layer: `tensor @ weight.T`, plus an optional bias.
+
+    When ``quant`` (a ``SwinQuantContext``) quantizes ``module``, the product runs as an
+    FP8 GEMM through Quantize/Dequantize and the bias add stays as it is.
+    """
     rank = len(tuple(tensor.shape))
-    matrix = np.ascontiguousarray(weight.T, dtype=dtype)
-    shape = (1,) * (rank - 2) + matrix.shape
-    layer = network.add_constant(shape, trt.Weights(matrix.reshape(shape)))
-    if layer is None:
-        raise RuntimeError("TensorRT rejected a Swin linear weight")
-    values = layer.get_output(0)
-    if values.dtype != tensor.dtype:
-        cast = network.add_cast(values, tensor.dtype)
-        if cast is None:
-            raise RuntimeError("TensorRT rejected a Swin linear cast")
-        values = cast.get_output(0)
-    product = network.add_matrix_multiply(
-        tensor, trt.MatrixOperation.NONE, values, trt.MatrixOperation.NONE
-    )
-    if product is None:
-        raise RuntimeError("TensorRT rejected a Swin matmul")
-    output = product.get_output(0)
+    if quant is not None and module is not None and quant.should_quantize(module):
+        output = quant.matmul(network, quant.quantize_input(network, tensor, module), module)
+    else:
+        matrix = np.ascontiguousarray(weight.T, dtype=dtype)
+        shape = (1,) * (rank - 2) + matrix.shape
+        layer = network.add_constant(shape, trt.Weights(matrix.reshape(shape)))
+        if layer is None:
+            raise RuntimeError("TensorRT rejected a Swin linear weight")
+        values = layer.get_output(0)
+        if values.dtype != tensor.dtype:
+            cast = network.add_cast(values, tensor.dtype)
+            if cast is None:
+                raise RuntimeError("TensorRT rejected a Swin linear cast")
+            values = cast.get_output(0)
+        product = network.add_matrix_multiply(
+            tensor, trt.MatrixOperation.NONE, values, trt.MatrixOperation.NONE
+        )
+        if product is None:
+            raise RuntimeError("TensorRT rejected a Swin matmul")
+        output = product.get_output(0)
     if bias is None:
         return output
     bias_shape = (1,) * (rank - 1) + (int(bias.shape[0]),)
