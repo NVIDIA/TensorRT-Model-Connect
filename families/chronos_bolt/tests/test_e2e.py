@@ -322,7 +322,7 @@ def _assert_sdk_consumers(
         value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value
     )
     for language in ("c", "cpp"):
-        consumer = build_root / f"test_chronos_bolt_{language}_api_consumer"
+        consumer = build_root / f"test_chronos_bolt_sdk_{language}"
         assert consumer.is_file(), f"build the Chronos-Bolt {language} SDK consumer first"
         invocation = [str(consumer), str(bundle), str(runtime_root), str(tmp_path / "values.f32")]
         completed = subprocess.run(
