@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from tools import test_impact
+from tools.e2e_evidence import STOP_AFTER_ENV, STOPPED_AFTER_MARKER
 
 from .context import CiContext
 from .package import native_cli_library
@@ -102,10 +103,19 @@ def _require_passing_junit(path: Path, label: str, *, allow_empty: bool = False)
     return len(testcases)
 
 
+def _stopped(result: ET.Element, stop_after: str) -> bool:
+    """A testcase that a build sweep stopped after its ``stop_after`` stage passed."""
+    skipped = result.find("skipped")
+    message = "" if skipped is None else skipped.get("message") or ""
+    return bool(stop_after) and f"{STOPPED_AFTER_MARKER}{stop_after}" in message
+
+
 def _require_e2e_junit(
     path: Path,
     family: str,
     requested: tuple[str, ...],
+    *,
+    stop_after: str = "",
 ) -> None:
     testcases = _read_junit(path, f"{family} E2E")
     results: dict[str, list[ET.Element]] = {}
@@ -116,7 +126,12 @@ def _require_e2e_junit(
 
     requested_counts = Counter(requested)
     selected_results = [result for name in requested_counts for result in results.get(name, ())]
-    skipped = [result for result in selected_results if result.find("skipped") is not None]
+    stopped = [result for result in selected_results if _stopped(result, stop_after)]
+    skipped = [
+        result
+        for result in selected_results
+        if result.find("skipped") is not None and not _stopped(result, stop_after)
+    ]
     failed = [
         result
         for result in selected_results
@@ -133,6 +148,7 @@ def _require_e2e_junit(
         f"{family} E2E results: requested={len(requested)} "
         f"executed={len(passed) + len(failed)} passed={len(passed)} "
         f"failed={len(failed)} skipped={len(skipped)}"
+        + (f" stopped_after_{stop_after}={len(stopped)}" if stop_after else "")
     )
 
     problems = []
@@ -148,7 +164,10 @@ def _require_e2e_junit(
     skipped_names = sorted(
         name
         for name in requested_counts
-        if any(result.find("skipped") is not None for result in results.get(name, ()))
+        if any(
+            result.find("skipped") is not None and not _stopped(result, stop_after)
+            for result in results.get(name, ())
+        )
     )
     if skipped_names:
         problems.append("requested E2E testcase skipped: " + ", ".join(skipped_names))
@@ -180,6 +199,8 @@ def _require_e2e_process_result(
     family: str,
     requested_testcases: tuple[str, ...],
     returncode: int,
+    *,
+    stop_after: str = "",
 ) -> None:
     """Preserve process termination details when pytest cannot write JUnit."""
     if returncode and not report.is_file():
@@ -198,7 +219,7 @@ def _require_e2e_process_result(
             except ValueError:
                 pass
         raise CiError(f"{family} E2E pytest failed with {cause} before writing JUnit report")
-    _require_e2e_junit(report, family, requested_testcases)
+    _require_e2e_junit(report, family, requested_testcases, stop_after=stop_after)
     if returncode:
         raise CiError(f"{family} E2E pytest failed with exit code {returncode}")
 
@@ -369,6 +390,7 @@ class E2ERunner:
                 family,
                 tuple(requested_testcases),
                 completed.returncode,
+                stop_after=self.context.env.get(STOP_AFTER_ENV, ""),
             )
 
     def _family_testcases(self, family: str) -> tuple[str, ...]:

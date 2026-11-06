@@ -12,7 +12,43 @@ import hashlib
 import importlib.metadata as metadata
 import io
 import platform
+import re
 from pathlib import Path
+
+
+_TENSORRT_PIN = re.compile(r'"tensorrt==(\d+(?:\.\d+)+)"')
+_DOCKERFILE_TENSORRT = (
+    re.compile(r"\btensorrt==(\d+(?:\.\d+)+)"),
+    re.compile(r"\blibnvinfer\d+=(\d+(?:\.\d+)+)-"),
+    re.compile(r"tensorrt\.__version__ == '(\d+(?:\.\d+)+)'"),
+)
+_DOCKERFILE_CUDA = re.compile(r"\blibnvinfer[\w-]*=[\d.]+-\d+\+cuda(\d+\.\d+)")
+
+
+def toolchain_identity(repository: Path) -> dict[str, object]:
+    """TensorRT and CUDA versions of the gating image, read from source.
+
+    ``tensorrt`` is the ``pyproject.toml`` pin; ``dockerfile_tensorrt`` and
+    ``cuda`` are every version the root ``Dockerfile`` installs or asserts.
+    Comparing this identity between two revisions tells whether the TensorRT
+    or CUDA toolchain changed. ``image`` is the default CI image tag.
+    """
+    pyproject = (repository / "pyproject.toml").read_text(encoding="utf-8")
+    pinned = _TENSORRT_PIN.search(pyproject)
+    if pinned is None:
+        raise ValueError("pyproject.toml does not pin tensorrt==<version>")
+    dockerfile = (repository / "Dockerfile").read_text(encoding="utf-8")
+    tensorrt = sorted(
+        {match.group(1) for pattern in _DOCKERFILE_TENSORRT for match in pattern.finditer(dockerfile)}
+    )
+    cuda = sorted({match.group(1) for match in _DOCKERFILE_CUDA.finditer(dockerfile)})
+    major_minor = ".".join(pinned.group(1).split(".")[:2])
+    return {
+        "tensorrt": pinned.group(1),
+        "dockerfile_tensorrt": tensorrt,
+        "cuda": cuda,
+        "image": f"trtmc-ci:trt{major_minor}",
+    }
 
 
 class DockerImageManager:
@@ -25,7 +61,9 @@ class DockerImageManager:
         self.github = GitHubFiles(env)
 
     def ensure(self) -> str:
-        image = self.env.get("TRTMC_CI_IMAGE", "trtmc-ci:trt11.4")
+        image = self.env.get("TRTMC_CI_IMAGE") or str(
+            toolchain_identity(self.repository)["image"]
+        )
         self.commands.run(
             [
                 "docker",

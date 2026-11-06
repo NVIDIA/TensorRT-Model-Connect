@@ -92,6 +92,15 @@ Confirm that the manifest has a meaningful task/testcase, exact inputs,
 premerge selection where intended, and thresholds that reject adversarial or
 known-wrong outputs. Never weaken a criterion to pass CI.
 
+A toolchain sweep that only needs every bundle to build and load can stop each
+testcase after one stage: with `TRTMC_E2E_STOP_AFTER=native`, a testcase that
+has passed its `evidence_stage("native")` is skipped with the reason
+`trtmc-e2e-stopped-after:native` as soon as it enters any other stage, so the
+reference and comparison stages do not run. Stages before the named one run
+normally, and a testcase that never enters it runs to completion. The CI E2E
+runner counts such a skip as a stopped testcase only while the same variable is
+set. This mode checks build and load; it is not correctness evidence.
+
 ## 5. Save and read correctness evidence
 
 Set an artifact directory when running a selected family E2E to retain the

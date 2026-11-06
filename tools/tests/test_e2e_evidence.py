@@ -2307,3 +2307,61 @@ def test_library_comparison_uses_human_labels_without_changing_check_identity():
     assert "raw similarity key" in _assess_reference_details(data)
     data["observations"][0]["value"]["checks"].append({**check, "label": "Another label"})
     assert assessment(data)["kind"] == "unverified"
+
+
+def test_stop_after_skips_the_first_other_stage_once_the_target_passed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(e2e_evidence.STOP_AFTER_ENV, "native")
+    with evidence_stage("reference"):
+        pass
+    with evidence_stage("build"):
+        pass
+    with evidence_stage("native"):
+        pass
+    with evidence_stage("native"):
+        pass
+
+    with pytest.raises(pytest.skip.Exception, match="trtmc-e2e-stopped-after:native"):
+        with evidence_stage("compare"):
+            raise AssertionError("a stopped stage must not run")
+
+
+def test_stop_after_ignores_a_failed_target_stage(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(e2e_evidence.STOP_AFTER_ENV, "native")
+    with pytest.raises(RuntimeError):
+        with evidence_stage("native"):
+            raise RuntimeError("context creation failed")
+    ran = []
+    with evidence_stage("compare"):
+        ran.append("compare")
+    assert ran == ["compare"]
+
+
+def test_stop_after_is_off_without_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(e2e_evidence.STOP_AFTER_ENV, raising=False)
+    with evidence_stage("native"):
+        pass
+    ran = []
+    with evidence_stage("compare"):
+        ran.append("compare")
+    assert ran == ["compare"]
+
+
+def test_stop_after_records_the_stop_in_active_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(e2e_evidence.STOP_AFTER_ENV, "build")
+    recorder = _recorder(tmp_path)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        with evidence_stage("build"):
+            pass
+        with pytest.raises(pytest.skip.Exception):
+            with evidence_stage("native"):
+                pass
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+
+    assert [item["stage"] for item in recorder.data["timing"]] == ["build"]
+    assert recorder.data["failure_stage"] is None

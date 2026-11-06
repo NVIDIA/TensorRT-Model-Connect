@@ -26,6 +26,14 @@ import pytest
 _ACTIVE: contextvars.ContextVar[Evidence | None] = contextvars.ContextVar(
     "e2e_evidence", default=None
 )
+# A build sweep sets TRTMC_E2E_STOP_AFTER=<stage>. Once that stage has passed in
+# a test, entering any other stage skips the test with STOPPED_AFTER_MARKER, so
+# the later reference and comparison stages do not run.
+STOP_AFTER_ENV = "TRTMC_E2E_STOP_AFTER"
+STOPPED_AFTER_MARKER = "trtmc-e2e-stopped-after:"
+_COMPLETED_STAGES: contextvars.ContextVar[set[str] | None] = contextvars.ContextVar(
+    "e2e_completed_stages", default=None
+)
 _SAFE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _REVISION = re.compile(r"[0-9a-f]{40}")
 _FILE_LIMIT = 32 * 1024 * 1024
@@ -425,18 +433,35 @@ def record_evidence(name: str, value: Any) -> Any:
     return value
 
 
+def _stop_before(name: str) -> None:
+    target = os.environ.get(STOP_AFTER_ENV, "")
+    completed = _COMPLETED_STAGES.get()
+    if target and completed is not None and target in completed and name != target:
+        record_evidence("stopped_after", target)
+        pytest.skip(f"{STOPPED_AFTER_MARKER}{target} (before {name})")
+
+
+def _stage_passed(name: str) -> None:
+    completed = _COMPLETED_STAGES.get()
+    if completed is not None:
+        completed.add(name)
+
+
 @contextmanager
 def evidence_stage(name: str):
     """Record stage duration and failure location, preserving every exception."""
+    _stop_before(name)
     recorder = _ACTIVE.get()
     if recorder is None:
         yield
+        _stage_passed(name)
         return
     previous, started = recorder.stage, time.monotonic()
     recorder.stage = name
     status = "passed"
     try:
         yield
+        _stage_passed(name)
     except BaseException as error:
         status = "failed"
         recorder.data["failure_stage"] = name
@@ -459,6 +484,15 @@ def evidence_stage(name: str):
             {"stage": name, "seconds": time.monotonic() - started, "status": status}
         )
         recorder.stage = previous
+
+
+@pytest.fixture(autouse=True)
+def _track_completed_stages():
+    token = _COMPLETED_STAGES.set(set())
+    try:
+        yield
+    finally:
+        _COMPLETED_STAGES.reset(token)
 
 
 @pytest.fixture(autouse=True)

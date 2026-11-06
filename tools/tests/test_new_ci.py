@@ -19,7 +19,7 @@ import yaml
 
 from tools.ci.context import CiContext
 from tools.ci.container import CiContainer
-from tools.ci.docker_image import DockerImageManager
+from tools.ci.docker_image import DockerImageManager, toolchain_identity
 from tools.ci.e2e import (
     E2ERunner,
     SDK_CONSUMER_LANGUAGES,
@@ -459,6 +459,47 @@ def test_e2e_junit_fails_closed_for_invalid_result_cardinality_or_skip(
 
     with pytest.raises(CiError, match=message):
         _require_e2e_junit(report, "family", requested)
+
+
+def test_e2e_junit_accepts_a_testcase_stopped_after_the_requested_stage(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report = tmp_path / "e2e.xml"
+    report.write_text(
+        '<testsuites><testsuite><testcase name="test_e2e[alpha]">'
+        '<skipped message="trtmc-e2e-stopped-after:native (before compare)" />'
+        '</testcase><testcase name="test_e2e[beta]" /></testsuite></testsuites>',
+        encoding="utf-8",
+    )
+
+    _require_e2e_junit(report, "family", ("alpha", "beta"), stop_after="native")
+
+    assert (
+        "family E2E results: requested=2 executed=1 passed=1 failed=0 skipped=0 "
+        "stopped_after_native=1" in capsys.readouterr().out
+    )
+
+
+@pytest.mark.parametrize(
+    ("message", "stop_after"),
+    (
+        ("trtmc-e2e-stopped-after:native (before compare)", ""),
+        ("trtmc-e2e-stopped-after:build (before native)", "native"),
+        ("real family E2E requires TRTMC_E2E=1", "native"),
+    ),
+)
+def test_e2e_junit_rejects_other_skips_in_a_stopped_run(
+    tmp_path: Path, message: str, stop_after: str
+) -> None:
+    report = tmp_path / "e2e.xml"
+    report.write_text(
+        '<testsuites><testsuite><testcase name="test_e2e[alpha]">'
+        f'<skipped message="{message}" /></testcase></testsuite></testsuites>',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CiError, match="requested E2E testcase skipped: alpha"):
+        _require_e2e_junit(report, "family", ("alpha",), stop_after=stop_after)
 
 
 @pytest.mark.parametrize(
@@ -1009,6 +1050,48 @@ def test_docker_ensure_builds_the_current_dockerfile(
     assert manager.ensure() == "trtmc:test"
     assert commands == [["docker", "build", "--file", "Dockerfile", "--tag", "trtmc:test", "."]]
     assert github_env.read_text() == "TRTMC_CI_IMAGE=trtmc:test\n"
+
+
+def test_docker_ensure_defaults_to_the_tag_of_the_pinned_tensorrt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "pyproject.toml").write_text('dependencies = ["tensorrt==12.0.1.5"]\n')
+    (tmp_path / "Dockerfile").write_text('RUN pip install "tensorrt==12.0.1.5"\n')
+    manager = DockerImageManager(tmp_path, {"GITHUB_ENV": str(tmp_path / "github-env")})
+    commands = []
+    monkeypatch.setattr(
+        manager.commands,
+        "run",
+        lambda command, **_kwargs: commands.append(command) or SimpleNamespace(returncode=0),
+    )
+
+    assert manager.ensure() == "trtmc-ci:trt12.0"
+    assert commands[0][-2] == "trtmc-ci:trt12.0"
+
+
+def test_toolchain_identity_reads_the_pin_and_the_gating_dockerfile(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text('dependencies = ["tensorrt==11.4.0.106"]\n')
+    (tmp_path / "Dockerfile").write_text(
+        'RUN apt-get install "libnvinfer11=11.4.0.106-1+cuda13.4" '
+        '"libnvinfer-dev=11.4.0.106-1+cuda13.4"\n'
+        'RUN pip install "tensorrt==11.4.0.106"\n'
+        "RUN python -c \"import tensorrt; assert tensorrt.__version__ == '11.4.0.106'\"\n"
+    )
+
+    assert toolchain_identity(tmp_path) == {
+        "tensorrt": "11.4.0.106",
+        "dockerfile_tensorrt": ["11.4.0.106"],
+        "cuda": ["13.4"],
+        "image": "trtmc-ci:trt11.4",
+    }
+
+
+def test_toolchain_identity_requires_a_tensorrt_pin(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("dependencies = []\n")
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+
+    with pytest.raises(ValueError, match="does not pin tensorrt"):
+        toolchain_identity(tmp_path)
 
 
 def test_container_does_not_chmod_the_shared_workspace() -> None:
