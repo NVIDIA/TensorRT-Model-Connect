@@ -109,8 +109,8 @@ bool near(float actual, float expected) {
 
 std::unique_ptr<trtmc::DetrObjectDetectionPipeline> make(std::unique_ptr<FakeEngine> engine) {
     trtmc::DetrPreprocessConfig config;
-    config.input_image_h = 800;
-    config.input_image_w = 800;
+    config.input_image_h = 1333;
+    config.input_image_w = 1333;
     config.shortest_edge = 800;
     config.longest_edge = 1333;
     config.dynamic_image_shapes = true;
