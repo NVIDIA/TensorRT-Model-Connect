@@ -533,6 +533,29 @@ def test_the_native_side_answers_compiled_or_else_eager_in_its_place(tmp_path, m
     assert any(note.startswith("native torch.compile failed") for note in entry["notes"])
 
 
+def test_an_incomplete_compiled_run_answers_again_in_eager_mode(tmp_path, monkeypatch):
+    """A request that timed out while the compiled model kept compiling leaves the compiled run incomplete:
+    eager answers in its place, and its own incomplete answers are returned (fewer copies may answer them)."""
+    from contextlib import contextmanager
+
+    from trtmc_aiperf_qual.config import Environment
+
+    modes = []
+
+    @contextmanager
+    def serving_replicas(environment, model, backend, out, *, mode, **kwargs):
+        modes.append(mode)
+        yield {"replicas": 1}
+
+    partial = {"records": {"greedy": {0: {"passed": True}}}, "failed": {"greedy": "1 of 2 requests timed out"}}
+    monkeypatch.setattr(absolute, "serving_replicas", serving_replicas)
+    monkeypatch.setattr(absolute, "run_side", lambda *args: partial)
+    model = {"absolute": [{"suite": "s"}], "reference": {"mode": "compile", "perf_precision": "fp16", "precision": "fp32"}}
+    native = absolute.run_native(Environment({"native_replicas": 1}), model, "python", {"s": [{}, {}]}, tmp_path)
+    assert modes == ["compile", "eager"] and native["mode"] == "eager" and native["runs"] == {"s": partial}
+    assert "incomplete under torch.compile: s: 1 of 2 requests timed out" in native["compile_fallback"]
+
+
 def test_native_copies_fit_the_free_gpu_memory():
     from trtmc_aiperf_qual.services import replicas_that_fit
 

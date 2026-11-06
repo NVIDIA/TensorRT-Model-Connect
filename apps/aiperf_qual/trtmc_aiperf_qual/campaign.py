@@ -533,14 +533,20 @@ def annotate_regressions(rows: Mapping[str, dict[str, Any]], baseline: Mapping[s
     """Compare TRTMC p50 per profile and timed request with a baseline run (for example the previous
     release); slower by more than the margin is noted as a regression (the category is unchanged). The native
     mode is not part of the key: it does not change the TRTMC time, and a baseline may have run another one."""
+    def timed(perf: Sequence[Mapping[str, Any]]) -> dict[str, float]:
+        """TRTMC p50 per timed request (a mode the native side could not run has no TRTMC timing)."""
+        found: dict[str, float] = {}
+        for item in perf:
+            p50 = (item.get("candidate") or {}).get("p50_ms")
+            if p50:
+                found.setdefault(str(item.get("request") or item.get("reference_mode")), p50)
+        return found
+
     for profile, row in rows.items():
-        key = lambda item: str(item.get("request") or item.get("reference_mode"))  # noqa: E731
-        previous = {key(item): item for item in (baseline.get(profile) or {}).get("perf", [])}
-        for name in dict.fromkeys(key(item) for item in row.get("perf", [])):
-            item = next(item for item in row["perf"] if key(item) == name)
-            before = (previous.get(name) or {}).get("candidate", {}).get("p50_ms")
-            now = item.get("candidate", {}).get("p50_ms")
-            if before and now:
+        previous = timed((baseline.get(profile) or {}).get("perf", []))
+        for name, now in timed(row.get("perf", [])).items():
+            before = previous.get(name)
+            if before:
                 change = (now / before - 1) * 100
                 row.setdefault("baseline", {})[name] = change
                 if change > margin_percent:

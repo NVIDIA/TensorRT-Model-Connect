@@ -138,6 +138,8 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
             memory: dict[str, float] = {}
 
             def call() -> Invocation:
+                if not state["available"]:  # the backend stopped serving while this call waited in the lane
+                    raise BackendUnavailable(state["reason"] or "backend is no longer available")
                 if config.memory_probe is None:
                     return backend.invoke(resolved, workdir / "output")
                 result, memory["peak_memory_mb"] = config.memory_probe.measure(

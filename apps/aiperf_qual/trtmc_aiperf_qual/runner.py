@@ -622,6 +622,8 @@ def _time_reference(environment: Environment, model: Mapping[str, Any], policy: 
                                    out / f"perf-reference-{tag}-{suite.name}", policy["aggregation"].get(mode, "mean"))
             if stats.get("p50_ms") is None:
                 raise RuntimeError(f"no successful {precision} requests ({suite.name})")
+            if mode == "compile" and stats.get("incomplete"):  # eager times it in its place
+                raise RuntimeError(f"incomplete under torch.compile ({suite.name}): {stats['incomplete']}")
             stats["precision"], stats["mode"] = precision, mode
             timed[suite.name] = (run, stats, service["info"])
     return timed

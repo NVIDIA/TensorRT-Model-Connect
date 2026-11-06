@@ -84,12 +84,18 @@ def test_a_compile_reference_whose_compiled_modules_never_ran_stops_serving(fami
         backend("compile").invoke({"compiled": False}, tmp_path / "out")
 
 
-def test_recompiling_past_the_limit_fails_instead_of_running_eager(monkeypatch):
+@pytest.mark.parametrize("options", [{"fail_on_recompile_limit_hit": False},
+                                     {"fail_on_cache_limit_hit": False},  # the name before PyTorch 2.7
+                                     {"fail_on_recompile_limit_hit": False, "fail_on_cache_limit_hit": False}, {}])
+def test_recompiling_past_the_limit_fails_instead_of_running_eager(monkeypatch, options):
+    from types import SimpleNamespace
+
     import torch._dynamo
 
-    monkeypatch.setattr(torch._dynamo.config, "fail_on_recompile_limit_hit", False)
+    config = SimpleNamespace(**options)
+    monkeypatch.setattr(torch._dynamo, "config", config)
     common.strict_recompiles()
-    assert torch._dynamo.config.fail_on_recompile_limit_hit is True
+    assert vars(config) == ({name: name == next(iter(options)) for name in options} if options else {})
 
 
 def test_compile_counts_read_dynamo_counters(monkeypatch):

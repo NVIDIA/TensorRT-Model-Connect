@@ -758,6 +758,15 @@ def test_summary_names_the_native_mode_and_keeps_regressions_across_a_mode_chang
     assert "regression: TRTMC mmlu p50 +10.0% vs baseline" in text  # the native mode is not part of the key
 
 
+def test_regression_notes_skip_entries_without_a_trtmc_timing():
+    rows = {"m": {"perf": [{"reference_mode": "eager", "request": "catalog", "candidate": {"p50_ms": 11.0}}]}}
+    baseline = {"m": {"perf": [{"reference_mode": "eager", "request": "catalog", "candidate": {"p50_ms": 10.0}},
+                               {"reference_mode": "compile", "request": "catalog", "light": "n/a", "candidate": {}}]}}
+    campaign.annotate_regressions(rows, baseline)
+    assert rows["m"]["baseline"] == {"catalog": pytest.approx(10.0)}
+    assert rows["m"]["notes"].startswith("regression: TRTMC catalog p50 +10.0% vs baseline")
+
+
 def test_the_qualifying_fixed_light_is_the_one_reported():
     row = {"perf": [{"reference_mode": "eager", "configured_mode": "compile", "qualifying": True, "request": "catalog"},
                     {"reference_mode": "compile", "qualifying": False, "request": "catalog"},

@@ -848,6 +848,10 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
                     if side.get("failed") and not any(answers.values()):
                         raise RuntimeError(f"{name}: no successful native responses "
                                            f"({next(iter(side['failed'].values()))})")
+                # A compiled run that left problems unanswered (a request timed out while it compiled, say) answers
+                # again in eager mode; an incomplete eager run is returned (fewer copies may then answer it).
+                if attempt.mode == "compile" and (gap := incomplete(model, plans, runs)):
+                    raise RuntimeError(f"incomplete under torch.compile: {gap}")
             finally:  # sharing an MPS daemon, no copy leaves while the other side's copies still answer
                 if finished is not None:
                     finished.set()

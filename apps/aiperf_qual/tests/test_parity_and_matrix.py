@@ -231,7 +231,9 @@ def test_an_order_check_whose_native_timing_fails_is_unresolved_and_replaces_the
     assert '"unresolved"' in (tmp_path / "order.json").read_text()
 
 
-def test_a_fixed_request_whose_torch_compile_fails_is_timed_eager_in_its_place(tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure, reason", [("start", "Inductor lowering failed"),
+                                             ("incomplete", "incomplete under torch.compile")])
+def test_a_fixed_request_whose_torch_compile_fails_is_timed_eager_in_its_place(tmp_path, monkeypatch, failure, reason):
     from contextlib import contextmanager
     from types import SimpleNamespace
 
@@ -242,16 +244,20 @@ def test_a_fixed_request_whose_torch_compile_fails_is_timed_eager_in_its_place(t
     @contextmanager
     def serving(environment, model, backend, out, *, mode="eager", compile_fallback=None, **kwargs):
         started.append((backend, mode, compile_fallback))
-        if backend == "reference" and mode == "compile":
+        if backend == "reference" and mode == "compile" and failure == "start":
             raise RuntimeError("Inductor lowering failed")
         yield {"url": "u", "info": {"backend": backend, "timing_scope": "task-call-wall"}}
 
     run = SimpleNamespace(raw_records=lambda: [])
     monkeypatch.setattr(runner, "serving", serving)
     monkeypatch.setattr(runner, "probe", lambda *args: None)
+
     def perf_run(*args):  # args[5]: the run's directory, perf-reference-<mode>-<precision>-<request> or perf-candidate-*
         p50 = 10.0 if "reference" in args[5].name else 2.0
-        return run, timing(p50, per_run_p50_ms=[p50, p50 * 1.01, p50 * 0.99])
+        stats = timing(p50, per_run_p50_ms=[p50, p50 * 1.01, p50 * 0.99])
+        if args[5].name.startswith("perf-reference-compile"):  # a request timed out while the server compiled
+            stats["incomplete"] = "11 of 12 requests succeeded"
+        return run, stats
 
     monkeypatch.setattr(runner, "_perf_run", perf_run)
     monkeypatch.setattr(runner, "output_check", lambda *args: (True, ""))
@@ -262,7 +268,7 @@ def test_a_fixed_request_whose_torch_compile_fails_is_timed_eager_in_its_place(t
               "margin_percent": 5, "max_ci_percent": 5, "guard_percent": 0}
     timed = runner._reference_perf(Environment({}), model, policy, [suite], "python", runner._Phases(tmp_path), tmp_path)
     stats = timed["compile"]["catalog"][1]
-    assert stats["mode"] == "eager" and "Inductor lowering failed" in stats["compile_fallback"]
+    assert stats["mode"] == "eager" and reason in stats["compile_fallback"]
     assert "precision_fallback" not in stats  # the same precision: no fallback baseline
     assert started == [("reference", "compile", None), ("reference", "eager", stats["compile_fallback"])]
     performance = []
