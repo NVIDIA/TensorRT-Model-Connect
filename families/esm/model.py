@@ -29,6 +29,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import config as config_module, encoder_builder, graph as g
+from .quantization import calibrate_esm, configure_quantized_build
 
 _SUPPORTED_TASKS = ("masked_text_to_token_scores",)
 
@@ -194,8 +195,10 @@ def _token_dropout(network, embedded, input_ids, keep_column, cfg, work_np, work
     return g.add_product(network, embedded, factor.get_output(0))
 
 
-def build_engine(weights, cfg, *, seq_len, precision="fp32", verbose=False) -> bytes:
+def build_engine(weights, cfg, *, seq_len, precision="fp32", quant_ctx=None,
+                 verbose=False) -> bytes:
     builder, network, config = _builder(verbose)
+    configure_quantized_build(config, quant_ctx)
     # The work type of every layer. Layer-norm statistics are taken in float32
     # either way (graph.add_layer_norm), and the engine I/O stays the same.
     work_np, work_trt = _WORK_TYPES[precision]
@@ -240,7 +243,7 @@ def build_engine(weights, cfg, *, seq_len, precision="fp32", verbose=False) -> b
     sin = g.add_constant(network, (1, seq_len, head_dim), sin_table, dtype=work_np)
 
     hidden = encoder_builder.build_layers(network, hidden, weights, cfg, mask=additive,
-                                          cos=cos, sin=sin, dtype=work_np)
+                                          cos=cos, sin=sin, dtype=work_np, quant_ctx=quant_ctx)
 
     head = g.add_gelu(network, g.add_linear(network, hidden, weights["lm_head.dense.weight"],
                                             weights["lm_head.dense.bias"], dtype=work_np),
@@ -278,8 +281,10 @@ def build(request, writer) -> None:
         raise NotImplementedError("esm does not take an image")
     if request.video_num_frames is not None:
         raise NotImplementedError("esm does not support video_num_frames")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("esm does not support quantization")
+    quantized = request.quantization not in {None, "none"}
+    if quantized and request.quantization != "fp8":
+        raise NotImplementedError(
+            f"esm supports quantization fp8 or none; got {request.quantization!r}")
     if request.fp32_layers:
         raise NotImplementedError("esm does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -293,7 +298,15 @@ def build(request, writer) -> None:
     # and an all-fp16 layer norm drops accuracy from 35% to 6%. The softmax
     # stays fp16; taking it in float32 changed neither speed nor quality.
     # The fp16 E2E case has its own logit tolerance (test_e2e.py).
+    # FP8: fp16 only. The rest of the graph runs in fp16 around the FP8
+    # GEMMs. fp16 alone moves the masked-token distribution by KL 1e-05 to
+    # 5e-05 and FP8 by 8e-03 to 1e-02, so the fp16 work type adds less than 1%
+    # of the FP8 error; the same FP8 projections inside an fp32 graph are 1.6x
+    # to 3.3x slower, because the attention matmuls and the elementwise work
+    # stay fp32.
     precision = str(request.precision).lower()
+    if quantized and precision != "fp16":
+        raise ValueError("esm quantization=fp8 requires precision=fp16")
     if precision not in _WORK_TYPES:
         raise NotImplementedError(
             f"esm builds fp32 or fp16; {precision} is not qualified for this family")
@@ -309,6 +322,7 @@ def build(request, writer) -> None:
     prefix = _prefix(weights)
     _require_weights(weights, prefix)
     cfg = config_module.resolve(model_dir, weights, prefix)
+    quant_ctx = calibrate_esm(weights, cfg, g, request.quantization) if quantized else None
     if seq_len > cfg["max_positions"]:
         raise NotImplementedError(
             f"esm was trained to {cfg['max_positions']} positions, not {seq_len}")
@@ -317,7 +331,8 @@ def build(request, writer) -> None:
 
     writer.set_header(family="esm", task=request.task, backend=request.backend)
     writer.add_bytes("model.plan", build_engine(
-        weights, cfg, seq_len=seq_len, precision=precision, verbose=bool(request.verbose)))
+        weights, cfg, seq_len=seq_len, precision=precision, quant_ctx=quant_ctx,
+        verbose=bool(request.verbose)))
     writer.add_bytes("vocab.txt", vocabulary)
     writer.add_json(
         "runtime.json",

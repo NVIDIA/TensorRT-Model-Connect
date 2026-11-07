@@ -27,9 +27,20 @@ import numpy as np
 import tensorrt as trt
 
 from . import graph as g
+from .quantization import HF_SUFFIX
 
 
-def build_layers(network, hidden, weights, cfg, *, mask, cos, sin, dtype=np.float32):
+def _project(network, inp, weights, cfg, index, stem, *, dtype, quant_ctx):
+    """One projection of layer ``index``; FP8 when the quant context lists it."""
+    module = f"{cfg['prefix']}encoder.layer.{index}.{HF_SUFFIX[stem]}"
+    weight, bias = weights[f"{module}.weight"], weights[f"{module}.bias"]
+    if quant_ctx is None:
+        return g.add_linear(network, inp, weight, bias, dtype=dtype)
+    return quant_ctx.linear(network, inp, f"layer.{index}.{stem}", weight, bias, dtype)
+
+
+def build_layers(network, hidden, weights, cfg, *, mask, cos, sin, dtype=np.float32,
+                 quant_ctx=None):
     num_heads = cfg["num_heads"]
     head_dim = cfg["head_dim"]
     root = cfg["prefix"]
@@ -42,15 +53,10 @@ def build_layers(network, hidden, weights, cfg, *, mask, cos, sin, dtype=np.floa
                                   weights[f"{prefix}attention.LayerNorm.weight"],
                                   weights[f"{prefix}attention.LayerNorm.bias"], cfg["eps"])
 
-        query = g.to_heads(network, g.add_linear(
-            network, normed, weights[f"{prefix}attention.self.query.weight"],
-            weights[f"{prefix}attention.self.query.bias"], dtype=dtype), num_heads, head_dim)
-        key = g.to_heads(network, g.add_linear(
-            network, normed, weights[f"{prefix}attention.self.key.weight"],
-            weights[f"{prefix}attention.self.key.bias"], dtype=dtype), num_heads, head_dim)
-        value = g.to_heads(network, g.add_linear(
-            network, normed, weights[f"{prefix}attention.self.value.weight"],
-            weights[f"{prefix}attention.self.value.bias"], dtype=dtype), num_heads, head_dim)
+        query, key, value = (
+            g.to_heads(network, _project(network, normed, weights, cfg, index, stem,
+                                         dtype=dtype, quant_ctx=quant_ctx), num_heads, head_dim)
+            for stem in ("query", "key", "value"))
 
         # Scale first, rotate second: the reference's order.
         query = g.add_rotary(network, g.add_product(network, query, scale), cos, sin, head_dim)
@@ -65,18 +71,16 @@ def build_layers(network, hidden, weights, cfg, *, mask, cos, sin, dtype=np.floa
             probabilities.get_output(0), trt.MatrixOperation.NONE,
             value, trt.MatrixOperation.NONE).get_output(0)
 
-        attended = g.add_linear(network, g.from_heads(network, context, num_heads, head_dim),
-                                weights[f"{prefix}attention.output.dense.weight"],
-                                weights[f"{prefix}attention.output.dense.bias"], dtype=dtype)
+        attended = _project(network, g.from_heads(network, context, num_heads, head_dim),
+                            weights, cfg, index, "attn_out", dtype=dtype, quant_ctx=quant_ctx)
         hidden = g.add_sum(network, hidden, attended)
 
         normed = g.add_layer_norm(network, hidden, weights[f"{prefix}LayerNorm.weight"],
                                   weights[f"{prefix}LayerNorm.bias"], cfg["eps"])
-        inner = g.add_gelu(network, g.add_linear(
-            network, normed, weights[f"{prefix}intermediate.dense.weight"],
-            weights[f"{prefix}intermediate.dense.bias"], dtype=dtype), dtype=dtype)
-        outer = g.add_linear(network, inner, weights[f"{prefix}output.dense.weight"],
-                             weights[f"{prefix}output.dense.bias"], dtype=dtype)
+        inner = g.add_gelu(network, _project(network, normed, weights, cfg, index, "fc1",
+                                             dtype=dtype, quant_ctx=quant_ctx), dtype=dtype)
+        outer = _project(network, inner, weights, cfg, index, "fc2", dtype=dtype,
+                         quant_ctx=quant_ctx)
         hidden = g.add_sum(network, hidden, outer)
 
     # One normalisation closes the stack, which a pre-norm encoder needs and a
