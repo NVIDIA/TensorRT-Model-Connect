@@ -6,6 +6,7 @@
 #pragma once
 
 #include "trtmc/internal/audio.h"
+#include "trtmc/internal/model.h"
 #include "trtmc/internal/tools.h"
 
 #include <functional>
@@ -159,6 +160,11 @@ class ISpeechDialogueSession {
     virtual ConfigView effective_config() const = 0;
     virtual ISpeechRealtimeControl* realtime_control() noexcept { return nullptr; }
     virtual ISpeechToolControl* tool_control() noexcept { return nullptr; }
+    // Text joins the existing session history. false accepts no bytes and
+    // reports backpressure, with the same concurrency contract as append_audio.
+    virtual bool append_text(std::string_view) {
+        throw UnsupportedTask("speech session does not accept text input");
+    }
 };
 
 class IDuplexSpeechDialogue {
