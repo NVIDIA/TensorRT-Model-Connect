@@ -14,6 +14,7 @@ from tensorrt_model_connect.model_support import (
     FamilyResolutionError,
     FamilySupport,
     ModelMetadata,
+    Variant,
     family_support,
     load_model_metadata,
     resolve_family,
@@ -294,3 +295,39 @@ def test_family_owned_exact_metadata_shapes_resolve_without_priority(
 ) -> None:
     family, _ = resolve_family(metadata)
     assert family == expected_family
+
+
+def test_family_support_carries_declared_variants() -> None:
+    variants = (Variant("bf16"), Variant("bf16", "fp8", status="experimental"))
+    describe = family_support(
+        model_types=("example",),
+        tasks=("generation",),
+        default_task="generation",
+        default_precision="bf16",
+        variants=variants,
+    )
+
+    support = describe(ModelMetadata({"model_type": "example"}, {}))
+    assert support is not None
+    assert support.variants == variants
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"precision": "BF16"},
+        {"precision": "bf16", "quantization": "none"},
+        {"precision": "bf16", "quantization": "FP8"},
+        {"precision": "bf16", "status": "qualified"},
+        {"precision": "bf16", "manifests": ("a", "a")},
+        {"precision": "bf16", "manifests": ("",)},
+    ],
+)
+def test_variant_rejects_invalid_declarations(arguments: dict) -> None:
+    with pytest.raises(ValueError):
+        Variant(**arguments)
+
+
+def test_family_support_rejects_duplicate_variants() -> None:
+    with pytest.raises(ValueError, match="unique"):
+        FamilySupport(("generation",), "generation", variants=(Variant("fp16"), Variant("fp16")))
