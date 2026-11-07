@@ -25,4 +25,9 @@ inline void m2m_100_apply_source_language_token(std::vector<int32_t>& ids, int32
         ids.push_back(eos_token_id);
 }
 
+inline int32_t m2m_100_apply_forced_bos_token(int32_t selected_token_id, int32_t decoder_step,
+                                              int32_t forced_bos_token_id) {
+    return decoder_step == 0 && forced_bos_token_id >= 0 ? forced_bos_token_id : selected_token_id;
+}
+
 } // namespace trtmc

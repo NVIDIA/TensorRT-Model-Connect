@@ -34,6 +34,10 @@ int main() {
     trtmc::m2m_100_apply_source_language_token(ids, eos, -1);
     if (ids != std::vector<std::int32_t>{10})
         return 6;
+    if (trtmc::m2m_100_apply_forced_bos_token(10, 0, 7) != 7 ||
+        trtmc::m2m_100_apply_forced_bos_token(10, 1, 7) != 10 ||
+        trtmc::m2m_100_apply_forced_bos_token(10, 0, -1) != 10)
+        return 7;
 
     const std::string valid =
         R"json({"vocab_size":100,"hidden_size":64,"bos_token_id":0,"eos_token_id":2,"pad_token_id":1,"num_attention_heads":4,"num_key_value_heads":4,"encoder_layers":2,"decoder_layers":2,"max_source_length":128,"decoder_start_token_id":2,"scale_embedding":true,"has_vision_engine":true,"is_encoder_decoder":true,"precision":"fp32","max_cache_length":128,"decoder_engine_layout":"single"})json";
