@@ -92,17 +92,29 @@ Confirm that the manifest has a meaningful task/testcase, exact inputs,
 premerge selection where intended, and thresholds that reject adversarial or
 known-wrong outputs. Never weaken a criterion to pass CI.
 
-A toolchain sweep that only needs every bundle to build and load can stop each
-testcase after one stage: with `TRTMC_E2E_STOP_AFTER=native`, a testcase that
-has passed its `evidence_stage("native")` is skipped with the reason
-`trtmc-e2e-stopped-after:native` as soon as it enters any other stage, so the
-reference and comparison stages after `native` do not run. Stages entered
-before `native`, including a comparison, run normally, and a testcase that never
-enters it runs to completion. The CI E2E runner counts such a skip as a stopped
-testcase only while the same variable is set, and in this mode it runs every
-selected testcase and the family hardware tests without stopping at the first
-failure, then reports all failures. This mode checks build and load; it is not
-correctness evidence.
+A toolchain sweep only needs every bundle to build and load. A family declares
+the point where that is true by calling `mark_loaded()` from
+`tools.e2e_evidence` once, after the native runtime has created an execution
+context for the last engine of the testcase and before any reference or
+comparison work:
+
+```python
+with evidence_stage("native"):
+    output = run_native(bundle)
+mark_loaded()
+with evidence_stage("reference"):
+    ...
+```
+
+With `TRTMC_E2E_STOP_AFTER=loaded`, a testcase that reaches `mark_loaded()` is
+skipped there with the reason `trtmc-e2e-stopped-after:loaded`; a testcase that
+does not call it runs to completion, so an undeclared family is checked in full
+rather than wrongly passed. Call it only where every engine is loaded: a native
+block that loads one component (for example a vision oracle) is not that point.
+While the variable is set, the CI E2E runner counts these skips as stopped
+testcases, runs every selected testcase and the family hardware tests without
+stopping at the first failure, and then reports all failures. This mode checks
+build and load; it is not correctness evidence.
 
 ## 5. Save and read correctness evidence
 

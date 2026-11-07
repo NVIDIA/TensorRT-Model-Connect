@@ -50,6 +50,7 @@ class RecordingContext:
         self.no_cpu_family_tests = False
         self.missing_e2e_testcases = set()
         self.failing_hardware = False
+        self.hardware_exit_code = 0
 
     def run(self, command, **kwargs):
         self.calls.append((list(command), kwargs))
@@ -120,6 +121,8 @@ class RecordingContext:
                 return SimpleNamespace(stdout="", returncode=5)
             if failing:
                 return SimpleNamespace(stdout="", returncode=1)
+            if "-hardware-junit.xml" in report.name and self.hardware_exit_code:
+                return SimpleNamespace(stdout="", returncode=self.hardware_exit_code)
         return SimpleNamespace(stdout="", returncode=0)
 
 
@@ -361,10 +364,23 @@ def test_hardware_failure_stops_the_family_by_default(tmp_path: Path) -> None:
     assert "-x" in _pytest_calls(context, "test_gpu.py")[-1]
 
 
+def test_stop_after_sweep_reports_a_hardware_exit_code_behind_passing_junit(
+    tmp_path: Path,
+) -> None:
+    context = _hardware_family(tmp_path, {"TRTMC_E2E_STOP_AFTER": "loaded"})
+    context.failing_hardware = False
+    context.hardware_exit_code = 2
+
+    with pytest.raises(CiError, match="exited with code 2 after a passing JUnit report"):
+        E2ERunner(context)._run(("beta",))
+
+    assert len(_pytest_calls(context, "test_e2e.py")) == 1
+
+
 def test_stop_after_sweep_runs_every_case_and_still_reports_hardware_failure(
     tmp_path: Path,
 ) -> None:
-    context = _hardware_family(tmp_path, {"TRTMC_E2E_STOP_AFTER": "native"})
+    context = _hardware_family(tmp_path, {"TRTMC_E2E_STOP_AFTER": "loaded"})
 
     with pytest.raises(CiError, match="family hardware tests"):
         E2ERunner(context)._run(("beta",))
@@ -552,25 +568,25 @@ def test_e2e_junit_accepts_a_testcase_stopped_after_the_requested_stage(
     report = tmp_path / "e2e.xml"
     report.write_text(
         '<testsuites><testsuite><testcase name="test_e2e[alpha]">'
-        '<skipped message="trtmc-e2e-stopped-after:native (before compare)" />'
+        '<skipped message="trtmc-e2e-stopped-after:loaded" />'
         '</testcase><testcase name="test_e2e[beta]" /></testsuite></testsuites>',
         encoding="utf-8",
     )
 
-    _require_e2e_junit(report, "family", ("alpha", "beta"), stop_after="native")
+    _require_e2e_junit(report, "family", ("alpha", "beta"), stop_after="loaded")
 
     assert (
         "family E2E results: requested=2 executed=1 passed=1 failed=0 skipped=0 "
-        "stopped_after_native=1" in capsys.readouterr().out
+        "stopped_after_loaded=1" in capsys.readouterr().out
     )
 
 
 @pytest.mark.parametrize(
     ("message", "stop_after"),
     (
-        ("trtmc-e2e-stopped-after:native (before compare)", ""),
-        ("trtmc-e2e-stopped-after:build (before native)", "native"),
-        ("real family E2E requires TRTMC_E2E=1", "native"),
+        ("trtmc-e2e-stopped-after:loaded", ""),
+        ("trtmc-e2e-stopped-after:native", "loaded"),
+        ("real family E2E requires TRTMC_E2E=1", "loaded"),
     ),
 )
 def test_e2e_junit_rejects_other_skips_in_a_stopped_run(
@@ -1156,19 +1172,34 @@ def test_docker_ensure_defaults_to_the_tag_of_the_pinned_tensorrt(
 
 def test_toolchain_identity_reads_the_pin_and_the_gating_dockerfile(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text('dependencies = ["tensorrt==11.4.0.106"]\n')
-    (tmp_path / "Dockerfile").write_text(
+    dockerfile = (
+        "FROM nvidia/cuda:13.4.3-devel-ubuntu24.04@sha256:abc AS base\n"
         'RUN apt-get install "libnvinfer11=11.4.0.106-1+cuda13.4" '
-        '"libnvinfer-dev=11.4.0.106-1+cuda13.4"\n'
+        '"libnvinfer-dev=11.4.0.106-1+cuda13.4" "libnvonnxparsers-dev=11.4.0.106-1+cuda13.4"\n'
         'RUN pip install "tensorrt==11.4.0.106"\n'
         "RUN python -c \"import tensorrt; assert tensorrt.__version__ == '11.4.0.106'\"\n"
     )
+    (tmp_path / "Dockerfile").write_text(dockerfile)
 
     assert toolchain_identity(tmp_path) == {
         "tensorrt": "11.4.0.106",
         "dockerfile_tensorrt": ["11.4.0.106"],
         "cuda": ["13.4"],
+        "base_images": ["nvidia/cuda:13.4.3-devel-ubuntu24.04@sha256:abc"],
         "image": "trtmc-ci:trt11.4",
     }
+    for old, new in (
+        ("13.4.3-devel", "13.4.4-devel"),
+        ('"libnvinfer-dev=11.4.0.106', '"libnvinfer-dev=11.4.1.1'),
+    ):
+        (tmp_path / "Dockerfile").write_text(dockerfile.replace(old, new))
+        assert toolchain_identity(tmp_path) != {
+            "tensorrt": "11.4.0.106",
+            "dockerfile_tensorrt": ["11.4.0.106"],
+            "cuda": ["13.4"],
+            "base_images": ["nvidia/cuda:13.4.3-devel-ubuntu24.04@sha256:abc"],
+            "image": "trtmc-ci:trt11.4",
+        }
 
 
 def test_toolchain_identity_requires_a_tensorrt_pin(tmp_path: Path) -> None:

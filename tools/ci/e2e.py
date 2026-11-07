@@ -323,7 +323,7 @@ class E2ERunner:
             hardware_error: CiError | None = None
             if hardware_tests:
                 hardware_junit = native_build / f"trtmc-{family}-hardware-junit.xml"
-                self.context.run(
+                hardware_run = self.context.run(
                     [
                         "python",
                         "-m",
@@ -345,6 +345,11 @@ class E2ERunner:
                 )
                 try:
                     _require_passing_junit(hardware_junit, "family hardware tests")
+                    if stop_after and hardware_run.returncode:
+                        raise CiError(
+                            "family hardware tests exited with code "
+                            f"{hardware_run.returncode} after a passing JUnit report"
+                        )
                 except CiError as error:
                     if not stop_after:
                         raise
