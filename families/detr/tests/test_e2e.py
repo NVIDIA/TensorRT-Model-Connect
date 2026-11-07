@@ -333,6 +333,7 @@ def _sdk_detections(runtime_root: Path, bundle: Path, image: Path, tmp_path: Pat
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
+    """Verify end-to-end detection output against official PyTorch reference and SDK consumers."""
     _, manifest, case = CASES[case_name]
     model_dir = _model_dir(manifest)
     binary, runtime_root = _runtime()

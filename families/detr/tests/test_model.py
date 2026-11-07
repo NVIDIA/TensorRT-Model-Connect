@@ -82,6 +82,8 @@ def test_support_resolves_facebook_detr_model(tmp_path: Path):
 
 
 class _Writer:
+    """Mock bundle writer capturing written sections for assertion."""
+
     def __init__(self) -> None:
         self.sections: dict[str, object] = {}
 
@@ -96,6 +98,7 @@ class _Writer:
 
 
 def _request(tmp_path: Path, task: str):
+    """Create a minimal BuildRequest targeting the given task."""
     from tensorrt_model_connect.build import BuildRequest
 
     return BuildRequest(
@@ -116,6 +119,7 @@ def test_build_rejects_the_retired_task(tmp_path: Path) -> None:
 
 
 def test_build_records_the_semantic_task(tmp_path: Path, monkeypatch) -> None:
+    """Building image_to_boxes records proper semantic header and runtime configuration."""
     from families.detr import model
 
     _write_config(tmp_path)
