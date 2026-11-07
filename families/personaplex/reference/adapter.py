@@ -3,11 +3,14 @@
 
 """PersonaPlex's native pipeline for the trtmc-perf-serve reference backend (``speak``): the pinned official
 moshi source (reference/prepare.py), loaded once; per request the user audio is encoded frame by frame and the
-greedy LMGen answers (at most ``max_new_tokens`` speech frames), decoded to 24 kHz audio."""
+greedy LMGen answers (at most ``max_new_tokens`` speech frames), decoded to 24 kHz audio. moshi runs its LM steps
+as CUDA graphs and torch.compiles its own hot functions (``torch_compile_lazy``): that is the compile mode; eager
+mode turns its torch.compile off (``NO_TORCH_COMPILE``)."""
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Mapping
@@ -25,6 +28,8 @@ class Adapter:
         if not (source / "moshi/moshi/offline.py").is_file():
             raise self.host.Error(f"the PersonaPlex reference is not prepared: {source}")
         sys.path[:0] = [str(COMPAT), str(source / "moshi"), str(source)]
+        if spec.mode == "eager":  # read when moshi's modules are imported
+            os.environ["NO_TORCH_COMPILE"] = "1"
         from huggingface_hub import hf_hub_download
         from moshi.models import LMGen, loaders
         from moshi.offline import warmup

@@ -25,7 +25,7 @@ def test_adapter_passes_requested_precision(monkeypatch, precision):
     import huggingface_hub
 
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda *a, **kw: "model.pt")
-    spec = SimpleNamespace(model="Ruicheng/moge-2-vitl", revision="pinned", precision=precision)
+    spec = SimpleNamespace(model="Ruicheng/moge-2-vitl", revision="pinned", precision=precision, mode="eager")
 
     adapter.Adapter(spec, object())
 

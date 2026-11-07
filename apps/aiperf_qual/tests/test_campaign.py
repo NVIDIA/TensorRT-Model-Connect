@@ -745,6 +745,35 @@ def test_summary_notes_trtmc_regressions_against_a_baseline(tmp_path):
     assert "regression: TRTMC eager p50 +10.0% vs baseline" in text
 
 
+def test_summary_names_the_native_mode_and_keeps_regressions_across_a_mode_change(tmp_path):
+    for root, p50, mode in (("now", 11.0, "compile"), ("before", 10.0, "eager")):
+        (tmp_path / root / "m").mkdir(parents=True)
+        (tmp_path / root / "m/report.json").write_text(json.dumps({
+            "task": "t", "started": 1.0, "verdict": {"category": "measured"}, "performance_source": "quality",
+            "performance": [{"reference_mode": mode, "request": "mmlu", "kind": "natural_dataset", "pairs": 2,
+                             "matched_pairs": 2, "complete": True, "light": "informational",
+                             "candidate": {"p50_ms": p50}, "reference": {"p50_ms": 30.0}}]}))
+    text, _ = campaign.summary([tmp_path / "now"], [tmp_path / "before"])
+    assert "mmlu: TRTMC 11.0 ms · native compile 30.0 ms" in text
+    assert "regression: TRTMC mmlu p50 +10.0% vs baseline" in text  # the native mode is not part of the key
+
+
+def test_regression_notes_skip_entries_without_a_trtmc_timing():
+    rows = {"m": {"perf": [{"reference_mode": "eager", "request": "catalog", "candidate": {"p50_ms": 11.0}}]}}
+    baseline = {"m": {"perf": [{"reference_mode": "eager", "request": "catalog", "candidate": {"p50_ms": 10.0}},
+                               {"reference_mode": "compile", "request": "catalog", "light": "n/a", "candidate": {}}]}}
+    campaign.annotate_regressions(rows, baseline)
+    assert rows["m"]["baseline"] == {"catalog": pytest.approx(10.0)}
+    assert rows["m"]["notes"].startswith("regression: TRTMC catalog p50 +10.0% vs baseline")
+
+
+def test_the_qualifying_fixed_light_is_the_one_reported():
+    row = {"perf": [{"reference_mode": "eager", "configured_mode": "compile", "qualifying": True, "request": "catalog"},
+                    {"reference_mode": "compile", "qualifying": False, "request": "catalog"},
+                    {"reference_mode": "eager", "request": "old"}]}  # a report without the flag: eager qualifies
+    assert [item["request"] for item in campaign.reported_perf(row)] == ["catalog", "old"]
+
+
 def test_html_report_lists_failures_first_with_evidence(tmp_path):
     from trtmc_aiperf_qual.report_html import render
 
@@ -1285,6 +1314,10 @@ def test_perf_is_white_on_a_busy_gpu_or_a_fallback_reference_precision():
     assert unmeasured["light"] == "white" and "not measured" in unmeasured["reasons"][0]
     fallback = judge.judge_performance(fast, {**slow, "precision": "fp32", "precision_fallback": "fp16: error"}, **ok)
     assert fallback["light"] == "white" and "fp32" in fallback["reasons"][0] and fallback["speedup"] == 10.0
+    # eager in place of a failed torch.compile is a valid baseline, noted (a rejudge keeps the note)
+    replaced = judge.judge_performance(fast, {**slow, "mode": "eager", "compile_fallback": "compile fp16: X"}, **ok)
+    assert replaced["light"] == "green" and replaced["notes"] == ["native torch.compile failed; timed in eager mode: "
+                                                                  "compile fp16: X"]
 
 
 def test_perf_lights_come_from_the_speedup_interval():

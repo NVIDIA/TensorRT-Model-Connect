@@ -20,13 +20,20 @@ def light_key(item: Mapping[str, Any]) -> str:
     return f"{item['reference_mode']}/{item['request']}" if item.get("request") else item["reference_mode"]
 
 
-QUALIFYING_MODE = "eager"  # torch.compile lights are opt-in reports outside the category
+QUALIFYING_MODE = "eager"  # the qualifying mode of reports written before lights carried ``qualifying``
+
+
+def qualifying(item: Mapping[str, Any]) -> bool:
+    """A gated light of the first configured native mode, which decides Perf (or of the eager run that replaced
+    it when torch.compile failed); other configured modes are reported only."""
+    return (bool(item.get("qualifying", item.get("reference_mode", QUALIFYING_MODE) == QUALIFYING_MODE))
+            and item.get("gate", True))
 
 
 def verdict(result: Mapping[str, Any], *, expected_suites: Sequence[str], expected_modes: int) -> dict[str, Any]:
     """Model-level outcome: Acc (``n/a`` for a Perf-only model), the lights, and a category.
-    Only ``pass`` qualifies. ``expected_modes`` eager lights (one per timed request) decide Perf; a missing,
-    unavailable (``n/a``), or ``error`` eager light is an error, and other reference modes are reported only.
+    Only ``pass`` qualifies. ``expected_modes`` qualifying lights (one per timed request) decide Perf; a missing,
+    unavailable (``n/a``), or ``error`` qualifying light is an error, and other reference modes are reported only.
 
     ``expected_suites`` names every judged result the configuration requires (benchmarks and the
     entries each supplementary check emits); a missing one is an error, whatever else ran.
@@ -61,11 +68,10 @@ def verdict(result: Mapping[str, Any], *, expected_suites: Sequence[str], expect
                     "acc-inconclusive" if acc == "inconclusive" else "not-comparable" if acc == "not-comparable" else
                     "measured")
         return {"acc": acc, "perf": perf, "lights": {}, "category": category}
-    qualifying = [item["light"] for item in result.get("performance", [])
-                  if item.get("reference_mode") == QUALIFYING_MODE and item.get("gate", True)]
-    perf = "error" if len(qualifying) < max(expected_modes, 1) or {"error", "n/a"} & set(qualifying) else (
-        "green" if all(value == "green" for value in qualifying) else
-        "red" if "red" in qualifying else "yellow" if "yellow" in qualifying else "white")
+    lit = [item["light"] for item in result.get("performance", []) if qualifying(item)]
+    perf = "error" if len(lit) < max(expected_modes, 1) or {"error", "n/a"} & set(lit) else (
+        "green" if all(value == "green" for value in lit) else
+        "red" if "red" in lit else "yellow" if "yellow" in lit else "white")
     if acc == "error" or perf == "error":
         category = "error"
     elif acc == "fail":
@@ -247,6 +253,8 @@ def judge_performance(candidate: Mapping[str, Any], reference: Mapping[str, Any]
         reasons.append(f"reference timed at {reference['precision']}, TRTMC runs {candidate_precision}")
     notes += [f"{side}: {stats['exit_note']}" for side, stats in (("candidate", candidate), ("reference", reference))
               if stats.get("exit_note")]
+    if reference.get("compile_fallback"):
+        notes.append(f"native torch.compile failed; timed in eager mode: {str(reference['compile_fallback'])[:200]}")
     result["notes"] = notes
     result["speedup"] = reference["p50_ms"] / candidate["p50_ms"]  # informative even when white
     interval = speedup_interval(candidate.get("per_run_p50_ms") or [], reference.get("per_run_p50_ms") or [])
@@ -255,7 +263,7 @@ def judge_performance(candidate: Mapping[str, Any], reference: Mapping[str, Any]
     if interval is None:
         reasons.append("fewer than two runs a side: no interval")
     # Unstable timing on either side invalidates the comparison, whatever the interval says (a side
-    # aggregated by its best run, the opt-in torch.compile reference, is not held to it).
+    # aggregated by its best run is not held to it).
     reasons += [f"{side} CI ±{stats['ci_percent']:.2f}% > {max_ci_percent}%"
                 for side, stats in (("TRTMC", candidate), ("native", reference))
                 if stats.get("aggregation", "mean") == "mean" and stats.get("ci_percent") is not None

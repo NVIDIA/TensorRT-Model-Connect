@@ -27,27 +27,38 @@ def is_video(request: Mapping[str, Any]) -> bool:
 
 
 def generate(environment: Environment, model: dict[str, Any], backend: str, out: Path, suite: Any,
-             python: str | None = None, precision: str | None = None, reuse: bool = False) -> Outputs:
+             python: str | None = None, precision: str | None = None, reuse: bool = False, *, mode: str = "eager",
+             compile_fallback: str | None = None) -> Outputs:
     """``reuse``: return an earlier generation in ``out`` when it sent exactly these requests and its
-    outputs are still there (rechecking finished results)."""
+    outputs are still there (rechecking finished results). ``mode``: the native model's (eager or compile)."""
     from .runner import _observations
     from . import execution
 
-    if reuse:
-        for previous in [*sorted(out.glob("rerun-*"), reverse=True), out]:
-            if (earlier := _earlier(previous, suite)) is not None and execution.can_reuse(previous / "aiperf"):
-                return earlier
+    if reuse and (earlier := _reusable(out, suite)) is not None:
+        return earlier
     execution.attempt(suite.name, "candidate" if backend == "trtmc" else "reference")
     if out.is_dir() and any(out.iterdir()):
         # Keep original exports and request files readable when a recheck regenerates outputs.
         out = out / f"rerun-{time.time_ns()}"
-    kwargs = {"precision": precision, "python": python} if backend != "trtmc" else {}
+    kwargs = ({"precision": precision, "python": python, "mode": mode, "compile_fallback": compile_fallback}
+              if backend != "trtmc" else {})
     with serving(environment, model, backend, out, keep_artifacts=True, **kwargs) as service:
         _observations(environment, service, model, suite, out / "aiperf")
     outputs = _answered(out, suite)
     if outputs is None:
         raise RuntimeError(f"{backend} did not answer all {len(suite.samples)} requests")
     return outputs
+
+
+def _reusable(out: Path, suite: Any) -> Outputs | None:
+    """The latest earlier generation in ``out`` (or a recheck's ``rerun-*`` below it) of exactly these requests
+    whose outputs and evidence are still there."""
+    from . import execution
+
+    for previous in [*sorted(out.glob("rerun-*"), reverse=True), out]:
+        if (earlier := _earlier(previous, suite)) is not None and execution.can_reuse(previous / "aiperf"):
+            return earlier
+    return None
 
 
 def _answered(out: Path, suite: Any) -> Outputs | None:
@@ -93,24 +104,31 @@ def _earlier(out: Path, suite: Any) -> Outputs | None:
 
 
 def generate_native(environment: Environment, model: dict[str, Any], suite: Any, python: str, out: Path,
-                    label: str, skip: tuple[str, str] | None = None, reuse: bool = False) -> tuple[Outputs, str, str]:
-    """The native model's outputs and the (backend, precision) that produced them: the reference adapter
-    at the Perf precisions in order (``skip`` excluded)."""
-    from . import execution
-    from .runner import timing_precisions
+                    label: str, skip: tuple[str, str] | None = None,
+                    reuse: bool = False) -> tuple[Outputs, str, str, str]:
+    """The native model's outputs and the (backend, precision, mode) that produced them: the reference adapter
+    at the Perf precisions in order (``skip`` excluded), each in its native modes (torch.compile, else eager in
+    its place). ``reuse`` (rechecking finished results) first returns the earlier generation of these requests
+    in whichever mode it ran."""
+    from .runner import first_native, native_modes, timing_precisions
 
-    errors = []
-    for precision in timing_precisions(model["reference"]):
-        if ("reference", precision) == skip:
-            continue
-        evidence_start = execution.checkpoint()
-        try:
-            return (generate(environment, model, "reference", out / f"{label}-native-reference-{precision}", suite,
-                             python, precision, reuse), "reference", precision)
-        except Exception as error:  # noqa: BLE001 - try the next precision
-            execution.supersede(evidence_start)
-            errors.append(f"{precision}: {type(error).__name__}: {str(error)[-200:]}")
-    raise RuntimeError("; ".join(errors)[-1500:] or "no other native precision")
+    precisions = [precision for precision in timing_precisions(model["reference"]) if ("reference", precision) != skip]
+    if not precisions:
+        raise RuntimeError("no other native precision")
+
+    def directory(mode: str, precision: str) -> Path:  # eager keeps the directory of earlier, eager-only results
+        return out / (f"{label}-native-reference-{precision}" if mode == "eager"
+                      else f"{label}-native-reference-{mode}-{precision}")
+
+    if reuse:
+        for precision in precisions:
+            for mode in native_modes(model["reference"]):
+                if (earlier := _reusable(directory(mode, precision), suite)) is not None:
+                    return earlier, "reference", precision, mode
+    outputs, attempt = first_native(model["reference"], lambda attempt: generate(
+        environment, model, "reference", directory(attempt.mode, attempt.precision), suite, python, attempt.precision,
+        mode=attempt.mode, compile_fallback=attempt.compile_fallback), precisions=precisions)
+    return outputs, "reference", attempt.precision, attempt.mode
 
 
 def media_source(workdir: Path, record: Mapping[str, Any]) -> dict[str, Any]:

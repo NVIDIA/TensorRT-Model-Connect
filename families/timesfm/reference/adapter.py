@@ -20,6 +20,7 @@ class Adapter:
         self.spec = spec
         self.model = transformers.TimesFmModelForPrediction.from_pretrained(
             spec.model, dtype=spec.dtype, **spec.pretrained_kwargs()).eval().to(spec.device)
+        host.maybe_compile(self.model.decoder, spec)  # invoke calls the decoder directly
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         import torch

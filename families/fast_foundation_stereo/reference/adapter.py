@@ -40,7 +40,7 @@ class Adapter:
         finally:
             os.chdir(previous)
         model.args.max_disp, model.args.valid_iters, model.args.normalize = PROFILE["max_disp"], PROFILE["valid_iters"], True
-        self.model, self.padder, self.amp_dtype = model.cuda().eval(), InputPadder, AMP_DTYPE
+        self.model, self.padder, self.amp_dtype = host.maybe_compile(model.cuda().eval(), spec), InputPadder, AMP_DTYPE
 
     def _image(self, path: str) -> np.ndarray:
         pixels = np.asarray(self.host.load_image(path), dtype=np.uint8)  # decoded before the timed call (preloaded)

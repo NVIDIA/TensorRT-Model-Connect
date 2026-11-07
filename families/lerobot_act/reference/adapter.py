@@ -27,6 +27,7 @@ class Adapter:
         checkpoint = Path(snapshot_download(spec.model, revision=spec.revision))
         self.torch, self.policy, self.config, self.device = load_policy(Path(sys.prefix) / "trtmc-reference/lerobot",
                                                                          checkpoint)
+        host.maybe_compile(self.policy.model, spec)  # predict_actions calls the ACT network directly
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         # The recorded observation, decoded before the timed call (preloaded), as the official load_observation does.
