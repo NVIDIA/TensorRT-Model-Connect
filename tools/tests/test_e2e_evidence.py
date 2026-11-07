@@ -2309,59 +2309,57 @@ def test_library_comparison_uses_human_labels_without_changing_check_identity():
     assert assessment(data)["kind"] == "unverified"
 
 
-def test_stop_after_skips_the_first_other_stage_once_the_target_passed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv(e2e_evidence.STOP_AFTER_ENV, "native")
-    with evidence_stage("reference"):
-        pass
-    with evidence_stage("build"):
-        pass
-    with evidence_stage("native"):
-        pass
-    with evidence_stage("native"):
-        pass
 
-    with pytest.raises(pytest.skip.Exception, match="trtmc-e2e-stopped-after:native"):
-        with evidence_stage("compare"):
-            raise AssertionError("a stopped stage must not run")
-
-
-def test_stop_after_ignores_a_failed_target_stage(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(e2e_evidence.STOP_AFTER_ENV, "native")
-    with pytest.raises(RuntimeError):
-        with evidence_stage("native"):
-            raise RuntimeError("context creation failed")
-    ran = []
-    with evidence_stage("compare"):
-        ran.append("compare")
-    assert ran == ["compare"]
-
-
-def test_stop_after_is_off_without_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(e2e_evidence.STOP_AFTER_ENV, raising=False)
-    with evidence_stage("native"):
-        pass
-    ran = []
-    with evidence_stage("compare"):
-        ran.append("compare")
-    assert ran == ["compare"]
-
-
-def test_stop_after_records_the_stop_in_active_evidence(
+def test_mark_loaded_stops_the_testcase_in_a_loaded_sweep(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv(e2e_evidence.STOP_AFTER_ENV, "build")
+    monkeypatch.setenv(e2e_evidence.STOP_AFTER_ENV, "loaded")
     recorder = _recorder(tmp_path)
     token = e2e_evidence._ACTIVE.set(recorder)
     try:
         with evidence_stage("build"):
             pass
-        with pytest.raises(pytest.skip.Exception):
-            with evidence_stage("native"):
-                pass
+        with evidence_stage("native"):
+            pass
+        with pytest.raises(pytest.skip.Exception, match="trtmc-e2e-stopped-after:loaded"):
+            e2e_evidence.mark_loaded()
     finally:
         e2e_evidence._ACTIVE.reset(token)
 
-    assert [item["stage"] for item in recorder.data["timing"]] == ["build"]
+    assert [(item["stage"], item["status"]) for item in recorder.data["timing"]] == [
+        ("build", "passed"),
+        ("native", "passed"),
+        ("loaded", "passed"),
+    ]
     assert recorder.data["failure_stage"] is None
+
+
+@pytest.mark.parametrize("stop_after", [None, "", "native"])
+def test_mark_loaded_only_records_the_stage_otherwise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop_after: str | None
+) -> None:
+    if stop_after is None:
+        monkeypatch.delenv(e2e_evidence.STOP_AFTER_ENV, raising=False)
+    else:
+        monkeypatch.setenv(e2e_evidence.STOP_AFTER_ENV, stop_after)
+    recorder = _recorder(tmp_path)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        e2e_evidence.mark_loaded()
+        with evidence_stage("compare"):
+            pass
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+
+    assert [item["stage"] for item in recorder.data["timing"]] == ["loaded", "compare"]
+
+
+def test_evidence_stages_never_stop_a_testcase_by_themselves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(e2e_evidence.STOP_AFTER_ENV, "loaded")
+    ran = []
+    for stage in ("build", "native", "compare", "native", "reference"):
+        with evidence_stage(stage):
+            ran.append(stage)
+    assert ran == ["build", "native", "compare", "native", "reference"]
