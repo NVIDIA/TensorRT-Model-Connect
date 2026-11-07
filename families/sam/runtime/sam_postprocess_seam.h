@@ -12,6 +12,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace trtmc {
@@ -96,10 +97,14 @@ inline bool has_complete_sam_mask_payload(const SamResult& result) {
 // upsample of the decoder mask, cropped to the rescaled image's top-left
 // rescaled_w x rescaled_h region, then resized to original_w x original_h.
 // Only the upsampled rows and columns the crop keeps are computed, and each
-// mask is written straight into the result.
+// mask is written straight into the result. With several workers each stage
+// splits the rows of all masks across up to `workers` threads of at least
+// `min_values` values each (sam_parallel.h); the output does not depend on the
+// split.
 inline SamResult postprocess_sam_result(SamResult result, int32_t image_size, int32_t rescaled_w,
-                                        int32_t rescaled_h, int32_t original_w,
-                                        int32_t original_h) {
+                                        int32_t rescaled_h, int32_t original_w, int32_t original_h,
+                                        int32_t workers = sam_host_worker_count(),
+                                        int64_t min_values = kSamMinValuesPerWorker) {
     if (!has_valid_sam_postprocess_request(result, image_size, rescaled_w, rescaled_h, original_w,
                                            original_h)) {
         return result;
@@ -132,23 +137,64 @@ inline SamResult postprocess_sam_result(SamResult result, int32_t image_size, in
         restore_y = make_sam_mask_resize_axis(rescaled_h, original_h, original_h);
     }
 
-    std::vector<float> processed(static_cast<std::size_t>(result.num_masks) * original_area);
-    std::vector<float> cropped(restore_is_copy ? 0 : crop_area);
-    for (int32_t mask_index = 0; mask_index < result.num_masks; ++mask_index) {
-        const float* mask = result.masks.data() + static_cast<std::size_t>(mask_index) * mask_area;
-        float* restored = processed.data() + static_cast<std::size_t>(mask_index) * original_area;
-        float* crop = restore_is_copy ? restored : cropped.data();
+    const auto num_masks = static_cast<std::size_t>(result.num_masks);
+    std::vector<float> processed(num_masks * original_area);
+    // The two stages of one mask, over a destination row range: the
+    // upsampled rows the crop keeps, then the restore of the crop.
+    const auto upsample = [&](std::size_t m, std::size_t y0, std::size_t y1, float* crop) {
+        const float* mask = result.masks.data() + m * mask_area;
         if (upsample_is_copy) {
-            for (int32_t y = 0; y < rescaled_h; ++y) {
-                std::copy_n(mask + static_cast<std::size_t>(y) * static_cast<std::size_t>(mask_w),
-                            crop_w, crop + static_cast<std::size_t>(y) * crop_w);
-            }
+            for (std::size_t y = y0; y < y1; ++y)
+                std::copy_n(mask + y * static_cast<std::size_t>(mask_w), crop_w, crop + y * crop_w);
         } else {
-            sam_bilinear_resize_plane(mask, mask_w, upsample_x, upsample_y, crop, crop_w);
+            sam_bilinear_resize_rows(mask, mask_w, upsample_x, upsample_y, y0, y1, crop, crop_w);
         }
+    };
+    const auto restore = [&](std::size_t m, std::size_t y0, std::size_t y1, const float* crop) {
+        sam_bilinear_resize_rows(crop, rescaled_w, restore_x, restore_y, y0, y1,
+                                 processed.data() + m * original_area,
+                                 static_cast<std::size_t>(original_w));
+    };
+    const auto rescaled_rows = static_cast<std::size_t>(rescaled_h);
+    const auto original_rows = static_cast<std::size_t>(original_h);
+    // Every crop value is written before it is read, so crops stay
+    // uninitialized.
+    if (workers <= 1) {
+        // One thread: each mask through both stages in turn, one crop reused.
+        std::unique_ptr<float[]> crop(restore_is_copy ? nullptr : new float[crop_area]);
+        for (std::size_t m = 0; m < num_masks; ++m) {
+            float* target = restore_is_copy ? processed.data() + m * original_area : crop.get();
+            upsample(m, 0, rescaled_rows, target);
+            if (!restore_is_copy)
+                restore(m, 0, original_rows, target);
+        }
+    } else {
+        // Several threads: each stage once over the rows of all masks, with a
+        // crop per mask.
+        std::unique_ptr<float[]> cropped(restore_is_copy ? nullptr
+                                                         : new float[num_masks * crop_area]);
+        const auto crop_of = [&](std::size_t m) {
+            return restore_is_copy ? processed.data() + m * original_area
+                                   : cropped.get() + m * crop_area;
+        };
+        const auto masks = static_cast<int64_t>(result.num_masks);
+        sam_parallel_for_rows(masks * rescaled_h, sam_min_rows_per_worker(rescaled_w, min_values),
+                              workers, [&](int64_t begin, int64_t end) {
+                                  sam_for_item_rows(
+                                      begin, end, rescaled_h,
+                                      [&](std::size_t m, std::size_t y0, std::size_t y1) {
+                                          upsample(m, y0, y1, crop_of(m));
+                                      });
+                              });
         if (!restore_is_copy) {
-            sam_bilinear_resize_plane(cropped.data(), rescaled_w, restore_x, restore_y, restored,
-                                      static_cast<std::size_t>(original_w));
+            sam_parallel_for_rows(
+                masks * original_h, sam_min_rows_per_worker(original_w, min_values), workers,
+                [&](int64_t begin, int64_t end) {
+                    sam_for_item_rows(begin, end, original_h,
+                                      [&](std::size_t m, std::size_t y0, std::size_t y1) {
+                                          restore(m, y0, y1, crop_of(m));
+                                      });
+                });
         }
     }
 

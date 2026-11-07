@@ -19,6 +19,7 @@ target_include_directories(trtmc_model_sam SYSTEM PRIVATE
 target_link_libraries(trtmc_model_sam PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
+  Threads::Threads
   ${TRTMC_CUDART_LIBRARY}
   ${CMAKE_DL_LIBS}
 )
@@ -45,6 +46,7 @@ if(TRTMC_BUILD_TESTS)
   )
   target_link_libraries(test_sam_prompt_seam PRIVATE
     trtmc_model_sam
+    Threads::Threads
   )
   target_compile_options(test_sam_prompt_seam PRIVATE
     -Wall -Wextra -Wpedantic
@@ -63,7 +65,7 @@ if(TRTMC_BUILD_TESTS)
     ${TRTMC_CUDA_INCLUDE_DIR}
   )
   target_link_libraries(test_sam_pixel_staging PRIVATE
-    trtmc_model_sam trtmc_core ${TRTMC_CUDART_LIBRARY}
+    trtmc_model_sam trtmc_core ${TRTMC_CUDART_LIBRARY} Threads::Threads
   )
   target_compile_options(test_sam_pixel_staging PRIVATE
     -Wall -Wextra -Wpedantic
@@ -83,6 +85,9 @@ if(TRTMC_BUILD_TESTS)
     target_include_directories(test_sam_prompt_seam_fma PRIVATE
       ${PROJECT_SOURCE_DIR}
       ${PROJECT_SOURCE_DIR}/core/runtime/include
+    )
+    target_link_libraries(test_sam_prompt_seam_fma PRIVATE
+      Threads::Threads
     )
     target_compile_options(test_sam_prompt_seam_fma PRIVATE
       -Wall -Wextra -Wpedantic -O2 -mfma -ffp-contract=fast

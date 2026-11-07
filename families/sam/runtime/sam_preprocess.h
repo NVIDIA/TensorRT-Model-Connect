@@ -50,12 +50,16 @@ inline float sam_preprocess_source_coordinate(int32_t i, int32_t src_len, int32_
 // image_size) from an HWC RGB float image: for each pixel and channel, the
 // bilinear sample (sam_bilinear.h) minus the channel mean, divided by the
 // channel std. Each source row is interpolated horizontally once for all three
-// channels; the vertical blend and the normalization then run over contiguous
-// rows.
+// channels (per worker); the vertical blend and the normalization then run over
+// contiguous rows. Rows are split across up to `workers` threads of at least
+// `min_values` values each (sam_parallel.h); the output does not depend on the
+// split.
 inline void fill_sam_preprocessed_pixels(float* pixel_values, const SamPreprocessPlan& plan,
                                          const float* image_pixels, int32_t height, int32_t width,
                                          const SamConfig& config, const std::array<float, 3>& mean,
-                                         const std::array<float, 3>& stdv) {
+                                         const std::array<float, 3>& stdv,
+                                         int32_t workers = sam_host_worker_count(),
+                                         int64_t min_values = kSamMinValuesPerWorker) {
     const int32_t rescaled_w = plan.rescaled_width;
     const int32_t rescaled_h = plan.rescaled_height;
     const auto x_axis = make_sam_bilinear_axis(width, rescaled_w, [&](int32_t x) {
@@ -68,42 +72,49 @@ inline void fill_sam_preprocessed_pixels(float* pixel_values, const SamPreproces
     const auto row_w = static_cast<std::size_t>(rescaled_w);
     const auto plane =
         static_cast<std::size_t>(config.image_size) * static_cast<std::size_t>(config.image_size);
-    // A cached source row holds its three channels' horizontal passes, planar.
-    SamBilinearRowCache cache(3 * row_w);
-    const auto fill = [&](int32_t row, float* out) {
-        const float* src =
-            image_pixels + static_cast<std::size_t>(row) * static_cast<std::size_t>(width) * 3;
-        const int32_t* lo = x_axis.lo.data();
-        const int32_t* hi = x_axis.hi.data();
-        const float* weight = x_axis.weight.data();
-        const float* inverse_weight = x_axis.inverse_weight.data();
-        for (std::size_t x = 0; x < row_w; ++x) {
-            const float* left = src + static_cast<std::size_t>(lo[x]) * 3;
-            const float* right = src + static_cast<std::size_t>(hi[x]) * 3;
+    const auto rows = [&](int64_t begin, int64_t end) {
+        // `out` (a row cache slot) never overlaps the image; saying so (__restrict)
+        // keeps the gather loop vectorized.
+        const auto fill = [&](int32_t row, float* __restrict out) {
+            const float* __restrict src =
+                image_pixels + static_cast<std::size_t>(row) * static_cast<std::size_t>(width) * 3;
+            const int32_t* lo = x_axis.lo.data();
+            const int32_t* hi = x_axis.hi.data();
+            const float* weight = x_axis.weight.data();
+            const float* inverse_weight = x_axis.inverse_weight.data();
+            for (std::size_t x = 0; x < row_w; ++x) {
+                const float* left = src + static_cast<std::size_t>(lo[x]) * 3;
+                const float* right = src + static_cast<std::size_t>(hi[x]) * 3;
+                for (std::size_t c = 0; c < 3; ++c) {
+                    out[c * row_w + x] = left[c] * inverse_weight[x] + right[c] * weight[x];
+                }
+            }
+        };
+
+        // A cached source row holds its three channels' horizontal passes, planar.
+        SamBilinearRowCache cache(3 * row_w);
+        for (auto y = static_cast<int32_t>(begin); y < static_cast<int32_t>(end); ++y) {
+            const float* top = cache.row(y_axis.lo[y], y_axis.hi[y], fill);
+            const float* bottom = cache.row(y_axis.hi[y], y_axis.lo[y], fill);
+            const float weight = y_axis.weight[y];
+            const float inverse_weight = y_axis.inverse_weight[y];
             for (std::size_t c = 0; c < 3; ++c) {
-                out[c * row_w + x] = left[c] * inverse_weight[x] + right[c] * weight[x];
+                const float* top_c = top + c * row_w;
+                const float* bottom_c = bottom + c * row_w;
+                const float channel_mean = mean[c];
+                const float channel_std = stdv[c];
+                float* out =
+                    pixel_values + c * plane +
+                    static_cast<std::size_t>(y) * static_cast<std::size_t>(config.image_size);
+                for (std::size_t x = 0; x < row_w; ++x) {
+                    out[x] = (top_c[x] * inverse_weight + bottom_c[x] * weight - channel_mean) /
+                             channel_std;
+                }
             }
         }
     };
-
-    for (int32_t y = 0; y < rescaled_h; ++y) {
-        const float* top = cache.row(y_axis.lo[y], y_axis.hi[y], fill);
-        const float* bottom = cache.row(y_axis.hi[y], y_axis.lo[y], fill);
-        const float weight = y_axis.weight[y];
-        const float inverse_weight = y_axis.inverse_weight[y];
-        for (std::size_t c = 0; c < 3; ++c) {
-            const float* top_c = top + c * row_w;
-            const float* bottom_c = bottom + c * row_w;
-            const float channel_mean = mean[c];
-            const float channel_std = stdv[c];
-            float* out = pixel_values + c * plane +
-                         static_cast<std::size_t>(y) * static_cast<std::size_t>(config.image_size);
-            for (std::size_t x = 0; x < row_w; ++x) {
-                out[x] =
-                    (top_c[x] * inverse_weight + bottom_c[x] * weight - channel_mean) / channel_std;
-            }
-        }
-    }
+    sam_parallel_for_rows(rescaled_h, sam_min_rows_per_worker(3 * int64_t{rescaled_w}, min_values),
+                          workers, rows);
 }
 
 // A request's geometry; all zero for an invalid request.

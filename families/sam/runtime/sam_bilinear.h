@@ -25,6 +25,8 @@
 // operands as the per-sample definition, so the result is identical bit for
 // bit.
 
+#include "families/sam/runtime/sam_parallel.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -102,8 +104,11 @@ class SamBilinearRowCache {
 };
 
 // The horizontal pass of one single-channel source row: the per-sample
-// definition's `top` (or `bottom`) for every destination column.
-inline void sam_bilinear_row(const float* src_row, const SamBilinearAxis& x_axis, float* dst) {
+// definition's `top` (or `bottom`) for every destination column. `dst` never
+// overlaps `src_row`; saying so (__restrict) keeps the gather loop vectorized
+// wherever this is inlined.
+inline void sam_bilinear_row(const float* __restrict src_row, const SamBilinearAxis& x_axis,
+                             float* __restrict dst) {
     const int32_t* lo = x_axis.lo.data();
     const int32_t* hi = x_axis.hi.data();
     const float* weight = x_axis.weight.data();
@@ -114,19 +119,19 @@ inline void sam_bilinear_row(const float* src_row, const SamBilinearAxis& x_axis
     }
 }
 
-// Resizes a single-channel plane (`src_w` floats per row) to y_axis.size()
-// rows of x_axis.size() values, written at `dst` with `dst_stride` floats
-// between rows.
-inline void sam_bilinear_resize_plane(const float* src, int32_t src_w,
-                                      const SamBilinearAxis& x_axis, const SamBilinearAxis& y_axis,
-                                      float* dst, std::size_t dst_stride) {
+// Destination rows [y_begin, y_end) of a single-channel plane resize
+// (`src_w` floats per source row), written at `dst` with `dst_stride` floats
+// between rows (`dst` addresses destination row 0).
+inline void sam_bilinear_resize_rows(const float* src, int32_t src_w, const SamBilinearAxis& x_axis,
+                                     const SamBilinearAxis& y_axis, std::size_t y_begin,
+                                     std::size_t y_end, float* dst, std::size_t dst_stride) {
     const std::size_t width = x_axis.size();
     SamBilinearRowCache cache(width);
     const auto fill = [&](int32_t row, float* out) {
         sam_bilinear_row(src + static_cast<std::size_t>(row) * static_cast<std::size_t>(src_w),
                          x_axis, out);
     };
-    for (std::size_t y = 0; y < y_axis.size(); ++y) {
+    for (std::size_t y = y_begin; y < y_end; ++y) {
         const float* top = cache.row(y_axis.lo[y], y_axis.hi[y], fill);
         const float* bottom = cache.row(y_axis.hi[y], y_axis.lo[y], fill);
         const float weight = y_axis.weight[y];
@@ -136,6 +141,23 @@ inline void sam_bilinear_resize_plane(const float* src, int32_t src_w,
             out[x] = top[x] * inverse_weight + bottom[x] * weight;
         }
     }
+}
+
+// Resizes a single-channel plane to y_axis.size() rows of x_axis.size()
+// values, written at `dst` with `dst_stride` floats between rows, on up to
+// `workers` threads of at least `min_values` values each (sam_parallel.h).
+inline void sam_bilinear_resize_plane(const float* src, int32_t src_w,
+                                      const SamBilinearAxis& x_axis, const SamBilinearAxis& y_axis,
+                                      float* dst, std::size_t dst_stride,
+                                      int32_t workers = sam_host_worker_count(),
+                                      int64_t min_values = kSamMinValuesPerWorker) {
+    sam_parallel_for_rows(static_cast<int64_t>(y_axis.size()),
+                          sam_min_rows_per_worker(static_cast<int64_t>(x_axis.size()), min_values),
+                          workers, [&](int64_t begin, int64_t end) {
+                              sam_bilinear_resize_rows(
+                                  src, src_w, x_axis, y_axis, static_cast<std::size_t>(begin),
+                                  static_cast<std::size_t>(end), dst, dst_stride);
+                          });
 }
 
 } // namespace trtmc

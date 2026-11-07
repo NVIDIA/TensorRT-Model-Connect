@@ -16,6 +16,7 @@
 // =============================================================================
 
 #include "families/sam/runtime/sam_output_selection.h"
+#include "families/sam/runtime/sam_parallel.h"
 #include "families/sam/runtime/sam_postprocess_seam.h"
 #include "families/sam/runtime/sam_preprocess.h"
 #include "families/sam/runtime/sam_prompt_seam.h"
@@ -27,8 +28,13 @@
 #include <cstring>
 #include <iostream>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <vector>
+
+#if defined(__linux__)
+#include <sched.h>
+#endif
 
 namespace {
 
@@ -469,6 +475,169 @@ void test_plan_sam_preprocess_rejects_invalid_requests() {
           "plan invalid: no image_size");
 }
 
+void test_parallel_rows_cover_each_row_once() {
+    for (int64_t count : {1, 2, 7, 64, 611}) {
+        for (int32_t workers : {1, 2, 3, 8}) {
+            for (int64_t min_rows : {1, 5, 32, 1000}) {
+                std::vector<int> hits(static_cast<std::size_t>(count), 0);
+                trtmc::sam_parallel_for_rows(count, min_rows, workers,
+                                             [&](int64_t begin, int64_t end) {
+                                                 for (int64_t row = begin; row < end; ++row)
+                                                     ++hits[static_cast<std::size_t>(row)];
+                                             });
+                check(std::all_of(hits.begin(), hits.end(), [](int hit) { return hit == 1; }),
+                      "parallel rows: every row exactly once");
+            }
+        }
+    }
+    bool called = false;
+    trtmc::sam_parallel_for_rows(0, 1, 8, [&](int64_t, int64_t) { called = true; });
+    check(!called, "parallel rows: an empty range calls nothing");
+}
+
+void test_item_rows_cover_each_item_row_once() {
+    for (int64_t rows : {1, 3, 611}) {
+        const int64_t items = 3;
+        const int64_t count = items * rows;
+        for (int64_t pieces : {1, 2, 5, 8, 13}) {
+            std::vector<int> hits(static_cast<std::size_t>(count), 0);
+            for (int64_t piece = 0; piece < pieces; ++piece) {
+                trtmc::sam_for_item_rows(
+                    count * piece / pieces, count * (piece + 1) / pieces, rows,
+                    [&](std::size_t item, std::size_t begin, std::size_t end) {
+                        check(item < static_cast<std::size_t>(items) && begin < end &&
+                                  end <= static_cast<std::size_t>(rows),
+                              "item rows: a share stays inside its item");
+                        for (std::size_t row = begin; row < end; ++row)
+                            ++hits[item * static_cast<std::size_t>(rows) + row];
+                    });
+            }
+            check(std::all_of(hits.begin(), hits.end(), [](int hit) { return hit == 1; }),
+                  "item rows: every item row exactly once");
+        }
+    }
+}
+
+void test_parallel_rows_rethrow_after_join() {
+    std::vector<int> hits(64, 0);
+    bool thrown = false;
+    try {
+        trtmc::sam_parallel_for_rows(64, 1, 4, [&](int64_t begin, int64_t end) {
+            for (int64_t row = begin; row < end; ++row)
+                ++hits[static_cast<std::size_t>(row)];
+            if (begin == 0)
+                throw std::runtime_error("first range");
+        });
+    } catch (const std::runtime_error&) {
+        thrown = true;
+    }
+    check(thrown, "parallel rows: a range's exception reaches the caller");
+    check(std::all_of(hits.begin(), hits.end(), [](int hit) { return hit == 1; }),
+          "parallel rows: the other ranges still ran to completion");
+}
+
+void test_worker_grain_counts_values() {
+    const int64_t grain = trtmc::kSamMinValuesPerWorker;
+    check(trtmc::sam_min_rows_per_worker(1024) == (grain + 1023) / 1024,
+          "grain: rows of 1024 values make up the grain");
+    check(trtmc::sam_min_rows_per_worker(7) == (grain + 6) / 7,
+          "grain: a narrow row needs many rows");
+    check(trtmc::sam_min_rows_per_worker(grain) == 1 &&
+              trtmc::sam_min_rows_per_worker(2 * grain) == 1,
+          "grain: a wide row is enough alone");
+    check(trtmc::sam_min_rows_per_worker(0, 1) == 1 && trtmc::sam_min_rows_per_worker(5, 1) == 1,
+          "grain: one row at least");
+    // A 7-wide pass of 2000 rows stays on one range.
+    int ranges = 0;
+    trtmc::sam_parallel_for_rows(2000, trtmc::sam_min_rows_per_worker(7), 8,
+                                 [&](int64_t, int64_t) { ++ranges; });
+    check(ranges == 1, "grain: a narrow pass stays on the calling thread");
+}
+
+void test_cpu_max_quota_parses_to_whole_cpus() {
+    check(trtmc::sam_cpu_max_cpus("max 100000") == 0, "cpu.max: no limit");
+    check(trtmc::sam_cpu_max_cpus("100000 100000") == 1, "cpu.max: one CPU");
+    check(trtmc::sam_cpu_max_cpus("50000 100000") == 1, "cpu.max: half a CPU rounds up");
+    check(trtmc::sam_cpu_max_cpus("250000 100000\n") == 3, "cpu.max: 2.5 CPUs round up");
+    check(trtmc::sam_cpu_max_cpus("") == 0 && trtmc::sam_cpu_max_cpus("100000") == 0 &&
+              trtmc::sam_cpu_max_cpus("100000 0") == 0 && trtmc::sam_cpu_max_cpus("-5 100000") == 0,
+          "cpu.max: malformed lines set no limit");
+    const int32_t quota = trtmc::sam_cgroup_cpu_quota();
+    check(quota >= 0, "cpu.max: the process quota reads as a CPU count or none");
+    if (quota > 0)
+        check(trtmc::sam_host_worker_count() <= quota, "workers: within the cgroup CPU quota");
+}
+
+void test_worker_count_follows_the_affinity_mask() {
+    const int32_t workers = trtmc::sam_host_worker_count();
+    check(workers >= 1 && workers <= 8, "workers: between 1 and 8");
+#if defined(__linux__)
+    cpu_set_t saved;
+    CPU_ZERO(&saved);
+    if (sched_getaffinity(0, sizeof(saved), &saved) != 0)
+        return;
+    int first = -1;
+    for (int cpu = 0; cpu < CPU_SETSIZE && first < 0; ++cpu) {
+        if (CPU_ISSET(cpu, &saved))
+            first = cpu;
+    }
+    cpu_set_t one;
+    CPU_ZERO(&one);
+    CPU_SET(first, &one);
+    if (first >= 0 && sched_setaffinity(0, sizeof(one), &one) == 0) {
+        check(trtmc::sam_host_worker_count() == 1, "workers: one CPU in the mask, one worker");
+        sched_setaffinity(0, sizeof(saved), &saved);
+    }
+#endif
+}
+
+// Splitting the rows across workers changes only which thread writes them.
+void test_host_passes_do_not_depend_on_the_worker_count() {
+    const int32_t image_h = 382;
+    const int32_t image_w = 640;
+    const auto image =
+        seeded_values(static_cast<std::size_t>(image_h) * image_w * 3, 300, 0.F, 1.F);
+    trtmc::SamConfig config;
+    const std::array<float, 3> mean = {0.485F, 0.456F, 0.406F};
+    const std::array<float, 3> stdv = {0.229F, 0.224F, 0.225F};
+    const auto plan = trtmc::plan_sam_preprocess(image.data(), image_h, image_w, config);
+    const auto plane_values = 3 * static_cast<std::size_t>(config.image_size) * config.image_size;
+    std::vector<float> serial(plane_values, 0.0F);
+    trtmc::fill_sam_preprocessed_pixels(serial.data(), plan, image.data(), image_h, image_w, config,
+                                        mean, stdv, /*workers=*/1);
+
+    trtmc::SamResult masks;
+    masks.num_masks = 3;
+    masks.mask_width = 256;
+    masks.mask_height = 256;
+    masks.masks = seeded_values(3 * 256 * 256, 301, -20.F, 20.F);
+    masks.iou_scores = {0.5F, 0.6F, 0.7F};
+    // {mask_w, mask_h, image_size, rescaled_w, rescaled_h, original_w, original_h}
+    const int32_t cases[][7] = {
+        {256, 256, 1024, 1024, 611, 640, 382}, // the family's geometry
+        {16, 16, 16, 16, 9, 30, 17},           // a copy upsample, then a resized restore
+        {64, 64, 64, 64, 40, 64, 40},          // a copy upsample and a copy restore
+    };
+    for (int32_t workers : {2, 3, 7, 8}) {
+        std::vector<float> split(plane_values, 0.0F);
+        trtmc::fill_sam_preprocessed_pixels(split.data(), plan, image.data(), image_h, image_w,
+                                            config, mean, stdv, workers, /*min_values=*/1);
+        check(bit_identical(split, serial), "workers: preprocess bit-identical to one worker");
+        for (const auto& c : cases) {
+            trtmc::SamResult request = masks;
+            request.mask_width = c[0];
+            request.mask_height = c[1];
+            request.masks.resize(3 * static_cast<std::size_t>(c[0]) * c[1]);
+            const auto one = trtmc::postprocess_sam_result(request, c[2], c[3], c[4], c[5], c[6],
+                                                           /*workers=*/1);
+            const auto many = trtmc::postprocess_sam_result(request, c[2], c[3], c[4], c[5], c[6],
+                                                            workers, /*min_values=*/1);
+            check(one.mask_width == c[5] && bit_identical(many.masks, one.masks),
+                  "workers: postprocess bit-identical to one worker");
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -485,6 +654,13 @@ int main() {
     test_postprocess_sam_result_matches_per_sample_restore();
     test_write_sam_pixel_values_matches_per_sample_reference();
     test_plan_sam_preprocess_rejects_invalid_requests();
+    test_parallel_rows_cover_each_row_once();
+    test_item_rows_cover_each_item_row_once();
+    test_parallel_rows_rethrow_after_join();
+    test_worker_grain_counts_values();
+    test_cpu_max_quota_parses_to_whole_cpus();
+    test_worker_count_follows_the_affinity_mask();
+    test_host_passes_do_not_depend_on_the_worker_count();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " SAM prompt seam test(s) failed" << '\n';
