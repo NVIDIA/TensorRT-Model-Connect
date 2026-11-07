@@ -3,7 +3,7 @@
 
 """Developer tool: calibrate FP8 activation scales for a ViT model config.
 
-Not used when building an engine. Calibrate each supported model config and commit the
+Not used when building an engine. Calibrate each supported checkpoint and commit the
 updated ``fp8_activation_scales.json``::
 
     python -m families.vit.calibrate_fp8_scales fetch --out images
@@ -18,9 +18,9 @@ the rest are left for evaluation, with every class in both.
 ``calibrate`` loads the model in PyTorch, runs ModelOpt ``FP8_DEFAULT_CFG`` (max
 calibration) over the first ``--calib-images`` images, and stores
 ``input_quantizer.amax / 448`` for the six projections of every encoder layer under the
-model-config key (see ``quantization.scale_key``). A projection whose scale is more than
-``OUTLIER_FACTOR`` times the median of its kind is stored as ``null`` and stays in the work
-precision. ``fetch`` needs network access; ``calibrate`` needs a GPU.
+checkpoint key (model config plus a weight fingerprint, see ``quantization.scale_key``).
+A projection whose scale is more than ``OUTLIER_FACTOR`` times the median of its kind is
+stored as ``null`` and stays in the work precision. ``fetch`` needs network access; ``calibrate`` needs a GPU.
 """
 
 from __future__ import annotations
@@ -152,7 +152,7 @@ def load_images(images: Path, start: int, stop: int):
 
 
 def calibrate(model_dir: Path, images: Path, calib_images: int) -> None:
-    """Run ModelOpt FP8 calibration and store the activation scales under the config key."""
+    """Run ModelOpt FP8 calibration and store the activation scales under the checkpoint key."""
     import modelopt.torch.quantization as mtq
     import torch
     from safetensors.numpy import load_file
@@ -162,7 +162,7 @@ def calibrate(model_dir: Path, images: Path, calib_images: int) -> None:
 
     weights = load_file(str(Path(model_dir) / "model.safetensors"))
     cfg = config_module.resolve(model_dir, weights)
-    key = scale_key(cfg)
+    key = scale_key(cfg, weights)
 
     processor = AutoImageProcessor.from_pretrained(str(model_dir))
     model = ViTForImageClassification.from_pretrained(str(model_dir), dtype=torch.float32)

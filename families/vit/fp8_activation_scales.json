@@ -1,5 +1,5 @@
 {
-  "vit-h768-l12-i3072-p16-s224": {
+  "vit-h768-l12-i3072-p16-s224-w1.2930e+04-4.7947e+04": {
     "vit.encoder.layer.0.attention.attention.key": 0.003086658460753305,
     "vit.encoder.layer.0.attention.attention.query": 0.003086658460753305,
     "vit.encoder.layer.0.attention.attention.value": 0.003086658460753305,
