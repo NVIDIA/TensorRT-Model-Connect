@@ -264,7 +264,12 @@ def test_build_rejects_unknown_quantization(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "overrides",
-    [{"precision": "fp32"}, {"tensor_parallel_size": 2}, {"max_batch_size": 2}],
+    [
+        {"precision": "fp32"},
+        {"precision": "bf16"},
+        {"tensor_parallel_size": 2},
+        {"max_batch_size": 2},
+    ],
 )
 def test_build_rejects_unsupported_fp8_combinations(tmp_path: Path, overrides: dict) -> None:
     """FP8 needs fp16, one device and batch size one."""

@@ -36,6 +36,7 @@ class _Network:
     def __init__(self):
         self.inputs: list[tuple[str, object, tuple]] = []
         self.outputs: list[_Tensor] = []
+        self.casts: list[object] = []
 
     def add_input(self, name: str, dtype, shape):
         self.inputs.append((name, dtype, tuple(shape)))
@@ -45,6 +46,7 @@ class _Network:
         self.outputs.append(tensor)
 
     def add_cast(self, _tensor, dtype):
+        self.casts.append(dtype)
         layer = _Layer()
         layer.get_output(0).dtype = dtype
         return layer
@@ -105,6 +107,7 @@ class _FakeTRT(types.SimpleNamespace):
     int32 = Dtype("int32")
     float32 = Dtype("float32")
     float16 = Dtype("float16")
+    bfloat16 = Dtype("bfloat16")
     Builder = _Builder
 
     @staticmethod
@@ -366,6 +369,25 @@ def test_static_fp16_accepts_selective_fp32_dit_layers(monkeypatch: pytest.Monke
     ]
 
 
+def test_static_bf16_runs_the_graph_in_bf16(monkeypatch: pytest.MonkeyPatch) -> None:
+    network, profile_calls = _call_builder(monkeypatch, precision="bf16")
+    assert profile_calls == []
+    assert {dtype for _name, dtype, _shape in network.inputs} == {_FakeTRT.float32}
+    # The five data inputs enter as bf16, nothing runs in fp16, and the output leaves as fp32.
+    assert network.casts[:5] == [_FakeTRT.bfloat16] * 5
+    assert _FakeTRT.float16 not in network.casts
+    assert network.casts[-1] == _FakeTRT.float32
+
+
+def test_bf16_takes_neither_fp32_layers_nor_a_dynamic_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(ValueError, match="FP16 base precision"):
+        _call_builder(monkeypatch, precision="bf16", fp32_layers=(0,))
+    with pytest.raises(NotImplementedError, match="BF16 Z-Image DiT"):
+        _call_builder(monkeypatch, precision="bf16", max_batch_size=2)
+
+
 def test_sandwich_prescale_params_fp16_scales_and_swaps_eps() -> None:
     weights = {
         "b.to_out": np.ones((4, 4), dtype=np.float32),
@@ -412,6 +434,7 @@ def test_sandwich_prescale_epsilon_identity() -> None:
     ("tp_size", "max_batch_size", "precision", "fp32_layers"),
     [
         (1, 1, "fp16", (2, 3, 4, 7, 8)),
+        (1, 1, "bf16", ()),
         (2, 1, "fp16", (2,)),
         (1, 4, "fp32", ()),
     ],

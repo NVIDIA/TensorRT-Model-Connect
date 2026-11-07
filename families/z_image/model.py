@@ -449,8 +449,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.task != "image_generation":
         raise ValueError("z_image supports only task=image_generation")
-    if request.precision not in {"fp16", "fp32"}:
-        raise ValueError("Z-Image supports only precision=fp16 or fp32")
+    if request.precision not in {"fp16", "bf16", "fp32"}:
+        raise ValueError("Z-Image supports only precision=fp16, bf16 or fp32")
     if request.quantization not in {None, "none", "fp8"}:
         raise NotImplementedError(f"Z-Image does not support quantization={request.quantization!r}")
     if request.quantization == "fp8" and (
