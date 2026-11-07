@@ -105,7 +105,7 @@ function semanticTaskIds() {
   }).sort();
 }
 
-test('every public semantic Task can generate a family recipe and route', (context) => {
+test('every public semantic Task can generate a family recipe and route', async (context) => {
   const tasks = semanticTaskIds();
   assert.ok(tasks.includes('text_continuation'));
   assert.ok(tasks.includes('batch_initial_image_text_to_audio_video'));
@@ -121,11 +121,11 @@ test('every public semantic Task can generate a family recipe and route', (conte
     [...tasks, 'text_generation'].sort());
   const routes = [];
   const plugin = modelSupportInventoryPlugin({siteDir: path.join(root, 'website'), baseUrl: '/docs/'});
-  plugin.contentLoaded({content: inventory, actions: {
-    setGlobalData: (data) => assert.equal(data, inventory),
+  await plugin.contentLoaded({content: inventory, actions: {
+    setGlobalData: (data) => assert.equal(data.familyCount, inventory.familyCount),
     addRoute: (route) => routes.push(route),
   }});
-  assert.equal(routes.length, tasks.length + 1 + inventory.familyCount);
+  assert.equal(routes.length, tasks.length + 1 + inventory.familyCount + inventory.manifestCount);
   for (const task of tasks) {
     const recipe = inventory.taskRecipes.find((item) => item.task === task);
     assert.ok(recipe.label.length > 0, task);
@@ -281,4 +281,81 @@ test('requires the complete family shape', () => {
   const root = repository();
   fs.rmSync(path.join(root, 'families', 'beta', 'runtime', 'CMakeLists.txt'));
   assert.throws(() => collectModelSupportInventory(root), /missing families\/beta\/runtime/);
+});
+
+test('every physical recipe has an exact detail route and keeps all manifest settings', async (context) => {
+  const root = repository();
+  context.after(() => fs.rmSync(root, {recursive: true, force: true}));
+  const sourcePath = 'families/alpha/tests/manifests/small.json';
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, sourcePath)));
+  Object.assign(manifest, {max_sequence_length: 4096, dynamic_kv_cache: false,
+    quantization: 'fp8', fp32_layers: [0, 3], custom_owner_setting: {enabled: true}});
+  fs.writeFileSync(path.join(root, sourcePath), JSON.stringify(manifest));
+  const inventory = collectModelSupportInventory(root, {sourceRevision: 'abc123'});
+  const [profile] = inventory.modelProfiles;
+  assert.deepEqual(profile.manifest, manifest);
+  assert.equal(profile.url, '/models-recipes/model-recipes/checkpoints/alpha/alpha-small');
+  assert.equal(profile.familyUrl, '/models-recipes/model-recipes/families/alpha');
+  assert.equal(profile.sourceUrl,
+    `https://github.com/NVIDIA/TensorRT-Model-Connect/blob/abc123/${sourcePath}`);
+  const routes = [];
+  await modelSupportInventoryPlugin({siteDir: path.join(root, 'website'), baseUrl: '/docs/'})
+    .contentLoaded({content: inventory, actions: {
+      setGlobalData() {}, addRoute: (route) => routes.push(route),
+    }});
+  const route = routes.find((item) => item.path === `/docs${profile.url}`);
+  assert.deepEqual(route.props, {familySlug: 'alpha', profileSlug: 'alpha-small'});
+  assert.ok(route.component.endsWith('/CheckpointPage.js'));
+  assert.ok(routes.some((item) => item.path.endsWith('/families/beta')),
+    'families without recipes must still have a detail page');
+});
+
+test('configuration data is loaded per family and native commands come from that owner', async (context) => {
+  const root = repository();
+  context.after(() => fs.rmSync(root, {recursive: true, force: true}));
+  const alpha = {cli: {commands: [
+    {name: 'build', executor: 'python'}, {name: 'owner-command', executor: 'native'},
+  ]}, configClasses: [{name: 'Config', fields: [{name: 'owner_field'}]}]};
+  const inventory = collectModelSupportInventory(root, {familyDetails: {families: {alpha, beta: {}}}});
+  const routes = [];
+  const dataFiles = new Map();
+  await modelSupportInventoryPlugin({siteDir: path.join(root, 'website'), baseUrl: '/docs/'})
+    .contentLoaded({content: inventory, actions: {
+      setGlobalData: (data) => {
+        assert.ok(data.familyRecipes.every((family) => !Object.hasOwn(family, 'details')));
+        assert.deepEqual(data.familyRecipes[0].declaredCliCommands, ['owner-command']);
+      },
+      createData: async (name, data) => { dataFiles.set(name, JSON.parse(data)); return name; },
+      addRoute: (route) => routes.push(route),
+    }});
+  assert.deepEqual(dataFiles.get('family-alpha.json'), alpha);
+  for (const route of routes.filter((route) => route.props.familySlug === 'alpha')) {
+    assert.deepEqual(route.modules, {details: 'family-alpha.json'});
+  }
+});
+
+test('rejects ambiguous checkpoint links and incomplete family audit coverage', (context) => {
+  const root = repository();
+  context.after(() => fs.rmSync(root, {recursive: true, force: true}));
+  assert.throws(() => collectModelSupportInventory(root, {familyDetails: {families: {alpha: {}}}}),
+    /beta is missing its configuration audit/);
+  fs.copyFileSync(path.join(root, 'families/alpha/tests/manifests/small.json'),
+    path.join(root, 'families/alpha/tests/manifests/duplicate.json'));
+  assert.throws(() => collectModelSupportInventory(root), /duplicate recipe names/);
+});
+
+test('real inventory audits every current family and every current recipe', () => {
+  const root = path.resolve(__dirname, '../../..');
+  const familyDetails = modelSupportInventoryPlugin.collectFamilyDetails(root);
+  const inventory = collectModelSupportInventory(root, {familyDetails});
+  assert.equal(Object.keys(familyDetails.families).length, inventory.familyCount);
+  for (const family of inventory.familyRecipes) {
+    assert.ok(family.details, family.family);
+    for (const profile of family.profiles) {
+      const check = family.details.profileChecks[profile.sourcePath];
+      assert.ok(check, profile.sourcePath);
+      assert.ok(['checked', 'issues', 'not-checked'].includes(check.status), profile.sourcePath);
+      assert.ok(Array.isArray(check.checks) && check.checks.length > 0, profile.sourcePath);
+    }
+  }
 });

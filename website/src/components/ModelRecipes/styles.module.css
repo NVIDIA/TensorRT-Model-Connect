@@ -1,0 +1,126 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+.page {
+  margin: 0 auto;
+  max-width: 1120px;
+  min-width: 0;
+  padding: 2rem;
+  width: 100%;
+}
+
+.page h1 {
+  overflow-wrap: anywhere;
+}
+
+.tableScroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.parameterTable {
+  display: table;
+  font-size: 0.92rem;
+  width: 100%;
+}
+
+.parameterTable td,
+.parameterTable th {
+  text-align: left;
+  vertical-align: top;
+}
+
+.inlineValue {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.value {
+  font-size: 0.85rem;
+  margin: 0;
+  max-height: 24rem;
+  padding: 0.5rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.note {
+  display: block;
+  margin-top: 0.25rem;
+  overflow-wrap: anywhere;
+}
+
+.muted {
+  color: var(--trtmc-muted);
+}
+
+.details {
+  margin: 0.75rem 0;
+  overflow: hidden;
+}
+
+.details > summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+  padding: 0.75rem 1rem;
+}
+
+.detailsBody {
+  padding: 0 1rem 1rem;
+}
+
+.detailsBody > :last-child {
+  margin-bottom: 0;
+}
+
+.constraint + .constraint {
+  border-top: 1px solid var(--trtmc-border);
+  margin-top: 1rem;
+  padding-top: 1rem;
+}
+
+.constraint p {
+  margin-bottom: 0.5rem;
+}
+
+.verification {
+  border-left: 3px solid var(--ifm-color-primary);
+  margin: 2rem 0;
+  padding-left: 1rem;
+}
+
+.familyList {
+  columns: 3 15rem;
+}
+
+.familyList li {
+  break-inside: avoid;
+}
+
+.search {
+  background: var(--ifm-background-color);
+  border: 1px solid var(--trtmc-border);
+  border-radius: 2px;
+  color: var(--ifm-font-color-base);
+  display: block;
+  font: inherit;
+  margin: 0.5rem 0;
+  max-width: 100%;
+  padding: 0.65rem;
+  width: 32rem;
+}
+
+.sectionLinks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.25rem;
+  margin: 1.5rem 0;
+}
+
+@media (max-width: 600px) {
+  .page {
+    padding: 1rem;
+  }
+}
