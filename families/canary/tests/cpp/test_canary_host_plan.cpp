@@ -16,6 +16,7 @@
 // =============================================================================
 
 #include "families/canary/runtime/canary_cross_kv_apply.h"
+#include "families/canary/runtime/canary_cross_kv_heads.h"
 #include "families/canary/runtime/canary_cross_kv_plan.h"
 #include "families/canary/runtime/canary_host_plan.h"
 #include "families/canary/runtime/canary_request.h"
@@ -23,6 +24,7 @@
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -283,6 +285,45 @@ void test_cross_kv_apply_reports_failures() {
     check(error == "invalid canary cross-kv plan", "canary cross-kv apply reports invalid plan");
 }
 
+void test_projected_cross_kv_lanes_read_samples_in_place() {
+    // Greedy decoding: lane i is sample i, read in place.
+    check(trtmc::canary_lanes_are_samples({0}, 1), "one lane reads its sample in place");
+    check(trtmc::canary_lanes_are_samples({0, 1, 2}, 3), "identity lanes read in place");
+    check(trtmc::canary_lanes_are_samples({0, 1}, 3), "a prefix of the samples reads in place");
+    // Beam search: several lanes per sample, or a reordering, needs copies.
+    check(!trtmc::canary_lanes_are_samples({0, 0, 1, 1}, 2), "beam lanes are copied");
+    check(!trtmc::canary_lanes_are_samples({1, 0}, 2), "reordered lanes are copied");
+    check(!trtmc::canary_lanes_are_samples({0, 1, 2}, 2), "more lanes than samples are copied");
+    check(!trtmc::canary_lanes_are_samples({}, 1), "no lane is never in place");
+}
+
+void test_cross_input_rank_follows_tensor_parallelism() {
+    check(trtmc::canary_cross_input_rank(1) == 4, "single-GPU decoders read projected K/V heads");
+    check(trtmc::canary_cross_input_rank(2) == 3, "tensor-parallel decoders read encoder states");
+    check(trtmc::canary_cross_input_rank(4) == 3, "TP4 decoders read encoder states");
+}
+
+void test_projected_cross_kv_sample_bytes() {
+    check(trtmc::canary_cross_head_sample_bytes({-1, 8, 376, 128}, 2) == 8U * 376U * 128U * 2U,
+          "one sample's heads x positions x head_dim elements, batch ignored");
+    check(trtmc::canary_cross_head_sample_bytes({32, 4, 5, 32}, 4) == 4U * 5U * 32U * 4U,
+          "fp32 heads");
+    bool rejected_rank = false;
+    try {
+        (void)trtmc::canary_cross_head_sample_bytes({-1, 376, 1024}, 2);
+    } catch (const std::invalid_argument&) {
+        rejected_rank = true;
+    }
+    check(rejected_rank, "raw [B,S,H] encoder states are not projected heads");
+    bool rejected_axis = false;
+    try {
+        (void)trtmc::canary_cross_head_sample_bytes({1, 8, 0, 128}, 2);
+    } catch (const std::invalid_argument&) {
+        rejected_axis = true;
+    }
+    check(rejected_axis, "an empty axis is rejected");
+}
+
 } // namespace
 
 int main() {
@@ -295,6 +336,9 @@ int main() {
     test_canary_pcm16_quantization();
     test_cross_kv_apply_tracks_zero_and_copy_operations();
     test_cross_kv_apply_reports_failures();
+    test_projected_cross_kv_lanes_read_samples_in_place();
+    test_projected_cross_kv_sample_bytes();
+    test_cross_input_rank_follows_tensor_parallelism();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " canary host plan test(s) failed\n";

@@ -781,35 +781,74 @@ def _add_conformer_block(
 # ---------------------------------------------------------------------------
 
 
-def _add_batched_attention(network, q, k, v, *, num_heads, head_dim, kv_seq, mask=None):
-    """Attention for Q=[B,H], K/V=[B,S,H], returning [B,H]."""
-    attention_size = num_heads * head_dim
+def _attention_heads(network, x, *, num_heads, head_dim, kv_seq):
+    """[B,S,H] -> [B,heads,S,head_dim], the layout the attention core reads."""
+    rows = network.add_shuffle(x)
+    rows.reshape_dims = (-1, kv_seq, num_heads, head_dim)
+    heads = network.add_shuffle(rows.get_output(0))
+    heads.first_transpose = trt.Permutation([0, 2, 1, 3])
+    return heads.get_output(0)
 
+
+def _query_heads(network, q, *, num_heads, head_dim):
+    """[B,H] -> [B,heads,1,head_dim]."""
     q_heads = network.add_shuffle(q)
     q_heads.reshape_dims = (-1, num_heads, 1, head_dim)
+    return q_heads.get_output(0)
 
-    k_rows = network.add_shuffle(k)
-    k_rows.reshape_dims = (-1, kv_seq, num_heads, head_dim)
-    k_heads = network.add_shuffle(k_rows.get_output(0))
-    k_heads.first_transpose = trt.Permutation([0, 2, 1, 3])
 
-    v_rows = network.add_shuffle(v)
-    v_rows.reshape_dims = (-1, kv_seq, num_heads, head_dim)
-    v_heads = network.add_shuffle(v_rows.get_output(0))
-    v_heads.first_transpose = trt.Permutation([0, 2, 1, 3])
-
+def _add_attention_context(network, q_heads, k_heads, v_heads, *, num_heads, head_dim, mask=None):
+    """Attention of [B,heads,1,head_dim] queries over [B,heads,S,head_dim] K/V, as [B,H]."""
     context = graph_ops.add_attention_core(
         network,
-        q_heads.get_output(0),
-        k_heads.get_output(0),
-        v_heads.get_output(0),
+        q_heads,
+        k_heads,
+        v_heads,
         mask=mask,
         scale=float(1.0 / math.sqrt(head_dim)),
     )
     rows = network.add_shuffle(context)
     rows.first_transpose = trt.Permutation([0, 2, 1, 3])
-    rows.reshape_dims = (-1, attention_size)
+    rows.reshape_dims = (-1, num_heads * head_dim)
     return rows.get_output(0)
+
+
+def _add_batched_attention(network, q, k, v, *, num_heads, head_dim, kv_seq, mask=None):
+    """Attention for Q=[B,H], K/V=[B,S,H], returning [B,H]."""
+    q_heads = _query_heads(network, q, num_heads=num_heads, head_dim=head_dim)
+    k_heads = _attention_heads(network, k, num_heads=num_heads, head_dim=head_dim, kv_seq=kv_seq)
+    v_heads = _attention_heads(network, v, num_heads=num_heads, head_dim=head_dim, kv_seq=kv_seq)
+    return _add_attention_context(
+        network, q_heads, k_heads, v_heads, num_heads=num_heads, head_dim=head_dim, mask=mask
+    )
+
+
+def _add_cross_kv_heads(
+    network, encoder_states, *, weights, pfx, hsz, nheads, hdim, maxsrc, dtype, quant_ctx=None
+):
+    """One decoder layer's cross-attention K and V of the encoder states
+    ([B,S,H] -> two [B,heads,S,head_dim]). They depend on the encoder output
+    only, so the encoder engine computes them once per request instead of the
+    decoder in every step."""
+    matmul = graph_blocks.make_matmul_fn(network, dtype, quant_ctx)
+    ck = graph_ops.add_bias_sum(
+        network,
+        matmul(encoder_states, hsz, hsz, weights[f"{pfx}.xw_k"], f"{pfx}.xw_k"),
+        hsz,
+        weights[f"{pfx}.xb_k"],
+        dtype=dtype,
+    )
+    cv = graph_ops.add_bias_sum(
+        network,
+        matmul(encoder_states, hsz, hsz, weights[f"{pfx}.xw_v"], f"{pfx}.xw_v"),
+        hsz,
+        weights[f"{pfx}.xb_v"],
+        dtype=dtype,
+    )
+    return (
+        _attention_heads(network, ck, num_heads=nheads, head_dim=hdim, kv_seq=maxsrc),
+        _attention_heads(network, cv, num_heads=nheads, head_dim=hdim, kv_seq=maxsrc),
+    )
 
 
 def _add_decoder_layer(
@@ -818,8 +857,8 @@ def _add_decoder_layer(
     hidden,
     cache_k,
     cache_v,
-    cross_k,
-    cross_v,
+    cross_k_heads,
+    cross_v_heads,
     attention_mask,
     cross_attention_mask,
     eps,
@@ -830,10 +869,12 @@ def _add_decoder_layer(
     hdim,
     ffn,
     maxcache,
-    maxsrc,
     dtype=np.float32,
     quant_ctx=None,
 ):
+    """One decoder layer. Its cross-attention K and V arrive already projected
+    and split into heads ([B,heads,S,head_dim], _add_cross_kv_heads in the
+    encoder engine)."""
     matmul = graph_blocks.make_matmul_fn(network, dtype, quant_ctx)
     aw = maxcache + 1
     # Self-attention
@@ -912,23 +953,15 @@ def _add_decoder_layer(
         weights[f"{pfx}.xb_q"],
         dtype=dtype,
     )
-    ck = graph_ops.add_bias_sum(
-        network,
-        matmul(cross_k, hsz, hsz, weights[f"{pfx}.xw_k"], f"{pfx}.xw_k"),
-        hsz,
-        weights[f"{pfx}.xb_k"],
-        dtype=dtype,
-    )
-    cv = graph_ops.add_bias_sum(
-        network,
-        matmul(cross_v, hsz, hsz, weights[f"{pfx}.xw_v"], f"{pfx}.xw_v"),
-        hsz,
-        weights[f"{pfx}.xb_v"],
-        dtype=dtype,
-    )
     cross_mask_4d = graph_ops.add_3d_mask_to_4d(network, cross_attention_mask)
-    ccf = _add_batched_attention(
-        network, cq, ck, cv, num_heads=nheads, head_dim=hdim, kv_seq=maxsrc, mask=cross_mask_4d
+    ccf = _add_attention_context(
+        network,
+        _query_heads(network, cq, num_heads=nheads, head_dim=hdim),
+        cross_k_heads,
+        cross_v_heads,
+        num_heads=nheads,
+        head_dim=hdim,
+        mask=cross_mask_4d,
     )
     ca = graph_ops.add_bias_sum(
         network,
@@ -1253,14 +1286,11 @@ class _CanaryModel:
         use_fp32_decoder_io = precision == "fp16" and decoder_io_component in {
             int(layer) for layer in config.raw.get("_fp32_layers", ())
         }
-        selected_fp32_layers = (
-            {
-                int(layer) - encoder_layers
-                for layer in config.raw.get("_fp32_layers", ())
-                if encoder_layers <= int(layer) < encoder_layers + dl
-            }
-            if precision == "fp16"
-            else set()
+        selected_fp32_layers = _decoder_fp32_layers(
+            config.raw.get("_fp32_layers", ()),
+            encoder_layers=encoder_layers,
+            decoder_layers=dl,
+            precision=precision,
         )
 
         log = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -1290,14 +1320,17 @@ class _CanaryModel:
                     (-1, max_cache_length, h),
                 )
             )
+            # The layer's cross-attention K/V, projected once per request by
+            # the encoder engine (_add_cross_kv_heads), in the layer's dtype.
+            cross_trt_dtype = trt.float32 if i in selected_fp32_layers else work_trt_dtype
             xki.append(
                 net.add_input(
-                    graph_ops.layer_tensor_name("cross_k", i), state_io_trt_dtype, (-1, es, h)
+                    graph_ops.layer_tensor_name("cross_k", i), cross_trt_dtype, (-1, dh, es, hd)
                 )
             )
             xvi.append(
                 net.add_input(
-                    graph_ops.layer_tensor_name("cross_v", i), state_io_trt_dtype, (-1, es, h)
+                    graph_ops.layer_tensor_name("cross_v", i), cross_trt_dtype, (-1, dh, es, hd)
                 )
             )
 
@@ -1325,10 +1358,16 @@ class _CanaryModel:
                 (CANARY_MAX_DECODER_LANES, max_cache_length, h),
             )
             profile.set_shape(
-                "cross_k" + suffix, (1, es, h), (16, es, h), (CANARY_MAX_DECODER_LANES, es, h)
+                "cross_k" + suffix,
+                (1, dh, es, hd),
+                (16, dh, es, hd),
+                (CANARY_MAX_DECODER_LANES, dh, es, hd),
             )
             profile.set_shape(
-                "cross_v" + suffix, (1, es, h), (16, es, h), (CANARY_MAX_DECODER_LANES, es, h)
+                "cross_v" + suffix,
+                (1, dh, es, hd),
+                (16, dh, es, hd),
+                (CANARY_MAX_DECODER_LANES, dh, es, hd),
             )
         tc.add_optimization_profile(profile)
 
@@ -1373,15 +1412,11 @@ class _CanaryModel:
                 hs = net.add_cast(hs, layer_trt_dtype).get_output(0)
             layer_cache_k = cki[li]
             layer_cache_v = cvi[li]
-            layer_cross_k = xki[li]
-            layer_cross_v = xvi[li]
             layer_mask = amask
             layer_cross_mask = cross_amask
             if layer_cache_k.dtype != layer_trt_dtype:
                 layer_cache_k = net.add_cast(layer_cache_k, layer_trt_dtype).get_output(0)
                 layer_cache_v = net.add_cast(layer_cache_v, layer_trt_dtype).get_output(0)
-                layer_cross_k = net.add_cast(layer_cross_k, layer_trt_dtype).get_output(0)
-                layer_cross_v = net.add_cast(layer_cross_v, layer_trt_dtype).get_output(0)
             if layer_mask.dtype != layer_trt_dtype:
                 layer_mask = net.add_cast(layer_mask, layer_trt_dtype).get_output(0)
                 layer_cross_mask = net.add_cast(layer_cross_mask, layer_trt_dtype).get_output(0)
@@ -1390,8 +1425,8 @@ class _CanaryModel:
                 hidden=hs,
                 cache_k=layer_cache_k,
                 cache_v=layer_cache_v,
-                cross_k=layer_cross_k,
-                cross_v=layer_cross_v,
+                cross_k_heads=xki[li],
+                cross_v_heads=xvi[li],
                 attention_mask=layer_mask,
                 cross_attention_mask=layer_cross_mask,
                 eps=_select_norm_eps(eps, fp32_eps, layer_np_dtype),
@@ -1402,7 +1437,6 @@ class _CanaryModel:
                 hdim=hd,
                 ffn=df,
                 maxcache=max_cache_length,
-                maxsrc=es,
                 dtype=layer_np_dtype,
                 quant_ctx=quant_ctx,
             )
@@ -1464,6 +1498,7 @@ class _CanaryModel:
         precision: str = "fp32",
         verbose: bool = False,
         quant_ctx=None,
+        project_cross_kv: bool,
     ) -> bytes | None:
         return _build_encoder(
             config,
@@ -1472,6 +1507,7 @@ class _CanaryModel:
             verbose=verbose,
             fp32_layers=config.raw.get("_fp32_layers", ()),
             quant_ctx=quant_ctx,
+            project_cross_kv=project_cross_kv,
         )
 
     def get_audio_config(self, config: ModelConfig) -> dict | None:
@@ -1563,6 +1599,64 @@ def _select_norm_eps(eps, fp32_eps, layer_np_dtype):
     return eps
 
 
+def _decoder_fp32_layers(fp32_layers, *, encoder_layers, decoder_layers, precision) -> set[int]:
+    """Decoder layer indices an fp16 build keeps in fp32 (``fp32_layers`` holds
+    global layer indices: encoder layers first, then decoder layers)."""
+    if precision != "fp16":
+        return set()
+    return {
+        int(layer) - encoder_layers
+        for layer in fp32_layers
+        if encoder_layers <= int(layer) < encoder_layers + decoder_layers
+    }
+
+
+def _add_decoder_cross_kv_outputs(
+    net,
+    encoder_states,
+    weights,
+    *,
+    precision,
+    fp32_layers,
+    work_np_dtype,
+    work_trt_dtype,
+    quant_ctx,
+):
+    """Mark every decoder layer's cross-attention K/V of ``encoder_states`` as
+    encoder outputs, each computed in its decoder layer's dtype (the
+    decoder's own fp32 layer selection) exactly as that layer projected them."""
+    el = int(weights["_enc_layers"])
+    dl = int(weights["_dec_layers"])
+    dh = int(weights["_dec_heads"])
+    h = int(weights["_hidden"])
+    es = int(weights["_enc_seq"])
+    decoder_fp32_layers = _decoder_fp32_layers(
+        fp32_layers, encoder_layers=el, decoder_layers=dl, precision=precision
+    )
+    for li in range(dl):
+        layer_np_dtype = np.float32 if li in decoder_fp32_layers else work_np_dtype
+        layer_trt_dtype = trt.float32 if li in decoder_fp32_layers else work_trt_dtype
+        states = encoder_states
+        if states.dtype != layer_trt_dtype:
+            states = net.add_cast(states, layer_trt_dtype).get_output(0)
+        k_heads, v_heads = _add_cross_kv_heads(
+            net,
+            states,
+            weights=weights,
+            pfx=f"layer.{li}",
+            hsz=h,
+            nheads=dh,
+            hdim=h // dh,
+            maxsrc=es,
+            dtype=layer_np_dtype,
+            quant_ctx=quant_ctx,
+        )
+        k_heads.name = graph_ops.layer_tensor_name("cross_k", li)
+        v_heads.name = graph_ops.layer_tensor_name("cross_v", li)
+        net.mark_output(k_heads)
+        net.mark_output(v_heads)
+
+
 def _build_encoder(
     config,
     weights,
@@ -1571,7 +1665,15 @@ def _build_encoder(
     verbose=False,
     fp32_layers=(),
     quant_ctx=None,
+    project_cross_kv,
 ):
+    """The Canary encoder engine. With ``project_cross_kv`` (single-GPU
+    bundles) it outputs every decoder layer's cross-attention K and V
+    (``cross_k_<i>``/``cross_v_<i>``, [B,heads,S,head_dim]) instead of the raw
+    ``encoder_output``: they depend on the encoder output only, so computing
+    them here once per request spares the decoder their projection and head
+    transpose in every step. Tensor-parallel decoders keep projecting their
+    own head shards from ``encoder_output``."""
     el = weights["_enc_layers"]
     eh = weights["_enc_heads"]
     h = weights["_hidden"]
@@ -1717,8 +1819,20 @@ def _build_encoder(
     output = output_layer.get_output(0)
     if output.dtype != work_trt_dtype:
         output = net.add_cast(output, work_trt_dtype).get_output(0)
-    output.name = "encoder_output"
-    net.mark_output(output)
+    if project_cross_kv:
+        _add_decoder_cross_kv_outputs(
+            net,
+            output,
+            weights,
+            precision=precision,
+            fp32_layers=fp32_layers,
+            work_np_dtype=work_np_dtype,
+            work_trt_dtype=work_trt_dtype,
+            quant_ctx=quant_ctx,
+        )
+    else:
+        output.name = "encoder_output"
+        net.mark_output(output)
     if verbose:
         print(
             f"[trtmc build] Building Canary encoder ({el}L, h={h}, "
@@ -1861,6 +1975,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         precision=request.precision,
         verbose=request.verbose,
         quant_ctx=quant_ctx,
+        project_cross_kv=not parallel.enabled,
     )
     if encoder is None:
         raise RuntimeError("Canary encoder build returned no engine")
