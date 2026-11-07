@@ -584,6 +584,9 @@ class _Qwen35Model:
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 1
+        if (config.raw.get("_prepared_quantization") == "nvfp4"
+                or getattr(quant_ctx, "has_nvfp4_weights", False)):
+            trt_config.max_aux_streams = 0
         if quant_ctx is not None:
             # The plan inspector reads kernel names from the engine.
             trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
