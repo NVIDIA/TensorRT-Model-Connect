@@ -21,8 +21,9 @@
 
 namespace trtmc {
 
+// A request's geometry: its original size and the size its longest side
+// rescales to image_size at.
 struct SamPreprocessPlan {
-    std::vector<float> pixel_values;
     int32_t rescaled_width{0};
     int32_t rescaled_height{0};
     int32_t original_width{0};
@@ -45,14 +46,15 @@ inline float sam_preprocess_source_coordinate(int32_t i, int32_t src_len, int32_
            0.5F;
 }
 
-// Writes the rescaled region of plan.pixel_values from an HWC RGB float image:
-// for each pixel and channel, the bilinear sample (sam_bilinear.h) minus the
-// channel mean, divided by the channel std. Each source row is interpolated
-// horizontally once for all three channels; the vertical blend and the
-// normalization then run over contiguous rows.
-inline void fill_sam_preprocessed_pixels(SamPreprocessPlan& plan, const float* image_pixels,
-                                         int32_t height, int32_t width, const SamConfig& config,
-                                         const std::array<float, 3>& mean,
+// Writes the rescaled region of `pixel_values` (3 planes of image_size x
+// image_size) from an HWC RGB float image: for each pixel and channel, the
+// bilinear sample (sam_bilinear.h) minus the channel mean, divided by the
+// channel std. Each source row is interpolated horizontally once for all three
+// channels; the vertical blend and the normalization then run over contiguous
+// rows.
+inline void fill_sam_preprocessed_pixels(float* pixel_values, const SamPreprocessPlan& plan,
+                                         const float* image_pixels, int32_t height, int32_t width,
+                                         const SamConfig& config, const std::array<float, 3>& mean,
                                          const std::array<float, 3>& stdv) {
     const int32_t rescaled_w = plan.rescaled_width;
     const int32_t rescaled_h = plan.rescaled_height;
@@ -94,7 +96,7 @@ inline void fill_sam_preprocessed_pixels(SamPreprocessPlan& plan, const float* i
             const float* bottom_c = bottom + c * row_w;
             const float channel_mean = mean[c];
             const float channel_std = stdv[c];
-            float* out = plan.pixel_values.data() + c * plane +
+            float* out = pixel_values + c * plane +
                          static_cast<std::size_t>(y) * static_cast<std::size_t>(config.image_size);
             for (std::size_t x = 0; x < row_w; ++x) {
                 out[x] =
@@ -104,8 +106,9 @@ inline void fill_sam_preprocessed_pixels(SamPreprocessPlan& plan, const float* i
     }
 }
 
-inline SamPreprocessPlan build_sam_preprocess_plan(const float* image_pixels, int32_t height,
-                                                   int32_t width, const SamConfig& config) {
+// A request's geometry; all zero for an invalid request.
+inline SamPreprocessPlan plan_sam_preprocess(const float* image_pixels, int32_t height,
+                                             int32_t width, const SamConfig& config) {
     SamPreprocessPlan plan;
     if (image_pixels == nullptr || height <= 0 || width <= 0 || config.image_size <= 0)
         return plan;
@@ -119,15 +122,27 @@ inline SamPreprocessPlan build_sam_preprocess_plan(const float* image_pixels, in
         std::max(1, static_cast<int32_t>(std::round(static_cast<float>(height) * scale)));
     plan.original_width = width;
     plan.original_height = height;
-    plan.pixel_values.assign(static_cast<std::size_t>(3) * static_cast<std::size_t>(image_size) *
-                                 static_cast<std::size_t>(image_size),
-                             0.0F);
+    return plan;
+}
 
+// Writes a planned request's encoder input into a caller-owned buffer of
+// 3 x image_size x image_size floats, whatever it held: the rescaled image,
+// normalized, and zeros everywhere else.
+inline void write_sam_pixel_values(float* pixel_values, const SamPreprocessPlan& plan,
+                                   const float* image_pixels, const SamConfig& config) {
+    const auto size = static_cast<std::size_t>(config.image_size);
+    const auto rescaled_w = static_cast<std::size_t>(plan.rescaled_width);
+    const auto rescaled_h = static_cast<std::size_t>(plan.rescaled_height);
+    for (std::size_t c = 0; c < 3; ++c) {
+        float* plane = pixel_values + c * size * size;
+        for (std::size_t y = 0; y < rescaled_h; ++y)
+            std::fill(plane + y * size + rescaled_w, plane + (y + 1) * size, 0.0F);
+        std::fill(plane + rescaled_h * size, plane + size * size, 0.0F);
+    }
     const auto mean = sam_channel_values(config.image_mean, {0.485F, 0.456F, 0.406F});
     const auto stdv = sam_channel_values(config.image_std, {0.229F, 0.224F, 0.225F});
-    fill_sam_preprocessed_pixels(plan, image_pixels, height, width, config, mean, stdv);
-
-    return plan;
+    fill_sam_preprocessed_pixels(pixel_values, plan, image_pixels, plan.original_height,
+                                 plan.original_width, config, mean, stdv);
 }
 
 } // namespace trtmc

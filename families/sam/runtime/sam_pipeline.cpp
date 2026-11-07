@@ -11,7 +11,9 @@
 #include "families/sam/runtime/sam_prompt_seam.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -86,6 +88,16 @@ SamPipeline::SamPipeline(std::unique_ptr<ITrtModule> image_encoder,
         throw std::runtime_error("SamPipeline: invalid image_encoder");
     if (!mask_decoder_ || !mask_decoder_->ok())
         throw std::runtime_error("SamPipeline: invalid mask_decoder");
+    if (config_.image_size <= 0)
+        throw std::runtime_error("SamPipeline: image_size must be positive");
+    const auto image_size = static_cast<std::size_t>(config_.image_size);
+    void* pinned = nullptr;
+    const cudaError_t error = cudaMallocHost(&pinned, 3 * image_size * image_size * sizeof(float));
+    if (error != cudaSuccess) {
+        throw std::runtime_error(std::string("SamPipeline: page-locked pixel_values allocation: ") +
+                                 cudaGetErrorString(error));
+    }
+    pixel_values_ = {static_cast<float*>(pinned), [](float* p) { (void)cudaFreeHost(p); }};
 }
 
 SegmentResult SamPipeline::segment(const float* pixels, int32_t height, int32_t width) {
@@ -107,12 +119,13 @@ PromptedSegmentationResult SamPipeline::segment_prompted(const float* image_pixe
                                                          int32_t image_height, int32_t image_width,
                                                          float point_x, float point_y,
                                                          bool is_foreground) {
-    auto plan = build_sam_preprocess_plan(image_pixels, image_height, image_width, config_);
-    if (plan.pixel_values.empty())
+    const auto plan = plan_sam_preprocess(image_pixels, image_height, image_width, config_);
+    if (plan.rescaled_width == 0)
         return {};
+    write_sam_pixel_values(pixel_values_.get(), plan, image_pixels, config_);
 
     Tensor img_t;
-    img_t.data = plan.pixel_values.data();
+    img_t.data = pixel_values_.get();
     img_t.shape = {1, 3, config_.image_size, config_.image_size};
     img_t.dtype = DType::kFloat32;
 

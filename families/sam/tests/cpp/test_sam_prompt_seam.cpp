@@ -406,23 +406,67 @@ void test_postprocess_sam_result_matches_per_sample_restore() {
     }
 }
 
-void test_build_sam_preprocess_plan_matches_per_sample_reference() {
-    const int32_t sizes[][2] = {{382, 640},   {640, 382}, {1024, 1024}, {768, 1024},
-                                {1080, 1920}, {60, 100},  {333, 777},   {1, 5}};
-    trtmc::SamConfig config;
-    const std::array<float, 3> mean = {0.485F, 0.456F, 0.406F};
-    const std::array<float, 3> stdv = {0.229F, 0.224F, 0.225F};
-    unsigned seed = 200;
+// Every request is written into ONE reused buffer that starts as NaN, so a
+// value the writer fails to overwrite (padding left by a larger earlier
+// request) differs from the reference's fresh zeros.
+void check_write_sam_pixel_values_matches_per_sample_reference(
+    const trtmc::SamConfig& config, const std::vector<std::array<int32_t, 2>>& sizes,
+    const std::array<float, 3>& mean, const std::array<float, 3>& stdv, unsigned seed,
+    const char* test_name) {
+    std::vector<float> pixel_values(3 * static_cast<std::size_t>(config.image_size) *
+                                        static_cast<std::size_t>(config.image_size),
+                                    std::numeric_limits<float>::quiet_NaN());
     for (const auto& size : sizes) {
         const auto image =
             seeded_values(static_cast<std::size_t>(size[0]) * size[1] * 3, seed++, 0.F, 1.F);
-        const auto plan = trtmc::build_sam_preprocess_plan(image.data(), size[0], size[1], config);
+        const auto plan = trtmc::plan_sam_preprocess(image.data(), size[0], size[1], config);
+        trtmc::write_sam_pixel_values(pixel_values.data(), plan, image.data(), config);
         const auto expected =
             reference_preprocess(image, size[0], size[1], config.image_size, plan.rescaled_width,
                                  plan.rescaled_height, mean, stdv);
-        check(bit_identical(plan.pixel_values, expected),
-              "preprocess per-sample: bit-identical pixel values");
+        check(plan.original_height == size[0] && plan.original_width == size[1] &&
+                  bit_identical(pixel_values, expected),
+              test_name);
     }
+}
+
+void test_write_sam_pixel_values_matches_per_sample_reference() {
+    check_write_sam_pixel_values_matches_per_sample_reference(
+        trtmc::SamConfig{},
+        {{382, 640},
+         {640, 382},
+         {1024, 1024},
+         {768, 1024},
+         {1080, 1920},
+         {60, 100},
+         {333, 777},
+         {1, 5}},
+        {0.485F, 0.456F, 0.406F}, {0.229F, 0.224F, 0.225F}, 200,
+        "preprocess per-sample: bit-identical pixel values");
+
+    // The config's own normalization and image_size, not the defaults.
+    trtmc::SamConfig custom;
+    custom.image_size = 32;
+    custom.image_mean = {0.4F, 0.5F, 0.6F};
+    custom.image_std = {0.2F, 0.25F, 0.3F};
+    check_write_sam_pixel_values_matches_per_sample_reference(
+        custom, {{19, 32}, {32, 19}, {13, 13}, {1, 7}, {9, 1}, {40, 33}, {33, 40}, {5, 3}},
+        {0.4F, 0.5F, 0.6F}, {0.2F, 0.25F, 0.3F}, 300,
+        "preprocess per-sample: custom config bit-identical");
+}
+
+void test_plan_sam_preprocess_rejects_invalid_requests() {
+    trtmc::SamConfig config;
+    const std::vector<float> image(4 * 4 * 3, 0.5F);
+    check(trtmc::plan_sam_preprocess(nullptr, 4, 4, config).rescaled_width == 0,
+          "plan invalid: no pixels");
+    check(trtmc::plan_sam_preprocess(image.data(), 0, 4, config).rescaled_width == 0,
+          "plan invalid: empty height");
+    check(trtmc::plan_sam_preprocess(image.data(), 4, -1, config).rescaled_width == 0,
+          "plan invalid: negative width");
+    config.image_size = 0;
+    check(trtmc::plan_sam_preprocess(image.data(), 4, 4, config).rescaled_width == 0,
+          "plan invalid: no image_size");
 }
 
 } // namespace
@@ -439,7 +483,8 @@ int main() {
     test_postprocess_sam_result_preserves_invalid_requests_and_incomplete_payload();
     test_resize_mask_bilinear_matches_per_sample_reference();
     test_postprocess_sam_result_matches_per_sample_restore();
-    test_build_sam_preprocess_plan_matches_per_sample_reference();
+    test_write_sam_pixel_values_matches_per_sample_reference();
+    test_plan_sam_preprocess_rejects_invalid_requests();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " SAM prompt seam test(s) failed" << '\n';
