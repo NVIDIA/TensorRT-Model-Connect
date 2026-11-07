@@ -84,7 +84,13 @@ only by specific manifests, for example a profile-restricted one, list them with
 lists the gaps between the declaration, the quantizations `model.py` accepts,
 the manifests and the hardware tests; `python -m tools.variant_coverage
 bootstrap <family>` prints a draft declaration. The report is informational and
-does not gate pull requests yet.
+does not gate pull requests yet. Its view of `model.py` is a heuristic: it finds
+string literals compared with `request.quantization`, so a format accepted
+through a lookup table is missed, and a manifest without a `quantization` field
+counts as unquantized even when the family detects a quantized checkpoint. A
+named manifest must still build the variant's precision and quantization, and
+only a collected `test*` function with a `gpu` or `trt` mark (on the function,
+its `Test*` class or the module `pytestmark`) counts as a hardware test.
 
 `model.py` must expose exactly one plain function. Any helper it calls is
 implemented in this file or elsewhere in the same family directory:
