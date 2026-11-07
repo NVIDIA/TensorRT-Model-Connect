@@ -35,6 +35,13 @@ bool is_official_profile(const Wan22TI2VOptions& profile) {
            profile.video_num_frames == kWan22OfficialVideoFrames;
 }
 
+bool is_portrait_profile(const Wan22TI2VOptions& profile) {
+    return profile.num_inference_steps == kWan22OfficialInferenceSteps &&
+           profile.video_height == kWan22PortraitVideoHeight &&
+           profile.video_width == kWan22PortraitVideoWidth &&
+           profile.video_num_frames == kWan22OfficialVideoFrames;
+}
+
 bool is_l0_profile(const Wan22TI2VOptions& profile) {
     return profile.num_inference_steps == kWan22L0InferenceSteps &&
            profile.video_height == kWan22L0VideoHeight &&
@@ -44,13 +51,13 @@ bool is_l0_profile(const Wan22TI2VOptions& profile) {
 
 void validate_profile(const Wan22TI2VOptions& profile, const char* subject) {
     validate_common_profile(profile);
-    if (is_official_profile(profile) || is_l0_profile(profile))
+    if (is_official_profile(profile) || is_portrait_profile(profile) || is_l0_profile(profile))
         return;
 
     throw std::invalid_argument(
         std::string("Wan2.2-TI2V-5B ") + subject +
-        " requires one complete qualified profile: 1280x704/121 frames/50 steps or "
-        "672x384/5 frames/15 steps");
+        " requires one complete qualified profile: 1280x704/121 frames/50 steps, "
+        "704x1280/121 frames/50 steps or 672x384/5 frames/15 steps");
 }
 
 void validate_request_overrides(const ImageGenerationConfig& config) {
