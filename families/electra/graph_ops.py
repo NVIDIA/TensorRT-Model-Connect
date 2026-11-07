@@ -143,7 +143,9 @@ def add_activation(
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Dispatch activation by name: 'silu', 'gelu_new', 'gelu', 'relu', 'relu2'/'squared_relu'."""
-    if activation_type in ("gelu_new", "gelu"):
+    if activation_type == "gelu":
+        return network.add_activation(inp, trt.ActivationType.GELU_ERF).get_output(0)
+    elif activation_type == "gelu_new":
         return add_gelu_new(network, inp, dtype=dtype)
     elif activation_type == "relu":
         act = network.add_activation(inp, trt.ActivationType.RELU)

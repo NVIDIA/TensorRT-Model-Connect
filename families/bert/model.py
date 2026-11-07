@@ -142,7 +142,9 @@ def add_activation(
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Add an activation supported by the family-owned graph contract."""
-    if activation_type in ("gelu_new", "gelu"):
+    if activation_type == "gelu":
+        return network.add_activation(inp, trt.ActivationType.GELU_ERF).get_output(0)
+    if activation_type == "gelu_new":
         return add_gelu_new(network, inp, dtype=dtype)
     if activation_type == "relu":
         return network.add_activation(inp, trt.ActivationType.RELU).get_output(0)
