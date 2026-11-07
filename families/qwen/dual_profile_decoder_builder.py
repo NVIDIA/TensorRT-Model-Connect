@@ -22,9 +22,12 @@ GeluFC MLP; RoPE (full / partial / interleaved), learned absolute, or
 ALiBi position; sequential or parallel residual; optional q/k_norm,
 QKV/output/MLP biases, and a Bloom-style embedding LayerNorm. Quantized
 builds (fp8 / int8 ``quant_ctx``) thread Q/DQ insertion through every
-projection matmul via ``QuantContext.maybe_quantized_matmul``. Per-layer
-debug outputs, hidden-state outputs, and the VL ``embed_input`` path stay
-on ``standard_decoder_builder`` for now and are dispatched there from
+projection matmul via ``QuantContext.maybe_quantized_matmul``. On the
+Qwen3 native KV path, ``debug_layer_outputs`` marks the per-layer
+``debug_hidden_<i>`` residual stream for all or selected layers. The full
+standard debug set (``debug_embed``, ``debug_post_attn_<i>``,
+``debug_hidden_<i>``), hidden-state outputs, and the VL ``embed_input`` path
+stay on ``standard_decoder_builder`` for now and are dispatched there from
 inside ``build_standard_decoder_engine``.
 
 Tensor contract for the Qwen3 TensorRT native KV-cache path:
@@ -40,6 +43,7 @@ Tensor contract for the Qwen3 TensorRT native KV-cache path:
                     or (Sq, vocab) for full-logits diffusion builds
     present_k_i     fp16/bf16 (1, Hkv, capacity, D)   # aliases cache_k_i
     present_v_i     fp16/bf16 (1, Hkv, capacity, D)   # aliases cache_v_i
+    debug_hidden_i  float32 (Sq, hidden)              # only layers selected by debug_layer_outputs
 
 The dense-mask/row-cache contract remains available for the other model
 types handled by this family.
@@ -48,6 +52,7 @@ types handled by this family.
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -83,6 +88,44 @@ def _resolve_prefill_lengths(
     resolved_max = max(1, min(requested, max_cache_length))
     resolved_opt = max(1, min(opt_prefill_length, resolved_max))
     return resolved_opt, resolved_max
+
+
+def _resolve_debug_layers(
+    debug_layer_outputs: bool | Sequence[int] | None,
+    num_layers: int,
+) -> tuple[int, ...]:
+    """Return the sorted layer indices whose hidden state is a debug output."""
+    if debug_layer_outputs is None or debug_layer_outputs is False:
+        return ()
+    if debug_layer_outputs is True:
+        return tuple(range(num_layers))
+    text_like = isinstance(debug_layer_outputs, (str, bytes, bytearray))
+    if text_like or not isinstance(debug_layer_outputs, Sequence):
+        raise ValueError(
+            "debug_layer_outputs must be a bool or a sequence of layer indices, "
+            f"got {debug_layer_outputs!r}")
+    layers = tuple(debug_layer_outputs)
+    for layer in layers:
+        if isinstance(layer, bool) or not isinstance(layer, int):
+            raise ValueError(f"debug layer index must be an integer, got {layer!r}")
+        if not 0 <= layer < num_layers:
+            raise ValueError(f"debug layer index {layer} is outside [0, {num_layers})")
+    if len(set(layers)) != len(layers):
+        raise ValueError(f"debug layer indices must be distinct, got {list(layers)}")
+    return tuple(sorted(layers))
+
+
+def _mark_debug_output(
+    network: trt.INetworkDefinition,
+    tensor: trt.ITensor,
+    name: str,
+) -> None:
+    """Mark a tensor as a network output for debug inspection."""
+    # The float32 cast gives the output its own tensor, so it never aliases the residual stream.
+    cast = network.add_cast(tensor, trt.float32)
+    out = cast.get_output(0)
+    out.name = name
+    network.mark_output(out)
 
 
 def _const_in_work_dtype(
@@ -295,6 +338,7 @@ def build_dual_profile_decoder_engine(
     profile_mode: str = "dual_profile",
     full_logits_output: bool = False,
     native_kv_cache: bool = False,
+    debug_layer_outputs: bool | Sequence[int] = False,
 ) -> bytes:
     """Build a prefill/decode-capable dynamic-Sq decoder engine.
 
@@ -319,6 +363,12 @@ def build_dual_profile_decoder_engine(
     a platform-independent primitive attention graph with an explicit BOOL
     active-prefix causal mask. The dense-mask graph remains available
     for non-Qwen3 models handled by this family.
+
+    ``debug_layer_outputs`` marks the residual stream at the output of the
+    selected decoder layers (before the final norm) as extra float32 outputs
+    ``debug_hidden_<i>`` with shape ``(Sq, hidden)``: ``True`` selects every
+    layer, a sequence selects those indices, and ``False`` leaves the engine
+    unchanged. The family routes it here only for the Qwen3 native KV path.
     """
     _supports_config(config, weights)
     if profile_mode not in ("dual_profile", "prefill", "decode"):
@@ -339,6 +389,7 @@ def build_dual_profile_decoder_engine(
         native_kv_cache=native_kv_cache,
         profile_mode=profile_mode,
     )
+    debug_layers = _resolve_debug_layers(debug_layer_outputs, config.num_hidden_layers)
 
 
     hidden = config.hidden_size
@@ -766,6 +817,10 @@ def build_dual_profile_decoder_engine(
             residual2 = network.add_elementwise(
                 residual1.get_output(0), mlp_out, trt.ElementWiseOperation.SUM)
         hidden_state = residual2.get_output(0)
+        if layer_idx in debug_layers:
+            _mark_debug_output(
+                network, hidden_state,
+                graph_ops.layer_tensor_name("debug_hidden", layer_idx))
 
     # ---- Final norm + LM head -------------------------------------------
     final_norm = weights.get("final_norm")

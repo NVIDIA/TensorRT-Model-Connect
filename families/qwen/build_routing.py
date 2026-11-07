@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import math
 import operator
+from collections.abc import Sequence
 
 _INT32_MAX = (1 << 31) - 1
 _UINT64_MAX = (1 << 64) - 1
@@ -238,9 +239,13 @@ def native_kv_build_capability(
     max_cache_length: int | None = None,
     parallel_enabled: bool | None = None,
     quantized: bool | None = None,
-    debug_layer_outputs: bool = False,
+    debug_layer_outputs: bool | Sequence[int] = False,
 ) -> NativeKvCapability:
-    """Apply deployment constraints once, after architecture routing."""
+    """Apply deployment constraints once, after architecture routing.
+
+    ``debug_layer_outputs`` does not affect eligibility: the native path builds
+    ``debug_hidden_<i>`` outputs for all or selected layers.
+    """
 
     architecture = native_kv_architecture_capability(config)
     if not architecture.eligible:
@@ -258,8 +263,6 @@ def native_kv_build_capability(
         reasons.append("native Qwen3 does not support quantized builds")
     if raw.get("_fp32_layers"):
         reasons.append("native Qwen3 does not support FP32 layer overrides")
-    if debug_layer_outputs:
-        reasons.append("native Qwen3 does not support debug layer outputs")
     try:
         native_kv_cache_geometry(
             config,
