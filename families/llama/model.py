@@ -10,8 +10,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .edge_llm import dispatch
-from .build_routing import native_kv_architecture_capability, native_kv_build_capability
+from .build_routing import (
+    dense_attention_mask_profile_error,
+    native_kv_architecture_capability,
+    native_kv_build_capability,
+)
 from .checkpoint_mapper import WeightDict, load_standard_weights
+from .prepared_quantization import checkpoint_format
 from .config import ModelConfig
 from .dual_profile_decoder_builder import build_dual_profile_decoder_engine
 from .native_kv_contract import validate_native_kv_weights
@@ -61,6 +66,32 @@ def _positive_int(value: object, name: str) -> int:
     if result < 1:
         raise ValueError(f"{name} must be a positive integer")
     return result
+
+
+def _dense_mask_error(
+    config: ModelConfig,
+    request: "BuildRequest",
+    precision: str,
+    max_sequence_length: int,
+    quantized: bool,
+) -> str | None:
+    """Return why this request's dense prefill mask exceeds its bound, or None.
+
+    Native KV and runtime-sized KV builds clamp one prefill enqueue to the
+    explicit-attention chunk, and FP32 layer overrides use the single-token
+    explicit graph. Every other route builds a dense prefill profile whose
+    float32 mask spans [cache, 2 * cache].
+    """
+    if request.dynamic_kv_cache or request.fp32_layers:
+        return None
+    if native_kv_build_capability(
+        config,
+        precision=precision,
+        max_cache_length=max_sequence_length,
+        quantized=quantized,
+    ).eligible:
+        return None
+    return dense_attention_mask_profile_error(max_sequence_length, max_sequence_length)
 
 
 def _build_engine(
@@ -202,10 +233,20 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         if precision not in {"fp32", "fp16", "bf16"}:
             raise ValueError("Llama precision must be fp32, fp16, or bf16")
         architecture = native_kv_architecture_capability(config)
+        quantized = request.quantization in {"fp8", "nvfp4"}
+        # A prepared ModelOpt checkpoint may declare its format only in a sidecar file.
+        dense_only = quantized or checkpoint_format(model_dir) is not None
+        full_context = config.max_position_embeddings
+        # Default to the full context only when the route this request takes at
+        # that length keeps its prefill mask bounded; otherwise keep the short
+        # dense fallback instead of emitting a bundle with an oversized mask.
+        # A runtime-sized KV cache bounds prefill on every architecture, so
+        # only the native route needs the native architecture contract.
         default_length = (
-            config.max_position_embeddings
-            if architecture.eligible
-            else min(config.max_position_embeddings, 256)
+            full_context
+            if (architecture.eligible or request.dynamic_kv_cache)
+            and _dense_mask_error(config, request, precision, full_context, dense_only) is None
+            else min(full_context, 256)
         )
         max_sequence_length = _positive_int(
             request.max_sequence_length or default_length,
@@ -219,10 +260,26 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             raise NotImplementedError(
                 f"Llama does not support quantization={request.quantization!r}"
             )
-        quantized = request.quantization in {"fp8", "nvfp4"}
         if quantized and (request.dynamic_kv_cache or request.fp32_layers):
             raise NotImplementedError(
                 "quantized Llama builds do not support dynamic_kv_cache or fp32_layers"
+            )
+        mask_error = _dense_mask_error(config, request, precision, max_sequence_length, dense_only)
+        if mask_error is not None:
+            alternatives = []
+            if architecture.eligible and not dense_only:
+                alternatives.append(
+                    "use --precision bf16 without --max-sequence-length "
+                    "(TensorRT native KV cache at the full context)"
+                )
+            if not quantized:
+                alternatives.append("add --dynamic-kv-cache (bounded prefill chunks)")
+            alternatives.append("lower --max-sequence-length")
+            raise ValueError(
+                f"Llama precision={precision} max_sequence_length={max_sequence_length} "
+                f"is rejected before building: {mask_error}. Instead, "
+                + ", or ".join(alternatives)
+                + "."
             )
 
         config.raw["_model_dir"] = str(model_dir)

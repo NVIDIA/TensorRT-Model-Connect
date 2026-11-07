@@ -50,7 +50,7 @@
             "fp16",
             "bf16"
           ],
-          "help": "Compute precision (default: fp16 for paired execution, fp32 otherwise)"
+          "help": "Compute precision (default: fp16 for paired execution, bf16 otherwise)"
         },
         {
           "name": "backend",
