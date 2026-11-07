@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import tensorrt as trt
 
+from . import checkpoint_mapper
 from . import graph_ops
 
 
@@ -83,8 +84,11 @@ def infer_kv_attention_size(
             f"({expected}), got _kv_attention_size={int(explicit)}"
         )
     w_k = weights.get(f"{prefix}.w_k")
-    if isinstance(w_k, np.ndarray) and w_k.ndim == 2:
-        actual = int(w_k.shape[1])
+    if checkpoint_mapper.is_tensor_like(w_k) and w_k.ndim == 2:
+        # Projections are [in, out], or [out, in] when the checkpoint's own
+        # layout is kept, so the K/V width sits on the other axis. Qwen3-0.6B
+        # cannot detect a mistake here -- its w_k is square [1024, 1024].
+        actual = int(w_k.shape[0 if checkpoint_mapper.native_layout() else 1])
         if actual != expected:
             raise ValueError(f"{prefix}.w_k must use compact K/V width {expected}, got {actual}")
     return expected
