@@ -10,17 +10,24 @@
 // Architecture:   ARCH-FAC-001
 // Unit Design:    UD-SEG-01
 // Intent:         SAM prompt seam: point sparse prompt building, embedding encoding, multimask
-// selection Preconditions:  Point coordinates and embedding data available Postconditions: Sparse
-// prompts padded correctly, missing data returns zeros, multimask selection correct
+// selection, image preprocess and mask postprocess Preconditions:  Point coordinates and embedding
+// data available Postconditions: Sparse prompts padded correctly, missing data returns zeros,
+// multimask selection correct, separable resampling bit-identical to the per-sample definition
 // =============================================================================
 
 #include "families/sam/runtime/sam_output_selection.h"
 #include "families/sam/runtime/sam_postprocess_seam.h"
+#include "families/sam/runtime/sam_preprocess.h"
 #include "families/sam/runtime/sam_prompt_seam.h"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
+#include <random>
+#include <string>
 #include <vector>
 
 namespace {
@@ -32,6 +39,95 @@ void check(bool condition, const char* test_name) {
         std::cerr << "FAIL: " << test_name << '\n';
         ++g_failures;
     }
+}
+
+bool bit_identical(const std::vector<float>& actual, const std::vector<float>& expected) {
+    return actual.size() == expected.size() &&
+           std::memcmp(actual.data(), expected.data(), actual.size() * sizeof(float)) == 0;
+}
+
+std::vector<float> seeded_values(std::size_t count, unsigned seed, float low, float high) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<float> uniform(low, high);
+    std::vector<float> values(count);
+    for (auto& value : values)
+        value = uniform(rng);
+    return values;
+}
+
+// The per-sample mask resize: sample_mask_bilinear at every destination pixel.
+std::vector<float> reference_resize_mask(const std::vector<float>& mask, int32_t src_w,
+                                         int32_t src_h, int32_t dst_w, int32_t dst_h) {
+    if (src_w == dst_w && src_h == dst_h)
+        return mask;
+    std::vector<float> resized(static_cast<std::size_t>(dst_w) * static_cast<std::size_t>(dst_h));
+    const float scale_x = static_cast<float>(src_w) / static_cast<float>(dst_w);
+    const float scale_y = static_cast<float>(src_h) / static_cast<float>(dst_h);
+    for (int32_t y = 0; y < dst_h; ++y) {
+        const float src_y = (static_cast<float>(y) + 0.5F) * scale_y - 0.5F;
+        for (int32_t x = 0; x < dst_w; ++x) {
+            const float src_x = (static_cast<float>(x) + 0.5F) * scale_x - 0.5F;
+            resized[static_cast<std::size_t>(y) * static_cast<std::size_t>(dst_w) +
+                    static_cast<std::size_t>(x)] =
+                trtmc::sample_mask_bilinear(mask, src_w, src_h, src_x, src_y);
+        }
+    }
+    return resized;
+}
+
+// The per-mask restore: upsample to image_size, crop the rescaled region, resize to the original.
+std::vector<float> reference_restore_mask(const std::vector<float>& mask, int32_t mask_w,
+                                          int32_t mask_h, int32_t image_size, int32_t rescaled_w,
+                                          int32_t rescaled_h, int32_t original_w,
+                                          int32_t original_h) {
+    const auto upsampled = reference_resize_mask(mask, mask_w, mask_h, image_size, image_size);
+    std::vector<float> cropped;
+    for (int32_t y = 0; y < rescaled_h; ++y) {
+        const auto row = upsampled.begin() + static_cast<std::ptrdiff_t>(y) * image_size;
+        cropped.insert(cropped.end(), row, row + rescaled_w);
+    }
+    return reference_resize_mask(cropped, rescaled_w, rescaled_h, original_w, original_h);
+}
+
+// The per-sample image preprocess: bilinear sample of the HWC image, then (value - mean) / std.
+std::vector<float> reference_preprocess(const std::vector<float>& image, int32_t height,
+                                        int32_t width, int32_t image_size, int32_t rescaled_w,
+                                        int32_t rescaled_h, const std::array<float, 3>& mean,
+                                        const std::array<float, 3>& stdv) {
+    std::vector<float> pixels(3 * static_cast<std::size_t>(image_size) * image_size, 0.0F);
+    const auto sample = [&](int32_t channel, float x, float y) {
+        const float clamped_x = std::clamp(x, 0.0F, static_cast<float>(width - 1));
+        const float clamped_y = std::clamp(y, 0.0F, static_cast<float>(height - 1));
+        const int32_t x0 = static_cast<int32_t>(std::floor(clamped_x));
+        const int32_t y0 = static_cast<int32_t>(std::floor(clamped_y));
+        const int32_t x1 = std::min(x0 + 1, width - 1);
+        const int32_t y1 = std::min(y0 + 1, height - 1);
+        const float wx = clamped_x - static_cast<float>(x0);
+        const float wy = clamped_y - static_cast<float>(y0);
+        const auto at = [&](int32_t yy, int32_t xx) {
+            return image[static_cast<std::size_t>((yy * width + xx) * 3 + channel)];
+        };
+        const float top = at(y0, x0) * (1.0F - wx) + at(y0, x1) * wx;
+        const float bottom = at(y1, x0) * (1.0F - wx) + at(y1, x1) * wx;
+        return top * (1.0F - wy) + bottom * wy;
+    };
+    for (int32_t y = 0; y < rescaled_h; ++y) {
+        const float src_y = (static_cast<float>(y) + 0.5F) * static_cast<float>(height) /
+                                static_cast<float>(rescaled_h) -
+                            0.5F;
+        for (int32_t x = 0; x < rescaled_w; ++x) {
+            const float src_x = (static_cast<float>(x) + 0.5F) * static_cast<float>(width) /
+                                    static_cast<float>(rescaled_w) -
+                                0.5F;
+            for (int32_t c = 0; c < 3; ++c) {
+                const float value = sample(c, src_x, src_y);
+                pixels[static_cast<std::size_t>(c) * image_size * image_size +
+                       static_cast<std::size_t>(y) * image_size + x] =
+                    (value - mean[static_cast<std::size_t>(c)]) / stdv[static_cast<std::size_t>(c)];
+            }
+        }
+    }
+    return pixels;
 }
 
 void check_close(float actual, float expected, const char* test_name) {
@@ -230,6 +326,147 @@ void test_postprocess_sam_result_preserves_invalid_requests_and_incomplete_paylo
                                                                     /*original_h=*/2);
     check(unchanged_incomplete.masks == incomplete_payload.masks,
           "postprocess incomplete: returns original result");
+
+    const auto unchanged_oversized = trtmc::postprocess_sam_result(invalid_request,
+                                                                   /*image_size=*/4,
+                                                                   /*rescaled_w=*/5,
+                                                                   /*rescaled_h=*/2,
+                                                                   /*original_w=*/5,
+                                                                   /*original_h=*/2);
+    check(unchanged_oversized.masks == invalid_request.masks &&
+              unchanged_oversized.mask_width == invalid_request.mask_width,
+          "postprocess oversized: a rescaled width above image_size returns original result");
+
+    const auto unchanged_too_tall = trtmc::postprocess_sam_result(invalid_request,
+                                                                  /*image_size=*/4,
+                                                                  /*rescaled_w=*/2,
+                                                                  /*rescaled_h=*/5,
+                                                                  /*original_w=*/2,
+                                                                  /*original_h=*/5);
+    check(unchanged_too_tall.masks == invalid_request.masks &&
+              unchanged_too_tall.mask_height == invalid_request.mask_height,
+          "postprocess oversized: a rescaled height above image_size returns original result");
+}
+
+void test_resize_mask_bilinear_matches_per_sample_reference() {
+    // up, down, mixed, one axis unchanged, and degenerate one-sample axes
+    const int32_t sizes[][4] = {{256, 256, 1024, 1024}, {1024, 611, 640, 382}, {37, 53, 101, 29},
+                                {64, 48, 64, 97},       {5, 1, 3, 7},          {1, 1, 4, 4}};
+    unsigned seed = 1;
+    for (const auto& size : sizes) {
+        auto mask = seeded_values(static_cast<std::size_t>(size[0]) * size[1], seed++, -20.F, 20.F);
+        mask[0] = -0.0F;
+        const auto actual = trtmc::resize_mask_bilinear(mask, size[0], size[1], size[2], size[3]);
+        const auto expected = reference_resize_mask(mask, size[0], size[1], size[2], size[3]);
+        check(bit_identical(actual, expected), "resize bilinear: bit-identical to per-sample");
+    }
+    check(trtmc::resize_mask_bilinear({}, 2, 2, 3, 3) == std::vector<float>(9, 0.0F),
+          "resize bilinear: empty mask resizes to zeros");
+}
+
+void test_postprocess_sam_result_matches_per_sample_restore() {
+    // {mask_w, mask_h, image_size, rescaled_w, rescaled_h, original_w, original_h}
+    const int32_t cases[][7] = {
+        {256, 256, 1024, 1024, 611, 640, 382},    // landscape (the family's test image geometry)
+        {256, 256, 1024, 611, 1024, 382, 640},    // portrait
+        {256, 256, 1024, 1024, 1024, 1024, 1024}, // no crop, no restore resize
+        {256, 256, 1024, 1024, 768, 1024, 768},   // crop only
+        {256, 256, 1024, 1024, 1, 2000, 1},       // restore resizes the width only
+        {256, 256, 1024, 7, 1024, 7, 1500},       // restore resizes the height only
+        {16, 16, 16, 16, 9, 30, 17},              // the upsample is a copy
+        {16, 8, 16, 16, 8, 30, 17},               // the mask width alone is image_size
+        {8, 16, 16, 16, 16, 40, 16},              // the mask height alone is image_size
+        {8, 8, 32, 32, 3, 100, 9},
+    };
+    unsigned seed = 100;
+    for (const auto& c : cases) {
+        trtmc::SamResult result;
+        result.num_masks = 3;
+        result.mask_width = c[0];
+        result.mask_height = c[1];
+        const auto mask_area = static_cast<std::size_t>(c[0]) * c[1];
+        result.masks = seeded_values(3 * mask_area, seed++, -20.F, 20.F);
+        result.masks[1] = -0.0F;
+        result.iou_scores = {0.5F, 0.6F, 0.7F};
+
+        std::vector<float> expected;
+        for (int32_t m = 0; m < 3; ++m) {
+            const std::vector<float> mask(result.masks.begin() + m * mask_area,
+                                          result.masks.begin() + (m + 1) * mask_area);
+            const auto restored =
+                reference_restore_mask(mask, c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
+            expected.insert(expected.end(), restored.begin(), restored.end());
+        }
+        const auto processed =
+            trtmc::postprocess_sam_result(std::move(result), c[2], c[3], c[4], c[5], c[6]);
+        check(processed.mask_width == c[5] && processed.mask_height == c[6],
+              "postprocess per-sample: original size");
+        check(bit_identical(processed.masks, expected),
+              "postprocess per-sample: bit-identical masks");
+    }
+}
+
+// Every request is written into ONE reused buffer that starts as NaN, so a
+// value the writer fails to overwrite (padding left by a larger earlier
+// request) differs from the reference's fresh zeros.
+void check_write_sam_pixel_values_matches_per_sample_reference(
+    const trtmc::SamConfig& config, const std::vector<std::array<int32_t, 2>>& sizes,
+    const std::array<float, 3>& mean, const std::array<float, 3>& stdv, unsigned seed,
+    const char* test_name) {
+    std::vector<float> pixel_values(3 * static_cast<std::size_t>(config.image_size) *
+                                        static_cast<std::size_t>(config.image_size),
+                                    std::numeric_limits<float>::quiet_NaN());
+    for (const auto& size : sizes) {
+        const auto image =
+            seeded_values(static_cast<std::size_t>(size[0]) * size[1] * 3, seed++, 0.F, 1.F);
+        const auto plan = trtmc::plan_sam_preprocess(image.data(), size[0], size[1], config);
+        trtmc::write_sam_pixel_values(pixel_values.data(), plan, image.data(), config);
+        const auto expected =
+            reference_preprocess(image, size[0], size[1], config.image_size, plan.rescaled_width,
+                                 plan.rescaled_height, mean, stdv);
+        check(plan.original_height == size[0] && plan.original_width == size[1] &&
+                  bit_identical(pixel_values, expected),
+              test_name);
+    }
+}
+
+void test_write_sam_pixel_values_matches_per_sample_reference() {
+    check_write_sam_pixel_values_matches_per_sample_reference(
+        trtmc::SamConfig{},
+        {{382, 640},
+         {640, 382},
+         {1024, 1024},
+         {768, 1024},
+         {1080, 1920},
+         {60, 100},
+         {333, 777},
+         {1, 5}},
+        {0.485F, 0.456F, 0.406F}, {0.229F, 0.224F, 0.225F}, 200,
+        "preprocess per-sample: bit-identical pixel values");
+
+    // The config's own normalization and image_size, not the defaults.
+    trtmc::SamConfig custom;
+    custom.image_size = 32;
+    custom.image_mean = {0.4F, 0.5F, 0.6F};
+    custom.image_std = {0.2F, 0.25F, 0.3F};
+    check_write_sam_pixel_values_matches_per_sample_reference(
+        custom, {{19, 32}, {32, 19}, {13, 13}, {1, 7}, {9, 1}, {40, 33}, {33, 40}, {5, 3}},
+        {0.4F, 0.5F, 0.6F}, {0.2F, 0.25F, 0.3F}, 300,
+        "preprocess per-sample: custom config bit-identical");
+}
+
+void test_plan_sam_preprocess_rejects_invalid_requests() {
+    trtmc::SamConfig config;
+    const std::vector<float> image(4 * 4 * 3, 0.5F);
+    check(trtmc::plan_sam_preprocess(nullptr, 4, 4, config).rescaled_width == 0,
+          "plan invalid: no pixels");
+    check(trtmc::plan_sam_preprocess(image.data(), 0, 4, config).rescaled_width == 0,
+          "plan invalid: empty height");
+    check(trtmc::plan_sam_preprocess(image.data(), 4, -1, config).rescaled_width == 0,
+          "plan invalid: negative width");
+    config.image_size = 0;
+    check(trtmc::plan_sam_preprocess(image.data(), 4, 4, config).rescaled_width == 0,
+          "plan invalid: no image_size");
 }
 
 } // namespace
@@ -244,6 +481,10 @@ int main() {
     test_sample_and_resize_sam_mask_helpers_handle_clamp_identity_and_invalid_inputs();
     test_postprocess_sam_result_crops_padding_region();
     test_postprocess_sam_result_preserves_invalid_requests_and_incomplete_payload();
+    test_resize_mask_bilinear_matches_per_sample_reference();
+    test_postprocess_sam_result_matches_per_sample_restore();
+    test_write_sam_pixel_values_matches_per_sample_reference();
+    test_plan_sam_preprocess_rejects_invalid_requests();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " SAM prompt seam test(s) failed" << '\n';
