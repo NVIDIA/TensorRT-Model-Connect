@@ -17,7 +17,7 @@ two terminals in the same container.
 ## 1. Install the client
 
 ```bash
-python -m pip install -e '.[serve]' -C py-only=true
+python -m pip install 'fastapi>=0.115,<0.142' 'pydantic>=2.11,<3' 'uvicorn>=0.30,<0.53'
 python -m venv .venv-aiperf
 .venv-aiperf/bin/pip install aiperf==0.13.0
 ```
