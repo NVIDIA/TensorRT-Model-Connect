@@ -872,8 +872,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one BERT bundle without shared model orchestration."""
     request = coerce_request(request)
 
-    if request.task not in {"encoding", "embedding", "reranking"}:
-        raise ValueError("BERT supports encoding, embedding, and reranking")
+    if request.task not in {"encoding", "embedding"}:
+        raise ValueError("BERT supports encoding and embedding")
     model_path = Path(request.model_dir)
     config = ModelConfig.from_dir(model_path)
     if config.model_type != "bert":

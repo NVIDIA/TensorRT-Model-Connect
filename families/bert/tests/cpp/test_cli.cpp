@@ -30,7 +30,7 @@ void check(bool condition, const char* message) {
     }
 }
 
-class FakeBert final : public trtmc::IEncoding, public trtmc::IEmbedding, public trtmc::IReranking {
+class FakeBert final : public trtmc::IEncoding, public trtmc::IEmbedding {
   public:
     const char* task() const noexcept override { return "encoding"; }
     trtmc::EmbeddingResult encode(const std::string& text) override {
@@ -38,12 +38,6 @@ class FakeBert final : public trtmc::IEncoding, public trtmc::IEmbedding, public
     }
     trtmc::EmbeddingResult embed(const std::string& text) override {
         return {{static_cast<float>(text.size()), 2.0F}, 2};
-    }
-    float rerank(const std::string& query, const std::string& document) override {
-        return query == document ? 1.0F : 0.0F;
-    }
-    std::vector<float> rerank_batch(const std::string&, const std::vector<std::string>&) override {
-        throw std::logic_error("unexpected batch operation");
     }
 };
 
@@ -94,10 +88,11 @@ void bert_contract(const fs::path& root) {
               Json::parse(embedded.second.output).at("values") == Json({3.0, 2.0}),
           "BERT owner selects the embedding interface");
     check(loaded_runtime == "/override/runtime", "runtime_root override remains owned by BERT");
+    const auto before_rank = task_loads;
     const auto ranked =
         invoke("rerank", {{"bundle", path.string()}, {"query", "a"}, {"document", "a"}});
-    check(ranked.first == 0 && Json::parse(ranked.second.output).at("score") == 1.0,
-          "BERT owner selects the reranking interface");
+    check(ranked.first != 0 && ranked.second.output.empty() && task_loads == before_rank,
+          "BERT rejects unsupported reranking before loading a task");
     write_bundle(path, "another_family");
     const auto before = task_loads;
     check(invoke("encode", {{"bundle", path.string()}, {"text", "a"}}).first != 0 &&
