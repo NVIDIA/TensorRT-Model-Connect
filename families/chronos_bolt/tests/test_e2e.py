@@ -17,7 +17,7 @@ import numpy as np
 from tensorrt_model_connect import BuildRequest, build
 
 FAMILY = "chronos_bolt"
-TASKS = frozenset({"time_series_forecast"})
+TASKS = frozenset({"series_to_quantile_forecast"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
@@ -275,20 +275,29 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
             prediction_length=pipeline.model_prediction_length,
             limit_prediction_length=True,
         )
-    return {"values": value.float().cpu().numpy()}
+    levels = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))["chronos_config"][
+        "quantiles"
+    ]
+    return {"values": value.float().cpu().numpy(), "quantile_levels": [float(v) for v in levels]}
 
 
 def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
-    manifest["task"]
     left = np.asarray(actual["values"])
     shape = tuple(int(value) for value in actual["shape"])
     assert shape and all(value > 0 for value in shape)
     assert left.size == int(np.prod(shape))
     left = left.reshape(shape)
     right = np.asarray(expected["values"])
+    # The Task returns [quantile, horizon, channel]; the official model returns
+    # [batch, quantile, horizon] for its single univariate batch item.
+    assert left.ndim == 3 and left.shape[2] == 1 and right.ndim == 3 and right.shape[0] == 1
+    right = right[0][:, :, None]
     assert left.shape == right.shape and left.size > 0
-    assert right.ndim == 3
-    assert right.shape[1] > 1
+    assert right.shape[0] > 1
+    assert actual["task"] == manifest["task"]
+    assert actual["axes"] == ["quantile", "horizon", "channel"]
+    assert actual["horizon_steps"] == list(range(1, right.shape[1] + 1))
+    assert actual["quantile_levels"] == pytest.approx(expected["quantile_levels"], abs=1e-12)
     assert np.isfinite(left).all() and np.isfinite(right).all()
     assert _relative_l2(left, right) <= float(thresholds["relative_l2"])
     assert np.max(np.abs(left.reshape(-1) - right.reshape(-1))) <= float(
@@ -296,15 +305,93 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
     )
 
 
+def _assert_sdk_consumers(
+    runtime_root: Path,
+    bundle: Path,
+    manifest: dict,
+    case: dict,
+    tmp_path: Path,
+    expected: dict,
+    thresholds: dict,
+) -> None:
+    if int(manifest["tensor_parallel_size"]) != 1:
+        return
+    build_root = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = ":".join(
+        value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value
+    )
+    for language in ("c", "cpp"):
+        consumer = build_root / f"test_chronos_bolt_sdk_{language}"
+        assert consumer.is_file(), f"build the Chronos-Bolt {language} SDK consumer first"
+        invocation = [str(consumer), str(bundle), str(runtime_root), str(tmp_path / "values.f32")]
+        completed = subprocess.run(
+            invocation,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=int(case.get("runtime_timeout_s", 3600)),
+        )
+        record_evidence("commands", {"argv": invocation})
+        payload = json.loads(completed.stdout)
+        record_evidence("native", {"sdk_language": language, **payload})
+        _assert_parity(payload, expected, manifest, case, thresholds)
+
+
+_QUANTILES = [0.1, 0.5, 0.9]
+
+
 def test_forecast_contract_requires_multiple_quantiles() -> None:
-    expected = {"values": np.asarray([[[0.1, 0.2]]], dtype=np.float32)}
+    expected = {"values": np.asarray([[[0.1, 0.2]]], dtype=np.float32), "quantile_levels": [0.5]}
     with pytest.raises(AssertionError):
         _assert_parity(
-            {"values": np.asarray([0.1, 0.2], dtype=np.float32), "shape": [1, 1, 2]},
+            {
+                "values": np.asarray([0.1, 0.2], dtype=np.float32),
+                "shape": [1, 2, 1],
+                "task": "series_to_quantile_forecast",
+                "axes": ["quantile", "horizon", "channel"],
+                "horizon_steps": [1, 2],
+                "quantile_levels": [0.5],
+            },
             expected,
-            {"task": "time_series_forecast"},
+            {"task": "series_to_quantile_forecast"},
             {},
             {"relative_l2": 1.0, "max_pointwise_error": 1.0},
+        )
+
+
+def test_forecast_contract_preserves_values_levels_and_axes() -> None:
+    values = np.arange(6, dtype=np.float32).reshape(3, 2) / 4.0
+    expected = {"values": values[None, :, :], "quantile_levels": _QUANTILES}
+    actual = {
+        "task": "series_to_quantile_forecast",
+        "values": values.reshape(-1).tolist(),
+        "shape": [3, 2, 1],
+        "axes": ["quantile", "horizon", "channel"],
+        "horizon_steps": [1, 2],
+        "quantile_levels": _QUANTILES,
+    }
+    gates = {"relative_l2": 1.0e-6, "max_pointwise_error": 1.0e-6}
+    manifest = {"task": "series_to_quantile_forecast"}
+    _assert_parity(actual, expected, manifest, {}, gates)
+    for changed in (
+        {"values": [0.0, 0.25, 0.5, 0.75, 1.0, 1.75]},
+        {"shape": [2, 3, 1]},
+        {"axes": ["horizon", "quantile", "channel"]},
+        {"horizon_steps": [0, 1]},
+        {"quantile_levels": [0.1, 0.5, 0.95]},
+        {"task": "series_to_point_forecast"},
+    ):
+        with pytest.raises(AssertionError):
+            _assert_parity({**actual, **changed}, expected, manifest, {}, gates)
+    with pytest.raises(AssertionError):
+        _assert_parity(
+            actual,
+            {"values": np.stack([values, values]), "quantile_levels": _QUANTILES},
+            manifest,
+            {},
+            gates,
         )
 
 
@@ -338,6 +425,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             with evidence_stage("compare"):
                 record_evidence("thresholds", GATES)
                 _assert_parity(actual, expected, manifest, window_case, GATES)
+                _assert_sdk_consumers(
+                    runtime_root, bundle, manifest, window_case, window_root, expected, GATES
+                )
         return
     with evidence_stage("native"):
         actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
@@ -346,4 +436,6 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         expected = _official_reference(model_dir, manifest, case, tmp_path)
     record_evidence("reference", expected)
     with evidence_stage("compare"):
-        _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+        thresholds = record_evidence("thresholds", _thresholds(case_name))
+        _assert_parity(actual, expected, manifest, case, thresholds)
+        _assert_sdk_consumers(runtime_root, bundle, manifest, case, tmp_path, expected, thresholds)
