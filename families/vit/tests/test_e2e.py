@@ -96,7 +96,7 @@ def pytest_generate_tests(metafunc) -> None:
             continue
         names, enabled = _selected_cases(metafunc.config)
         if fixture == "fp16_case_name":
-            names = [name for name in names if CASES[name][1]["precision"] == "fp16"]
+            names = [name for name in names if _gate(CASES[name][1]) == "fp16"]
         parameters = names
         if not enabled:
             parameters = [
@@ -252,6 +252,23 @@ _COSINE_FLOOR = 0.999
 _FP16_LOGIT_TOLERANCE = 3e-2
 _TANH_SHARE_LIMIT = 0.5
 
+# fp8 (FP8 projections on the fp16 graph) has its own gate. Measured on this case (B200
+# and B300, TensorRT 11.4 and 11.1), a correct fp8 engine is 0.17 to 0.30 off the
+# reference at cosine 0.99881 to 0.99903. The tolerance and the cosine floor sit 3x above
+# that noise, so the gate still catches the nearest-resize and classifier-row errors of the
+# table above (1.38 and 3.18, cosine 0.968 and 0.866). The smaller errors (bicubic
+# resize, tanh GELU, epsilon) are inside the FP8 noise; the fp32 and fp16 cases, which
+# share the graph and the preprocessing, guard them.
+_FP8_LOGIT_TOLERANCE = 0.9
+_FP8_COSINE_FLOOR = 0.996
+
+
+def _gate(manifest: dict) -> str:
+    """The gate of a case: "fp8" for FP8 builds, else the build precision."""
+    if manifest.get("quantization") == "fp8":
+        return "fp8"
+    return manifest["precision"]
+
 
 def _reference(model_dir: Path, case: dict, hidden_act: str | None = None):
     """The reference's own logits, computed the way the reference computes them.
@@ -298,14 +315,16 @@ def _tanh_share(scores: list[float], reference: list[float],
 
 def _check_logits(scores: list[float], reference: list[float], precision: str,
                   tanh_reference: list[float] | None = None) -> tuple[float, float]:
-    """Assert the gate of ``precision``; return the max abs difference and the cosine."""
+    """Assert the gate ``precision`` (fp32, fp16 or fp8); return max abs difference and cosine."""
     assert len(scores) == len(reference), (
         f"{FAMILY} returned {len(scores)} scores, reference {len(reference)}"
     )
     worst = max(abs(a - b) for a, b in zip(scores, reference))
     cosine = _cosine(scores, reference)
-    assert cosine >= _COSINE_FLOOR, f"{FAMILY} logit cosine {cosine}"
-    tolerance = _FP16_LOGIT_TOLERANCE if precision == "fp16" else _LOGIT_TOLERANCE
+    floor = _FP8_COSINE_FLOOR if precision == "fp8" else _COSINE_FLOOR
+    assert cosine >= floor, f"{FAMILY} {precision} logit cosine {cosine}"
+    tolerance = {"fp16": _FP16_LOGIT_TOLERANCE, "fp8": _FP8_LOGIT_TOLERANCE}.get(
+        precision, _LOGIT_TOLERANCE)
     assert worst <= tolerance, (
         f"{FAMILY} {precision} logits differ from the reference by {worst}"
     )
@@ -326,15 +345,16 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _build(model_dir, bundle, manifest)
 
     reference, reference_labels = _reference(model_dir, case)
+    gate = _gate(manifest)
     tanh_reference = None
-    if manifest["precision"] == "fp16":
+    if gate == "fp16":
         tanh_reference, _ = _reference(model_dir, case, hidden_act="gelu_pytorch_tanh")
     payload = _run_json(binary, runtime_root, bundle, case, "classify", "--task",
                         "image_to_class_scores", "--image",
                         str(_asset(case["test_image"])))
 
     scores = [float(value) for value in payload["scores"]]
-    worst, cosine = _check_logits(scores, reference, manifest["precision"], tanh_reference)
+    worst, cosine = _check_logits(scores, reference, gate, tanh_reference)
 
     # The head emits logits; nothing in the runtime softmaxes them, and the
     # Task reports which kind they are rather than leaving it to the caller.
@@ -401,6 +421,19 @@ def test_fp32_gate_is_unchanged() -> None:
         _check_logits(shifted, reference, "fp32")
 
 
+def test_fp8_gate_has_its_own_tolerance() -> None:
+    """fp8 noise passes the fp8 gate, fails the fp16 one, and a gross error still fails."""
+    scores, reference, _ = _synthetic(0, 0.0, 0.1)
+    worst, cosine = _check_logits(scores, reference, "fp8")
+    assert _FP16_LOGIT_TOLERANCE < worst < _FP8_LOGIT_TOLERANCE and cosine > _FP8_COSINE_FLOOR
+    shifted = list(scores)
+    shifted[0] += 1.5
+    with pytest.raises(AssertionError, match="differ from the reference"):
+        _check_logits(shifted, reference, "fp8")
+    assert _gate({"precision": "fp16", "quantization": "fp8"}) == "fp8"
+    assert _gate({"precision": "fp16"}) == "fp16"
+
+
 def _tanh_gelu(network, inp, dtype=None):
     """The defect under test: the tanh approximation in place of the exact GELU."""
     import numpy as np
@@ -440,7 +473,7 @@ def test_fp16_gate_rejects_a_tanh_gelu_build(fp16_case_name: str, monkeypatch) -
     from .. import config as config_module, graph, model
 
     _, manifest, case = CASES[fp16_case_name]
-    assert manifest["precision"] == "fp16"
+    assert _gate(manifest) == "fp16"
     model_dir = _model_dir(manifest)
     assert torch.cuda.is_available(), f"selected {FAMILY} E2E requires CUDA"
     reference, _ = _reference(model_dir, case)

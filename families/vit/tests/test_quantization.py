@@ -188,8 +188,20 @@ def test_unknown_model_config_names_the_calibration_tool(tmp_path: Path) -> None
 
 def test_scale_key_comes_from_the_resolved_config(tmp_path: Path) -> None:
     """The key names the hidden size, layers, MLP size, patch and input size."""
-    cfg = _config(tmp_path, _tiny_weights())
-    assert scale_key(cfg) == f"vit-h{D}-l{LAYERS}-i{FFN}-p{PATCH}-s{PATCH * GRID}"
+    weights = _tiny_weights()
+    cfg = _config(tmp_path, weights)
+    assert scale_key(cfg, weights).startswith(
+        f"vit-h{D}-l{LAYERS}-i{FFN}-p{PATCH}-s{PATCH * GRID}-w"
+    )
+
+
+def test_scale_key_separates_checkpoints_of_one_model_config(tmp_path: Path) -> None:
+    """A fine-tune shares the model config with its base model, but not the scales."""
+    weights = _tiny_weights()
+    cfg = _config(tmp_path, weights)
+    other = _tiny_weights(seed=1)
+    assert scale_key(cfg, weights) == scale_key(cfg, _tiny_weights())
+    assert scale_key(cfg, weights) != scale_key(cfg, other)
 
 
 def test_committed_scales_cover_every_projection() -> None:
@@ -199,7 +211,7 @@ def test_committed_scales_cover_every_projection() -> None:
     )
     assert table
     for key, scales in table.items():
-        match = re.fullmatch(r"vit-h(\d+)-l(\d+)-i(\d+)-p(\d+)-s(\d+)", key)
+        match = re.fullmatch(r"vit-h(\d+)-l(\d+)-i(\d+)-p(\d+)-s(\d+)-w\S+-\S+", key)
         assert match, key
         layers = int(match.group(2))
         assert len(scales) == layers * len(quantization_module.LAYER_PROJECTIONS), key
@@ -287,7 +299,7 @@ class _Engine:
 @pytest.mark.gpu
 @pytest.mark.trt
 def test_quantized_engine_builds_and_matches_float32(tiny) -> None:
-    """The FP8 engine builds, is smaller, and tracks the float32 engine."""
+    """The FP8 engine on the fp16 work type builds, is smaller, and tracks the float32 engine."""
     torch = pytest.importorskip("torch")
     weights, cfg = tiny
     ctx = calibrate_vit(weights, cfg, "fp8")
@@ -295,7 +307,7 @@ def test_quantized_engine_builds_and_matches_float32(tiny) -> None:
     pixels = torch.randn(1, 3, size, size, device="cuda")
 
     plain = model.build_engine(weights, cfg)
-    quant = model.build_engine(weights, cfg, quant_ctx=ctx)
+    quant = model.build_engine(weights, cfg, quant_ctx=ctx, dtype=np.float16)
     assert len(quant) < len(plain)
 
     reference = _Engine(plain).run(torch, "pixel_values", pixels, "logits")
@@ -315,17 +327,40 @@ def test_fp8_build_options_keep_layer_names(tiny) -> None:
     assert plain.profiling_verbosity != trt.ProfilingVerbosity.DETAILED
 
 
-def test_build_requires_float32_for_fp8(tmp_path: Path) -> None:
-    """fp8 builds stay float32: fp16 with fp8 is refused (fp16 alone is accepted)."""
+def _fp8_request(tmp_path: Path, precision: str):
     from tensorrt_model_connect import BuildRequest
 
-    request = BuildRequest(
+    return BuildRequest(
         model_dir=tmp_path,
         output_path=tmp_path / "b",
         family="vit",
         task="image_to_class_scores",
-        precision="fp16",
+        precision=precision,
         quantization="fp8",
     )
-    with pytest.raises(NotImplementedError, match="fp32 only"):
-        model.build(request, None)
+
+
+@pytest.mark.parametrize("precision", ["fp32", "bf16"])
+def test_fp8_requires_fp16(tmp_path: Path, precision: str) -> None:
+    """fp8 runs on the fp16 graph only; fp32 and bf16 raise before the checkpoint is read."""
+    with pytest.raises(ValueError, match="requires precision=fp16"):
+        model.build(_fp8_request(tmp_path, precision), None)
+
+
+def test_fp8_with_fp16_reaches_the_checkpoint(tmp_path: Path) -> None:
+    """fp16 with fp8 passes the precision check and goes on to read the checkpoint."""
+    (tmp_path / "config.json").write_text("{}")
+    with pytest.raises(FileNotFoundError, match="safetensors"):
+        model.build(_fp8_request(tmp_path, "fp16"), None)
+
+
+@pytest.mark.parametrize("marker", ["config", "hf_quant_config"])
+def test_fp8_refuses_an_already_quantized_checkpoint(tmp_path: Path, marker: str) -> None:
+    """Self-quantization needs the original checkpoint, not a quantized export."""
+    if marker == "config":
+        (tmp_path / "config.json").write_text(json.dumps({"quantization_config": {"x": 1}}))
+    else:
+        (tmp_path / "config.json").write_text("{}")
+        (tmp_path / "hf_quant_config.json").write_text("{}")
+    with pytest.raises(ValueError, match="already quantized"):
+        model.build(_fp8_request(tmp_path, "fp16"), None)
