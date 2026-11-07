@@ -4,7 +4,7 @@
   "hf_revision": "65f84bcda1d13df582c4a8443c1c5aa53c0c66db",
   "bundle": "s1-mini-fp16.bundle",
   "family": "qwen",
-  "task": "text_generation",
+  "task": "text_continuation",
   "precision": "fp16",
   "trust_remote_code": false,
   "max_sequence_length": 256,
