@@ -84,4 +84,16 @@ if(TRTMC_BUILD_TESTS)
   )
   add_test(NAME test_bert_wordpiece_tokenizer COMMAND test_bert_wordpiece_tokenizer)
   set_tests_properties(test_bert_wordpiece_tokenizer PROPERTIES LABELS cpu)
+
+  add_executable(test_bert_precompiled_normalizer
+    ${PROJECT_SOURCE_DIR}/families/bert/tests/cpp/test_precompiled_normalizer.cpp
+    unigram_tokenizer.cpp
+  )
+  target_include_directories(test_bert_precompiled_normalizer PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(test_bert_precompiled_normalizer PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_bert_precompiled_normalizer PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME bert_precompiled_normalizer COMMAND test_bert_precompiled_normalizer
+    ${PROJECT_SOURCE_DIR}/families/bert/tests/data/precompiled-unigram.json
+  )
+  set_tests_properties(bert_precompiled_normalizer PROPERTIES LABELS cpu)
 endif()
