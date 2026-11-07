@@ -16,7 +16,7 @@ import numpy as np
 from tensorrt_model_connect import BuildRequest, build
 
 FAMILY = "roberta"
-TASKS = frozenset({"encoding"})
+TASKS = frozenset({"encoding", "embedding"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
@@ -248,20 +248,20 @@ def _native(
     case: dict,
     tmp_path: Path,
 ):
-    manifest["task"]
+    command = "embed" if manifest["task"] == "embedding" else "encode"
     return _run_json(
-        binary, runtime_root, bundle, manifest, case, "encode", "--text", _case_text(case)
+        binary, runtime_root, bundle, manifest, case, command, "--text", _case_text(case)
     )
 
 
 def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: Path):
-    manifest["task"]
     import torch
     from transformers import AutoModel, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
     device = torch.device("cuda")
-    encoded = tokenizer(_case_text(case), return_tensors="pt", truncation=True)
+    encoded = tokenizer(_case_text(case), return_tensors="pt", truncation=True,
+                        max_length=int(manifest["max_sequence_length"]))
     model = (
         AutoModel.from_pretrained(
             model_dir, trust_remote_code=True, torch_dtype=_torch_dtype(case["reference_precision"])
@@ -273,12 +273,19 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     with torch.no_grad():
         outputs = model(**encoded)
     hidden = outputs.last_hidden_state
-    values = hidden[0, 0]
+    if manifest["task"] == "embedding":
+        mask = encoded["attention_mask"].unsqueeze(-1).bool()
+        pooled = hidden.masked_fill(~mask, 0.0).sum(dim=1) / mask.sum(dim=1)
+        values = torch.nn.functional.normalize(pooled, p=2, dim=1)[0]
+    else:
+        values = hidden[0, 0]
     return {"values": values.float().cpu().numpy()}
 
 
 def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
-    del manifest, case
+    del case
+    if manifest["task"] == "embedding":
+        assert np.isclose(np.linalg.norm(actual["values"]), 1.0, atol=1e-3)
     configured = thresholds.get(
         "contract_cosine_threshold", thresholds.get("cls_embedding_cosine", 0.8)
     )
