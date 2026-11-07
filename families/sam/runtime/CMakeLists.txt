@@ -51,6 +51,26 @@ if(TRTMC_BUILD_TESTS)
   )
   add_test(NAME sam_prompt_seam COMMAND test_sam_prompt_seam)
 
+  # SamPipeline with mock engines: the image embedding's handoff between them.
+  add_executable(test_sam_pipeline_handoff
+    ${PROJECT_SOURCE_DIR}/families/sam/tests/cpp/test_sam_pipeline_handoff.cpp
+  )
+  target_include_directories(test_sam_pipeline_handoff PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_sam_pipeline_handoff SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(test_sam_pipeline_handoff PRIVATE
+    trtmc_model_sam trtmc_core ${TRTMC_CUDART_LIBRARY}
+  )
+  target_compile_options(test_sam_pipeline_handoff PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME sam_pipeline_handoff COMMAND test_sam_pipeline_handoff)
+  set_tests_properties(sam_pipeline_handoff PROPERTIES LABELS "cpu")
+
   # The seam tests compare the separable resampling to the per-sample
   # definition bit for bit. A default x86-64 build has no FMA, so it cannot see
   # a multiply-add that would be fused differently where FMA is contracted (as

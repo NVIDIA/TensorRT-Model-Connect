@@ -75,6 +75,43 @@ PromptedSegmentationResult to_public_result(SamResult result) {
     return out;
 }
 
+// The mask decoder's input the pipeline uploads per request.
+constexpr const char* kSparsePrompt = "sparse_prompt_embeddings";
+
+// Binds every other mask-decoder input to the image-encoder output of the same
+// name, so the decoder reads the image embedding in place and it never
+// round-trips through the host. Throws unless the encoder has no dynamic input
+// (its outputs keep one shape) and each bound pair is static, with one shape
+// and dtype on both engines.
+void bind_decoder_to_encoder_outputs(ITrtModule& encoder, ITrtModule& decoder) {
+    for (const auto& input : encoder.input_info()) {
+        if (encoder.input_is_dynamic(input.name)) {
+            throw std::runtime_error("SamPipeline: image_encoder input '" + input.name +
+                                     "' is dynamic; the mask_decoder reads its outputs in place");
+        }
+    }
+    for (const auto& input : decoder.input_info()) {
+        if (input.name == kSparsePrompt)
+            continue;
+        const auto refuse = [&input](const char* reason) {
+            throw std::runtime_error("SamPipeline: mask_decoder input '" + input.name + "' " +
+                                     reason);
+        };
+        if (!encoder.has_output(input.name))
+            refuse("is not an image_encoder output");
+        if (decoder.input_is_dynamic(input.name))
+            refuse("is dynamic");
+        if (decoder.tensor_shape(input.name) != encoder.tensor_shape(input.name) ||
+            decoder.tensor_dtype(input.name) != encoder.tensor_dtype(input.name)) {
+            refuse("differs from the image_encoder output in shape or dtype");
+        }
+        void* const device = encoder.device_ptr(input.name);
+        if (device == nullptr)
+            refuse("has no image_encoder device buffer");
+        decoder.bind_external(input.name, device);
+    }
+}
+
 } // namespace
 
 SamPipeline::SamPipeline(std::unique_ptr<ITrtModule> image_encoder,
@@ -86,6 +123,7 @@ SamPipeline::SamPipeline(std::unique_ptr<ITrtModule> image_encoder,
         throw std::runtime_error("SamPipeline: invalid image_encoder");
     if (!mask_decoder_ || !mask_decoder_->ok())
         throw std::runtime_error("SamPipeline: invalid mask_decoder");
+    bind_decoder_to_encoder_outputs(*image_encoder_, *mask_decoder_);
 }
 
 SegmentResult SamPipeline::segment(const float* pixels, int32_t height, int32_t width) {
@@ -116,7 +154,10 @@ PromptedSegmentationResult SamPipeline::segment_prompted(const float* image_pixe
     img_t.shape = {1, 3, config_.image_size, config_.image_size};
     img_t.dtype = DType::kFloat32;
 
-    auto enc_out = image_encoder_->forward({{"pixel_values", img_t}});
+    // The mask decoder reads the encoder's outputs in place (bound at
+    // construction), so they are not downloaded.
+    image_encoder_->forward_async({{"pixel_values", img_t}});
+    image_encoder_->sync();
 
     const float reference_point_x = quantize_sam_fractional_point(point_x, plan.original_width);
     const float reference_point_y = quantize_sam_fractional_point(point_y, plan.original_height);
@@ -130,12 +171,7 @@ PromptedSegmentationResult SamPipeline::segment_prompted(const float* image_pixe
     sparse_t.shape = {2, config_.decoder_hidden_size};
     sparse_t.dtype = DType::kFloat32;
 
-    TensorMap decoder_inputs;
-    for (auto& [name, tensor] : enc_out)
-        decoder_inputs[name] = tensor;
-    decoder_inputs["sparse_prompt_embeddings"] = sparse_t;
-
-    auto dec_out = mask_decoder_->forward(decoder_inputs);
+    auto dec_out = mask_decoder_->forward({{kSparsePrompt, sparse_t}});
 
     auto sam = parse_sam_outputs(dec_out);
     sam = select_sam_multimask_outputs(std::move(sam), config_.num_multimask_outputs);
