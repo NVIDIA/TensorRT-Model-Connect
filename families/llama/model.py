@@ -215,11 +215,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             raise ValueError("Llama max_sequence_length exceeds checkpoint context capacity")
         if request.tensor_parallel_size != 1:
             raise NotImplementedError("Llama does not expose a tensor-parallel builder")
-        if request.quantization not in {None, "none", "fp8", "nvfp4"}:
+        if request.quantization not in {None, "none", "fp8", "nvfp4", "int4_awq"}:
             raise NotImplementedError(
                 f"Llama does not support quantization={request.quantization!r}"
             )
-        quantized = request.quantization in {"fp8", "nvfp4"}
+        quantized = request.quantization in {"fp8", "nvfp4", "int4_awq"}
         if quantized and (request.dynamic_kv_cache or request.fp32_layers):
             raise NotImplementedError(
                 "quantized Llama builds do not support dynamic_kv_cache or fp32_layers"

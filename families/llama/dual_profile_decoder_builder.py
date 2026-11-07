@@ -295,9 +295,14 @@ def build_dual_profile_decoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
-    trt_config.builder_optimization_level = 1
+    trt_config.builder_optimization_level = (
+        1 if quant_ctx is None else quant_ctx.builder_optimization_level
+    )
     if quant_ctx is not None and quant_ctx.disable_dual_gemm_fusion:
         trt_config.build_route = "-peep:match_dual_gemm=off"
+    if quant_ctx is not None:
+        # Keep per-layer tactic details so the plan inspector shows the quantized GEMM kernels.
+        trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
     # Native full-context Llama builds can require substantial tactic workspace
     # while TensorRT compiles the primitive attention graph. This is build-time
     # scratch only (it is not serialized as runtime KV memory), and the limit
