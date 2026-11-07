@@ -6,6 +6,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        - ARCH=${ARCH:-aarch64}
+        - TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-10.0}
     container_name: trtmc-dev
     working_dir: /workspace/tensorrt-model-connect
     tty: true
