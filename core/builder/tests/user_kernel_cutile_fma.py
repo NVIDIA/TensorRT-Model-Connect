@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""cuTile kernels for the toy user kernel tests: ``out = a * b + c + 1``.
+
+``fma_tile`` works on flat arrays. ``fma_2d_tile`` works on 2-D arrays. ``fma_bcast_tile`` has the
+second input broadcast along rows and the third along columns. ``fma_3d_tile`` works on 3-D arrays
+with any strides, for example channel-last inputs. ``fma_5d_tile`` works on 5-D arrays: grid z holds
+the block indices of dimensions 2, 3 and 4.
+
+This module needs ``cuda.tile``. The tests import it only after checking that it is installed.
+It has no ``from __future__ import annotations`` because cuTile reads the annotations.
+"""
+
+import cuda.tile as ct
+
+ConstInt = ct.Constant[int]
+
+
+@ct.kernel
+def fma_tile(a, b, c, out, TILE: ConstInt):
+    i = ct.bid(0)
+    ta = ct.load(a, index=(i,), shape=(TILE,), padding_mode=ct.PaddingMode.ZERO)
+    tb = ct.load(b, index=(i,), shape=(TILE,), padding_mode=ct.PaddingMode.ZERO)
+    tc = ct.load(c, index=(i,), shape=(TILE,), padding_mode=ct.PaddingMode.ZERO)
+    ct.store(out, index=(i,), tile=ta * tb + tc + 1.0)
+
+
+@ct.kernel
+def fma_2d_tile(a, b, c, out, TR: ConstInt, TC: ConstInt):
+    i = ct.bid(0)
+    j = ct.bid(1)
+    ta = ct.load(a, index=(i, j), shape=(TR, TC), padding_mode=ct.PaddingMode.ZERO)
+    tb = ct.load(b, index=(i, j), shape=(TR, TC), padding_mode=ct.PaddingMode.ZERO)
+    tc = ct.load(c, index=(i, j), shape=(TR, TC), padding_mode=ct.PaddingMode.ZERO)
+    ct.store(out, index=(i, j), tile=ta * tb + tc + 1.0)
+
+
+@ct.kernel
+def fma_bcast_tile(x, s, r, out, TR: ConstInt, TC: ConstInt):
+    """out[i, j] = x[i, j] * s[0, j] + r[i, 0] + 1, with s of shape (1, C) and r of shape (R, 1)."""
+    i = ct.bid(0)
+    j = ct.bid(1)
+    tx = ct.load(x, index=(i, j), shape=(TR, TC), padding_mode=ct.PaddingMode.ZERO)
+    ts = ct.load(s, index=(0, j), shape=(1, TC), padding_mode=ct.PaddingMode.ZERO)
+    tr = ct.load(r, index=(i, 0), shape=(TR, 1), padding_mode=ct.PaddingMode.ZERO)
+    ct.store(out, index=(i, j), tile=tx * ts + tr + 1.0)
+
+
+@ct.kernel
+def fma_3d_tile(a, b, c, out, TA: ConstInt, TB: ConstInt, TC: ConstInt):
+    i = ct.bid(0)
+    j = ct.bid(1)
+    k = ct.bid(2)
+    ta = ct.load(a, index=(i, j, k), shape=(TA, TB, TC), padding_mode=ct.PaddingMode.ZERO)
+    tb = ct.load(b, index=(i, j, k), shape=(TA, TB, TC), padding_mode=ct.PaddingMode.ZERO)
+    tc = ct.load(c, index=(i, j, k), shape=(TA, TB, TC), padding_mode=ct.PaddingMode.ZERO)
+    ct.store(out, index=(i, j, k), tile=ta * tb + tc + 1.0)
+
+
+@ct.kernel
+def fma_5d_tile(
+    a, b, c, out, T0: ConstInt, T1: ConstInt, T2: ConstInt, T3: ConstInt, T4: ConstInt
+):
+    i0 = ct.bid(0)
+    i1 = ct.bid(1)
+    z = ct.bid(2)
+    n3 = (out.shape[3] + T3 - 1) // T3
+    n4 = (out.shape[4] + T4 - 1) // T4
+    i4 = z % n4
+    i3 = (z // n4) % n3
+    i2 = z // (n4 * n3)
+    idx = (i0, i1, i2, i3, i4)
+    shape = (T0, T1, T2, T3, T4)
+    ta = ct.load(a, index=idx, shape=shape, padding_mode=ct.PaddingMode.ZERO)
+    tb = ct.load(b, index=idx, shape=shape, padding_mode=ct.PaddingMode.ZERO)
+    tc = ct.load(c, index=idx, shape=shape, padding_mode=ct.PaddingMode.ZERO)
+    ct.store(out, index=idx, tile=ta * tb + tc + 1.0)
