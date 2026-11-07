@@ -20,7 +20,7 @@ from trtmc_server.app import ServerConfig, create_app
 from trtmc_server.errors import WorkerProtocolError, WorkerSaturatedError
 from trtmc_perf_serving.video_media import decoded_identity, encode, frame_identity
 from trtmc_server.registry import ModelRegistry
-from trtmc_server.videos import VideoJobs, fit_initial_image
+from trtmc_server.videos import VideoJobs
 
 
 class VideoWorker:
@@ -88,6 +88,13 @@ class ImageVideoWorker(VideoWorker):
             with Image.open(payload["image_path"]) as image:
                 self.initial_images.append(image.convert("RGB").copy())
         return super().submit(operation, payload)
+
+
+class ImageOnlyVideoWorker(ImageVideoWorker):
+    """A model that starts every video from an initial image."""
+
+    def supports(self, model, capability):
+        return model == "video" and capability == "initial_image_video_generation"
 
 
 def png(image):
@@ -321,19 +328,36 @@ def test_shutdown_waits_for_in_progress_submission_setup(monkeypatch, tmp_path):
     asyncio.run(scenario())
 
 
-def test_an_input_reference_starts_the_video_from_the_image_fitted_to_the_built_frame():
+def test_an_input_reference_starts_the_video_from_that_image():
     worker = ImageVideoWorker()
-    source = Image.new("RGB", (16, 16), "red")
-    source.paste(Image.new("RGB", (16, 8), "blue"), (0, 8))  # red top half, blue bottom half
+    source = Image.effect_noise((8, 4), 64).convert("RGB")
     with TestClient(app_for(worker)) as client:
         response = submit_image(client, png(source))
         assert response.status_code == 202
         finished(client, response.json()["id"])
         assert submit(client).status_code == 202  # text-to-video stays available
-    fitted, = worker.initial_images
-    assert fitted.size == (8, 4)  # scaled to 8x8 to cover 8x4, then center-cropped
-    top, bottom = fitted.getpixel((4, 0)), fitted.getpixel((4, 3))
-    assert top[0] > 200 > top[2] and bottom[2] > 200 > bottom[0]
+    given, = worker.initial_images
+    assert list(given.getdata()) == list(source.getdata())
+
+
+def test_an_input_reference_must_have_the_video_size():
+    worker = ImageVideoWorker()
+    with TestClient(app_for(worker)) as client:
+        response = submit_image(client, png(Image.new("RGB", (16, 16), "red")))
+    assert response.status_code == 400
+    assert "8x4" in response.json()["error"]["message"]
+    assert not worker.calls
+
+
+def test_a_model_that_only_starts_from_an_image_runs_its_image_task():
+    worker = ImageOnlyVideoWorker()
+    with TestClient(app_for(worker)) as client:
+        assert submit(client).status_code == 400
+        response = submit_image(client, png(Image.new("RGB", (8, 4), "red")))
+        assert response.status_code == 202
+        finished(client, response.json()["id"])
+    call, = worker.calls
+    assert "image_path" in call
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="external FFmpeg codec unavailable")
@@ -345,28 +369,6 @@ def test_the_completion_record_names_the_initial_image(tmp_path):
     completion, = [r for r in map(json.loads, records.read_text().splitlines())
                    if r.get("record_kind") == "video_completion"]
     assert completion["initial_image_sha256"] == hashlib.sha256(image).hexdigest()
-
-
-def test_an_image_of_the_built_size_passes_unchanged():
-    image = Image.effect_noise((8, 4), 64).convert("RGB")
-    with Image.open(io.BytesIO(fit_initial_image(png(image), 8, 4))) as fitted:
-        assert list(fitted.convert("RGB").getdata()) == list(image.getdata())
-
-
-def test_fitting_matches_upstream_resize_then_crop_and_stays_bounded():
-    source = Image.effect_noise((50, 30), 64).convert("RGB")
-    scale = max(8 / 50, 6 / 30)
-    cover = source.resize((round(50 * scale), round(30 * scale)), Image.LANCZOS)  # upstream i2v
-    left, top = (cover.width - 8) // 2, (cover.height - 6) // 2
-    expected = cover.crop((left, top, left + 8, top + 6))
-    with Image.open(io.BytesIO(fit_initial_image(png(source), 8, 6))) as fitted:
-        difference = [abs(a - b) for pa, pb in zip(fitted.getdata(), expected.getdata()) for a, b in zip(pa, pb)]
-    assert max(difference) <= 1
-    sliver = png(Image.new("RGB", (1, 100_000), "red"))  # covering 704x1280 would be 704 x 70 million
-    started = time.monotonic()
-    with Image.open(io.BytesIO(fit_initial_image(sliver, 704, 1280))) as fitted:
-        assert fitted.size == (704, 1280) and fitted.getpixel((350, 640)) == (255, 0, 0)
-    assert time.monotonic() - started < 5
 
 
 def test_input_reference_needs_one_image_and_a_model_that_starts_from_one():

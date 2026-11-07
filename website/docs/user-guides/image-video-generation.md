@@ -52,9 +52,17 @@ trtmc generate-video wan22-portrait.bundle \
 ```
 
 `trtmc-server` serves such a bundle at POST `/v1/videos`. Send the image as a
-multipart `input_reference` file; the server scales it to cover the built size
-and center-crops it, as upstream Wan image-to-video does. Requests without an
-image stay text-to-video.
+multipart `input_reference` PNG or JPEG of the video size; the server rejects
+other sizes. Requests without an image stay text-to-video. Upstream Wan
+image-to-video scales an image to cover the frame and crops the center, which
+Pillow does in one call:
+
+```python
+from PIL import Image, ImageOps
+
+frame = ImageOps.fit(Image.open("photo.jpg").convert("RGB"), (704, 1280), Image.LANCZOS)
+frame.save("first-frame.png")
+```
 
 ## Perception
 

@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import io
 import json
 import logging
 from pathlib import Path
@@ -45,30 +44,6 @@ class VideoRequest(ImageGenerationRequest):
                     raise ValueError(f"{key} must be an integer")
                 values[key] = int(raw)
         return super().from_form(values)
-
-
-def fit_initial_image(data: bytes, width: int, height: int) -> bytes:
-    """Scale an initial image to cover the built frame and center-crop it to a PNG.
-
-    This is upstream Wan i2v's preprocessing: resize to cover, then crop the center. Pillow
-    resamples only the source box that the crop keeps, straight to the built size, so an
-    extreme aspect ratio never allocates the uncropped cover. An image of the built size
-    passes unchanged.
-    """
-    from PIL import Image
-
-    with Image.open(io.BytesIO(data)) as source:
-        image = source.convert("RGB")
-    if image.size != (width, height):
-        scale = max(width / image.width, height / image.height)
-        cover_width, cover_height = round(image.width * scale), round(image.height * scale)
-        left, top = (cover_width - width) // 2, (cover_height - height) // 2
-        x_scale, y_scale = image.width / cover_width, image.height / cover_height
-        box = (left * x_scale, top * y_scale, (left + width) * x_scale, (top + height) * y_scale)
-        image = image.resize((width, height), Image.LANCZOS, box=box)
-    output = io.BytesIO()
-    image.save(output, format="PNG")
-    return output.getvalue()
 
 
 class VideoJobs:
@@ -141,11 +116,14 @@ class VideoJobs:
             if not self.registry.supports(body.model, capability):
                 return self.error(400, "unsupported_task", "model does not support this endpoint")
             if upload is not None:  # decode only for a model that takes it, off the event loop
-                reference, _, _ = await asyncio.to_thread(image_file, upload, self.config.max_image_pixels)
+                reference = await asyncio.to_thread(image_file, upload, self.config.max_image_pixels)
             geometry = self.registry.video_geometry(body.model)
             width, height, count = geometry["width"], geometry["height"], geometry["num_frames"]
             if body.num_frames not in (None, count) or body.size not in (None, f"{width}x{height}"):
                 raise ValueError("size and num_frames must match the built video geometry")
+            # The image becomes the first frame as given; fitting it to the frame is the client's choice.
+            if reference is not None and (reference[2]["image_width"], reference[2]["image_height"]) != (width, height):
+                return self.error(400, "invalid_request", f"input_reference must be {width}x{height}, the video size")
             reserved = width * height * count * 3 * 4 + self.config.max_body_bytes + 1024 * 1024
             if (len(self.jobs) >= self.config.max_video_jobs or
                     sum(job["reserved"] for job in self.jobs.values()) + reserved > self.config.max_video_bytes):
@@ -188,16 +166,17 @@ class VideoJobs:
             if noise:
                 payload["initial_latents_path"] = str(media.path)
             if reference is not None:
-                fitted = await asyncio.to_thread(fit_initial_image, reference, width, height)
-                (root / "initial_image.png").write_bytes(fitted)
-                payload["image_path"] = str(root / "initial_image.png")
+                image = root / f"initial_image{reference[1]}"
+                image.write_bytes(reference[0])
+                payload["image_path"] = str(image)
             context = {**request.state.timing, "record_kind": "video_completion", "job_id": identifier,
                        "prompt_sha256": hashlib.sha256(body.prompt.encode()).hexdigest(),
                        "negative_prompt_sha256": hashlib.sha256(body.negative_prompt.encode() if body.negative_prompt else b"").hexdigest(),
                        "generation_config": {k: v for k, v in mapped.items() if k != "negative_prompt"},
                        "initial_latents_sha256": hashlib.sha256(noise).hexdigest() if noise else None,
-                       "initial_image_sha256": hashlib.sha256(reference).hexdigest() if reference else None}
-            task = asyncio.create_task(self.run(job, request, payload, geometry, body.fps, session, media, context))
+                       "initial_image_sha256": hashlib.sha256(reference[0]).hexdigest() if reference else None}
+            task = asyncio.create_task(self.run(job, request, capability, payload, geometry, body.fps, session,
+                                                media, context))
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
             return JSONResponse(self.view(job), status_code=202)
@@ -215,7 +194,7 @@ class VideoJobs:
             if not self.setups:
                 self.setups_idle.set()
 
-    async def run(self, job, request, payload, geometry, fps, session, media, context):
+    async def run(self, job, request, capability, payload, geometry, fps, session, media, context):
         started = time.monotonic()
 
         def validate(result):
@@ -225,7 +204,7 @@ class VideoJobs:
                 raise WorkerProtocolError("native video geometry differs from the built clip")
 
         try:
-            result = await self.execute(request, job["model"], "video_generation", "generate_video", payload,
+            result = await self.execute(request, job["model"], capability, "generate_video", payload,
                                         validate, release_input=media.close, acquired_session=session,
                                         task_context=context)
             if isinstance(result, JSONResponse):
