@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 from tensorrt_model_connect import BuildRequest, build
 
-from .frame_accuracy import compare_png_sequences
+from .frame_accuracy import active_transition_fraction, compare_png_sequences
 from .official_reference import generate as generate_official_reference
 
 FAMILY = "wan2_2_ti2v"
@@ -486,9 +486,17 @@ def _assert_parity(
         assert float(stats["std"]) >= float(thresholds["min_pixel_std"])
 
     if expected.get("_invariant_only"):
+        # Without a reference, the case still rejects a video that never changes.
+        if "min_active_transition_fraction" in thresholds:
+            assert active_transition_fraction([str(path) for path in actual_paths]) >= float(
+                thresholds["min_active_transition_fraction"]
+            )
         return
 
     expected_paths = [Path(path) for path in expected["frame_paths"]]
+    if image is not None:
+        # The reference must start from the image as well.
+        assert _psnr_uint8(image, expected_paths[0]) >= float(thresholds["min_first_frame_psnr"])
     accuracy = compare_png_sequences(
         [str(path) for path in expected_paths],
         [str(path) for path in actual_paths],
@@ -568,6 +576,55 @@ def test_semantic_artifacts_reject_unpaired_frames(monkeypatch, tmp_path: Path) 
 
     with pytest.raises(AssertionError):
         _write_semantic_artifacts(case, [actual], [])
+
+
+def _l0_image_to_video(tmp_path: Path):
+    from PIL import Image
+
+    _, manifest, case = CASES["wan22-ti2v-5b-i2v-l0"]
+    height, width = int(manifest["image_height"]), int(manifest["image_width"])
+    ramp = np.linspace(40, 200, width)[None, :, None]
+    first = np.broadcast_to(ramp, (height, width, 3)).astype(np.int16)
+    image = tmp_path / "image.png"
+    Image.fromarray(first.astype(np.uint8)).save(image)
+    return manifest, case, _thresholds("wan22-ti2v-5b-i2v-l0"), first, image
+
+
+def _frames(root: Path, first: np.ndarray, step: int, name: str = "frame-{:06d}.png") -> list[str]:
+    """Five frames that start from ``first`` and brighten by ``step`` levels a frame."""
+    from PIL import Image
+
+    root.mkdir()
+    paths = []
+    for index in range(5):
+        path = root / name.format(index)
+        Image.fromarray(np.clip(first + step * index, 0, 255).astype(np.uint8)).save(path)
+        paths.append(str(path))
+    return paths
+
+
+def test_l0_image_to_video_rejects_a_video_that_never_changes(tmp_path: Path) -> None:
+    manifest, case, thresholds, first, image = _l0_image_to_video(tmp_path)
+    expected = {"_invariant_only": True}
+
+    moving = {"frames": _frames(tmp_path / "moving", first, 2)}
+    _assert_parity(moving, expected, manifest, case, thresholds, image)
+    frozen = {"frames": _frames(tmp_path / "frozen", first, 0)}
+    with pytest.raises(AssertionError):
+        _assert_parity(frozen, expected, manifest, case, thresholds, image)
+
+
+def test_image_to_video_reference_must_start_from_the_image(tmp_path: Path) -> None:
+    from PIL import Image
+
+    manifest, case, thresholds, first, image = _l0_image_to_video(tmp_path)
+    actual = {"frames": _frames(tmp_path / "native", first, 2)}
+    expected = {"frame_paths": _frames(tmp_path / "reference", first, 2, "frame_{:04d}.png")}
+
+    _assert_parity(actual, expected, manifest, case, thresholds, image)
+    Image.fromarray(np.zeros(first.shape, dtype=np.uint8)).save(expected["frame_paths"][0])
+    with pytest.raises(AssertionError):
+        _assert_parity(actual, expected, manifest, case, thresholds, image)
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
