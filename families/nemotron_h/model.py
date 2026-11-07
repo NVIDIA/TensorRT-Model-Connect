@@ -191,6 +191,7 @@ class _NemotronHModel:
         # Attention dimensions
         q_dim = num_heads * head_dim
         weights = WeightDict()
+        weights["_nvfp4_weights"] = prepared_policy is not None and prepared_policy.request_format == "nvfp4"
         # Exported scale tensors, not broad checkpoint metadata, enable FP8 KV.
         fp8_kv_cache = any(
             _has_tensor(readers, f"backbone.layers.{i}.mixer.k_proj.k_scale")
@@ -499,6 +500,11 @@ class _NemotronHModel:
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 3
+        if "moe" not in layer_types and (
+            getattr(quant_ctx, "has_nvfp4_weights", False)
+            or weights.get("_nvfp4_weights", False)
+        ):
+            trt_config.max_aux_streams = 0
         if quant_ctx is not None:
             # The plan inspector reads kernel names from the engine.
             trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
