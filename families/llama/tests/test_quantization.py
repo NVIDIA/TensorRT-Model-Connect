@@ -219,6 +219,23 @@ def test_calibrate_awq_rejects_checkpoint_with_changed_projection(tmp_path: Path
         )
 
 
+def test_calibrate_awq_refuses_an_already_quantized_checkpoint(tmp_path: Path) -> None:
+    """A prepared INT4 checkpoint fails with a format error before any scale lookup."""
+    _write_checkpoint(tmp_path / "ckpt", "none")
+    _write_awq_scales(tmp_path / "ckpt", tmp_path / "scales")
+    config = _config()
+    config.raw["quantization_config"] = {"quant_method": "awq", "bits": 4}
+    with pytest.raises(ValueError, match="already quantized"):
+        calibrate_llama(
+            tmp_path / "ckpt", config, graph_ops, "int4_awq", awq_scales_dir=tmp_path / "scales"
+        )
+    (tmp_path / "ckpt" / "hf_quant_config.json").write_text("{}")
+    with pytest.raises(ValueError, match="already quantized"):
+        calibrate_llama(
+            tmp_path / "ckpt", _config(), graph_ops, "int4_awq", awq_scales_dir=tmp_path / "scales"
+        )
+
+
 def test_calibrate_awq_rejects_missing_projection_scale(tmp_path: Path) -> None:
     """A projection without a calibrated scale fails the build instead of staying unquantized."""
     _write_checkpoint(tmp_path / "ckpt", "none")

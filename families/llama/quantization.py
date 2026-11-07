@@ -427,6 +427,14 @@ def _load_awq_scales(scales_dir: Path, identity: dict[str, np.ndarray]) -> dict[
 
 def _quantize_llama_awq(model_dir: Path, config, graph_ops, scales_dir: Path) -> LlamaQuantContext:
     """Quantize every decoder projection of the original checkpoint to INT4-AWQ."""
+    if (
+        config.raw.get("quantization_config")
+        or (Path(model_dir) / "hf_quant_config.json").is_file()
+    ):
+        raise ValueError(
+            f"llama int4_awq quantizes the original 16-bit checkpoint; {model_dir} is already "
+            "quantized (quantization_config or hf_quant_config.json)"
+        )
     tensors = _open_raw_readers(Path(model_dir))
     table = _load_awq_scales(scales_dir, awq_identity(tensors))
     scales: dict[str, _LayerScales] = {}
