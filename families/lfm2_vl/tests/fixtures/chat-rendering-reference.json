@@ -1,0 +1,125 @@
+{
+  "checkpoint": "LiquidAI/LFM2.5-VL-1.6B",
+  "revision": "919fde3d022e3f90a4716006f993938ee8c2eb97",
+  "cases": [
+    {
+      "name": "discard_old_raw_reasoning",
+      "messages": [
+        {
+          "role": "user",
+          "content": "First question."
+        },
+        {
+          "role": "assistant",
+          "content": "<think>old reasoning</think>  First answer. "
+        },
+        {
+          "role": "user",
+          "content": "Second question."
+        },
+        {
+          "role": "assistant",
+          "content": "<think>latest reasoning</think> Latest answer."
+        },
+        {
+          "role": "user",
+          "content": "Final question."
+        }
+      ],
+      "expected": "<|startoftext|><|im_start|>user\nFirst question.<|im_end|>\n<|im_start|>assistant\nFirst answer.<|im_end|>\n<|im_start|>user\nSecond question.<|im_end|>\n<|im_start|>assistant\n<think>latest reasoning</think> Latest answer.<|im_end|>\n<|im_start|>user\nFinal question.<|im_end|>\n<|im_start|>assistant\n"
+    },
+    {
+      "name": "keep_old_raw_reasoning",
+      "messages": [
+        {
+          "role": "user",
+          "content": "First question."
+        },
+        {
+          "role": "assistant",
+          "content": "<think>old reasoning</think>  First answer. "
+        },
+        {
+          "role": "user",
+          "content": "Second question."
+        },
+        {
+          "role": "assistant",
+          "content": "<think>latest reasoning</think> Latest answer."
+        },
+        {
+          "role": "user",
+          "content": "Final question."
+        }
+      ],
+      "keep_past_thinking": true,
+      "expected": "<|startoftext|><|im_start|>user\nFirst question.<|im_end|>\n<|im_start|>assistant\n<think>old reasoning</think>  First answer. <|im_end|>\n<|im_start|>user\nSecond question.<|im_end|>\n<|im_start|>assistant\n<think>latest reasoning</think> Latest answer.<|im_end|>\n<|im_start|>user\nFinal question.<|im_end|>\n<|im_start|>assistant\n"
+    },
+    {
+      "name": "typed_reasoning",
+      "messages": [
+        {
+          "role": "user",
+          "content": "First question."
+        },
+        {
+          "role": "assistant",
+          "reasoning": "old reasoning",
+          "content": "  First answer. "
+        },
+        {
+          "role": "user",
+          "content": "Second question."
+        },
+        {
+          "role": "assistant",
+          "reasoning": "latest reasoning",
+          "content": " Latest answer."
+        },
+        {
+          "role": "user",
+          "content": "Final question."
+        }
+      ],
+      "expected": "<|startoftext|><|im_start|>user\nFirst question.<|im_end|>\n<|im_start|>assistant\nFirst answer.<|im_end|>\n<|im_start|>user\nSecond question.<|im_end|>\n<|im_start|>assistant\n<think>latest reasoning</think> Latest answer.<|im_end|>\n<|im_start|>user\nFinal question.<|im_end|>\n<|im_start|>assistant\n"
+    },
+    {
+      "name": "empty_system_with_tools",
+      "messages": [
+        {
+          "role": "system",
+          "content": ""
+        },
+        {
+          "role": "user",
+          "content": "Hello."
+        }
+      ],
+      "tools": [
+        {
+          "name": "get_weather",
+          "description": "Get weather",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      ],
+      "expected": "<|startoftext|><|im_start|>system\nList of tools: [{\"name\": \"get_weather\", \"description\": \"Get weather\", \"parameters\": {\"type\": \"object\", \"properties\": {}}}]<|im_end|>\n<|im_start|>user\nHello.<|im_end|>\n<|im_start|>assistant\n"
+    },
+    {
+      "name": "empty_system",
+      "messages": [
+        {
+          "role": "system",
+          "content": ""
+        },
+        {
+          "role": "user",
+          "content": "Hello."
+        }
+      ],
+      "expected": "<|startoftext|><|im_start|>user\nHello.<|im_end|>\n<|im_start|>assistant\n"
+    }
+  ]
+}
