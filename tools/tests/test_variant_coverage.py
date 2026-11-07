@@ -196,3 +196,71 @@ def test_unknown_family_is_an_error_not_a_clean_report(tmp_path: Path, capsys) -
     assert variant_coverage.main(["--repo-root", str(repo), "report", "--family", "alpah"]) == 2
     assert variant_coverage.main(["--repo-root", str(repo), "bootstrap", "alpah"]) == 2
     assert "unknown family: alpah" in capsys.readouterr().err
+
+
+def test_named_manifest_must_build_the_declared_variant(tmp_path: Path) -> None:
+    root = _family(
+        _repo(tmp_path),
+        "alpha",
+        model=_MODEL_FP8,
+        variants='(Variant("bf16"), Variant("bf16", "fp8", manifests=("a-l0",)))',
+        manifests={"a-l0": {"precision": "bf16"}},
+        tests={"test_trt.py": _HARDWARE_TEST},
+    )
+
+    report = variant_coverage.family_report(root)
+
+    assert report.variants_without_manifest == ["bf16+fp8"]
+
+
+def test_only_marked_collected_tests_cover_a_variant(tmp_path: Path) -> None:
+    root = _family(
+        _repo(tmp_path),
+        "alpha",
+        model=_MODEL_FP8,
+        variants='(Variant("bf16", status="experimental"), Variant("bf16", "fp8"))',
+        manifests={"a-fp8": {"precision": "bf16", "quantization": "fp8"}},
+        tests={
+            "test_helpers.py": (
+                "import pytest\n"
+                "from tools.variant_coverage import covers_variant\n\n"
+                '@covers_variant(precision="bf16", quantization="fp8")\n'
+                "def helper_not_a_test():\n    pass\n\n"
+                '@covers_variant(precision="bf16", quantization="fp8")\n'
+                "def test_cpu_only():\n    pass\n\n"
+                "@pytest.mark.gpu\n"
+                "def test_other_gpu():\n    pass\n"
+            ),
+        },
+    )
+
+    assert variant_coverage.family_report(root).variants_without_test == ["bf16+fp8"]
+
+
+def test_class_and_module_marks_count_as_hardware_tests(tmp_path: Path) -> None:
+    for name, text in (
+        (
+            "class",
+            "import pytest\nfrom tools.variant_coverage import covers_variant\n\n"
+            "@pytest.mark.trt\nclass TestTiny:\n"
+            '    @covers_variant(precision="bf16", quantization="fp8")\n'
+            "    def test_engine(self):\n        pass\n",
+        ),
+        (
+            "module",
+            "import pytest\nfrom tools.variant_coverage import covers_variant\n\n"
+            "pytestmark = [pytest.mark.trt]\n\n"
+            '@covers_variant(precision="bf16", quantization="fp8")\n'
+            "def test_engine():\n    pass\n",
+        ),
+    ):
+        (tmp_path / name).mkdir()
+        root = _family(
+            _repo(tmp_path / name),
+            "alpha",
+            model=_MODEL_FP8,
+            variants='(Variant("bf16", status="experimental"), Variant("bf16", "fp8"))',
+            manifests={"a-fp8": {"precision": "bf16", "quantization": "fp8"}},
+            tests={"test_trt.py": text},
+        )
+        assert variant_coverage.family_report(root).variants_without_test == [], name

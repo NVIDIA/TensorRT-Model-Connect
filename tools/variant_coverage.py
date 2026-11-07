@@ -168,12 +168,49 @@ def manifest_variants(family_root: Path) -> dict[str, tuple[str, str]]:
     return result
 
 
-def _covers_variant_keys(tree: ast.Module) -> set[tuple[str, str]]:
-    keys: set[tuple[str, str]] = set()
-    for node in ast.walk(tree):
+def _has_hardware_mark(nodes: Sequence[ast.expr]) -> bool:
+    return any(_HARDWARE_MARK.search(ast.unparse(node)) for node in nodes)
+
+
+def _module_hardware_mark(tree: ast.Module) -> bool:
+    return any(
+        isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "pytestmark" for target in node.targets)
+        and _HARDWARE_MARK.search(ast.unparse(node.value))
+        for node in tree.body
+    )
+
+
+def _variant_key(decorators: Sequence[ast.expr]) -> set[tuple[str, str]]:
+    keys = set()
+    for node in decorators:
         if isinstance(node, ast.Call) and ast.unparse(node.func).endswith("covers_variant"):
             values = {k.arg: ast.literal_eval(k.value) for k in node.keywords if k.arg}
             keys.add((str(values.get("precision")), values.get("quantization") or UNQUANTIZED))
+    return keys
+
+
+def _covers_variant_keys(tree: ast.Module) -> set[tuple[str, str]]:
+    """Variant keys of pytest-collected test functions that carry a gpu or trt mark.
+
+    The mark may sit on the function, its ``Test*`` class, or the module's
+    ``pytestmark``. An annotated helper or CPU-only test covers nothing.
+    """
+    keys: set[tuple[str, str]] = set()
+    module_marked = _module_hardware_mark(tree)
+
+    def visit(functions: Sequence[ast.stmt], marked: bool) -> None:
+        for node in functions:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith(
+                "test"
+            ):
+                if marked or _has_hardware_mark(node.decorator_list):
+                    keys.update(_variant_key(node.decorator_list))
+
+    visit(tree.body, module_marked)
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            visit(node.body, module_marked or _has_hardware_mark(node.decorator_list))
     return keys
 
 
@@ -192,8 +229,9 @@ def hardware_tests(family_root: Path) -> tuple[set[tuple[str, str]], list[str]]:
 
 
 def _matches(variant: DeclaredVariant, manifests: dict[str, tuple[str, str]]) -> bool:
+    """Named manifests narrow the coverage to a profile; they must still build the variant."""
     if variant.manifests:
-        return all(name in manifests for name in variant.manifests)
+        return all(manifests.get(name) == variant.key for name in variant.manifests)
     return variant.key in manifests.values()
 
 
@@ -216,17 +254,16 @@ def family_report(family_root: Path) -> FamilyReport:
     report.variants_without_test = [
         variant.label for variant in supported if variant.key not in annotated
     ]
-    named = {name for variant in declared for name in variant.manifests}
     keys = {variant.key for variant in declared}
     report.manifests_without_variant = sorted(
-        name for name, key in manifests.items() if name not in named and key not in keys
+        name for name, key in manifests.items() if key not in keys
     )
     return report
 
 
 _VERSION_PATTERNS = (
     re.compile(r"\btensorrt==(\d+(?:\.\d+)+)"),
-    re.compile(r"\blibnvinfer\d+=(\d+(?:\.\d+)+)-"),
+    re.compile(r"\blibnv(?:infer|onnxparsers)[\w-]*=(\d+(?:\.\d+)+)-"),
     re.compile(r"tensorrt\.__version__ == '(\d+(?:\.\d+)+)'"),
     re.compile(r"^ARG TENSORRT_VERSION=(\d+(?:\.\d+)+)", re.MULTILINE),
 )
