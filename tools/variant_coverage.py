@@ -215,10 +215,16 @@ def _covers_variant_keys(tree: ast.Module) -> set[tuple[str, str]]:
 
 
 def hardware_tests(family_root: Path) -> tuple[set[tuple[str, str]], list[str]]:
-    """Annotated variant keys and hardware test files without an annotation."""
+    """Annotated variant keys and hardware test files without an annotation.
+
+    Only the files the CI runner executes as family hardware tests count:
+    ``tests/test_*.py`` other than ``test_e2e.py``.
+    """
     annotated: set[tuple[str, str]] = set()
     unannotated: list[str] = []
-    for path in sorted((family_root / "tests").glob("*.py")):
+    for path in sorted((family_root / "tests").glob("test_*.py")):
+        if path.name == "test_e2e.py":
+            continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         tree = _parse(path)
         keys = _covers_variant_keys(tree) if tree else set()

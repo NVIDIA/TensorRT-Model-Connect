@@ -264,3 +264,17 @@ def test_class_and_module_marks_count_as_hardware_tests(tmp_path: Path) -> None:
             tests={"test_trt.py": text},
         )
         assert variant_coverage.family_report(root).variants_without_test == [], name
+
+
+def test_only_files_the_runner_executes_count_as_hardware_tests(tmp_path: Path) -> None:
+    root = _family(
+        _repo(tmp_path),
+        "alpha",
+        model=_MODEL_FP8,
+        variants='(Variant("bf16", status="experimental"), Variant("bf16", "fp8"))',
+        manifests={"a-fp8": {"precision": "bf16", "quantization": "fp8"}},
+        tests={"helpers.py": _HARDWARE_TEST},
+    )
+    (root / "tests/test_e2e.py").write_text(_HARDWARE_TEST)
+
+    assert variant_coverage.family_report(root).variants_without_test == ["bf16+fp8"]
