@@ -168,7 +168,7 @@ def test_plain_build_publishes_abstract_classification_bundle(
         dynamic_kv_cache=False,
         mtp_seq_len=None,
         family="timm_repvgg",
-        task="classification",
+        task="image_to_class_scores",
         precision="fp16",
         max_sequence_length=1,
         image_height=None,
@@ -187,7 +187,7 @@ def test_plain_build_publishes_abstract_classification_bundle(
 
     assert writer.header == {
         "family": "timm_repvgg",
-        "task": "classification",
+        "task": "image_to_class_scores",
         "backend": "trt",
     }
     assert writer.sections["engine.plan"] == b"plan"
