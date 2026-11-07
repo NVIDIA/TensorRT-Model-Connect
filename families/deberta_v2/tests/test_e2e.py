@@ -25,6 +25,9 @@ row above measures exactly the baseline and the gate tests nothing. At 148
 tokens it costs 0.0685. A 0.999 cosine floor would still miss it at
 0.99999666, which is why the values are gated and the cosine is only a
 loud-failure guard.
+
+The fp16 case uses its own feature tolerance, set from the fp16 noise
+measured on this case; see ``_FP16_FEATURE_TOLERANCE``.
 """
 
 from __future__ import annotations
@@ -94,8 +97,12 @@ def _selected_cases(config) -> tuple[list[str], bool]:
 
 
 def pytest_generate_tests(metafunc) -> None:
-    if "case_name" in metafunc.fixturenames:
+    for fixture in ("case_name", "fp16_case_name"):
+        if fixture not in metafunc.fixturenames:
+            continue
         names, enabled = _selected_cases(metafunc.config)
+        if fixture == "fp16_case_name":
+            names = [name for name in names if CASES[name][1]["precision"] == "fp16"]
         parameters = names
         if not enabled:
             parameters = [
@@ -107,7 +114,7 @@ def pytest_generate_tests(metafunc) -> None:
                 )
                 for name in names
             ]
-        metafunc.parametrize("case_name", parameters, ids=names)
+        metafunc.parametrize(fixture, parameters, ids=names)
 
 
 def _required_path(value: str | None, label: str) -> Path:
@@ -195,6 +202,21 @@ _FEATURE_TOLERANCE = 5e-3
 # see the bucketing break at all.
 _COSINE_FLOOR = 0.999
 
+# fp16 cannot use the tolerance above. Measured on this case (B200 and B300,
+# TensorRT 11.1 and 11.4, 24 builds), a correct fp16 engine is 4.5e-02 to
+# 7.8e-02 off the reference, and an fp16 engine scaled by sqrt(d) instead of
+# sqrt(3d) 7.81 to 7.86 (12 builds). 2.5e-01 sits 3.2x above the first and 31x
+# below the second; the cosine floor is shared (fp16 noise moves it by under
+# 1e-05).
+#
+# The bucketing break (0.0685 in fp32) is inside the fp16 noise and is not
+# gated here: an fp16 build with linear relative positions is 6.9e-02 to
+# 8.9e-02 off on this passage. The index matrices come from rel_position,
+# which does not depend on the precision, so the fp32 case gates them for both.
+#
+# test_fp16_gate_rejects_a_wrong_attention_scale builds both and checks this.
+_FP16_FEATURE_TOLERANCE = 2.5e-1
+
 
 def _reference_ids(model_dir: Path, text: str) -> list[int]:
     """The framing the checkpoint was trained with, built explicitly.
@@ -231,6 +253,21 @@ def _cosine(left, right) -> float:
     right_norm = math.sqrt(sum(b * b for b in right))
     assert left_norm > 0.0 and right_norm > 0.0
     return dot / (left_norm * right_norm)
+
+
+def _check_features(native, reference, precision: str) -> tuple[float, float]:
+    """Assert the gate of ``precision`` on the real rows; return max abs and cosine."""
+    assert len(native) == len(reference)
+    worst = max(max(abs(a - b) for a, b in zip(row, want))
+                for row, want in zip(native, reference))
+    cosine = _cosine([v for row in native for v in row],
+                     [v for row in reference for v in row])
+    assert cosine >= _COSINE_FLOOR, f"{FAMILY} feature cosine {cosine}"
+    tolerance = _FP16_FEATURE_TOLERANCE if precision == "fp16" else _FEATURE_TOLERANCE
+    assert worst <= tolerance, (
+        f"{FAMILY} {precision} features differ from the reference by {worst}"
+    )
+    return worst, cosine
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
@@ -279,15 +316,88 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     reference = _reference_features(model_dir, expected_ids,
                                     int(manifest["max_sequence_length"]))
 
-    worst = max(max(abs(a - b) for a, b in zip(row, want))
-                for row, want in zip(native, reference))
-    cosine = _cosine([v for row in native for v in row],
-                     [v for row in reference for v in row])
-    assert cosine >= _COSINE_FLOOR, f"{FAMILY} feature cosine {cosine}"
-    assert worst <= _FEATURE_TOLERANCE, (
-        f"{FAMILY} features differ from the reference by {worst}"
-    )
+    worst, cosine = _check_features(native, reference, manifest["precision"])
     print(
-        f"{FAMILY} parity: {shape[0]} tokens x {shape[1]} features, "
+        f"{FAMILY} {manifest['precision']} parity: {shape[0]} tokens x {shape[1]} features, "
         f"feature maxabs {worst:.3e}, cosine {cosine:.8f}"
+    )
+
+
+def _synthetic(seed: int, noise: float, rows: int = 4) -> tuple[list, list]:
+    """Unit-scale reference features, and the same features with uniform noise of ``noise``."""
+    import random
+
+    rng = random.Random(seed)
+    reference = [[rng.gauss(0.0, 1.0) for _ in range(64)] for _ in range(rows)]
+    features = [[value + rng.uniform(-noise, noise) for value in row] for row in reference]
+    return features, reference
+
+
+def test_fp16_gate_takes_fp16_noise_and_fails_a_larger_error() -> None:
+    """fp16-sized noise passes the fp16 gate; one feature off by twice the tolerance fails it."""
+    features, reference = _synthetic(0, 2e-2)
+    features[2][5] = reference[2][5] + 7.8e-2
+    _check_features(features, reference, "fp16")
+    features[1][7] = reference[1][7] + 2 * _FP16_FEATURE_TOLERANCE
+    with pytest.raises(AssertionError, match="fp16 features differ"):
+        _check_features(features, reference, "fp16")
+
+
+def test_fp32_gate_is_unchanged() -> None:
+    """fp32 keeps its own tolerance: fp16-sized noise fails it."""
+    features, reference = _synthetic(0, 4.3e-5)
+    _check_features(features, reference, "fp32")
+    features, reference = _synthetic(0, 2e-2)
+    with pytest.raises(AssertionError, match="fp32 features differ"):
+        _check_features(features, reference, "fp32")
+
+
+def test_fp16_gate_rejects_a_wrong_attention_scale(fp16_case_name: str) -> None:
+    """A correct fp16 engine passes the fp16 gate; one scaled by sqrt(d) instead of sqrt(3d) fails it.
+
+    Both engines are built from the case checkpoint and run in this process on
+    the case passage, padded to the window the way the runtime pads it.
+    """
+    import tensorrt as trt
+    import torch
+
+    from .. import config as config_module, model
+
+    _, manifest, case = CASES[fp16_case_name]
+    assert manifest["precision"] == "fp16"
+    model_dir = _model_dir(manifest)
+    assert torch.cuda.is_available(), f"selected {FAMILY} E2E requires CUDA"
+    window = int(manifest["max_sequence_length"])
+    ids = _reference_ids(model_dir, str(case["prompt"]))
+    reference = _reference_features(model_dir, ids, window)
+    weights = model._open_checkpoint(model_dir)
+    cfg = config_module.resolve(model_dir, weights, model._prefix(weights))
+
+    input_ids = torch.zeros(window, dtype=torch.int32, device="cuda")
+    input_ids[: len(ids)] = torch.tensor(ids, dtype=torch.int32)
+    attention_mask = torch.zeros(window, dtype=torch.int32, device="cuda")
+    attention_mask[: len(ids)] = 1
+
+    def run(build_cfg) -> list[list[float]]:
+        plan = model.build_engine(weights, build_cfg, seq_len=window, precision="fp16")
+        engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
+        context = engine.create_execution_context()
+        hidden = torch.empty((window, cfg["hidden_size"]), dtype=torch.float32, device="cuda")
+        for name, tensor in (("input_ids", input_ids), ("attention_mask", attention_mask),
+                             ("last_hidden_state", hidden)):
+            context.set_tensor_address(name, tensor.data_ptr())
+        context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+        torch.cuda.synchronize()
+        return hidden[: len(ids)].cpu().tolist()
+
+    worst, _ = _check_features(run(cfg), reference, "fp16")
+    broken = run(dict(cfg, scale_factor=1))
+    broken_worst = max(max(abs(a - b) for a, b in zip(row, want))
+                       for row, want in zip(broken, reference))
+    assert broken_worst > _FP16_FEATURE_TOLERANCE
+    with pytest.raises(AssertionError):
+        _check_features(broken, reference, "fp16")
+    print(
+        f"{FAMILY} fp16 gate: correct maxabs {worst:.3e}; sqrt(d) scale maxabs "
+        f"{broken_worst:.3e}"
     )
