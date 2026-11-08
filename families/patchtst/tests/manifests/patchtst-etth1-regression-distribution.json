@@ -4,7 +4,7 @@
   "hf_revision": "d5ef731ed80ffcd2f0a3262138b1009bbcedb2c4",
   "bundle": "patchtst-etth1-regression-distribution.bundle",
   "family": "patchtst",
-  "task": "time_series_forecast",
+  "task": "series_to_regression_distribution",
   "precision": "fp16",
   "testcases": [
     {
