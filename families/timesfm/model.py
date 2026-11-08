@@ -68,6 +68,16 @@ def _load_all_tensors(
                     and (bias_selector in fp32_layers_set or not name.endswith(".bias"))
                     and not name.endswith(".self_attn.k_proj.bias")
                 )
+                # These blocks consume the unbounded normalized input and
+                # residual stream, so their weights and biases stay FP32.
+                or name.startswith("decoder.input_ff_layer.")
+                or name.startswith("horizon_ff_layer.")
+                # Avoid quantizing the embedding added to the FP32 residual
+                # stream before the first decoder normalization.
+                or name.startswith("decoder.freq_emb.")
+                # The first decoder update is sensitive to projection and
+                # affine rounding, especially for short masked histories.
+                or name.startswith("decoder.layers.0.")
                 or name.endswith("layer_norm.weight")
                 or name.endswith("layer_norm.bias")
                 or name.endswith("layernorm.weight")
@@ -232,17 +242,21 @@ def _add_padding_mask(
     *,
     num_patches: int,
     num_heads: int,
+    precision: str,
 ) -> tuple[trt.ITensor, trt.ITensor]:
     patched_padding = network.add_reduce(
         patched_pads, trt.ReduceOperation.MIN, 1 << 2, keep_dims=False
     ).get_output(0)
     pad_shuf = network.add_shuffle(patched_padding)
     pad_shuf.reshape_dims = (1, 1, 1, num_patches)
-    neg = add_scalar(network, (1, 1, 1, 1), -1.0e9)
+    # Padding and causal penalties can overlap. Keep their sum finite in
+    # FP16 as well as FP32 when TensorRT lowers the attention graph.
+    penalty = -float(np.finfo(np.float16).max) / 2 if precision == "fp16" else -1.0e9
+    neg = add_scalar(network, (1, 1, 1, 1), penalty)
     pad_mask = network.add_elementwise(
         pad_shuf.get_output(0), neg, trt.ElementWiseOperation.PROD
     ).get_output(0)
-    causal = np.triu(np.ones((num_patches, num_patches), dtype=np.float32), k=1) * -1.0e9
+    causal = np.triu(np.ones((num_patches, num_patches), dtype=np.float32), k=1) * penalty
     causal_t = graph_ops.add_constant(
         network,
         (1, 1, num_patches, num_patches),
@@ -305,18 +319,37 @@ def _add_decoder_layer(
     qh = _heads_from_rows(network, q, num_heads=num_heads, head_dim=head_dim, seq_len=num_patches)
     kh = _heads_from_rows(network, k, num_heads=num_heads, head_dim=head_dim, seq_len=num_patches)
     vh = _heads_from_rows(network, v, num_heads=num_heads, head_dim=head_dim, seq_len=num_patches)
+    # Query scaling and probability arithmetic need FP32 even when the
+    # projections use FP16. Preserve the finite mask for padded query rows.
+    if qh.dtype != trt.float32:
+        qh = network.add_cast(qh, trt.float32).get_output(0)
+        kh = network.add_cast(kh, trt.float32).get_output(0)
+        vh = network.add_cast(vh, trt.float32).get_output(0)
     scale = _softplus_np(weights[f"{prefix}.self_attn.scaling"].astype(np.float32))
     scale = scale * (1.442695041 / np.sqrt(float(head_dim)))
     scale_t = graph_ops.add_constant(
         network,
         (1, 1, 1, head_dim),
         scale.reshape(1, 1, 1, head_dim),
-        dtype=(np.float16 if qh.dtype == trt.float16 else np.float32),
+        dtype=np.float32,
     )
     qh = network.add_elementwise(qh, scale_t, trt.ElementWiseOperation.PROD).get_output(0)
-    if attn_mask.dtype != qh.dtype:
-        attn_mask = network.add_cast(attn_mask, qh.dtype).get_output(0)
-    ctx = graph_ops.add_attention_core(network, qh, kh, vh, causal=False, mask=attn_mask, scale=1.0)
+    if precision == "fp16":
+        scores = network.add_matrix_multiply(
+            qh, trt.MatrixOperation.NONE, kh, trt.MatrixOperation.TRANSPOSE
+        ).get_output(0)
+        scores = network.add_elementwise(
+            scores, attn_mask, trt.ElementWiseOperation.SUM
+        ).get_output(0)
+        probabilities = network.add_softmax(scores)
+        probabilities.axes = 1 << 3
+        ctx = network.add_matrix_multiply(
+            probabilities.get_output(0), trt.MatrixOperation.NONE, vh, trt.MatrixOperation.NONE
+        ).get_output(0)
+    else:
+        ctx = graph_ops.add_attention_core(
+            network, qh, kh, vh, causal=False, mask=attn_mask, scale=1.0
+        )
     ctx_rows = _rows_from_heads(network, ctx, hidden_size=hidden_size, seq_len=num_patches)
     attn_out = add_linear(
         network,
@@ -325,6 +358,8 @@ def _add_decoder_layer(
         weights.get(f"{prefix}.self_attn.o_proj.bias"),
         precision=precision,
     )
+    if attn_out.dtype != residual.dtype:
+        attn_out = network.add_cast(attn_out, residual.dtype).get_output(0)
     hidden = network.add_elementwise(residual, attn_out, trt.ElementWiseOperation.SUM).get_output(0)
 
     mlp_norm = graph_ops.add_layer_norm_native(
@@ -361,6 +396,8 @@ def _add_decoder_layer(
     if keep_t.dtype != mlp.dtype:
         keep_t = network.add_cast(keep_t, mlp.dtype).get_output(0)
     mlp = network.add_elementwise(mlp, keep_t, trt.ElementWiseOperation.PROD).get_output(0)
+    if mlp.dtype != hidden.dtype:
+        mlp = network.add_cast(mlp, hidden.dtype).get_output(0)
     return network.add_elementwise(hidden, mlp, trt.ElementWiseOperation.SUM).get_output(0)
 
 
@@ -381,9 +418,6 @@ def _build_timesfm_network(
     horizon = int(raw.get("horizon_length", 128))
     quantile_count = len(raw.get("quantiles", []))
     num_layers = int(raw.get("num_hidden_layers", 1))
-    input_selector = num_layers
-    frequency_selector = num_layers + 1
-    horizon_selector = num_layers + 2
     bias_selector = num_layers + 3
     fp32_layers = frozenset(int(layer) for layer in raw.get("_fp32_layers", ()))
     invalid_fp32_layers = sorted(
@@ -480,37 +514,33 @@ def _build_timesfm_network(
         concat.get_output(0),
         weights,
         prefix="decoder.input_ff_layer",
-        precision=("fp32" if precision == "fp16" and input_selector in fp32_layers else precision),
+        # First-patch normalization can exceed FP16's range even for finite,
+        # ordinary-sized histories. Preserve that range without clipping.
+        precision="fp32",
     )
 
-    frequency_precision = (
-        "fp32" if precision == "fp16" and frequency_selector in fp32_layers else precision
-    )
-    frequency_dtype = np.float16 if frequency_precision == "fp16" else np.float32
     freq_w = graph_ops.add_constant(
         network,
         tuple(weights["decoder.freq_emb.weight"].shape),
         weights["decoder.freq_emb.weight"],
-        dtype=frequency_dtype,
+        dtype=np.float32,
     )
     freq_emb = network.add_gather(freq_w, freq, 0).get_output(0)
     freq_shuf = network.add_shuffle(freq_emb)
     freq_shuf.reshape_dims = (1, 1, hidden_size)
     freq_t = freq_shuf.get_output(0)
-    if frequency_precision == "fp32" and hidden.dtype != trt.float32:
-        hidden = network.add_cast(hidden, trt.float32).get_output(0)
-    elif freq_t.dtype != hidden.dtype:
-        freq_t = network.add_cast(freq_t, hidden.dtype).get_output(0)
     hidden = network.add_elementwise(hidden, freq_t, trt.ElementWiseOperation.SUM).get_output(0)
 
     patched_padding, attn_mask = _add_padding_mask(
-        network, patched_pads, num_patches=num_patches, num_heads=num_heads
+        network, patched_pads, num_patches=num_patches, num_heads=num_heads, precision=precision
     )
     for layer_idx in range(num_layers):
-        layer_precision = "fp32" if precision == "fp16" and layer_idx in fp32_layers else precision
-        layer_dtype = trt.float16 if layer_precision == "fp16" else trt.float32
-        if hidden.dtype != layer_dtype:
-            hidden = network.add_cast(hidden, layer_dtype).get_output(0)
+        layer_precision = (
+            "fp32" if precision == "fp16" and (layer_idx == 0 or layer_idx in fp32_layers)
+            else precision
+        )
+        # The residual stream stays FP32. Each projection casts its bounded
+        # normalization output to the requested matrix precision itself.
         hidden = _add_decoder_layer(
             network,
             hidden,
@@ -530,9 +560,7 @@ def _build_timesfm_network(
         last_hidden,
         weights,
         prefix="horizon_ff_layer",
-        precision=(
-            "fp32" if precision == "fp16" and horizon_selector in fp32_layers else precision
-        ),
+        precision="fp32",
     )
     full = network.add_shuffle(forecast)
     full.reshape_dims = (1, horizon, quantile_count + 1)
@@ -582,8 +610,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config = ModelConfig.from_dir(model_dir)
     if "timesfm" not in config.model_type.lower().replace("_", ""):
         raise ValueError(f"TimesFM checkpoint has unexpected model_type {config.model_type!r}")
-    if request.precision != "fp32":
-        raise ValueError("TimesFM currently requires precision='fp32'")
+    if request.precision not in {"fp32", "fp16"}:
+        raise ValueError("TimesFM supports only fp32 and fp16 builds")
     if request.max_sequence_length is not None:
         raise ValueError("TimesFM derives context_length from its checkpoint")
     if request.quantization is not None:
@@ -595,14 +623,14 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     layers = int(config.raw.get("num_hidden_layers", 1))
     weights = _load_all_tensors(
         model_dir,
-        precision="fp32",
+        precision=request.precision,
         fp32_layers=tuple(config.raw["_fp32_layers"]),
         num_layers=layers,
     )
     plan = _build_timesfm_network(
         config,
         weights,
-        precision="fp32",
+        precision=request.precision,
         verbose=request.verbose,
     )
     context_length = int(config.raw.get("context_length", 0))

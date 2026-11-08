@@ -1,0 +1,6 @@
+{
+  "threshold_overrides": {
+    "max_pointwise_error": 0.007,
+    "relative_l2": 0.004
+  }
+}

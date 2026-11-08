@@ -1,0 +1,33 @@
+{
+  "name": "timesfm-2.0-500m-official-fp16",
+  "hf_id": "google/timesfm-2.0-500m-pytorch",
+  "hf_revision": "dc2443792ce5516872b89b37cf1bc058c3bf0c10",
+  "bundle": "timesfm-2.0-500m-official-fp16.bundle",
+  "family": "timesfm",
+  "task": "time_series_forecast",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "timesfm-2.0-500m-official-fp16",
+      "premerge": true,
+      "inputs": {
+        "past_values": [
+          0.05,
+          0.15,
+          0.3,
+          0.5,
+          0.65,
+          0.8,
+          0.95,
+          1.1,
+          1.18,
+          1.24,
+          1.28,
+          1.31
+        ],
+        "frequency": 2
+      }
+    }
+  ],
+  "tensor_parallel_size": 1
+}
