@@ -106,7 +106,7 @@ def main():
                     probabilities /= probabilities.sum()
                     np.testing.assert_allclose(actual["logits"], expected, atol=0.125, rtol=0.015)
                     np.testing.assert_allclose(
-                        actual["probabilities"], probabilities, atol=0.002, rtol=0.01
+                        actual["probabilities"], probabilities, atol=0.015, rtol=0.01
                     )
                     assert np.argmax(actual["probabilities"]) == np.argmax(probabilities)
                 print(

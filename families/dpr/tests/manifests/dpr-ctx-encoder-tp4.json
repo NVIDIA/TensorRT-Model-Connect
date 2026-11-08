@@ -4,7 +4,7 @@
   "hf_revision": "bb21a3c2b1656d60c6a8e920283bc40dabddadb8",
   "bundle": "dpr-ctx-encoder-tp4.bundle",
   "family": "dpr",
-  "task": "encoding",
+  "task": "text_to_pooled_features",
   "testcases": [
     {
       "name": "dpr-ctx-encoder-tp4",

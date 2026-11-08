@@ -72,6 +72,8 @@ A suite with `base: catalog` overrides the profile's catalog request with its da
 For a profile with `candidate.benchmark_sequence_length`, the build counts the prepared
 gold-suite prompts with its pinned tokenizer and uses their maximum length plus the configured
 `extra_tokens`. Qwen3-Embedding reserves one token for EOS and four for runtime tokenizer count differences.
+EmbeddingGemma2 reserves none: its runtime tokenizer counts every benchmark prompt as Transformers does, BOS and
+EOS included.
 The evidence is written to
 `artifacts/build/benchmark-capacity.json`; request truncation and accuracy tolerances do not change.
 Dataset or tokenizer failures stop capacity planning rather than falling back to the catalog size.
@@ -186,6 +188,20 @@ performance:
 service_metrics: {isl: 96, osl: 32, concurrency: [1, 4], requests: 32}
 ```
 
+### Quantized profiles
+
+A quantized profile (the catalog's `quantization`) is qualified as its model's highest-precision ready profile:
+of the profiles of its family and Task whose names differ only in precision and quantization tokens, the one
+ranked first by fp32, bf16, fp16, then a quantized checkpoint (`qwen35-9b` for `qwen35-9b-nvfp4`;
+`llama-3.1-8b-fp8` for `llama-3.1-8b-nvfp4`, as the catalog has no unquantized Llama 3.1 8B). The profile takes
+that configuration except `candidate` (benchmarks, requests, native adapter, requirements, `trust_remote_code`)
+under its own and answers the benchmarks on that profile's route (chat or completions; the sampling stays its own
+catalog request's), and when its checkpoint is a separate pre-quantized repository, its native reference loads that
+profile's checkpoint. Its candidate stays its own bundle, held to the benchmarks' quantization gates;
+`qualified_as` in the plan names the profile it follows. When the base builds from a prepared
+`candidate.model_directory` that the benchmark depends on, a profile that quantizes the same checkpoint at build
+time names that directory in its own definition (`personaplex-7b-fp8`: the bundle holds the VoiceBench system prompt).
+
 ### Reference environments
 
 A model whose native reference needs more than the serving interpreter declares
@@ -207,6 +223,11 @@ apps/aiperf_qual/setup.sh /path/to/aiperf-venv /path/to/trtmc-venv/bin/python   
 cp config/environments/example.yaml config/environments/<machine>.yaml         # fill in this machine's paths
 trtmc-aiperf-qual doctor --environment config/environments/<machine>.yaml       # paths, packages, GPU, model list
 ```
+
+`setup.sh` installs `apps/perf_serving/requirements.txt` into the serving interpreter, including timm and
+Diffusers for the generic `timm/` classifier and image-generation references. `doctor` reports a serving package
+that the serving interpreter cannot import (missing, or failing on a missing or mismatched dependency), and
+`run-all` does not start until all of them import.
 
 ## Commands
 
@@ -381,7 +402,13 @@ A suite with media and neither `media_root` nor `hf_datasets_cache` configured i
 - New Task: one entry in `config/tasks.yaml`: its gold-labelled benchmarks (`absolute`, defined under
   `benchmarks`, scored by `gold_metrics.py` or an AIPerf grader) and the Perf output check
   (`output_grader`, a comparator in `plugins/trtmc_aiperf_plugins/accuracy.py`).
+- Task renamed by a Task SDK migration (same operation and output): an alias of its old entry in
+  `config/tasks.yaml` (`text_to_pooled_features: *encode`). A ready profile whose Task has no entry is a
+  configuration error that only `plan.json` lists: reports leave it out.
 - Model needing a different input or reference option: `config/models/<profile>.yaml`.
+- Model that cannot be qualified as cataloged (for example a catalog testcase without a prompt):
+  `exclude: <reason>` in `families/<family>/tests/aiperf/<profile>.yaml`. Every machine's model list then
+  excludes it, and the run's `excluded.json` keeps the reason; `run-all --profile` still runs it.
 - Model whose native pipeline the generic adapters cannot run: `families/<family>/reference/adapter.py`
   (an `Adapter(spec, host)` with `invoke(request, artifact_base)`; it imports nothing from the applications and
   reaches the serving mechanics through `host`), named by `reference.adapter`.

@@ -280,6 +280,75 @@ def test_models_are_derived_from_the_catalog_and_task_defaults():
         assert resolve_model("sana-wm-bidirectional", environment, root=root)["reference"]["backend"] == "unsupported"
 
 
+def test_a_family_definition_is_merged_over_config_models(tmp_path):
+    """sana-wm-bidirectional: its native adapter in config/models, its reference build policy in the family's own
+    definition (families/sana_wm/tests/aiperf). The resolved reference has both."""
+    import shutil
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+    from trtmc_aiperf_qual.models import resolve_model
+
+    reference = resolve_model("sana-wm-bidirectional", _environment())["reference"]
+    assert reference["adapter"] == "families/sana_wm/reference/adapter.py" and reference["build_isolation"] is False
+    root = tmp_path / "config"
+    shutil.copytree(CONFIG_ROOT, root)
+    (root / "models/sana-wm-bidirectional.yaml").unlink()
+    alone = resolve_model("sana-wm-bidirectional", _environment(), root=root)["reference"]
+    assert "adapter" not in alone and alone["build_isolation"] is False
+
+
+def test_task_sdk_migrations_keep_their_tasks_qualification():
+    """Encoders migrated to text_to_pooled_features, Bark to text_to_audio and the eagle_vlm reranker to
+    text_query_documents_to_relevance keep their old benchmarks, and a profile's own suites still replace them
+    (dpr-ctx-encoder)."""
+    from trtmc_aiperf_qual.models import resolve_model
+
+    for profile in ("fnet-base", "deberta-base", "distilbert-base-uncased"):
+        model = resolve_model(profile, _environment())
+        assert (model["task"], model["operation"]) == ("text_to_pooled_features", "encode")
+        assert [item["suite"] for item in model["absolute"]] == ["encoder-parity"]
+    dpr = resolve_model("dpr-ctx-encoder", _environment())
+    assert [item["suite"] for item in dpr["absolute"]] == ["scifact-retrieval", "stsb"]
+    bark = resolve_model("bark-small", _environment())
+    assert (bark["task"], bark["operation"]) == ("text_to_audio", "generate_audio")
+    assert [item["check"] for item in bark["supplementary"]] == ["tts_intelligibility"]
+    assert bark["performance"]["output_grader"] == "parity_audio"
+    rerank = resolve_model("nemotron-rerank-vl-1b-v2", _environment())
+    assert (rerank["task"], rerank["operation"]) == ("text_query_documents_to_relevance", "rerank")
+    assert [item["suite"] for item in rerank["absolute"]] == ["scifact-rerank"]
+    assert rerank["performance"]["output_grader"] == "parity_scores"
+
+
+def test_image_to_boxes_keeps_object_detection_qualification():
+    """The YOLO families migrate object_detection to image_to_boxes; detect and its benchmarks stay the same."""
+    import yaml
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+
+    tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
+    assert tasks["image_to_boxes"] == tasks["object_detection"]
+
+
+def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():
+    """A ready profile whose Task has no defaults is a configuration error that reports leave out, so a Task SDK
+    rename drops its profiles without a trace: alias the old entry in config/tasks.yaml, or state the gap here."""
+    import yaml
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+    from trtmc_aiperf_qual.selection import catalog
+
+    not_qualified = {  # Tasks no generic native reference or benchmark serves yet
+        "structured_decision": "no generic native adapter for decide",
+        "image_text_to_boxes": "no generic native adapter for detect_prompted",
+        "text_to_token_features": "the generic encode reference returns the first token's features only",
+        "image_to_token_and_pooled_features": "no image feature benchmark outside the families that state one",
+        "text_to_embedding": "query and document roles; the generic embed reference mean-pools",
+        "speech_transcription": "the generic transcribe reference loads Whisper-style speech-seq2seq models only",
+    }
+    tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
+    assert {profile.task for profile in catalog(REPOSITORY)} - set(tasks) == set(not_qualified)
+
+
 def test_top1_near_tie_tolerance_is_opt_in():
     from trtmc_aiperf_plugins.accuracy import compare_top1
 
@@ -507,6 +576,71 @@ def test_quantized_candidates_get_the_benchmarks_quantization_gate():
     assert fp8["candidate"]["quantization"] == "fp8"
     assert [(item["suite"], item["gate"]) for item in fp8["absolute"]] == [
         ("mmlu-0shot", {"margin": 2.0})]
+
+
+def test_a_quantized_profile_is_qualified_as_its_models_highest_precision_profile(tmp_path):
+    from types import SimpleNamespace
+
+    from trtmc_aiperf_qual.models import qualified_as
+
+    def entry(name, family="f", task="t", **manifest):
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps({"name": name, **manifest}))
+        return SimpleNamespace(model=SimpleNamespace(family=family, task=task, manifest_path=path))
+
+    entries = {"m-nvfp4": entry("m-nvfp4", precision="fp16", quantization="nvfp4"),
+               "m-fp8": entry("m-fp8", precision="fp16", quantization="fp8"),
+               "m": entry("m", precision="fp16"), "m-bf16": entry("m-bf16", precision="bf16"),
+               "m-topp": entry("m-topp", precision="fp32"),  # another model: its name differs beyond precision
+               "m-fp32": entry("m-fp32", task="other", precision="fp32"),  # another Task
+               "x-fp8": entry("x-fp8", precision="fp16", quantization="fp8"),
+               "y-nvfp4": entry("y-nvfp4", precision="fp16", quantization="nvfp4"),
+               "y-fp8": entry("y-fp8", precision="fp16", quantization="fp8")}
+    assert qualified_as("m-nvfp4", entries) == qualified_as("m-fp8", entries) == "m-bf16"
+    assert qualified_as("m", entries) == "m"  # not quantized: its own configuration
+    assert qualified_as("x-fp8", entries) == "x-fp8"  # nothing ranks higher
+    assert qualified_as("y-nvfp4", entries) == "y-fp8"  # the highest precision there is, quantized too
+
+
+def test_quantized_profiles_take_their_bases_native_reference_and_benchmarks():
+    from trtmc_aiperf_qual.models import resolve_model
+
+    environment = _environment()
+    # A pre-quantized checkpoint: the native reference loads the base's checkpoint, in the base's environment.
+    fp8, base = resolve_model("nemotron-h-nano-9b-fp8", environment), resolve_model("nemotron-h-nano-9b", environment)
+    manifest = json.loads((REPOSITORY / "families/nemotron_h/tests/manifests/nemotron-h-nano-9b.json").read_text())
+    assert fp8["qualified_as"] == "nemotron-h-nano-9b" and "qualified_as" not in base
+    assert (fp8["reference"]["model"], fp8["reference"]["revision"]) == (manifest["hf_id"], manifest["hf_revision"])
+    assert fp8["reference"]["requirements"] == base["reference"]["requirements"] and fp8["reference"]["trust_remote_code"]
+    assert fp8["candidate"]["checkpoint"] == "nvidia/NVIDIA-Nemotron-Nano-9B-v2-FP8"
+    assert [(item["suite"], item["endpoint"]) for item in fp8["absolute"]] == [
+        (item["suite"], item["endpoint"]) for item in base["absolute"]]
+    assert [item["gate"] for item in fp8["absolute"]] == [{"margin": 2.0}]  # the quantization gate
+    # Its own catalog request is a completion: it still answers the benchmarks on its base's chat route.
+    qwen = resolve_model("qwen3-0.6b-fp8", environment)
+    assert [item["endpoint"] for item in qwen["absolute"]] == [
+        item["endpoint"] for item in resolve_model("qwen3-0.6b-fp16", environment)["absolute"]] == ["chat"]
+    # The same checkpoint quantized by TRTMC: the base's own native pipeline on the profile's pinned checkpoint.
+    canary = resolve_model("canary-1b-v2-fp8", environment)
+    assert canary["qualified_as"] == "canary-1b-v2" and "model" not in canary["reference"]
+    assert canary["reference"]["adapter"] == "families/canary/reference/adapter.py"
+    assert canary["reference"]["revision"] == canary["candidate"]["revision"]
+    # The base's candidate settings stay its own. PersonaPlex FP8 quantizes its base's checkpoint at build time and
+    # names the base's prepared model directory itself, so both bundles hold the benchmark's system prompt.
+    personaplex, base = resolve_model("personaplex-7b-fp8", environment), resolve_model("personaplex-7b", environment)
+    assert personaplex["reference"]["adapter"] == base["reference"]["adapter"]
+    assert personaplex["candidate"]["bundle"] == "personaplex-7b-fp8/personaplex-7b-fp8.bundle"
+    assert personaplex["candidate"]["model_directory"] == base["candidate"]["model_directory"]
+    assert personaplex["candidate"]["quantization"] == "fp8"
+    # Without an unquantized profile, the highest precision there is.
+    nvfp4 = resolve_model("llama-3.1-8b-nvfp4", environment)
+    assert (nvfp4["qualified_as"], nvfp4["reference"]["model"]) == ("llama-3.1-8b-fp8", "nvidia/Llama-3.1-8B-Instruct-FP8")
+    assert "qualified_as" not in resolve_model("llama-3.1-8b-fp8", environment)
+    # The only profile of its model: its definition names the BF16 original and an environment that loads it.
+    muse = resolve_model("muse-glimmer-nvfp4", environment)
+    assert "qualified_as" not in muse and muse["reference"]["model"] == "meta-models/Muse-Glimmer-30B"
+    assert muse["reference"]["revision"] == "cec94fcfd6512f2cfe708138c32533b346ea4f69"
+    assert muse["reference"]["requirements"] == "families/muse_glimmer/tests/requirements.txt"
 
 
 def test_stable_diffusion_uses_explicit_controls_on_its_actual_request(tmp_path):

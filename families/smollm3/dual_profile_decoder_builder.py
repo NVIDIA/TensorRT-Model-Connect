@@ -22,6 +22,8 @@ from .native_kv_attention_builder import (
 
 from . import graph_ops
 from . import graph_blocks
+from .quantization import append_build_route, configure_fp8_build
+
 # Runtime import: the schedule is resolved while the graph is built, so this
 # cannot live under TYPE_CHECKING the way the annotation-only names do.
 from .config import resolve_rope_layer_schedule
@@ -36,10 +38,10 @@ def _disable_scatter_nd_fusion(trt_config) -> None:
 
     With the fused reshape/transpose/scatter K/V-cache kernel, TensorRT 11.4 builds the
     prefill plan but cannot create an execution context for it (CUDA error 500).
-    The route is set only when this TensorRT build lists the knob.
+    The route is added only when this TensorRT build lists the knob, next to any knob already set
+    (the FP8 dual-GEMM knob).
     """
-    if _SCATTER_ND_KNOB in getattr(trt_config, "all_build_routes", ""):
-        trt_config.build_route = f"-{_SCATTER_ND_KNOB}=off"
+    append_build_route(trt_config, _SCATTER_ND_KNOB)
 
 
 if TYPE_CHECKING:
@@ -86,6 +88,7 @@ def build_dual_profile_decoder_engine(
     profile_mode: str = "dual_profile",
     native_kv_cache: bool = False,
     runtime_sized_kv_cache: bool = False,
+    quant_ctx=None,
 ) -> bytes:
     """Build a prefill/decode-capable dynamic-Sq decoder engine.
 
@@ -112,6 +115,9 @@ def build_dual_profile_decoder_engine(
 
     ``runtime_sized_kv_cache`` makes the standard cache row dimension dynamic
     from one row through the bundle capacity.
+
+    ``quant_ctx`` routes the q/k/v/gate/up/down projections through FP8 Q/DQ
+    (see ``quantization.py``); ``None`` builds the unquantized graph.
     """
     _supports_config(config, weights)
     if profile_mode not in ("dual_profile", "prefill", "decode"):
@@ -163,6 +169,7 @@ def build_dual_profile_decoder_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
+    configure_fp8_build(trt_config, quant_ctx)
     # Native full-context SmolLM3 builds can require substantial tactic workspace
     # while TensorRT compiles the primitive attention graph. This is build-time
     # scratch only (it is not serialized as runtime KV memory), and the limit
@@ -344,7 +351,7 @@ def build_dual_profile_decoder_engine(
     # Attention scale.
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
 
-    matmul = graph_blocks.make_matmul_fn(network, work_np_dtype)
+    matmul = graph_blocks.make_matmul_fn(network, work_np_dtype, quant_ctx)
 
     # ---- Embedding -------------------------------------------------------
     emb = network.add_gather(embedding_table, token_id, 0)
@@ -600,6 +607,7 @@ def build_dual_profile_decoder_engine(
                 mlp_size=mlp_size,
                 activation=activation,
                 dtype=work_np_dtype,
+                quant_ctx=quant_ctx,
             )
         else:
             mlp_out = graph_blocks.add_swiglu_mlp(
@@ -610,6 +618,7 @@ def build_dual_profile_decoder_engine(
                 hidden_size=hidden,
                 mlp_size=mlp_size,
                 dtype=work_np_dtype,
+                quant_ctx=quant_ctx,
             )
 
         # Final residual.

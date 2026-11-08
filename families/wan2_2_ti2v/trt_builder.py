@@ -51,14 +51,9 @@ def _qualified_fp8_scale_names(profile) -> tuple[set[str], set[str]]:
             f"blocks.{index}.ffn.net.2",
         )
     }
-    cross_qo = {
-        name
-        for index in range(profile.num_layers)
-        for name in (
-            f"blocks.{index}.attn2.to_q",
-            f"blocks.{index}.attn2.to_out.0",
-        )
-    }
+    # attn2.to_out.0 stays BF16: TensorRT 11.4 cannot compile an FP8 Quantize
+    # on the output of the fused cross-attention.
+    cross_qo = {f"blocks.{index}.attn2.to_q" for index in range(profile.num_layers)}
     return ffn, cross_qo
 
 
@@ -83,7 +78,7 @@ def _split_qualified_fp8_scales(
 
     raise ValueError(
         "Wan2.2 FP8 scales must contain either the complete FFN map or the "
-        "complete FFN+cross-Q/O map; "
+        "complete FFN+cross-Q map; "
         f"missing_ffn={sorted(expected_ffn - provided)}, "
         f"missing_cross_qo={sorted(expected_cross_qo - provided)}, "
         f"unexpected={sorted(provided - expected_ffn - expected_cross_qo)}"

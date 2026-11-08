@@ -54,6 +54,24 @@ def _add_layernorm_no_bias(
     return graph_ops.add_layer_norm_native(network, inp, hidden_size, gamma, beta, eps, dtype=dtype)
 
 
+def _quantized_input(network, activation, quant_ctx, module):
+    """Shared Quantize/Dequantize of ``module``'s input, or None when it stays 16-bit."""
+    if quant_ctx is None or not quant_ctx.should_quantize(module):
+        return None
+    return quant_ctx.quantize_input(network, activation, module)
+
+
+def _projection(
+    network, activation, dequantized, in_width, out_width, weight, *, dtype, quant_ctx, module, part
+):
+    """``activation @ weight``; FP8 when ``dequantized`` holds the module's Q/DQ input."""
+    if dequantized is None:
+        return graph_ops.add_matmul_rhs_constant(
+            network, activation, in_width, out_width, weight, dtype=dtype
+        )
+    return quant_ctx.matmul(network, dequantized, module, part)
+
+
 if TYPE_CHECKING:
     from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
@@ -162,12 +180,12 @@ class _ModernBertModel:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             parallel.validate()
+            if quant_ctx is not None:
+                raise ValueError("ModernBERT tensor-parallel builds do not support quantization")
             if precision != "fp32":
                 raise NotImplementedError(
                     "ModernBERT tensor-parallel builds require fp32 precision"
                 )
-            if quant_ctx is not None:
-                raise ValueError("ModernBERT tensor-parallel builds do not support quantization")
             from .parallel import build_tp_modernbert_engine
 
             return build_tp_modernbert_engine(
@@ -196,6 +214,8 @@ class _ModernBertModel:
             work_np_dtype, work_trt_dtype = np.float32, trt.float32
         else:
             raise ValueError(f"Unsupported ModernBERT precision: {precision}")
+        if quant_ctx is not None and precision != "fp16":
+            raise ValueError(f"ModernBERT FP8 needs precision fp16, got {precision!r}")
 
         attention_contract = resolve_attention_contract(config)
         layer_types = attention_contract.layer_types
@@ -208,6 +228,8 @@ class _ModernBertModel:
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 1
         trt_config.clear_flag(trt.BuilderFlag.TF32)
+        if quant_ctx is not None:
+            quant_ctx.configure_build(trt_config)
 
         def work_constant(shape, values):
             tensor = graph_ops.add_constant(network, shape, values, dtype=work_np_dtype)
@@ -305,14 +327,22 @@ class _ModernBertModel:
                 attn_input = hidden_state
 
             # QKV projections
-            q = graph_ops.add_matmul_rhs_constant(
-                network, attn_input, hidden, hidden, weights[f"{prefix}.w_q"], dtype=work_np_dtype
-            )
-            k = graph_ops.add_matmul_rhs_constant(
-                network, attn_input, hidden, hidden, weights[f"{prefix}.w_k"], dtype=work_np_dtype
-            )
-            v = graph_ops.add_matmul_rhs_constant(
-                network, attn_input, hidden, hidden, weights[f"{prefix}.w_v"], dtype=work_np_dtype
+            qkv_module = f"layers.{layer_idx}.attn.Wqkv"
+            qkv_input = _quantized_input(network, attn_input, quant_ctx, qkv_module)
+            q, k, v = (
+                _projection(
+                    network,
+                    attn_input,
+                    qkv_input,
+                    hidden,
+                    hidden,
+                    weights[f"{prefix}.w_{part}"],
+                    dtype=work_np_dtype,
+                    quant_ctx=quant_ctx,
+                    module=qkv_module,
+                    part=part,
+                )
+                for part in ("q", "k", "v")
             )
 
             # RoPE
@@ -370,32 +400,38 @@ class _ModernBertModel:
             )
 
             # GeGLU: act(input) * gate
-            inp_proj = graph_ops.add_matmul_rhs_constant(
-                network,
-                mlp_input,
-                hidden,
-                intermediate,
-                weights[f"{prefix}.w_mlp_input"],
-                dtype=work_np_dtype,
-            )
-            gate_proj = graph_ops.add_matmul_rhs_constant(
-                network,
-                mlp_input,
-                hidden,
-                intermediate,
-                weights[f"{prefix}.w_mlp_gate"],
-                dtype=work_np_dtype,
+            wi_module = f"layers.{layer_idx}.mlp.Wi"
+            wi_input = _quantized_input(network, mlp_input, quant_ctx, wi_module)
+            inp_proj, gate_proj = (
+                _projection(
+                    network,
+                    mlp_input,
+                    wi_input,
+                    hidden,
+                    intermediate,
+                    weights[f"{prefix}.w_mlp_{part}"],
+                    dtype=work_np_dtype,
+                    quant_ctx=quant_ctx,
+                    module=wi_module,
+                    part=part,
+                )
+                for part in ("input", "gate")
             )
             inp_act = graph_ops.add_gelu_erf(network, inp_proj, dtype=work_np_dtype)
             gated = network.add_elementwise(inp_act, gate_proj, trt.ElementWiseOperation.PROD)
 
-            down = graph_ops.add_matmul_rhs_constant(
+            down_module = f"layers.{layer_idx}.mlp.Wo"
+            down = _projection(
                 network,
                 gated.get_output(0),
+                _quantized_input(network, gated.get_output(0), quant_ctx, down_module),
                 intermediate,
                 hidden,
                 weights[f"{prefix}.w_down"],
                 dtype=work_np_dtype,
+                quant_ctx=quant_ctx,
+                module=down_module,
+                part="down",
             )
 
             res2 = network.add_elementwise(hidden_state, down, trt.ElementWiseOperation.SUM)
@@ -520,8 +556,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("ModernBERT max_sequence_length exceeds checkpoint capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("ModernBERT has no family-owned quantized build")
+    quantization = None if request.quantization in {None, "none"} else request.quantization
+    if quantization is not None and quantization != "fp8":
+        raise NotImplementedError(
+            f"ModernBERT supports quantization fp8 or none; got {request.quantization!r}"
+        )
+    if quantization is not None and precision != "fp16":
+        raise ValueError(f"ModernBERT FP8 needs precision fp16, got {precision!r}")
     if request.fp32_layers:
         raise NotImplementedError("ModernBERT does not expose mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -530,10 +571,19 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
     parallel.validate()
+    if quantization is not None and parallel.enabled:
+        raise ValueError("ModernBERT tensor-parallel builds do not support quantization")
     if parallel.enabled and precision != "fp32":
         raise NotImplementedError("ModernBERT tensor-parallel builds require fp32 precision")
+    if quantization is not None:
+        from .quantization import calibrate_modernbert, refuse_quantized_checkpoint
+
+        refuse_quantized_checkpoint(config, _open_safetensors(model_dir).tensor_map)
     model = _ModernBertModel()
     weights = model.load_weights(str(model_dir), config)
+    quant_ctx = None
+    if quantization is not None:
+        quant_ctx = calibrate_modernbert(config, weights, quantization, precision=precision)
     writer.set_header(family="modernbert", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -553,7 +603,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             parallel_config=parallel,
         )

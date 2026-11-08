@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# The AIPerf native reference of Muse Glimmer, layered on the serving interpreter: Transformers knows the
+# muse_glimmer model type from 5.16.0. Not the family's requirements, so CI keeps its own Transformers.
+transformers==5.22.1

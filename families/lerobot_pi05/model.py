@@ -44,7 +44,8 @@ def _builder(precision: str, verbose: bool):
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     config.builder_optimization_level = 3
-    # The float32 parts (the vision tower in either precision) must be real float32:
+    # The float32 parts (the whole fp32 build; in the bf16 build the vision tower's
+    # residual stream and patch embedding, norm statistics and softmax) must be real float32:
     # TF32 would hide graph error behind a plausible-looking number and drift from
     # the reference, which runs them at full precision.
     config.clear_flag(trt.BuilderFlag.TF32)

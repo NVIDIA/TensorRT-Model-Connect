@@ -51,6 +51,7 @@ import tensorrt as trt
 
 from . import graph_ops
 from . import graph_blocks
+from .quantization import configure_fp8_build
 
 
 if TYPE_CHECKING:
@@ -325,6 +326,7 @@ def build_dual_profile_decoder_engine(
     else:
         work_np_dtype, work_trt_dtype = np.float32, trt.float32
         trt_config.clear_flag(trt.BuilderFlag.TF32)
+    configure_fp8_build(trt_config, quant_ctx)
 
     # ---- Inputs (dynamic Sq) ---------------------------------------------
     token_id = network.add_input("token_id", trt.int32, (-1,))

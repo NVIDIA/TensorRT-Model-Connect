@@ -27,3 +27,17 @@ same bundle. Native CPU contracts cover bindings, masks, pooling, unsupported re
 invalid inputs and engine failures; CPU results do not establish GPU model parity.
 Set `TRTMC_NATIVE_BUILD_DIR` to the CMake build root containing both SDK consumers,
 including when `TRTMC_BINARY` points to a CLI installed from a wheel.
+
+## FP8 (`quantization=fp8`)
+
+FP8 self-quantizes the original checkpoint at build time (TP1, `precision=fp16`
+only; TP plans stay unquantized). Weights get one scale per checkpoint module
+(`max(abs(weight)) / 448`); activations use static per-tensor scales from
+`fp8_activation_scales.json`, calibrated once with `calibrate_fp8_scales.py`
+(ModelOpt `FP8_DEFAULT_CFG`, WikiText-2 training text). Quantized: `attn.Wqkv`,
+`mlp.Wi` and `mlp.Wo` of every layer, except `layers.0.mlp.Wi` and modules whose
+input scale is above 20x the median of their kind (stored as `null`). The
+attention output projection `attn.Wo` stays fp16: TensorRT 11.4 cannot compile an
+FP8 Quantize after the fused attention. Calibrated model configs:
+ModernBERT-base, ModernBERT-large and granite-embedding-small-english-r2; any other
+config raises until it is calibrated.

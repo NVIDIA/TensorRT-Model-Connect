@@ -26,6 +26,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import config as config_module, head_builder, text_builder, vision_builder
+from .quantization import calibrate_owlv2
 
 _SUPPORTED_TASKS = ("image_text_to_boxes",)
 
@@ -90,7 +91,7 @@ def _tokenizer_json(model_dir: Path) -> bytes:
     return tokenizer.backend_tokenizer.to_str().encode("utf-8")
 
 
-def _builder(precision, verbose):
+def _builder(precision, verbose, quant_ctx=None):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -100,6 +101,9 @@ def _builder(precision, verbose):
         # TF32 caps a conv-and-matmul graph near 0.99998 cosine by default,
         # which hides real graph error behind a plausible-looking number.
         config.clear_flag(trt.BuilderFlag.TF32)
+    if quant_ctx is not None:
+        # Keep layer names so the plan inspector shows which kernels run.
+        config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
     return builder, network, config
 
 
@@ -118,8 +122,8 @@ def _as_fp32(network, tensor, name):
     return out
 
 
-def build_vision_engine(weights, cfg, *, precision, verbose=False) -> bytes:
-    builder, network, config = _builder(precision, verbose)
+def build_vision_engine(weights, cfg, *, precision, verbose=False, quant_ctx=None) -> bytes:
+    builder, network, config = _builder(precision, verbose, quant_ctx)
     work_np, work_trt = ((np.float16, trt.float16) if precision == "fp16"
                          else (np.float32, trt.float32))
     vision = cfg["vision"]
@@ -128,11 +132,14 @@ def build_vision_engine(weights, cfg, *, precision, verbose=False) -> bytes:
     source = (pixels if pixels.dtype == work_trt
               else network.add_cast(pixels, work_trt).get_output(0))
 
-    merged = vision_builder.build_features(network, source, weights, vision, dtype=work_np)
+    merged = vision_builder.build_features(network, source, weights, vision, dtype=work_np,
+                                           quant=quant_ctx)
     feats = vision_builder.merge_norm(network, merged, weights, vision, dtype=work_np)
 
-    boxes = head_builder.build_boxes(network, feats, weights, grid=vision["grid"], dtype=work_np)
-    embeds, shift, scale = head_builder.build_class_terms(network, feats, weights, dtype=work_np)
+    boxes = head_builder.build_boxes(network, feats, weights, grid=vision["grid"], dtype=work_np,
+                                     quant=quant_ctx)
+    embeds, shift, scale = head_builder.build_class_terms(network, feats, weights, dtype=work_np,
+                                                          quant=quant_ctx)
     _as_fp32(network, boxes, "pred_boxes")
     _as_fp32(network, embeds, "class_embeds")
     _as_fp32(network, shift, "logit_shift")
@@ -140,13 +147,14 @@ def build_vision_engine(weights, cfg, *, precision, verbose=False) -> bytes:
     return _serialize(builder, network, config, "vision")
 
 
-def build_text_engine(weights, cfg, *, max_text_len, precision, verbose=False) -> bytes:
-    builder, network, config = _builder(precision, verbose)
+def build_text_engine(weights, cfg, *, max_text_len, precision, verbose=False,
+                      quant_ctx=None) -> bytes:
+    builder, network, config = _builder(precision, verbose, quant_ctx)
     work_np = np.float16 if precision == "fp16" else np.float32
     input_ids = network.add_input("input_ids", trt.int32, (max_text_len,))
     eos_index = network.add_input("eos_index", trt.int32, (1,))
     query = text_builder.build_query(network, input_ids, eos_index, weights, cfg["text"],
-                                     dtype=work_np)
+                                     dtype=work_np, quant=quant_ctx)
     _as_fp32(network, query, "query_embeds")
     return _serialize(builder, network, config, "text")
 
@@ -167,8 +175,9 @@ def build(request, writer) -> None:
         raise NotImplementedError("owlv2 does not support context parallelism")
     if request.video_num_frames is not None:
         raise NotImplementedError("owlv2 does not support video_num_frames")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("owlv2 does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"owlv2 supports quantization fp8 or none; got {request.quantization!r}")
     if request.fp32_layers:
         raise NotImplementedError("owlv2 does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -199,12 +208,19 @@ def build(request, writer) -> None:
             raise NotImplementedError(
                 "owlv2 phrase length is fixed at the checkpoint's position table")
 
+    # fp8: the projections are quantized from the original checkpoint, so the weights
+    # above stay as shipped and only the Q/DQ constants of quantized projections are new.
+    quant_ctx = None
+    if request.quantization == "fp8":
+        quant_ctx = calibrate_owlv2(weights, cfg, "fp8")
+
     writer.set_header(family="owlv2", task=request.task, backend=request.backend)
     writer.add_bytes("vision.plan", build_vision_engine(
-        weights, cfg, precision=precision, verbose=bool(request.verbose)))
+        weights, cfg, precision=precision, verbose=bool(request.verbose),
+        quant_ctx=quant_ctx))
     writer.add_bytes("text.plan", build_text_engine(
         weights, cfg, max_text_len=max_text_len, precision=precision,
-        verbose=bool(request.verbose)))
+        verbose=bool(request.verbose), quant_ctx=quant_ctx))
     writer.add_bytes("tokenizer.json", _tokenizer_json(model_dir))
     writer.add_json(
         "runtime.json",

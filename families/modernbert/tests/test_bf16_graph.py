@@ -138,3 +138,36 @@ def test_public_serial_bf16_request_reaches_typed_graph(graph, tmp_path, monkeyp
     encoder.build(request, writer)
     assert engines["engine.plan"] == b"typed-graph"
     assert network.gathers[0].dtype == "bf16"
+
+
+def test_public_fp8_tp_preserves_quantization_rejection(graph, tmp_path):
+    _, encoder, _, _ = graph(1)
+    encoder.build.__globals__["_ModernBertModel"] = lambda: pytest.fail("weights loaded for FP8 TP")
+    (tmp_path / "config.json").write_text(
+        json.dumps({"model_type": "modernbert"}), encoding="utf-8"
+    )
+    request = BuildRequest(
+        model_dir=tmp_path,
+        output_path=tmp_path / "model.bundle",
+        family="modernbert",
+        task="text_to_pooled_features",
+        precision="fp16",
+        quantization="fp8",
+        tensor_parallel_size=2,
+        max_sequence_length=8,
+    )
+    with pytest.raises(ValueError, match="do not support quantization"):
+        encoder.build(request, None)
+
+
+@pytest.mark.parametrize("precision", ["fp32", "fp16", "bf16"])
+def test_direct_tp_preserves_quantization_rejection(graph, precision):
+    _, encoder, _, _ = graph(1)
+    parallel = SimpleNamespace(enabled=True, validate=lambda: None)
+    encoder._ModernBertModel.build_engine.__globals__["normalize_parallel_config"] = lambda _: (
+        parallel
+    )
+    with pytest.raises(ValueError, match="do not support quantization"):
+        encoder._ModernBertModel().build_engine(
+            None, {}, 8, precision=precision, parallel_config=parallel, quant_ctx=object()
+        )

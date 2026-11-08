@@ -432,10 +432,10 @@ class _PersonaPlexModel:
         for cb in range(num_codebooks):
             cb_prefix = f"depth_cb{cb}."
             depth_weights = WeightDict()
-            for key, val in weights.items():
-                if key.startswith(cb_prefix):
-                    new_key = key[len(cb_prefix) :]
-                    depth_weights[new_key] = val
+            # Pop rather than copy: this codebook's slice is not read again
+            # by a later iteration or by the embedding/Mimi sections below.
+            for key in [name for name in weights if name.startswith(cb_prefix)]:
+                depth_weights[key[len(cb_prefix) :]] = weights.pop(key)
 
             if verbose:
                 print(
@@ -1498,6 +1498,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 parallel_config=parallel,
             ),
         )
+
+    # The temporal decoder engine(s) are built. build_extra_engines never
+    # reads a "temporal."-prefixed key, so drop them now instead of holding
+    # the largest weight slice resident through the depth/Mimi builds too.
+    for key in [name for name in weights if name.startswith("temporal.")]:
+        del weights[key]
 
     extras = model.build_extra_engines(
         config,

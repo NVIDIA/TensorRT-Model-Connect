@@ -40,6 +40,17 @@ def test_build_uses_the_catalog_manifest_or_a_descriptor_with_build_overrides(tm
     image = Path(descriptor["testcases"][0]["test_image"])
     assert image.is_absolute() and image.is_file()  # catalog assets stay reachable from the descriptor
 
+    # A model directory prepared in the reference environment replaces only the checkpoint: PersonaPlex FP8 builds
+    # its own FP8 manifest from its base's prepared directory.
+    prepared = tmp_path / "env/trtmc-reference/personaplex-model"
+    prepared.mkdir(parents=True)
+    fp8 = resolve_model("personaplex-7b-fp8", environment)
+    command = bundles.build_command(environment, fp8, tmp_path / "fp8", str(tmp_path / "env/bin/python"))
+    descriptor = json.loads(Path(command[command.index("--model") + 1]).read_text())
+    assert (descriptor["name"], descriptor["quantization"], descriptor["precision"]) == (
+        "personaplex-7b-fp8", "fp8", "fp16")
+    assert (descriptor["hf_id"], descriptor["hf_revision"]) == (str(prepared.resolve()), "")
+
 
 def test_ensure_bundle_lets_trtmc_bench_decide_reuse_by_its_build_receipt(tmp_path, monkeypatch):
     environment = Environment({"repo": str(tmp_path), "bundle_root": str(tmp_path / "engines"),
@@ -444,6 +455,31 @@ def test_machine_model_list_excludes_checkpoints_above_the_size_limit():
                          "reason": "checkpoint 54 GiB > models.max_checkpoint_gib 30"}]
 
 
+def test_a_profile_definition_excludes_the_profile_from_every_machines_list():
+    """``exclude: <reason>`` in a profile's own definition: a profile AIPerf cannot qualify as cataloged."""
+    reason = "its catalog testcase has no prompt or image, so no request can be built"
+    declared = selection.Profile("qwen35-moe-gptq-edge", "vision_language_generation", "Qwen/x", None, reason)
+    selected, excluded = selection.select({}, [*CATALOG, declared])
+    assert _names(selected) == _names(CATALOG)
+    assert excluded == [{"profile": "qwen35-moe-gptq-edge", "task": "vision_language_generation", "reason": reason}]
+    # A machine whose list does not include it still records the profile's own reason.
+    _, excluded = selection.select({"include": ["qwen3-0.6b-fp16"]}, [*CATALOG, declared])
+    assert {item["profile"]: item["reason"] for item in excluded}["qwen35-moe-gptq-edge"] == reason
+    declared_here = {profile.name: profile.excluded for profile in selection.catalog(REPOSITORY)}
+    assert declared_here["qwen35-moe-gptq-edge"] == reason and declared_here["qwen3-0.6b-fp16"] is None
+
+
+def test_an_unreadable_profile_definition_is_an_error_of_that_profile_alone(tmp_path):
+    """A malformed definition raises ConfigError, which the catalog listing and a campaign's other profiles survive."""
+    from trtmc_aiperf_qual.models import profile_override
+
+    definition = tmp_path / "families/f/tests/aiperf/p.yaml"
+    definition.parent.mkdir(parents=True)
+    definition.write_text("reference: [unclosed\n")
+    with pytest.raises(ConfigError, match="p.yaml"):
+        profile_override("p", "f", tmp_path, root=tmp_path / "config")
+
+
 @pytest.mark.parametrize("config, message", [
     ({"exclude": [{"profile": "flux-2-dev"}]}, "reason"),
     ({"include": ["qwen3-0.6b-fp61"]}, "matches no ready catalog profile"),
@@ -471,15 +507,18 @@ def test_summary_omits_exclusions_but_keeps_an_actual_result_from_another_host(t
     assert len(json.loads((root / campaign.EXCLUSIONS).read_text())) == 2
 
 
-def test_build_capacity_covers_prepared_benchmark_requests_and_extra_tokens(tmp_path, monkeypatch):
+@pytest.mark.parametrize("profile, extra_tokens", [
+    ("qwen3-embedding-0.6b", 5), ("embeddinggemma2-text-bf16", 0), ("embeddinggemma2-text-fp32", 0)])
+def test_build_capacity_covers_prepared_benchmark_requests_and_extra_tokens(tmp_path, monkeypatch, profile,
+                                                                             extra_tokens):
     from trtmc_aiperf_qual import absolute
     from trtmc_aiperf_qual.models import resolve_model
 
     environment = Environment({"repo": str(REPOSITORY), "bundle_root": str(tmp_path / "engines"),
                                "runtime_root": "/rt", "worker": "/rt/worker", "serve_python": "/py"})
-    model = resolve_model("qwen3-embedding-0.6b", environment)
+    model = resolve_model(profile, environment)
     plans = {"stsb": [{"request": {"prompt": "short"}}],
-             "scifact-retrieval": [{"request": {"prompt": "x" * 256}}]}
+             "scifact-retrieval": [{"request": {"prompt": "x" * 258}}]}  # over the catalog's 256 tokens
     monkeypatch.setattr(absolute, "plan", lambda environment, model, item: plans[item["suite"]])
 
     class Tokenizer:
@@ -490,11 +529,11 @@ def test_build_capacity_covers_prepared_benchmark_requests_and_extra_tokens(tmp_
     monkeypatch.setattr(absolute, "_candidate_tokenizer", lambda model: Tokenizer())
     command = bundles.build_command(environment, model, tmp_path / "build")
     descriptor = json.loads(Path(command[command.index("--model") + 1]).read_text())
-    assert descriptor["max_sequence_length"] == model["candidate"]["max_sequence_length"] == 261
-    assert model["candidate"]["bundle"].startswith("qwen3-embedding-0.6b-benchmark/")
-    assert plans["scifact-retrieval"][0]["request"]["prompt"] == "x" * 256
+    assert descriptor["max_sequence_length"] == model["candidate"]["max_sequence_length"] == 258 + extra_tokens
+    assert model["candidate"]["bundle"].startswith(f"{profile}-benchmark/")
+    assert plans["scifact-retrieval"][0]["request"]["prompt"] == "x" * 258
     evidence = json.loads((tmp_path / "build/benchmark-capacity.json").read_text())
-    assert evidence["required_sequence_length"] == 261 and evidence["extra_tokens"] == 5
+    assert evidence["required_sequence_length"] == 258 + extra_tokens and evidence["extra_tokens"] == extra_tokens
 
 
 def test_benchmark_capacity_planning_failure_prevents_a_catalog_fallback(tmp_path, monkeypatch):
@@ -563,6 +602,45 @@ def test_doctor_runs_one_cudnn_convolution_in_the_serving_interpreter(tmp_path, 
     assert preflight.problems(checks) == ([] if expected.startswith("ok") else ["cudnn"])
 
 
+@pytest.mark.parametrize("probe, message", [
+    ((0, json.dumps(["timm", "diffusers"]), ""), "['timm', 'diffusers']"),
+    ((-9, "", ""), "the import probe failed (exit status -9)"),  # killed without a word: still no campaign
+])
+def test_run_all_does_not_start_without_the_serving_packages(tmp_path, monkeypatch, capsys, probe, message):
+    """timm and diffusers serve the generic timm/ classifier and image-generation references: without them each
+    such native reference would fail, hours into the campaign."""
+    from trtmc_aiperf_qual import cli, preflight
+
+    python = tmp_path / "python"
+    python.write_text("#!/bin/sh\n")
+    python.chmod(0o755)
+    (tmp_path / "env.yaml").write_text(f"repo: {tmp_path}\nserve_python: {python}\n")
+    probed = []
+
+    def run(command, **_kwargs):
+        probed.append(command[0])
+        return subprocess.CompletedProcess(command, *probe)
+
+    monkeypatch.setattr(preflight.subprocess, "run", run)
+    monkeypatch.setattr("trtmc_aiperf_qual.campaign.run_all", lambda *args, **kwargs: pytest.fail("the campaign started"))
+    assert cli.main(["run-all", "--environment", str(tmp_path / "env.yaml"), "--out-root", str(tmp_path / "out"),
+                     "--profile", "x"]) == 2
+    assert probed == [str(python)] and message in capsys.readouterr().err
+    assert {"timm", "diffusers"} <= set(preflight.SERVE_PACKAGES)
+
+
+def test_a_serving_package_that_fails_to_import_counts_as_missing(tmp_path, monkeypatch):
+    """Installed is not enough: a package whose dependency is missing or mismatched fails on import."""
+    from trtmc_aiperf_qual import preflight
+
+    (tmp_path / "brokenpkg").mkdir()  # the repository root is on the serving PYTHONPATH
+    (tmp_path / "brokenpkg/__init__.py").write_text("raise ImportError('torchvision is incompatible')\n")
+    monkeypatch.setattr(preflight, "SERVE_PACKAGES", ("json", "brokenpkg", "absentpkg"))
+    missing = preflight.missing_serve_packages(Environment({"repo": str(tmp_path), "serve_python": sys.executable}))
+    assert missing == ["brokenpkg (ImportError: torchvision is incompatible)",
+                       "absentpkg (ModuleNotFoundError: No module named 'absentpkg')"]
+
+
 def test_summary_fetches_remote_result_roots_over_ssh(tmp_path):
     fake_ssh = tmp_path / "fake-ssh"
     fake_ssh.write_text('#!/usr/bin/env bash\n# fake-ssh HOST COMMAND: run COMMAND locally\nexec bash -c "$2"\n')
@@ -629,6 +707,25 @@ def test_summary_counts_every_planned_profile(tmp_path):
     assert "| White | b | - | gb300-1 |" in text and "unknown benchmark 'typo'" in text
     assert "| White | c |" not in text and "no Task defaults" not in text
     assert len(json.loads((root / campaign.PLAN).read_text())["config_errors"]) == 2
+
+
+def test_run_all_sets_aside_the_older_result_of_a_profile_that_no_longer_configures(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual import cli, models
+
+    def broken(name, environment):
+        raise ConfigError(f"unknown benchmark 'typo' ({name})")
+
+    monkeypatch.setattr(cli, "load_environment", lambda path: Environment({}))
+    monkeypatch.setattr(models, "resolve_model", broken)
+    out = tmp_path / "gb300-1"
+    (out / "m").mkdir(parents=True)
+    (out / "m/report.json").write_text(json.dumps({"task": "t", "started": 1.0, "verdict": {"category": "pass"}}))
+
+    assert cli.main(["run-all", "--profile", "m", "--environment", str(tmp_path / "env.yaml"),
+                     "--out-root", str(out)]) == 2
+    text, counts = campaign.summary([out])
+    assert counts == {"config-error": 1} and "unknown benchmark 'typo'" in text
+    assert [path.name for path in out.iterdir() if campaign.KEPT_ASIDE.search(path.name)] != []
 
 
 def test_run_all_exit_code_reports_harness_failures():
