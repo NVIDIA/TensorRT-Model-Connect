@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from trtmc_aiperf_qual import aiperf_runner, compat, execution, judge, runner
+from trtmc_aiperf_qual import aiperf_runner, compat, execution, judge, report, runner
 from trtmc_aiperf_qual.config import Environment
 
 
@@ -213,6 +213,10 @@ def test_natural_timings_name_the_native_mode_that_answered(tmp_path):
     row, = evidence.natural_performance()
     assert row["reference_mode"] == "eager"
     assert any(note.startswith("Native torch.compile failed") and note.endswith("X") for note in row["notes"])
+    evidence = new_session(tmp_path / "failed")  # no native mode answered: none is named
+    collect(evidence, "candidate", [raw(0, 10)])
+    row, = evidence.natural_performance()
+    assert row["reference_mode"] == "" and report.native_modes({"performance": [row]}) == ""
 
 
 def test_less_generation_is_not_claimed_as_equal_work_acceleration(tmp_path):
