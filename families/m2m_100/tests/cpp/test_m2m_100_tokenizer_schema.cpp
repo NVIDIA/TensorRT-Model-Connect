@@ -33,5 +33,12 @@ int main(int argc, char** argv) {
         std::cerr << "native SentencePiece-BPE tokenizer did not apply the declared merges\n";
         return 1;
     }
+    const std::vector<std::int32_t> raw_expected =
+        argc == 2 ? std::vector<std::int32_t>{1617, 34151, 248, 157826, 248075}
+                  : std::vector<std::int32_t>{10};
+    if (tokenizer->encode(input, false) != raw_expected || tokenizer->encode(input) != expected) {
+        std::cerr << "unframed encoding must omit the template without changing later calls\n";
+        return 1;
+    }
     return 0;
 }

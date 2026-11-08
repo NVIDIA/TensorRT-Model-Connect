@@ -322,8 +322,12 @@ class UnigramTokenizer final : public ITokenizer {
     }
 
     std::vector<int32_t> encode(const std::string& text) const override {
+        return encode(text, mAddSpecialTokens);
+    }
+
+    std::vector<int32_t> encode(const std::string& text, bool add_special_tokens) const override {
         if (text.empty()) {
-            return mAddSpecialTokens ? make_special_frame({}) : std::vector<int32_t>{};
+            return add_special_tokens ? make_special_frame({}) : std::vector<int32_t>{};
         }
 
         // Normalize
@@ -341,7 +345,7 @@ class UnigramTokenizer final : public ITokenizer {
             ids.insert(ids.end(), word_ids.begin(), word_ids.end());
         }
 
-        if (mAddSpecialTokens)
+        if (add_special_tokens)
             ids = make_special_frame(ids);
         return ids;
     }
@@ -635,6 +639,11 @@ class SentencePieceBpeTokenizer final : public ITokenizer {
     }
 
     std::vector<std::int32_t> encode(const std::string& text) const override {
+        return encode(text, mAddSpecialTokens);
+    }
+
+    std::vector<std::int32_t> encode(const std::string& text,
+                                     bool add_special_tokens) const override {
         std::string normalized = mUsePrecompiled ? precompiled_normalize(text) : text;
         if (mCollapseSpaces) {
             std::string collapsed;
@@ -706,7 +715,7 @@ class SentencePieceBpeTokenizer final : public ITokenizer {
             }
             previous_unknown = unknown;
         }
-        if (!mAddSpecialTokens)
+        if (!add_special_tokens)
             return ids;
         std::vector<std::int32_t> framed;
         framed.reserve(mPrefixIds.size() + ids.size() + mSuffixIds.size());

@@ -289,9 +289,9 @@ def _native(
 def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: Path):
     manifest["task"]
     import torch
-    from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+    from transformers import NllbTokenizer, AutoModelForSeq2SeqLM
 
-    tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
+    tokenizer = NllbTokenizer.from_pretrained(model_dir, src_lang=case["source_language"])
     model = (
         AutoModelForSeq2SeqLM.from_pretrained(
             model_dir, trust_remote_code=True, torch_dtype=_torch_dtype(case["reference_precision"])
@@ -303,17 +303,15 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     forced_bos_token_id = tokenizer.convert_tokens_to_ids(case["target_language"])
     assert source_language_token_id == int(case["source_language_token_id"])
     assert forced_bos_token_id == int(case["forced_bos_token_id"])
-    input_ids = tokenizer.encode(_case_text(case))
-    if len(input_ids) >= 2 and input_ids[-2] == tokenizer.eos_token_id:
-        input_ids[-1] = source_language_token_id
-    else:
-        if not input_ids or input_ids[-1] != tokenizer.eos_token_id:
-            input_ids.append(tokenizer.eos_token_id)
-        input_ids.append(source_language_token_id)
-    encoded = {
-        "input_ids": torch.tensor([input_ids], dtype=torch.long),
-        "attention_mask": torch.ones((1, len(input_ids)), dtype=torch.long),
-    }
+    encoded = tokenizer(_case_text(case), return_tensors="pt")
+    content = tokenizer.encode(_case_text(case), add_special_tokens=False)
+    expected_frame = (
+        content + [tokenizer.eos_token_id, source_language_token_id]
+        if tokenizer.legacy_behaviour
+        else [source_language_token_id] + content + [tokenizer.eos_token_id]
+    )
+    assert encoded["input_ids"][0].tolist() == expected_frame
+    record_evidence("inputs", {"reference_input_ids": encoded["input_ids"].tolist()})
     encoded = {key: value.to("cuda") for key, value in encoded.items()}
     with torch.no_grad():
         generated = model.generate(
@@ -358,11 +356,21 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
         _build(model_dir, bundle, manifest)
-    with evidence_stage("native"):
-        actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
-    record_evidence("native", actual)
-    with evidence_stage("reference"):
-        expected = _official_reference(model_dir, manifest, case, tmp_path)
-    record_evidence("reference", expected)
-    with evidence_stage("compare"):
-        _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+    reverse = {
+        **case,
+        "prompt": "La maison est merveilleuse.",
+        "source_language": case["target_language"],
+        "source_language_token_id": case["forced_bos_token_id"],
+        "target_language": case["source_language"],
+        "forced_bos_token_id": case["source_language_token_id"],
+    }
+    for translation_case in (case, reverse):
+        record_evidence("inputs", {"translation_case": translation_case})
+        with evidence_stage("native"):
+            actual = _native(binary, runtime_root, bundle, model_dir, manifest, translation_case, tmp_path)
+        record_evidence("native", actual)
+        with evidence_stage("reference"):
+            expected = _official_reference(model_dir, manifest, translation_case, tmp_path)
+        record_evidence("reference", expected)
+        with evidence_stage("compare"):
+            _assert_parity(actual, expected, manifest, translation_case, record_evidence("thresholds", _thresholds(case_name)))

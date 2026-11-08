@@ -5,9 +5,24 @@
 
 #include "families/m2m_100/runtime/plugin_helpers.h"
 
+#include "families/m2m_100/runtime/request_tokens.h"
+
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 
 namespace trtmc::m2m_100 {
+
+bool source_language_is_prefix(std::string_view tokenizer_config) {
+    if (tokenizer_config.empty())
+        return true;
+    const auto config = nlohmann::json::parse(tokenizer_config);
+    if (!config.is_object())
+        throw std::runtime_error("m2m_100 tokenizer_config.json must be an object");
+    const auto type = config.value("tokenizer_class", std::string{});
+    if (type == "NllbTokenizer" || type == "NllbTokenizerFast")
+        return !config.value("legacy_behaviour", false);
+    return true;
+}
 
 std::vector<char> require_section(const BundleReader& bundle, std::string_view name) {
     const auto* section = bundle.find_section(name);
