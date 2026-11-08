@@ -47,19 +47,113 @@ _WORK_TYPES = {"fp32": (np.float32, trt.float32), "fp16": (np.float16, trt.float
 
 
 def _open_checkpoint(model_dir: Path) -> dict:
+    """Load an ESM-2 checkpoint into a dictionary of NumPy float32 arrays.
+
+    Supports single-file checkpoints (model.safetensors, pytorch_model.bin)
+    and sharded checkpoints indexed by model.safetensors.index.json or
+    pytorch_model.bin.index.json (used by ESM-2 3B and 15B).
+    """
     directory = Path(model_dir)
+
+    # 1. Single safetensors checkpoint
     safetensors = directory / "model.safetensors"
     if safetensors.is_file():
         from safetensors.numpy import load_file
 
         return load_file(str(safetensors))
-    binary = directory / "pytorch_model.bin"
-    if not binary.is_file():
-        raise FileNotFoundError(f"missing esm checkpoint: neither {safetensors} nor {binary}")
-    import torch
 
-    state = torch.load(str(binary), map_location="cpu", weights_only=True)
-    return {key: value.detach().to(torch.float32).numpy() for key, value in state.items()}
+    # 2. Sharded safetensors checkpoint
+    safetensors_index = directory / "model.safetensors.index.json"
+    if safetensors_index.is_file():
+        import json
+        from safetensors.numpy import load_file
+
+        try:
+            index = json.loads(safetensors_index.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as err:
+            raise ValueError(
+                f"esm checkpoint index {safetensors_index.name} is invalid JSON"
+            ) from err
+        if not isinstance(index, dict):
+            raise ValueError(
+                f"esm checkpoint index {safetensors_index.name} must be a JSON object"
+            )
+        weight_map = index.get("weight_map")
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError(
+                f"esm checkpoint index {safetensors_index.name} has no valid weight_map"
+            )
+        if any(
+            not isinstance(shard, str)
+            or not shard.strip()
+            or Path(shard).name != shard
+            for shard in weight_map.values()
+        ):
+            raise ValueError(
+                "safetensors shard names in index must be non-empty checkpoint-local filenames"
+            )
+        shards = sorted(set(weight_map.values()))
+        weights = {}
+        for shard in shards:
+            shard_path = directory / shard
+            if not shard_path.is_file():
+                raise FileNotFoundError(f"missing esm checkpoint shard: {shard_path}")
+            weights.update(load_file(str(shard_path)))
+        return weights
+
+    # 3. Single PyTorch binary checkpoint
+    binary = directory / "pytorch_model.bin"
+    if binary.is_file():
+        import torch
+
+        state = torch.load(str(binary), map_location="cpu", weights_only=True)
+        return {key: value.detach().to(torch.float32).numpy() for key, value in state.items()}
+
+    # 4. Sharded PyTorch binary checkpoint (e.g. ESM-2 3B and 15B)
+    torch_index = directory / "pytorch_model.bin.index.json"
+    if torch_index.is_file():
+        import json
+        import torch
+
+        try:
+            index = json.loads(torch_index.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as err:
+            raise ValueError(
+                f"esm checkpoint index {torch_index.name} is invalid JSON"
+            ) from err
+        if not isinstance(index, dict):
+            raise ValueError(
+                f"esm checkpoint index {torch_index.name} must be a JSON object"
+            )
+        weight_map = index.get("weight_map")
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError(
+                f"esm checkpoint index {torch_index.name} has no valid weight_map"
+            )
+        if any(
+            not isinstance(shard, str)
+            or not shard.strip()
+            or Path(shard).name != shard
+            for shard in weight_map.values()
+        ):
+            raise ValueError(
+                "PyTorch shard names in index must be non-empty checkpoint-local filenames"
+            )
+        shards = sorted(set(weight_map.values()))
+        weights = {}
+        for shard in shards:
+            shard_path = directory / shard
+            if not shard_path.is_file():
+                raise FileNotFoundError(f"missing esm checkpoint shard: {shard_path}")
+            state = torch.load(str(shard_path), map_location="cpu", weights_only=True)
+            for key, value in state.items():
+                weights[key] = value.detach().to(torch.float32).numpy()
+        return weights
+
+    raise FileNotFoundError(
+        f"missing esm checkpoint: neither {safetensors}, {safetensors_index.name}, "
+        f"{binary}, nor {torch_index.name} found in {directory}"
+    )
 
 
 def _prefix(weights: dict) -> str:
