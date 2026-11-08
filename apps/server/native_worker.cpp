@@ -1268,21 +1268,22 @@ int run_bundle_worker(const std::string& bundle, const LoadOptions& options, std
         }
     }
     if (app::uses_existing_task_runtime(primary)) {
-        // An image_generation video bundle keeps the existing video protocol even when its
-        // family also implements the Task SDK model interface (wan2_2_ti2v does).
-        if (geometry.frames == 1) {
-            try {
-                const auto model = Model::load(bundle, options);
+        try {
+            const auto model = Model::load(bundle, options);
+            if (geometry.frames == 1)
                 return run_model_worker(model, input, output);
-            } catch (const Error& error) {
-                // Only pre-SDK families may take this compatibility path. Never
-                // retry a malformed SDK binding or a failed Task operation.
-                if (error.code() != TRTMC_UNSUPPORTED ||
-                    std::string(error.what())
-                            .find("family has not implemented the Task SDK model interface") ==
-                        std::string::npos)
-                    throw;
-            }
+            // A family whose SDK Tasks are video (wan2_2_ti2v) serves its image_generation
+            // video bundles through the existing runtime below; an SDK image binding cannot.
+            if (model.supports<TextToImage>())
+                throw std::invalid_argument("SDK image binding cannot serve a video bundle");
+        } catch (const Error& error) {
+            // Otherwise only pre-SDK families take the existing runtime. Never
+            // retry a malformed SDK binding or a failed Task operation.
+            if (error.code() != TRTMC_UNSUPPORTED ||
+                std::string(error.what())
+                        .find("family has not implemented the Task SDK model interface") ==
+                    std::string::npos)
+                throw;
         }
         auto task = load_task(bundle, options.runtime_root, options.kv_cache_size_bytes,
                               options.runtime_cache_path, options.cuda_graphs);

@@ -768,6 +768,7 @@ if(TRTMC_BUILD_TESTS)
       trtmc_api_test_audio_family trtmc_api_test_image_boxes_family)
     add_dependencies(test_server_sdk_worker trtmc_api_test_language_family)
     add_dependencies(test_server_sdk_worker trtmc_api_test_image_family)
+    add_dependencies(test_server_sdk_worker trtmc_api_test_video_family)
     add_test(NAME server_sdk_worker
       COMMAND test_server_sdk_worker "${_trtmc_api_test_runtime_root}")
     add_test(NAME server_sdk_worker_process
