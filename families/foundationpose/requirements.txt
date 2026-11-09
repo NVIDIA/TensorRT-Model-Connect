@@ -4,3 +4,7 @@
 numpy==1.26.4
 onnx
 onnxruntime==1.29.0
+# FP8 weight packing; ml-dtypes 0.6 requires NumPy 2 and onnx 1.23 requires >=0.5.4.
+ml-dtypes==0.5.4
+# Calibration crops (calibrate_fp8_scales.py and its test).
+Pillow
