@@ -21,6 +21,13 @@ and compared with the reference model truncated to the same two blocks.
 Agreement is 1.6e-06 relative. The remaining thirty-four layers are the same
 block repeated, so what a longer stack adds is build time and memory rather
 than new graph structure.
+
+**Precision.** ``add_dit(..., dtype=trt.bfloat16)`` runs the thirty-six blocks
+(norms, attention, feed-forward and the residual stream between them) in bf16,
+the precision of the PyTorch reference; ``dtype=None`` keeps them float32. The
+timestep embedding, the two stem convolutions, ``proj_in`` and ``proj_out``
+stay float32 either way. In float32 (TF32 off) the blocks run on CUDA cores and
+one call takes about 98 ms on a B200, against about 5 ms in bf16.
 """
 
 from __future__ import annotations
@@ -64,15 +71,24 @@ def _no_bias(trt: Any):
     return trt.Weights()
 
 
-def _const(network, trt, array):
+def _const(network, trt, array, dtype=None):
+    """A float32 constant, cast to ``dtype`` when one is given.
+
+    TensorRT folds the cast at build time, so the plan stores the constant in
+    ``dtype``.
+    """
+
     import numpy as np
 
     data = np.ascontiguousarray(np.asarray(array, dtype=np.float32))
-    return network.add_constant(data.shape, trt.Weights(data)).get_output(0)
+    constant = network.add_constant(data.shape, trt.Weights(data)).get_output(0)
+    if dtype is None:
+        return constant
+    return network.add_cast(constant, dtype).get_output(0)
 
 
-def _linear(network, trt, hidden, weight, out_features, bias=None):
-    """``x @ W.T (+ b)`` with the weight as a constant operand."""
+def _linear(network, trt, hidden, weight, out_features, bias=None, dtype=None):
+    """``x @ W.T (+ b)`` with the weight as a constant operand of ``dtype``."""
 
     import numpy as np
 
@@ -80,20 +96,20 @@ def _linear(network, trt, hidden, weight, out_features, bias=None):
     if array.shape[0] != out_features:
         raise ValueError(f"weight has {array.shape[0]} rows, expected {out_features}")
     operand = _const(network, trt, np.ascontiguousarray(array.T).reshape(
-        1, array.shape[1], out_features))
+        1, array.shape[1], out_features), dtype)
     out = network.add_matrix_multiply(
         hidden, trt.MatrixOperation.NONE, operand, trt.MatrixOperation.NONE
     ).get_output(0)
     if bias is not None:
         offset = _const(network, trt, np.asarray(bias, dtype=np.float32).reshape(
-            1, 1, out_features))
+            1, 1, out_features), dtype)
         out = network.add_elementwise(
             out, offset, trt.ElementWiseOperation.SUM
         ).get_output(0)
     return out
 
 
-def add_layer_norm(network: Any, trt: Any, hidden: Any, weight, bias) -> Any:
+def add_layer_norm(network: Any, trt: Any, hidden: Any, weight, bias, dtype=None) -> Any:
     """Mean-and-variance normalisation over the last dimension, then affine."""
 
     import numpy as np
@@ -108,7 +124,7 @@ def add_layer_norm(network: Any, trt: Any, hidden: Any, weight, bias) -> Any:
                                   axes=1 << 2, keep_dims=True)
     shifted = network.add_elementwise(
         variance.get_output(0),
-        _const(network, trt, np.array([[[LAYER_NORM_EPS]]], dtype=np.float32)),
+        _const(network, trt, np.array([[[LAYER_NORM_EPS]]], dtype=np.float32), dtype),
         trt.ElementWiseOperation.SUM,
     )
     deviation = network.add_unary(shifted.get_output(0), trt.UnaryOperation.SQRT)
@@ -117,17 +133,18 @@ def add_layer_norm(network: Any, trt: Any, hidden: Any, weight, bias) -> Any:
     )
     scaled = network.add_elementwise(
         normalised.get_output(0),
-        _const(network, trt, np.asarray(weight, dtype=np.float32).reshape(1, 1, -1)),
+        _const(network, trt, np.asarray(weight, dtype=np.float32).reshape(1, 1, -1), dtype),
         trt.ElementWiseOperation.PROD,
     )
     return network.add_elementwise(
         scaled.get_output(0),
-        _const(network, trt, np.asarray(bias, dtype=np.float32).reshape(1, 1, -1)),
+        _const(network, trt, np.asarray(bias, dtype=np.float32).reshape(1, 1, -1), dtype),
         trt.ElementWiseOperation.SUM,
     ).get_output(0)
 
 
-def add_partial_rope(network: Any, trt: Any, heads: Any, cos, sin, seq_len: int) -> Any:
+def add_partial_rope(network: Any, trt: Any, heads: Any, cos, sin, seq_len: int,
+                     dtype=None) -> Any:
     """Rotate the leading ``ROTARY_DIM`` of each head, pass the rest through.
 
     ``heads`` is ``(num_heads, seq_len, head_dim)``.
@@ -154,8 +171,8 @@ def add_partial_rope(network: Any, trt: Any, heads: Any, cos, sin, seq_len: int)
     swapped = network.add_concatenation([negated, first])
     swapped.axis = 2
 
-    cos_c = _const(network, trt, np.asarray(cos).reshape(1, seq_len, ROTARY_DIM))
-    sin_c = _const(network, trt, np.asarray(sin).reshape(1, seq_len, ROTARY_DIM))
+    cos_c = _const(network, trt, np.asarray(cos).reshape(1, seq_len, ROTARY_DIM), dtype)
+    sin_c = _const(network, trt, np.asarray(sin).reshape(1, seq_len, ROTARY_DIM), dtype)
     direct = network.add_elementwise(rotated, cos_c, trt.ElementWiseOperation.PROD)
     turned = network.add_elementwise(swapped.get_output(0), sin_c,
                                      trt.ElementWiseOperation.PROD)
@@ -167,25 +184,25 @@ def add_partial_rope(network: Any, trt: Any, heads: Any, cos, sin, seq_len: int)
     return joined.get_output(0)
 
 
-def add_attention(network, trt, hidden, weights, prefix, seq_len, cos, sin):
+def add_attention(network, trt, hidden, weights, prefix, seq_len, cos, sin, dtype=None):
     """Full attention with partial rotary embedding and no mask."""
 
     heads = {}
     for name in ("to_q", "to_k", "to_v"):
         flat = _linear(network, trt, hidden,
-                       weights[f"{prefix}.attn.{name}.weight"], INNER_DIM)
+                       weights[f"{prefix}.attn.{name}.weight"], INNER_DIM, dtype=dtype)
         split = network.add_shuffle(flat)
         split.reshape_dims = (seq_len, NUM_ATTENTION_HEADS, ATTENTION_HEAD_DIM)
         split.second_transpose = (1, 0, 2)
         heads[name] = split.get_output(0)
 
-    query = add_partial_rope(network, trt, heads["to_q"], cos, sin, seq_len)
-    key = add_partial_rope(network, trt, heads["to_k"], cos, sin, seq_len)
+    query = add_partial_rope(network, trt, heads["to_q"], cos, sin, seq_len, dtype)
+    key = add_partial_rope(network, trt, heads["to_k"], cos, sin, seq_len, dtype)
 
     scores = network.add_matrix_multiply(
         query, trt.MatrixOperation.NONE, key, trt.MatrixOperation.TRANSPOSE)
     scaled = network.add_elementwise(
-        scores.get_output(0), _const(network, trt, [[[attention_scale()]]]),
+        scores.get_output(0), _const(network, trt, [[[attention_scale()]]], dtype),
         trt.ElementWiseOperation.PROD)
     probabilities = network.add_softmax(scaled.get_output(0))
     probabilities.axes = 1 << 2
@@ -197,14 +214,14 @@ def add_attention(network, trt, hidden, weights, prefix, seq_len, cos, sin):
     merge.first_transpose = (1, 0, 2)
     merge.reshape_dims = (1, seq_len, INNER_DIM)
     return _linear(network, trt, merge.get_output(0),
-                   weights[f"{prefix}.attn.to_out.0.weight"], INNER_DIM)
+                   weights[f"{prefix}.attn.to_out.0.weight"], INNER_DIM, dtype=dtype)
 
 
-def add_gated_feed_forward(network, trt, hidden, weights, prefix, seq_len):
+def add_gated_feed_forward(network, trt, hidden, weights, prefix, seq_len, dtype=None):
     """``ff_out(first * silu(second))`` over the two halves of ``ff_in``."""
 
     projected = _linear(network, trt, hidden, weights[f"{prefix}.ff_in.weight"],
-                        2 * FF_INNER_DIM, weights[f"{prefix}.ff_in.bias"])
+                        2 * FF_INNER_DIM, weights[f"{prefix}.ff_in.bias"], dtype)
     first = network.add_slice(projected, (0, 0, 0), (1, seq_len, FF_INNER_DIM),
                               (1, 1, 1)).get_output(0)
     second = network.add_slice(projected, (0, 0, FF_INNER_DIM),
@@ -215,15 +232,20 @@ def add_gated_feed_forward(network, trt, hidden, weights, prefix, seq_len):
                                     trt.ElementWiseOperation.PROD)
     return _linear(network, trt, gated.get_output(0),
                    weights[f"{prefix}.ff_out.weight"], INNER_DIM,
-                   weights[f"{prefix}.ff_out.bias"])
+                   weights[f"{prefix}.ff_out.bias"], dtype)
 
 
 def add_dit(network: Any, trt: Any, latents: Any, condition: Any, timestep_embedding: Any,
-            *, latent_length: int, weights: dict, num_layers: int = NUM_LAYERS) -> Any:
+            *, latent_length: int, weights: dict, num_layers: int = NUM_LAYERS,
+            dtype=None) -> Any:
     """Add the transformer and return the predicted velocity.
 
     ``timestep_embedding`` is the already-embedded ``(1, 1, INNER_DIM)`` prefix
     token, so the Fourier projection stays outside this subgraph.
+
+    With ``dtype`` the blocks run in that type: the prefixed sequence is cast
+    after ``proj_in`` and cast back to float32 before ``proj_out``. The inputs,
+    the output and everything outside the blocks stay float32.
     """
 
     import numpy as np
@@ -259,24 +281,28 @@ def add_dit(network: Any, trt: Any, latents: Any, condition: Any, timestep_embed
     prefixed = network.add_concatenation([timestep_embedding, hidden])
     prefixed.axis = 1
     hidden = prefixed.get_output(0)
+    if dtype is not None:
+        hidden = network.add_cast(hidden, dtype).get_output(0)
 
     cos, sin = rotary_tables(seq_len)
     for layer in range(num_layers):
         prefix = f"transformer_blocks.{layer}"
         normed = add_layer_norm(network, trt, hidden,
                                 weights[f"{prefix}.norm1.weight"],
-                                weights[f"{prefix}.norm1.bias"])
+                                weights[f"{prefix}.norm1.bias"], dtype)
         attended = add_attention(network, trt, normed, weights, prefix, seq_len,
-                                 cos, sin)
+                                 cos, sin, dtype)
         hidden = network.add_elementwise(hidden, attended,
                                          trt.ElementWiseOperation.SUM).get_output(0)
         normed = add_layer_norm(network, trt, hidden,
                                 weights[f"{prefix}.norm2.weight"],
-                                weights[f"{prefix}.norm2.bias"])
+                                weights[f"{prefix}.norm2.bias"], dtype)
         projected = add_gated_feed_forward(network, trt, normed, weights, prefix,
-                                           seq_len)
+                                           seq_len, dtype)
         hidden = network.add_elementwise(hidden, projected,
                                          trt.ElementWiseOperation.SUM).get_output(0)
+    if dtype is not None:
+        hidden = network.add_cast(hidden, trt.float32).get_output(0)
 
     trimmed = network.add_slice(hidden, (0, 1, 0), (1, latent_length, INNER_DIM),
                                 (1, 1, 1)).get_output(0)
