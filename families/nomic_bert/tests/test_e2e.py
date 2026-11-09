@@ -24,6 +24,9 @@ here - the rotary base, the weakest of them, still costs 0.0035 of cosine.
 The values are gated anyway, because the margin is far larger in that space:
 1e-3 sits 270x above a correct build's noise and 190x below the weakest
 break, where a 0.999 cosine floor has only 1.7x of room against it.
+
+The fp16 case uses its own tolerance, set from the fp16 noise measured on
+this case; see ``_FP16_EMBEDDING_TOLERANCE``.
 """
 
 from __future__ import annotations
@@ -104,8 +107,12 @@ def _selected_cases(config) -> tuple[list[str], bool]:
 
 
 def pytest_generate_tests(metafunc) -> None:
-    if "case_name" in metafunc.fixturenames:
+    for fixture in ("case_name", "fp16_case_name"):
+        if fixture not in metafunc.fixturenames:
+            continue
         names, enabled = _selected_cases(metafunc.config)
+        if fixture == "fp16_case_name":
+            names = [name for name in names if CASES[name][1]["precision"] == "fp16"]
         parameters = names
         if not enabled:
             parameters = [
@@ -117,7 +124,7 @@ def pytest_generate_tests(metafunc) -> None:
                 )
                 for name in names
             ]
-        metafunc.parametrize("case_name", parameters, ids=names)
+        metafunc.parametrize(fixture, parameters, ids=names)
 
 
 def _required_path(value: str | None, label: str) -> Path:
@@ -203,6 +210,15 @@ _EMBEDDING_TOLERANCE = 1e-3
 # Kept only to fail early and loudly on a gross error.
 _COSINE_FLOOR = 0.999
 
+# fp16 cannot use the tolerance above. Measured on this case (B200 and B300,
+# TensorRT 11.1 and 11.4, 24 builds), a correct fp16 engine is 3.3e-03 to
+# 8.3e-03 off the reference, and an fp16 engine with the weakest break of the
+# table (rotary base 10000 instead of 1000, 12 builds) is 0.279 to 0.283 off.
+# 2.5e-02 sits 3.0x above the worst correct build and 11x below that break.
+#
+# test_fp16_gate_rejects_the_wrong_rotary_base builds both and checks this.
+_FP16_EMBEDDING_TOLERANCE = 2.5e-2
+
 # The prefixes are the checkpoint's, not this test's: the runtime applies
 # them from the role, and these are what it must apply.
 _ROLE_PREFIXES = {"query": "search_query: ", "document": "search_document: "}
@@ -236,6 +252,18 @@ def _cosine(left: list[float], right: list[float]) -> float:
     return dot / (left_norm * right_norm)
 
 
+def _check_embedding(values, reference, precision: str, text: str) -> tuple[float, float]:
+    """Assert the gate of ``precision`` on one pooled vector; return max abs and cosine."""
+    delta = max(abs(a - b) for a, b in zip(values, reference))
+    cosine = _cosine(values, reference)
+    assert cosine >= _COSINE_FLOOR, f"{FAMILY} embedding cosine {cosine} for {text!r}"
+    tolerance = _FP16_EMBEDDING_TOLERANCE if precision == "fp16" else _EMBEDDING_TOLERANCE
+    assert delta <= tolerance, (
+        f"{FAMILY} {precision} embedding for {text!r} differs from the reference by {delta}"
+    )
+    return delta, cosine
+
+
 def _native(binary, runtime_root, bundle, case, text: str, role: str) -> dict:
     return _run_json(binary, runtime_root, bundle, case, "embed", "--task",
                      "text_to_embedding", "--text", text, "--role", role)
@@ -262,12 +290,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         assert len(values) == len(reference), (
             f"{FAMILY} returned {len(values)} values, reference {len(reference)}"
         )
-        delta = max(abs(a - b) for a, b in zip(values, reference))
-        cosine = _cosine(values, reference)
-        assert cosine >= _COSINE_FLOOR, f"{FAMILY} embedding cosine {cosine} for {text!r}"
-        assert delta <= _EMBEDDING_TOLERANCE, (
-            f"{FAMILY} embedding for {text!r} differs from the reference by {delta}"
-        )
+        delta, cosine = _check_embedding(values, reference, manifest["precision"], str(text))
         worst = max(worst, delta)
         worst_cosine = min(worst_cosine, cosine)
 
@@ -306,7 +329,101 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         f"{FAMILY} scored the unrelated document higher: {relevant} <= {irrelevant}"
     )
     print(
-        f"{FAMILY} parity: {len(document)} values, embedding maxabs {worst:.3e}, "
+        f"{FAMILY} {manifest['precision']} parity: {len(document)} values, "
+        f"embedding maxabs {worst:.3e}, "
         f"cosine {worst_cosine:.8f}, query-vs-answer {relevant:.6f} "
         f"vs query-vs-other {irrelevant:.6f}"
+    )
+
+
+def _synthetic(seed: int, noise: float) -> tuple[list[float], list[float]]:
+    """A reference vector on the scale of this case, and one with random noise of size ``noise``."""
+    import random
+
+    rng = random.Random(seed)
+    reference = [rng.gauss(0.0, 0.5) for _ in range(768)]
+    values = [value + rng.uniform(-noise, noise) for value in reference]
+    return values, reference
+
+
+def test_fp16_gate_takes_fp16_noise_and_fails_the_rotary_base_break() -> None:
+    """fp16-sized noise passes the fp16 gate; an error of the rotary-base size fails it."""
+    values, reference = _synthetic(0, 8.5e-3)
+    _check_embedding(values, reference, "fp16", "synthetic")
+    values[3] = reference[3] + 0.28
+    with pytest.raises(AssertionError, match="fp16 embedding"):
+        _check_embedding(values, reference, "fp16", "synthetic")
+
+
+def test_fp32_gate_is_unchanged() -> None:
+    """fp32 keeps its own tolerance: fp16-sized noise fails it."""
+    values, reference = _synthetic(0, 3e-6)
+    _check_embedding(values, reference, "fp32", "synthetic")
+    values, reference = _synthetic(0, 8.5e-3)
+    with pytest.raises(AssertionError, match="fp32 embedding"):
+        _check_embedding(values, reference, "fp32", "synthetic")
+
+
+def test_fp16_gate_rejects_the_wrong_rotary_base(fp16_case_name: str) -> None:
+    """A correct fp16 engine passes the fp16 gate; one with rotary base 10000 fails it.
+
+    Both engines are built from the case checkpoint and run in this process on
+    the three case texts with their role prefixes, padded to the window the way
+    the runtime pads them and mean-pooled over the real rows.
+    """
+    import tensorrt as trt
+    import torch
+    from transformers import AutoTokenizer
+
+    from .. import config as config_module, model
+
+    _, manifest, case = CASES[fp16_case_name]
+    assert manifest["precision"] == "fp16"
+    model_dir = _model_dir(manifest)
+    assert torch.cuda.is_available(), f"selected {FAMILY} E2E requires CUDA"
+    window = int(manifest["max_sequence_length"])
+    weights = model._open_checkpoint(model_dir)
+    cfg = config_module.resolve(model_dir, weights)
+    tokenizer = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
+    texts = [_ROLE_PREFIXES["query"] + str(case["query"]),
+             _ROLE_PREFIXES["document"] + str(case["document"]),
+             _ROLE_PREFIXES["document"] + str(case["negative_document"])]
+    references = [_reference(model_dir, text) for text in texts]
+
+    def run(build_cfg) -> list[list[float]]:
+        plan = model.build_engine(weights, build_cfg, seq_len=window, precision="fp16")
+        engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
+        context = engine.create_execution_context()
+        vectors = []
+        for text in texts:
+            ids = tokenizer(text)["input_ids"]
+            input_ids = torch.full((window,), cfg["pad_token_id"], dtype=torch.int32,
+                                   device="cuda")
+            input_ids[: len(ids)] = torch.tensor(ids, dtype=torch.int32)
+            attention_mask = torch.zeros(window, dtype=torch.int32, device="cuda")
+            attention_mask[: len(ids)] = 1
+            hidden = torch.empty((window, cfg["hidden_size"]), dtype=torch.float32,
+                                 device="cuda")
+            for name, tensor in (("input_ids", input_ids), ("attention_mask", attention_mask),
+                                 ("last_hidden_state", hidden)):
+                context.set_tensor_address(name, tensor.data_ptr())
+            context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+            torch.cuda.synchronize()
+            vectors.append(hidden[: len(ids)].double().mean(0).cpu().tolist())
+        return vectors
+
+    worst = max(_check_embedding(values, reference, "fp16", text)[0]
+                for values, reference, text in zip(run(cfg), references, texts))
+    broken = run(dict(cfg, rotary_base=10000.0))
+    broken_worst = max(max(abs(a - b) for a, b in zip(values, reference))
+                       for values, reference in zip(broken, references))
+    # The break also costs about 0.005 of cosine, so the cosine floor may fire
+    # first; the tolerance alone must reject it too.
+    with pytest.raises(AssertionError, match="fp16 embedding|embedding cosine"):
+        for values, reference, text in zip(broken, references, texts):
+            _check_embedding(values, reference, "fp16", text)
+    assert broken_worst > _FP16_EMBEDDING_TOLERANCE, broken_worst
+    print(
+        f"{FAMILY} fp16 gate: correct maxabs {worst:.3e}; rotary base 10000 "
+        f"maxabs {broken_worst:.3e}"
     )
