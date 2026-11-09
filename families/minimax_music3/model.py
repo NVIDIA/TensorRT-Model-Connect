@@ -376,6 +376,11 @@ def _build_one(engine: str, weights: dict, *, latent_length: int = 689,
     from . import engines
 
     tensors = weights[engine]
+    # Under precision=bf16 the DiT blocks and the depth decoder blocks run in
+    # bf16, the precision of the PyTorch reference; their inputs, outputs, stems
+    # and heads stay float32 (TF32 off). The condition encoder and the vocoder
+    # stay float32 in every precision.
+    block_dtype = trt.bfloat16 if precision == "bf16" else None
 
     if engine == engines.LANGUAGE_MODEL_ENGINE:
         # The decoder builder assembles and serialises its own network: it owns
@@ -434,7 +439,8 @@ def _build_one(engine: str, weights: dict, *, latent_length: int = 689,
             network, trt, lm_hidden, codes, weights=tensors,
             embed_tokens=language_model_tensors["model.embed_tokens.weight"])
         hidden = builder_module.add_depth_decoder(
-            network, trt, sequence, steps=depth_engine.MAX_STEPS, weights=tensors)
+            network, trt, sequence, steps=depth_engine.MAX_STEPS, weights=tensors,
+            dtype=block_dtype)
         output = depth_engine.add_output_heads(
             network, trt, hidden, weights=tensors)
         output.name = depth_engine.LOGITS_OUTPUT
@@ -475,7 +481,7 @@ def _build_one(engine: str, weights: dict, *, latent_length: int = 689,
             network, trt, timestep, weights=tensors)
         output = builder_module.add_dit(
             network, trt, latents, condition, embedded,
-            latent_length=latent_length, weights=tensors)
+            latent_length=latent_length, weights=tensors, dtype=block_dtype)
         output.name = builder_module.OUTPUT_NAME
     else:
         raise ValueError(f"unknown MiniMax-Music3 engine {engine!r}")

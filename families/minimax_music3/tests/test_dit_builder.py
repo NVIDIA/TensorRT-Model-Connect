@@ -49,6 +49,7 @@ class _Network:
     def add_slice(self, *a): return self._add("slice", *a)
     def add_concatenation(self, *a): return self._add("concat", *a)
     def add_convolution_nd(self, *a): return self._add("conv", *a)
+    def add_cast(self, *a): return self._add("cast", *a)
 
 
 def _weights_stub(*args):
@@ -64,6 +65,7 @@ _TRT = SimpleNamespace(
     ActivationType=SimpleNamespace(SIGMOID="SIGMOID"),
     MemoryPoolType=SimpleNamespace(WORKSPACE="WORKSPACE"),
     BuilderFlag=SimpleNamespace(TF32="TF32"),
+    float32="FLOAT",
 )
 
 
@@ -102,11 +104,11 @@ def _weights(layers: int):
     return w
 
 
-def _build(latent_length=16, layers=2):
+def _build(latent_length=16, layers=2, dtype=None):
     net = _Network()
     dib.add_dit(net, _TRT, SimpleNamespace(name="lat"), SimpleNamespace(name="cond"),
                 SimpleNamespace(name="temb"), latent_length=latent_length,
-                weights=_weights(layers), num_layers=layers)
+                weights=_weights(layers), num_layers=layers, dtype=dtype)
     return net
 
 
@@ -229,3 +231,50 @@ def test_bias_free_convolutions_use_an_empty_weights_object() -> None:
     assert len(conv_args) == 2
     for args in conv_args:
         assert args[4] == ("W", "empty")
+
+
+def _cast_inputs(net, layer_kind):
+    """Names of the layers whose outputs feed a cast."""
+
+    kinds = {f"{kind}{index}#0": kind for index, (kind, _) in enumerate(net.calls, start=1)}
+    return [(kinds.get(args[0].name), args[1]) for kind, args in net.calls
+            if kind == "cast" and kinds.get(args[0].name) == layer_kind]
+
+
+def test_float32_blocks_add_no_cast() -> None:
+    """Without a dtype the graph is the float32 graph, layer for layer."""
+
+    assert "cast" not in [k for k, _ in _build().calls]
+
+
+def test_bf16_blocks_cast_the_stream_once_in_and_once_out() -> None:
+    net = _build(layers=2, dtype="BF16")
+    calls = net.calls
+    computed = [args[1] for kind, args in calls if kind == "cast"
+                and not args[0].name.startswith("constant")]
+
+    # In after the timestep prefix is joined, out before the trim and proj_out.
+    assert computed == ["BF16", "FLOAT"]
+    prefix = next(i for i, (k, _) in enumerate(calls, start=1) if k == "concat"
+                  and len(calls[i - 1][1][0]) == 2)
+    first_cast = next(i for i, (k, a) in enumerate(calls, start=1) if k == "cast"
+                      and a[0].name == f"concat{prefix}#0")
+    assert calls[first_cast - 1][1][1] == "BF16"
+
+
+def test_bf16_blocks_hold_every_block_constant_in_bf16() -> None:
+    layers = 2
+    net = _build(layers=layers, dtype="BF16")
+    names = {f"{kind}{index}#0": kind for index, (kind, _) in enumerate(net.calls, start=1)}
+    operands = [names[args[2].name] for kind, args in net.calls
+                if kind == "matmul" and args[2].name in names
+                and names[args[2].name] in ("constant", "cast")]
+
+    # q, k, v, out, ff_in, ff_out per block read bf16 (cast) weights; proj_in
+    # and proj_out keep float32 constants.
+    assert operands.count("cast") == 6 * layers
+    assert operands.count("constant") == 2
+    # Every constant cast goes to bf16; the stem convolutions keep float32 kernels.
+    assert {dtype for _, dtype in _cast_inputs(net, "constant")} == {"BF16"}
+    assert [args[4] for kind, args in net.calls if kind == "conv"] == [("W", "empty")] * 2
+
