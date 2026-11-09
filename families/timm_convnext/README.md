@@ -64,3 +64,33 @@ SDK benchmark worker. The existing reference policy still excludes input
 preparation (`task-model-call-wall`), while the native public Task call includes
 family preprocessing. This fixes reduction/reporting placement, not that existing
 scope difference, and does not establish a performance improvement.
+
+## FP8
+
+`--quantization fp8` self-quantizes the original checkpoint at build time; no FP8
+checkpoint exists for these models. FP8 needs the fp16 work precision.
+
+```sh
+trtmc build timm/convnext_tiny.in12k_ft_in1k --precision fp16 --quantization fp8 -o timm_convnext_fp8.bundle
+```
+
+- Quantized: the two MLP projections of every block (`mlp.fc1`, `mlp.fc2`,
+  built as 1x1 convolutions) and the 2x2 downsample convolution of every stage
+  after the first. Each runs as an e4m3 convolution with a static per-tensor
+  activation scale and a per-tensor weight scale (`max(abs(weight)) / 448`).
+- Kept in fp16: the stem convolution, the 7x7 depthwise convolutions, the layer
+  norms, the layer scale, the GELU and the classifier head.
+- Activation scales are calibrated once with ModelOpt `FP8_DEFAULT_CFG` (max
+  calibration, 500 ImageNet validation images) and stored in
+  `fp8_activation_scales.json`, keyed by model config and two weight sums.
+  Calibrated: `convnext_tiny.in12k_ft_in1k`, `convnext_small.in12k_ft_in1k`,
+  `convnext_base.fb_in22k_ft_in1k` at 224x224 (automatic family resolution
+  claims `convnext_tiny` only; the other two were built through the family
+  builder). Another model config is refused;
+  run `python -m families.timm_convnext.calibrate_fp8_scales` (`fetch`, then
+  `calibrate`) to add it. FP8 weights are never stored.
+- An already quantized checkpoint, `--precision fp32` and any quantization other
+  than `fp8` are refused.
+
+The `convnext-tiny-in12k-ft-in1k-fp8` manifest runs the same top-1 E2E check as
+the fp16 case.
