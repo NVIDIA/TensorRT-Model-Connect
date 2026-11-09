@@ -53,6 +53,9 @@ distributed under the Apache License 2.0 with the rest of the project:
   `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the input of the FP8
   E2E case (its top-1 class has a clear margin; the shared vehicle photograph
   is a near-tie for this model)
+- `families/timm_inception_v4/tests/data/orc_test_img.jpeg` — byte-identical copy of
+  `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the input of the FP8
+  E2E case, chosen for its clear top-1 margin
 
 ## Project overview media
 
