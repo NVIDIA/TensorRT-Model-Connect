@@ -88,7 +88,7 @@ def test_tiers_follow_gpu_memory(tmp_path: Path, monkeypatch):
     spark = catalog.parse_gpu("0, NVIDIA GB10, [N/A], 12.1")
     assert spark.memory_gib == 121.6 and catalog.pick_tier(spark).name == "b"
     tiers = catalog.describe_tiers()
-    assert [t["name"] for t in tiers] == ["a", "b", "c"] and tiers[0]["ready"] and not tiers[2]["ready"]
+    assert [t["name"] for t in tiers] == ["a", "b", "c"]
 
 
 def test_video_submission_waits_while_server_storage_is_full(tmp_path: Path, monkeypatch):
@@ -184,18 +184,6 @@ def test_the_language_model_is_built_only_with_llm_local(tmp_path: Path, monkeyp
         cli.main([*common, "--bundle", f"vision={tmp_path / 'v.bundle'}"])
 
 
-def test_a_planned_tier_says_what_is_missing_before_it_starts(tmp_path: Path, monkeypatch):
-    from trtmc_short_drama import cli
-
-    monkeypatch.setattr(cli.shutil, "which", lambda tool: f"/usr/bin/{tool}")
-    monkeypatch.setattr(catalog, "gpus", lambda: [catalog.parse_gpu("0, RTX PRO 6000, 97887, 12.0")])
-    (tmp_path / "trtmc-server").touch()
-    start = ["up", "--data", str(tmp_path / "data"), "--runtime-root", str(tmp_path)]
-    with pytest.raises(SystemExit, match="tier B is planned; TRTMC still needs: image-to-video"):
-        cli.main(start)
-    assert cli.main([*start, "--dry-run"]) == 0
-
-
 def test_tier_b_builds_a_vertical_editor_and_wan_image_to_video(tmp_path: Path, monkeypatch, capsys):
     from trtmc_short_drama import cli
 
@@ -226,7 +214,6 @@ def test_tier_c_builds_z_image_turbo_and_wan_without_an_edit_model(tmp_path: Pat
     assert "--precision bf16 --image-height 1280 --image-width 720" in built["build image"]
     assert catalog.TIERS["c"].models["image"].picture_size == "720x1280"
     assert catalog.TIERS["b"].models["image"].picture_size == "928x1664"
-    assert catalog.TIERS["c"].missing == (catalog._I2V, catalog._ZIMAGE)
 
 
 def test_h3_is_built_through_the_family_command(tmp_path: Path):

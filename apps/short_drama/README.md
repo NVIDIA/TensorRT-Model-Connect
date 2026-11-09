@@ -29,8 +29,8 @@ second shot about 10 minutes (one H3 call renders 226 frames, 9.4 s, with audio)
 
 - An NVIDIA GPU and driver. Tier A needs about 140 GB of GPU memory (MiniMax H3 peaks near
   110 GB at 768x1344 and 226 frames); it was run on a GB300.
-  Tiers B (80 GB, for example an RTX PRO 6000) and C (24 GB) render shots without voices on a TRTMC
-  build that has what they list. See [Tiers](#tiers).
+  Tiers B (80 GB, for example an RTX PRO 6000) and C (24 GB) render shots without voices. See
+  [Tiers](#tiers).
 - A TRTMC build with the server, bring-your-own kernels and the H3 sparse-attention kernel:
 
   ```bash
@@ -66,7 +66,6 @@ and the build commands without running them.
 | --- | --- |
 | `--data DIR` | projects, bundles, settings and logs (default `./short-drama-data`) |
 | `--tier a\|b\|c` | force a tier instead of choosing by GPU memory |
-| `--allow-planned` | start a tier that TRTMC cannot run end to end yet; without it `up` names what is missing and stops |
 | `--gpu N` | GPU index as `nvidia-smi` numbers it |
 | `--llm api\|local` | `api` (default): the chat API chosen in Settings; `local`: build and serve the tier's language model on this GPU |
 | `--bundle ROLE=PATH` | use an existing bundle for `llm` (with `--llm local`), `image`, `video`, `asr` or `tts` |
@@ -223,13 +222,14 @@ to the browser.
 ## Tiers
 
 `up` picks the largest tier the GPU's memory holds; GPUs that share system memory (DGX Spark,
-Jetson Thor) count their system memory. Settings shows the table below for the running GPU.
+Jetson Thor) count their system memory. Settings shows the table below, without its last column, for
+the running GPU.
 
 | Tier | GPU memory | For example | Shots | Speech | Status |
 | --- | --- | --- | --- | --- | --- |
 | A | 140 GB or more | GB300, B200, H200 | MiniMax H3 films each shot from up to 6 reference pictures | native audio from the video model | runs end to end |
-| B | 80 GB or more | RTX PRO 6000, H100, DGX Spark | Qwen-Image-Edit draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it | none yet: each line is a subtitle | runs end to end on a TRTMC build with image-to-video for Wan2.2-TI2V-5B and vertical Qwen-Image-Edit pictures; start it with `--allow-planned` until TRTMC main has both |
-| C | 24 GB or more | RTX 4090, RTX 5090, L40S | Wan2.2-TI2V-5B animates each shot from its speaker's reference picture | none yet: each line is a subtitle | runs end to end in 24 GB (peak 22.0 GiB) on a TRTMC build with image-to-video for Wan2.2-TI2V-5B and bf16 Z-Image-Turbo; start it with `--allow-planned` until TRTMC main has both |
+| B | 80 GB or more | RTX PRO 6000, H100, DGX Spark | Qwen-Image-Edit draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it | none yet: each line is a subtitle | runs end to end |
+| C | 24 GB or more | RTX 4090, RTX 5090, L40S | Wan2.2-TI2V-5B animates each shot from its speaker's reference picture | none yet: each line is a subtitle | runs end to end in 24 GB (peak 22.0 GiB) |
 
 On tiers B and C a shot starts from one picture. A shot in the same place as the shot before it
 starts on that shot's last frame. Any other shot starts from the reference picture of its speaker,

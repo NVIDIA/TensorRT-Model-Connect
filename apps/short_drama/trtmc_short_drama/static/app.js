@@ -618,13 +618,11 @@ function renderSettings() {
     tiers.length ? el("section", { class: "panel" },
       el("h2", { style: "margin-top:0" }, t("Hardware tiers")),
       el("p", { class: "note" }, t("The app picks the tier by GPU memory. Lower tiers keep the same steps with smaller models.")),
-      el("table", { class: "edit" }, el("tr", {}, [t("Tier"), t("GPU memory"), t("Shots"), t("Speech"), t("Status")].map((h) => el("th", {}, h))),
+      el("table", { class: "edit" }, el("tr", {}, [t("Tier"), t("GPU memory"), t("Shots"), t("Speech")].map((h) => el("th", {}, h))),
         tiers.map((tier) => el("tr", { class: tier.name === s.tier ? "current" : "" },
           el("td", {}, el("b", {}, tier.name.toUpperCase()), tier.name === s.tier ? ` · ${t("this GPU")}` : ""),
           el("td", {}, t("{n} GB or more", { n: tier.min_gb }), el("div", { class: "faint" }, tier.hardware)),
-          el("td", {}, t(tier.video)), el("td", {}, t(tier.speech)),
-          el("td", {}, el("span", { class: `badge ${tier.ready ? "ok" : "warn"}` }, t(tier.ready ? "ready" : "planned")),
-            tier.missing?.length ? el("div", { class: "faint" }, tier.missing.map((m) => t(m)).join("; ")) : ""))))) : "");
+          el("td", {}, t(tier.video)), el("td", {}, t(tier.speech)))))) : "");
 }
 
 // ---- data ----

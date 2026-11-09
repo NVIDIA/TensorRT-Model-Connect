@@ -53,8 +53,6 @@ class Tier:
     hardware: str = ""  # the GPUs the tier is sized for
     video: str = ""  # how a shot is made
     speech: str = ""  # where the voices come from
-    # What TRTMC still lacks before the tier runs end to end; empty when it does.
-    missing: tuple[str, ...] = ()
     # The memory size cards are sold with; nvidia-smi reports a little less (a 24 GB card: 23.99 GiB),
     # so `min_gib` sits just under it.
     nominal_gb: int = 0
@@ -67,12 +65,7 @@ _WAN = Model("video", "wan2.2-ti2v-5b", "Wan-AI/Wan2.2-TI2V-5B",
              ("--task", "initial_image_text_to_video", "--precision", "bf16", "--image-height", "1280",
               "--image-width", "704", "--video-num-frames", "121"), first_frame=True)
 
-_I2V = "image-to-video for Wan2.2-TI2V-5B in TRTMC (its family renders from text only)"
-_EDIT = "vertical pictures from Qwen-Image-Edit in TRTMC (its edit bundles render 1024x1024 only)"
 _SILENT = "none yet: each line is a subtitle until TRTMC has Chinese text-to-speech"
-# TRTMC main builds Z-Image-Turbo in fp16 or fp32 only: fp16 renders white pictures (an RTX PRO 6000,
-# TensorRT 11.4) and fp32 does not fit 24 GB. Its bf16 build matches the reference and peaks at 22 GiB.
-_ZIMAGE = "bf16 Z-Image-Turbo in TRTMC (its fp16 build renders white pictures)"
 
 # Every model here has a permissive license (Apache-2.0 or MIT) except MiniMax H3, whose community
 # license excludes some territories; see the README before shipping tier A.
@@ -101,27 +94,28 @@ TIERS = {
         "asr": _WHISPER,
     }, hardware="RTX PRO 6000, H100, DGX Spark",
         video="Qwen-Image-Edit draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it",
-        speech=_SILENT, missing=(_I2V, _EDIT), nominal_gb=80),
+        speech=_SILENT, nominal_gb=80),
     # No edit model fits beside the others in 24 GB (Qwen-Image-Edit holds about 65 GB), so a shot
     # starts on its reference picture; FLUX.2 klein 4B could draw first frames once TRTMC takes
     # reference pictures for it.
     "c": Tier("c", 23, "Wan2.2-TI2V-5B image-to-video straight from the reference pictures, without voices", {
         "llm": Model("llm", "qwen3.5-4b", "Qwen/Qwen3.5-4B", ("--max-sequence-length", "32768")),
+        # bf16: its fp16 build renders white pictures and fp32 does not fit 24 GB.
         "image": Model("image", "z-image-turbo", "Tongyi-MAI/Z-Image-Turbo",
                        ("--precision", "bf16", "--image-height", "1280", "--image-width", "720")),
         "video": _WAN,
         "asr": _WHISPER,
     }, hardware="RTX 4090, RTX 5090, L40S",
         video="Wan2.2-TI2V-5B animates each shot from its speaker's reference picture",
-        speech=_SILENT, missing=(_I2V, _ZIMAGE), nominal_gb=24),
+        speech=_SILENT, nominal_gb=24),
 }
 
 
 def describe_tiers() -> list[dict]:
-    """The tiers for the page: what each GPU size gets and what is still missing."""
+    """The tiers for the page: what each GPU size gets."""
 
     return [{"name": t.name, "min_gib": t.min_gib, "min_gb": t.nominal_gb or t.min_gib, "hardware": t.hardware, "summary": t.summary,
-             "video": t.video, "speech": t.speech, "ready": not t.missing, "missing": list(t.missing)}
+             "video": t.video, "speech": t.speech}
             for t in sorted(TIERS.values(), key=lambda tier: -tier.min_gib)]
 
 
