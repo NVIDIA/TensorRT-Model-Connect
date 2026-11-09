@@ -26,6 +26,7 @@ import tensorrt as trt
 
 from . import graph
 from .checkpoint import Checkpoint
+from .quantization import calibrate_timm_seresnet, configure_fp8_build
 
 
 if TYPE_CHECKING:
@@ -173,40 +174,110 @@ def _weights(
     return result
 
 
-def _block(network, tensor, weights, prefix: str, dtype, *, stride: int, bottleneck: bool):
+def _convolution(
+    network,
+    tensor,
+    weights,
+    key: str,
+    module: str,
+    dtype,
+    *,
+    stride: int = 1,
+    padding: int = 0,
+    groups: int = 1,
+    quant=None,
+    dequantized=None,
+):
+    """One BN-folded convolution; an FP8 convolution when ``quant`` quantizes ``module``.
+
+    ``dequantized`` is an already quantized input to reuse (the block input).
+    """
+    if quant is not None and quant.should_quantize(module):
+        if dequantized is None:
+            dequantized = quant.quantize_input(network, tensor, module)
+        return quant.convolution(
+            network,
+            dequantized,
+            module,
+            stride=(stride, stride),
+            padding=(padding, padding),
+            groups=groups,
+        )
+    return graph.convolution(
+        network,
+        tensor,
+        weights[f"{key}.weight"],
+        weights[f"{key}.bias"],
+        stride=stride,
+        padding=padding,
+        groups=groups,
+        dtype=dtype,
+    )
+
+
+def _block(
+    network, tensor, weights, prefix: str, dtype, *, stride: int, bottleneck: bool, quant=None
+):
     """One residual block whose output is gated before the residual add.
 
     timm puts the spatial stride on the 3x3 convolution and applies the gate
     after the last norm but before the add, so the shortcut is never gated.
+    An FP8 block quantizes its input once for conv1 and the downsample (same
+    input, same scale); the identity stays fp16, since the gate sits between
+    the last convolution and the add, so a quantized identity fuses nothing.
     """
     identity = tensor
+    first = f"{prefix}.conv1"
+    shared = None
+    if quant is not None and quant.should_quantize(first):
+        shared = quant.quantize_input(network, tensor, first)
     if bottleneck:
-        tensor = graph.convolution(
-            network, tensor, weights[f"{prefix}.conv1.weight"],
-            weights[f"{prefix}.conv1.bias"], dtype=dtype,
+        tensor = _convolution(
+            network, tensor, weights, first, first, dtype, quant=quant, dequantized=shared
         )
         tensor = graph.relu(network, tensor)
         grouped = weights[f"{prefix}.conv2.weight"]
         # Grouped (SE-ResNeXt) convolutions store (out, in / groups, kh, kw).
         groups = max(1, int(weights[f"{prefix}.conv1.weight"].shape[0]) // int(grouped.shape[1]))
-        tensor = graph.convolution(
-            network, tensor, grouped, weights[f"{prefix}.conv2.bias"],
-            stride=stride, padding=1, groups=groups, dtype=dtype,
+        tensor = _convolution(
+            network,
+            tensor,
+            weights,
+            f"{prefix}.conv2",
+            f"{prefix}.conv2",
+            dtype,
+            stride=stride,
+            padding=1,
+            groups=groups,
+            quant=quant,
         )
         tensor = graph.relu(network, tensor)
-        tensor = graph.convolution(
-            network, tensor, weights[f"{prefix}.conv3.weight"],
-            weights[f"{prefix}.conv3.bias"], dtype=dtype,
+        tensor = _convolution(
+            network, tensor, weights, f"{prefix}.conv3", f"{prefix}.conv3", dtype, quant=quant
         )
     else:
-        tensor = graph.convolution(
-            network, tensor, weights[f"{prefix}.conv1.weight"],
-            weights[f"{prefix}.conv1.bias"], stride=stride, padding=1, dtype=dtype,
+        tensor = _convolution(
+            network,
+            tensor,
+            weights,
+            first,
+            first,
+            dtype,
+            stride=stride,
+            padding=1,
+            quant=quant,
+            dequantized=shared,
         )
         tensor = graph.relu(network, tensor)
-        tensor = graph.convolution(
-            network, tensor, weights[f"{prefix}.conv2.weight"],
-            weights[f"{prefix}.conv2.bias"], padding=1, dtype=dtype,
+        tensor = _convolution(
+            network,
+            tensor,
+            weights,
+            f"{prefix}.conv2",
+            f"{prefix}.conv2",
+            dtype,
+            padding=1,
+            quant=quant,
         )
     tensor = graph.squeeze_excite(
         network, tensor,
@@ -215,9 +286,22 @@ def _block(network, tensor, weights, prefix: str, dtype, *, stride: int, bottlen
         dtype=dtype,
     )
     if f"{prefix}.downsample.weight" in weights:
-        identity = graph.convolution(
-            network, identity, weights[f"{prefix}.downsample.weight"],
-            weights[f"{prefix}.downsample.bias"], stride=stride, dtype=dtype,
+        down = f"{prefix}.downsample.0"
+        reuse = (
+            shared is not None
+            and quant.should_quantize(down)
+            and quant.input_scale(down) == quant.input_scale(first)
+        )
+        identity = _convolution(
+            network,
+            identity,
+            weights,
+            f"{prefix}.downsample",
+            down,
+            dtype,
+            stride=stride,
+            quant=quant,
+            dequantized=shared if reuse else None,
         )
     return graph.relu(network, graph.add(network, tensor, identity))
 
@@ -227,6 +311,7 @@ def _build_engine(
     checkpoint: Checkpoint,
     precision: str,
     verbose: bool,
+    quantization: str | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     if precision == "fp16":
         numpy_dtype, tensor_dtype = np.float16, trt.float16
@@ -239,6 +324,21 @@ def _build_engine(
     weights = _weights(checkpoint, layout, numpy_dtype)
     if weights["fc.weight"].shape[0] != config["num_classes"]:
         raise ValueError("SEResNet classifier dimensions do not match config.json")
+    quant_ctx = None
+    if quantization == "fp8":
+        if "quantization_config" in raw or any(
+            name.endswith((".weight_scale", ".input_scale")) for name in checkpoint.names
+        ):
+            raise ValueError(
+                "the checkpoint is already quantized; FP8 self-quantization needs the original"
+            )
+        quant_ctx = calibrate_timm_seresnet(
+            layout,
+            (config["image_height"], config["image_width"]),
+            weights,
+            quantization,
+            precision=precision,
+        )
 
     # The stem strides twice, then every stage after the first halves again.
     total_stride = 4 * 2 ** (len(_STAGES) - 1)
@@ -264,6 +364,7 @@ def _build_engine(
     builder_config.max_aux_streams = 0
     builder_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+    configure_fp8_build(builder_config, quant_ctx)
 
     pixels = network.add_input("pixel_values", trt.float32, (1, 3, height, width))
     if pixels is None:
@@ -290,6 +391,7 @@ def _build_engine(
                 # Only the first block of stages after layer1 reduces.
                 stride=2 if position > 0 and index == 0 else 1,
                 bottleneck=bool(layout["bottleneck"]),
+                quant=quant_ctx,
             )
 
     hidden = graph.global_average_pool(
@@ -338,8 +440,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_seresnet does not support context parallelism")
     if request.task != "classification":
         raise ValueError("timm_seresnet supports only task=classification")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("timm_seresnet does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"timm_seresnet supports quantization fp8 or none; got {request.quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("timm_seresnet does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -352,6 +456,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         Checkpoint.open(model_dir),
         str(request.precision).lower(),
         bool(request.verbose),
+        None if request.quantization in {None, "none"} else request.quantization,
     )
     writer.set_header(family="timm_seresnet", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)
