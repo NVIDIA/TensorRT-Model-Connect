@@ -105,10 +105,20 @@ def _asset(case: dict) -> Path:
     return path
 
 
+def _logit_cosine(actual: list[float], expected: np.ndarray) -> float:
+    native = np.asarray(actual, dtype=np.float64).ravel()
+    reference = np.asarray(expected, dtype=np.float64).ravel()
+    assert native.shape == reference.shape
+    return float(native @ reference / (np.linalg.norm(native) * np.linalg.norm(reference)))
+
+
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
-    record_evidence("thresholds", {"top1_match": True})
+    # An FP8 case also bounds the logits: the cosine to the fp32 timm logits fails a
+    # build whose activation scales are wrong while its top-1 can still match.
+    cosine_floor = case.get("logit_cosine_floor")
+    record_evidence("thresholds", {"top1_match": True, "logit_cosine_floor": cosine_floor})
     binary = _required_path(os.environ.get("TRTMC_BINARY"), "TRTMC_BINARY")
     runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
     with evidence_stage("setup"):
@@ -128,6 +138,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
                 precision=manifest["precision"],
                 max_sequence_length=int(manifest["max_sequence_length"]),
                 tensor_parallel_size=int(manifest["tensor_parallel_size"]),
+                quantization=manifest.get("quantization"),
             )
         )
     with evidence_stage("native"):
@@ -168,6 +179,8 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             checkpoint_path=str(model_dir / "model.safetensors"),
         )
         reference = reference.to("cuda").eval()
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cuda.matmul.allow_tf32 = False
         transform = create_transform(**resolve_model_data_config(reference), is_training=False)
         pixels = transform(Image.open(_asset(case)).convert("RGB")).unsqueeze(0).to("cuda")
         with torch.no_grad():
@@ -176,4 +189,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
                 "reference", {"top_class": int(np.argmax(expected)), "logits": expected}
             )
     with evidence_stage("compare"):
+        if cosine_floor is not None:
+            cosine = _logit_cosine(actual["logits"], expected)
+            record_evidence("compare", {"logit_cosine": cosine})
         assert int(actual["top_class"]) == int(np.argmax(expected))
+        if cosine_floor is not None:
+            assert cosine >= float(cosine_floor), f"logit cosine {cosine:.6f} < {cosine_floor}"
