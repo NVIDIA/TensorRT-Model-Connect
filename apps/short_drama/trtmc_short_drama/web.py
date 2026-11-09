@@ -29,7 +29,7 @@ from .store import Project, Store, read_json, write_json, write_secret
 log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).with_name("static")
-SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "ah_q_zheng_zhuan.txt"
+SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "tuantuan_star_tree.txt"
 CORE_STEPS = [planning.STEP, media.STILLS, media.SHOTS, editing.SUBTITLES, editing.ASSEMBLE,
               assist.STORY, assist.REVISE, assist.REVIEW, analysis.ANALYZE]
 WRITE_HEADER = "x-short-drama"

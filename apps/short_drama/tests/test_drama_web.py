@@ -82,7 +82,7 @@ def test_create_plan_edit_and_select_flow(tmp_path, monkeypatch):
         created = client.post("/api/projects", json={"title": "AQ", "sample": True, "episodes": 1,
                                                      "max_seconds": 30}).json()
         project = client.get(f"/api/projects/{created['id']}").json()
-        assert project["novel_chars"] > 8000 and project["meta"]["flow"] == "default@1"
+        assert project["novel_chars"] > 600 and project["meta"]["flow"] == "default@1"
 
         assert client.post(f"/api/projects/{created['id']}/run", json={"step": "plan"}).status_code == 200
         jobs = wait(client)

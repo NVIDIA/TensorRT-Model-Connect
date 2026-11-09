@@ -270,17 +270,12 @@ distributed under the
 [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license)
 of the source checkpoint.
 
-## Short-drama sample novel
+## Short-drama sample story
 
-`apps/short_drama/samples/ah_q_zheng_zhuan.txt` is the complete text of
-《阿Q正传》 (The True Story of Ah Q) by Lu Xun (1881-1936), first serialized in
-1921-1922. The author died in 1936, so the work is in the public domain in
-mainland China, Taiwan and countries with copyright terms of life plus 50 to 80
-years, and in the United States. The text was taken from the Chinese Wikisource
-edition based on the 1938 《鲁迅全集》, which Wikisource marks public domain. The
-file keeps the nine chapters and the closing date line; the corner brackets
-(『』「」) were changed to curly quotation marks and nothing else was edited.
-
-- Source: https://zh.wikisource.org/wiki/阿Q正傳 (simplified-Chinese view)
+`apps/short_drama/samples/tuantuan_star_tree.txt`, 《团团的星星树》, is an
+original one-chapter children's story written for this app. A language model
+drafted it, through the app's own story-from-an-idea step, from this idea by a
+project contributor: 幼儿3D卡通动画，适合3到5岁的孩子：熊猫宝宝团团在竹林里捡到一颗会发光的种子，和好朋友小兔子朵朵一起把它种下、浇水、守着它过夜；第二天早上，种子长成了一棵挂满星星小灯的小树，照亮了整片竹林。故事温暖简单，没有坏人，只有团团和朵朵两个角色、竹林一个场景，台词短小可爱。
+It is distributed under the Apache License 2.0 with the rest of the project.
 
 <!-- Collaborative review anchor: batch 2. -->
