@@ -9,6 +9,7 @@
   "testcases": [
     {
       "name": "wan22-ti2v-5b-i2v-portrait",
+      "premerge": true,
       "reference_backend": "wan_official",
       "semantic_assessment": true,
       "semantic_samples": 6,
