@@ -47,6 +47,10 @@ def _pfx(root, key):
     return f"{root}.{key}" if root else key
 
 
+def _position_offset(config: ModelConfig) -> int:
+    return config.raw.get("pad_token_id", 1) + 1
+
+
 def _compute_relative_position_bias(
     seq_length: int,
     num_buckets: int,
@@ -126,8 +130,7 @@ class _MPNetModel:
 
         # Position embedding — MPNet uses padding_idx=1, positions start at 2
         pos_embed_raw = _load_tensor(readers, _pfx(root, "embeddings.position_embeddings.weight"))
-        pad_idx = config.raw.get("pad_token_id", 1)
-        pos_offset = pad_idx + 1
+        pos_offset = _position_offset(config)
         pos_embed = pos_embed_raw[pos_offset:].astype(np.float32)
         weights["position_embedding"] = pos_embed
 
@@ -218,6 +221,12 @@ class _MPNetModel:
         parallel_config=None,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
+        position_capacity = weights["position_embedding"].shape[0]
+        if max_cache_length > position_capacity:
+            raise ValueError(
+                f"MPNet sequence length {max_cache_length} exceeds mapped position "
+                f"embedding capacity {position_capacity}"
+            )
         # Pre-compute relative position bias if present
         if "_relative_attention_bias" in weights:
             bias_table = weights.pop("_relative_attention_bias")
@@ -333,12 +342,19 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     precision = str(request.precision).lower()
     if precision not in {"fp32", "fp16", "bf16"}:
         raise ValueError("MPNet precision must be fp32, fp16, or bf16")
+    position_capacity = _positive_int(
+        config.max_position_embeddings - _position_offset(config),
+        "position embedding capacity",
+    )
     max_sequence_length = _positive_int(
-        request.max_sequence_length or min(config.max_position_embeddings, 512),
+        request.max_sequence_length or min(position_capacity, 512),
         "max_sequence_length",
     )
-    if max_sequence_length > config.max_position_embeddings:
-        raise ValueError("MPNet max_sequence_length exceeds checkpoint capacity")
+    if max_sequence_length > position_capacity:
+        raise ValueError(
+            f"MPNet max_sequence_length {max_sequence_length} exceeds position "
+            f"embedding capacity {position_capacity}"
+        )
     if request.quantization not in {None, "none"}:
         raise NotImplementedError("MPNet has no family-owned quantized build")
     if request.fp32_layers:
