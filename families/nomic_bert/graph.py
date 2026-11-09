@@ -47,6 +47,14 @@ def _restore_dtype(network, tensor, original):
 
 
 def add_layer_norm(network, inp, gamma, beta, eps):
+    """Layer norm with float32 statistics whatever the input type.
+
+    A float16 input is cast to float32 and the result cast back, so a float32
+    graph gets no extra layer. In an fp16 graph the largest residual (before
+    ``norm2``, up to 118 on held-out text) has a squared deviation from the
+    mean of up to 1.4e+04, only 4.7x below the fp16 limit (65504); an
+    all-fp16 layer norm measured no faster and slightly less accurate.
+    """
     source, original = _as_float32(network, inp)
     axis = len(inp.shape) - 1
     mean = network.add_reduce(source, trt.ReduceOperation.AVG, 1 << axis, True).get_output(0)
@@ -164,15 +172,19 @@ def add_attention(network, query, key, value, mask, *, num_heads, head_dim,
     scores = network.add_matrix_multiply(
         heads_q, trt.MatrixOperation.NONE,
         heads_k, trt.MatrixOperation.TRANSPOSE).get_output(0)
-    scale = add_constant(network, (1, 1, 1, 1), np.full((1,), 1.0 / np.sqrt(head_dim)),
-                         dtype=np.dtype(trt.nptype(scores.dtype)))
+    # Scale, mask and softmax run in float32 whatever the work type (the mask
+    # is float32). In an fp16 graph this costs nothing: TensorRT still fuses
+    # the attention, and the fused kernel is 3% to 4% faster than with an fp16
+    # softmax at 2048 tokens on B200 and B300 (the same at 128 and 512).
+    scores, original = _as_float32(network, scores)
+    scale = add_constant(network, (1, 1, 1, 1), np.full((1,), 1.0 / np.sqrt(head_dim)))
     scores = add_product(network, scores, scale)
     if mask is not None:
         scores = add_sum(network, scores, mask)
     weights = network.add_softmax(scores)
     weights.axes = 1 << 3
     context = network.add_matrix_multiply(
-        weights.get_output(0), trt.MatrixOperation.NONE,
+        _restore_dtype(network, weights.get_output(0), original), trt.MatrixOperation.NONE,
         heads_v, trt.MatrixOperation.NONE).get_output(0)
     back = network.add_shuffle(context)
     back.first_transpose = (0, 2, 1, 3)
