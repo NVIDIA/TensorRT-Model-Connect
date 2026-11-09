@@ -24,6 +24,11 @@ from .config import DenseLfm2Config, validate_dense_lfm2_config
 from .quantization import Lfm2QuantContext, calibrate_lfm2_fp8, configure_fp8_build
 
 
+# Tactic-selection point for the active key-row count (typical chat and
+# benchmark contexts); any count from 1 to the cache capacity is valid.
+ACTIVE_KEY_ROWS_OPTIMUM = 256
+
+
 if TYPE_CHECKING:
     from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
@@ -340,6 +345,29 @@ def _apply_rope(
     )
 
 
+def _slice_cache_rows(
+    network: trt.INetworkDefinition,
+    cache: trt.ITensor,
+    key_positions: trt.ITensor,
+) -> trt.ITensor:
+    """Return the first ``len(key_positions)`` rows of a ``[1,Hkv,C,D]`` cache."""
+
+    cache_shape = network.add_shape(cache).get_output(0)
+    leading = network.add_slice(cache_shape, start=(0,), shape=(2,), stride=(1,))
+    trailing = network.add_slice(cache_shape, start=(3,), shape=(1,), stride=(1,))
+    rows = network.add_shape(key_positions).get_output(0)
+    size = network.add_concatenation([leading.get_output(0), rows, trailing.get_output(0)])
+    size.axis = 0
+    rows_slice = network.add_slice(
+        cache,
+        start=(0, 0, 0, 0),
+        shape=(1, 1, 1, 1),
+        stride=(1, 1, 1, 1),
+    )
+    rows_slice.set_input(2, size.get_output(0))
+    return rows_slice.get_output(0)
+
+
 def add_native_kv_attention(
     network: trt.INetworkDefinition,
     q: trt.ITensor,
@@ -349,6 +377,7 @@ def add_native_kv_attention(
     cache_v: trt.ITensor,
     cache_write_indices: trt.ITensor,
     attention_masks: NativeKvMasks,
+    key_positions: trt.ITensor,
     *,
     num_heads: int,
     num_kv_heads: int,
@@ -356,7 +385,13 @@ def add_native_kv_attention(
     work_dtype: trt.DataType,
     tag: str,
 ) -> dict[str, trt.ITensor]:
-    """Use TensorRT's in-place KV update and explicit masked attention."""
+    """Use TensorRT's in-place KV update and explicit masked attention.
+
+    Attention reads only the first ``R`` cache rows, where ``R`` is the length
+    of ``key_positions``; the runtime keeps ``R`` at or above the valid
+    context, so the cost of a step follows the context instead of the cache
+    capacity.
+    """
 
     if work_dtype not in {trt.float16, trt.bfloat16}:
         raise ValueError("LFM2 native KV attention requires FP16 or BF16")
@@ -391,6 +426,8 @@ def add_native_kv_attention(
     update_v.name = f"{tag}.cache_v_update"
     present_k = update_k.get_output(0)
     present_v = update_v.get_output(0)
+    active_k = _slice_cache_rows(network, present_k, key_positions)
+    active_v = _slice_cache_rows(network, present_v, key_positions)
 
     q_4d = _reshape_rows_to_heads(
         network,
@@ -401,8 +438,8 @@ def add_native_kv_attention(
     context_4d = add_explicit_masked_grouped_query_attention(
         network,
         q_4d,
-        present_k,
-        present_v,
+        active_k,
+        active_v,
         attention_masks,
         num_heads=num_heads,
         num_kv_heads=num_kv_heads,
@@ -670,12 +707,23 @@ def build_lfm2_engine(
         trt.int32,
         (1,),
     )
+    # 0..R-1 for the cache rows attention reads; R is bucketed by the runtime.
+    key_positions = network.add_input("key_positions", trt.int32, (-1,))
+    profile = builder.create_optimization_profile()
+    profile.set_shape(
+        "key_positions",
+        (1,),
+        (min(ACTIVE_KEY_ROWS_OPTIMUM, max_cache_length),),
+        (max_cache_length,),
+    )
+    builder_config.add_optimization_profile(profile)
     attention_masks = add_active_prefix_causal_masks(
         network,
         token_id,
         cache_write_indices,
         key_value_lengths,
         max_cache_length,
+        key_positions=key_positions,
     )
 
     cache_shape = (
@@ -839,6 +887,7 @@ def build_lfm2_engine(
                 cache_v_inputs[attention_index],
                 cache_write_indices,
                 attention_masks,
+                key_positions,
                 num_heads=cfg.num_attention_heads,
                 num_kv_heads=cfg.num_key_value_heads,
                 head_dim=cfg.head_dim,
