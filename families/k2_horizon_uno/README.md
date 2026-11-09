@@ -10,6 +10,45 @@ decoding: per cycle one draft call (`[seed, 7 noise tokens]`, mask
 equals greedy autoregressive decoding of the base model. The manifest builds the
 model in bf16 with `max_sequence_length` 256. Batch size is 1.
 
+## Engine profiles and CUDA graph
+
+The engine has two optimization profiles over the same weights. Profile 0
+takes one `lora_mask` value per row and runs the LoRA branch; profile 1 takes
+an empty `lora_mask` and gives the LoRA GEMMs no rows. The native runtime
+deserializes the engine once, keeps one execution context per profile on the
+same KV cache, and sends a call to profile 0 only when its mask has a nonzero
+value (draft calls). Prompt, verify and autoregressive calls (mask all 0) use
+profile 1; their logits and K/V are bit-identical to the same call with an
+all-0 mask on profile 0 and on the single-profile engine of earlier versions.
+Draft calls on profile 0 run the LoRA rows through other GEMM kernels than
+before, so draft logits differ in the last bits (max abs 0.4 to 1.8 on one
+test call). This changes only which draft tokens are proposed at near ties;
+the committed tokens are the verify argmax and did not change on any measured
+prompt (48 of 48 runs; 3150 to 3162 forwards against 3156). Bundles built
+before this change have one profile and must be rebuilt.
+
+The draft context replays a CUDA graph (8 rows in every cycle except the
+last). The base context runs without a graph: its row count changes in every
+request (prompt chunks of 8, k and 1 rows, then verify blocks), and a recapture
+(2 to 13 ms) costs more than a replay saves (about 0.2 ms per call).
+
+One call, 8 rows, `max_sequence_length` 256, TensorRT 11.4, ms (in brackets:
+1024):
+
+| Call | B200 before | B200 now | B300 before | B300 now |
+|---|---|---|---|---|
+| Draft (mask `[0, 1, ..., 1]`) | 5.51 (5.64) | 4.73 (4.88), graph | 5.06 (5.12) | 4.91 (5.00), graph |
+| Verify or prompt (mask all 0) | 5.51 (5.63) | 4.53 (4.59) | 5.04 (5.12) | 4.16 (4.18) |
+| 1 row (AR, last prompt row) | 5.61 | 4.56 | 5.13 | 4.13 |
+
+Native runtime, 16 chat prompts x 3 rounds, 128 new tokens, greedy, same
+tokens as before on every run: speculative decode 141.6 -> 151.6 tokens/s
+(B200, 1.07x) and 148.9 -> 151.6 (B300, 1.02x); prompt time per request 26.6
+-> 22.2 ms and 24.2 -> 20.6 ms; autoregressive mode 1.16x on both GPUs. The
+end-to-end gain is smaller than the per-call gain because the host side of a
+call (copy of the float32 logits and the argmax over 8 x 250624 values on the
+CPU, about 7 ms per 8-row call) is longer than the engine time.
+
 ## FP8 quantization study (not shipped)
 
 FP8 self-quantization of the base projections was built and measured on
@@ -189,6 +228,7 @@ Not shipped: the quality loss is large and speculative decode is slower.
    the branch is 1.21x to 1.24x faster. Skipping the branch when the mask is
    all 0 (or a second engine profile without LoRA for prompt and verify) would
    speed up bf16 decode more than FP8 does.
+   Addressed: see "Engine profiles and CUDA graph" (item 1 for draft calls).
 3. TensorRT 11.4 stream assignment fails for some FP8 graphs of this family
    (`[MS] Multi stream is disabled because the stream assignment failed`).
    Without a CUDA graph the multi-stream plans are 1.3x to 1.5x slower than

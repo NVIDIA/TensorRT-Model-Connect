@@ -120,6 +120,74 @@ def _matmul(
     return layer.get_output(0)
 
 
+def _shape_length(network, tensor):
+    shape = network.add_shape(tensor).get_output(0)
+    return network.add_slice(shape, start=(0,), shape=(1,), stride=(1,)).get_output(0)
+
+
+def _with_width(network, rows, width: int, keepalive: list[np.ndarray]):
+    """INT64 ``[rows, width]`` shape tensor."""
+
+    width_tensor = _constant(
+        network, (1,), np.array([width], dtype=np.int64), keepalive, dtype=np.dtype(np.int64)
+    )
+    layer = network.add_concatenation([rows, width_tensor])
+    layer.axis = 0
+    return layer.get_output(0)
+
+
+LORA_PROFILE = 0
+BASE_PROFILE = 1
+
+
+def add_lora_and_base_profiles(builder, builder_config, row_inputs, max_rows: int) -> None:
+    """Add the two optimization profiles of a ``1..max_rows`` row engine.
+
+    ``LORA_PROFILE`` takes one ``lora_mask`` value per row and runs the LoRA
+    branch. ``BASE_PROFILE`` takes an empty mask, for prompt and verify calls
+    whose mask is all 0, so the LoRA GEMMs get no rows. The native runtime
+    keeps one execution context per profile.
+    """
+
+    for mask_rows in ((1, max_rows, max_rows), (0, 0, 0)):
+        profile = builder.create_optimization_profile()
+        for name in row_inputs:
+            # TensorRT 11.1 mutates the profile in place and returns ``None`` from
+            # this Python binding.  Registration below is the authoritative
+            # validation boundary.
+            profile.set_shape(name, (1,), (max_rows,), (max_rows,))
+        profile.set_shape("lora_mask", *((rows,) for rows in mask_rows))
+        if builder_config.add_optimization_profile(profile) < 0:
+            raise RuntimeError("TensorRT rejected the K2-Horizon-Uno optimization profile")
+
+
+def _lora_rows(network, token_id, lora_mask):
+    """Row split of a call, as INT64 ``[1]`` shape tensors ``(rows, remaining)``.
+
+    ``rows`` is the length of ``lora_mask``: the leading token rows that run
+    the LoRA branch. ``remaining`` is the other token rows, which keep the base
+    projection. The LoRA profile binds one mask value per token row
+    (``remaining`` is 0); the base profile binds an empty mask, so the LoRA
+    GEMMs get no rows.
+    """
+
+    rows = _shape_length(network, lora_mask)
+    remaining = network.add_elementwise(
+        _shape_length(network, token_id), rows, trt.ElementWiseOperation.SUB
+    ).get_output(0)
+    return rows, remaining
+
+
+def _row_slice(network, tensor, start, rows, width: int, keepalive: list[np.ndarray]):
+    """Rows ``[start, start + rows)`` of a ``[S, width]`` tensor; ``start`` is ``None`` for 0."""
+
+    layer = network.add_slice(tensor, start=(0, 0), shape=(1, width), stride=(1, 1))
+    if start is not None:
+        layer.set_input(1, _with_width(network, start, 0, keepalive))
+    layer.set_input(2, _with_width(network, rows, width, keepalive))
+    return layer.get_output(0)
+
+
 def _conditional_projection(
     network,
     lhs,
@@ -127,6 +195,7 @@ def _conditional_projection(
     lora_a: np.ndarray,
     lora_b: np.ndarray,
     lora_mask,
+    lora_rows,
     *,
     lhs_width: int,
     rhs_width: int,
@@ -136,7 +205,9 @@ def _conditional_projection(
     constant_keepalive: list[np.ndarray],
     name: str,
 ):
-    """Compute ``xW + mask * scale * (xA)B`` for every active token row."""
+    """Compute ``xW + mask * scale * (xA)B`` on the mask rows and ``xW`` on the other rows."""
+
+    rows, remaining = lora_rows
 
     base = _matmul(
         network,
@@ -150,7 +221,7 @@ def _conditional_projection(
     )
     low_rank = _matmul(
         network,
-        lhs,
+        _row_slice(network, lhs, None, rows, lhs_width, constant_keepalive),
         lora_a,
         lhs_width=lhs_width,
         rhs_width=rank,
@@ -179,16 +250,26 @@ def _conditional_projection(
     if scaled is None:
         raise RuntimeError(f"TensorRT failed to scale conditional LoRA for {name}")
     mask_rows = network.add_shuffle(lora_mask)
-    mask_rows.reshape_dims = (-1, 1)
+    # An empty mask cannot use a -1 reshape; give the row count explicitly.
+    mask_rows.set_input(1, _with_width(network, rows, 1, constant_keepalive))
     mask_work = _cast(network, mask_rows.get_output(0), work_dtype)
     selected = network.add_elementwise(
         scaled.get_output(0), mask_work, trt.ElementWiseOperation.PROD
     )
     if selected is None:
         raise RuntimeError(f"TensorRT failed to mask conditional LoRA for {name}")
-    result = network.add_elementwise(base, selected.get_output(0), trt.ElementWiseOperation.SUM)
-    if result is None:
+    lora_part = network.add_elementwise(
+        _row_slice(network, base, None, rows, rhs_width, constant_keepalive),
+        selected.get_output(0),
+        trt.ElementWiseOperation.SUM,
+    )
+    if lora_part is None:
         raise RuntimeError(f"TensorRT failed to apply conditional LoRA for {name}")
+    base_part = _row_slice(network, base, rows, remaining, rhs_width, constant_keepalive)
+    result = network.add_concatenation([lora_part.get_output(0), base_part])
+    if result is None:
+        raise RuntimeError(f"TensorRT failed to join conditional LoRA rows for {name}")
+    result.axis = 0
     result.name = name
     return result.get_output(0)
 
@@ -404,15 +485,10 @@ def build_engine(
     ):
         raise RuntimeError("TensorRT failed to create K2-Horizon-Uno engine inputs")
 
-    profile = builder.create_optimization_profile()
-    optimum = cfg.max_block_size
-    for name in ("token_id", "position_id", "lora_mask"):
-        # TensorRT 11.1 mutates the profile in place and returns ``None`` from
-        # this Python binding.  Registration below is the authoritative
-        # validation boundary.
-        profile.set_shape(name, (1,), (optimum,), (cfg.max_block_size,))
-    if builder_config.add_optimization_profile(profile) < 0:
-        raise RuntimeError("TensorRT rejected the K2-Horizon-Uno optimization profile")
+    add_lora_and_base_profiles(
+        builder, builder_config, ("token_id", "position_id"), cfg.max_block_size
+    )
+    lora_rows = _lora_rows(network, token_id, lora_mask)
 
     attention_masks = add_active_prefix_causal_masks(
         network,
@@ -465,6 +541,7 @@ def build_engine(
                 weights[f"{prefix}.{logical}_lora_a"],
                 weights[f"{prefix}.{logical}_lora_b"],
                 lora_mask,
+                lora_rows,
                 lhs_width=lhs_width,
                 rhs_width=rhs_width,
                 rank=cfg.lora_rank,
