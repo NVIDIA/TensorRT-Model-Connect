@@ -521,6 +521,7 @@ def _assert_parity(
         assert accuracy["temporal_profile_correlation"] >= float(
             thresholds["min_temporal_profile_correlation"]
         )
+    if "min_active_transition_fraction" in thresholds:
         assert accuracy["trt_active_transition_fraction"] >= float(
             thresholds["min_active_transition_fraction"]
         )
