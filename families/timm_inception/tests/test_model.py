@@ -262,17 +262,17 @@ def test_build_rejects_inception_v4(tmp_path: Path):
         build_family(request, object())
 
 
-def test_build_rejects_quantization(tmp_path: Path):
+def test_build_rejects_other_quantization(tmp_path: Path):
     request = BuildRequest(
         model_dir=tmp_path,
         output_path=tmp_path / "unused.bundle",
         family="timm_inception",
         task="image_to_class_scores",
         precision="fp16",
-        quantization="fp8",
+        quantization="nvfp4",
     )
 
-    with pytest.raises(NotImplementedError, match="quantization"):
+    with pytest.raises(NotImplementedError, match="quantization fp8 or none"):
         build_family(request, object())
 
 @pytest.mark.parametrize("metadata", [

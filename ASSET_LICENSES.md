@@ -45,6 +45,10 @@ distributed under the Apache License 2.0 with the rest of the project:
   synthetic test patterns written by the checked-in
   `families/phi4_multimodal/tests/data/dynamic-hd/generate.py` for Dynamic-HD
   preprocessing goldens
+- `families/timm_inception/tests/data/orc_test_img.jpeg` — byte-identical copy of
+  `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the input of the FP8
+  E2E case (its top-1 class has a clear margin; the shared vehicle photograph
+  is a near-tie for this model)
 
 ## Project overview media
 
