@@ -133,6 +133,45 @@ def test_official_reference_consumes_the_materialized_raw_checkpoint(
     assert kwargs["env"]["TRANSFORMERS_OFFLINE"] == "1"
 
 
+def test_official_reference_runs_image_to_video_from_the_given_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    (source / official_reference.SOURCE_ENTRYPOINT).parent.mkdir(parents=True)
+    (source / official_reference.SOURCE_ENTRYPOINT).write_text("# entrypoint\n", encoding="utf-8")
+    monkeypatch.setenv(official_reference.SOURCE_ENVIRONMENT, str(source))
+    scripts: list[str] = []
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        scripts.append(command[2])
+        for index in range(5):
+            _write_png(
+                tmp_path / f"artifacts/reference-frames/frame_{index:04d}.png", 32, 16, index
+            )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(official_reference.subprocess, "run", fake_run)
+    arguments = dict(
+        prompt="A cat turns",
+        height=16,
+        width=32,
+        num_frames=5,
+        num_steps=7,
+        guidance_scale=5.0,
+        flow_shift=5.0,
+        seed=42,
+        timeout_s=60,
+    )
+    image = tmp_path / "first.png"
+    official_reference.generate(tmp_path, tmp_path / "artifacts", image=image, **arguments)
+    official_reference.generate(tmp_path, tmp_path / "artifacts", **arguments)
+    image_to_video, text_to_video = scripts
+    assert f"image_path = {str(image)!r}" in image_to_video
+    assert "image_path = None" in text_to_video
+    assert all("img=initial_image," in script for script in scripts)
+    assert "is not 32x16" in image_to_video  # an initial image of another size is rejected
+
+
 def test_official_reference_declares_its_real_import_dependencies() -> None:
     requirements = {
         line

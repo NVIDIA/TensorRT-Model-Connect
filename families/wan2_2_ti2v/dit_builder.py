@@ -215,6 +215,32 @@ def _slice_chunks(network, tensor, count: int, width: int):
     ]
 
 
+def _row(network, tensor, row: int, width: int):
+    return network.add_slice(tensor, (row, 0), (1, width), (1, 1)).get_output(0)
+
+
+class _TokenSelect:
+    """Give the first latent frame's tokens one value and every later token another.
+
+    Image-to-video keeps the first latent frame clean, so upstream runs its
+    tokens at timestep 0 and the rest at the sampling timestep. With 0/1 masks,
+    ``first * mask + later * (1 - mask)`` selects exactly, so text-to-video,
+    which passes one timestep for both, computes what a scalar timestep does.
+    """
+
+    def __init__(self, network, profile: Wan22TI2VConfig):
+        first = np.arange(profile.num_patches) < profile.first_frame_patches
+        self.network = network
+        self.first_mask = op.constant(network, first.astype(np.float32).reshape(-1, 1))
+        self.later_mask = op.constant(network, (~first).astype(np.float32).reshape(-1, 1))
+
+    def __call__(self, first, later):
+        product, total = trt.ElementWiseOperation.PROD, trt.ElementWiseOperation.SUM
+        first = self.network.add_elementwise(first, self.first_mask, product).get_output(0)
+        later = self.network.add_elementwise(later, self.later_mask, product).get_output(0)
+        return self.network.add_elementwise(first, later, total).get_output(0)
+
+
 def _patchify(network, latent, weight, bias, profile: Wan22TI2VConfig):
     pt, ph, pw = profile.patch_size
     patches = network.add_shuffle(latent)
@@ -308,7 +334,8 @@ def build_dit_engine(
             profile.latent_width,
         ),
     )
-    time_features = network.add_input("time_features", trt.float32, (1, profile.freq_dim))
+    # Row 0 holds the first latent frame's timestep features, row 1 the later frames'.
+    time_features = network.add_input("time_features", trt.float32, (2, profile.freq_dim))
     text = network.add_input(
         "encoder_hidden_states",
         trt.float32,
@@ -324,16 +351,13 @@ def build_dit_engine(
         weights["patch_embedding.bias"],
         profile,
     )
-    # Upstream expands the scalar timestep before the FP32 MLP. The row count
-    # influences GEMM dispatch, so materialize the same shape here.
-    expanded_time_features = network.add_elementwise(
-        time_features,
-        op.constant(
-            network,
-            np.zeros((profile.num_patches, profile.freq_dim), dtype=np.float32),
-        ),
-        trt.ElementWiseOperation.SUM,
-    ).get_output(0)
+    # Upstream gives every token its own timestep before the FP32 MLP. The row
+    # count influences GEMM dispatch, so materialize the same shape here.
+    per_token = _TokenSelect(network, profile)
+    expanded_time_features = per_token(
+        _row(network, time_features, 0, profile.freq_dim),
+        _row(network, time_features, 1, profile.freq_dim),
+    )
     time_linear1 = op.linear(
         network,
         expanded_time_features,
@@ -370,17 +394,32 @@ def build_dit_engine(
         weights["condition_embedder.text_embedder.linear_2.bias"],
     )
 
+    # Every token of a frame shares its timestep: one row stands for each group.
+    later_row = profile.first_frame_patches
+    time_proj_rows = [_row(network, time_proj, row, 6 * profile.dim) for row in (0, later_row)]
+    time_embed_rows = [_row(network, time_embed, row, profile.dim) for row in (0, later_row)]
+
+    def modulation_chunks(table, rows, count: int):
+        """Per-token chunks of table + time rows: [first-frame value, later value] per chunk."""
+
+        constant = op.constant(network, table)
+        chunks = [
+            _slice_chunks(
+                network,
+                network.add_elementwise(constant, row, trt.ElementWiseOperation.SUM).get_output(0),
+                count,
+                profile.dim,
+            )
+            for row in rows
+        ]
+        return [per_token(first, later) for first, later in zip(*chunks)]
+
     rope_cos, rope_sin = _wan_rope(profile)
     for index in range(profile.num_layers):
         prefix = f"blocks.{index}"
         table = weights[f"{prefix}.scale_shift_table"].reshape(1, 6 * profile.dim)
-        modulation = network.add_elementwise(
-            op.constant(network, table),
-            time_proj,
-            trt.ElementWiseOperation.SUM,
-        ).get_output(0)
-        shift_sa, scale_sa, gate_sa, shift_ff, scale_ff, gate_ff = _slice_chunks(
-            network, modulation, 6, profile.dim
+        shift_sa, scale_sa, gate_sa, shift_ff, scale_ff, gate_ff = modulation_chunks(
+            table, time_proj_rows, 6
         )
 
         normalized = op.layer_norm(
@@ -556,14 +595,12 @@ def build_dit_engine(
         hidden = op.add_fp32_residual(network, hidden, ffn, gate_ff)
 
     final_table = weights["scale_shift_table"].reshape(1, 2 * profile.dim)
-    final_time = network.add_concatenation([time_embed, time_embed])
-    final_time.axis = 1
-    final_modulation = network.add_elementwise(
-        op.constant(network, final_table),
-        final_time.get_output(0),
-        trt.ElementWiseOperation.SUM,
-    ).get_output(0)
-    final_shift, final_scale = _slice_chunks(network, final_modulation, 2, profile.dim)
+    final_rows = []
+    for row in time_embed_rows:
+        doubled = network.add_concatenation([row, row])
+        doubled.axis = 1
+        final_rows.append(doubled.get_output(0))
+    final_shift, final_scale = modulation_chunks(final_table, final_rows, 2)
     hidden = op.layer_norm(network, hidden, profile.dim, profile.eps)
     hidden = op.adaptive_norm(network, hidden, final_shift, final_scale)
     rows = op.linear(
