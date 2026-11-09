@@ -236,7 +236,8 @@ starts on that shot's last frame. Any other shot starts from the reference pictu
 else of its first person, else of its place. Tier B's image-edit model draws the shot's first
 frame from that picture and describes the other people of the shot in words. Tier C has no room
 for an edit model, so the shot starts on the picture itself and shows one person at first.
-Wan2.2-TI2V-5B then animates 121 frames, about 5 s, so a shot planned longer ends after 5 s. The
+Every first frame is scaled and cropped to 704x1280, the size the Wan2.2 bundle renders, before
+it is sent. Wan2.2-TI2V-5B then animates 121 frames, about 5 s, so a shot planned longer ends after 5 s. The
 clips have no sound: each line becomes a subtitle that starts with the speaker's name, and the
 analysis skips the sound and speech checks.
 

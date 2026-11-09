@@ -414,17 +414,20 @@ def test_an_animated_shot_opens_on_a_keyframe_or_where_the_shot_before_it_ends(p
     services = FirstFrameServices()
     render(project, services)
     assert services.loaded == ["e", "v"]  # every keyframe first, so each model loads once
-    assert fitted == [("character-aq.png", 704, 1280), ("location-street.png", 704, 1280)]
+    assert fitted == [("character-aq.png", 704, 1280), ("location-street.png", 704, 1280),  # the edit inputs
+                      # then every first frame, at the size the video bundle takes
+                      ("e1s1-take1.png", 704, 1280), ("e1s1-take1-last.png", 704, 1280), ("e1s3-take1.png", 704, 1280)]
     person, place = services.engine.edits
     assert "Use the person in the picture (阿Q, a thin man)" in person["prompt"] and "The place: a shrine." in person["prompt"]
     assert "Use the place in the picture" in place["prompt"] and person["picture"] == b"picture"
     first, second, third = services.engine.calls
-    assert first["references"] == ["e1s1-take1.png"] and third["references"] == ["e1s3-take1.png"]
-    assert second["references"] == ["e1s1-take1-last.png"]  # the same place: it opens where e1s1 ends
+    assert [c["references"] for c in (first, second, third)] == [
+        ["e1s1-take1-first.png"], ["e1s2-take1-first.png"], ["e1s3-take1-first.png"]]
     assert "阿Q talks." in first["prompt"] and "talks" not in second["prompt"] and "<Subject" not in first["prompt"]
     assert finished == [0.0, 0.0, 0.0]  # a first frame is the shot itself: nothing is skipped
     state = project.shot_state(1)
     assert state["e1s1"]["silent"] and state["e1s1"]["keyframe"]["file"] == "episodes/01/keyframes/e1s1-take1.png"
+    # the same place: e1s2 opens where e1s1 ends
     assert state["e1s2"]["first_frame"] == "episodes/01/frames/e1s1-take1-last.png" and not state["e1s2"]["keyframe"]
 
     def reasons(shot_id):
@@ -452,7 +455,7 @@ def test_without_an_edit_model_an_animated_shot_opens_on_its_reference_picture(p
     services.serving = lambda role: None  # a 24 GB tier: no edit model
     render(project, services)
     assert services.loaded == ["v"] and services.engine.edits == []
-    assert services.engine.calls[0]["references"] == ["e1s1-take1-picture.png"]
+    assert services.engine.calls[0]["references"] == ["e1s1-take1-first.png"]
     picture = "episodes/01/keyframes/e1s1-take1-picture.png"
     entry = project.shot_state(1)["e1s1"]
     assert entry["keyframe"] == {"file": picture, "still": "stills/character-aq.png", "picture": picture, "model": None}

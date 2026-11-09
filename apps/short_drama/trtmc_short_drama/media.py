@@ -20,7 +20,8 @@ log = logging.getLogger(__name__)
 MAX_REFERENCES = 6
 STILL_SIZE = "928x1664"
 # A video model that animates one first frame starts each shot on a keyframe that the edit model draws
-# from a picture of this size, the one its bundle is built for (--image-width, --image-height).
+# from a picture of this size, the one its bundle is built for (--image-width, --image-height). The
+# video bundle renders this size too, and trtmc-server takes a first frame of exactly that size.
 KEYFRAME_PICTURE = (704, 1280)
 KEYFRAME_STEPS, KEYFRAME_CFG = 40, 4.0  # Qwen-Image-Edit-2511's own defaults
 # Only takes animated from one first frame have these; another take must not inherit them.
@@ -513,10 +514,13 @@ def animate_shots(context: Context, episode: dict[str, Any], todo: list[dict[str
         prompt = entry.get("prompt_override") or prompts.motion_prompt(plan, shot, english)
         take = next_take(entry)
         seed = int(params.get("seed", 7)) + take - 1
+        # A drawn keyframe can come back another size and a last frame is 1080x1920, so fit each one.
+        sent = inside(project, directory / "keyframes" / f"{shot['id']}-take{take}-first.png")
+        video.fit_picture(first, sent, width=KEYFRAME_PICTURE[0], height=KEYFRAME_PICTURE[1])
         raw = inside(project, directory / "raw" / f"{shot['id']}-take{take}.mp4")
         raw.parent.mkdir(parents=True, exist_ok=True)
         started = time.monotonic()
-        context.services.engine.video(context.model, prompt, [first], raw, seed=seed)
+        context.services.engine.video(context.model, prompt, [sent], raw, seed=seed)
         clip = inside(project, directory / "clips" / f"{shot['id']}-take{take}.mp4")
         video.finish_clip(raw, clip, seconds=float(shot["seconds"]), lead_in=0.0)
         sheet = inside(project, directory / "sheets" / f"{shot['id']}-take{take}.jpg")
