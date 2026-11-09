@@ -3,12 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/* NVIDIA style: NVIDIA Sans from the brand-asset CDN (system fonts when offline), NVIDIA green,
-   light and dark schemes. */
-@font-face { font-family: "NVIDIA Sans"; font-weight: 400; font-display: swap;
-  src: url("https://brand-assets.cne.ngc.nvidia.com/assets/fonts/nvidia-sans/1.0.0/NVIDIASans_Rg.woff2") format("woff2"); }
-@font-face { font-family: "NVIDIA Sans"; font-weight: 700; font-display: swap;
-  src: url("https://brand-assets.cne.ngc.nvidia.com/assets/fonts/nvidia-sans/1.0.0/NVIDIASans_Bd.woff2") format("woff2"); }
+/* NVIDIA style: NVIDIA Sans where it is installed, else system fonts; NVIDIA green; light and dark
+   schemes. The page loads nothing from other hosts. */
 
 :root {
   color-scheme: light;
