@@ -509,8 +509,18 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             raise ValueError(
                 "Qwen-Image Edit requires image_height and image_width for the condition image"
             )
+        from .qwen_image_bundle_config import (
+            _EDIT_IMAGE_VAE_SIDE,
+            _calculate_aspect_size_from_area,
+        )
+
         edit_condition_image_size = (request.image_height, request.image_width)
-        raw_geometry = {}
+        # diffusers' QwenImageEditPlusPipeline, and the runtime when a request names no size,
+        # render the edit at the 1024*1024-area size of the input picture's aspect.
+        output_height, output_width = _calculate_aspect_size_from_area(
+            _EDIT_IMAGE_VAE_SIDE, request.image_height, request.image_width, 32
+        )
+        raw_geometry = {"image_height": output_height, "image_width": output_width}
     else:
         edit_condition_image_size = None
         raw_geometry = {
