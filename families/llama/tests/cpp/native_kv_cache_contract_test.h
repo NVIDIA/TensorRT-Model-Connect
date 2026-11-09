@@ -240,11 +240,15 @@ int run_native_kv_contract_tests(const char* model) {
           "rejects a non-int32 cache_write_indices input");
     check(rejects_native_contract<Cache>(
               stream,
-              [](auto& module) { module.set_tensor("cache_k_0", {1, 1, 10, 2}, DType::kFloat16); }),
+              [](auto& module) {
+                  module.set_tensor("cache_k_0", {1, 1, 10, 2}, DType::kFloat16);
+              }),
           "rejects a cache with the wrong capacity");
     check(rejects_native_contract<Cache>(
               stream,
-              [](auto& module) { module.set_tensor("cache_k_0", {1, 1, 11, 2}, DType::kFloat32); }),
+              [](auto& module) {
+                  module.set_tensor("cache_k_0", {1, 1, 11, 2}, DType::kFloat32);
+              }),
           "rejects a cache with the wrong dtype");
 
     {
@@ -307,6 +311,57 @@ int run_native_kv_contract_tests(const char* model) {
         check(dynamic.bound_shape("cache_k_0") == std::vector<int64_t>({7, 2}) &&
                   inputs.at("attention_mask").shape == std::vector<int64_t>({1, 8}),
               "runtime-sized cache binds its allocation and mask directly");
+    }
+
+    {
+        // A runtime-sized cache binds the valid prefix rounded up to 32 rows, not
+        // the whole allocation, so each step's attention follows the context.
+        const auto mask_at = [](const TensorMap& inputs, int64_t row, int64_t col) {
+            const auto& mask = inputs.at("attention_mask");
+            return static_cast<const float*>(mask.data)[row * mask.shape.back() + col];
+        };
+        Cache cache(1, 100, 2, stream, DType::kFloat16);
+        NativeKvModuleStub decode(stream, 1, 100, 1, 2, DType::kFloat16, false, nullptr, 4, 16, {},
+                                  true, true);
+        cache.bind_to(decode);
+        check(decode.bound_shape("cache_k_0") == std::vector<int64_t>({32, 2}) &&
+                  decode.bound_shape("cache_v_0") == std::vector<int64_t>({32, 2}),
+              "runtime-sized cache binds one row bucket before any context");
+
+        cache.set_position(40);
+        TensorMap inputs;
+        cache.prepare_step(inputs);
+        check(decode.bound_shape("cache_k_0") == std::vector<int64_t>({64, 2}) &&
+                  inputs.at("attention_mask").shape == std::vector<int64_t>({1, 65}),
+              "decode binds the bucketed valid prefix and a matching mask");
+        check(mask_at(inputs, 0, 39) == 0.0F && mask_at(inputs, 0, 40) < -1.0F &&
+                  mask_at(inputs, 0, 63) < -1.0F && mask_at(inputs, 0, 64) == 0.0F,
+              "decode mask shows valid rows and the new token and hides stale rows");
+
+        inputs.clear();
+        cache.prepare_step(inputs, 3);
+        check(inputs.at("attention_mask").shape == std::vector<int64_t>({3, 67}) &&
+                  mask_at(inputs, 1, 39) == 0.0F && mask_at(inputs, 1, 40) < -1.0F &&
+                  mask_at(inputs, 1, 65) == 0.0F && mask_at(inputs, 1, 66) < -1.0F,
+              "batched mask places the causal block after the bound rows");
+
+        cache.set_position(100);
+        inputs.clear();
+        cache.prepare_step(inputs);
+        check(decode.bound_shape("cache_k_0") == std::vector<int64_t>({100, 2}) &&
+                  inputs.at("attention_mask").shape == std::vector<int64_t>({1, 101}),
+              "the bound rows never exceed the allocation");
+
+        Cache prefill_cache(1, 100, 2, stream, DType::kFloat16);
+        NativeKvModuleStub prefill(stream, 1, 100, 1, 2, DType::kFloat16, false, nullptr, 4, 16, {},
+                                   true, true);
+        prefill_cache.bind_cache_inputs(prefill);
+        prefill_cache.set_position(33);
+        inputs.clear();
+        prefill_cache.prepare_step(inputs, 4);
+        check(prefill.bound_shape("cache_k_0") == std::vector<int64_t>({64, 2}) &&
+                  inputs.at("attention_mask").shape == std::vector<int64_t>({4, 68}),
+              "prefill chunks bind the bucketed valid prefix too");
     }
 
     {

@@ -10,7 +10,9 @@
 //
 // Manages per-layer K/V device tensors and position tracking. Native TensorRT
 // KV engines update these buffers in place; standard engines use present rows
-// plus an attention mask.
+// plus an attention mask. Runtime-sized engines (dynamic cache rows) bind only
+// the valid prefix of the allocation, rounded up to a row bucket, so attention
+// cost follows the context rather than the allocated capacity.
 
 #include "families/llama/runtime/inference_state.h"
 #include "trtmc/runtime/device_tensor.h"
@@ -99,6 +101,11 @@ class LlamaKvCache : public LlamaInferenceState {
     void write_batched_mask(TensorMap& inputs, int32_t seq_len);
     void write_bidirectional_mask(TensorMap& inputs, int32_t seq_len);
     void write_decode_mask(TensorMap& inputs);
+    // Cache rows the next step binds: the allocation for static engines, the
+    // bucketed valid prefix for runtime-sized ones.
+    int32_t step_cache_rows() const;
+    void bind_dynamic_cache_rows(ITrtModule& module, int32_t cache_rows);
+    void rebind_cache_rows(int32_t cache_rows);
 
     std::vector<DeviceTensor> cache_k_; // [num_layers], shape [max_length, kv_dim]
     std::vector<DeviceTensor> cache_v_; // [num_layers]
@@ -119,6 +126,7 @@ class LlamaKvCache : public LlamaInferenceState {
     bool binding_mode_initialized_{false};
     bool native_kv_update_enabled_{false};
     bool dynamic_binding_enabled_{false};
+    int32_t bound_cache_rows_{0};
     DType cache_dtype_{DType::kFloat32};
     std::size_t cache_element_size_{sizeof(float)};
     LlamaKvCacheNames names_;
