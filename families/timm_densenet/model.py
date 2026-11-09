@@ -15,6 +15,9 @@ and the number of layers in each come from the `features.denseblockN.denselayerM
 keys, and the growth rate follows from the layer convolution shapes. Nothing
 here needs an architecture table, so densenet121/161/169/201 all build from one
 code path.
+
+``quantization="fp8"`` self-quantizes the convolutions of the dense layers and transitions
+at build time (see ``quantization.py``); the fp16 and fp32 builds are unchanged.
 """
 
 from __future__ import annotations
@@ -28,6 +31,12 @@ import numpy as np
 import tensorrt as trt
 
 from .graph import model as graph_ops
+from .quantization import (
+    calibrate_timm_densenet,
+    configure_fp8_build,
+    conv_names,
+    is_already_quantized,
+)
 from .weights import (
     WeightDict,
     _has_tensor,
@@ -119,7 +128,13 @@ class _TimmDensenetModel:
         config: ModelConfig,
         *,
         precision: str = "fp32",
+        quantization: str | None = None,
     ) -> WeightDict:
+        """Load the checkpoint in the work precision.
+
+        With ``quantization`` set, the convolutions that may run as FP8 stay float32, so the
+        build-time quantizer reads the original values.
+        """
         readers = _open_safetensors(Path(model_dir))
         raw = config.raw
         cfg = _resolve_config(raw)
@@ -127,11 +142,21 @@ class _TimmDensenetModel:
         cfg.update(layout)
         raw["_timm_densenet_config"] = cfg
         target_dtype = _target_np_dtype(precision)
+        quantizable = set()
+        if quantization not in (None, "none"):
+            names = getattr(readers, "tensor_map", None)
+            names = set(names) if names is not None else {k for r in readers for k in r.keys()}
+            if is_already_quantized(Path(model_dir), names):
+                raise ValueError(
+                    "the checkpoint is already quantized; FP8 self-quantization needs the original"
+                )
+            quantizable = {f"{name}.weight" for name in conv_names(layout["block_layers"])}
 
         weights = WeightDict()
 
         def conv(key: str) -> None:
-            weights[key] = _load_tensor(readers, key).astype(target_dtype)
+            tensor = _load_tensor(readers, key)
+            weights[key] = tensor if key in quantizable else tensor.astype(target_dtype)
 
         def bn(prefix: str) -> None:
             for suffix in ("weight", "bias", "running_mean", "running_var"):
@@ -184,8 +209,8 @@ class _TimmDensenetModel:
         parallel_config=None,
     ) -> bytes:
         del max_cache_length
-        if quant_ctx is not None:
-            raise NotImplementedError("timm_densenet does not support quantized builds yet")
+        if quant_ctx is not None and precision != "fp16":
+            raise ValueError(f"timm_densenet FP8 needs precision fp16, got {precision!r}")
         if parallel_config is not None and getattr(parallel_config, "enabled", False):
             raise NotImplementedError("timm_densenet does not support tensor-parallel builds")
 
@@ -229,6 +254,23 @@ class _TimmDensenetModel:
         trt_config.max_aux_streams = 0
         trt_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+        configure_fp8_build(trt_config, quant_ctx)
+
+        def conv1x1_or_3x3(tensor, name: str, kernel: tuple[int, int], padding=(0, 0)):
+            """A dense-layer or transition convolution, FP8 when the context quantizes it."""
+            if quant_ctx is not None and quant_ctx.should_quantize(name):
+                return quant_ctx.conv2d(network, tensor, name, kernel, padding)
+            weight = weights[f"{name}.weight"]
+            return graph_ops.add_conv2d(
+                network,
+                tensor,
+                weight,
+                None,
+                int(weight.shape[0]),
+                kernel,
+                padding=padding,
+                dtype=work_np_dtype,
+            )
 
         pixel_values = network.add_input("pixel_values", trt.float32, (1, 3, image_h, image_w))
         hidden = pixel_values
@@ -262,24 +304,11 @@ class _TimmDensenetModel:
                 # DenseNet is pre-activation: norm and ReLU come before the conv.
                 out = self._bn(network, inputs, weights, f"{prefix}.norm1", work_np_dtype)
                 out = graph_ops.add_relu(network, out)
-                w1 = weights[f"{prefix}.conv1.weight"]
-                out = graph_ops.add_conv2d(
-                    network, out, w1, None, int(w1.shape[0]), (1, 1), dtype=work_np_dtype
-                )
+                out = conv1x1_or_3x3(out, f"{prefix}.conv1", (1, 1))
 
                 out = self._bn(network, out, weights, f"{prefix}.norm2", work_np_dtype)
                 out = graph_ops.add_relu(network, out)
-                w2 = weights[f"{prefix}.conv2.weight"]
-                out = graph_ops.add_conv2d(
-                    network,
-                    out,
-                    w2,
-                    None,
-                    int(w2.shape[0]),
-                    (3, 3),
-                    padding=(1, 1),
-                    dtype=work_np_dtype,
-                )
+                out = conv1x1_or_3x3(out, f"{prefix}.conv2", (3, 3), (1, 1))
                 stack.append(out)
 
             hidden = graph_ops.add_concat(network, stack)
@@ -288,10 +317,7 @@ class _TimmDensenetModel:
                 t = f"features.transition{block_index}"
                 hidden = self._bn(network, hidden, weights, f"{t}.norm", work_np_dtype)
                 hidden = graph_ops.add_relu(network, hidden)
-                tw = weights[f"{t}.conv.weight"]
-                hidden = graph_ops.add_conv2d(
-                    network, hidden, tw, None, int(tw.shape[0]), (1, 1), dtype=work_np_dtype
-                )
+                hidden = conv1x1_or_3x3(hidden, f"{t}.conv", (1, 1))
                 hidden = graph_ops.add_avg_pool2d(network, hidden, 2, 2)
 
         hidden = self._bn(network, hidden, weights, "features.norm5", work_np_dtype)
@@ -365,8 +391,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_densenet does not support context parallelism")
     if request.task != "image_to_class_scores":
         raise ValueError("timm_densenet supports only task=image_to_class_scores")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("timm_densenet does not support quantization")
+    quantization = request.quantization
+    if quantization in {None, "none"}:
+        quantization = None
+    elif quantization != "fp8":
+        raise NotImplementedError(
+            f"timm_densenet supports quantization fp8 or none; got {quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("timm_densenet does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -380,14 +411,28 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if architecture not in _QUALIFIED_ARCHITECTURES:
         raise ValueError(f"timm DenseNet does not support architecture={architecture!r}")
     precision = str(request.precision).lower()
+    if quantization is not None and precision != "fp16":
+        raise ValueError(f"timm_densenet FP8 needs precision fp16, got {precision!r}")
     model = _TimmDensenetModel()
-    weights = model.load_weights(str(model_dir), config, precision=precision)
+    weights = model.load_weights(
+        str(model_dir), config, precision=precision, quantization=quantization
+    )
+    quant_ctx = None
+    if quantization is not None:
+        cfg = config.raw["_timm_densenet_config"]
+        quant_ctx = calibrate_timm_densenet(
+            cfg["block_layers"],
+            (cfg["image_size_h"], cfg["image_size_w"]),
+            weights,
+            quantization,
+            precision=precision,
+        )
     plan = model.build_engine(
         config,
         weights,
         1,
         precision=precision,
-        quant_ctx=None,
+        quant_ctx=quant_ctx,
         verbose=bool(request.verbose),
         parallel_config=None,
     )
