@@ -9,6 +9,6 @@ from tensorrt_model_connect.model_support import family_support
 describe = family_support(
     model_types=("timm_dpn", "dpn68", "dpn68b", "dpn92", "dpn98", "dpn107", "dpn131"),
     architectures=("dpn68", "dpn68b", "dpn92", "dpn98", "dpn107", "dpn131"),
-    tasks=("classification",),
-    default_task="classification",
+    tasks=("image_to_class_scores",),
+    default_task="image_to_class_scores",
 )
