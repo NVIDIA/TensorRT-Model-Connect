@@ -233,7 +233,12 @@ class _ConvBertModel:
         from .builder import build_convbert_encoder_engine
 
         return build_convbert_encoder_engine(
-            config, weights, max_seq_length=max_cache_length, precision=precision, verbose=verbose
+            config,
+            weights,
+            max_seq_length=max_cache_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
+            verbose=verbose,
         )
 
 
@@ -352,8 +357,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("ConvBERT max_sequence_length exceeds checkpoint capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("ConvBERT has no family-owned quantized build")
+    quantization = None if request.quantization in {None, "none"} else request.quantization
+    if quantization is not None and quantization != "fp8":
+        raise NotImplementedError(
+            f"ConvBERT supports quantization fp8 or none; got {request.quantization!r}"
+        )
+    if quantization is not None and precision != "fp16":
+        raise ValueError(f"ConvBERT FP8 needs precision fp16, got {precision!r}")
     if request.fp32_layers:
         raise NotImplementedError("ConvBERT does not expose mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -362,8 +372,19 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
     parallel.validate()
+    if quantization is not None and parallel.enabled:
+        raise ValueError("ConvBERT tensor-parallel builds do not support quantization")
     model = _ConvBertModel()
+    quant_ctx = None
+    if quantization is not None:
+        from .quantization import calibrate_convbert, refuse_quantized_checkpoint
+
+        readers = _open_torch_checkpoint(model_dir)
+        refuse_quantized_checkpoint(config, model_dir, readers.tensor_map)
+        del readers
     weights = model.load_weights(str(model_dir), config)
+    if quantization is not None:
+        quant_ctx = calibrate_convbert(config, weights, quantization, precision=precision)
     writer.set_header(family="convbert", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -383,7 +404,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             parallel_config=parallel,
         )
