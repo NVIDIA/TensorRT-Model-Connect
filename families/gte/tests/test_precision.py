@@ -99,7 +99,7 @@ def _request(model_dir: Path, precision: str) -> BuildRequest:
 def _capture_precision(monkeypatch) -> list[str]:
     seen: list[str] = []
 
-    def fake_engine(weights, cfg, *, seq_len, precision="fp32", verbose=False):
+    def fake_engine(weights, cfg, *, seq_len, precision="fp32", verbose=False, quant_ctx=None):
         seen.append(precision)
         return b"plan"
 

@@ -41,7 +41,9 @@ Two things that table is honest about:
 7.5x below the weakest break this gate does catch.
 
 The fp16 case uses its own tolerance, set from the fp16 noise measured on
-this case; see ``_FP16_EMBEDDING_TOLERANCE``.
+this case; see ``_FP16_EMBEDDING_TOLERANCE``. The FP8 case (fp16 work type,
+``quantization: fp8``) has its own tolerance and cosine floor; see
+``_FP8_EMBEDDING_TOLERANCE``.
 """
 
 from __future__ import annotations
@@ -127,12 +129,14 @@ def _selected_cases(config) -> tuple[list[str], bool]:
 
 
 def pytest_generate_tests(metafunc) -> None:
-    for fixture in ("case_name", "fp16_case_name"):
+    for fixture in ("case_name", "fp16_case_name", "fp8_case_name"):
         if fixture not in metafunc.fixturenames:
             continue
         names, enabled = _selected_cases(metafunc.config)
         if fixture == "fp16_case_name":
-            names = [name for name in names if CASES[name][1]["precision"] == "fp16"]
+            names = [name for name in names if _gate(CASES[name][1]) == "fp16"]
+        if fixture == "fp8_case_name":
+            names = [name for name in names if _gate(CASES[name][1]) == "fp8"]
         parameters = names
         if not enabled:
             parameters = [
@@ -246,6 +250,29 @@ _COSINE_FLOOR = 0.999
 # test_fp16_gate_rejects_ignored_ntk_scaling builds both and checks this.
 _FP16_EMBEDDING_TOLERANCE = 2.5e-2
 
+# FP8 (projections quantized, fp16 work type) cannot use either tolerance
+# above. Measured on this case (B200 and B300, TensorRT 11.1 and 11.4, 8
+# builds), a correct FP8 engine is 0.262 off the reference in every build
+# (cosine 0.9956). FP8 engines with deliberate errors: the activation scales
+# of the wrong layers (the table read in reverse layer order) 3.53, every
+# activation scale 8x too small 5.20. 0.8 sits 3.1x above the correct build
+# and 4.4x below the first break.
+#
+# Rotary breaks are inside the FP8 noise (NTK scaling ignored 0.297, NTK base
+# doubled 0.252) and are not gated here; the rotary code is the same at every
+# precision, so the fp32 and fp16 cases gate it.
+#
+# test_fp8_gate_rejects_scales_of_the_wrong_layers builds both and checks this.
+_FP8_EMBEDDING_TOLERANCE = 0.8
+# Correct FP8 builds keep 0.9956 of cosine and the two breaks above 0.71 and
+# 0.57; the floor only fails early on a gross error, like the fp32 one.
+_FP8_COSINE_FLOOR = 0.98
+
+
+def _gate(manifest: dict) -> str:
+    """The gate of a case: ``fp8`` for a quantized case, otherwise its precision."""
+    return "fp8" if manifest.get("quantization") == "fp8" else str(manifest["precision"])
+
 
 def _reference(model_dir: Path, text: str):
     """The reference's own pooled vector, pooled the way its module list says."""
@@ -291,11 +318,16 @@ def _cosine(left: list[float], right: list[float]) -> float:
 
 
 def _check_embedding(values, reference, precision: str, text: str) -> tuple[float, float]:
-    """Assert the gate of ``precision`` on one pooled vector; return max abs and cosine."""
+    """Assert the gate of ``precision`` (fp32, fp16 or fp8) on one pooled vector.
+
+    Returns the max abs difference and the cosine.
+    """
     delta = max(abs(a - b) for a, b in zip(values, reference))
     cosine = _cosine(values, reference)
-    assert cosine >= _COSINE_FLOOR, f"{FAMILY} embedding cosine {cosine} for {text!r}"
-    tolerance = _FP16_EMBEDDING_TOLERANCE if precision == "fp16" else _EMBEDDING_TOLERANCE
+    floor = _FP8_COSINE_FLOOR if precision == "fp8" else _COSINE_FLOOR
+    assert cosine >= floor, f"{FAMILY} {precision} embedding cosine {cosine} for {text!r}"
+    tolerance = {"fp16": _FP16_EMBEDDING_TOLERANCE, "fp8": _FP8_EMBEDDING_TOLERANCE}.get(
+        precision, _EMBEDDING_TOLERANCE)
     assert delta <= tolerance, (
         f"{FAMILY} {precision} embedding for {text!r} differs from the reference by {delta}"
     )
@@ -324,7 +356,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         assert len(values) == len(reference), (
             f"{FAMILY} returned {len(values)} values, reference {len(reference)}"
         )
-        delta, cosine = _check_embedding(values, reference, manifest["precision"], str(text))
+        delta, cosine = _check_embedding(values, reference, _gate(manifest), str(text))
         worst = max(worst, delta)
         worst_cosine = min(worst_cosine, cosine)
 
@@ -361,7 +393,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         f"{FAMILY} scored the unrelated document higher: {relevant} <= {irrelevant}"
     )
     print(
-        f"{FAMILY} {manifest['precision']} parity: {len(document)} values, "
+        f"{FAMILY} {_gate(manifest)} parity: {len(document)} values, "
         f"embedding maxabs {worst:.3e}, "
         f"cosine {worst_cosine:.8f}, query-vs-answer {relevant:.6f} "
         f"vs query-vs-other {irrelevant:.6f}"
@@ -387,6 +419,18 @@ def test_fp16_gate_takes_fp16_noise_and_fails_the_ntk_break() -> None:
         _check_embedding(values, reference, "fp16", "synthetic")
 
 
+def test_fp8_gate_takes_fp8_noise_and_fails_the_wrong_scales() -> None:
+    """FP8-sized error passes the FP8 gate; an error of the wrong-layer-scales size fails it."""
+    values, reference = _synthetic(0, 5e-3)
+    values[3] = reference[3] + 0.27
+    _check_embedding(values, reference, "fp8", "synthetic")
+    with pytest.raises(AssertionError, match="fp16 embedding"):
+        _check_embedding(values, reference, "fp16", "synthetic")
+    values[5] = reference[5] + 3.5
+    with pytest.raises(AssertionError, match="fp8 embedding"):
+        _check_embedding(values, reference, "fp8", "synthetic")
+
+
 def test_fp32_gate_is_unchanged() -> None:
     """fp32 keeps its own tolerance: fp16-sized noise fails it."""
     values, reference = _synthetic(0, 3e-6)
@@ -396,13 +440,39 @@ def test_fp32_gate_is_unchanged() -> None:
         _check_embedding(values, reference, "fp32", "synthetic")
 
 
+def _engine_vectors(plan: bytes, cfg: dict, tokenizer, texts: list[str],
+                    window: int) -> list[list[float]]:
+    """Pooled [CLS] vectors of ``plan`` for ``texts``, padded the way the runtime pads them."""
+    import tensorrt as trt
+    import torch
+
+    engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
+    context = engine.create_execution_context()
+    vectors = []
+    for text in texts:
+        ids = tokenizer(text)["input_ids"]
+        input_ids = torch.full((window,), cfg["pad_token_id"], dtype=torch.int32,
+                               device="cuda")
+        input_ids[: len(ids)] = torch.tensor(ids, dtype=torch.int32)
+        attention_mask = torch.zeros(window, dtype=torch.int32, device="cuda")
+        attention_mask[: len(ids)] = 1
+        hidden = torch.empty((window, cfg["hidden_size"]), dtype=torch.float32,
+                             device="cuda")
+        for name, tensor in (("input_ids", input_ids), ("attention_mask", attention_mask),
+                             ("last_hidden_state", hidden)):
+            context.set_tensor_address(name, tensor.data_ptr())
+        context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+        torch.cuda.synchronize()
+        vectors.append(hidden[0].cpu().tolist())
+    return vectors
+
+
 def test_fp16_gate_rejects_ignored_ntk_scaling(fp16_case_name: str) -> None:
     """A correct fp16 engine passes the fp16 gate; one that ignores the NTK rotary scaling fails.
 
     Both engines are built from the case checkpoint and run in this process on
     the three case texts, padded to the window the way the runtime pads them.
     """
-    import tensorrt as trt
     import torch
     from transformers import AutoTokenizer
 
@@ -421,25 +491,7 @@ def test_fp16_gate_rejects_ignored_ntk_scaling(fp16_case_name: str) -> None:
 
     def run(build_cfg) -> list[list[float]]:
         plan = model.build_engine(weights, build_cfg, seq_len=window, precision="fp16")
-        engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
-        context = engine.create_execution_context()
-        vectors = []
-        for text in texts:
-            ids = tokenizer(text)["input_ids"]
-            input_ids = torch.full((window,), cfg["pad_token_id"], dtype=torch.int32,
-                                   device="cuda")
-            input_ids[: len(ids)] = torch.tensor(ids, dtype=torch.int32)
-            attention_mask = torch.zeros(window, dtype=torch.int32, device="cuda")
-            attention_mask[: len(ids)] = 1
-            hidden = torch.empty((window, cfg["hidden_size"]), dtype=torch.float32,
-                                 device="cuda")
-            for name, tensor in (("input_ids", input_ids), ("attention_mask", attention_mask),
-                                 ("last_hidden_state", hidden)):
-                context.set_tensor_address(name, tensor.data_ptr())
-            context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
-            torch.cuda.synchronize()
-            vectors.append(hidden[0].cpu().tolist())
-        return vectors
+        return _engine_vectors(plan, cfg, tokenizer, texts, window)
 
     worst = max(_check_embedding(values, reference, "fp16", text)[0]
                 for values, reference, text in zip(run(cfg), references, texts))
@@ -451,5 +503,55 @@ def test_fp16_gate_rejects_ignored_ntk_scaling(fp16_case_name: str) -> None:
             _check_embedding(values, reference, "fp16", text)
     print(
         f"{FAMILY} fp16 gate: correct maxabs {worst:.3e}; NTK scaling ignored "
+        f"maxabs {broken_worst:.3e}"
+    )
+
+
+def test_fp8_gate_rejects_scales_of_the_wrong_layers(fp8_case_name: str) -> None:
+    """A correct FP8 engine passes the FP8 gate; one with another layer's activation scales fails.
+
+    Both engines are built from the case checkpoint with the committed scale table (the
+    broken one reads the table in reverse layer order) and run in this process on the
+    three case texts.
+    """
+    import torch
+    from transformers import AutoTokenizer
+
+    from .. import config as config_module, model, quantization
+
+    _, manifest, case = CASES[fp8_case_name]
+    assert manifest["precision"] == "fp16" and manifest["quantization"] == "fp8"
+    model_dir = _model_dir(manifest)
+    assert torch.cuda.is_available(), f"selected {FAMILY} E2E requires CUDA"
+    window = int(manifest["max_sequence_length"])
+    weights = model._open_checkpoint(model_dir)
+    cfg = config_module.resolve(model_dir, weights)
+    tokenizer = AutoTokenizer.from_pretrained(str(model_dir), trust_remote_code=True)
+    texts = [str(case[key]) for key in ("query", "document", "negative_document")]
+    references = [_reference(model_dir, text) for text in texts]
+
+    correct = quantization.calibrate_gte(weights, cfg, "fp8")
+    names = quantization.projections(cfg)
+    swapped = {
+        name: quantization._LayerScales(
+            correct.scales[names[-1 - index]].input_scale, correct.scales[name].weight)
+        for index, name in enumerate(names)
+    }
+
+    def run(quant_ctx) -> list[list[float]]:
+        plan = model.build_engine(weights, cfg, seq_len=window, precision="fp16",
+                                  quant_ctx=quant_ctx)
+        return _engine_vectors(plan, cfg, tokenizer, texts, window)
+
+    worst = max(_check_embedding(values, reference, "fp8", text)[0]
+                for values, reference, text in zip(run(correct), references, texts))
+    broken = run(quantization.GteQuantContext(scales=swapped))
+    broken_worst = max(max(abs(a - b) for a, b in zip(values, reference))
+                       for values, reference in zip(broken, references))
+    with pytest.raises(AssertionError, match="fp8 embedding"):
+        for values, reference, text in zip(broken, references, texts):
+            _check_embedding(values, reference, "fp8", text)
+    print(
+        f"{FAMILY} fp8 gate: correct maxabs {worst:.3e}; scales of the wrong layers "
         f"maxabs {broken_worst:.3e}"
     )
