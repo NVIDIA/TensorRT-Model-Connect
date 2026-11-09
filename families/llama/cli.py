@@ -47,10 +47,10 @@ def build(
 ) -> int:
     """Run the declared owner command; help never imports this handler."""
     execution = execution_inputs(execution_variant, companion)
-    if precision is None:
-        precision = "fp16" if execution is not None else "fp32"
     model_dir = resolve_model(model, revision)
-    resolve_family(load_model_metadata(model_dir), "llama")
+    _, support = resolve_family(load_model_metadata(model_dir), "llama")
+    if precision is None:
+        precision = "fp16" if execution is not None else support.default_precision
     request = BuildRequest(
         model_dir=model_dir, output_path=output, family="llama",
         task=task, precision=precision, backend=backend,

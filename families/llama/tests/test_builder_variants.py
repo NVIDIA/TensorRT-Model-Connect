@@ -562,7 +562,7 @@ def test_declared_build_matches_legacy_request(tmp_path, monkeypatch, options):
         coerce_request(SimpleNamespace(**vars(captured[1]), unexpected_option=True))
     assert captured[0].family == "llama"
     assert captured[0].task == "text_generation"
-    assert captured[0].precision == ("fp16" if options else "fp32")
+    assert captured[0].precision == ("fp16" if options else "bf16")
     assert not output.exists()
 
 

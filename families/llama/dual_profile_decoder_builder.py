@@ -50,6 +50,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import tensorrt as trt
+from .build_routing import dense_attention_mask_profile_error
 from .native_kv_attention_builder import (
     EXPLICIT_ATTENTION_PREFILL_CHUNK_TOKENS,
     add_active_prefix_causal_masks,
@@ -263,6 +264,12 @@ def build_dual_profile_decoder_engine(
         max_prefill_length = min(max_prefill_length, EXPLICIT_ATTENTION_PREFILL_CHUNK_TOKENS)
     max_prefill_length = max(1, min(max_prefill_length, max_cache_length))
     opt_prefill_length = max(1, min(opt_prefill_length, max_prefill_length))
+    # A decode-only build emits just the fixed one-row profile, so only a
+    # prefill profile can carry the oversized mask.
+    if not native_kv_cache and profile_mode != "decode":
+        mask_error = dense_attention_mask_profile_error(max_prefill_length, max_cache_length)
+        if mask_error is not None:
+            raise ValueError(mask_error)
 
     if native_kv_cache and position_type == "alibi":
         raise NotImplementedError("TensorRT native KV cache prototype does not support ALiBi")
