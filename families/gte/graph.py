@@ -73,14 +73,22 @@ def add_layer_norm(network, inp, gamma, beta, eps):
     return _restore_dtype(network, affine, original)
 
 
-def add_linear(network, inp, weight, bias=None, dtype=np.float32):
-    """y = x @ W^T + b, matching torch.nn.Linear's weight layout."""
-    weight = np.ascontiguousarray(np.asarray(weight, dtype=dtype))
+def add_linear(network, inp, weight, bias=None, dtype=np.float32, *, matmul=None):
+    """y = x @ W^T + b, matching torch.nn.Linear's weight layout.
+
+    ``matmul`` (``(network, input) -> output``) replaces the matrix product, which is how
+    a quantized projection takes its place; the bias is added the same way either way.
+    """
     rank = len(inp.shape)
-    shape = (1,) * (rank - 2) + tuple(weight.shape)
-    constant = add_constant(network, shape, weight.reshape(shape), dtype=dtype)
-    out = network.add_matrix_multiply(
-        inp, trt.MatrixOperation.NONE, constant, trt.MatrixOperation.TRANSPOSE).get_output(0)
+    if matmul is not None:
+        out = matmul(network, inp)
+    else:
+        weight = np.ascontiguousarray(np.asarray(weight, dtype=dtype))
+        shape = (1,) * (rank - 2) + tuple(weight.shape)
+        constant = add_constant(network, shape, weight.reshape(shape), dtype=dtype)
+        out = network.add_matrix_multiply(
+            inp, trt.MatrixOperation.NONE, constant,
+            trt.MatrixOperation.TRANSPOSE).get_output(0)
     if bias is None:
         return out
     bias_shape = (1,) * (rank - 1) + (-1,)
@@ -118,7 +126,7 @@ def add_gelu(network, inp):
 
 
 def add_gated_mlp(network, hidden, up_gate_weight, down_weight, down_bias, *,
-                  intermediate, dtype=np.float32):
+                  intermediate, dtype=np.float32, up_gate_matmul=None, down_matmul=None):
     """``down_proj(gelu(gate) * up)`` from one stacked ``up_gate_proj``.
 
     The reference splits the *projection output* as ``up_states, gate``, so
@@ -126,12 +134,18 @@ def add_gated_mlp(network, hidden, up_gate_weight, down_weight, down_bias, *,
     last ``intermediate`` are ``gate``, and **gate is the half that goes
     through the activation**. Swapping the halves builds and runs; it just
     answers wrong.
+
+    ``up_gate_matmul`` and ``down_matmul`` replace the two matrix products of a
+    quantized build (see ``add_linear``); a weight they replace may be None.
     """
-    weight = np.asarray(up_gate_weight)
-    if weight.shape[0] != 2 * intermediate:
-        raise ValueError(
-            f"gte up_gate_proj has {weight.shape[0]} rows, expected {2 * intermediate}")
-    projected = add_linear(network, hidden, weight, dtype=dtype)
+    if up_gate_matmul is None:
+        weight = np.asarray(up_gate_weight)
+        if weight.shape[0] != 2 * intermediate:
+            raise ValueError(
+                f"gte up_gate_proj has {weight.shape[0]} rows, expected {2 * intermediate}")
+    else:
+        weight = None
+    projected = add_linear(network, hidden, weight, dtype=dtype, matmul=up_gate_matmul)
     rank = len(projected.shape)
     shape = tuple(int(v) for v in projected.shape)
 
@@ -143,7 +157,7 @@ def add_gated_mlp(network, hidden, up_gate_weight, down_weight, down_bias, *,
     up = half(0)
     gate = add_gelu(network, half(intermediate))
     return add_linear(network, add_product(network, gate, up), down_weight, down_bias,
-                      dtype=dtype)
+                      dtype=dtype, matmul=down_matmul)
 
 
 def _rotate_half(network, tensor, head_dim):
