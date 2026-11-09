@@ -261,6 +261,8 @@ class _RwkvModel:
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
             parallel.validate()
+            if quant_ctx is not None:
+                raise ValueError("RWKV tensor-parallel builds do not support quantization")
             from .tp_builder import build_rwkv_tp_engine
 
             return build_rwkv_tp_engine(
@@ -290,6 +292,8 @@ class _RwkvModel:
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 1
+        if quant_ctx is not None:
+            quant_ctx.configure_build(trt_config)
 
         # -----------------------------------------------------------
         # Inputs
@@ -397,6 +401,7 @@ class _RwkvModel:
                 hidden_size=hidden,
                 intermediate_size=intermediate,
                 dtype=work_np_dtype,
+                quant_ctx=quant_ctx,
             )
 
             hidden_state = result["hidden"]
@@ -514,11 +519,24 @@ def _add_rwkv_layer(
     hidden_size: int,
     intermediate_size: int,
     dtype: np.dtype = np.float32,
+    quant_ctx=None,
 ) -> dict[str, trt.ITensor]:
     """Add one RWKV layer (time-mixing + channel-mixing).
 
+    ``quant_ctx`` (FP8 builds only) routes the projections it quantizes through Q/DQ;
+    every other projection is the unchanged 16/32-bit matmul.
+
     Returns: {hidden, present_attn, present_ff, present_num, present_den, present_max}
     """
+
+    def _project(inp, in_width, out_width, weight_key, module):
+        name = f"{prefix}.{module}"
+        if quant_ctx is not None and quant_ctx.should_quantize(name):
+            return quant_ctx.matmul(network, inp, name)
+        return graph_ops.add_matmul_rhs_constant(
+            network, inp, in_width, out_width, weights[f"{prefix}.{weight_key}"], dtype=dtype
+        )
+
     # ================================================================
     # TIME-MIXING BLOCK
     # ================================================================
@@ -562,21 +580,15 @@ def _add_rwkv_layer(
 
     # ===== 3. Projections =====
     # R = sigmoid(xr @ w_attn_r)
-    r_proj = graph_ops.add_matmul_rhs_constant(
-        network, xr, hidden_size, hidden_size, weights[f"{prefix}.w_attn_r"], dtype=dtype
-    )
+    r_proj = _project(xr, hidden_size, hidden_size, "w_attn_r", "attention.receptance")
     r_gate = network.add_activation(r_proj, trt.ActivationType.SIGMOID)
 
     # K = xk @ w_attn_k
-    k_proj = graph_ops.add_matmul_rhs_constant(
-        network, xk, hidden_size, hidden_size, weights[f"{prefix}.w_attn_k"], dtype=dtype
-    )
+    k_proj = _project(xk, hidden_size, hidden_size, "w_attn_k", "attention.key")
     # K: [1, hidden_size]
 
     # V = xv @ w_attn_v
-    v_proj = graph_ops.add_matmul_rhs_constant(
-        network, xv, hidden_size, hidden_size, weights[f"{prefix}.w_attn_v"], dtype=dtype
-    )
+    v_proj = _project(xv, hidden_size, hidden_size, "w_attn_v", "attention.value")
     # V: [1, hidden_size]
 
     # ===== 4. WKV recurrence (numerically stable) =====
@@ -687,13 +699,8 @@ def _add_rwkv_layer(
     )
 
     # out_proj: [1, hidden_size] @ w_attn_o -> [1, hidden_size]
-    attn_out = graph_ops.add_matmul_rhs_constant(
-        network,
-        gated.get_output(0),
-        hidden_size,
-        hidden_size,
-        weights[f"{prefix}.w_attn_o"],
-        dtype=dtype,
+    attn_out = _project(
+        gated.get_output(0), hidden_size, hidden_size, "w_attn_o", "attention.output"
     )
 
     # Residual add
@@ -723,26 +730,15 @@ def _add_rwkv_layer(
     xr_ffn = _time_shift_blend(normed_ffn, ff_state_in, f"{prefix}.time_mix_ffn_receptance")
 
     # ===== 3. Key projection + squared ReLU =====
-    k_ffn = graph_ops.add_matmul_rhs_constant(
-        network, xk_ffn, hidden_size, intermediate_size, weights[f"{prefix}.w_ffn_k"], dtype=dtype
-    )
+    k_ffn = _project(xk_ffn, hidden_size, intermediate_size, "w_ffn_k", "feed_forward.key")
     k_activated = graph_ops.add_activation(network, k_ffn, "squared_relu", dtype=dtype)
 
     # ===== 4. Receptance gate =====
-    r_ffn = graph_ops.add_matmul_rhs_constant(
-        network, xr_ffn, hidden_size, hidden_size, weights[f"{prefix}.w_ffn_r"], dtype=dtype
-    )
+    r_ffn = _project(xr_ffn, hidden_size, hidden_size, "w_ffn_r", "feed_forward.receptance")
     r_ffn_gate = network.add_activation(r_ffn, trt.ActivationType.SIGMOID)
 
     # ===== 5. Value projection + gating + residual =====
-    kv_ffn = graph_ops.add_matmul_rhs_constant(
-        network,
-        k_activated,
-        intermediate_size,
-        hidden_size,
-        weights[f"{prefix}.w_ffn_v"],
-        dtype=dtype,
-    )
+    kv_ffn = _project(k_activated, intermediate_size, hidden_size, "w_ffn_v", "feed_forward.value")
     gated_ffn = network.add_elementwise(
         r_ffn_gate.get_output(0), kv_ffn, trt.ElementWiseOperation.PROD
     )
@@ -844,8 +840,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("RWKV max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("RWKV has no qualified family-owned quantized build")
+    quantization = None if request.quantization in {None, "none"} else request.quantization
+    if quantization is not None and quantization != "fp8":
+        raise NotImplementedError(
+            f"RWKV supports quantization fp8 or none; got {request.quantization!r}"
+        )
+    if quantization is not None and precision != "fp16":
+        raise ValueError(f"RWKV FP8 needs precision fp16, got {precision!r}")
     if request.fp32_layers:
         raise NotImplementedError("RWKV does not expose mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -854,9 +855,22 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
     parallel.validate()
+    if quantization is not None and parallel.enabled:
+        raise ValueError("RWKV tensor-parallel builds do not support quantization")
+    if quantization is not None:
+        from .quantization import refuse_quantized_checkpoint
+
+        refuse_quantized_checkpoint(
+            config, _open_torch_checkpoint(model_dir).tensor_map, model_dir=model_dir
+        )
     model = _RwkvModel()
     config.raw["_model_dir"] = str(model_dir)
     weights = model.load_weights(str(model_dir), config)
+    quant_ctx = None
+    if quantization is not None:
+        from .quantization import calibrate_rwkv
+
+        quant_ctx = calibrate_rwkv(config, weights, quantization, precision=precision)
     writer.set_header(family="rwkv", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -878,7 +892,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,
