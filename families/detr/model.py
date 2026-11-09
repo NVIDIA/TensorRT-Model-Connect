@@ -443,8 +443,8 @@ class _DetrModel:
 
 def build(request, writer) -> None:
     """Build one DETR object-detection bundle."""
-    if request.task != "object_detection":
-        raise ValueError("detr supports only task=object_detection")
+    if request.task != "image_to_boxes":
+        raise ValueError("detr supports only task=image_to_boxes")
     if request.backend not in {"trt", "trt_rtx"}:
         raise ValueError("detr supports only backend=trt")
     if request.dynamic_kv_cache:
