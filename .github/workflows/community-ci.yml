@@ -367,7 +367,9 @@ jobs:
                 then .inputs.gpu_provider = $gpu_provider else . end
               | if $lane == "dev" and $gpu_profile != "standard"
                 then .inputs.gpu_profile = $gpu_profile else . end' > "$payload"
-          dispatched="$(gh api --method POST \
+          # Bounded so a stalled GitHub API response fails fast and visibly
+          # instead of occupying this job for hours with no output.
+          dispatched="$(timeout 45s gh api --method POST \
             -H 'X-GitHub-Api-Version: 2026-03-10' \
             "/repos/$GITHUB_REPOSITORY/actions/workflows/community-ci.yml/dispatches" \
             --input "$payload")"

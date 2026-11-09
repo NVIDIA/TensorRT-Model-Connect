@@ -5174,13 +5174,19 @@ gh() {
     ],
 )
 def test_manual_gpu_profile_survives_coordinator_dispatch(tmp_path, profile, lane, allowed):
-    script = r"""
-gh() {
-  while [ "$1" != --input ]; do shift; done
-  cp "$2" "$CAPTURED_PAYLOAD"
-  printf '{"workflow_run_id":42}\n'
-}
-""" + _workflow_step_script(
+    # A real executable, not a shell function: the dispatch step wraps its
+    # gh call in the external `timeout`, which execs by name and cannot see
+    # functions defined in the parent shell.
+    fake_gh = tmp_path / "gh"
+    fake_gh.write_text(
+        """#!/usr/bin/env bash
+while [ "$1" != --input ]; do shift; done
+cp "$2" "$CAPTURED_PAYLOAD"
+printf '{"workflow_run_id":42}\\n'
+"""
+    )
+    fake_gh.chmod(0o755)
+    script = _workflow_step_script(
         "community-ci.yml", "dispatch", "Dispatch the selected Community CI implementation"
     )
     captured = tmp_path / "captured.json"
@@ -5188,6 +5194,7 @@ gh() {
         ["bash", "-c", script],
         env={
             **os.environ,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
             "GPU_PROFILE": profile,
             "GPU_PROVIDER": "aws",
             "LANE": lane,
