@@ -128,6 +128,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
                 precision=manifest["precision"],
                 max_sequence_length=int(manifest["max_sequence_length"]),
                 tensor_parallel_size=int(manifest["tensor_parallel_size"]),
+                quantization=manifest.get("quantization"),
             )
         )
     with evidence_stage("native"):
