@@ -139,6 +139,7 @@ def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
             max_sequence_length=manifest.get("max_sequence_length"),
             max_batch_size=int(manifest.get("max_batch_size", 1)),
             tensor_parallel_size=int(manifest["tensor_parallel_size"]),
+            quantization=manifest.get("quantization"),
         )
     )
 
