@@ -75,7 +75,8 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, request) -> Non
         )
     )
     output = tmp_path / "proof"
-    image = TEST_DIR / "data/test_img.jpeg"
+    case = next(item for item in MANIFEST["testcases"] if item["name"] == case_name)
+    image = TEST_DIR / case["test_image"]
     edge_validation.gpu(
         SimpleNamespace(
             bundle=bundle,
@@ -112,3 +113,18 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, request) -> Non
     )
     evidence = json.loads((output / "evidence.json").read_text())
     assert evidence["passed"] and evidence["hf_quality"] == "passed"
+
+
+def test_catalog_case_is_the_validated_image_request() -> None:
+    """trtmc-bench, and AIPerf's bundle build, run the catalog case: it is the image request this family validates."""
+    case = next(item for item in MANIFEST["testcases"] if "test_image" in item)
+    image = TEST_DIR / case["test_image"]
+    public, _ = edge_validation.requests(
+        MANIFEST["max_sequence_length"], image, 16, 16, MANIFEST["task"], backend="native"
+    )
+    validated = next(row for row in public if row["id"] == "image")
+    assert image.is_file()
+    assert (case["prompt"], case["max_new_tokens"]) == (
+        validated["prompt"],
+        validated["config"]["max_new_tokens"],
+    )

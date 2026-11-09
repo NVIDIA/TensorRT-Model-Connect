@@ -38,6 +38,7 @@ struct GptOssTextGenConfig {
     std::string present_v_pattern{"present_v_{i}"};
     int32_t prefill_max_length{0};
     int32_t num_layers{0};
+    std::vector<int32_t> id_eos_ids;
 };
 
 class GptOssTextGenerationPipeline final : public ITextGeneration {

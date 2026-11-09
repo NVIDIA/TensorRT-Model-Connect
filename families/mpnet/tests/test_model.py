@@ -140,8 +140,9 @@ def test_build_rejects_an_unrelated_task(tmp_path: Path, monkeypatch) -> None:
 @pytest.mark.parametrize(
     "rows,pad_id,length", [(514, 1, 513), (514, 1, 514), (16, 1, 15), (16, 0, 16)]
 )
+@pytest.mark.parametrize("precision,quantization", [("fp32", None), ("fp16", "fp8")])
 def test_build_rejects_lengths_in_reserved_position_rows(
-    tmp_path, monkeypatch, rows, pad_id, length
+    tmp_path, monkeypatch, rows, pad_id, length, precision, quantization
 ):
     def unexpected_load(*args, **kwargs):
         pytest.fail("an over-capacity request must be refused before loading weights")
@@ -154,7 +155,8 @@ def test_build_rejects_lengths_in_reserved_position_rows(
                 output_path=tmp_path / "unused.bundle",
                 family="mpnet",
                 task="text_to_embedding",
-                precision="fp32",
+                precision=precision,
+                quantization=quantization,
                 max_sequence_length=length,
             ),
             _Writer(),
@@ -222,3 +224,40 @@ def test_loader_reserves_pad_and_preceding_position_rows(tmp_path, pad_id):
     )
     weights = model._MPNetModel().load_weights(str(directory), config)
     np.testing.assert_array_equal(weights["position_embedding"], positions[pad_id + 1 :])
+
+
+def test_build_forwards_fp8_context_at_usable_capacity(tmp_path, monkeypatch):
+    from families.mpnet import quantization
+
+    context = object()
+    weights = model.WeightDict(position_embedding=np.zeros((512, 32), np.float32))
+    monkeypatch.setattr(model._MPNetModel, "load_weights", lambda *args: weights)
+    monkeypatch.setattr(model, "_open_safetensors", lambda *args: SimpleNamespace(tensor_map={}))
+    monkeypatch.setattr(model, "_tokenizer_runtime_contract", lambda *args: {})
+    monkeypatch.setattr(quantization, "refuse_quantized_checkpoint", lambda *args: None)
+    monkeypatch.setattr(quantization, "calibrate_mpnet", lambda *args, **kwargs: context)
+    seen = {}
+
+    def capture(config, mapped_weights, **kwargs):
+        seen.update(kwargs)
+        assert mapped_weights is weights
+        return b"fp8-plan"
+
+    monkeypatch.setattr(model, "build_encoder_engine", capture)
+    writer = _Writer()
+    model.build(
+        BuildRequest(
+            model_dir=_position_checkpoint(tmp_path, 514),
+            output_path=tmp_path / "unused.bundle",
+            family="mpnet",
+            task="text_to_embedding",
+            precision="fp16",
+            quantization="fp8",
+            max_sequence_length=512,
+        ),
+        writer,
+    )
+    assert seen["max_seq_length"] == 512
+    assert seen["precision"] == "fp16"
+    assert seen["quant_ctx"] is context
+    assert writer.sections["engine.plan"] == b"fp8-plan"

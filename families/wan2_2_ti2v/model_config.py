@@ -59,8 +59,17 @@ class Wan22TI2VConfig:
         pt, ph, pw = self.patch_size
         return self.latent_frames // pt * self.latent_height // ph * self.latent_width // pw
 
+    @property
+    def first_frame_patches(self) -> int:
+        """Tokens of the first latent frame, which leads the frame-major token order."""
+
+        _, ph, pw = self.patch_size
+        return self.latent_height // ph * self.latent_width // pw
+
 
 WAN22_TI2V_5B = Wan22TI2VConfig()
+# Upstream ti2v-5B also supports the portrait size 704*1280 (vertical 9:16 video).
+WAN22_TI2V_5B_PORTRAIT = Wan22TI2VConfig(video_height=1280, video_width=704)
 WAN22_TI2V_5B_L0 = Wan22TI2VConfig(
     video_height=384,
     video_width=672,
@@ -70,6 +79,7 @@ WAN22_TI2V_5B_L0 = Wan22TI2VConfig(
 
 SUPPORTED_GENERATION_PROFILES = (
     WAN22_TI2V_5B,
+    WAN22_TI2V_5B_PORTRAIT,
     WAN22_TI2V_5B_L0,
 )
 

@@ -195,6 +195,8 @@ def build_target(config, checkpoint, capacity, *, target_layer_ids=(), verbose=F
     graph.populate(target_layer_ids)
     settings = builder.create_builder_config()
     settings.builder_optimization_level = 1
+    if "NVFP4" in checkpoint.formats.values():
+        settings.max_aux_streams = 0
     engine = builder.build_serialized_network(network, settings)
     if engine is None:
         raise RuntimeError("TensorRT failed to build the Muse native target; see builder diagnostics")

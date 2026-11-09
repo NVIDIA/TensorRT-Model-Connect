@@ -387,7 +387,7 @@ def build(request, writer, config, *, companion=None, companion_variant="mtp"):
     source = Path(request.model_dir)
     if request.quantization not in {None, "none"}:
         raise NotImplementedError("Gemma4 native quantization requires an already prepared source")
-    from .gemma4_quant import validate_source
+    from .gemma4_quant import configure_aux_streams, validate_source
 
     readers = _open_safetensors(source)
     validate_source(source, raw, readers)
@@ -466,6 +466,7 @@ def build(request, writer, config, *, companion=None, companion_variant="mtp"):
     graph.build()
     build_config = builder.create_builder_config()
     build_config.builder_optimization_level = 1
+    configure_aux_streams(build_config, raw)
     if precision == "fp32":
         build_config.clear_flag(trt.BuilderFlag.TF32)
     # Expert loops can have substantial context scratch. One dynamic

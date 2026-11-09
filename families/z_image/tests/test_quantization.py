@@ -264,12 +264,34 @@ def test_build_rejects_unknown_quantization(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "overrides",
-    [{"precision": "fp32"}, {"tensor_parallel_size": 2}, {"max_batch_size": 2}],
+    [
+        {"precision": "fp32"},
+        {"precision": "bf16"},
+        {"tensor_parallel_size": 2},
+        {"max_batch_size": 2},
+    ],
 )
 def test_build_rejects_unsupported_fp8_combinations(tmp_path: Path, overrides: dict) -> None:
     """FP8 needs fp16, one device and batch size one."""
     with pytest.raises(NotImplementedError, match="fp16"):
         model.build(_request(tmp_path, **overrides), Mock())
+
+
+@pytest.mark.parametrize(
+    ("overrides", "error", "match"),
+    [
+        ({"tensor_parallel_size": 2}, NotImplementedError, "tensor_parallel_size=1"),
+        ({"fp32_layers": [0]}, ValueError, "fp32_layers"),
+        ({"fp32_layers": [7]}, ValueError, "fp32_layers"),
+    ],
+)
+def test_build_rejects_bf16_settings_it_would_not_honor(
+    tmp_path: Path, overrides: dict, error: type[Exception], match: str
+) -> None:
+    """bf16 builds on one device and keeps no component or layer in fp32."""
+    request = _request(tmp_path, precision="bf16", quantization=None, **overrides)
+    with pytest.raises(error, match=match):
+        model.build(request, Mock())
 
 
 def test_dit_builder_rejects_fp8_with_fp32_precision() -> None:

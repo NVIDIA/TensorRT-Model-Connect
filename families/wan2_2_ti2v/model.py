@@ -22,6 +22,11 @@ if TYPE_CHECKING:
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
+# image_generation is the existing video endpoint's mode; every bundle also serves the
+# text_to_video and initial_image_text_to_video Tasks.
+_TASKS = ("image_generation", "text_to_video", "initial_image_text_to_video")
+
+
 class _Wan22TI2VModel:
     def load_weights(self, model_dir: str, config) -> dict:
         root = Path(model_dir)
@@ -91,7 +96,7 @@ class _Wan22TI2VModel:
 
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
-    """Build one Wan2.2 TI2V image-generation bundle."""
+    """Build one Wan2.2 TI2V text- and image-to-video bundle."""
     if request.dynamic_kv_cache:
         raise NotImplementedError("wan2_2_ti2v does not support dynamic_kv_cache")
 
@@ -101,8 +106,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task != "image_generation":
-        raise ValueError("wan2_2_ti2v supports only task=image_generation")
+    if request.task not in _TASKS:
+        raise ValueError("wan2_2_ti2v supports only task=" + ", ".join(_TASKS))
     if request.tensor_parallel_size != 1:
         raise NotImplementedError("Wan2.2 TI2V requires tensor_parallel_size=1")
     if request.max_batch_size != 1:
@@ -114,7 +119,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.precision not in {"bf16", "bfloat16"}:
         raise ValueError("Wan2.2 TI2V requires precision=bf16")
 
-    from .model_config import WAN22_TI2V_5B, WAN22_TI2V_5B_L0
+    from .model_config import SUPPORTED_GENERATION_PROFILES, WAN22_TI2V_5B
 
     requested_shape = (
         int(request.image_width or WAN22_TI2V_5B.video_width),
@@ -123,10 +128,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     profiles = {
         (profile.video_width, profile.video_height, profile.video_num_frames): profile
-        for profile in (WAN22_TI2V_5B, WAN22_TI2V_5B_L0)
+        for profile in SUPPORTED_GENERATION_PROFILES
     }
     if requested_shape not in profiles:
-        raise ValueError("Wan2.2 TI2V supports only 1280x704/121 frames or 672x384/5 frames")
+        raise ValueError(
+            "Wan2.2 TI2V supports only 1280x704/121 frames, 704x1280/121 frames or 672x384/5 frames"
+        )
     profile = profiles[requested_shape]
     config = SimpleNamespace(
         raw={
@@ -169,6 +176,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     writer.add_bytes("denoiser.plan", components["denoiser"])
     writer.add_bytes("vae.plan", components["vae_decoder"])
     writer.add_bytes("vae.first_frame.plan", components["vae_decoder_first_frame"])
+    writer.add_bytes("vae.encoder.plan", components["vae_encoder"])
     writer.add_bytes("tokenizer.json", components["tokenizer_json"])
     runtime = model.get_diffusion_config(config)
     runtime.update(

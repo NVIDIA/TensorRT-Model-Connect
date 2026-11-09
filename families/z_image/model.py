@@ -449,8 +449,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.task != "image_generation":
         raise ValueError("z_image supports only task=image_generation")
-    if request.precision not in {"fp16", "fp32"}:
-        raise ValueError("Z-Image supports only precision=fp16 or fp32")
+    if request.precision not in {"fp16", "bf16", "fp32"}:
+        raise ValueError("Z-Image supports only precision=fp16, bf16 or fp32")
     if request.quantization not in {None, "none", "fp8"}:
         raise NotImplementedError(f"Z-Image does not support quantization={request.quantization!r}")
     if request.quantization == "fp8" and (
@@ -461,6 +461,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError(
             "Z-Image FP8 requires precision=fp16, tensor_parallel_size=1 and max_batch_size=1"
         )
+    # The tensor-parallel DiT builder takes no precision and would build the DiT in fp32.
+    if request.precision == "bf16" and int(request.tensor_parallel_size) != 1:
+        raise NotImplementedError("Z-Image bf16 requires tensor_parallel_size=1")
+    if request.precision == "bf16" and request.fp32_layers:
+        raise ValueError("Z-Image fp32_layers requires precision=fp16")
     height = int(request.image_height or 1024)
     width = int(request.image_width or 1024)
     if height % 16 or width % 16:
