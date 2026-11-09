@@ -147,10 +147,16 @@ def _encoder(network, projected, weights, cfg):
     return hidden
 
 
-def _builder(verbose):
+_PRECISIONS = ("fp32", "fp16")
+
+
+def _builder(verbose, *, strongly_typed=False):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
-    network = builder.create_network()
+    # The fp16 graph states every tensor type itself (fp16 compute, fp32 norms);
+    # the fp32 graph keeps the default network flags.
+    flags = 1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED) if strongly_typed else 0
+    network = builder.create_network(flags)
     config = builder.create_builder_config()
     config.builder_optimization_level = 3
     # TF32 would cap the convolutions near 1e-3 and hide a real graph error.
@@ -159,9 +165,16 @@ def _builder(verbose):
     return builder, network, config
 
 
-def build_engine(weights, cfg, *, max_samples, verbose=False) -> bytes:
-    builder, network, config = _builder(verbose)
+def build_engine(weights, cfg, *, max_samples, precision="fp32", verbose=False) -> bytes:
+    """Build the CTC engine. ``precision`` is the compute type of the convolutions,
+    projections and attention; the input waveform and the output logits stay fp32."""
+    if precision not in _PRECISIONS:
+        raise NotImplementedError(f"wav2vec2 builds {' or '.join(_PRECISIONS)}, not {precision}")
+    half = precision == "fp16"
+    builder, network, config = _builder(verbose, strongly_typed=half)
     audio = network.add_input("audio", trt.float32, (1, 1, 1, -1))
+    if half:
+        audio = network.add_cast(audio, trt.float16).get_output(0)
 
     hidden = _feature_encoder(network, audio, weights, cfg)
     rows = network.add_shuffle(hidden)
@@ -178,6 +191,8 @@ def build_engine(weights, cfg, *, max_samples, verbose=False) -> bytes:
     hidden = _encoder(network, projected, weights, cfg)
 
     logits = g.add_linear(network, hidden, weights["lm_head.weight"], weights["lm_head.bias"])
+    if half:
+        logits = network.add_cast(logits, trt.float32).get_output(0)
     logits.name = "logits"
     network.mark_output(logits)
 
@@ -220,12 +235,12 @@ def build(request, writer) -> None:
         raise NotImplementedError("wav2vec2 does not support MTP speculative decoding")
 
     precision = str(request.precision).lower()
-    if precision != "fp32":
-        # The E2E gate is an exact transcript match, so any drift that flips a
-        # single frame's argmax changes the output. fp32 costs little on a 94M
-        # encoder and is the only precision this family has been measured at.
+    if precision not in _PRECISIONS:
+        # fp32 stays the default. fp16 is accepted when asked for: it keeps the
+        # norms in fp32 and its transcripts differ from the fp32 reference on
+        # a small share of clips (see the README).
         raise NotImplementedError(
-            f"wav2vec2 is qualified at fp32 only, not {precision}")
+            f"wav2vec2 builds {' or '.join(_PRECISIONS)}, not {precision}")
 
     model_dir = Path(request.model_dir)
     weights, shapes = _load(model_dir)
@@ -243,7 +258,8 @@ def build(request, writer) -> None:
 
     writer.set_header(family="wav2vec2", task=request.task, backend=request.backend)
     writer.add_bytes("model.plan", build_engine(
-        weights, cfg, max_samples=max_samples, verbose=bool(request.verbose)))
+        weights, cfg, max_samples=max_samples, precision=precision,
+        verbose=bool(request.verbose)))
     writer.add_json(
         "runtime.json",
         {

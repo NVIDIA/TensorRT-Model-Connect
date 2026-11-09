@@ -23,9 +23,8 @@ def test_architecture_also_resolves():
 
 
 def test_qualifies_at_fp32():
-    # The graph is built in fp32 throughout and fp16 is refused by the builder,
-    # because the E2E gate is an exact transcript match: any drift that flips a
-    # single frame's argmax changes the text, and fp16 was not measured here.
+    # fp32 stays the default: it is the precision that matches the reference
+    # transcript exactly. fp16 is built only when asked for (precision=fp16).
     support = describe(ModelMetadata(config={"model_type": "wav2vec2"}, model_index={}))
     assert support.default_precision == "fp32"
 
