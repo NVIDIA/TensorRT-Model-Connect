@@ -34,6 +34,7 @@ from .weights import (
     _target_np_dtype,
 )
 from .config import ModelConfig
+from .quantization import calibrate_timm_resnet, configure_fp8_build
 
 
 if TYPE_CHECKING:
@@ -163,68 +164,157 @@ class _TimmResnetModel:
             dtype=dtype,
         )
 
-    def _add_block(self, network, x, weights, prefix, stride, bottleneck, dtype):
+    def _conv_bn(
+        self,
+        network,
+        x,
+        weights,
+        conv,
+        norm,
+        kernel,
+        dtype,
+        *,
+        stride=1,
+        padding=0,
+        groups=1,
+        quant=None,
+        dequantized=None,
+    ):
+        """Convolution followed by its batch norm.
+
+        A convolution that ``quant`` quantizes runs with its FP8 weight, the batch norm folded
+        into it; ``dequantized`` is an already quantized input to reuse (the block input).
+        """
+        if quant is not None and quant.should_quantize(conv):
+            if dequantized is None:
+                dequantized = quant.quantize_input(network, x, conv)
+            return quant.convolution(
+                network,
+                dequantized,
+                conv,
+                stride=(stride, stride),
+                padding=(padding, padding),
+                groups=groups,
+            )
+        weight = weights[f"{conv}.weight"]
+        out = graph_ops.add_conv2d(
+            network,
+            x,
+            weight,
+            None,
+            int(weight.shape[0]),
+            kernel,
+            stride=(stride, stride),
+            padding=(padding, padding),
+            groups=groups,
+            dtype=dtype,
+        )
+        return self._add_bn(network, out, weights, norm, dtype)
+
+    def _add_block(self, network, x, weights, prefix, stride, bottleneck, dtype, quant=None):
         """One residual block. timm places the spatial stride on the 3x3 conv."""
         identity = x
+        first = f"{prefix}.conv1"
+        # An FP8 block quantizes its input once: conv1, the downsample (same input, same
+        # scale) and the identity of the residual add read the same Dequantize output.
+        shared = None
+        if quant is not None and quant.should_quantize(first):
+            shared = quant.quantize_input(network, x, first)
 
         if bottleneck:
-            w1 = weights[f"{prefix}.conv1.weight"]
-            out = graph_ops.add_conv2d(network, x, w1, None, int(w1.shape[0]), (1, 1), dtype=dtype)
-            out = self._add_bn(network, out, weights, f"{prefix}.bn1", dtype)
+            out = self._conv_bn(
+                network,
+                x,
+                weights,
+                first,
+                f"{prefix}.bn1",
+                (1, 1),
+                dtype,
+                quant=quant,
+                dequantized=shared,
+            )
             out = graph_ops.add_relu(network, out)
 
+            w1 = weights[f"{prefix}.conv1.weight"]
             w2 = weights[f"{prefix}.conv2.weight"]
             # Grouped (ResNeXt) convs store (out, in/groups, kh, kw).
             groups = max(1, int(w1.shape[0]) // int(w2.shape[1]))
-            out = graph_ops.add_conv2d(
+            out = self._conv_bn(
                 network,
                 out,
-                w2,
-                None,
-                int(w2.shape[0]),
+                weights,
+                f"{prefix}.conv2",
+                f"{prefix}.bn2",
                 (3, 3),
-                stride=(stride, stride),
-                padding=(1, 1),
+                dtype,
+                stride=stride,
+                padding=1,
                 groups=groups,
-                dtype=dtype,
+                quant=quant,
             )
-            out = self._add_bn(network, out, weights, f"{prefix}.bn2", dtype)
             out = graph_ops.add_relu(network, out)
 
-            w3 = weights[f"{prefix}.conv3.weight"]
-            out = graph_ops.add_conv2d(
-                network, out, w3, None, int(w3.shape[0]), (1, 1), dtype=dtype
+            out = self._conv_bn(
+                network,
+                out,
+                weights,
+                f"{prefix}.conv3",
+                f"{prefix}.bn3",
+                (1, 1),
+                dtype,
+                quant=quant,
             )
-            out = self._add_bn(network, out, weights, f"{prefix}.bn3", dtype)
         else:
-            w1 = weights[f"{prefix}.conv1.weight"]
-            out = graph_ops.add_conv2d(
+            out = self._conv_bn(
                 network,
                 x,
-                w1,
-                None,
-                int(w1.shape[0]),
+                weights,
+                first,
+                f"{prefix}.bn1",
                 (3, 3),
-                stride=(stride, stride),
-                padding=(1, 1),
-                dtype=dtype,
+                dtype,
+                stride=stride,
+                padding=1,
+                quant=quant,
+                dequantized=shared,
             )
-            out = self._add_bn(network, out, weights, f"{prefix}.bn1", dtype)
             out = graph_ops.add_relu(network, out)
 
-            w2 = weights[f"{prefix}.conv2.weight"]
-            out = graph_ops.add_conv2d(
-                network, out, w2, None, int(w2.shape[0]), (3, 3), padding=(1, 1), dtype=dtype
+            out = self._conv_bn(
+                network,
+                out,
+                weights,
+                f"{prefix}.conv2",
+                f"{prefix}.bn2",
+                (3, 3),
+                dtype,
+                padding=1,
+                quant=quant,
             )
-            out = self._add_bn(network, out, weights, f"{prefix}.bn2", dtype)
 
-        down_key = f"{prefix}.downsample.0.weight"
-        if down_key in weights:
-            wd = weights[down_key]
-            identity = graph_ops.add_conv2d(
-                network, x, wd, None, int(wd.shape[0]), (1, 1), stride=(stride, stride), dtype=dtype
+        down = f"{prefix}.downsample.0"
+        if f"{down}.weight" in weights:
+            reuse = (
+                shared is not None
+                and quant.should_quantize(down)
+                and quant.input_scale(down) == quant.input_scale(first)
             )
-            identity = self._add_bn(network, identity, weights, f"{prefix}.downsample.1", dtype)
+            identity = self._conv_bn(
+                network,
+                x,
+                weights,
+                down,
+                f"{prefix}.downsample.1",
+                (1, 1),
+                dtype,
+                stride=stride,
+                quant=quant,
+                dequantized=shared if reuse else None,
+            )
+        elif shared is not None:
+            # The identity reads the quantized block input, so TensorRT fuses the residual
+            # add and ReLU into the last convolution of the block.
+            identity = shared
 
         out = graph_ops.add_sum(network, out, identity)
         return graph_ops.add_relu(network, out)
@@ -241,8 +331,8 @@ class _TimmResnetModel:
         parallel_config=None,
     ) -> bytes:
         del max_cache_length
-        if quant_ctx is not None:
-            raise NotImplementedError("timm_resnet does not support quantized builds yet")
+        if quant_ctx is not None and precision != "fp16":
+            raise ValueError(f"timm_resnet FP8 needs precision fp16, got {precision!r}")
         if parallel_config is not None and getattr(parallel_config, "enabled", False):
             raise NotImplementedError("timm_resnet does not support tensor-parallel builds")
 
@@ -286,6 +376,7 @@ class _TimmResnetModel:
         trt_config.max_aux_streams = 0
         trt_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+        configure_fp8_build(trt_config, quant_ctx)
 
         pixel_values = network.add_input("pixel_values", trt.float32, (1, 3, image_h, image_w))
         hidden = pixel_values
@@ -313,7 +404,14 @@ class _TimmResnetModel:
                 # First block of every stage after layer1 downsamples.
                 stride = 2 if (stage_idx > 0 and block == 0) else 1
                 hidden = self._add_block(
-                    network, hidden, weights, f"{stage}.{block}", stride, bottleneck, work_np_dtype
+                    network,
+                    hidden,
+                    weights,
+                    f"{stage}.{block}",
+                    stride,
+                    bottleneck,
+                    work_np_dtype,
+                    quant=quant_ctx,
                 )
 
         hidden = graph_ops.add_global_avg_pool(network, hidden, (feat_h, feat_w))
@@ -373,6 +471,19 @@ def _positive_int(value: object, name: str) -> int:
     return result
 
 
+def _refuse_quantized_checkpoint(model_dir: Path, raw: dict) -> None:
+    """FP8 self-quantization needs the original checkpoint, not an already quantized one."""
+    names = _open_safetensors(model_dir).tensor_map
+    if (
+        "quantization_config" in raw
+        or (model_dir / "hf_quant_config.json").is_file()
+        or any(str(name).endswith((".weight_scale", ".input_scale")) for name in names)
+    ):
+        raise ValueError(
+            "the checkpoint is already quantized; FP8 self-quantization needs the original"
+        )
+
+
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one timm ResNet image-classification bundle."""
     if request.dynamic_kv_cache:
@@ -392,8 +503,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_resnet does not support context parallelism")
     if request.task != "image_to_class_scores":
         raise ValueError("timm_resnet supports only task=image_to_class_scores")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("timm_resnet does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"timm_resnet supports quantization fp8 or none; got {request.quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("timm_resnet does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -407,13 +520,24 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     precision = str(request.precision).lower()
     max_sequence_length = _positive_int(request.max_sequence_length or 1, "max_sequence_length")
     model = _TimmResnetModel()
+    quant_ctx = None
+    if request.quantization == "fp8":
+        _refuse_quantized_checkpoint(model_dir, config.raw)
     weights = model.load_weights(str(model_dir), config, precision=precision)
+    if request.quantization == "fp8":
+        quant_ctx = calibrate_timm_resnet(
+            config.raw["_timm_resnet_config"],
+            weights,
+            "fp8",
+            precision=precision,
+            eps=_BN_EPS,
+        )
     plan = model.build_engine(
         config,
         weights,
         max_sequence_length,
         precision=precision,
-        quant_ctx=None,
+        quant_ctx=quant_ctx,
         verbose=bool(request.verbose),
         parallel_config=None,
     )
