@@ -160,6 +160,7 @@ class _InternVLModel:
             vision_config,
             vision_weights,
             fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,
+            precision=precision,
             verbose=verbose,
         )
 
