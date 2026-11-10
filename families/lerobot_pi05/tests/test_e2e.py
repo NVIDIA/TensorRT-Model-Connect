@@ -200,6 +200,7 @@ def bundles(tmp_path_factory, model_dirs):
                         family=FAMILY,
                         task=manifest["task"],
                         precision=manifest["precision"],
+                        quantization=manifest.get("quantization"),
                     )
                 )
             assert output.is_file()

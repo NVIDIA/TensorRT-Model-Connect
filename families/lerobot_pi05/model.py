@@ -7,6 +7,8 @@ The bundle carries two engines. ``prefix.plan`` embeds the cameras and the promp
 and returns each prefix layer's keys and values; ``denoise.plan`` is one
 flow-matching step, run ``num_inference_steps`` times by the runtime. They are
 separate because the prefix runs once per observation and the step ten times.
+``quantization="fp8"`` makes the Gemma projections of both engines FP8 (see
+``quantization.py``).
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ if TYPE_CHECKING:
 
 TASK = "images_state_text_to_action_chunk"
 _PRECISIONS = ("bf16", "fp32")
+_QUANTIZATIONS = (None, "none", "fp8")
 STATE_BINS = 256
 
 
@@ -63,20 +66,26 @@ def _prefix_length(cfg) -> int:
     return cfg.camera_slots * config_module.IMAGE_TOKENS + cfg.tokenizer_max_length
 
 
-def _build_prefix_plan(cfg, weights, *, precision: str, verbose: bool = False, debug: bool = False) -> bytes:
+def _build_prefix_plan(
+    cfg, weights, *, precision: str, verbose: bool = False, debug: bool = False, quant=None
+) -> bytes:
     from . import prefix
+    from .quantization import configure_quantized_build
 
     builder, network, config = _builder(precision, verbose)
-    prefix.build_prefix(network, weights, cfg, dtype=_dtype(precision), debug=debug)
+    configure_quantized_build(config, quant)
+    prefix.build_prefix(network, weights, cfg, dtype=_dtype(precision), debug=debug, quant=quant)
     return _serialize(builder, network, config, "prefix")
 
 
-def _build_denoise_plan(cfg, weights, *, precision: str, verbose: bool = False) -> bytes:
+def _build_denoise_plan(cfg, weights, *, precision: str, verbose: bool = False, quant=None) -> bytes:
     from . import denoise
+    from .quantization import configure_quantized_build
 
     builder, network, config = _builder(precision, verbose)
+    configure_quantized_build(config, quant)
     denoise.build_denoise(
-        network, weights, cfg, dtype=_dtype(precision), prefix_len=_prefix_length(cfg))
+        network, weights, cfg, dtype=_dtype(precision), prefix_len=_prefix_length(cfg), quant=quant)
     return _serialize(builder, network, config, "denoise")
 
 
@@ -108,8 +117,14 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("lerobot_pi05 does not support video_num_frames")
     if request.mtp_seq_len is not None:
         raise NotImplementedError("lerobot_pi05 does not support MTP speculative decoding")
-    if request.quantization not in {None, "none"} or request.fp32_layers:
-        raise NotImplementedError("lerobot_pi05 does not support quantization or mixed-precision layers")
+    if request.quantization not in _QUANTIZATIONS:
+        raise NotImplementedError(
+            f"Unsupported lerobot_pi05 quantization: {request.quantization} (supported: fp8)")
+    quantized = request.quantization not in {None, "none"}
+    if quantized and precision != "bf16":
+        raise NotImplementedError(f"lerobot_pi05 fp8 needs precision bf16, got {precision}")
+    if request.fp32_layers:
+        raise NotImplementedError("lerobot_pi05 does not support mixed-precision layers")
     if request.max_sequence_length not in {None, cfg.tokenizer_max_length}:
         raise NotImplementedError(
             f"lerobot_pi05 prompt length is fixed at the checkpoint's {cfg.tokenizer_max_length}")
@@ -117,6 +132,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                                 (request.image_width, cfg.camera_width, "width")):
         if given not in {None, wanted}:
             raise NotImplementedError(f"lerobot_pi05 camera {axis} is fixed at the checkpoint's {wanted}")
+    if quantized:
+        from .quantization import refuse_quantized_checkpoint
+
+        refuse_quantized_checkpoint(model_dir)
 
     # The tokenizer first: a missing or wrong file, or a missing converter dependency,
     # then fails in seconds rather than after the weights load.
@@ -124,10 +143,15 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         load_tokenizer_model(model_dir))
     check_vocabulary(tokenizer_metadata)
     weights = load_checkpoint(model_dir)
+    quant = None
+    if quantized:
+        from .quantization import build_quant_context
+
+        quant = build_quant_context(weights, cfg, request.quantization, precision=precision)
 
     verbose = bool(request.verbose)
-    prefix_plan = _build_prefix_plan(cfg, weights, precision=precision, verbose=verbose)
-    denoise_plan = _build_denoise_plan(cfg, weights, precision=precision, verbose=verbose)
+    prefix_plan = _build_prefix_plan(cfg, weights, precision=precision, verbose=verbose, quant=quant)
+    denoise_plan = _build_denoise_plan(cfg, weights, precision=precision, verbose=verbose, quant=quant)
 
     writer.set_header(family="lerobot_pi05", task=request.task, backend=request.backend)
     writer.add_bytes("prefix.plan", prefix_plan)
