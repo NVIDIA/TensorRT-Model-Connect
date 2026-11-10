@@ -362,7 +362,8 @@ def native_mode(row: Mapping[str, Any]) -> str:
     failed)`` where eager replaced a failed torch.compile, both when the evidence mixes them, or ``—``."""
     # An entry that errored records the mode it would have run; only evidence names the mode that answered.
     accuracy = [item.get("native") or {} for item in row.get("accuracy", []) if item.get("status") != "error"]
-    perf = [item for item in row.get("perf", []) if item.get("light") != "n/a"]
+    perf = [item for item in row.get("perf", []) if item.get("light") != "n/a"
+            and (item.get("reference") or {}).get("p50_ms") is not None]  # a native side that timed requests
     modes = {str(item["mode"]) for item in accuracy if item.get("mode")}
     modes |= {mode for item in perf for mode in str(item.get("reference_mode") or "").split("+") if mode}
     fell_back = (any(item.get("compile_fallback") for item in accuracy)

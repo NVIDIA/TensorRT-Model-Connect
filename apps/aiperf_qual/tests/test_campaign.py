@@ -401,14 +401,21 @@ def test_run_cli_exit_codes_require_a_supported_success_outcome(tmp_path, monkey
     assert json.loads(capsys.readouterr().out) == {"report": str(tmp_path / "report.md"), **record}
 
 
+TIMED = {"reference": {"p50_ms": 9.0}}
+
+
 @pytest.mark.parametrize("accuracy, perf, expected", [
-    ([{"native": {"mode": "compile"}}], [{"reference_mode": "compile", "light": "green"}], "compile"),
+    ([{"native": {"mode": "compile"}}], [{"reference_mode": "compile", "light": "green", **TIMED}], "compile"),
     ([{"native": {"mode": "eager"}}], [], "eager"),  # configured or pinned
     ([{"native": {"mode": "eager", "compile_fallback": "Dynamo recompile limit"}}], [], "eager (compile failed)"),
-    ([], [{"reference_mode": "eager", "configured_mode": "compile", "light": "green"}], "eager (compile failed)"),
-    ([{"native": {"mode": "compile"}}], [{"reference_mode": "compile+eager", "light": "green"}], "compile, eager"),
-    ([], [{"reference_mode": "eager", "light": "n/a"}], "—"),
-    ([{"status": "error", "native": {"mode": "eager"}}], [], "—"),  # the native side never answered
+    ([], [{"reference_mode": "eager", "configured_mode": "compile", "light": "green", **TIMED}],
+     "eager (compile failed)"),
+    ([{"native": {"mode": "compile"}}], [{"reference_mode": "compile+eager", "light": "green", **TIMED}],
+     "compile, eager"),
+    ([], [{"reference_mode": "eager", "light": "n/a", **TIMED}], "—"),
+    # The native side never answered: an errored entry, or a Perf row without native timings.
+    ([{"status": "error", "native": {"mode": "eager"}}], [{"reference_mode": "eager", "light": "informational",
+                                                          "reference": {"p50_ms": None}}], "—"),
 ])
 def test_native_mode_names_compile_eager_or_a_failed_compile(accuracy, perf, expected):
     assert campaign.native_mode({"accuracy": accuracy, "perf": perf}) == expected
