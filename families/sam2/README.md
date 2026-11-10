@@ -4,9 +4,66 @@ This family builds SAM2.1 Hiera-S (`facebook/sam2.1-hiera-small`) for
 `video_segmentation` as six TensorRT plans: one image plan (Hiera backbone, FPN
 neck, box head) and five tracker plans (the prompt plan for the first frame and
 four recurrent plans for 1 to 4 history frames, each with memory attention,
-memory encoder and mask decoder). The family precision is `mixed_bf16_fp32`,
-batch size is 1 and the image plan input is 1024x1024. The family has no
-quantized build.
+memory encoder and mask decoder). The default precision is `fp16`; the earlier
+default `mixed_bf16_fp32` can still be selected. Batch size is 1 and the image
+plan input is 1024x1024. The family has no quantized build.
+
+## Precision
+
+| Precision | How to select | GEMM, convolution, attention | Layer norms and the other fp32 parts of the graph | Plan inputs and outputs |
+|---|---|---|---|---|
+| `fp16` (default) | default of `trtmc build`, or `precision="fp16"` | fp16 | fp32 | same for both precisions |
+| `mixed_bf16_fp32` | `precision="mixed_bf16_fp32"` in a `BuildRequest` or E2E manifest | bf16 | fp32 | same for both precisions |
+
+Both precisions build the same graph and only change the 16-bit compute type.
+The plan inputs and outputs do not change: FPN levels 0 and 1, the box maps
+and the memory features stay bf16, the rest stays fp32. The fp16 build adds one
+cast at each bf16 input or output (8 in the image plan, 2 in the prompt plan, 3
+in each recurrent plan), so the native runtime and the bundle layout are the
+same for both precisions. The `mixed_bf16_fp32` network is unchanged.
+
+Measured with TensorRT 11.4.0.106 (11.1.0.106 as a check), batch 1, one GPU,
+both precisions built three times (11.1: once) and timed in the same job,
+median of 9 interleaved rounds. "Video" is the real unit of work of the
+bundle: 5 frames, each the image plan plus the prompt plan (frame 0) or the
+recurrent plan with 1 to 4 history frames, with the memory features and object
+pointers passed from frame to frame (plans only, no pre- or post-processing).
+
+| GPU | TensorRT | Video, `mixed_bf16_fp32` (ms) | Video, `fp16` (ms) | Speedup | Image plan | Prompt plan | Recurrent H=1 / H=4 |
+|---|---|---|---|---|---|---|---|
+| B200 | 11.4 | 18.676 | 17.565 | 1.063x | 1.954 to 1.830 ms | 0.617 to 0.525 ms | 1.065x / 1.042x |
+| B300 | 11.4 | 18.484 | 17.245 | 1.072x | 1.995 to 1.841 ms | 0.596 to 0.506 ms | 1.068x / 1.041x |
+| B200 | 11.1 | 19.545 | 18.446 | 1.060x | 2.144 to 2.012 ms | 0.617 to 0.534 ms | 1.060x / 1.036x |
+| B300 | 11.1 | 19.172 | 17.911 | 1.070x | 2.129 to 1.964 ms | 0.604 to 0.510 ms | 1.067x / 1.036x |
+
+The six-plan set shrinks from 378 to 300 MiB (B200) and from 381 to 302 MiB
+(B300).
+
+Quality against the PyTorch fp32 `sam2` 1.1.0 video predictor (same
+preprocessed pixels; not ground truth), TensorRT 11.4. COCO: 300 COCO 2017
+validation images, the largest object box as the prompt, mask logits > 0 at
+256x256. Video: 18 objects in 6 windows of 5 frames of the `sam2` demo clip
+"bedroom". Stress: 90 frames (black, white, uniform noise, 1-pixel and 8-pixel
+checkerboards, saturated color; full, mid-size and 4-pixel boxes; 5 frames
+each).
+
+| Set | Metric | B200 `mixed_bf16_fp32` | B200 `fp16` | B300 `mixed_bf16_fp32` | B300 `fp16` |
+|---|---|---|---|---|---|
+| COCO | mask IoU mean (p5) | 0.9895 (0.975) | 0.9956 (0.996) | 0.9922 (0.973) | 0.9970 (0.996) |
+| COCO | mask IoU min | 0.089 | 0.462 | 0.458 | 0.462 |
+| COCO | FPN relative L2, level 0 / 1 / 2 | 0.016 / 0.035 / 0.017 | 0.003 / 0.008 / 0.004 | 0.016 / 0.035 / 0.017 | 0.004 / 0.008 / 0.004 |
+| Video, frames 1 to 4 | mask IoU mean | 0.959 to 0.969 | 0.981 to 0.997 | 0.976 to 0.993 | 0.995 to 0.998 |
+| Stress | mask IoU mean (min) | 0.970 (0.000) | 0.999 (0.990) | 0.954 (0.000) | 0.999 (0.991) |
+| All | non-finite outputs | 0 | 0 | 0 | 0 |
+
+The fp16 build is closer to PyTorch on every set; the bf16 build loses the
+mask completely on some stress frames and drops to IoU 0.09 on one COCO image
+(B200). The COCO
+minimum of 0.46 is the same image for both precisions (logit cosine 0.948
+against PyTorch). The largest activation of the PyTorch model on all inputs is
+8.9 (image encoder and memory attention block outputs), far below the fp16
+range. TensorRT 11.1 (50 COCO images): mask IoU 0.9991 / 0.9993 for fp16 and
+0.9963 / 0.9956 for bf16 (B200 / B300), no non-finite output.
 
 ## FP8 quantization study (not shipped)
 
@@ -17,13 +74,16 @@ fp16 build of the same graph, a whole frame gains 1.01x to 1.06x, and the masks
 get clearly worse. This section records the recipe, the method and the numbers,
 so that the study does not have to be repeated. The FP8 code was not merged.
 All numbers come from a local study; this repository has no FP8 build for SAM2.
+The study was run when the default precision was `mixed_bf16_fp32`: "bf16"
+below is that precision, and the "fp16 control" is close to the current `fp16`
+default (the control also changed the plan inputs and outputs to fp16).
 
 ### 1. Summary and decision
 
 TensorRT 11.4, batch 1. "fp16 control" is the same graph with bf16 replaced by
 fp16 (experiment only, not a family build).
 
-| Item | bf16 (family default) | fp16 control | FP8 image encoder | FP8 vs default / vs fp16 control |
+| Item | bf16 (default at the time) | fp16 control | FP8 image encoder | FP8 vs default / vs fp16 control |
 |---|---|---|---|---|
 | Image plan, B200 | 1.976 ms | 1.877 ms | 1.935 ms | 1.02x / 0.97x |
 | Image plan, B300 | 2.024 ms | 1.893 ms | 1.758 ms | 1.15x / 1.08x |
@@ -46,7 +106,7 @@ Decision: do not ship FP8 for SAM2.
   faster in FP8 (section 5), so the bundle only shrinks by about 8%.
 - An fp16 build of the same graph is 5% to 8% faster than the bf16 default on
   the image plan and has a higher mask IoU (0.9991 vs 0.9954). It is a better
-  first step than FP8 (not part of this study's code).
+  first step than FP8 and is now the default (see Precision).
 
 ### 2. Model and plans
 
@@ -54,7 +114,7 @@ Decision: do not ship FP8 for SAM2.
 |---|---|
 | Checkpoint | `facebook/sam2.1-hiera-small`, revision `6c381d9c16faed5e8a7c4a2cd99918bdca8316e4` (the public snapshot with the family's synthetic box head) |
 | Plans | image plan; prompt plan; recurrent plans H=1, 2, 3, 4 |
-| Family precision | `mixed_bf16_fp32` |
+| Family precision | `mixed_bf16_fp32` (the default at the time) |
 | Batch size | 1 (the family builds batch 1 only) |
 | Image encoder model config | Hiera, embed dim 96, 16 blocks in 4 stages (1, 2, 11, 2), neck dim 256, image 1024 |
 | Image plan outputs used by the tracker | FPN levels 0, 1, 2 |
@@ -145,7 +205,7 @@ bf16 / fp16 numbers within 0.004.
 
 | Image plan | Mask IoU vs PyTorch, mean (min) | Mask logit cosine vs PyTorch, mean (min) | FPN relative L2, level 0 / 1 / 2 |
 |---|---|---|---|
-| bf16 (default) | 0.9954 (0.861) | 1.0000 (0.992) | 0.015 / 0.034 / 0.017 |
+| bf16 (default at the time) | 0.9954 (0.861) | 1.0000 (0.992) | 0.015 / 0.034 / 0.017 |
 | fp16 control (floor) | 0.9991 (0.988) | 1.0000 (1.000) | 0.003 / 0.007 / 0.004 |
 | FP8 | 0.9788 (0.399) | 0.9968 (0.524) | 0.063 / 0.168 / 0.099 |
 | FP8, bf16 scale constants | 0.9776 (0.394) | 0.9946 (0.254) | 0.064 / 0.169 / 0.099 |
@@ -158,7 +218,7 @@ Mask IoU of FP8 against the fp16 control: 0.9789 mean, 0.399 min.
 B300, TensorRT 11.4, mean mask IoU vs PyTorch per frame (18 objects; frames 1
 to 4 use the recurrent plans):
 
-| Frame | bf16 (default) | fp16 control | FP8 | NVFP4 (experiment) |
+| Frame | bf16 (default at the time) | fp16 control | FP8 | NVFP4 (experiment) |
 |---|---|---|---|---|
 | 0 | 0.990 | 0.999 | 0.978 | 0.890 |
 | 1 | 0.991 | 0.997 | 0.975 | 0.909 |
@@ -281,7 +341,6 @@ predictor.
   default (0.995) with no collapsed images.
 - A TensorRT release that builds `attn.proj` in FP8 after the fused attention,
   or gives a larger FP8 gain on B200 (retest the speed table on both GPUs).
-- A change of the family default to fp16 (measured 5% to 8% faster than bf16 on
-  the image plan): FP8 must then beat fp16, which it does not on 11.4 B200 or
-  11.1.
+- The family default is now fp16 (see Precision): FP8 must beat it, which the
+  fp16 control above shows it does not on 11.4 B200 or 11.1.
 - Batch support above 1 in the family.
