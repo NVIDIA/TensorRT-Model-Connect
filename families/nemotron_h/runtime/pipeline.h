@@ -39,7 +39,8 @@ class RecurrentPipeline final : public ITextGeneration {
                       cudaStream_t stream, const char* name,
                       std::shared_ptr<ITokenizer> tokenizer = nullptr,
                       std::string model_id_str = "",
-                      std::unique_ptr<NemotronHPairedDraft> paired = nullptr);
+                      std::unique_ptr<NemotronHPairedDraft> paired = nullptr,
+                      std::unique_ptr<ITrtModule> prefill = nullptr);
     ~RecurrentPipeline() override;
 
     TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg = {}) override;
@@ -61,6 +62,9 @@ class RecurrentPipeline final : public ITextGeneration {
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
     std::unique_ptr<NemotronHPairedDraft> paired_;
+    // Multi-row prefill engine (single-GPU split bundles only); decoding stays on decoder_.
+    std::unique_ptr<ITrtModule> prefill_;
+    int32_t prefill_rows_{0};
 
     std::vector<int32_t> generate_from_ids(const std::vector<int32_t>& input_ids,
                                            int32_t max_new_tokens,
@@ -72,6 +76,9 @@ class RecurrentPipeline final : public ITextGeneration {
                                          std::vector<float>& logits, int32_t& decode_steps);
 
     void run_step(int32_t token_id, std::vector<float>& logits, bool copy_logits);
+    // Feed the prompt to prefill_ in chunks of up to prefill_rows_ tokens and
+    // return the logits of the last token.
+    void run_prefill_chunks(const std::vector<int32_t>& input_ids, std::vector<float>& logits);
 
     using SteadyClock = std::chrono::steady_clock;
     void report_timing(SteadyClock::time_point t_prefill_start,
