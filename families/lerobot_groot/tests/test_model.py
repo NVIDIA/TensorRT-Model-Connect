@@ -373,6 +373,39 @@ def test_condition_vision_tower_runs_in_the_build_precision(tmp_path, monkeypatc
     assert dtypes == dict.fromkeys(("vision", "backbone", "action_head"), getattr(trt, expected))
 
 
+@pytest.mark.parametrize("precision", ["bfloat16", "float32"])
+def test_every_vision_tower_matrix_product_runs_in_the_tower_dtype(monkeypatch, precision) -> None:
+    """No projection, attention or merger of the tower is pinned to another dtype."""
+    import tensorrt as trt
+
+    dtype = getattr(trt, precision)
+    used: list[tuple[str, object]] = []
+
+    def linear(network, x, weight, bias=None, *, dtype):
+        used.append(("linear", dtype))
+        return "t"
+
+    def attention(network, q, k, v, *, heads, head_dim, dtype):
+        used.append(("attention", dtype))
+        return "t"
+
+    monkeypatch.setattr(vision, "require", lambda weights, name, shape: np.zeros(shape, np.float32))
+    monkeypatch.setattr(graph, "linear", linear)
+    monkeypatch.setattr(graph, "batched_attention", attention)
+    for name in ("shuffle", "f32", "add", "const", "layer_norm", "slice_static", "rotate", "gelu_tanh", "gelu_erf"):
+        monkeypatch.setattr(graph, name, lambda *a, **k: "t")
+    tokens, deepstack = vision.build_vision(None, "pixels", _AnyWeights(), images=2, grid_h=16, grid_w=16, dtype=dtype)
+    assert (tokens, len(deepstack)) == ("t", len(vision.DEEPSTACK_LAYERS))
+    # Four projections and one attention per block, two products per patch merger, plus the patch embedding.
+    assert len(used) == 1 + vision.DEPTH * 5 + 2 * (len(vision.DEEPSTACK_LAYERS) + 1)
+    assert {d for _, d in used} == {dtype}
+
+
+class _AnyWeights(dict):
+    def __missing__(self, key):
+        return None
+
+
 def test_checkpoint_loading_and_shape_checks(tmp_path) -> None:
     with pytest.raises(FileNotFoundError, match="model.safetensors"):
         load_checkpoint(tmp_path)

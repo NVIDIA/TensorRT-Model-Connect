@@ -93,8 +93,7 @@ def _build_condition_plan(cfg, weights, *, precision: str, verbose: bool = False
     state = network.add_input("state", trt.float32, (1, cfg.max_state_dim))
 
     # The vision tower runs in the build precision, as LeRobot's bfloat16 autocast runs it (the
-    # fine-tune keeps the base model's bfloat16 vision weights); only its query/key/value
-    # projection stays float32 (see vision.build_vision).
+    # fine-tune keeps the base model's bfloat16 vision weights).
     tokens, deepstack = vision.build_vision(
         network, pixels, weights, images=len(cfg.cameras), grid_h=grid, grid_w=grid, dtype=dtype)
     hidden = backbone.build_backbone(
