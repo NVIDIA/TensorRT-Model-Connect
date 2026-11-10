@@ -71,12 +71,14 @@ void Phi4MultimodalKvCache::write_position_input(TensorMap& inputs, int32_t seq_
 }
 
 void Phi4MultimodalKvCache::write_batched_mask(TensorMap& inputs, int32_t seq_len) {
-    // Batched prefill mask: (seq_len, max_length + seq_len). Columns
-    // [0, valid) are visible cache, [valid, max_length) are stale slots,
-    // [max_length, max_length+seq_len) are the new tokens — causal so
-    // token i sees tokens 0..i.
-    const int32_t valid = std::max(0, std::min(position_, max_length_));
-    const int32_t kv_len = max_length_ + seq_len;
+    // Batched prefill mask: (seq_len, cache_rows + seq_len), cache_rows the
+    // bound cache prefix (max_length for a static engine). Columns [0, valid)
+    // are visible cache, [valid, cache_rows) are stale slots, and
+    // [cache_rows, cache_rows+seq_len) are the new tokens — causal so token i
+    // sees tokens 0..i.
+    const int32_t cache_rows = prefill_cache_rows();
+    const int32_t valid = std::max(0, std::min(position_, cache_rows));
+    const int32_t kv_len = cache_rows + seq_len;
     const std::size_t total = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(kv_len);
     mask_buf_.assign(total, kMaskedScore);
     for (int32_t i = 0; i < seq_len; ++i) {
@@ -84,7 +86,7 @@ void Phi4MultimodalKvCache::write_batched_mask(TensorMap& inputs, int32_t seq_le
         for (int32_t j = 0; j < valid; ++j)
             mask_buf_[row + static_cast<std::size_t>(j)] = 0.0f;
         for (int32_t j = 0; j <= i; ++j)
-            mask_buf_[row + static_cast<std::size_t>(max_length_) + static_cast<std::size_t>(j)] =
+            mask_buf_[row + static_cast<std::size_t>(cache_rows) + static_cast<std::size_t>(j)] =
                 0.0f;
     }
     Tensor mask_t;
@@ -98,8 +100,9 @@ void Phi4MultimodalKvCache::write_bidirectional_mask(TensorMap& inputs, int32_t 
     // Diffusion block mask: all valid prefix cache rows are visible, stale cache
     // rows are hidden, and every token in the current block can see every other
     // token in the current block.
-    const int32_t valid = std::max(0, std::min(position_, max_length_));
-    const int32_t kv_len = max_length_ + seq_len;
+    const int32_t cache_rows = prefill_cache_rows();
+    const int32_t valid = std::max(0, std::min(position_, cache_rows));
+    const int32_t kv_len = cache_rows + seq_len;
     const std::size_t total = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(kv_len);
     mask_buf_.assign(total, kMaskedScore);
     for (int32_t i = 0; i < seq_len; ++i) {
@@ -107,7 +110,7 @@ void Phi4MultimodalKvCache::write_bidirectional_mask(TensorMap& inputs, int32_t 
         for (int32_t j = 0; j < valid; ++j)
             mask_buf_[row + static_cast<std::size_t>(j)] = 0.0f;
         for (int32_t j = 0; j < seq_len; ++j)
-            mask_buf_[row + static_cast<std::size_t>(max_length_) + static_cast<std::size_t>(j)] =
+            mask_buf_[row + static_cast<std::size_t>(cache_rows) + static_cast<std::size_t>(j)] =
                 0.0f;
     }
     Tensor mask_t;
@@ -184,11 +187,28 @@ void Phi4MultimodalKvCache::bind_to(ITrtModule& module) {
 
 void Phi4MultimodalKvCache::bind_cache_inputs(ITrtModule& module) {
     has_position_input_ = module.has_input(names_.position_id);
+    prefill_cache_rows_ = 0;
+    if (!names_.cache_k.empty() && module.input_is_dynamic(names_.cache_k.front())) {
+        const int32_t used = std::max(0, std::min(position_, max_length_));
+        const int32_t bucketed =
+            (used + kPrefillCacheRowBucket - 1) / kPrefillCacheRowBucket * kPrefillCacheRowBucket;
+        prefill_cache_rows_ = std::max(1, std::min(bucketed, max_length_));
+    }
+    const std::vector<int64_t> cache_shape{prefill_cache_rows_, kv_dim_};
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
-        module.bind_external(names_.cache_k[li], cache_k_[li].data());
-        module.bind_external(names_.cache_v[li], cache_v_[li].data());
+        if (prefill_cache_rows_ > 0) {
+            module.bind_external(names_.cache_k[li], cache_k_[li].data(), cache_shape);
+            module.bind_external(names_.cache_v[li], cache_v_[li].data(), cache_shape);
+        } else {
+            module.bind_external(names_.cache_k[li], cache_k_[li].data());
+            module.bind_external(names_.cache_v[li], cache_v_[li].data());
+        }
     }
+}
+
+int32_t Phi4MultimodalKvCache::prefill_cache_rows() const {
+    return prefill_cache_rows_ > 0 ? prefill_cache_rows_ : max_length_;
 }
 
 void Phi4MultimodalKvCache::write_prefill_kv(const std::vector<const void*>& prefill_k,
@@ -290,6 +310,7 @@ void Phi4MultimodalKvCache::reset() {
     // Reset only the logical sequence length. Attention masks hide every
     // stale cache row, and each present row is overwritten before use.
     position_ = 0;
+    prefill_cache_rows_ = 0;
 }
 
 std::size_t Phi4MultimodalKvCache::device_memory_bytes() const {
