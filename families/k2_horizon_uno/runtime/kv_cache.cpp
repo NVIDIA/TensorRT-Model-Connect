@@ -15,7 +15,8 @@ namespace trtmc {
 namespace {
 
 constexpr int32_t kHeadDim = 128;
-constexpr int32_t kMaximumBlockLength = 8;
+// Rows of one call: decode blocks use at most 8, prompt chunks up to 64.
+constexpr int32_t kMaximumCallRows = 64;
 constexpr int32_t kNumKvHeads = 8;
 constexpr int32_t kNumLayers = 36;
 
@@ -83,8 +84,8 @@ K2HorizonUnoCacheCursor::K2HorizonUnoCacheCursor(int32_t capacity) : capacity_(c
 }
 
 void K2HorizonUnoCacheCursor::validate_block(int32_t sequence_length) const {
-    if (sequence_length <= 0 || sequence_length > kMaximumBlockLength) {
-        throw std::invalid_argument("K2-Horizon-Uno block length must be in [1, 8]");
+    if (sequence_length <= 0 || sequence_length > kMaximumCallRows) {
+        throw std::invalid_argument("K2-Horizon-Uno call rows must be in [1, 64]");
     }
     if (position_ > capacity_ - sequence_length)
         throw std::runtime_error("K2-Horizon-Uno sequence exceeds fixed KV capacity");
