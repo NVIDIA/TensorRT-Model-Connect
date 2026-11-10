@@ -21,12 +21,12 @@ def _snapshot(model: str, revision: str) -> Path:
     return Path(snapshot_download(model, revision=revision))
 
 
-def _request(model_dir: Path, output: Path):
+def _request(model_dir: Path, output: Path, frames: int):
     from tensorrt_model_connect.build import BuildRequest
 
     return BuildRequest(model_dir=model_dir, output_path=output, family="minimax_h3",
                         task="references_text_to_audio_video", precision="bf16", backend="trt",
-                        image_height=1344, image_width=768, video_num_frames=124)
+                        image_height=1344, image_width=768, video_num_frames=frames)
 
 
 def _publish(output: Path, build) -> None:
@@ -69,8 +69,12 @@ def _register_kernel(bridge: Path, kernel_library: Path) -> None:
 
 def build_omniref(*, output: Path, scratch: Path, bridge: Path, kernel_library: Path,
                   denoiser_workspace_gib: int = 24, base: str = "MiniMaxAI/MiniMax-H3",
-                  student: str = "FastVideo/FastVideo-FastH3-Omni-8-Step-V1") -> int:
-    """Build the original bundle once (kept in `scratch`), then the student."""
+                  student: str = "FastVideo/FastVideo-FastH3-Omni-8-Step-V1",
+                  two_window: bool = False) -> int:
+    """Build the original bundle once (kept in `scratch`), then the student.
+
+    `two_window` selects the experimental 226-frame profile for both bundles.
+    """
     for library, role in ((bridge, "the TVM-FFI bridge"), (kernel_library, "its VSA kernel")):
         if not library.is_file():
             raise FileNotFoundError(f"OmniRef needs {role}: {library}")
@@ -78,15 +82,16 @@ def build_omniref(*, output: Path, scratch: Path, bridge: Path, kernel_library: 
 
     base_dir, student_dir = _snapshot(base, BASE_REVISION), _snapshot(student, MODEL_REVISION)
     scratch.mkdir(parents=True, exist_ok=True)
-    source = scratch / "minimax-h3-six-portrait.bundle"
+    profile, frames = {**PROFILE, "continuation": two_window}, 226 if two_window else 124
+    source = scratch / f"minimax-h3-{'two-window-' if two_window else ''}six-portrait.bundle"
     if not source.is_file():
         from .reference_build import build as build_original
 
-        original = _request(base_dir, source)
+        original = _request(base_dir, source, frames)
 
         def build_source(writer) -> None:
             writer.record_build(original)
-            build_original(original, writer, **PROFILE)
+            build_original(original, writer, **profile)
 
         _publish(source, build_source)
         os.sync()
@@ -94,9 +99,9 @@ def build_omniref(*, output: Path, scratch: Path, bridge: Path, kernel_library: 
     from .reference_pdd_build import build as build_student
 
     _register_kernel(bridge, kernel_library)
-    request = _request(student_dir, output)
+    request = _request(student_dir, output, frames)
     _publish(output, lambda writer: build_student(
         request, writer, base_model_dir=base_dir, source_bundle=source,
         plugin_library=bridge.resolve(), denoiser_workspace_bytes=denoiser_workspace_gib << 30,
-        **PROFILE))
+        **profile))
     return 0

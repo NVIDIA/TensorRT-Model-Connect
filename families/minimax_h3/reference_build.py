@@ -25,6 +25,7 @@ from .config import Ref2VAPackedProfile, SOL_ENGINE_1344X768_124F
 
 TASK = "references_text_to_audio_video"
 SCHEMA = "minimax_h3.image_ref2va/v1"
+CONTINUATION_SCHEMA = "minimax_h3.image_ref2va_continuation/v1"
 PLAN_NAMES = (
     "vision.plan",
     "text_encoder.plan",
@@ -204,7 +205,9 @@ def _configs(root):
     return configs
 
 
-def _target(request, memory_preset, reference_capacity="standard"):
+def _target(request, memory_preset, reference_capacity="standard", continuation=False):
+    if not isinstance(continuation, bool):
+        raise ValueError("MiniMax-H3 continuation must be a boolean")
     if (
         request.family != "minimax_h3"
         or request.task != TASK
@@ -237,8 +240,11 @@ def _target(request, memory_preset, reference_capacity="standard"):
             raise ValueError(
                 "H3 output dimensions must be integers >=256 aligned to 32; no resizing is implicit"
             )
-    if request.video_num_frames not in (None, 124):
-        raise ValueError("The original image Ref2VA profile requires 124 output frames")
+    output_frames = 226 if continuation else 124
+    if request.video_num_frames not in (None, output_frames):
+        raise ValueError(
+            f"This original image Ref2VA profile requires {output_frames} output frames"
+        )
     video_rows = 37 * (height // 32) * (width // 32)
     target = replace(
         SOL_ENGINE_1344X768_124F,
@@ -246,7 +252,19 @@ def _target(request, memory_preset, reference_capacity="standard"):
         text_rows=text_rows,
         padded_sequence_length=video_rows + 414 + text_rows,
     )
-    reference = Ref2VAPackedProfile((1, 128, text_rows), condition_rows, (0, 0, 0))
+    # The first window has no guide. Later windows append seven video latent
+    # frames and 37 audio latents per stereo channel to the static references.
+    # Keep the minimum video count unchanged so the first window also fits.
+    guide_video = 7 * (height // 32) * (width // 32) if continuation else 0
+    if continuation:
+        condition_rows = (
+            condition_rows[0],
+            condition_rows[1] + guide_video,
+            condition_rows[2] + guide_video,
+        )
+    reference = Ref2VAPackedProfile(
+        (1, 128, text_rows), condition_rows, (0, 74, 74) if continuation else (0, 0, 0)
+    )
     reference.validate(target)
     return height, width, target, reference
 
@@ -260,18 +278,19 @@ def runtime_metadata(
     *,
     memory_preset,
     reference_capacity,
+    continuation,
 ):
     """Describe the exact family profile, shared by full and incremental builds."""
     batch = 1 if memory_preset == "minimal" else 28
     return dict(
-        schema_version=SCHEMA,
-        workflow="image_ref2va",
+        schema_version=CONTINUATION_SCHEMA if continuation else SCHEMA,
+        workflow="image_ref2va_continuation" if continuation else "image_ref2va",
         weights_variant="transformer_ref",
         memory_preset=memory_preset,
         vae_tile_batch=batch,
         height=height,
         width=width,
-        num_frames=124,
+        num_frames=226 if continuation else 124,
         fps=24,
         num_inference_steps=50,
         denoiser_forwards=49,
@@ -292,12 +311,26 @@ def runtime_metadata(
         text_width=5120,
         context_parallel_size=1,
         first_block_cache=False,
+        **(
+            dict(
+                continuation_window_frames=124,
+                continuation_overlap_frames=22,
+                continuation_windows=2,
+                decoded_latent_frames=67,
+                decoded_audio_latent_frames=377,
+                total_denoiser_forwards=98,
+            )
+            if continuation
+            else {}
+        ),
         **_statistics(configs["vae"], 24, "video VAE"),
         **({"reference_capacity": reference_capacity} if reference_capacity != "standard" else {}),
     )
 
 
-def build(request, writer, *, memory_preset="minimal", reference_capacity="standard"):
+def build(
+    request, writer, *, memory_preset="minimal", reference_capacity="standard", continuation=False
+):
     """Build the explicit experimental profile; callers own writer commit/abort.
 
     Minimal selects staged modules and a static batch-1 video plan; original
@@ -307,8 +340,16 @@ def build(request, writer, *, memory_preset="minimal", reference_capacity="stand
     model math or checkpoint partitions. Standard retains the original budget;
     six_portrait requires newly built language/DiT plans, not a metadata edit.
     The complete trained path must still pass its owning qualification gates.
+
+    Continuation is an explicit two-window profile, not a metadata upgrade of
+    an existing bundle. It retains two complete 124-frame/49-forward windows,
+    discards the second window's 22-frame overlap in latent space, and decodes
+    the complete 226-frame history. Canonical images and the prompt are reused
+    in both windows; cross-request state and prompt changes are not enabled.
     """
-    height, width, target, reference = _target(request, memory_preset, reference_capacity)
+    height, width, target, reference = _target(
+        request, memory_preset, reference_capacity, continuation
+    )
     root = Path(request.model_dir)
     configs = _configs(root)
     tokenizer = (root / "tokenizer/tokenizer.json").read_bytes()
@@ -413,6 +454,7 @@ def build(request, writer, *, memory_preset="minimal", reference_capacity="stand
         audio.build_audio_vae_decoder_engine,
         configs["audio_vae"]["latents_mean"],
         configs["audio_vae"]["latents_std"],
+        **({"latent_frames": 377} if continuation else {}),
     )
     writer.add_bytes("tokenizer.json", tokenizer)
     writer.add_json(
@@ -425,5 +467,6 @@ def build(request, writer, *, memory_preset="minimal", reference_capacity="stand
             configs,
             memory_preset=memory_preset,
             reference_capacity=reference_capacity,
+            continuation=continuation,
         ),
     )

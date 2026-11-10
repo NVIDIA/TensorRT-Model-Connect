@@ -129,13 +129,19 @@ class RecordingModule final : public trtmc::ITrtModule {
 
 int main(int argc, char** argv) {
     try {
-        if (argc != 7)
-            throw std::invalid_argument("usage: probe RUNTIME_ROOT PLAN_DIR INPUT_DIR "
-                                        "OUTPUT_PREFIX staged|resident SEED");
+        if (argc != 7 && argc != 8)
+            throw std::invalid_argument(
+                "usage: probe RUNTIME_ROOT PLAN_DIR INPUT_DIR "
+                "OUTPUT_PREFIX staged|resident SEED [guide|windows|window-prompts]");
         const std::string root = argv[1], plans = argv[2], inputs = argv[3], output = argv[4],
                           mode = argv[5];
         if (mode != "staged" && mode != "resident")
             throw std::invalid_argument("invalid residency");
+        const bool guided = argc == 8 && std::string(argv[7]) == "guide";
+        const bool window_prompts = argc == 8 && std::string(argv[7]) == "window-prompts";
+        const bool windows = argc == 8 && (std::string(argv[7]) == "windows" || window_prompts);
+        if (argc == 8 && !guided && !windows)
+            throw std::invalid_argument("invalid continuation probe mode");
         std::size_t parsed = 0;
         const uint64_t seed = std::stoull(argv[6], &parsed);
         if (parsed != std::string(argv[6]).size())
@@ -178,21 +184,52 @@ int main(int argc, char** argv) {
         text.presentation.input_ids.assign(15, 42);
         text.presentation.visual_rows = {2, 3, 4, 5, 6, 7, 10, 11};
         text.embeddings = read_floats(inputs + "/text.f32.bin", 15 * 8);
+        std::optional<ReferenceImageConditioning> continuation_text;
+        int32_t max_text_rows = 15;
+        if (window_prompts) {
+            const auto bytes = read_bytes(inputs + "/continuation-text-rows.txt");
+            const std::string raw(bytes.begin(), bytes.end());
+            std::size_t count = 0;
+            const auto rows = std::stoi(raw, &count);
+            if (count != raw.size() || rows < 14 || rows > 19)
+                throw std::invalid_argument("invalid continuation text row fixture");
+            continuation_text = text;
+            continuation_text->presentation.h3_token_tags.resize(rows, 1);
+            continuation_text->presentation.input_ids.assign(rows, 43);
+            continuation_text->embeddings =
+                read_floats(inputs + "/continuation-text.f32.bin", rows * 8);
+            max_text_rows = std::max(15, rows);
+        }
         const std::vector<EncodedVisualReference> images = {
             {4, 6, read_floats(inputs + "/reference-0.f32.bin", 24 * 4 * 6)},
             {2, 4, read_floats(inputs + "/reference-1.f32.bin", 24 * 2 * 4)}};
-        const ReferenceDenoiserConfig config{{2, 4, 6, 3}, 1, 8, 8, 41};
+        const ReferenceDenoiserConfig config =
+            windows ? ReferenceDenoiserConfig{{37, 4, 6, 207}, 1, 8, 8, 760 + max_text_rows}
+                    : ReferenceDenoiserConfig{{2, 4, 6, 3}, 1, 8, 8, guided ? 49 : 41};
+        ReferenceLatentGuide guide{{1, 4, 6, 1}, {}, {}};
+        if (guided) {
+            guide.video_rows = read_floats(inputs + "/guide.video.f32.bin", 6 * 96);
+            guide.audio_rows = read_floats(inputs + "/guide.audio.f32.bin", 2 * 32);
+        }
         const bool resident = mode == "resident";
         ImageReferenceDenoiser owner(loader, config, nullptr,
                                      resident ? ReferenceDenoiserResidency::Resident
                                               : ReferenceDenoiserResidency::Staged);
-        const auto execute = [&] { return owner.run(text, images, seed); };
+        const auto execute = [&] {
+            if (windows)
+                return owner.run_windows(text, images, seed, 226,
+                                         continuation_text ? &*continuation_text : nullptr);
+            return guided ? owner.run_continuation(text, images, guide, seed, 17.5, 21)
+                          : owner.run(text, images, seed);
+        };
         const auto cold = execute();
         write_floats(output + ".cold.video.bin", cold.video_rows);
         write_floats(output + ".cold.audio.bin", cold.audio_rows);
         write_floats(output + ".cold.trace.video.bin", trace.video);
         write_floats(output + ".cold.trace.audio.bin", trace.audio);
-        const std::size_t video_values = 49 * 20 * 96, audio_values = 49 * 6 * 32;
+        const std::size_t video_rows = guided ? 26 : 20, audio_rows = guided ? 8 : 6;
+        const std::size_t video_values = windows ? 49 * (230 + 272) * 96 : 49 * video_rows * 96;
+        const std::size_t audio_values = windows ? 49 * (414 + 488) * 32 : 49 * audio_rows * 32;
         if (trace.video.size() != video_values || trace.audio.size() != audio_values)
             throw std::runtime_error("native reference did not execute 49 recorded forwards");
         trace.video.clear();
@@ -204,11 +241,13 @@ int main(int argc, char** argv) {
         write_floats(output + ".warm.trace.audio.bin", trace.audio);
         if (trace.video.size() != video_values || trace.audio.size() != audio_values)
             throw std::runtime_error("native reference warm forward count mismatch");
-        if (cold.forwards != 49 || warm.forwards != 49 || cold.video_rows.size() != 12 * 96 ||
-            cold.audio_rows.size() != 6 * 32 || cold.video_rows != warm.video_rows ||
-            cold.audio_rows != warm.audio_rows)
+        const int32_t forwards = windows ? 98 : 49;
+        if (cold.forwards != forwards || warm.forwards != forwards ||
+            cold.video_rows.size() != (windows ? 402 : 12) * 96 ||
+            cold.audio_rows.size() != (windows ? 754 : 6) * 32 ||
+            cold.video_rows != warm.video_rows || cold.audio_rows != warm.audio_rows)
             throw std::runtime_error("native reference cold/warm or forward-count contract failed");
-        const int32_t expected_loads = resident ? 1 : 2;
+        const int32_t expected_loads = windows ? 4 : (resident ? 1 : 2);
         if (loads["adaln.plan"] != expected_loads || loads["denoiser.plan"] != expected_loads)
             throw std::runtime_error(
                 "native reference residency did not reuse/release actual modules");

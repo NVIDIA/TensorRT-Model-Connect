@@ -45,6 +45,7 @@ def runtime_metadata(
     *,
     memory_preset,
     reference_capacity,
+    continuation,
     max_vsa_tiles,
 ):
     value = base.runtime_metadata(
@@ -55,16 +56,21 @@ def runtime_metadata(
         configs,
         memory_preset=memory_preset,
         reference_capacity=reference_capacity,
+        continuation=continuation,
     )
     value.update(
-        schema_version="minimax_h3.omniref_pdd/v1",
-        workflow="omniref_pdd",
+        schema_version="minimax_h3.omniref_pdd_continuation/v1"
+        if continuation
+        else "minimax_h3.omniref_pdd/v1",
+        workflow="omniref_pdd_continuation" if continuation else "omniref_pdd",
         num_inference_steps=8,
         denoiser_forwards=8,
         checkpoint=dict(hf_id=MODEL_ID, revision=MODEL_REVISION),
         inference_contract=deepcopy(CONTRACT),
         max_vsa_tiles=max_vsa_tiles,
     )
+    if continuation:
+        value["total_denoiser_forwards"] = 16
     return value
 
 
@@ -77,6 +83,7 @@ def build(
     plugin_library,
     memory_preset="minimal",
     reference_capacity="six_portrait",
+    continuation=True,
     max_vsa_tiles=2048,
     denoiser_workspace_bytes=None,
 ):
@@ -99,7 +106,12 @@ def build(
         raise ValueError("OmniRef requires an even supported VSA tile bound")
     if not Path(plugin_library).is_file():
         raise FileNotFoundError("OmniRef requires its explicit compiled TVM-FFI bridge")
-    height, width, target, reference = base._target(request, memory_preset, reference_capacity)
+    height, width, target, reference = base._target(
+        request,
+        memory_preset,
+        reference_capacity,
+        continuation,
+    )
     root, common_root = Path(request.model_dir), Path(base_model_dir)
     student_identity = dict(hf_id=MODEL_ID, revision=MODEL_REVISION)
     if _checkpoint_identity(root) != student_identity:
@@ -121,7 +133,11 @@ def build(
     )
     configs = base._configs(common_root)
     tokenizer = (common_root / "tokenizer/tokenizer.json").read_bytes()
-    common = dict(memory_preset=memory_preset, reference_capacity=reference_capacity)
+    common = dict(
+        memory_preset=memory_preset,
+        reference_capacity=reference_capacity,
+        continuation=continuation,
+    )
     expected_source = base.runtime_metadata(
         height,
         width,

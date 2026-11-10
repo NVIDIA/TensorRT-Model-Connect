@@ -39,6 +39,15 @@ struct ReferenceDenoiserResult {
     int32_t forwards{0};
 };
 
+// Family-owned, already normalized latent tail. Video rows use the same
+// patchified layout as generated output; stereo audio rows are channel-major.
+// This is not an encoded-media reference or a public cross-request state ABI.
+struct ReferenceLatentGuide {
+    ReferenceTargetLatentShape shape;
+    std::vector<float> video_rows;
+    std::vector<float> audio_rows;
+};
+
 // Image Ref2VA denoising with an explicit checkpoint/sampling recipe, using
 // encoded Qwen/VisualVAE outputs and family plans through ITrtModule. The
 // original-H3 default retains 49 forwards; the OmniRef student uses its eight
@@ -53,13 +62,38 @@ class ImageReferenceDenoiser {
     ReferenceDenoiserResult run(const ReferenceImageConditioning& text,
                                 const std::vector<EncodedVisualReference>& images, uint64_t seed);
 
+    ReferenceDenoiserResult
+    run_continuation(const ReferenceImageConditioning& text,
+                     const std::vector<EncodedVisualReference>& images,
+                     const ReferenceLatentGuide& guide, uint64_t seed, double temporal_offset,
+                     std::optional<int32_t> media_time_origin = std::nullopt);
+
+    // One bounded request with the same canonical images in both windows.
+    // Optional child conditioning pins the media clock after the longest text
+    // prefix, matching the fixed upstream per-window conditioning behavior.
+    // A 226-frame request uses two complete 124-frame windows and
+    // returns cumulative normalized latents, not cross-request accepted state.
+    ReferenceDenoiserResult
+    run_windows(const ReferenceImageConditioning& text,
+                const std::vector<EncodedVisualReference>& images, uint64_t seed,
+                int32_t output_frames,
+                const ReferenceImageConditioning* continuation_text = nullptr);
+
   private:
     struct Modulations;
     void precompute(const ImageReferenceLayout& layout, const std::vector<float>& video_times,
                     const std::vector<float>& audio_times);
-    ImageReferenceLayout
-    validate_conditioning(const ReferenceImageConditioning& text,
-                          const std::vector<EncodedVisualReference>& images) const;
+    ImageReferenceLayout validate_conditioning(const ReferenceImageConditioning& text,
+                                               const std::vector<EncodedVisualReference>& images,
+                                               std::optional<ReferenceContinuationGuideShape> guide,
+                                               double temporal_offset,
+                                               std::optional<int32_t> media_time_origin) const;
+    // The public family entry points hold mutex_ for the whole request.
+    ReferenceDenoiserResult run_unlocked(const ReferenceImageConditioning& text,
+                                         const std::vector<EncodedVisualReference>& images,
+                                         uint64_t seed, const ReferenceLatentGuide* guide,
+                                         double temporal_offset,
+                                         std::optional<int32_t> media_time_origin);
 
     ReferenceModuleLoader loader_;
     ReferenceDenoiserConfig config_;

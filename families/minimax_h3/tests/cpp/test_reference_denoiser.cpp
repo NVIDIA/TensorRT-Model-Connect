@@ -5,6 +5,7 @@
 
 // Explicit engine/RNG doubles: this test qualifies orchestration, not a model.
 #include "families/minimax_h3/runtime/pipeline.h"
+#include "families/minimax_h3/runtime/reference_continuation.h"
 #include "families/minimax_h3/runtime/reference_denoiser.h"
 #include "families/minimax_h3/runtime/reference_vsa_geometry.h"
 #include "families/minimax_h3/runtime/torch_cuda_normal.h"
@@ -40,9 +41,17 @@ struct State {
     ReferenceDenoiserConfig config{{2, 4, 6, 3}, 1, 8, 4, 100};
     int adaln_loads{0}, dit_loads{0}, adaln_live{0}, dit_live{0}, step{0};
     bool fail{false};
+    bool continuation{false};
+    bool windows{false};
+    bool fail_only_guide{false};
     std::vector<std::array<uint64_t, 3>> draws;
     std::vector<float> prefix;
+    std::vector<float> audio_prefix;
     std::vector<int32_t> tags = {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1};
+    std::optional<int32_t> media_origin;
+    std::vector<int32_t> child_tags;
+    std::vector<float> first_text, child_text;
+    int child_text_forwards{0};
     bool pdd() const { return config.recipe == ReferenceSamplingRecipe::OmniRefPdd8; }
     int forwards() const { return pdd() ? 8 : 49; }
     MiniMaxH3Schedule schedule(float shift) const {
@@ -52,15 +61,24 @@ struct State {
 State* rng_state = nullptr;
 
 ImageReferenceLayout expected_layout(const State& state) {
-    return make_image_reference_layout(state.tags, {{4, 6}, {2, 4}}, state.config.target,
-                                       state.config.max_sequence_rows);
+    const auto& tags =
+        state.continuation && !state.child_tags.empty() ? state.child_tags : state.tags;
+    if (state.continuation)
+        return make_continuation_reference_layout(
+            tags, {{4, 6}, {2, 4}}, state.config.target, state.config.max_sequence_rows,
+            state.windows ? ReferenceContinuationGuideShape{7, 37}
+                          : ReferenceContinuationGuideShape{1, 1},
+            state.windows ? 170.0 : 17.5,
+            state.windows ? state.media_origin : std::optional<int32_t>{21});
+    return make_image_reference_layout(tags, {{4, 6}, {2, 4}}, state.config.target,
+                                       state.config.max_sequence_rows, state.media_origin);
 }
 
 class Module final : public ITrtModule {
   public:
     Module(State& state, bool adaln) : state_(state), adaln_(adaln) {
         if (adaln_) {
-            require(state_.dit_live == 0, "AdaLN loads before the DiT");
+            require(state_.dit_live == 0, "release the old DiT before changing the AdaLN cache");
             ++state_.adaln_live;
             ++state_.adaln_loads;
         } else {
@@ -79,6 +97,10 @@ class Module final : public ITrtModule {
         if (adaln_) {
             require(input.size() == 1 && input.at("timesteps").shape == std::vector<int64_t>({4}),
                     "native time values, not CPU trig features");
+            if (state_.windows) {
+                const auto* times = static_cast<const float*>(input.at("timesteps").data);
+                state_.continuation = std::find(times, times + 4, 1.0F) != times + 4;
+            }
             const auto vs = state_.schedule(12.0F);
             const auto as = state_.schedule(3.0F);
             const auto plan = make_image_reference_timesteps(
@@ -87,17 +109,27 @@ class Module final : public ITrtModule {
             std::copy(plan.timesteps.begin(), plan.timesteps.end(), times.begin());
             require(std::equal(times.begin(), times.end(),
                                static_cast<const float*>(input.at("timesteps").data)),
-                    "each distinct row time receives its own AdaLN value");
+                    "clean audio receives its own unmodified AdaLN time value");
             block_.assign(12 * 6 * 8, static_cast<uint16_t>(0x3f00 + step_));
             final_.assign(4 * 2 * 8, static_cast<uint16_t>(0x3e00 + step_));
             ++step_;
             return {{"block_modulation_0", Tensor{block_.data(), {12, 6, 8}, DType::kBFloat16}},
                     {"final_modulation", Tensor{final_.data(), {4, 2, 8}, DType::kBFloat16}}};
         }
-        if (state_.fail && step_ == (state_.pdd() ? 3 : 10))
+        if (state_.fail && step_ == (state_.pdd() ? 3 : 10) &&
+            (!state_.fail_only_guide || state_.continuation))
             throw std::runtime_error("fixture forward failure");
         require(input.size() == (state_.pdd() ? 16 : 11),
                 "all reference DiT operands supplied exactly once");
+        if (!state_.first_text.empty()) {
+            const auto& wanted = state_.continuation ? state_.child_text : state_.first_text;
+            const auto& got = input.at("encoder_hidden_states");
+            require(got.numel() == wanted.size() && std::equal(wanted.begin(), wanted.end(),
+                                                               static_cast<const float*>(got.data)),
+                    "each window receives its own complete Qwen embeddings");
+            if (state_.continuation)
+                ++state_.child_text_forwards;
+        }
         const auto& video = input.at("video_hidden_states");
         const auto layout = expected_layout(state_);
         const auto video_targets = static_cast<int64_t>(layout.target_video_indices.size());
@@ -107,18 +139,25 @@ class Module final : public ITrtModule {
                 "own-reference geometry plus target");
         require(input.at("audio_hidden_states").shape ==
                     std::vector<int64_t>({static_cast<int64_t>(layout.audio_indices.size()), 32}),
-                "audio rows are generated target rows only");
+                "only continuation adds clean audio guide rows");
         require(input.at("target_video_indices").shape == std::vector<int64_t>({video_targets}),
                 "only generated rows are projected");
         const auto* values = static_cast<const float*>(video.data);
         const auto* audio = static_cast<const float*>(input.at("audio_hidden_states").data);
-        if (step_ == 0)
+        if (step_ == 0) {
             state_.prefix.assign(values, values + layout.condition_video_rows * 96);
+            state_.audio_prefix.assign(audio, audio + layout.condition_audio_rows * 32);
+        }
         if (state_.pdd()) {
             require(*static_cast<const int32_t*>(input.at("pdd_step").data) == step_,
                     "each PDD forward selects its own trained output-head bank");
-            std::vector<ReferenceVsaSegment> segments{static_cast<int32_t>(state_.tags.size()), 6,
-                                                      2};
+            const auto& tags =
+                state_.continuation && !state_.child_tags.empty() ? state_.child_tags : state_.tags;
+            std::vector<ReferenceVsaSegment> segments{static_cast<int32_t>(tags.size()), 6, 2};
+            if (state_.continuation) {
+                segments.emplace_back(ReferenceVsaVideoGrid{state_.windows ? 7 : 1, 4, 6});
+                segments.emplace_back(state_.windows ? 74 : 2);
+            }
             segments.emplace_back(2 * state_.config.target.audio_latents);
             segments.emplace_back(ReferenceVsaVideoGrid{state_.config.target.frames, 4, 6});
             const auto expected = make_reference_vsa_layout(segments, state_.config.max_vsa_tiles);
@@ -137,14 +176,16 @@ class Module final : public ITrtModule {
                 for (int modality = 0; modality < 2; ++modality) {
                     const auto& draw = state_.draws[state_.draws.size() - 2 + modality];
                     const float raw = static_cast<float>(draw[1] + draw[2]) / 4096.0F;
-                    const float got =
-                        modality == 0 ? values[layout.condition_video_rows * 96] : audio[0];
+                    const float got = modality == 0 ? values[layout.condition_video_rows * 96]
+                                                    : audio[layout.condition_audio_rows * 32];
                     require(got == raw * 0.999F, "PDD scales only freshly drawn target noise");
                 }
             }
         }
         require(std::equal(state_.prefix.begin(), state_.prefix.end(), values),
                 "reference prefix never updated by scheduler");
+        require(std::equal(state_.audio_prefix.begin(), state_.audio_prefix.end(), audio),
+                "clean stereo guide never updated by scheduler");
         require(*static_cast<const uint16_t*>(input.at("block_modulation_0").data) ==
                     0x3f00 + step_,
                 "borrowed AdaLN buffers copied before next forward");
@@ -153,7 +194,7 @@ class Module final : public ITrtModule {
         const std::vector<float> positions(layout.positions.begin(), layout.positions.end());
         require(std::equal(positions.begin(), positions.end(),
                            static_cast<const float*>(input.at("position_ids").data)),
-                "references and target share one media clock");
+                "guide and target share the explicit global media clock");
         const auto vs = state_.schedule(12.0F);
         const auto as = state_.schedule(3.0F);
         const auto expected =
@@ -335,6 +376,212 @@ void run_case(ReferenceDenoiserResidency residency, ReferenceSamplingRecipe reci
     rng_state = nullptr;
 }
 
+void run_continuation_case(ReferenceDenoiserResidency residency, ReferenceSamplingRecipe recipe) {
+    State state;
+    state.config.recipe = recipe;
+    state.config.max_vsa_tiles = state.pdd() ? 32 : 0;
+    rng_state = &state;
+    ReferenceModuleLoader load = [&](const std::string& name, cudaStream_t) {
+        require(name == "adaln.plan" || name == "denoiser.plan", "declared family plans only");
+        return std::make_unique<Module>(state, name == "adaln.plan");
+    };
+    ReferenceImageConditioning text;
+    text.presentation.h3_token_tags = state.tags;
+    text.presentation.input_ids.assign(state.tags.size(), 42);
+    text.presentation.visual_rows = {2, 3, 4, 5, 6, 7, 10, 11};
+    text.embeddings.assign(state.tags.size() * 4, 0.25F);
+    const std::vector<EncodedVisualReference> images = {
+        {4, 6, std::vector<float>(24 * 4 * 6, 0.5F)},
+        {2, 4, std::vector<float>(24 * 2 * 4, -0.25F)}};
+    ReferenceLatentGuide guide{
+        {1, 4, 6, 1}, std::vector<float>(6 * 96, 2.0F), std::vector<float>(2 * 32, 3.0F)};
+    std::fill(guide.audio_rows.begin() + 32, guide.audio_rows.end(), -4.0F);
+    const auto clean = guide;
+    {
+        ImageReferenceDenoiser owner(load, state.config, nullptr, residency);
+        const auto legacy = owner.run(text, images, 77);
+        state.continuation = true;
+        const auto first = owner.run_continuation(text, images, guide, 91, 17.5, 21);
+        require(first.forwards == state.forwards() && first.video_rows.size() == 12 * 96 &&
+                    first.audio_rows.size() == 6 * 32,
+                "guides do not leak into generated-only outputs");
+        const std::vector<std::array<uint64_t, 3>> draws(state.draws.end() - 5, state.draws.end());
+        require(draws == std::vector<std::array<uint64_t, 3>>({{576, 91, 0},
+                                                               {192, 91, 576},
+                                                               {576, 91, 768},
+                                                               {1152, 91, 1344},
+                                                               {192, 91, 2496}}),
+                "guide video uses one native C/T/H/W draw; clean audio consumes no RNG");
+        volatile float reference = 0.999F * 2.0F;
+        volatile float random = (1.0F - 0.999F) * ((91.0F + 768.0F + 6.0F) / 4096.0F);
+        require(state.prefix[8 * 96 + 2] == reference + random,
+                "guide noise is patchified before mixing the packed clean guide");
+        require(state.audio_prefix == guide.audio_rows, "stereo guide remains exactly clean");
+        const auto second = owner.run_continuation(text, images, guide, 91, 17.5, 21);
+        require(first.video_rows == second.video_rows && first.audio_rows == second.audio_rows,
+                "guided cold/warm results preserve deterministic request-local RNG");
+        const auto count = state.draws.size();
+        const auto loads = state.adaln_loads + state.dit_loads;
+        auto bad = guide;
+        bad.shape.width = 4;
+        rejects([&] { owner.run_continuation(text, images, bad, 91, 17.5, 21); });
+        bad = guide;
+        bad.shape.frames = 3;
+        rejects([&] { owner.run_continuation(text, images, bad, 91, 17.5, 21); });
+        bad = guide;
+        bad.shape.audio_latents = 4;
+        rejects([&] { owner.run_continuation(text, images, bad, 91, 17.5, 21); });
+        bad = guide;
+        bad.video_rows.pop_back();
+        rejects([&] { owner.run_continuation(text, images, bad, 91, 17.5, 21); });
+        bad = guide;
+        bad.audio_rows[0] = std::numeric_limits<float>::quiet_NaN();
+        rejects([&] { owner.run_continuation(text, images, bad, 91, 17.5, 21); });
+        for (const auto offset : {-1.0, std::numeric_limits<double>::infinity(),
+                                  std::numeric_limits<double>::quiet_NaN()})
+            rejects([&] { owner.run_continuation(text, images, guide, 91, offset, 21); });
+        rejects([&] { owner.run_continuation(text, images, guide, 91, 17.5, 14); });
+        require(state.draws.size() == count && state.adaln_loads + state.dit_loads == loads,
+                "invalid guide geometry, payload and clock fail before RNG or module work");
+        state.continuation = false;
+        const auto after = owner.run(text, images, 77);
+        require(after.video_rows == legacy.video_rows && after.audio_rows == legacy.audio_rows,
+                "switching back retains the exact image-only result");
+        const bool resident = residency == ReferenceDenoiserResidency::Resident;
+        require(state.adaln_loads == (resident ? 3 : 4) && state.dit_loads == (resident ? 3 : 4),
+                "switching clean-audio presence rebuilds AdaLN without overlapping DiT weights");
+        state.continuation = true;
+        state.fail = true;
+        rejects([&] { owner.run_continuation(text, images, guide, 91, 17.5, 21); });
+        require(state.adaln_live == 0 && state.dit_live == 0,
+                "guided failure releases all native modules and cached modulations");
+        state.fail = false;
+        require(owner.run_continuation(text, images, guide, 91, 17.5, 21).forwards ==
+                    state.forwards(),
+                "guided execution recovers after an explicit failed forward");
+    }
+    require(guide.video_rows == clean.video_rows && guide.audio_rows == clean.audio_rows,
+            "clean guide buffers are immutable across sampling and failures");
+    require(state.adaln_live == 0 && state.dit_live == 0, "guided owner releases resident state");
+    rng_state = nullptr;
+}
+void run_windows_case(ReferenceDenoiserResidency residency, ReferenceSamplingRecipe recipe) {
+    State state;
+    state.config = {{37, 4, 6, 207}, 1, 8, 4, 2000};
+    state.windows = true;
+    state.config.recipe = recipe;
+    state.config.max_vsa_tiles = state.pdd() ? 32 : 0;
+    rng_state = &state;
+    ReferenceModuleLoader load = [&](const std::string& name, cudaStream_t) {
+        require(name == "adaln.plan" || name == "denoiser.plan", "declared window plans");
+        return std::make_unique<Module>(state, name == "adaln.plan");
+    };
+    ReferenceImageConditioning text;
+    text.presentation.h3_token_tags = state.tags;
+    text.presentation.input_ids.assign(state.tags.size(), 42);
+    text.presentation.visual_rows = {2, 3, 4, 5, 6, 7, 10, 11};
+    text.embeddings.assign(state.tags.size() * 4, 0.25F);
+    const std::vector<EncodedVisualReference> images = {
+        {4, 6, std::vector<float>(24 * 4 * 6, 0.5F)},
+        {2, 4, std::vector<float>(24 * 2 * 4, -0.25F)}};
+    {
+        ImageReferenceDenoiser owner(load, state.config, nullptr, residency);
+        const auto initial = owner.run_windows(text, images, 77, 124);
+        const auto joined = owner.run_windows(text, images, 77, 226);
+        require(initial.forwards == state.forwards() && joined.forwards == 2 * state.forwards() &&
+                    state.step == 3 * state.forwards(),
+                "one and two complete recipe-specific windows, without repeated video playback");
+        require(joined.shape.frames == 67 && joined.shape.audio_latents == 377,
+                "cumulative video and global stereo audio lengths");
+        require(std::equal(initial.video_rows.begin(), initial.video_rows.end(),
+                           joined.video_rows.begin()),
+                "the complete initial video latent prefix survives window append");
+        for (std::size_t channel = 0; channel < 2; ++channel)
+            require(std::equal(initial.audio_rows.begin() + channel * 207 * 32,
+                               initial.audio_rows.begin() + (channel + 1) * 207 * 32,
+                               joined.audio_rows.begin() + channel * 377 * 32),
+                    "each stereo channel retains its complete initial prefix");
+        const auto window = plan_reference_continuation(226, 124, 22, 2)[1];
+        const auto clean = reference_latent_guide(initial, window);
+        require(state.audio_prefix == clean.audio_rows,
+                "the second window actually receives each channel's clean tail");
+        const auto draws = state.draws;
+        require(draws.size() == 13 && draws[4] == draws[0] && draws[8][1] == 77 &&
+                    draws[10][0] == 7 * 24 * 4 * 6 && draws[10][2] == 768,
+                "same request seed, original first-window draws, additional guide-video draw only");
+        const auto repeated = owner.run_windows(text, images, 77, 226);
+        require(repeated.video_rows == joined.video_rows &&
+                    repeated.audio_rows == joined.audio_rows,
+                "complete two-window cold/warm determinism");
+        auto child_text = text;
+        child_text.presentation.h3_token_tags.resize(19, 1);
+        child_text.presentation.input_ids.resize(19, 43);
+        child_text.embeddings.assign(19 * 4, -0.5F);
+        state.media_origin = 19;
+        state.child_tags = child_text.presentation.h3_token_tags;
+        state.first_text = text.embeddings;
+        state.child_text = child_text.embeddings;
+        const auto changed = owner.run_windows(text, images, 77, 226, &child_text);
+        const auto changed_warm = owner.run_windows(text, images, 77, 226, &child_text);
+        require(changed.forwards == 2 * state.forwards() &&
+                    state.child_text_forwards == 2 * state.forwards() &&
+                    changed.video_rows == changed_warm.video_rows &&
+                    changed.audio_rows == changed_warm.audio_rows,
+                "distinct child text reaches every child forward with one shared media origin");
+        state.media_origin.reset();
+        state.child_tags.clear();
+        state.first_text.clear();
+        state.child_text.clear();
+        const auto before = state.draws.size();
+        rejects([&] { owner.run_windows(text, images, 77, 225); });
+        auto limited = state.config;
+        limited.max_sequence_rows = 700; // First window659 fits, second775 does not.
+        ImageReferenceDenoiser too_small(load, limited, nullptr, residency);
+        rejects([&] { too_small.run_windows(text, images, 77, 226); });
+        require(state.draws.size() == before, "reject a child cap before first-window inference");
+        for (int kind = 0; kind < 6; ++kind) {
+            auto bad_child = text;
+            switch (kind) {
+            case 0:
+                bad_child.embeddings.pop_back();
+                break;
+            case 1:
+                bad_child.embeddings[0] = std::numeric_limits<float>::quiet_NaN();
+                break;
+            case 2:
+                bad_child.presentation.input_ids.pop_back();
+                break;
+            case 3:
+                bad_child.presentation.visual_rows[0] = -1;
+                break;
+            case 4:
+                bad_child.presentation.visual_rows[1] = bad_child.presentation.visual_rows[0];
+                break;
+            case 5:
+                bad_child.presentation.h3_token_tags[0] = 3;
+                break;
+            }
+            const auto adaln_before = state.adaln_loads;
+            const auto dit_before = state.dit_loads;
+            rejects([&] { owner.run_windows(text, images, 77, 226, &bad_child); });
+            require(state.draws.size() == before && state.adaln_loads == adaln_before &&
+                        state.dit_loads == dit_before,
+                    "invalid child payload rejects before any first-window work");
+        }
+        rejects([&] { owner.run_windows(text, images, 77, 124, &text); });
+        require(state.draws.size() == before,
+                "a single-window request cannot silently ignore child conditioning");
+        state.fail = state.fail_only_guide = true;
+        rejects([&] { owner.run_windows(text, images, 77, 226); });
+        require(state.adaln_live == 0 && state.dit_live == 0,
+                "second-window failure releases modules and cannot return a partial result");
+        state.fail = false;
+        require(owner.run_windows(text, images, 77, 226).video_rows == joined.video_rows,
+                "fresh bounded request recovers after second-window failure");
+    }
+    require(state.adaln_live == 0 && state.dit_live == 0, "window owner releases resident state");
+    rng_state = nullptr;
+}
 } // namespace
 
 namespace trtmc::minimax_h3 {
@@ -358,6 +605,8 @@ int main() {
             for (const auto residency :
                  {ReferenceDenoiserResidency::Staged, ReferenceDenoiserResidency::Resident}) {
                 run_case(residency, recipe);
+                run_continuation_case(residency, recipe);
+                run_windows_case(residency, recipe);
             }
         return 0;
     } catch (const std::exception& error) {

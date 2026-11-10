@@ -91,7 +91,8 @@ def finished(client, identifier):
 def test_reference_images_reach_the_worker_and_the_clip_keeps_its_audio(tmp_path):
     worker = ReferenceWorker()
     with TestClient(app_for(worker)) as client:
-        response = client.post("/v1/videos", data={"model": "h3", "prompt": "two people talk", "seed": "7"},
+        response = client.post("/v1/videos", data={"model": "h3", "prompt": "two people talk", "seed": "7",
+                                                   "continuation_prompt": "they keep still"},
                                files=[("input_reference", ("a.png", png("red"), "image/png")),
                                       ("input_reference", ("b.png", png("blue"), "image/png"))])
         assert response.status_code == 202
@@ -102,7 +103,7 @@ def test_reference_images_reach_the_worker_and_the_clip_keeps_its_audio(tmp_path
         clip.write_bytes(client.get(f"/v1/videos/{view['id']}/content").content)
     payload, = worker.calls
     assert payload["prompt"] == "two people talk"
-    assert payload["config"] == {"seed": 7}
+    assert payload["config"] == {"seed": 7, "continuation_prompt": "they keep still"}
     assert worker.references == [png("red"), png("blue")]
     streams = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0",
                               str(clip)], capture_output=True, text=True, check=True).stdout.split()

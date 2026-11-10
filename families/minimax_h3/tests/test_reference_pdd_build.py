@@ -22,18 +22,21 @@ checkpoint = original.checkpoint
 plans = original.plans
 
 
-@pytest.fixture(params=["minimal", "original"])
+@pytest.fixture(params=[(False, "minimal"), (True, "minimal"), (True, "original")])
 def baseline(checkpoint, plans, tmp_path, request):
-    preset = request.param
+    continuation, preset = request.param
+    frames = 226 if continuation else 124
     root = (
         tmp_path
         / "hub/models--MiniMaxAI--MiniMax-H3/snapshots/48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc"
     )
     shutil.copytree(checkpoint, root)
     source = tmp_path / "original.bundle"
-    original_request = make_request(root, source, video_num_frames=124)
+    original_request = make_request(root, source, video_num_frames=frames)
     plans.batch, plans.text_rows = (1 if preset == "minimal" else 28), 65536
-    plans.condition_rows = (4096, 43776, 49152)
+    plans.condition_rows = (4096, 50832, 56208) if continuation else (4096, 43776, 49152)
+    plans.audio_condition_rows = (0, 74, 74) if continuation else (0, 0, 0)
+    plans.decoded_audio_latents = 377 if continuation else 207
     writer = BundleWriter(source)
     writer.record_build(original_request)
     add = writer.add_bytes
@@ -49,7 +52,12 @@ def baseline(checkpoint, plans, tmp_path, request):
         writer,
         reference_capacity="six_portrait",
         memory_preset=preset,
+        continuation=continuation,
     )
+    if continuation:
+        writer.add_json(
+            "minimax_h3.reused_plans.json", {"fixture": "explicit retained base receipt"}
+        )
     writer.finish()
     model = (
         tmp_path
@@ -74,6 +82,7 @@ def baseline(checkpoint, plans, tmp_path, request):
         base=root,
         bridge=bridge,
         preset=preset,
+        continuation=continuation,
     )
 
 
@@ -105,7 +114,9 @@ def student_builders(monkeypatch, baseline):
             else:
                 assert options["plugin_library"] == baseline["bridge"]
                 assert options["max_vsa_tiles"] == 2048
-                assert options["reference_profile"].condition_audio_rows == (0, 0, 0)
+                assert options["reference_profile"].condition_audio_rows == (
+                    (0, 74, 74) if baseline["continuation"] else (0, 0, 0)
+                )
             assert target.num_layers == 50 and target.hidden_size == 5376
             options["output"].write(("new-student-" + group).encode())
             built.append(group)
@@ -128,6 +139,7 @@ def run_build(baseline, writer, **overrides):
         plugin_library=baseline["bridge"],
         memory_preset=baseline["preset"],
         reference_capacity="six_portrait",
+        continuation=baseline["continuation"],
     )
     options.update(overrides)
     return student.build(baseline["request"], writer, **options)
@@ -154,9 +166,14 @@ def test_student_build_replaces_both_learned_partitions_and_streams_common_plans
     assert metadata["checkpoint"] == {"hf_id": student.MODEL_ID, "revision": student.MODEL_REVISION}
     assert metadata["inference_contract"] == CONTRACT
     assert metadata["num_inference_steps"] == metadata["denoiser_forwards"] == 8
-    assert metadata["num_frames"] == 124
+    assert metadata["num_frames"] == (226 if baseline["continuation"] else 124)
+    assert metadata.get("total_denoiser_forwards") == (16 if baseline["continuation"] else None)
     assert metadata["max_vsa_tiles"] == 2048
-    assert metadata["schema_version"] == "minimax_h3.omniref_pdd/v1"
+    assert metadata["schema_version"] == (
+        "minimax_h3.omniref_pdd_continuation/v1"
+        if baseline["continuation"]
+        else "minimax_h3.omniref_pdd/v1"
+    )
     receipt = json.loads(after["minimax_h3.reused_plans.json"])
     assert receipt["rebuilt_sections"] == ["adaln.plan", "denoiser.plan"]
     assert set(receipt["reused_sections"]) == set(student.REUSED_PLANS)
@@ -223,7 +240,7 @@ def test_invalid_source_or_student_fails_before_loading_any_weights(
         with baseline["source"].open("ab") as source:
             source.write(b"\0")
     elif problem == "source_profile":
-        options["reference_capacity"] = "standard"
+        options["continuation"] = not baseline["continuation"]
     elif problem == "student_contract":
         (root / "fastvideo_inference.json").write_text("{}")
     elif problem == "student_index":

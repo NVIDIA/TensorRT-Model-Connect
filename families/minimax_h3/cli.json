@@ -13,7 +13,8 @@
         {"name": "kernel_library", "flags": ["--kernel-library"], "type": "path", "required": true, "help": "This family's VSA kernel, libtrtmc_minimax_h3_omniref_vsa.so"},
         {"name": "denoiser_workspace_gib", "flags": ["--denoiser-workspace-gib"], "type": "int", "default": 24, "help": "TensorRT tactic workspace for the VSA DiT; large VSA fusions need more than the 8 GiB default"},
         {"name": "base", "flags": ["--base"], "type": "string", "default": "MiniMaxAI/MiniMax-H3", "help": "Hugging Face ID or local snapshot of the original checkpoint"},
-        {"name": "student", "flags": ["--student"], "type": "string", "default": "FastVideo/FastVideo-FastH3-Omni-8-Step-V1", "help": "Hugging Face ID or local snapshot of the FastH3 student"}
+        {"name": "student", "flags": ["--student"], "type": "string", "default": "FastVideo/FastVideo-FastH3-Omni-8-Step-V1", "help": "Hugging Face ID or local snapshot of the FastH3 student"},
+        {"name": "two_window", "flags": ["--two-window"], "type": "bool", "action": "store_true", "default": false, "help": "Build the experimental 226-frame two-window profile instead of one 124-frame window"}
       ]
     }
   ]

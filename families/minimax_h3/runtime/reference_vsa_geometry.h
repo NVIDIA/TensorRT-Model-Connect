@@ -38,6 +38,8 @@ ReferenceVsaLayout make_reference_vsa_layout(const std::vector<ReferenceVsaSegme
 
 ReferenceVsaLayout make_reference_vsa_layout(int32_t text_rows,
                                              const std::vector<ImageReferenceLatentShape>& images,
-                                             ReferenceTargetLatentShape target, int32_t max_tiles);
+                                             ReferenceTargetLatentShape target,
+                                             std::optional<ReferenceContinuationGuideShape> guide,
+                                             int32_t max_tiles);
 
 } // namespace trtmc::minimax_h3

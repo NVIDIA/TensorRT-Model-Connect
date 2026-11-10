@@ -15,7 +15,10 @@ def test_build_omniref_is_a_declared_family_command():
     command, = [c for c in declaration["commands"] if c["name"] == "build-omniref"]
     assert command["handler"] == "cli:build_omniref"
     assert {a["name"] for a in command["arguments"]} == {"output", "scratch", "bridge", "kernel_library",
-                                                          "denoiser_workspace_gib", "base", "student"}
+                                                          "denoiser_workspace_gib", "base", "student",
+                                                          "two_window"}
+    two_window, = [a for a in command["arguments"] if a["name"] == "two_window"]
+    assert two_window["default"] is False  # one 124-frame window unless asked
     workspace, = [a for a in command["arguments"] if a["name"] == "denoiser_workspace_gib"]
     assert workspace["default"] == 24  # what the released FastH3 bundle's reuse receipt records
 

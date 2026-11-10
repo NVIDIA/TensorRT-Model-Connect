@@ -6,6 +6,7 @@
 #include "families/minimax_h3/runtime/reference_denoiser.h"
 
 #include "families/minimax_h3/runtime/pipeline.h"
+#include "families/minimax_h3/runtime/reference_continuation.h"
 #include "families/minimax_h3/runtime/reference_vsa_geometry.h"
 #include "families/minimax_h3/runtime/torch_cuda_normal.h"
 
@@ -25,11 +26,13 @@ constexpr int32_t kVideoWidth = 96;
 constexpr int32_t kAudioWidth = 32;
 
 ReferenceVsaLayout vsa_layout(int32_t text_rows, const std::vector<EncodedVisualReference>& images,
-                              ReferenceTargetLatentShape target, int32_t max_tiles) {
+                              ReferenceTargetLatentShape target,
+                              std::optional<ReferenceContinuationGuideShape> guide,
+                              int32_t max_tiles) {
     std::vector<ImageReferenceLatentShape> shapes;
     for (const auto& image : images)
         shapes.push_back({image.latent_height, image.latent_width});
-    return make_reference_vsa_layout(text_rows, shapes, target, max_tiles);
+    return make_reference_vsa_layout(text_rows, shapes, target, guide, max_tiles);
 }
 
 bool finite(const std::vector<float>& values) {
@@ -103,6 +106,7 @@ struct ImageReferenceDenoiser::Modulations {
         std::vector<float> unique_times;
     };
     std::vector<Step> steps;
+    bool has_clean_audio_reference{false};
 };
 
 ImageReferenceDenoiser::ImageReferenceDenoiser(ReferenceModuleLoader loader,
@@ -130,14 +134,21 @@ ImageReferenceDenoiser::~ImageReferenceDenoiser() = default;
 void ImageReferenceDenoiser::precompute(const ImageReferenceLayout& layout,
                                         const std::vector<float>& video_times,
                                         const std::vector<float>& audio_times) {
-    if (modulations_)
+    const bool has_audio_reference = layout.condition_audio_rows > 0;
+    if (modulations_ && modulations_->has_clean_audio_reference == has_audio_reference)
         return;
+    // Clean audio introduces a 1.0 time value. Reusing an image-only table
+    // would bind the wrong AdaLN slot. Release a resident DiT before rebuilding
+    // that table so the two weight sets do not overlap during this transition.
+    denoiser_.reset();
+    modulations_.reset();
     auto module = loader_("adaln.plan", stream_);
     if (!module || !module->ok())
         throw std::runtime_error("MiniMax-H3 failed to load Ref2VA AdaLN");
     require_profile(*module, "timesteps", {kTimeSlots}, DType::kFloat32);
     module->reset_execution_context();
     auto all = std::make_unique<Modulations>();
+    all->has_clean_audio_reference = has_audio_reference;
     for (std::size_t index = 0; index < video_times.size(); ++index) {
         Modulations::Step step;
         step.unique_times =
@@ -162,9 +173,71 @@ void ImageReferenceDenoiser::precompute(const ImageReferenceLayout& layout,
     modulations_ = std::move(all);
 }
 
+ReferenceDenoiserResult
+ImageReferenceDenoiser::run(const ReferenceImageConditioning& text,
+                            const std::vector<EncodedVisualReference>& images, uint64_t seed) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    return run_unlocked(text, images, seed, nullptr, 0.0, std::nullopt);
+}
+
+ReferenceDenoiserResult ImageReferenceDenoiser::run_continuation(
+    const ReferenceImageConditioning& text, const std::vector<EncodedVisualReference>& images,
+    const ReferenceLatentGuide& guide, uint64_t seed, double temporal_offset,
+    std::optional<int32_t> media_time_origin) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    return run_unlocked(text, images, seed, &guide, temporal_offset, media_time_origin);
+}
+
+ReferenceDenoiserResult ImageReferenceDenoiser::run_windows(
+    const ReferenceImageConditioning& text, const std::vector<EncodedVisualReference>& images,
+    uint64_t seed, int32_t output_frames, const ReferenceImageConditioning* continuation_text) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if ((output_frames != 124 && output_frames != 226) || config_.target.frames != 37 ||
+        config_.target.audio_latents != 207 || (continuation_text && output_frames != 226))
+        throw std::invalid_argument(
+            "MiniMax-H3 window execution requires the explicit 124/226 profile");
+    const auto windows = plan_reference_continuation(output_frames, 124, 22, 2);
+    const auto& child_text = continuation_text ? *continuation_text : text;
+    std::optional<int32_t> media_origin;
+    if (continuation_text) {
+        const auto rows = std::max(text.presentation.h3_token_tags.size(),
+                                   child_text.presentation.h3_token_tags.size());
+        if (rows > static_cast<std::size_t>(config_.max_sequence_rows))
+            throw std::length_error("MiniMax-H3 window text exceeds its packed profile");
+        media_origin = static_cast<int32_t>(rows);
+    }
+    (void)validate_conditioning(text, images, std::nullopt, 0.0, media_origin);
+    if (windows.size() == 2) {
+        // Validate the complete child payload, not just its packed row count,
+        // before any first-window RNG draw, engine load or denoiser forward.
+        const auto& child = windows[1];
+        (void)validate_conditioning(child_text, images,
+                                    ReferenceContinuationGuideShape{child.guide_video_latent_frames,
+                                                                    child.guide_audio_latents},
+                                    child.temporal_offset, media_origin);
+    }
+    auto result = run_unlocked(text, images, seed, nullptr, 0.0, media_origin);
+    const int32_t expected_forwards =
+        config_.recipe == ReferenceSamplingRecipe::OmniRefPdd8 ? 8 : 49;
+    if (result.forwards != expected_forwards)
+        throw std::runtime_error("MiniMax-H3 window forward count differs from its recipe");
+    if (windows.size() == 2) {
+        const auto guide = reference_latent_guide(result, windows[1]);
+        // The fixed upstream reuses the request seed for each fresh window;
+        // guide augmentation extends that window's own original RNG stream.
+        auto child = run_unlocked(child_text, images, seed, &guide, windows[1].temporal_offset,
+                                  media_origin);
+        if (child.forwards != expected_forwards)
+            throw std::runtime_error("MiniMax-H3 child forward count differs from its recipe");
+        result = append_reference_window(result, child, windows[1]);
+    }
+    return result;
+}
+
 ImageReferenceLayout ImageReferenceDenoiser::validate_conditioning(
-    const ReferenceImageConditioning& text,
-    const std::vector<EncodedVisualReference>& images) const {
+    const ReferenceImageConditioning& text, const std::vector<EncodedVisualReference>& images,
+    std::optional<ReferenceContinuationGuideShape> guide, double temporal_offset,
+    std::optional<int32_t> media_time_origin) const {
     const auto rows = text.presentation.h3_token_tags.size();
     if (rows == 0 || rows > static_cast<std::size_t>(config_.max_sequence_rows) ||
         text.embeddings.size() != rows * static_cast<std::size_t>(config_.text_width) ||
@@ -180,10 +253,14 @@ ImageReferenceLayout ImageReferenceDenoiser::validate_conditioning(
                 "MiniMax-H3 Ref2VA received incompatible reference latents");
         shapes.push_back({image.latent_height, image.latent_width});
     }
-    auto layout = make_image_reference_layout(text.presentation.h3_token_tags, shapes,
-                                              config_.target, config_.max_sequence_rows);
+    auto layout =
+        guide ? make_continuation_reference_layout(text.presentation.h3_token_tags, shapes,
+                                                   config_.target, config_.max_sequence_rows,
+                                                   *guide, temporal_offset, media_time_origin)
+              : make_image_reference_layout(text.presentation.h3_token_tags, shapes, config_.target,
+                                            config_.max_sequence_rows, media_time_origin);
     if (text.presentation.visual_rows.size() !=
-        static_cast<std::size_t>(layout.condition_video_rows))
+        static_cast<std::size_t>(layout.condition_video_rows - layout.continuation_video_rows))
         throw std::invalid_argument(
             "MiniMax-H3 Qwen visual rows and encoded image geometry disagree");
     const auto& visual = text.presentation.visual_rows;
@@ -195,19 +272,33 @@ ImageReferenceLayout ImageReferenceDenoiser::validate_conditioning(
         }))
         throw std::invalid_argument("MiniMax-H3 Ref2VA received incompatible Qwen visual indexes");
     if (config_.recipe == ReferenceSamplingRecipe::OmniRefPdd8) {
-        const auto geometry =
-            vsa_layout(static_cast<int32_t>(rows), images, config_.target, config_.max_vsa_tiles);
+        const auto geometry = vsa_layout(static_cast<int32_t>(rows), images, config_.target, guide,
+                                         config_.max_vsa_tiles);
         if (static_cast<std::size_t>(geometry.source_rows) != layout.token_tags.size())
             throw std::runtime_error("OmniRef VSA and packed Ref2VA rows disagree");
     }
     return layout;
 }
 
-ReferenceDenoiserResult
-ImageReferenceDenoiser::run(const ReferenceImageConditioning& text,
-                            const std::vector<EncodedVisualReference>& images, uint64_t seed) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto layout = validate_conditioning(text, images);
+ReferenceDenoiserResult ImageReferenceDenoiser::run_unlocked(
+    const ReferenceImageConditioning& text, const std::vector<EncodedVisualReference>& images,
+    uint64_t seed, const ReferenceLatentGuide* guide, double temporal_offset,
+    std::optional<int32_t> media_time_origin) {
+    if (guide && (guide->shape.height != config_.target.height ||
+                  guide->shape.width != config_.target.width))
+        throw std::invalid_argument("MiniMax-H3 continuation guide must retain target geometry");
+    auto layout = validate_conditioning(
+        text, images,
+        guide ? std::optional<ReferenceContinuationGuideShape>{{guide->shape.frames,
+                                                                guide->shape.audio_latents}}
+              : std::nullopt,
+        temporal_offset, media_time_origin);
+    if (guide && (guide->video_rows.size() !=
+                      static_cast<std::size_t>(layout.continuation_video_rows) * kVideoWidth ||
+                  guide->audio_rows.size() !=
+                      static_cast<std::size_t>(layout.condition_audio_rows) * kAudioWidth ||
+                  !finite(guide->video_rows) || !finite(guide->audio_rows)))
+        throw std::invalid_argument("MiniMax-H3 continuation guide has invalid latent payloads");
     const auto rows = text.presentation.h3_token_tags.size();
     const bool pdd = config_.recipe == ReferenceSamplingRecipe::OmniRefPdd8;
     const auto video_schedule =
@@ -215,13 +306,20 @@ ImageReferenceDenoiser::run(const ReferenceImageConditioning& text,
     const auto audio_schedule =
         pdd ? make_minimax_h3_pdd_schedule(3.0F) : make_minimax_h3_schedule(50, 3.0F);
     auto geometry =
-        pdd ? vsa_layout(static_cast<int32_t>(rows), images, config_.target, config_.max_vsa_tiles)
+        pdd ? vsa_layout(
+                  static_cast<int32_t>(rows), images, config_.target,
+                  guide
+                      ? std::optional<ReferenceContinuationGuideShape>{{guide->shape.frames,
+                                                                        guide->shape.audio_latents}}
+                      : std::nullopt,
+                  config_.max_vsa_tiles)
             : ReferenceVsaLayout{};
     if (video_schedule.timesteps.size() != audio_schedule.timesteps.size())
         throw std::runtime_error("MiniMax-H3 audio/video schedule lengths disagree");
     try {
-        // Draw the static images, then target video and target stereo audio,
-        // each in its native layout.
+        // Keep image-only draw order unchanged. Continuation adds one C/T/H/W
+        // video-guide draw after the static images; clean audio draws no noise.
+        // Target video and then target stereo audio retain their native layouts.
         uint64_t offset = 0;
         const auto draw = [&](std::size_t count) {
             auto noise = torch_cuda_normal(count, seed, offset);
@@ -239,6 +337,13 @@ ImageReferenceDenoiser::run(const ReferenceImageConditioning& text,
                 pack_reference_video_rows(condition, 1, image.latent_height, image.latent_width);
             video.insert(video.end(), packed.begin(), packed.end());
         }
+        if (guide) {
+            auto condition = guide->video_rows;
+            auto noise = pack_reference_video_rows(draw(condition.size()), guide->shape.frames,
+                                                   guide->shape.height, guide->shape.width);
+            noise_condition(condition, noise);
+            video.insert(video.end(), condition.begin(), condition.end());
+        }
         const auto target_pixels = static_cast<std::size_t>(config_.target.frames) *
                                    config_.target.height * config_.target.width;
         auto video_noise = draw(24 * target_pixels);
@@ -254,6 +359,8 @@ ImageReferenceDenoiser::run(const ReferenceImageConditioning& text,
         if (pdd)
             for (auto& value : audio)
                 value *= audio_schedule.sigmas.front();
+        if (guide)
+            audio.insert(audio.begin(), guide->audio_rows.begin(), guide->audio_rows.end());
         precompute(layout, video_schedule.timesteps, audio_schedule.timesteps);
         if (!denoiser_)
             denoiser_ = loader_("denoiser.plan", stream_);
@@ -310,6 +417,8 @@ ImageReferenceDenoiser::run(const ReferenceImageConditioning& text,
         for (const auto& item : common)
             require_profile(module, item.first.c_str(), item.second.shape, item.second.dtype);
         const auto prefix = static_cast<std::size_t>(layout.condition_video_rows) * kVideoWidth;
+        const auto audio_prefix =
+            static_cast<std::size_t>(layout.condition_audio_rows) * kAudioWidth;
         int32_t forwards = 0;
         for (std::size_t index = 0; index < video_schedule.timesteps.size(); ++index) {
             pdd_step = static_cast<int32_t>(index);
@@ -346,8 +455,9 @@ ImageReferenceDenoiser::run(const ReferenceImageConditioning& text,
             minimax_h3_scheduler_step(video.data() + prefix, video_velocity, video.size() - prefix,
                                       video_schedule.timesteps[index], video_schedule.sigmas[index],
                                       video_schedule.sigmas[index + 1]);
-            minimax_h3_scheduler_step(audio.data(), audio_velocity, audio.size(),
-                                      audio_schedule.timesteps[index], audio_schedule.sigmas[index],
+            minimax_h3_scheduler_step(audio.data() + audio_prefix, audio_velocity,
+                                      audio.size() - audio_prefix, audio_schedule.timesteps[index],
+                                      audio_schedule.sigmas[index],
                                       audio_schedule.sigmas[index + 1]);
         }
         module.sync();
@@ -355,6 +465,8 @@ ImageReferenceDenoiser::run(const ReferenceImageConditioning& text,
             throw std::runtime_error("MiniMax-H3 Ref2VA denoising produced nonfinite samples");
         std::vector<float> target_video(video.begin() + static_cast<std::ptrdiff_t>(prefix),
                                         video.end());
+        if (audio_prefix)
+            audio.erase(audio.begin(), audio.begin() + static_cast<std::ptrdiff_t>(audio_prefix));
         if (residency_ == ReferenceDenoiserResidency::Staged) {
             denoiser_.reset();
             modulations_.reset();

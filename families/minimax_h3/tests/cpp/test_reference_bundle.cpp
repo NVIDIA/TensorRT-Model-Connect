@@ -106,6 +106,41 @@ void check() {
     auto unlabeled = expanded;
     unlabeled.erase("reference_capacity");
     rejects(unlabeled); // Existing metadata cannot silently become an expanded profile.
+    auto continuation = expanded;
+    continuation["schema_version"] = "minimax_h3.image_ref2va_continuation/v1";
+    continuation["workflow"] = "image_ref2va_continuation";
+    continuation["num_frames"] = 226;
+    continuation["condition_video_rows"] = {4096, 50832, 56208};
+    continuation["condition_audio_rows"] = {0, 74, 74};
+    continuation["max_sequence_rows"] = 159528;
+    for (const auto& pair : {std::pair{"continuation_window_frames", 124},
+                             {"continuation_overlap_frames", 22},
+                             {"continuation_windows", 2},
+                             {"decoded_latent_frames", 67},
+                             {"decoded_audio_latent_frames", 377},
+                             {"total_denoiser_forwards", 98}})
+        continuation[pair.first] = pair.second;
+    parsed = parse_image_reference_config(continuation);
+    require(parsed.output_frames == 226 && parsed.max_condition_audio_rows == 74 &&
+                parsed.max_condition_video_rows == 56208 && parsed.denoiser.target.frames == 37 &&
+                parsed.denoiser.target.audio_latents == 207,
+            "new guide profiles and cumulative decoders retain full single-window DiT geometry");
+    for (const auto& name : {"condition_video_rows", "condition_audio_rows", "num_frames",
+                             "schema_version", "workflow", "max_sequence_rows"}) {
+        auto incompatible = continuation;
+        incompatible[name] = expanded[name];
+        rejects(incompatible);
+    }
+    for (const auto* name :
+         {"continuation_window_frames", "continuation_overlap_frames", "continuation_windows",
+          "decoded_latent_frames", "decoded_audio_latent_frames", "total_denoiser_forwards"}) {
+        auto incompatible = continuation;
+        incompatible[name] = 1;
+        rejects(incompatible);
+        incompatible = expanded;
+        incompatible[name] = continuation[name];
+        rejects(incompatible);
+    }
     const std::vector<std::pair<const char*, Json>> changes = {
         {"schema_version", "v2"},
         {"weights_variant", "transformer"},
@@ -158,11 +193,14 @@ void check() {
                                 "../fixtures/omniref-pdd-contract.json");
     Json contract;
     contract_file >> contract;
-    {
-        auto student = expanded;
-        student["schema_version"] = "minimax_h3.omniref_pdd/v1";
-        student["workflow"] = "omniref_pdd";
+    for (const bool multi : {false, true}) {
+        auto student = multi ? continuation : expanded;
+        student["schema_version"] =
+            multi ? "minimax_h3.omniref_pdd_continuation/v1" : "minimax_h3.omniref_pdd/v1";
+        student["workflow"] = multi ? "omniref_pdd_continuation" : "omniref_pdd";
         student["num_inference_steps"] = student["denoiser_forwards"] = 8;
+        if (multi)
+            student["total_denoiser_forwards"] = 16;
         student["checkpoint"] = {
             {"hf_id", "FastVideo/FastVideo-FastH3-Omni-8-Step-V1"},
             {"revision", "53e0d26a1691aa473b6262d8196a8feb2c297df0"},
@@ -171,7 +209,8 @@ void check() {
         student["max_vsa_tiles"] = 2048;
         const auto value = parse_omniref_pdd_config(student);
         require(value.denoiser.recipe == ReferenceSamplingRecipe::OmniRefPdd8 &&
-                    value.denoiser.max_vsa_tiles == 2048,
+                    value.denoiser.max_vsa_tiles == 2048 &&
+                    value.output_frames == (multi ? 226 : 124),
                 "closed student contract selects eight-forward runtime and VSA ABI");
         rejects(student); // A student cannot masquerade as the original recipe.
         const auto reject_student = [](const Json& config) {
@@ -182,7 +221,7 @@ void check() {
             }
             throw std::runtime_error("incompatible OmniRef recipe was accepted");
         };
-        reject_student(expanded);
+        reject_student(multi ? continuation : expanded);
         for (const auto* name : {"checkpoint", "inference_contract", "max_vsa_tiles"}) {
             auto missing = student;
             missing.erase(name);

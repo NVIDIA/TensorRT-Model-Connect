@@ -111,9 +111,14 @@ void require_pdd_contract(const nlohmann::json& runtime) {
 }
 
 ReferencePipelineConfig parse_reference_config(const nlohmann::json& runtime, bool pdd) {
-    exact(runtime, "schema_version",
-          pdd ? "minimax_h3.omniref_pdd/v1" : "minimax_h3.image_ref2va/v1");
-    exact(runtime, "workflow", pdd ? "omniref_pdd" : "image_ref2va");
+    const std::string single = pdd ? "minimax_h3.omniref_pdd/v1" : "minimax_h3.image_ref2va/v1";
+    const std::string multi =
+        pdd ? "minimax_h3.omniref_pdd_continuation/v1" : "minimax_h3.image_ref2va_continuation/v1";
+    const bool continuation = runtime.at("schema_version") == multi;
+    exact(runtime, "schema_version", continuation ? multi : single);
+    exact(runtime, "workflow",
+          pdd ? (continuation ? "omniref_pdd_continuation" : "omniref_pdd")
+              : (continuation ? "image_ref2va_continuation" : "image_ref2va"));
     if (pdd)
         require_pdd_contract(runtime);
     exact(runtime, "weights_variant", "transformer_ref");
@@ -122,7 +127,7 @@ ReferencePipelineConfig parse_reference_config(const nlohmann::json& runtime, bo
         throw std::invalid_argument("MiniMax-H3 unsupported reference capacity profile");
     const int32_t text_rows = capacity == "six_portrait" ? 65536 : 32768;
     const int32_t static_condition_rows = capacity == "six_portrait" ? 49152 : 16384;
-    for (const auto& pair : {std::pair{"num_frames", 124},
+    for (const auto& pair : {std::pair{"num_frames", continuation ? 226 : 124},
                              {"fps", 24},
                              {"num_inference_steps", pdd ? 8 : 50},
                              {"denoiser_forwards", pdd ? 8 : 49},
@@ -142,7 +147,20 @@ ReferencePipelineConfig parse_reference_config(const nlohmann::json& runtime, bo
         throw std::invalid_argument("MiniMax-H3 reference capacity and text budget disagree");
     exact(runtime, "first_block_cache", false);
     exact(runtime, "text_rows", nlohmann::json::array({1, 128, text_rows}));
-    exact(runtime, "condition_audio_rows", nlohmann::json::array({0, 0, 0}));
+    exact(runtime, "condition_audio_rows",
+          continuation ? nlohmann::json::array({0, 74, 74}) : nlohmann::json::array({0, 0, 0}));
+    for (const auto& pair : {std::pair{"continuation_window_frames", 124},
+                             {"continuation_overlap_frames", 22},
+                             {"continuation_windows", 2},
+                             {"decoded_latent_frames", 67},
+                             {"decoded_audio_latent_frames", 377},
+                             {"total_denoiser_forwards", pdd ? 16 : 98}}) {
+        if (continuation)
+            exact(runtime, pair.first, pair.second);
+        else if (runtime.contains(pair.first))
+            throw std::invalid_argument(
+                "MiniMax-H3 single-window metadata cannot declare continuation");
+    }
     exact(runtime, "reference_pixels", nlohmann::json::array({16384, 22016, 65536}));
     ReferencePipelineConfig config;
     if (pdd) {
@@ -165,9 +183,10 @@ ReferencePipelineConfig parse_reference_config(const nlohmann::json& runtime, bo
     if (height < 256 || width < 256 || height % 32 || width % 32)
         throw std::invalid_argument(
             "MiniMax-H3 reference output geometry must be 32-aligned and at least 256 pixels");
-    const int64_t condition_rows = static_condition_rows;
-    const int64_t rows =
-        int64_t{37} * (height / 32) * (width / 32) + 414 + text_rows + condition_rows;
+    const int64_t guide_rows = continuation ? int64_t{7} * (height / 32) * (width / 32) : 0;
+    const int64_t condition_rows = static_condition_rows + guide_rows;
+    const int64_t rows = int64_t{37} * (height / 32) * (width / 32) + 414 + text_rows +
+                         condition_rows + (continuation ? 74 : 0);
     if (rows > std::numeric_limits<int32_t>::max() ||
         integer(runtime, "max_sequence_rows") != rows ||
         integer(runtime, "latent_height") != height / 16 ||
@@ -175,11 +194,14 @@ ReferencePipelineConfig parse_reference_config(const nlohmann::json& runtime, bo
         throw std::invalid_argument(
             "MiniMax-H3 reference latent geometry and packed sequence cap disagree");
     exact(runtime, "condition_video_rows",
-          nlohmann::json::array({4096, capacity == "six_portrait" ? 43776 : 5504, condition_rows}));
+          nlohmann::json::array(
+              {4096, (capacity == "six_portrait" ? 43776 : 5504) + guide_rows, condition_rows}));
     config.denoiser.target = {37, height / 16, width / 16, 207};
     config.denoiser.max_sequence_rows = static_cast<int32_t>(rows);
     config.max_text_rows = text_rows;
     config.max_condition_video_rows = static_cast<int32_t>(condition_rows);
+    config.output_frames = continuation ? 226 : 124;
+    config.max_condition_audio_rows = continuation ? 74 : 0;
     config.normalization.mean = statistics(runtime, "latents_mean", false);
     config.normalization.std = statistics(runtime, "latents_std", true);
     return config;

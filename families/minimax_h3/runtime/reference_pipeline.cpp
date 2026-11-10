@@ -20,12 +20,23 @@ const internal::ConfigField kFields[] = {
     {"seed", internal::ConfigKind::I64, internal::ConfigValue{int64_t{42}},
      "Nonnegative H3 request seed; reference posterior seeds remain 42."},
 };
+const internal::ConfigField kWindowFields[] = {
+    kFields[0],
+    {"continuation_prompt", internal::ConfigKind::String, internal::ConfigValue{std::string_view{}},
+     "Second-window prompt for the 226-frame profile; empty reuses the initial prompt."},
+};
+
+Span<const internal::ConfigField> fields(int32_t output_frames) {
+    return output_frames == 226 ? Span<const internal::ConfigField>{kWindowFields}
+                                : Span<const internal::ConfigField>{kFields};
+}
 
 // Validate every borrowed operand and both packed sequence caps before image
 // allocation or engine loading. A reference is not an initial frame. No video
 // or audio operand is silently discarded, converted or treated as an image.
 void preflight(const internal::ReferencesTextToAudioVideoRequest& request,
-               const ITokenizer& tokenizer, const ReferencePipelineConfig& config) {
+               const ITokenizer& tokenizer, const ReferencePipelineConfig& config,
+               std::string_view continuation_prompt) {
     if (request.references.empty())
         throw internal::UnsupportedTask("MiniMax-H3 image Ref2VA requires at least one image");
     std::vector<QwenImageGrid> grids;
@@ -48,32 +59,58 @@ void preflight(const internal::ReferencesTextToAudioVideoRequest& request,
     }
     const auto presentation = make_qwen_image_presentation(tokenizer, std::string(request.prompt),
                                                            grids, config.max_text_rows);
-    const auto layout =
-        make_image_reference_layout(presentation.h3_token_tags, latent_shapes,
-                                    config.denoiser.target, config.denoiser.max_sequence_rows);
+    std::optional<QwenImagePresentation> continuation;
+    std::optional<int32_t> media_origin;
+    if (!continuation_prompt.empty() && continuation_prompt != request.prompt) {
+        continuation = make_qwen_image_presentation(tokenizer, std::string(continuation_prompt),
+                                                    grids, config.max_text_rows);
+        media_origin = static_cast<int32_t>(
+            std::max(presentation.h3_token_tags.size(), continuation->h3_token_tags.size()));
+    }
+    const auto layout = make_image_reference_layout(
+        presentation.h3_token_tags, latent_shapes, config.denoiser.target,
+        config.denoiser.max_sequence_rows, media_origin);
     if (layout.condition_video_rows > config.max_condition_video_rows)
         throw std::length_error("MiniMax-H3 reference images exceed their own DiT operand profile");
     if (config.denoiser.recipe == ReferenceSamplingRecipe::OmniRefPdd8)
         (void)make_reference_vsa_layout(static_cast<int32_t>(presentation.h3_token_tags.size()),
-                                        latent_shapes, config.denoiser.target,
+                                        latent_shapes, config.denoiser.target, std::nullopt,
                                         config.denoiser.max_vsa_tiles);
+    if (config.output_frames == 226) {
+        const auto guided = make_continuation_reference_layout(
+            continuation ? continuation->h3_token_tags : presentation.h3_token_tags, latent_shapes,
+            config.denoiser.target, config.denoiser.max_sequence_rows, {7, 37}, 170.0,
+            media_origin);
+        if (guided.condition_video_rows > config.max_condition_video_rows ||
+            guided.condition_audio_rows > config.max_condition_audio_rows)
+            throw std::length_error("MiniMax-H3 continuation exceeds its DiT operand profiles");
+        if (config.denoiser.recipe == ReferenceSamplingRecipe::OmniRefPdd8)
+            (void)make_reference_vsa_layout(
+                static_cast<int32_t>(
+                    (continuation ? continuation->h3_token_tags : presentation.h3_token_tags)
+                        .size()),
+                latent_shapes, config.denoiser.target, ReferenceContinuationGuideShape{7, 37},
+                config.denoiser.max_vsa_tiles);
+    }
 }
 } // namespace
 
 void ReferencePipelineConfig::validate_forward_count(int32_t forwards) const {
-    int32_t expected;
+    if (output_frames != 124 && output_frames != 226)
+        throw std::invalid_argument("MiniMax-H3 Ref2VA requires a supported window profile");
+    int32_t forwards_per_window;
     switch (denoiser.recipe) {
     case ReferenceSamplingRecipe::OriginalH3:
-        expected = 49;
+        forwards_per_window = 49;
         break;
     case ReferenceSamplingRecipe::OmniRefPdd8:
-        expected = 8;
+        forwards_per_window = 8;
         break;
     default:
         throw std::invalid_argument("MiniMax-H3 Ref2VA sampling recipe is unknown");
     }
-    if (forwards != expected)
-        throw std::runtime_error("MiniMax-H3 Ref2VA forward count differs from its recipe");
+    if (forwards != forwards_per_window * (output_frames == 226 ? 2 : 1))
+        throw std::runtime_error("MiniMax-H3 Ref2VA window forward count mismatch");
 }
 
 struct ImageReferencePipeline::State {
@@ -99,13 +136,13 @@ struct ImageReferencePipeline::State {
                   ? ReferenceDenoiserResidency::Staged
                   : ReferenceDenoiserResidency::Resident)),
           video(loader,
-                {config.denoiser.target.frames, config.denoiser.target.height,
+                {config.output_frames == 226 ? 67 : 37, config.denoiser.target.height,
                  config.denoiser.target.width,
                  config.memory == ReferenceMemoryPreset::Minimal ? 1 : 28, config.normalization},
                 stream,
                 config.memory == ReferenceMemoryPreset::Minimal ? VideoDecoderResidency::Staged
                                                                 : VideoDecoderResidency::Resident),
-          audio(loader, config.denoiser.target.audio_latents, stream,
+          audio(loader, config.output_frames == 226 ? 377 : 207, stream,
                 config.memory == ReferenceMemoryPreset::Minimal ? AudioDecoderResidency::Staged
                                                                 : AudioDecoderResidency::Resident) {
     }
@@ -117,9 +154,16 @@ ImageReferencePipeline::ImageReferencePipeline(ReferenceModuleLoader loader,
     : loader_(std::move(loader)), tokenizer_(std::move(tokenizer)), config_(std::move(config)),
       stream_(stream) {
     if (!loader_ || !tokenizer_ || config_.max_condition_video_rows <= 0 ||
-        config_.max_condition_video_rows > 49152 || config_.denoiser.layers != 50 ||
-        config_.denoiser.hidden_size != 5376 || config_.denoiser.text_width != 5120 ||
-        config_.denoiser.target.frames != 37 || config_.denoiser.target.audio_latents != 207 ||
+        config_.max_condition_video_rows >
+            49152 + (config_.output_frames == 226
+                         ? int64_t{7} * (config_.denoiser.target.height / 2) *
+                               (config_.denoiser.target.width / 2)
+                         : 0) ||
+        (config_.output_frames != 124 && config_.output_frames != 226) ||
+        config_.max_condition_audio_rows != (config_.output_frames == 226 ? 74 : 0) ||
+        config_.denoiser.layers != 50 || config_.denoiser.hidden_size != 5376 ||
+        config_.denoiser.text_width != 5120 || config_.denoiser.target.frames != 37 ||
+        config_.denoiser.target.audio_latents != 207 ||
         (config_.memory != ReferenceMemoryPreset::Minimal &&
          config_.memory != ReferenceMemoryPreset::Original))
         throw std::invalid_argument("MiniMax-H3 image Ref2VA requires the original full topology");
@@ -131,18 +175,24 @@ ImageReferencePipeline::ImageReferencePipeline(ReferenceModuleLoader loader,
 ImageReferencePipeline::~ImageReferencePipeline() = default;
 
 std::vector<internal::TaskInstance> ImageReferencePipeline::task_bindings() {
-    return {internal::bind<internal::IReferencesTextToAudioVideo>(*this, kFields)};
+    return {internal::bind<internal::IReferencesTextToAudioVideo>(*this,
+                                                                  fields(config_.output_frames))};
 }
 
 internal::AudioVideoResult
 ImageReferencePipeline::run(const internal::ReferencesTextToAudioVideoRequest& request,
                             internal::ConfigView config) {
     std::lock_guard<std::mutex> lock(mutex_);
-    internal::validate_config(kFields, config);
-    const auto seed = *internal::config_get<int64_t>(config, kFields, "seed");
+    const auto declared = fields(config_.output_frames);
+    internal::validate_config(declared, config);
+    const auto seed = *internal::config_get<int64_t>(config, declared, "seed");
     if (seed < 0)
         throw internal::ConfigError("MiniMax-H3 seed must be nonnegative");
-    preflight(request, *tokenizer_, config_);
+    const auto continuation_prompt =
+        config_.output_frames == 226
+            ? *internal::config_get<std::string_view>(config, declared, "continuation_prompt")
+            : std::string_view{};
+    preflight(request, *tokenizer_, config_, continuation_prompt);
     const auto start = std::chrono::steady_clock::now();
     try {
         if (!state_)
@@ -162,6 +212,10 @@ ImageReferencePipeline::run(const internal::ReferencesTextToAudioVideoRequest& r
                 qwen_images.push_back(
                     {image.rgb.data(), image.rgb.size(), image.shape.height, image.shape.width});
             auto text = state_->conditioner.encode(qwen_images, std::string(request.prompt));
+            std::optional<ReferenceImageConditioning> continuation;
+            if (!continuation_prompt.empty() && continuation_prompt != request.prompt)
+                continuation =
+                    state_->conditioner.encode(qwen_images, std::string(continuation_prompt));
             std::vector<EncodedVisualReference> latents;
             for (auto& image : prepared) {
                 latents.push_back(state_->visual.encode_image(image));
@@ -170,7 +224,9 @@ ImageReferencePipeline::run(const internal::ReferencesTextToAudioVideoRequest& r
             if (!state_->denoiser)
                 state_->denoiser = std::make_unique<ImageReferenceDenoiser>(
                     loader_, config_.denoiser, stream_, ReferenceDenoiserResidency::Staged);
-            return state_->denoiser->run(text, latents, static_cast<uint64_t>(seed));
+            return state_->denoiser->run_windows(text, latents, static_cast<uint64_t>(seed),
+                                                 config_.output_frames,
+                                                 continuation ? &*continuation : nullptr);
         }();
         // Minimal mode trades rebuilding deterministic AdaLN tables on the next
         // request for releasing their host storage before full video decoding.

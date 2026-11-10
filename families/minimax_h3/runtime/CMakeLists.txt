@@ -10,6 +10,7 @@ add_library(trtmc_model_minimax_h3 SHARED
   plugin.cpp
   qwen_reference.cpp
   reference_conditioner.cpp
+  reference_continuation.cpp
   reference_bundle.cpp
   reference_denoiser.cpp
   reference_image.cpp
@@ -139,7 +140,7 @@ if(TRTMC_BUILD_TESTS)
   add_executable(test_minimax_h3_reference_pipeline
     reference_pipeline.cpp reference_conditioner.cpp reference_visual_encoder.cpp
     reference_denoiser.cpp reference_image.cpp reference_layout.cpp qwen_reference.cpp
-    diffusion_schedule.cpp audio_decoder.cpp video_decoder.cpp video_decode_math.cpp
+    diffusion_schedule.cpp reference_continuation.cpp audio_decoder.cpp video_decoder.cpp video_decode_math.cpp
     visual_reference.cpp
     reference_vsa_geometry.cpp
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_pipeline.cpp
@@ -242,7 +243,7 @@ if(TRTMC_BUILD_TESTS)
   target_compile_options(minimax_h3_reference_denoiser_probe PRIVATE -Wall -Wextra -Wpedantic)
 
   add_executable(test_minimax_h3_reference_denoiser
-    diffusion_schedule.cpp reference_layout.cpp reference_denoiser.cpp
+    diffusion_schedule.cpp reference_layout.cpp reference_denoiser.cpp reference_continuation.cpp
     reference_vsa_geometry.cpp
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_denoiser.cpp
   )
@@ -252,6 +253,18 @@ if(TRTMC_BUILD_TESTS)
   target_include_directories(test_minimax_h3_reference_denoiser SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
   target_compile_options(test_minimax_h3_reference_denoiser PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME minimax_h3_reference_denoiser COMMAND test_minimax_h3_reference_denoiser)
+
+  add_executable(test_minimax_h3_reference_continuation
+    reference_continuation.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_continuation.cpp
+  )
+  target_include_directories(test_minimax_h3_reference_continuation PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_minimax_h3_reference_continuation SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_minimax_h3_reference_continuation PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_minimax_h3_reference_continuation PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_reference_continuation COMMAND test_minimax_h3_reference_continuation)
 
   # The owning Python GPU oracle drives this probe with a real serialized
   # posterior plan and compares native CPU noise plus backend execution.
@@ -279,6 +292,15 @@ if(TRTMC_BUILD_TESTS)
   target_link_libraries(test_minimax_h3_reference_layout PRIVATE nlohmann_json::nlohmann_json)
   target_compile_options(test_minimax_h3_reference_layout PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME minimax_h3_reference_layout COMMAND test_minimax_h3_reference_layout)
+
+  add_executable(test_minimax_h3_reference_continuation_layout
+    reference_layout.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_continuation_layout.cpp
+  )
+  target_include_directories(test_minimax_h3_reference_continuation_layout PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(test_minimax_h3_reference_continuation_layout PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_minimax_h3_reference_continuation_layout PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_reference_continuation_layout COMMAND test_minimax_h3_reference_continuation_layout)
 
   add_executable(test_minimax_h3_reference_visual_encoder
     reference_visual_encoder.cpp

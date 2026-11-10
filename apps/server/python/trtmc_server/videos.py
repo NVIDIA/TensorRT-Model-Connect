@@ -29,7 +29,7 @@ from trtmc_perf_serving.video_media import encode
 
 # Reference-to-video requests (multipart: input_reference files plus these text fields).
 MAX_REFERENCE_IMAGES = 16
-REFERENCE_VIDEO_FIELDS = {"model", "prompt", "seed"}
+REFERENCE_VIDEO_FIELDS = {"model", "prompt", "seed", "continuation_prompt"}
 # Native frames are unknown until the Task returns; reserve storage for a long clip.
 REFERENCE_VIDEO_RESERVE_BYTES = 2 * 1024**3
 
@@ -220,13 +220,16 @@ class VideoJobs:
             model, prompt = values["model"], values["prompt"]
             if not prompt.strip() or not 1 <= len(files) <= MAX_REFERENCE_IMAGES:
                 raise ValueError("a prompt and 1 to 16 reference images are required")
-            if len(prompt.encode()) > self.config.max_prompt_bytes:
+            if (len(prompt.encode()) > self.config.max_prompt_bytes or
+                    len(values.get("continuation_prompt", "").encode()) > self.config.max_prompt_bytes):
                 return self.error(413, "content_too_large", "prompt exceeds the server limit")
             config: dict[str, Any] = {}
             if "seed" in values:
                 if not values["seed"].isascii() or not values["seed"].isdecimal():
                     raise ValueError("seed must be a non-negative integer")
                 config["seed"] = int(values["seed"])
+            if "continuation_prompt" in values:
+                config["continuation_prompt"] = values["continuation_prompt"]
             if not self.registry.supports(model, "reference_video_generation"):
                 return self.error(400, "unsupported_task", "model does not support reference video generation")
             reserved = REFERENCE_VIDEO_RESERVE_BYTES
@@ -271,7 +274,7 @@ class VideoJobs:
                        "audio_path": str(root / "audio.wav"), "reference_paths": paths}
             context = {**request.state.timing, "record_kind": "video_completion", "job_id": identifier,
                        "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
-                       "generation_config": config,
+                       "generation_config": {k: v for k, v in config.items() if k != "continuation_prompt"},
                        "reference_count": len(paths)}
             task = asyncio.create_task(self.run_references(job, request, payload, session, context))
             self.tasks.add(task)

@@ -192,6 +192,28 @@ std::vector<float> test(int32_t batch, VideoDecoderResidency residency) {
     }
     return retained;
 }
+void test_cumulative() {
+    VideoDecoderConfig config;
+    config.latent_frames = 67;
+    config.latent_height = config.latent_width = 16;
+    config.tile_batch = 1;
+    config.normalization.std.fill(1.0F);
+    State state{config, make_video_decode_geometry(67, 16, 16), {}};
+    state.cthw.resize(24 * 67 * 16 * 16);
+    for (std::size_t i = 0; i < state.cthw.size(); ++i)
+        state.cthw[i] = static_cast<float>(i % 251) / 251.0F;
+    auto rows = pack_reference_video_rows(state.cthw, 67, 16, 16);
+    ReferenceModuleLoader loader = [&](const std::string& name, cudaStream_t) {
+        require(name == "vae.plan", "same original static video tile plan");
+        ++state.loads;
+        return std::make_unique<Module>(state);
+    };
+    VideoDecoder owner(loader, config, nullptr, VideoDecoderResidency::Staged);
+    const auto decoded = owner.run(rows);
+    require(decoded.frames == 226 && decoded.rgb.size() == std::size_t{226} * 256 * 256 * 3 &&
+                decoded.forwards == 13 && state.forwards == 13 && state.live == 0,
+            "all 67 cumulative latent frames reach 13 real tile invocations and 226 output frames");
+}
 } // namespace
 
 int main() {
@@ -203,6 +225,7 @@ int main() {
                 "single-tile and original batch assembly match");
         require(test(28, VideoDecoderResidency::Resident) == baseline,
                 "both memory policies preserve assembly");
+        test_cumulative();
         std::cout << "MiniMax-H3 native video lifecycle checks passed\n";
         return 0;
     } catch (const std::exception& error) {

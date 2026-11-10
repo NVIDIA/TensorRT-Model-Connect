@@ -128,9 +128,13 @@ ReferenceVsaLayout make_reference_vsa_layout(const std::vector<ReferenceVsaSegme
 
 ReferenceVsaLayout make_reference_vsa_layout(int32_t text_rows,
                                              const std::vector<ImageReferenceLatentShape>& images,
-                                             ReferenceTargetLatentShape target, int32_t max_tiles) {
+                                             ReferenceTargetLatentShape target,
+                                             std::optional<ReferenceContinuationGuideShape> guide,
+                                             int32_t max_tiles) {
     if (text_rows <= 0 || target.audio_latents <= 0 ||
-        target.audio_latents > std::numeric_limits<int32_t>::max() / 2)
+        target.audio_latents > std::numeric_limits<int32_t>::max() / 2 ||
+        (guide && (guide->audio_latents <= 0 ||
+                   guide->audio_latents > std::numeric_limits<int32_t>::max() / 2)))
         throw std::invalid_argument("OmniRef VSA requires positive bounded text/audio segments");
     std::vector<ReferenceVsaSegment> segments{text_rows};
     for (const auto& image : images) {
@@ -140,6 +144,11 @@ ReferenceVsaLayout make_reference_vsa_layout(int32_t text_rows,
         if (rows >= std::numeric_limits<int32_t>::max())
             throw std::length_error("OmniRef VSA image exceeds the native row index range");
         segments.emplace_back(static_cast<int32_t>(rows));
+    }
+    if (guide) {
+        segments.emplace_back(
+            ReferenceVsaVideoGrid{guide->video_frames, target.height, target.width});
+        segments.emplace_back(2 * guide->audio_latents);
     }
     segments.emplace_back(2 * target.audio_latents);
     segments.emplace_back(ReferenceVsaVideoGrid{target.frames, target.height, target.width});
