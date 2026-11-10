@@ -86,7 +86,15 @@ def _run(argv: list[str]) -> str:
     return completed.stdout
 
 
-def test_e2e(case_name: str, tmp_path: Path) -> None:
+#: The small structure case is also built with the attention's query blocks
+#: forced (BLOCK_ALIGN 8 splits its 46 tokens into 3 blocks), so the FP32
+#: structure tolerance covers the block windows and their concatenation.
+SPLIT_ALIGN = 8
+
+
+def test_e2e(case_name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import families.hstu.model as hstu_model
+    from families.hstu.config import load_config
     from families.hstu.tests.parity import checkpoint_of, parity_record
     from families.hstu.weights import generate
     from tensorrt_model_connect import BuildRequest, build
@@ -110,24 +118,35 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
         if os.environ.get(variable)
         else generate(tmp_path / "checkpoint", small=small)
     )
-    bundle = tmp_path / manifest["bundle"]
-    build(
-        BuildRequest(
-            model_dir=model_dir,
-            output_path=bundle,
-            family=FAMILY,
-            task=TASK,
-            precision=manifest["precision"],
-            tensor_parallel_size=manifest["tensor_parallel_size"],
-        )
-    )
-
     record_path = TEST_ROOT / case["record"]
-    native = json.loads(_run([str(probe), str(bundle), str(runtime_root), str(record_path), "2"]))
-    first, second = native["results"]
-    assert first["scores"] == second["scores"], "two runs of one request disagree"
-    record = parity_record(native, golden, limits, checkpoint=checkpoint_of(model_dir))
-    assert record["passed"], json.dumps(record["repeats"], indent=1)
+
+    def build_and_judge(bundle: Path) -> dict:
+        build(
+            BuildRequest(
+                model_dir=model_dir,
+                output_path=bundle,
+                family=FAMILY,
+                task=TASK,
+                precision=manifest["precision"],
+                tensor_parallel_size=manifest["tensor_parallel_size"],
+            )
+        )
+        native = json.loads(
+            _run([str(probe), str(bundle), str(runtime_root), str(record_path), "2"])
+        )
+        first, second = native["results"]
+        assert first["scores"] == second["scores"], "two runs of one request disagree"
+        record = parity_record(native, golden, limits, checkpoint=checkpoint_of(model_dir))
+        assert record["passed"], json.dumps(record["repeats"], indent=1)
+        return first
+
+    bundle = tmp_path / manifest["bundle"]
+    first = build_and_judge(bundle)
+    if small:
+        blocks = load_config(model_dir).attention_blocks(hstu_model.QUERY_BLOCKS, SPLIT_ALIGN)
+        assert len(blocks) > 1, blocks
+        monkeypatch.setattr(hstu_model, "BLOCK_ALIGN", SPLIT_ALIGN)
+        build_and_judge(tmp_path / f"split-{manifest['bundle']}")
 
     document = json.loads(
         _run(

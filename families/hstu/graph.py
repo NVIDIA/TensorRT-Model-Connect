@@ -125,6 +125,12 @@ class Graph:
         layer.reshape_dims = (tokens, width)
         return layer.get_output(0)
 
+    def window(self, x, start: int, count: int, keys: int):
+        """``x[:, start:start + count, :keys]`` of a rank-3 tensor."""
+        return self.n.add_slice(x, (0, start, 0), (x.shape[0], count, keys), (1, 1, 1)).get_output(
+            0
+        )
+
     def concat(self, tensors, axis: int):
         layer = self.n.add_concatenation(list(tensors))
         layer.axis = axis

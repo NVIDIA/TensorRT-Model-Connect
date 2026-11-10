@@ -40,6 +40,13 @@ CHECKPOINT_SECTION = "hstu.checkpoint.json"
 CANDIDATE_EMBEDDINGS = "candidate_embeddings"
 LOGITS = "logits"
 L2_FLOOR = 1e-6
+#: The attention's query blocks (``HstuConfig.attention_blocks``): each block
+#: attends only to its key prefix, skipping the keys the causal mask zeroes
+#: for all of its rows. A tuning value for TensorRT 11.4's fused attention:
+#: in engine-only screens on Jetson Thor at 8298 tokens, 3 blocks on 256-token
+#: bounds beat 1, 2 and 4 blocks; other GPUs and versions are unmeasured.
+QUERY_BLOCKS = 3
+BLOCK_ALIGN = 256
 
 
 def _serialize(builder, network, config, what: str) -> bytes:
@@ -123,13 +130,25 @@ def _hstu_layer(g: Graph, cfg: HstuConfig, tensors, x, valid, index: int):
     # failed": operands of mixed type). The 1/scaling_seqlen factor is linear,
     # so it scales P.V in FP32 instead, where 8398 is exact (BF16 rounds it to
     # 8384).
-    scores = g.mul(
-        g.matmul(query, key, transpose_b=True), g.work_scalar(1.0 / math.sqrt(cfg.head_dim), 3)
-    )
-    probs = g.mul(g.silu(scores), valid)  # x * 1 = x, x * 0 = +-0
+    alpha = g.work_scalar(1.0 / math.sqrt(cfg.head_dim), 3)
+    blocks = []
+    for start, end in cfg.attention_blocks(QUERY_BLOCKS, BLOCK_ALIGN):
+        # Each query block attends to keys [0, end) only: the mask is zero
+        # right of the block's last row, so the skipped products were zeros.
+        rows = end - start
+        scores = g.mul(
+            g.matmul(
+                g.window(query, start, rows, cfg.head_dim),
+                g.window(key, 0, end, cfg.head_dim),
+                transpose_b=True,
+            ),
+            alpha,
+        )
+        probs = g.mul(g.silu(scores), g.window(valid, start, rows, end))  # x * 1 = x, x * 0 = +-0
+        blocks.append(g.matmul(probs, g.window(value, 0, end, cfg.head_dim)))
+    attended = blocks[0] if len(blocks) == 1 else g.concat(blocks, 1)
     attended = g.div(
-        g.to_f32(g.merge_heads(g.matmul(probs, value), n, width)),
-        g.scalar(float(cfg.scaling_seqlen), 2),
+        g.to_f32(g.merge_heads(attended, n, width)), g.scalar(float(cfg.scaling_seqlen), 2)
     )
     normed_attention = g.layer_norm_f32(
         attended,

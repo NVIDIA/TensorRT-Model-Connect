@@ -69,7 +69,11 @@ linear 1/scaling_seqlen factor scales P·V in FP32 instead. The valid mask is
 multiplied in as 0/1 in the work dtype: a select on the bool mask makes Myelin
 pick a much slower fused-attention kernel, and the mask stays a graph
 expression because the same mask as a build-time constant gave wrong logits
-with TensorRT 11.4.
+with TensorRT 11.4. The attention runs in query blocks (three on 256-token
+bounds at 8298 tokens, one at the small structure geometry), each over its
+key prefix only: the causal mask zeroes every later key for all of a block's
+rows. The E2E also builds the small FP32 case with the split forced, so the
+structure test covers the blocks.
 
 ## Validation
 

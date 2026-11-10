@@ -67,6 +67,17 @@ class HstuConfig:
     def attention_width(self) -> int:
         return self.num_attention_heads * self.head_dim
 
+    def attention_blocks(self, count: int, align: int) -> list[tuple[int, int]]:
+        """``count`` query-row blocks ``[start, end)`` tiling the tokens, the
+        inner bounds rounded to multiples of ``align`` (a bound that rounds onto
+        another drops, so a short sequence is one block). The valid mask is
+        causal, so it is zero right of a block's last row: each block needs
+        only the keys ``[0, end)``."""
+        n = self.tokens
+        inner = {round(i * n / count / align) * align for i in range(1, count)}
+        bounds = sorted({0, n} | {b for b in inner if 0 < b < n})
+        return list(zip(bounds, bounds[1:]))
+
     def position_ids(self) -> list[int]:
         """recsys-examples' inference position law (``_add_position_embeddings``
         with ``high_inds = seq_len - num_targets``, clamped to the table): token

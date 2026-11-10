@@ -63,6 +63,31 @@ def test_config_refuses_what_the_graph_cannot_build(change, message):
         parse_config(dict(copy.deepcopy(REFERENCE_CONFIG), **change))
 
 
+@pytest.mark.parametrize(
+    "history, candidates, count, align",
+    [(4096, 100, 3, 256), (4096, 100, 8, 256), (16, 8, 3, 256), (16, 8, 4, 8), (3, 2, 2, 1)],
+)
+def test_attention_blocks_tile_the_tokens_on_aligned_bounds(history, candidates, count, align):
+    config = parse_config(
+        dict(
+            copy.deepcopy(REFERENCE_CONFIG),
+            max_history_seqlen=history,
+            max_num_candidates=candidates,
+            scaling_seqlen=2 * (history + candidates) + 6,
+        )
+    )
+    blocks = config.attention_blocks(count, align)
+    assert blocks[0][0] == 0 and blocks[-1][1] == config.tokens
+    assert all(end == start for (_, end), (start, _) in zip(blocks, blocks[1:]))
+    assert all(start < end for start, end in blocks) and len(blocks) <= count
+    assert all(start % align == 0 for start, _ in blocks)
+
+
+def test_the_measured_geometry_takes_three_aligned_blocks():
+    config = parse_config(copy.deepcopy(REFERENCE_CONFIG))
+    assert config.attention_blocks(3, 256) == [(0, 2816), (2816, 5632), (5632, 8298)]
+
+
 def test_bf16_rounding_is_round_to_nearest_even():
     values = np.array([1.0, 1.0 + 2**-8, 1.0 + 3 * 2**-8, -2.5, 0.0], dtype=np.float32)
     assert bf16_bits_to_fp32(fp32_to_bf16_bits(values)).tolist() == [
