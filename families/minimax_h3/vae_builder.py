@@ -75,7 +75,7 @@ def checkpoint_keys() -> tuple[str, ...]:
 
 def _heads(network, tensor):
     reshape = network.add_shuffle(tensor)
-    reshape.reshape_dims = (BATCH, SEQUENCE, HEADS, HEAD_DIM)
+    reshape.reshape_dims = (tensor.shape[0], SEQUENCE, HEADS, HEAD_DIM)
     reshape.second_transpose = trt.Permutation([0, 2, 1, 3])
     return reshape.get_output(0)
 
@@ -83,22 +83,22 @@ def _heads(network, tensor):
 def _rows(network, tensor):
     reshape = network.add_shuffle(tensor)
     reshape.first_transpose = trt.Permutation([0, 2, 1, 3])
-    reshape.reshape_dims = (BATCH, SEQUENCE, DIM)
+    reshape.reshape_dims = (tensor.shape[0], SEQUENCE, DIM)
     return reshape.get_output(0)
 
 
 def _per_head_norm(network, tensor):
     reshape = network.add_shuffle(tensor)
-    reshape.reshape_dims = (BATCH, SEQUENCE, HEADS, HEAD_DIM)
+    reshape.reshape_dims = (tensor.shape[0], SEQUENCE, HEADS, HEAD_DIM)
     normalized = op.rms_norm(
         network, reshape.get_output(0), np.ones(HEAD_DIM, np.float32), HEAD_DIM, NORM_EPS
     )
     flatten = network.add_shuffle(normalized)
-    flatten.reshape_dims = (BATCH, SEQUENCE, DIM)
+    flatten.reshape_dims = (tensor.shape[0], SEQUENCE, DIM)
     return flatten.get_output(0)
 
 
-def _rope_cache(network):
+def _rope_cache(network, batch_size=BATCH):
     axes = [
         2.0 * (np.arange(size, dtype=np.float32) + 0.5) / size - 1.0
         for size in (FRAMES, HEIGHT, WIDTH)
@@ -113,11 +113,11 @@ def _rope_cache(network):
     )
     cos = np.broadcast_to(
         np.cos(frequency).reshape(1, SEQUENCE, ROTARY_DIM // 2),
-        (BATCH, SEQUENCE, ROTARY_DIM // 2),
+        (batch_size, SEQUENCE, ROTARY_DIM // 2),
     ).copy()
     sin = np.broadcast_to(
         np.sin(frequency).reshape(1, SEQUENCE, ROTARY_DIM // 2),
-        (BATCH, SEQUENCE, ROTARY_DIM // 2),
+        (batch_size, SEQUENCE, ROTARY_DIM // 2),
     ).copy()
     cos = op.constant(network, cos)
     sin = op.constant(network, sin)
@@ -139,11 +139,12 @@ def _fused_qkv(network, hidden, weights, prefix: str):
         np.concatenate([weights[f"{prefix}.to_{name}.weight"] for name in ("q", "k", "v")], axis=0),
         np.concatenate([weights[f"{prefix}.to_{name}.bias"] for name in ("q", "k", "v")], axis=0),
         compute_dtype=trt.float16,
+        accumulation_dtype=trt.float32,
     )
     return tuple(
-        network.add_slice(packed, (0, 0, part * DIM), (BATCH, SEQUENCE, DIM), (1, 1, 1)).get_output(
-            0
-        )
+        network.add_slice(
+            packed, (0, 0, part * DIM), (hidden.shape[0], SEQUENCE, DIM), (1, 1, 1)
+        ).get_output(0)
         for part in range(3)
     )
 
@@ -155,12 +156,13 @@ def _swiglu(network, hidden, weights, prefix: str):
         weights[f"{prefix}.net.0.proj.weight"],
         weights[f"{prefix}.net.0.proj.bias"],
         compute_dtype=trt.float16,
+        accumulation_dtype=trt.float32,
     )
     value = network.add_slice(
-        projected, (0, 0, 0), (BATCH, SEQUENCE, FFN_DIM), (1, 1, 1)
+        projected, (0, 0, 0), (hidden.shape[0], SEQUENCE, FFN_DIM), (1, 1, 1)
     ).get_output(0)
     gate = network.add_slice(
-        projected, (0, 0, FFN_DIM), (BATCH, SEQUENCE, FFN_DIM), (1, 1, 1)
+        projected, (0, 0, FFN_DIM), (hidden.shape[0], SEQUENCE, FFN_DIM), (1, 1, 1)
     ).get_output(0)
     gate = op.silu(network, gate)
     hidden = network.add_elementwise(value, gate, trt.ElementWiseOperation.PROD).get_output(0)
@@ -170,7 +172,58 @@ def _swiglu(network, hidden, weights, prefix: str):
         weights[f"{prefix}.net.2.weight"],
         weights[f"{prefix}.net.2.bias"],
         compute_dtype=trt.float16,
+        accumulation_dtype=trt.float32,
     )
+
+
+def _post_quant_conv(network, latent, weights):
+    """Preserve half operands, float accumulation and two half roundings.
+
+    The original cuDNN path computes half operands in float, returns a half
+    convolution, then adds the half bias separately. Explicitly widen only
+    the already-half input/kernel for that computation and round before the
+    bias. This is not a full-FP32 checkpoint convolution or a blanket decoder
+    precision change. TensorRT owns all lowering and kernel selection.
+    """
+    kernel = np.asarray(weights["post_quant_conv.weight"])
+    bias = np.asarray(weights["post_quant_conv.bias"])
+    if (
+        kernel.shape != (CHANNELS, CHANNELS, 1, 1, 1)
+        or bias.shape != (CHANNELS,)
+        or kernel.dtype != np.float32
+        or bias.dtype != np.float32
+        or not np.isfinite(kernel).all()
+        or not np.isfinite(bias).all()
+    ):
+        raise ValueError("MiniMax-H3 post_quant_conv requires its original FP32 Conv3d parameters")
+    kernel = np.ascontiguousarray(kernel, dtype=np.float16)
+    bias = np.ascontiguousarray(bias, dtype=np.float16)
+    if not np.isfinite(kernel).all() or not np.isfinite(bias).all():
+        raise ValueError("MiniMax-H3 post_quant_conv parameters overflow FP16 autocast")
+    value = op.cast(network, latent, trt.float16)
+    value = op.cast(network, value, trt.float32)
+    kernel = kernel.astype(np.float32)
+    # An empty NumPy array can have a non-null pointer, which TensorRT rejects
+    # for count zero. Its native empty Weights object has the required null pointer.
+    no_bias = trt.Weights(trt.float32)
+    convolution = network.add_convolution_nd(value, CHANNELS, (1, 1, 1), kernel, no_bias)
+    if convolution is None:
+        raise RuntimeError("TensorRT rejected MiniMax-H3 post_quant_conv")
+    convolution.name = "post_quant_conv"
+    convolution.stride_nd = (1, 1, 1)
+    convolution.padding_nd = (0, 0, 0)
+    # Retain borrowed convolution weights before any subsequent graph call.
+    op._WEIGHT_BUFFER_KEEPALIVE.setdefault(id(network), []).append(kernel)
+    value = op.cast(network, convolution.get_output(0), trt.float16)
+    value = op.cast(network, value, trt.float32)
+    bias = op.constant(network, bias.astype(np.float32).reshape(1, CHANNELS, 1, 1, 1))
+    value = network.add_elementwise(value, bias, trt.ElementWiseOperation.SUM).get_output(0)
+    value = op.cast(network, value, trt.float16)
+    rows = network.add_shuffle(value)
+    rows.first_transpose = trt.Permutation([0, 2, 3, 4, 1])
+    rows.reshape_dims = (latent.shape[0], TOKENS, CHANNELS)
+    result = rows.get_output(0)
+    return result
 
 
 def build_vae_tile_decoder_engine(
@@ -179,7 +232,16 @@ def build_vae_tile_decoder_engine(
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
+    batch_size: int = BATCH,
 ) -> bytes:
+    # Static batch changes scheduling/storage only. Each tile's attention and
+    # normalization remain independent; no pixel or latent is resized.
+    if (
+        not isinstance(batch_size, int)
+        or isinstance(batch_size, bool)
+        or batch_size not in (1, BATCH)
+    ):
+        raise ValueError("MiniMax-H3 VAE tile batch_size must be 1 or 28")
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -191,37 +253,38 @@ def build_vae_tile_decoder_engine(
         workspace_bytes,
         default_bytes=VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES,
     )
+    # Preserve the upstream FP32 normalization/residual boundaries; TF32 is
+    # not part of the original decoder's FP16 autocast computation contract.
+    config.clear_flag(trt.BuilderFlag.TF32)
     latent = network.add_input(
-        "latent_tiles", trt.float32, (BATCH, CHANNELS, FRAMES, HEIGHT, WIDTH)
+        "latent_tiles", trt.float32, (batch_size, CHANNELS, FRAMES, HEIGHT, WIDTH)
     )
-    rows = network.add_shuffle(latent)
-    rows.first_transpose = trt.Permutation([0, 2, 3, 4, 1])
-    rows.reshape_dims = (BATCH, TOKENS, CHANNELS)
-    post_weight = weights["post_quant_conv.weight"].reshape(CHANNELS, CHANNELS)
-    hidden = op.linear(
-        network,
-        rows.get_output(0),
-        post_weight,
-        weights["post_quant_conv.bias"],
-        compute_dtype=trt.float16,
-    )
+    hidden = _post_quant_conv(network, latent, weights)
+    # Upstream permutes channel-first Conv3d output to noncontiguous patch
+    # rows. ATen linear therefore uses matmul followed by a separate bias
+    # addition, unlike the contiguous block projections' fused bias epilogue.
     hidden = op.linear(
         network,
         hidden,
         weights["decoder.proj_in.weight"],
         weights["decoder.proj_in.bias"],
         compute_dtype=trt.float16,
+        accumulation_dtype=trt.float32,
+        round_before_bias=True,
     )
-    hidden = op.cast(network, hidden, trt.float16)
+    # Upstream autocasts proj_in, not the learned FP32 register parameter.
+    # torch.cat promotes the complete initial residual sequence to FP32; an
+    # FP16 concatenation loses register bits and changes the first block norm.
+    hidden = op.cast(network, hidden, trt.float32)
     registers = np.broadcast_to(
-        weights["decoder.register_tokens"], (BATCH, REGISTER_TOKENS, DIM)
+        weights["decoder.register_tokens"], (batch_size, REGISTER_TOKENS, DIM)
     ).copy()
-    registers = op.cast(network, op.weight_constant(network, registers), trt.float16)
-    cls = op.cast(network, op.constant(network, np.zeros((BATCH, 1, DIM), np.float32)), trt.float16)
+    registers = op.cast(network, op.weight_constant(network, registers), trt.float32)
+    cls = op.constant(network, np.zeros((batch_size, 1, DIM), np.float32))
     packed = network.add_concatenation([hidden, registers, cls])
     packed.axis = 1
     hidden = packed.get_output(0)
-    cos, sin = _rope_cache(network)
+    cos, sin = _rope_cache(network, batch_size)
 
     for index in range(LAYERS):
         prefix = f"decoder.transformer_blocks.{index}"
@@ -252,6 +315,7 @@ def build_vae_tile_decoder_engine(
             weights[f"{prefix}.attn.to_out.0.weight"],
             weights[f"{prefix}.attn.to_out.0.bias"],
             compute_dtype=trt.float16,
+            accumulation_dtype=trt.float32,
         )
         update = op.cast(network, update, trt.float32)
         scale1 = op.weight_constant(network, weights[f"{prefix}.scale1"].reshape(1, 1, DIM))
@@ -285,15 +349,16 @@ def build_vae_tile_decoder_engine(
         weights["decoder.proj_out.weight"],
         weights["decoder.proj_out.bias"],
         compute_dtype=trt.float16,
+        accumulation_dtype=trt.float32,
     )
     pixels = network.add_slice(
-        pixels, (0, 0, 0), (BATCH, TOKENS, OUT_CHANNELS * PATCH_T * PATCH * PATCH), (1, 1, 1)
+        pixels, (0, 0, 0), (batch_size, TOKENS, OUT_CHANNELS * PATCH_T * PATCH * PATCH), (1, 1, 1)
     ).get_output(0)
     output = network.add_shuffle(pixels)
-    output.reshape_dims = (BATCH, FRAMES, HEIGHT, WIDTH, OUT_CHANNELS, PATCH_T, PATCH, PATCH)
+    output.reshape_dims = (batch_size, FRAMES, HEIGHT, WIDTH, OUT_CHANNELS, PATCH_T, PATCH, PATCH)
     output.second_transpose = trt.Permutation([0, 4, 1, 5, 2, 6, 3, 7])
     final = network.add_shuffle(output.get_output(0))
-    final.reshape_dims = (BATCH, OUT_CHANNELS, FRAMES * PATCH_T, HEIGHT * PATCH, WIDTH * PATCH)
+    final.reshape_dims = (batch_size, OUT_CHANNELS, FRAMES * PATCH_T, HEIGHT * PATCH, WIDTH * PATCH)
     # Keep the decoder math in FP16 and expose FP32 for the runtime's tile
     # assembly, ImageNet denormalization, and clamp. The resulting blend
     # delta against autocast assembly is covered by the decoded-video gate.
@@ -302,7 +367,7 @@ def build_vae_tile_decoder_engine(
     network.mark_output(result)
     op.validate_native_network(network, expected_attentions=LAYERS, label="VAE tile decoder")
     print(
-        f"[minimax-h3] building native VAE tile decoder: batch={BATCH}, "
+        f"[minimax-h3] building native VAE tile decoder: batch={batch_size}, "
         f"sequence={SEQUENCE}, layers={LAYERS}",
         file=sys.stderr,
     )

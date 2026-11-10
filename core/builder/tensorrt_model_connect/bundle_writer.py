@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -40,8 +41,57 @@ def _validate_nonempty_string(field: str, value: object) -> str:
     return value
 
 
+def _write_all(output: BinaryIO, data) -> int:
+    value = memoryview(data).cast("B")
+    size = len(value)
+    while value:
+        written = output.write(value[: 1 << 20])
+        if not written:
+            raise OSError("bundle write made no progress")
+        value = value[written:]
+    return size
+
+
+class _AppendSection(io.RawIOBase):
+    """One forward-only view; closing it never closes the shared spool."""
+
+    def __init__(self, output: BinaryIO, start: int, data_start: int) -> None:
+        self._output = output
+        self._start = start
+        self._data_start = data_start
+
+    def writable(self) -> bool:
+        return True
+
+    def tell(self) -> int:
+        if self.closed:
+            raise ValueError("section is closed")
+        return self._output.tell() - self._start
+
+    def write(self, data) -> int:
+        if self.closed:
+            raise ValueError("section is closed")
+        value = memoryview(data).cast("B")
+        size = len(value)
+        offset = self._output.tell() - self._data_start
+        if size > _MAX_UINT64 - offset:
+            raise OverflowError("bundle section table exceeds uint64 range")
+        return _write_all(self._output, value)
+
+    def flush(self) -> None:
+        if self.closed:
+            raise ValueError("section is closed")
+        if not self._output.closed:
+            self._output.flush()
+
+
 class BundleWriter:
-    """Stage named sections and atomically publish one bundle."""
+    """Stage named sections and atomically publish one format-v1 bundle.
+
+    The default uses separate section files. ``enable_direct_staging`` opts
+    into one append-only spool with a bounded, whitespace-padded JSON header.
+    Both paths preserve section payloads and the same atomic publication API.
+    """
 
     def __init__(self, destination: str | Path) -> None:
         self._destination = Path(destination)
@@ -58,6 +108,52 @@ class BundleWriter:
         self._finished = False
         self._aborted = False
         self._build_request: Any = None
+        self._header_reserve_bytes = 0
+        self._direct_path: Path | None = None
+        self._direct_output: BinaryIO | None = None
+        self._direct_sections: dict[str, dict[str, int]] = {}
+
+    def enable_direct_staging(self, *, header_reserve_bytes: int = 64 * 1024) -> None:
+        """Write each section once, without a second full-bundle disk copy.
+
+        Opt in before opening any section. This mode permits only one open
+        section at a time, with forward writes and section-relative ``tell``;
+        seeking, reading and exposing the spool's descriptor are unsupported.
+        The reserved header remains within format v1's existing 100-MiB cap.
+        """
+
+        self._ensure_writable()
+        if self._section_names or self._header_reserve_bytes:
+            raise RuntimeError("direct staging must be selected once before any section")
+        if (
+            type(header_reserve_bytes) is not int
+            or not 0 < header_reserve_bytes <= _MAX_HEADER_SIZE
+        ):
+            raise ValueError("header reserve must be an integer within the 100 MiB limit")
+        self._header_reserve_bytes = header_reserve_bytes
+
+    def _ensure_direct_output(self) -> BinaryIO:
+        if self._direct_output is None:
+            descriptor, name = tempfile.mkstemp(
+                prefix=f".{self._destination.name}.",
+                suffix=".tmp",
+                dir=self._destination.parent,
+            )
+            self._direct_path = Path(name)
+            self._direct_output = os.fdopen(descriptor, "w+b", buffering=0)
+            try:
+                _write_all(self._direct_output, BUNDLE_MAGIC)
+                _write_all(self._direct_output, struct.pack("<Q", self._header_reserve_bytes))
+                remaining = self._header_reserve_bytes
+                while remaining:
+                    size = min(remaining, 1 << 20)
+                    _write_all(self._direct_output, b" " * size)
+                    remaining -= size
+            except BaseException:
+                self._failed_section = True
+                self._cleanup_staging()
+                raise
+        return self._direct_output
 
     def _ensure_writable(self) -> None:
         if self._finished:
@@ -75,6 +171,12 @@ class BundleWriter:
         return self._staging_dir
 
     def _cleanup_staging(self) -> None:
+        if self._direct_output is not None:
+            self._direct_output.close()
+            self._direct_output = None
+        if self._direct_path is not None:
+            self._direct_path.unlink(missing_ok=True)
+            self._direct_path = None
         if self._staging_dir is not None:
             shutil.rmtree(self._staging_dir, ignore_errors=True)
             self._staging_dir = None
@@ -121,6 +223,10 @@ class BundleWriter:
         self._ensure_writable()
         if name in self._section_names:
             raise ValueError(f"duplicate bundle section name: {name!r}")
+        if self._header_reserve_bytes:
+            with self._append_section(name) as section:
+                yield section
+            return
 
         section_path = self._ensure_staging_dir() / f"section-{len(self._sections)}"
         self._section_names.add(name)
@@ -129,6 +235,28 @@ class BundleWriter:
         try:
             with section_path.open("xb") as section:
                 yield section
+        except BaseException:
+            self._failed_section = True
+            raise
+        finally:
+            self._open_sections -= 1
+
+    @contextmanager
+    def _append_section(self, name: str) -> Iterator[BinaryIO]:
+        if self._open_sections:
+            raise RuntimeError("direct staging permits only one open section")
+        output = self._ensure_direct_output()
+        start = output.tell()
+        data_start = len(BUNDLE_MAGIC) + 8 + self._header_reserve_bytes
+        self._section_names.add(name)
+        self._open_sections += 1
+        try:
+            with _AppendSection(output, start, data_start) as section:
+                yield section
+            self._direct_sections[name] = {
+                "offset": start - data_start,
+                "length": output.tell() - start,
+            }
         except BaseException:
             self._failed_section = True
             raise
@@ -167,7 +295,7 @@ class BundleWriter:
                 )
             self._build_request = None
 
-        section_table: dict[str, dict[str, int]] = {}
+        section_table: dict[str, dict[str, int]] = dict(self._direct_sections)
         offset = 0
         for name, path in self._sections:
             length = path.stat().st_size
@@ -180,6 +308,24 @@ class BundleWriter:
         header_bytes = json.dumps(header, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(header_bytes) > _MAX_HEADER_SIZE:
             raise ValueError("bundle header exceeds the 100 MiB runtime limit")
+        if self._header_reserve_bytes:
+            if len(header_bytes) > self._header_reserve_bytes:
+                raise ValueError("bundle header exceeds its reserved header capacity")
+            output = self._ensure_direct_output()
+            try:
+                output.seek(len(BUNDLE_MAGIC) + 8)
+                _write_all(output, header_bytes)
+                output.flush()
+                output.close()
+                os.replace(self._direct_path, self._destination)
+            except BaseException:
+                self._failed_section = True
+                self._cleanup_staging()
+                raise
+            self._direct_path = None
+            self._direct_output = None
+            self._finished = True
+            return
 
         temporary_path: Path | None = None
         try:
