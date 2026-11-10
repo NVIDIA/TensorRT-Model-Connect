@@ -422,6 +422,11 @@ A suite with media and neither `media_root` nor `hf_datasets_cache` configured i
   reaches the serving mechanics through `host`), named by `reference.adapter`.
 - Model needing a differently built bundle: `candidate.build` (or `candidate.model_directory`) in
   `config/models/<profile>.yaml`; the report names the bundle it qualified.
+- Model whose remote-code tokenizer counts differently from its bundle's tokenizer: `candidate.tokenizer_json`
+  (`{repo, revision}` of the `tokenizer.json` the bundle carries) in `config/models/<profile>.yaml`. The problem
+  selection, the fit helpers and AIPerf then count with it, loaded as a plain fast tokenizer with the
+  checkpoint's special tokens and chat template (InternLM2: its remote-code tokenizer splits text into characters
+  on transformers 5.x).
 - New machine: a new file under `config/environments/` (paths, Python interpreters, ports, lock, model list,
   retention); Docker or bare metal only differ in these paths. A run's own inputs (its ledger and multi-host
   assignment) stay with that run's results and are passed by path (`run-all --ledger`, `--assignment`).

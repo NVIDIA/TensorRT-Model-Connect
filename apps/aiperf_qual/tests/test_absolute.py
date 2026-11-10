@@ -601,6 +601,42 @@ def test_an_adapter_checkpoint_without_a_tokenizer_uses_the_base_models(monkeypa
     assert absolute.tokenizer_source({"candidate": {"checkpoint": "org/adapter"}, "reference": {}}) == ("org/adapter", None)
 
 
+def test_a_profile_tokenizer_json_is_loaded_without_the_checkpoints_remote_code(monkeypatch, tmp_path):
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    (hub / "tokenizer.json").write_text('{"model": "bpe"}')
+    (hub / "tokenizer_config.json").write_text(json.dumps({
+        "auto_map": {"AutoTokenizer": ["tokenization_x.XTokenizer", None]}, "tokenizer_class": "XTokenizer",
+        "bos_token": "<s>", "chat_template": "{{ messages }}"}))
+    downloads = []
+
+    def download(repo, filename, revision=None):
+        downloads.append((repo, filename, revision))
+        return str(hub / filename)
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", download)
+    monkeypatch.setattr("huggingface_hub.constants.HF_HOME", str(tmp_path / "hf"))
+    absolute._tokenizer_json_directory.cache_clear()
+    model = {"candidate": {"checkpoint": "org/remote", "revision": "c1",
+                           "tokenizer_json": {"repo": "org/files", "revision": "t1"}},
+             "reference": {"trust_remote_code": True}}
+
+    name, revision = absolute.tokenizer_source(model)
+
+    directory = Path(name)
+    assert revision is None and directory.parent == tmp_path / "hf" / "trtmc-aiperf-tokenizers"
+    assert directory.stat().st_mode & 0o777 == 0o700  # it is loaded with trust_remote_code: private to the user
+    assert [path.name for path in directory.parent.iterdir()] == [directory.name]  # no staging copy left
+    assert sorted(downloads) == [("org/files", "tokenizer.json", "t1"), ("org/remote", "tokenizer_config.json", "c1")]
+    assert (directory / "tokenizer.json").read_text() == '{"model": "bpe"}'
+    # The checkpoint's special tokens and chat template stay; its remote-code class does not.
+    assert json.loads((directory / "tokenizer_config.json").read_text()) == {
+        "tokenizer_class": "PreTrainedTokenizerFast", "bos_token": "<s>", "chat_template": "{{ messages }}"}
+    assert absolute.tokenizer_source(model) == (name, None)
+    absolute._tokenizer_json_directory.cache_clear()
+    assert absolute.tokenizer_source(model) == (name, None) and len(downloads) == 2  # reused, not rewritten
+
+
 def test_an_empty_answer_is_a_wrong_answer_not_a_failed_request():
     empty = {"status": 200, "error": {"type": "InvalidInferenceResultError", "message": "no content"}}
     assert not absolute.unanswered(empty)  # AIPerf grades it (passed False)

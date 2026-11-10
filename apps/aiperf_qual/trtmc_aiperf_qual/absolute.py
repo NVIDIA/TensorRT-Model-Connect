@@ -20,9 +20,12 @@ is judged on the per-problem seed means.
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import re
+import shutil
 import statistics
+import tempfile
 import threading
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -65,10 +68,47 @@ def _has_tokenizer(name: str, revision: str | None, trust_remote_code: bool) -> 
     return True
 
 
+@functools.lru_cache(maxsize=None)
+def _tokenizer_json_directory(checkpoint: str, revision: str | None, repo: str, json_revision: str) -> str:
+    """A local tokenizer directory: ``repo``'s tokenizer.json as a plain fast tokenizer, with the checkpoint's
+    tokenizer settings (special tokens, chat template) but not its remote-code tokenizer class.
+
+    The directory lives in the user's Hugging Face home, not a shared temporary directory, because it is loaded
+    with the profile's trust_remote_code: it is written once into a private (0700) staging directory and renamed
+    into place, so every process of the run (the plan, both sides' AIPerf) reads the same complete files."""
+    from huggingface_hub import constants, hf_hub_download
+
+    key = hashlib.sha256(f"{checkpoint}@{revision}|{repo}@{json_revision}".encode()).hexdigest()[:16]
+    root = Path(constants.HF_HOME) / "trtmc-aiperf-tokenizers"
+    directory = root / key
+    if directory.is_dir():
+        return str(directory)
+    tokenizer_file = Path(hf_hub_download(repo, "tokenizer.json", revision=json_revision))
+    settings = json.loads(Path(hf_hub_download(checkpoint, "tokenizer_config.json", revision=revision)).read_text())
+    settings.pop("auto_map", None)
+    settings["tokenizer_class"] = "PreTrainedTokenizerFast"
+    root.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(dir=root, prefix=f".{key}-"))
+    shutil.copyfile(tokenizer_file, staging / "tokenizer.json")
+    (staging / "tokenizer_config.json").write_text(json.dumps(settings, indent=1, sort_keys=True))
+    try:
+        staging.rename(directory)
+    except OSError:  # another process of the run renamed its identical copy first
+        shutil.rmtree(staging)
+    return str(directory)
+
+
 def tokenizer_source(model: Mapping[str, Any]) -> tuple[str, str | None]:
     """The checkpoint whose tokenizer counts and formats the prompts: the candidate's, unless it carries
-    none (an adapter on a base model), then the native reference model's (that base model)."""
+    none (an adapter on a base model), then the native reference model's (that base model).
+
+    A profile's ``candidate.tokenizer_json`` (``{repo, revision}``) names the tokenizer.json the bundle
+    carries instead, for a checkpoint whose remote-code tokenizer counts differently (InternLM2 on
+    transformers 5.x splits text into characters): the source is then a local directory that loads it."""
     candidate = (str(model["candidate"]["checkpoint"]), model["candidate"].get("revision") or None)
+    json_source = model["candidate"].get("tokenizer_json")
+    if json_source:
+        return _tokenizer_json_directory(*candidate, str(json_source["repo"]), str(json_source["revision"])), None
     reference = model["reference"]
     if reference.get("model") and not _has_tokenizer(*candidate, bool(reference.get("trust_remote_code"))):
         return str(reference["model"]), reference.get("revision") or None

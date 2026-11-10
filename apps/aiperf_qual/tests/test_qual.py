@@ -1051,3 +1051,15 @@ def test_lance_qualification_has_a_native_path_and_sizes_the_multimodal_benchmar
     assert (repository / model["reference"]["adapter"]).is_file()
     assert model["candidate"]["benchmark_sequence_length"]["extra_tokens"] == 288
     assert model["candidate"]["tokenizer_subfolder"] == "Lance_3B"
+
+
+def test_internlm2_counts_prompts_with_the_bundles_tokenizer_json():
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.models import resolve_model
+
+    repository = Path(__file__).resolve().parents[3]
+    model = resolve_model("internlm2-1.8b", Environment({"repo": str(repository)}))
+    assert model["reference"]["trust_remote_code"]
+    # The repository families/internlm/tokenizer_json.py builds the bundle's tokenizer from.
+    assert model["candidate"]["tokenizer_json"] == {
+        "repo": "internlm/internlm2-step-prover", "revision": "9e24972976836edf59be9eb14050437c60f50a6c"}
