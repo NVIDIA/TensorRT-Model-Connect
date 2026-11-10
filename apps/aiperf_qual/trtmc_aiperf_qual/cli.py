@@ -315,6 +315,9 @@ def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: 
                     elif item["gate"] != judged:  # a corpus bootstrap needs the outputs: rerun the model
                         item["metrics"]["test"] = {"outcome": None}
                     item["status"], item["reasons"] = absolute.status(item)
+            elif (item.get("source") == "task" and (item.get("metrics") or {}).get("test")
+                  and item.get("status") != "error"):  # a task check's test (the TTS ASR round trip)
+                item["status"], item["reasons"] = absolute.status(item)
         result["accuracy"] = [item for item in result.get("accuracy", []) if item.get("source") != "missing"]
         if model.get("accuracy_source") == "none":  # re-derived from today's output checks
             result["accuracy"] = [item for item in result["accuracy"] if item.get("suite") != CONVERSION_PARITY]
