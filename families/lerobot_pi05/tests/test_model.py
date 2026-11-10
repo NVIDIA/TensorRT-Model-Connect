@@ -338,7 +338,8 @@ def test_build_writes_the_bundle_contract(tmp_path, stubbed_build) -> None:
         ({"dynamic_kv_cache": True}, NotImplementedError, "does not support dynamic_kv_cache"),
         ({"video_num_frames": 4}, NotImplementedError, "video_num_frames"),
         ({"mtp_seq_len": 2}, NotImplementedError, "MTP"),
-        ({"quantization": "fp8"}, NotImplementedError, "quantization"),
+        ({"quantization": "nvfp4"}, NotImplementedError, "quantization"),
+        ({"quantization": "fp8", "precision": "fp32"}, NotImplementedError, "needs precision bf16"),
         ({"fp32_layers": (3,)}, NotImplementedError, "mixed-precision"),
         ({"max_sequence_length": 100}, NotImplementedError, "prompt length"),
         ({"image_height": 224}, NotImplementedError, "height"),
@@ -351,6 +352,20 @@ def test_build_rejects_unsupported_requests_before_any_heavy_work(
     model_dir = _model_dir(tmp_path / "ckpt")
     with pytest.raises(error, match=message):
         build(_request(model_dir, **overrides), _Writer())
+    assert stubbed_build == []
+
+
+@pytest.mark.parametrize("marker", ["config", "hf_quant_config.json"])
+def test_build_refuses_a_quantized_checkpoint_before_any_heavy_work(tmp_path, stubbed_build, marker) -> None:
+    model_dir = _model_dir(tmp_path / "ckpt")
+    if marker == "config":
+        config = json.loads((model_dir / "config.json").read_text())
+        config["quantization_config"] = {"quant_method": "modelopt"}
+        (model_dir / "config.json").write_text(json.dumps(config))
+    else:
+        (model_dir / marker).write_text("{}")
+    with pytest.raises(ValueError, match="already quantized"):
+        build(_request(model_dir, quantization="fp8"), _Writer())
     assert stubbed_build == []
 
 
