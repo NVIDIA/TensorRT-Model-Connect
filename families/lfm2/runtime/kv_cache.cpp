@@ -28,6 +28,15 @@ void validate_scalar(ITrtModule& module, const std::string& name) {
     }
 }
 
+// Token-axis inputs are static [1] in single-profile engines and [S] in
+// dual-profile engines, whose token range the plugin checks per profile.
+void validate_token_vector(ITrtModule& module, const std::string& name) {
+    if (!module.has_input(name) || module.tensor_dtype(name) != DType::kInt32 ||
+        module.tensor_shape(name).size() != 1) {
+        throw std::runtime_error("LFM2 native KV input '" + name + "' must be int32 [S]");
+    }
+}
+
 // Returns true when the engine has the optional active-row `key_positions`
 // input, which must then be a rank-1 int32 tensor.
 bool has_key_positions_input(ITrtModule& module, const std::string& name) {
@@ -99,7 +108,7 @@ Lfm2KvCache::Lfm2KvCache(int32_t num_layers, int32_t max_length, int32_t num_kv_
 void Lfm2KvCache::validate_contract(ITrtModule& module) const {
     validate_scalar(module, names_.cache_write_indices);
     validate_scalar(module, names_.key_value_lengths);
-    validate_scalar(module, names_.position_id);
+    validate_token_vector(module, names_.position_id);
     const std::vector<int64_t> expected_shape{1, num_kv_heads_, max_length_, head_dim_};
     for (int32_t layer = 0; layer < num_layers_; ++layer) {
         const auto index = static_cast<std::size_t>(layer);
@@ -161,9 +170,8 @@ void Lfm2KvCache::prepare_step(TensorMap& inputs, int32_t seq_len) {
             Tensor{key_positions_.data(), {active_key_rows(key_value_length_)}, DType::kInt32};
     }
 
-    // LFM2 always uses rotary position embeddings for the dense checkpoints.
-    // The v1 engine is single-token, but keeping the vector-shaped contract
-    // makes the state correct if a family-owned multi-token engine is added.
+    // LFM2 always uses rotary position embeddings for the dense checkpoints;
+    // a prefill chunk carries one position per token.
     positions_.resize(static_cast<std::size_t>(seq_len));
     for (int32_t index = 0; index < seq_len; ++index)
         positions_[static_cast<std::size_t>(index)] = position_ + index;
