@@ -289,17 +289,20 @@ def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: 
                                               not_equivalent=policy.get("not_equivalent"),
                                               candidate_precision=(model.get("reference") or {}).get("perf_precision"))
             result["performance"][index] = {key: item[key] for key in item
-                                               if key in ("reference_mode", "request", "candidate_timing_scope",
-                                                          "reference_timing_scope", "reference_backend")} | verdict
+                                               if key in ("reference_mode", "configured_mode", "qualifying", "request",
+                                                          "candidate_timing_scope", "reference_timing_scope",
+                                                          "reference_backend")} | verdict
         requests = sorted({item.get("request") for item in result.get("performance", []) if item.get("gate", True)}, key=str) or [None]
         if any(item.get("gate", True) for item in result.get("performance", [])):
             from .runner import unavailable_mode
 
-            measured = {(item["reference_mode"], item.get("request")) for item in result["performance"]
-                        if item.get("gate", True)}
+            measured = {(item.get("configured_mode", item["reference_mode"]), item.get("request"))
+                        for item in result["performance"] if item.get("gate", True)}
+            configured = list(policy.get("reference_modes", []))
             result["performance"] += [
-                unavailable_mode(mode, result.get("errors", {}).get(f"reference_perf_{mode}", "not measured"), request)
-                for mode in policy.get("reference_modes", []) for request in requests if (mode, request) not in measured]
+                {**unavailable_mode(mode, result.get("errors", {}).get(f"reference_perf_{mode}", "not measured"),
+                                    request), "qualifying": mode == configured[0]}
+                for mode in configured for request in requests if (mode, request) not in measured]
         for item in result["accuracy"]:
             if item.get("source") == "absolute":  # both sides' scores are kept: re-apply today's gate
                 declared = next((entry for entry in model.get("absolute", []) if entry["suite"] == item["suite"]), {})
@@ -649,7 +652,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             names, _ = machine_list()
             return write_matrix(environment, names, arguments.output)
         if arguments.command == "plan":
-            from .runner import applies, quality_only
+            from .runner import applies, native_modes, quality_only
 
             names, excluded = machine_list()
             for item in excluded:
@@ -666,7 +669,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                                       "perf_request": "quality" if quality_only(model) else
                                                       model["performance"]["suite"]["source"]["kind"],
                                       "bundle": model["candidate"]["bundle"],
-                                      "modes": ["eager"] if quality_only(model) else model["performance"]["reference_modes"]}))
+                                      "modes": native_modes(model["reference"]) if quality_only(model) else
+                                               model["performance"]["reference_modes"]}))
                 except ConfigError as error:
                     print(json.dumps({"profile": name, "error": str(error)}))
             return 0

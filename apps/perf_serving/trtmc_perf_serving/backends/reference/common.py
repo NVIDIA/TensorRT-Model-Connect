@@ -86,15 +86,32 @@ def timed(call: Callable[[], Any]) -> tuple[Any, float]:
 
 
 def maybe_compile(module: torch.nn.Module, spec: ReferenceSpec) -> torch.nn.Module:
-    """torch.compile ``module.forward`` (default mode, dynamic shapes) for compile references."""
+    """torch.compile ``module.forward`` for compile references, with PyTorch's defaults: the default mode, and
+    static shapes until a dimension changes, which then recompiles once as dynamic."""
     if spec.mode == "compile":
-        module.forward = torch.compile(module.forward, dynamic=True)
+        module.forward = torch.compile(module.forward)
     return module
 
 
-def reject_compile(spec: ReferenceSpec, adapter: str) -> None:
-    if spec.mode != "eager":
-        raise BackendError(f"{adapter} reference supports only eager mode")
+def strict_recompiles() -> None:
+    """A compiled function that would recompile past Dynamo's limit raises instead of running eager from then on
+    (Dynamo's default), so a compile reference never answers partly in eager mode."""
+    import torch._dynamo
+
+    config = torch._dynamo.config
+    for name in ("fail_on_recompile_limit_hit", "fail_on_cache_limit_hit"):  # the older name before PyTorch 2.7
+        if hasattr(config, name):
+            setattr(config, name, True)
+            return
+
+
+def compile_counts() -> dict[str, int]:
+    """What torch.compile did in this process so far: the graphs it compiled (recompilations included) and the
+    graph breaks between them."""
+    from torch._dynamo.utils import counters
+
+    return {"compiled_graphs": int(counters["stats"]["unique_graphs"]),
+            "graph_breaks": int(sum(counters["graph_break"].values()))}
 
 
 def required(request: Mapping[str, Any], name: str) -> Any:
@@ -225,12 +242,14 @@ class NativeHost:
     """What this backend hands a family's native pipeline: ``Adapter(spec, host)``. The family file imports
     nothing from this package (a family must not depend on an application); it reaches the backend's
     model-agnostic mechanics through ``host``: the request's fields and its input files, decoded before the timed
-    call (``required``, ``load_image``, ``load_audio``, ``load_bytes``), the timed model call (``timed``), output
-    tensors and files written after it (``tensor_observation``, ``deferred_files``), the result
-    (``invocation``), and the rejection of a request (``raise host.Error(...)``)."""
+    call (``required``, ``load_image``, ``load_audio``, ``load_bytes``), torch.compile of its modules in compile
+    mode (``maybe_compile``), the timed model call (``timed``), output tensors and files written after it
+    (``tensor_observation``, ``deferred_files``), the result (``invocation``), and the rejection of a request
+    (``raise host.Error(...)``)."""
 
     Error = BackendError
     required = staticmethod(required)
+    maybe_compile = staticmethod(maybe_compile)
     timed = staticmethod(timed)
     load_image = staticmethod(load_image)
     load_audio = staticmethod(load_audio)

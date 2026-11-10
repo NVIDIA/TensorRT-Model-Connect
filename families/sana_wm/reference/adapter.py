@@ -35,6 +35,7 @@ class Adapter:
         install_local_stage1_text_encoder(official, model / "stage1_text_encoder")
         self.pipeline = official.SanaWMPipeline(config=config, model_path=model / "dit/sana_wm_1600m_720p.safetensors",
                                                 device=spec.device, refiner=refiner)
+        host.maybe_compile(self.pipeline.model, spec)  # the stage-1 DiT
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         import tempfile

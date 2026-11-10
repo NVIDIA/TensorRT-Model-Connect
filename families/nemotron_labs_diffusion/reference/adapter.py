@@ -24,6 +24,7 @@ class Adapter:
         options = {"trust_remote_code": True, **({"revision": spec.revision} if spec.revision else {})}
         self.tokenizer = AutoTokenizer.from_pretrained(spec.model, **options)
         self.model = AutoModel.from_pretrained(spec.model, torch_dtype=spec.dtype, **options).eval().to(spec.device)
+        host.maybe_compile(self.model.encoder, spec)  # ar_generate calls the backbone directly, not forward
 
     def _input_ids(self, request: Mapping[str, Any]) -> Any:
         prompt = str(self.host.required(request, "prompt"))

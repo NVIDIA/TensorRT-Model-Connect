@@ -50,7 +50,7 @@ def test_native_adapter_returns_complete_public_task_features(monkeypatch, tmp_p
         device="cpu",
     )
     backend = object.__new__(ReferenceBackend)
-    backend._adapter = adapter.Adapter(spec, common.NativeHost())
+    backend._adapter, backend._spec = adapter.Adapter(spec, common.NativeHost()), spec
     path = tmp_path / "input.png"
     Image.new("RGB", (2, 2)).save(path)
     result = backend.invoke({"image_path": str(path)}, tmp_path / "features").observation

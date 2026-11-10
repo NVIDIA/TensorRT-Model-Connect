@@ -15,8 +15,9 @@ import math
 import statistics
 import time
 import traceback
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from . import absolute, aiperf_metrics, compat, edits, execution, geneval, intelligibility, judge, replay_parity, sweep, world_model
 from .aiperf_runner import AiperfRun, run_aiperf
@@ -415,17 +416,19 @@ CONVERSION_PARITY = "conversion-parity"
 
 def conversion_parity(performance: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """A Perf-only model's Acc evidence: on every timed request TRTMC's output passes the
-    Task's output check against the native eager output (text: the first 8 greedy token ids, or the whole
-    text, are equal); a mismatch is a ``fail``. Empty when no eager comparison ran (``missing_results``
+    Task's output check against the qualifying native output (text: the first 8 greedy token ids, or the whole
+    text, are equal); a mismatch is a ``fail``. Empty when no qualifying comparison ran (``missing_results``
     then reports it)."""
     checks = [(item.get("request"), item.get("output_check") or {}) for item in performance
-              if item.get("gate", True) and item.get("reference_mode") == "eager" and "match" in (item.get("output_check") or {})]
+              if judge.qualifying(item) and "match" in (item.get("output_check") or {})]
     if not checks:
         return []
     failures = [{"sample_id": str(request), "explanation": str(check.get("reason"))[:300]}
                 for request, check in checks if not check["match"]]
     count = len(checks)
-    return [{"suite": CONVERSION_PARITY, "source": "parity", "benchmark": "TRTMC vs native eager output on the timed requests",
+    modes = "/".join(sorted({str(item.get("reference_mode")) for item in performance if judge.qualifying(item)}))
+    return [{"suite": CONVERSION_PARITY, "source": "parity",
+             "benchmark": f"TRTMC vs native {modes} output on the timed requests",
              "samples": count, "expected_samples": count, "passed": count - len(failures), "required_passes": count,
              "status": "fail" if failures else "pass", "failures": failures,
              "reasons": [f"{len(failures)} of {count} timed requests differ from the native output"] if failures else []}]
@@ -543,23 +546,63 @@ def timing_precisions(reference: Mapping[str, Any]) -> list[str]:
     return list(dict.fromkeys(value for value in (reference["perf_precision"], reference["precision"]) if value))
 
 
+def native_modes(reference: Mapping[str, Any]) -> list[str]:
+    """The native modes to try, in order: torch.compile (``reference.mode: compile``) and eager in its place
+    when compile fails, or the configured mode alone."""
+    mode = reference.get("mode", "eager")
+    return ["compile", "eager"] if mode == "compile" else [mode]
+
+
+@dataclass(frozen=True)
+class NativeAttempt:
+    precision: str
+    mode: str
+    compile_fallback: str | None = None  # why torch.compile failed at this precision (an eager attempt in its place)
+    precision_fallback: str | None = None  # why the earlier precisions failed
+
+
+def first_native(reference: Mapping[str, Any], attempt: Callable[[NativeAttempt], Any], *,
+                 precisions: Sequence[str] | None = None,
+                 modes: Sequence[str] | None = None) -> tuple[Any, NativeAttempt]:
+    """``attempt``'s result for the first native attempt that succeeds, and that attempt: each precision
+    (``timing_precisions``) in each mode (``native_modes``). The evidence of a failed attempt is superseded,
+    never mixed with the attempt that replaces it; when all fail, the error names every failure."""
+    errors: list[str] = []
+    for precision in precisions if precisions is not None else timing_precisions(reference):
+        earlier, compile_error = "; ".join(errors)[:600] or None, None
+        for mode in modes or native_modes(reference):
+            current = NativeAttempt(precision, mode, compile_error if mode != "compile" else None, earlier)
+            evidence_start = execution.checkpoint()
+            try:
+                return attempt(current), current
+            except Exception as error:  # noqa: BLE001 - the next mode or precision
+                execution.supersede(evidence_start)
+                errors.append(f"{mode} {precision}: {type(error).__name__}: {str(error)[-300:]}")
+                if mode == "compile":
+                    compile_error = errors[-1]
+    raise RuntimeError("; ".join(errors)[:1500])
+
+
 def _reference_perf(environment: Environment, model: Mapping[str, Any], policy: Mapping[str, Any], suites: Sequence[Suite],
                     python: str, phases: _Phases, out: Path) -> dict[str, dict[str, tuple[AiperfRun, dict, dict]]]:
-    """Time the native model per reference mode and timed request, at the first precision it runs at."""
+    """Time the native model per configured reference mode and timed request, at the first precision it runs
+    at. A compile mode that fails is timed in eager mode in its place (unless eager is configured too); the
+    stats record the mode that ran (``mode``) and why compile did not (``compile_fallback``)."""
     results: dict[str, dict[str, tuple[AiperfRun, dict, dict]]] = {}
-    for mode in policy["reference_modes"]:
-        def measure(mode: str = mode) -> None:
-            errors = []
-            for precision in timing_precisions(model["reference"]):
-                try:
-                    results[mode] = _time_reference(environment, model, policy, suites, python, mode, precision, out)
-                    if errors:
-                        for _, stats, _ in results[mode].values():
-                            stats["precision_fallback"] = errors[-1][:300]
-                    return
-                except Exception as error:  # noqa: BLE001 - try the next precision
-                    errors.append(f"{precision}: {type(error).__name__}: {error}")
-            raise RuntimeError("; ".join(errors)[:1500])
+    configured = policy["reference_modes"]
+    for mode in configured:
+        modes = ["compile", "eager"] if mode == "compile" and "eager" not in configured else [mode]
+
+        def measure(mode: str = mode, modes: Sequence[str] = modes) -> None:
+            timed, attempt = first_native(model["reference"], lambda attempt: _time_reference(
+                environment, model, policy, suites, python, attempt.mode, attempt.precision, out,
+                compile_fallback=attempt.compile_fallback), modes=modes)
+            for _, stats, _ in timed.values():
+                if attempt.precision_fallback:
+                    stats["precision_fallback"] = attempt.precision_fallback[:300]
+                if attempt.compile_fallback:
+                    stats["compile_fallback"] = attempt.compile_fallback[:300]
+            results[mode] = timed
         phases.run(f"reference_perf_{mode}", measure, retries=retries(environment))
         if mode in results:
             phases.errors.pop(f"reference_perf_{mode}", None)  # a retry measured it
@@ -567,19 +610,21 @@ def _reference_perf(environment: Environment, model: Mapping[str, Any], policy: 
 
 
 def _time_reference(environment: Environment, model: Mapping[str, Any], policy: Mapping[str, Any], suites: Sequence[Suite],
-                    python: str, mode: str, precision: str,
-                    out: Path) -> dict[str, tuple[AiperfRun, dict[str, Any], dict[str, Any]]]:
+                    python: str, mode: str, precision: str, out: Path,
+                    compile_fallback: str | None = None) -> dict[str, tuple[AiperfRun, dict[str, Any], dict[str, Any]]]:
     tag = f"{mode}-{precision}"
     timed = {}
     with serving(environment, model, "reference", out / f"reference-{tag}", mode=mode, precision=precision,
-                 python=python) as service:
+                 python=python, compile_fallback=compile_fallback) as service:
         for suite in suites:
             probe(service, model["operation"], suite.samples[0]["request"])
             run, stats = _perf_run(environment, service, model, suite, policy["measurement"],
                                    out / f"perf-reference-{tag}-{suite.name}", policy["aggregation"].get(mode, "mean"))
             if stats.get("p50_ms") is None:
                 raise RuntimeError(f"no successful {precision} requests ({suite.name})")
-            stats["precision"] = precision
+            if mode == "compile" and stats.get("incomplete"):  # eager times it in its place
+                raise RuntimeError(f"incomplete under torch.compile ({suite.name}): {stats['incomplete']}")
+            stats["precision"], stats["mode"] = precision, mode
             timed[suite.name] = (run, stats, service["info"])
     return timed
 
@@ -602,9 +647,12 @@ def _candidate(environment: Environment, model: Mapping[str, Any], policy: Mappi
                                    out / f"perf-candidate-{suite.name}", policy["aggregation"].get("candidate", "mean"))
             candidate_output = judge.first_observation(run.raw_records())
             timed = {mode: by_suite[suite.name] for mode, by_suite in reference_perf.items() if suite.name in by_suite}
-            outputs = {mode: judge.first_observation(entry[0].raw_records()) for mode, entry in timed.items()}
+            # Keyed by the mode that ran: a failed compile mode was timed in eager mode in its place.
+            outputs = {entry[1].get("mode", mode): judge.first_observation(entry[0].raw_records())
+                       for mode, entry in timed.items()}
             for mode, (reference_run, reference_stats, info) in timed.items():
-                match, reason = output_check(policy, candidate_output, outputs, mode, sampled)
+                ran = reference_stats.get("mode", mode)
+                match, reason = output_check(policy, candidate_output, outputs, ran, sampled)
                 verdict = judge.judge_performance(stats, reference_stats, margin_percent=float(policy["margin_percent"]),
                                                   max_ci_percent=float(policy["max_ci_percent"]),
                                                   guard_percent=float(policy.get("guard_percent", 0)),
@@ -613,7 +661,8 @@ def _candidate(environment: Environment, model: Mapping[str, Any], policy: Mappi
                                                   candidate_precision=model["reference"].get("perf_precision"))
                 if (model["reference"].get("options") or {}).get("cpu_offload"):
                     verdict["notes"].append("the native pipeline offloads its weights to host memory (larger than the GPU)")
-                performance.append({"reference_mode": mode, "request": suite.name,
+                performance.append({"reference_mode": ran, **({"configured_mode": mode} if ran != mode else {}),
+                                    "qualifying": mode == policy["reference_modes"][0], "request": suite.name,
                                     "candidate_timing_scope": service["info"].get("timing_scope"),
                                     "reference_timing_scope": info.get("timing_scope"),
                                     "reference_backend": info.get("backend"), **verdict})
@@ -722,9 +771,11 @@ def retries(environment: Environment) -> int:
 
 
 def smoke_model(model: Mapping[str, Any]) -> dict[str, Any]:
-    """The model as smoke mode runs it: performance with one request against native eager, no opt-in sweeps."""
+    """The model as smoke mode runs it: performance with one request against the first native mode, no opt-in
+    sweeps."""
     policy = model.get("performance")
-    performance = {**policy, "measurement": dict(SMOKE_MEASUREMENT), "reference_modes": ["eager"]} if policy else {}
+    performance = {**policy, "measurement": dict(SMOKE_MEASUREMENT),
+                   "reference_modes": list(policy.get("reference_modes") or ["eager"])[:1]} if policy else {}
     return {**model, "performance": performance}
 
 
@@ -887,10 +938,11 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
                 phases.run("service_metrics", lambda: service_metrics.update(sweep.run_serial(
                     environment, model, service_config, out, python, timing_precisions(reference)[0])))
     if performance:  # the candidate was measured: record modes whose native reference could not run
-        measured = {(item["reference_mode"], item.get("request")) for item in performance}
-        performance += [unavailable_mode(mode, phases.errors.get(f"reference_perf_{mode}", "not measured"), suite.name)
-                           for mode in policy["reference_modes"] for suite in timed_suites
-                           if (mode, suite.name) not in measured]
+        measured = {(item.get("configured_mode", item["reference_mode"]), item.get("request")) for item in performance}
+        performance += [{**unavailable_mode(mode, phases.errors.get(f"reference_perf_{mode}", "not measured"),
+                                            suite.name), "qualifying": mode == policy["reference_modes"][0]}
+                        for mode in policy["reference_modes"] for suite in timed_suites
+                        if (mode, suite.name) not in measured]
     if model.get("accuracy_source") == "none":
         accuracy.extend(conversion_parity(performance))
     mark_informational(model, accuracy)

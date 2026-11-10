@@ -262,6 +262,8 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         accuracy_source = "missing"
 
     policy = dict(config["performance"])
+    # The fixed request is timed in the native mode the quality runs use, unless the profile names its own.
+    policy.setdefault("reference_modes", [reference.get("mode", "eager")])
     if isinstance(policy["suite"], Mapping) and policy["suite"].get("from_benchmark"):
         # The first problem of one of the model's benchmarks (a catalog testcase that is no workload,
         # for example a 28-value time series against a 512-step model).

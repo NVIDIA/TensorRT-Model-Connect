@@ -29,7 +29,7 @@ from typing import Any, Mapping, Sequence
 from . import bundles, retention
 from .bundles import prefetch
 from .config import Environment
-from .judge import QUALIFYING_MODE
+from .judge import qualifying
 from .models import checkpoints
 from .compat import report as normalized_report
 from .report import acc_value, plain
@@ -379,9 +379,15 @@ def measurement_note(item: Mapping[str, Any]) -> str:
     return "; ".join(notes)
 
 
+def _native(item: Mapping[str, Any]) -> str:
+    """``native``, with the mode that answered (compile or eager) unless the request label already names it."""
+    mode = item.get("reference_mode")
+    return f"native {mode}" if mode and item.get("request") else "native"
+
+
 def _perf_text(profile: str, items: Sequence[Mapping[str, Any]]) -> str:
     return "; ".join(f"{request_label(profile, item)}: TRTMC {ms((item.get('candidate') or {}).get('p50_ms'))} · "
-                     f"native {ms((item.get('reference') or {}).get('p50_ms'))}"
+                     f"{_native(item)} {ms((item.get('reference') or {}).get('p50_ms'))}"
                      + (" per audio second" if (item.get("candidate") or {}).get("unit") else "")
                      + (f" ({note})" if (note := measurement_note(item)) else "") for item in items)
 
@@ -402,7 +408,7 @@ def reported_perf(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     if row.get("performance_source") == "quality":
         return datasets
     return [item for item in row.get("perf", []) if "near-capacity" not in str(item.get("request") or "")
-            and item.get("reference_mode", QUALIFYING_MODE) == QUALIFYING_MODE and item.get("gate", True)]
+            and qualifying(item)]
 
 
 def request_label(profile: str, item: Mapping[str, Any]) -> str:
@@ -524,19 +530,27 @@ REGRESSION_MARGIN_PERCENT = 5.0
 
 def annotate_regressions(rows: Mapping[str, dict[str, Any]], baseline: Mapping[str, Mapping[str, Any]],
                          margin_percent: float = REGRESSION_MARGIN_PERCENT) -> None:
-    """Compare TRTMC p50 per profile and native mode with a baseline run (for example the previous
-    release); slower by more than the margin is noted as a regression (the category is unchanged)."""
+    """Compare TRTMC p50 per profile and timed request with a baseline run (for example the previous
+    release); slower by more than the margin is noted as a regression (the category is unchanged). The native
+    mode is not part of the key: it does not change the TRTMC time, and a baseline may have run another one."""
+    def timed(perf: Sequence[Mapping[str, Any]]) -> dict[str, float]:
+        """TRTMC p50 per timed request (a mode the native side could not run has no TRTMC timing)."""
+        found: dict[str, float] = {}
+        for item in perf:
+            p50 = (item.get("candidate") or {}).get("p50_ms")
+            if p50:
+                found.setdefault(str(item.get("request") or item.get("reference_mode")), p50)
+        return found
+
     for profile, row in rows.items():
-        key = lambda item: f"{item.get('reference_mode')}/{item.get('request') or ''}".rstrip("/")  # noqa: E731
-        previous = {key(item): item for item in (baseline.get(profile) or {}).get("perf", [])}
-        for item in row.get("perf", []):
-            before = (previous.get(key(item)) or {}).get("candidate", {}).get("p50_ms")
-            now = item.get("candidate", {}).get("p50_ms")
-            if before and now:
+        previous = timed((baseline.get(profile) or {}).get("perf", []))
+        for name, now in timed(row.get("perf", [])).items():
+            before = previous.get(name)
+            if before:
                 change = (now / before - 1) * 100
-                row.setdefault("baseline", {})[key(item)] = change
+                row.setdefault("baseline", {})[name] = change
                 if change > margin_percent:
-                    row["notes"] = (f"regression: TRTMC {key(item)} p50 +{change:.1f}% vs baseline; "
+                    row["notes"] = (f"regression: TRTMC {name} p50 +{change:.1f}% vs baseline; "
                                     + row.get("notes", "")).strip("; ")
 
 

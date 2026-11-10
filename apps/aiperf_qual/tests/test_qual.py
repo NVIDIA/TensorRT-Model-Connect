@@ -198,6 +198,37 @@ def test_verdict_categories(accuracy, lights, category):
     assert judge.verdict(result, expected_suites=["s"], expected_modes=1)["category"] == category
 
 
+@pytest.mark.parametrize("performance, perf", [
+    ([{"reference_mode": "compile", "qualifying": True, "light": "green"}], "green"),
+    # eager timed in place of a failed torch.compile decides Perf as the configured mode would have
+    ([{"reference_mode": "eager", "configured_mode": "compile", "qualifying": True, "light": "red"}], "red"),
+    ([{"reference_mode": "eager", "qualifying": True, "light": "green"},
+      {"reference_mode": "compile", "qualifying": False, "light": "red"}], "green"),  # a second mode: reported only
+    ([{"reference_mode": "compile", "qualifying": True, "light": "n/a"}], "error"),
+])
+def test_the_first_configured_native_mode_decides_perf(performance, perf):
+    result = {"accuracy": [{"suite": "s", "status": "pass"}], "performance": performance}
+    assert judge.verdict(result, expected_suites=["s"], expected_modes=1)["perf"] == perf
+
+
+def test_a_profile_pins_its_native_model_to_eager(tmp_path):
+    import shutil
+
+    import yaml
+
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.models import CONFIG_ROOT, resolve_model
+
+    root = tmp_path / "config"
+    shutil.copytree(CONFIG_ROOT, root)
+    override = root / "models" / "gpt2-125m.yaml"
+    config = yaml.safe_load(override.read_text()) or {}
+    config["reference"] = {**(config.get("reference") or {}), "mode": "eager"}
+    override.write_text(yaml.safe_dump(config))
+    gpt2 = resolve_model("gpt2-125m", Environment({"repo": str(REPOSITORY)}), root)
+    assert gpt2["reference"]["mode"] == "eager" and gpt2["performance"]["reference_modes"] == ["eager"]
+
+
 def test_numeric_parity_matches_shapes_exactly_and_vectors_by_cosine():
     from trtmc_aiperf_plugins.accuracy import compare_numeric
 
@@ -239,7 +270,8 @@ def test_models_are_derived_from_the_catalog_and_task_defaults():
     assert [(item["suite"], item["endpoint"]) for item in qwen["absolute"]] == [("mmlu-0shot", "chat")]
     assert qwen["candidate"]["bundle"] == "qwen3-0.6b-fp16/qwen3-0.6b-fp16.bundle" and not qwen["candidate"]["build"]
     assert qwen["performance"]["suite"]["source"] == {"kind": "catalog_testcase", "profile": "qwen3-0.6b-fp16"}
-    assert qwen["performance"]["reference_modes"] == ["eager"] and "service_metrics" not in qwen["performance"]
+    assert qwen["reference"]["mode"] == "compile" and qwen["performance"]["reference_modes"] == ["compile"]
+    assert "service_metrics" not in qwen["performance"]
     small = resolve_model("falcon-rw-1b", environment)  # MMLU is near chance: LAMBADA
     assert [item["suite"] for item in small["absolute"]] == ["lambada"] and small["candidate"]["max_sequence_length"] == 256
     detr = resolve_model("detr-resnet-50", environment)

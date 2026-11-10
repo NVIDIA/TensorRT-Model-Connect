@@ -5,3 +5,6 @@
 # token parity with the native model) is the conversion evidence.
 accuracy_source: none
 accuracy_note: random weights (a test model); no accuracy to measure
+
+reference:
+  mode: eager  # torch.compile: Dynamo cannot trace the MoE experts' torch._grouped_mm

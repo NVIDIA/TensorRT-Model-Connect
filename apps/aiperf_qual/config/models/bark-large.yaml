@@ -7,4 +7,5 @@ performance:
     max_log_spectral_distance: 1000000000.0}
 
 reference:
+  mode: eager  # torch.compile: Bark's three token models share one forward, which recompiles past Dynamo's limit
   requirements: families/bark/requirements.txt  # the family's dependencies, layered on the serving interpreter

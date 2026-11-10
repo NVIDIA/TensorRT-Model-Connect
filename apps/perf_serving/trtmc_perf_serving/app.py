@@ -118,7 +118,7 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
     app = FastAPI(title="TRTMC performance serving")
     lane = Lane(config.max_queue)
     records = Records(config.records)
-    state = {"available": True, "jobs": {}}
+    state = {"available": True, "reason": None, "jobs": {}}
     identity = dict(backend.describe())
     operation = backend.operation
 
@@ -138,6 +138,8 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
             memory: dict[str, float] = {}
 
             def call() -> Invocation:
+                if not state["available"]:  # the backend stopped serving while this call waited in the lane
+                    raise BackendUnavailable(state["reason"] or "backend is no longer available")
                 if config.memory_probe is None:
                     return backend.invoke(resolved, workdir / "output")
                 result, memory["peak_memory_mb"] = config.memory_probe.measure(
@@ -156,8 +158,8 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
                     observation["initial_latents_sha256"] = hashlib.sha256(
                         Path(resolved["initial_latents_path"]).read_bytes()).hexdigest()
             invocation = Invocation(observation, invocation.model_call_ms, invocation.extra)
-        except BackendUnavailable:
-            state["available"] = False
+        except BackendUnavailable as error:
+            state["available"], state["reason"] = False, str(error)
             raise
         finally:
             if not config.keep_artifacts:
@@ -186,7 +188,7 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
         if operation not in operations:
             return _error(404, "route_not_served", f"{route} is not served for operation {operation!r}", request_id)
         if not state["available"]:
-            return _error(503, "backend_unavailable", "backend is no longer available", request_id)
+            return _error(503, "backend_unavailable", f"backend is no longer available: {state['reason']}", request_id)
         try:
             return await handler(request_id)
         except (openai.RequestError, ValueError, json.JSONDecodeError) as error:
@@ -317,8 +319,8 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
 
     @app.get("/health/ready")
     async def ready():
-        if not state["available"]:
-            return JSONResponse({"status": "unavailable"}, status_code=503)
+        if not state["available"]:  # the reason: why the backend stopped serving
+            return JSONResponse({"status": "unavailable", "reason": state["reason"]}, status_code=503)
         return {"status": "ready", "operation": operation}
 
     @app.get("/v1/models")
