@@ -1504,6 +1504,14 @@
         386
       ],
       "decoded": "é"
+    },
+    {
+      "ids": [
+        412,
+        999999,
+        386
+      ],
+      "decoded": "é"
     }
   ],
   "hf_id": "google/siglip2-base-patch16-224",

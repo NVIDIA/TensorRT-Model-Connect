@@ -190,7 +190,7 @@ class BpeTokenizer final : public ITokenizer {
             bytes.clear();
         };
         for (auto id : ids) {
-            if (special_.count(id))
+            if (id < 0 || static_cast<std::size_t>(id) >= id_to_token_.size() || special_.count(id))
                 continue;
             const auto token = token_for_id(id);
             const auto byte = std::find(byte_ids_.begin(), byte_ids_.end(), id);

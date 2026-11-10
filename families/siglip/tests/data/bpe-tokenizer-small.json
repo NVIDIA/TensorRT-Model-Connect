@@ -521,5 +521,14 @@
       "decoded": "\n\t"
     }
   ],
-  "decode_cases": []
+  "decode_cases": [
+    {
+      "ids": [
+        198,
+        999999,
+        172
+      ],
+      "decoded": "é"
+    }
+  ]
 }
