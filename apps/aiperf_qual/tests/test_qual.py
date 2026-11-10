@@ -367,6 +367,27 @@ def test_image_to_boxes_keeps_coco_without_the_threshold_its_tasks_do_not_declar
     assert yolo11["suite_definition"]["request"] == {"score_threshold": 0.25}
 
 
+def test_migrated_text_encoders_keep_their_benchmarks():
+    """text_to_embedding keeps embedding's benchmarks; text_to_token_features keeps encode's on every token."""
+    import yaml
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+
+    tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
+    assert tasks["text_to_embedding"] == tasks["embedding"]
+    assert tasks["text_to_token_features"] == {**tasks["encoding"], "reference": {"options": {"all_tokens": True}}}
+
+
+def test_text_encoders_the_generic_references_cannot_serve_are_excluded_with_a_reason():
+    from trtmc_aiperf_qual.selection import catalog
+
+    excluded = {profile.name: profile.excluded for profile in catalog(REPOSITORY)}
+    assert all(excluded[name] for name in ("gte-base-en-v1_5", "gte-base-en-v1_5-fp16", "gte-base-en-v1_5-fp8",
+                                           "nomic-embed-text-v1_5", "nomic-embed-text-v1_5-fp16",
+                                           "deberta-v3-base", "deberta-v3-base-fp16"))
+    assert not any(excluded[name] for name in ("nemotron-embed-vl-1b-v2", "albert-base-token-features"))
+
+
 def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():
     """A ready profile whose Task has no defaults is a configuration error that reports leave out, so a Task SDK
     rename drops its profiles without a trace: alias the old entry in config/tasks.yaml, or state the gap here."""
@@ -378,9 +399,7 @@ def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():
     not_qualified = {  # Tasks no generic native reference or benchmark serves yet
         "structured_decision": "no generic native adapter for decide",
         "image_text_to_boxes": "no generic native adapter for detect_prompted",
-        "text_to_token_features": "the generic encode reference returns the first token's features only",
         "image_to_token_and_pooled_features": "no image feature benchmark outside the families that state one",
-        "text_to_embedding": "query and document roles; the generic embed reference mean-pools",
         "speech_transcription": "the generic transcribe reference loads Whisper-style speech-seq2seq models only",
     }
     tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
