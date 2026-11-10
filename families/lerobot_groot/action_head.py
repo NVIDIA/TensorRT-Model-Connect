@@ -20,6 +20,7 @@ import tensorrt as trt
 
 from . import graph
 from .checkpoint import category, require
+from .quantization import fp8
 
 VL_WIDTH = 2048
 VL_HEADS = 32
@@ -65,7 +66,7 @@ def _self_attention_block(network, h, weights, p, dtype):
         network, hidden, weights[p + "ff.net.2.weight"], weights[p + "ff.net.2.bias"], dtype=dtype)))
 
 
-def build_condition(network, weights, backbone_features, state, *, embodiment, max_state_dim, dtype):
+def build_condition(network, weights, backbone_features, state, *, embodiment, max_state_dim, dtype, quant=None):
     """Returns ``(vl_embeds[S, 2048] f32, state_features[1, 1536] f32, cross_k, cross_v)``.
 
     ``cross_k``/``cross_v`` are ``[len(CROSS_BLOCKS), S, WIDTH]`` in ``dtype``; ``state`` is the
@@ -85,7 +86,8 @@ def build_condition(network, weights, backbone_features, state, *, embodiment, m
         p = f"{_DIT}transformer_blocks.{index}.attn1."
         require(weights, p + "to_k.weight", (WIDTH, VL_WIDTH))
         for name, out in (("to_k", keys), ("to_v", values)):
-            rows = graph.linear(network, vl, weights[p + name + ".weight"], weights[p + name + ".bias"], dtype=dtype)
+            rows = graph.linear(network, vl, weights[p + name + ".weight"], weights[p + name + ".bias"], dtype=dtype,
+                                fp8=fp8(quant, p + name))
             out.append(graph.shuffle(network, rows, reshape=(1, -1, WIDTH)))
     return vl, state_features, graph.concat(network, keys, 0), graph.concat(network, values, 0)
 
@@ -126,7 +128,7 @@ def _modulate(network, h, temb, weight, bias, eps, *, scale_first, dtype):
 
 
 def build_denoise(network, weights, *, embodiment, action_horizon, max_action_dim, dtype,
-                  x_t, timestep, dt, state_features, cross_k, cross_v, text_bias, image_bias):
+                  x_t, timestep, dt, state_features, cross_k, cross_v, text_bias, image_bias, quant=None):
     """One Euler step: returns ``(x_next, velocity)``, both float32 ``[action_horizon, max_action_dim]``."""
     def encoder(x, name, shape):
         return _category_linear(network, x, weights, f"{_HEAD}action_encoder.{name}.", embodiment, shape, dtype)
@@ -150,7 +152,8 @@ def build_denoise(network, weights, *, embodiment, action_horizon, max_action_di
         p = f"{_DIT}transformer_blocks.{index}."
         norm = _modulate(network, h, temb, weights[p + "norm1.linear.weight"], weights[p + "norm1.linear.bias"], LN_EPS,
                          scale_first=True, dtype=dtype)
-        q = graph.linear(network, norm, weights[p + "attn1.to_q.weight"], weights[p + "attn1.to_q.bias"], dtype=dtype)
+        q = graph.linear(network, norm, weights[p + "attn1.to_q.weight"], weights[p + "attn1.to_q.bias"], dtype=dtype,
+                         fp8=fp8(quant, p + "attn1.to_q"))
         if index in CROSS_BLOCKS:
             slot = CROSS_BLOCKS.index(index)
             k, v = (graph.shuffle(network, network.add_gather(cache, graph.const_int32(network, [slot]), 0).get_output(0),
@@ -158,17 +161,20 @@ def build_denoise(network, weights, *, embodiment, action_horizon, max_action_di
                     for cache in (cross_k, cross_v))
             bias = text_bias if index % 4 == 0 else image_bias
         else:
-            k, v = (graph.linear(network, norm, weights[f"{p}attn1.to_{n}.weight"], weights[f"{p}attn1.to_{n}.bias"], dtype=dtype)
+            k, v = (graph.linear(network, norm, weights[f"{p}attn1.to_{n}.weight"], weights[f"{p}attn1.to_{n}.bias"], dtype=dtype,
+                                 fp8=fp8(quant, f"{p}attn1.to_{n}"))
                     for n in "kv")
             bias = None
         context = graph.attention(network, q, k, v, heads=HEADS, kv_heads=HEADS, head_dim=HEAD_DIM, dtype=dtype, bias=bias)
         h = graph.add(network, h, graph.f32(network, graph.linear(
-            network, context, weights[p + "attn1.to_out.0.weight"], weights[p + "attn1.to_out.0.bias"], dtype=dtype)))
+            network, context, weights[p + "attn1.to_out.0.weight"], weights[p + "attn1.to_out.0.bias"], dtype=dtype,
+            fp8=fp8(quant, p + "attn1.to_out.0"))))
         hidden = graph.gelu_tanh(network, graph.linear(
             network, graph.layer_norm(network, h, LN_EPS), weights[p + "ff.net.0.proj.weight"],
-            weights[p + "ff.net.0.proj.bias"], dtype=dtype))
+            weights[p + "ff.net.0.proj.bias"], dtype=dtype, fp8=fp8(quant, p + "ff.net.0.proj")))
         h = graph.add(network, h, graph.f32(network, graph.linear(
-            network, hidden, weights[p + "ff.net.2.weight"], weights[p + "ff.net.2.bias"], dtype=dtype)))
+            network, hidden, weights[p + "ff.net.2.weight"], weights[p + "ff.net.2.bias"], dtype=dtype,
+            fp8=fp8(quant, p + "ff.net.2"))))
 
     h = _modulate(network, h, temb, weights[_DIT + "proj_out_1.weight"], weights[_DIT + "proj_out_1.bias"], OUT_EPS,
                   scale_first=False, dtype=dtype)

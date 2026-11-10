@@ -8,6 +8,8 @@ cameras and the prompt, the action head's vision-language layers and the state e
 and returns the keys/values every cross-attention block of the DiT reads plus the state
 token; ``denoise.plan`` is one flow-matching step, run ``num_inference_steps`` times by
 the runtime. The prompt length is dynamic, bounded by ``max_instruction_tokens``.
+``quantization="fp8"`` (bf16 builds only) runs the DiT projections as FP8 GEMMs; see
+``quantization.py``.
 """
 
 from __future__ import annotations
@@ -39,8 +41,10 @@ def _dtype(precision: str):
     return trt.bfloat16 if precision == "bf16" else trt.float32
 
 
-def _builder(verbose: bool):
+def _builder(verbose: bool, quant=None):
     import tensorrt as trt
+
+    from .quantization import configure_fp8_build
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -50,6 +54,7 @@ def _builder(verbose: bool):
     # The float32 parts (norms, softmax, rotary angles, the residual stream) must be real
     # float32: TF32 would hide graph error behind a plausible-looking number.
     config.clear_flag(trt.BuilderFlag.TF32)
+    configure_fp8_build(config, quant)
     return builder, network, config
 
 
@@ -77,12 +82,12 @@ def _profile(builder, config, shapes: dict[str, Callable[[int], tuple[int, ...]]
     config.add_optimization_profile(profile)
 
 
-def _build_condition_plan(cfg, weights, *, precision: str, verbose: bool = False) -> bytes:
+def _build_condition_plan(cfg, weights, *, precision: str, verbose: bool = False, quant=None) -> bytes:
     import tensorrt as trt
 
     from . import action_head, backbone, graph, vision
 
-    builder, network, config = _builder(verbose)
+    builder, network, config = _builder(verbose, quant)
     dtype = _dtype(precision)
     grid = cfg.camera_height // vision.PATCH
     patches = len(cfg.cameras) * grid * grid
@@ -100,7 +105,8 @@ def _build_condition_plan(cfg, weights, *, precision: str, verbose: bool = False
         network, weights, token_ids=ids["token_ids"], image_index=ids["image_index"], image_mask=ids["image_mask"],
         position_ids=positions, causal_bias=causal, image_tokens=tokens, deepstack=deepstack, dtype=dtype)
     _, state_features, cross_k, cross_v = action_head.build_condition(
-        network, weights, hidden, state, embodiment=cfg.embodiment_id, max_state_dim=cfg.max_state_dim, dtype=dtype)
+        network, weights, hidden, state, embodiment=cfg.embodiment_id, max_state_dim=cfg.max_state_dim, dtype=dtype,
+        quant=quant)
     graph.mark_output(network, state_features, "state_features")
     graph.mark_output(network, cross_k, "cross_k")
     graph.mark_output(network, cross_v, "cross_v")
@@ -112,12 +118,12 @@ def _build_condition_plan(cfg, weights, *, precision: str, verbose: bool = False
     return _serialize(builder, network, config, "condition")
 
 
-def _build_denoise_plan(cfg, weights, *, precision: str, verbose: bool = False) -> bytes:
+def _build_denoise_plan(cfg, weights, *, precision: str, verbose: bool = False, quant=None) -> bytes:
     import tensorrt as trt
 
     from . import action_head, graph
 
-    builder, network, config = _builder(verbose)
+    builder, network, config = _builder(verbose, quant)
     dtype = _dtype(precision)
     blocks, width = len(action_head.CROSS_BLOCKS), action_head.WIDTH
     x_next, velocity = action_head.build_denoise(
@@ -130,7 +136,7 @@ def _build_denoise_plan(cfg, weights, *, precision: str, verbose: bool = False) 
         cross_k=network.add_input("cross_k", dtype, (blocks, -1, width)),
         cross_v=network.add_input("cross_v", dtype, (blocks, -1, width)),
         text_bias=network.add_input("text_bias", trt.float32, (1, 1, 1, -1)),
-        image_bias=network.add_input("image_bias", trt.float32, (1, 1, 1, -1)))
+        image_bias=network.add_input("image_bias", trt.float32, (1, 1, 1, -1)), quant=quant)
     graph.mark_output(network, x_next, "x_next")
     graph.mark_output(network, velocity, "velocity")
 
@@ -144,6 +150,16 @@ def crop_size(cfg: config_module.GrootConfig) -> int:
     """LeRobot's crop: ``int(size * crop_fraction)`` when the fraction is below one."""
     fraction = cfg.image.crop_fraction
     return max(1, int(cfg.camera_height * fraction)) if 0.0 < fraction < 1.0 else cfg.camera_height
+
+
+def quantization_context(cfg: config_module.GrootConfig, weights, quantization: str, precision: str):
+    """The FP8 context of an ``fp8`` build: the stored activation scales of this checkpoint."""
+    from . import action_head, backbone
+    from .quantization import calibrate_groot
+
+    return calibrate_groot(
+        weights, backbone_layers=backbone.kept_layers(weights), dit_layers=action_head.LAYERS,
+        embodiment_id=cfg.embodiment_id, quantization=quantization, precision=precision)
 
 
 def runtime_json(cfg: config_module.GrootConfig, precision: str) -> dict:
@@ -196,8 +212,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("lerobot_groot does not support video_num_frames")
     if request.mtp_seq_len is not None:
         raise NotImplementedError("lerobot_groot does not support MTP speculative decoding")
-    if request.quantization not in {None, "none"} or request.fp32_layers:
-        raise NotImplementedError("lerobot_groot does not support quantization or mixed-precision layers")
+    quantization = None if request.quantization in {None, "none"} else str(request.quantization).lower()
+    if quantization not in {None, "fp8"}:
+        raise NotImplementedError(f"lerobot_groot supports quantization fp8 or none; got {request.quantization!r}")
+    if quantization == "fp8" and precision != "bf16":
+        raise NotImplementedError(f"lerobot_groot fp8 needs precision bf16, got {precision}")
+    if request.fp32_layers:
+        raise NotImplementedError("lerobot_groot does not support mixed-precision layers")
     if request.max_sequence_length is not None:
         raise NotImplementedError(
             f"lerobot_groot prompt length is bounded by {MAX_INSTRUCTION_TOKENS} instruction tokens")
@@ -205,12 +226,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         if given not in {None, cfg.camera_height}:
             raise NotImplementedError(f"lerobot_groot camera {axis} is fixed at the checkpoint's {cfg.camera_height}")
 
+    if quantization is not None:
+        from .quantization import refuse_quantized_checkpoint
+
+        refuse_quantized_checkpoint(model_dir)
     # The tokenizer first: a missing or wrong file then fails in seconds, not after the weights load.
     vocabulary = load_tokenizer_json(model_dir)
     weights = load_checkpoint(model_dir)
     verbose = bool(request.verbose)
-    condition_plan = _build_condition_plan(cfg, weights, precision=precision, verbose=verbose)
-    denoise_plan = _build_denoise_plan(cfg, weights, precision=precision, verbose=verbose)
+    quant = None if quantization is None else quantization_context(cfg, weights, quantization, precision)
+    condition_plan = _build_condition_plan(cfg, weights, precision=precision, verbose=verbose, quant=quant)
+    denoise_plan = _build_denoise_plan(cfg, weights, precision=precision, verbose=verbose, quant=quant)
 
     writer.set_header(family="lerobot_groot", task=request.task, backend=request.backend)
     writer.add_bytes("condition.plan", condition_plan)
