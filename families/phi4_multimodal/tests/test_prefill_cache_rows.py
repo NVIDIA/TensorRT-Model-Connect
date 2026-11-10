@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The prefill engine attends over the bound cache prefix, not the whole allocation."""
+"""The prefill and decode engines attend over the bound cache prefix, not the whole allocation."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import pytest
 trt = pytest.importorskip("tensorrt")
 torch = pytest.importorskip("torch")
 
+from families.phi4_multimodal import default_decoder  # noqa: E402
 from families.phi4_multimodal import model as family_model  # noqa: E402
 from families.phi4_multimodal.config import ModelConfig  # noqa: E402
 
@@ -85,6 +86,8 @@ def _run(engine, cache_rows: int, caches: dict, tokens: list[int], position: int
             value = caches[name][:cache_rows]
         else:
             value = inputs[name].cuda()
+            if -1 not in tuple(engine.get_tensor_shape(name)):  # the decode engine's static inputs
+                value = value.reshape(tuple(engine.get_tensor_shape(name)))
         bound[name] = value
         if -1 in tuple(engine.get_tensor_shape(name)):
             assert context.set_input_shape(name, tuple(value.shape)), name
@@ -101,26 +104,18 @@ def _run(engine, cache_rows: int, caches: dict, tokens: list[int], position: int
     return {name: value.cpu().numpy() for name, value in outputs.items()}
 
 
-@pytest.mark.gpu
-@pytest.mark.trt
-def test_prefill_over_the_cached_prefix_matches_the_whole_cache(tmp_path: Path) -> None:
-    if not torch.cuda.is_available():
-        pytest.skip("requires CUDA")
+def _engine(tmp_path: Path, role: str):
     config = _write_checkpoint(tmp_path)
     config.raw["_model_dir"] = str(tmp_path)
-    config.raw["_decoder_engine_role"] = "prefill"
+    config.raw["_decoder_engine_role"] = role
     instance = family_model._Phi4MultimodalModel()
     weights = instance.load_weights(str(tmp_path), config)
-    engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(
+    return trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(
         instance.build_engine(config, weights, MAX_CACHE, precision="fp32")
     )
-    assert tuple(engine.get_tensor_shape("cache_k_0"))[0] == -1
-    assert [tuple(s) for s in engine.get_tensor_profile_shape("cache_k_0", 0)] == [
-        (1, engine.get_tensor_shape("cache_k_0")[1]),
-        (1, engine.get_tensor_shape("cache_k_0")[1]),
-        (MAX_CACHE, engine.get_tensor_shape("cache_k_0")[1]),
-    ]
 
+
+def _random_caches(engine) -> dict:
     caches = {}
     for i in range(engine.num_io_tensors):
         name = engine.get_tensor_name(i)
@@ -128,11 +123,53 @@ def test_prefill_over_the_cached_prefix_matches_the_whole_cache(tmp_path: Path) 
             width = engine.get_tensor_shape(name)[1]
             # Rows beyond the prefix hold garbage that the mask must hide.
             caches[name] = torch.randn(MAX_CACHE, width, device="cuda")
+    return caches
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_prefill_over_the_cached_prefix_matches_the_whole_cache(tmp_path: Path) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    engine = _engine(tmp_path, "prefill")
+    assert tuple(engine.get_tensor_shape("cache_k_0"))[0] == -1
+    assert [tuple(s) for s in engine.get_tensor_profile_shape("cache_k_0", 0)] == [
+        (1, engine.get_tensor_shape("cache_k_0")[1]),
+        (1, engine.get_tensor_shape("cache_k_0")[1]),
+        (MAX_CACHE, engine.get_tensor_shape("cache_k_0")[1]),
+    ]
+
+    caches = _random_caches(engine)
 
     rng = np.random.default_rng(0)
     for position, rows in ((0, 1), (5, 16)):
         tokens = rng.integers(0, VOCAB, 7).tolist()
         whole = _run(engine, MAX_CACHE, caches, tokens, position)
         prefix = _run(engine, rows, caches, tokens, position)
+        for name, value in whole.items():
+            np.testing.assert_allclose(prefix[name], value, rtol=1e-4, atol=1e-4, err_msg=name)
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_decode_over_the_cached_prefix_matches_the_whole_cache(tmp_path: Path) -> None:
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    engine = _engine(tmp_path, "decode")
+    width = engine.get_tensor_shape("cache_k_0")[1]
+    opt_rows = min(MAX_CACHE, default_decoder.DECODE_OPT_CACHE_ROWS)
+    assert tuple(engine.get_tensor_shape("cache_k_0"))[0] == -1
+    assert [tuple(s) for s in engine.get_tensor_profile_shape("cache_k_0", 0)] == [
+        (1, width),
+        (opt_rows, width),
+        (MAX_CACHE, width),
+    ]
+    caches = _random_caches(engine)
+
+    rng = np.random.default_rng(1)
+    for position, rows in ((0, 1), (5, 16), (40, 48), (MAX_CACHE - 1, MAX_CACHE)):
+        token = rng.integers(0, VOCAB, 1).tolist()
+        whole = _run(engine, MAX_CACHE, caches, token, position)
+        prefix = _run(engine, rows, caches, token, position)
         for name, value in whole.items():
             np.testing.assert_allclose(prefix[name], value, rtol=1e-4, atol=1e-4, err_msg=name)

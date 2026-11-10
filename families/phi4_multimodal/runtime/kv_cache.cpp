@@ -127,8 +127,16 @@ void Phi4MultimodalKvCache::write_decode_mask(TensorMap& inputs) {
     if (mask_rank != 2)
         throw std::runtime_error("phi4_multimodal decoder has an invalid attention-mask rank");
 
+    // Columns [0, valid) are the cached prefix, [valid, cache_rows) stale rows
+    // and the last column the new token; a runtime-sized decode engine binds
+    // only the bucketed prefix instead of all max_length rows.
     const int32_t valid = std::max(0, std::min(position_, max_length_));
-    const int32_t mask_width = max_length_ + 1;
+    int32_t cache_rows = max_length_;
+    if (decode_dynamic_rows_) {
+        cache_rows = bucketed_cache_rows();
+        bind_decode_cache_rows(cache_rows);
+    }
+    const int32_t mask_width = cache_rows + 1;
     if (mask_buf_.size() != static_cast<std::size_t>(mask_width))
         mask_buf_.resize(static_cast<std::size_t>(mask_width));
     std::fill(mask_buf_.begin(), mask_buf_.end(), kMaskedScore);
@@ -165,10 +173,12 @@ void Phi4MultimodalKvCache::bind_to(ITrtModule& module) {
         throw std::runtime_error("phi4_multimodal KV cache has no cache tensor names");
     const auto cache_shape = module.tensor_shape(names_.cache_k.front());
     const std::vector<int64_t> expected_cache_shape{max_length_, kv_dim_};
-    if (module.input_rank(names_.cache_k.front()) != 2 ||
-        module.input_is_dynamic(names_.cache_k.front()) || cache_shape != expected_cache_shape) {
-        throw std::runtime_error(
-            "phi4_multimodal decoder does not match its fixed KV-cache contract");
+    const bool dynamic_rows = module.input_is_dynamic(names_.cache_k.front());
+    const bool shape_matches = dynamic_rows
+                                   ? cache_shape.size() == 2 && cache_shape.back() == kv_dim_
+                                   : cache_shape == expected_cache_shape;
+    if (module.input_rank(names_.cache_k.front()) != 2 || !shape_matches) {
+        throw std::runtime_error("phi4_multimodal decoder does not match its KV-cache contract");
     }
     const int32_t mask_rank = module.input_rank(names_.attention_mask);
     if (mask_rank != 2)
@@ -183,17 +193,35 @@ void Phi4MultimodalKvCache::bind_to(ITrtModule& module) {
         module.bind_external(names_.present_k[layer], present_k_[layer].data());
         module.bind_external(names_.present_v[layer], present_v_[layer].data());
     }
+    decode_dynamic_rows_ = dynamic_rows;
+    decode_cache_rows_ = 0;
+    if (decode_dynamic_rows_)
+        bind_decode_cache_rows(bucketed_cache_rows());
+}
+
+int32_t Phi4MultimodalKvCache::bucketed_cache_rows() const {
+    const int32_t used = std::max(0, std::min(position_, max_length_));
+    const int32_t bucketed = (used + kCacheRowBucket - 1) / kCacheRowBucket * kCacheRowBucket;
+    return std::max(1, std::min(bucketed, max_length_));
+}
+
+void Phi4MultimodalKvCache::bind_decode_cache_rows(int32_t rows) {
+    if (rows == decode_cache_rows_)
+        return;
+    const std::vector<int64_t> cache_shape{rows, kv_dim_};
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        const auto layer = static_cast<std::size_t>(i);
+        bound_module_->bind_external(names_.cache_k[layer], cache_k_[layer].data(), cache_shape);
+        bound_module_->bind_external(names_.cache_v[layer], cache_v_[layer].data(), cache_shape);
+    }
+    decode_cache_rows_ = rows;
 }
 
 void Phi4MultimodalKvCache::bind_cache_inputs(ITrtModule& module) {
     has_position_input_ = module.has_input(names_.position_id);
     prefill_cache_rows_ = 0;
-    if (!names_.cache_k.empty() && module.input_is_dynamic(names_.cache_k.front())) {
-        const int32_t used = std::max(0, std::min(position_, max_length_));
-        const int32_t bucketed =
-            (used + kPrefillCacheRowBucket - 1) / kPrefillCacheRowBucket * kPrefillCacheRowBucket;
-        prefill_cache_rows_ = std::max(1, std::min(bucketed, max_length_));
-    }
+    if (!names_.cache_k.empty() && module.input_is_dynamic(names_.cache_k.front()))
+        prefill_cache_rows_ = bucketed_cache_rows();
     const std::vector<int64_t> cache_shape{prefill_cache_rows_, kv_dim_};
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);

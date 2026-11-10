@@ -86,22 +86,28 @@ class Phi4MultimodalKvCache : public Phi4MultimodalInferenceState {
     // — too big for Phi4MultimodalKvCache's single-row present buffer. The caller reads
     // the prefill outputs directly from the module's own allocations and
     // copies them via write_prefill_kv(). A prefill engine with runtime-sized
-    // cache inputs gets only the cached prefix, rounded up to
-    // kPrefillCacheRowBucket rows (one masked row for an empty cache), so its
-    // attention follows the context rather than the allocated capacity.
+    // cache inputs gets only the cached prefix, rounded up to kCacheRowBucket
+    // rows (one masked row for an empty cache), so its attention follows the
+    // context rather than the allocated capacity. A runtime-sized decode
+    // engine (bind_to) is bound the same way before every step.
     void bind_cache_inputs(ITrtModule& module);
 
     // Cache rows of the next batched (prefill) step: the rows bound by
     // bind_cache_inputs() for a runtime-sized prefill engine, else max_length.
     int32_t prefill_cache_rows() const;
 
-    static constexpr int32_t kPrefillCacheRowBucket = 256;
+    static constexpr int32_t kCacheRowBucket = 256;
 
   private:
     void write_position_input(TensorMap& inputs, int32_t seq_len);
     void write_batched_mask(TensorMap& inputs, int32_t seq_len);
     void write_bidirectional_mask(TensorMap& inputs, int32_t seq_len);
     void write_decode_mask(TensorMap& inputs);
+    // The cached prefix rounded up to kCacheRowBucket rows, 1..max_length.
+    int32_t bucketed_cache_rows() const;
+    // Bind `rows` cache rows to the runtime-sized decode engine (no-op when
+    // they are already bound).
+    void bind_decode_cache_rows(int32_t rows);
 
     std::vector<DeviceTensor> cache_k_;   // [num_layers], shape [max_length, kv_dim]
     std::vector<DeviceTensor> cache_v_;   // [num_layers]
@@ -122,6 +128,10 @@ class Phi4MultimodalKvCache : public Phi4MultimodalInferenceState {
     ITrtModule* bound_module_{nullptr};
     // Rows bound on a runtime-sized prefill engine; 0 when its cache is static.
     int32_t prefill_cache_rows_{0};
+    // The bound decode engine takes runtime-sized cache inputs, and the rows
+    // currently bound to it (0 before the first step).
+    bool decode_dynamic_rows_{false};
+    int32_t decode_cache_rows_{0};
 };
 
 } // namespace trtmc
