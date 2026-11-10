@@ -19,6 +19,7 @@ TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES = 96 << 30
 ADALN_PRECOMPUTE_DEFAULT_WORKSPACE_BYTES = 64 << 30
 DENOISER_DEFAULT_WORKSPACE_BYTES = 96 << 30
 VAE_TILE_DECODER_DEFAULT_WORKSPACE_BYTES = 96 << 30
+AUDIO_VAE_DECODER_DEFAULT_WORKSPACE_BYTES = 96 << 30
 
 DEFAULT_WORKSPACE_LIMIT_BYTES = {
     "text_encoder.plan": TEXT_ENCODER_DEFAULT_WORKSPACE_BYTES,
@@ -149,3 +150,48 @@ class MiniMaxH3Config:
 
 
 SOL_ENGINE_1344X768_124F = MiniMaxH3Config()
+
+
+@dataclass(frozen=True)
+class Ref2VAPackedProfile:
+    """Explicit min/opt/max rows for reference-conditioned DiT operands.
+
+    Video and audio condition counts exclude generated target rows. Text
+    counts include all Qwen3-VL conditioning embeddings, including visual
+    tokens; their AdaLN modality tags remain a separate runtime operand.
+    No default reference budget is inferred from the text-only profile.
+    """
+
+    text_rows: tuple[int, int, int]
+    condition_video_rows: tuple[int, int, int]
+    condition_audio_rows: tuple[int, int, int]
+
+    def validate(self, target: MiniMaxH3Config) -> None:
+        target.validate()
+        if target.first_block_cache:
+            raise ValueError("H3 Ref2VA requires the exact uncached DiT path")
+        if target.video_rows <= 0 or target.audio_rows <= 0:
+            raise ValueError("H3 Ref2VA target row counts must be positive")
+        for name, lower in (
+            ("text_rows", 1),
+            ("condition_video_rows", 1),
+            ("condition_audio_rows", 0),
+        ):
+            values = getattr(self, name)
+            if (
+                not isinstance(values, tuple)
+                or len(values) != 3
+                or any(isinstance(value, bool) or not isinstance(value, int) for value in values)
+                or not lower <= values[0] <= values[1] <= values[2]
+            ):
+                raise ValueError(f"H3 Ref2VA {name} requires valid integer min/opt/max bounds")
+        if self.sequence_rows(target)[2] > 2**31 - 1:
+            raise ValueError("H3 Ref2VA packed sequence exceeds the int32 index range")
+
+    def sequence_rows(self, target: MiniMaxH3Config) -> tuple[int, int, int]:
+        return tuple(
+            target.video_rows + target.audio_rows + text + video + audio
+            for text, video, audio in zip(
+                self.text_rows, self.condition_video_rows, self.condition_audio_rows
+            )
+        )

@@ -93,10 +93,14 @@ class WorkerLoadOptions:
     kv_cache_size_bytes: int | None = None
     runtime_cache: str | None = None
     cuda_graphs: bool = False
+    # (library, function, kernel name) registered before each bundle loads.
+    byok_kernel: tuple[str, str, str] | None = None
 
     def __post_init__(self) -> None:
         if self.runtime_root is not None and not self.runtime_root:
             raise ValueError("runtime_root must be non-empty when provided")
+        if self.byok_kernel is not None and (len(self.byok_kernel) != 3 or not all(self.byok_kernel)):
+            raise ValueError("byok_kernel needs a library, a function and a kernel name")
         if (
             self.kv_cache_size_bytes is not None
             and (
@@ -116,6 +120,9 @@ class WorkerLoadOptions:
             result.extend(("--runtime-cache", self.runtime_cache))
         if self.cuda_graphs:
             result.append("--cuda-graphs")
+        if self.byok_kernel is not None:
+            library, function, name = self.byok_kernel
+            result.extend(("--byok-library", library, "--byok-function", function, "--byok-name", name))
         return result
 
 
