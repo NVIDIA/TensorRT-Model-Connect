@@ -274,8 +274,10 @@ def calibrate(model_dir: Path, clips: Path, right_context: int) -> None:
         if (index + 1) % 16 == 0:
             print(f"[{index + 1}/{len(files)}]", flush=True)
 
-    scales = {name: value / FP8_E4M3_MAX for name, value in amax.items() if value > 0}
-    missing = [name for name in projection_names(weights) if name not in scales]
+    # Every encoder matmul is observed; only the quantized projections are stored.
+    quantized = projection_names(weights)
+    scales = {name: amax[name] / FP8_E4M3_MAX for name in quantized if amax.get(name, 0.0) > 0}
+    missing = [name for name in quantized if name not in scales]
     if missing:
         raise RuntimeError(
             f"no calibrated input range for {len(missing)} projections: {missing[:4]}"
