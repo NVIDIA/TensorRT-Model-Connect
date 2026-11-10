@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "decide", "help": "Rank one HSTU request record (JSON) with an hstu bundle", "executor": "native", "handler": "decide",
+      "arguments": [
+        {"name": "bundle", "type": "path"},
+        {"name": "record", "flags": ["--record"], "type": "path", "required": true},
+        {"name": "runtime_root", "flags": ["--runtime-root"], "type": "path"}
+      ]
+    }
+  ]
+}
