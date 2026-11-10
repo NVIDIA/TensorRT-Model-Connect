@@ -180,7 +180,8 @@ def _fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]], min_
     return kept
 
 
-PAIR_MARGIN_TOKENS = 4  # the bundle's own tokenizer may count a pair a few tokens apart from Transformers'
+# The bundle's own tokenizer may count a pair or a cut document a few tokens apart from Transformers'.
+PAIR_MARGIN_TOKENS = 4
 
 
 def _candidate_tokenizer(model: Mapping[str, Any]) -> Any:
@@ -225,12 +226,13 @@ def _pairs_fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]
 
 
 def _head_truncated(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]], limit: int) -> list[dict[str, Any]]:
-    """Samples whose ``prompt`` keeps only its first ``limit`` tokens (the model's tokenizer)."""
-    from transformers import AutoTokenizer
-
-    name, revision = tokenizer_source(model)
-    tokenizer = AutoTokenizer.from_pretrained(name, revision=revision,
-                                              trust_remote_code=bool(model["reference"].get("trust_remote_code")))
+    """Samples whose ``prompt`` keeps only its first ``limit`` tokens (the model's tokenizer), fewer when the
+    bundle's max_sequence_length cannot hold that many with the tokenizer's special tokens (less the margin)."""
+    tokenizer = _candidate_tokenizer(model)
+    length = int(model["candidate"].get("max_sequence_length") or 0)
+    if length:
+        specials = len(tokenizer("", add_special_tokens=True)["input_ids"])
+        limit = min(limit, length - specials - PAIR_MARGIN_TOKENS)
     result = []
     for sample in samples:
         request = dict(sample["request"])
