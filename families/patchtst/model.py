@@ -20,6 +20,7 @@ from .checkpoint_mapper import (
 )
 from .config import ModelConfig
 from .time_series_trt import (
+    LinearConstants,
     add_batch_norm_last_dim,
     add_gelu,
     add_linear,
@@ -261,6 +262,20 @@ def _add_encoder_layer(
     head_dim = hidden_size // num_heads
     seq_len = _num_patches(raw) + (1 if bool(raw.get("use_cls_token", False)) else 0)
     prefix = f"model.encoder.layers.{layer_idx}"
+    # Every channel row runs the same linears: add each weight once and reuse it.
+    shared: LinearConstants = {}
+
+    def linear(inp: trt.ITensor, name: str, precision: str) -> trt.ITensor:
+        weight, bias = _linear_key(prefix, name)
+        return add_linear(
+            network,
+            inp,
+            weights[weight],
+            weights.get(bias),
+            precision=precision,
+            shared=shared,
+            name=name,
+        )
 
     channel_rows: list[trt.ITensor] = []
     for channel in range(channels):
@@ -283,19 +298,9 @@ def _add_encoder_layer(
             hidden_size=hidden_size,
             raw=raw,
         )
-        qw, qb = _linear_key(prefix, "self_attn.q_proj")
-        kw, kb = _linear_key(prefix, "self_attn.k_proj")
-        vw, vb = _linear_key(prefix, "self_attn.v_proj")
-        ow, ob = _linear_key(prefix, "self_attn.out_proj")
-        q = add_linear(
-            network, normed, weights[qw], weights.get(qb), precision=linear_precisions[0]
-        )
-        k = add_linear(
-            network, normed, weights[kw], weights.get(kb), precision=linear_precisions[1]
-        )
-        v = add_linear(
-            network, normed, weights[vw], weights.get(vb), precision=linear_precisions[2]
-        )
+        q = linear(normed, "self_attn.q_proj", linear_precisions[0])
+        k = linear(normed, "self_attn.k_proj", linear_precisions[1])
+        v = linear(normed, "self_attn.v_proj", linear_precisions[2])
         attention_dtype = trt.float32 if "fp32" in linear_precisions[:3] else trt.float16
         q = q if q.dtype == attention_dtype else network.add_cast(q, attention_dtype).get_output(0)
         k = k if k.dtype == attention_dtype else network.add_cast(k, attention_dtype).get_output(0)
@@ -312,9 +317,7 @@ def _add_encoder_layer(
             causal=False,
             tag=f"patchtst.l{layer_idx}.c{channel}",
         )
-        attn = add_linear(
-            network, ctx, weights[ow], weights.get(ob), precision=linear_precisions[3]
-        )
+        attn = linear(ctx, "self_attn.out_proj", linear_precisions[3])
         if attn.dtype != row_t.dtype:
             attn = network.add_cast(attn, row_t.dtype).get_output(0)
         row_t = network.add_elementwise(row_t, attn, trt.ElementWiseOperation.SUM).get_output(0)
@@ -328,13 +331,9 @@ def _add_encoder_layer(
             hidden_size=hidden_size,
             raw=raw,
         )
-        fw0, fb0 = _linear_key(prefix, "ff.0")
-        fw1, fb1 = _linear_key(prefix, "ff.3")
-        ff = add_linear(
-            network, normed, weights[fw0], weights.get(fb0), precision=linear_precisions[4]
-        )
+        ff = linear(normed, "ff.0", linear_precisions[4])
         ff = add_gelu(network, ff)
-        ff = add_linear(network, ff, weights[fw1], weights.get(fb1), precision=linear_precisions[5])
+        ff = linear(ff, "ff.3", linear_precisions[5])
         if ff.dtype != row_t.dtype:
             ff = network.add_cast(ff, row_t.dtype).get_output(0)
         row_t = network.add_elementwise(row_t, ff, trt.ElementWiseOperation.SUM).get_output(0)
@@ -466,6 +465,7 @@ def _build_patchtst_network(
     head_precision = "fp32" if precision == "fp16" and depth + 2 in fp32_layers else precision
 
     if task_type == "forecast":
+        head_constants: LinearConstants = {}
         channel_outputs: list[trt.ITensor] = []
         for channel in range(channels):
             if use_cls_token:
@@ -494,6 +494,8 @@ def _build_patchtst_network(
                 weights["head.projection.weight"],
                 weights.get("head.projection.bias"),
                 precision=head_precision,
+                shared=head_constants,
+                name="head.projection",
             )
             pred3 = network.add_shuffle(pred)
             pred3.reshape_dims = (1, int(raw.get("prediction_length", 1)), 1)
