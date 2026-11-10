@@ -53,6 +53,8 @@ class Tier:
     hardware: str = ""  # the GPUs the tier is sized for
     video: str = ""  # how a shot is made
     speech: str = ""  # where the voices come from
+    # What TRTMC main still lacks before the tier runs end to end; empty when it does.
+    missing: tuple[str, ...] = ()
     # The memory size cards are sold with; nvidia-smi reports a little less (a 24 GB card: 23.99 GiB),
     # so `min_gib` sits just under it.
     nominal_gb: int = 0
@@ -66,6 +68,9 @@ _WAN = Model("video", "wan2.2-ti2v-5b", "Wan-AI/Wan2.2-TI2V-5B",
               "--image-width", "704", "--video-num-frames", "121"), first_frame=True)
 
 _SILENT = "none yet: each line is a subtitle until TRTMC has Chinese text-to-speech"
+# MiniMax-H3 on TRTMC main generates from text only; the reference path is still under review.
+_H3 = ("MiniMax-H3 reference-to-video in TRTMC, with the FastH3-Omni-8-Step student and two-window "
+       "continuation (under review)")
 
 # Every model here has a permissive license (Apache-2.0 or MIT) except MiniMax H3, whose community
 # license excludes some territories; see the README before shipping tier A.
@@ -83,7 +88,7 @@ TIERS = {
                         ("--task", "vision_language_generation", "--precision", "fp16",
                          "--max-sequence-length", "32768")),
     }, hardware="GB300, B200, H200", video="MiniMax H3 films each shot from up to 6 reference pictures",
-        speech="native audio from the video model", nominal_gb=140),
+        speech="native audio from the video model", missing=(_H3,), nominal_gb=140),
     "b": Tier("b", 78, "keyframes from the reference pictures and Wan2.2-TI2V-5B image-to-video, without voices", {
         "llm": Model("llm", "qwen3.5-4b", "Qwen/Qwen3.5-4B", ("--max-sequence-length", "32768")),
         "image": Model("image", "qwen-image", "Qwen/Qwen-Image",
@@ -112,10 +117,10 @@ TIERS = {
 
 
 def describe_tiers() -> list[dict]:
-    """The tiers for the page: what each GPU size gets."""
+    """The tiers for the page: what each GPU size gets and what is still missing."""
 
     return [{"name": t.name, "min_gib": t.min_gib, "min_gb": t.nominal_gb or t.min_gib, "hardware": t.hardware, "summary": t.summary,
-             "video": t.video, "speech": t.speech}
+             "video": t.video, "speech": t.speech, "ready": not t.missing, "missing": list(t.missing)}
             for t in sorted(TIERS.values(), key=lambda tier: -tier.min_gib)]
 
 

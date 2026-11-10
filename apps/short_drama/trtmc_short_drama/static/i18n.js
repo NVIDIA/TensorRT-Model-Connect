@@ -126,8 +126,8 @@ const ZH = {
   "Used for": "用途", "Bundle": "Bundle", "Last load failed: {error}": "上次加载失败：{error}", "Show the model server log": "显示模型服务日志",
   "Hardware tiers": "硬件档位", "The app picks the tier by GPU memory. Lower tiers keep the same steps with smaller models.":
     "应用按显存自动选档。低档位步骤相同，换用更小的模型。",
-  "Tier": "档位", "GPU memory": "显存", "Shots": "镜头", "Speech": "台词", "this GPU": "本机",
-  "{n} GB or more": "{n} GB 及以上",
+  "Tier": "档位", "GPU memory": "显存", "Shots": "镜头", "Speech": "台词", "Status": "状态", "this GPU": "本机",
+  "{n} GB or more": "{n} GB 及以上", "ready": "可用", "planned": "规划中",
   "Free for development with an NVIDIA Developer Program account; requests per minute are limited.": "加入 NVIDIA 开发者计划即可免费用于开发；每分钟请求数有限制。",
   "Models ending in :free cost nothing: 20 requests a minute and 50 a day, 1,000 a day after buying $10 of credits once. Some need free-model training allowed in the privacy settings.":
     "以 :free 结尾的模型免费：每分钟 20 次、每天 50 次，一次性充值 10 美元后每天 1000 次。部分模型需要在隐私设置里允许免费模型训练。",
@@ -140,6 +140,8 @@ const ZH = {
   "Qwen-Image-Edit draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it": "Qwen-Image-Edit 按参考图画出每个镜头的首帧，Wan2.2-TI2V-5B 让它动起来",
   "Wan2.2-TI2V-5B animates each shot from its speaker's reference picture": "Wan2.2-TI2V-5B 直接从说话人的参考图开始生成每个镜头",
   "none yet: each line is a subtitle until TRTMC has Chinese text-to-speech": "暂无：TRTMC 支持中文语音合成之前，台词只以字幕显示",
+  "MiniMax-H3 reference-to-video in TRTMC, with the FastH3-Omni-8-Step student and two-window continuation (under review)":
+    "TRTMC 的 MiniMax-H3 参考图生视频，以及 FastH3-Omni-8-Step 蒸馏模型和两段拼接（审阅中）",
   // roles, scopes, statuses
   "llm": "语言模型", "image": "画图", "video": "视频", "asr": "语音识别", "tts": "语音合成", "vision": "看图",
   "project": "项目", "episode": "分集", "running": "运行中", "done": "完成", "failed": "失败", "cancelled": "已取消",

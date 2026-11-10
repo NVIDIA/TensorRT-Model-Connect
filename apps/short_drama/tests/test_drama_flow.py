@@ -89,6 +89,8 @@ def test_tiers_follow_gpu_memory(tmp_path: Path, monkeypatch):
     assert spark.memory_gib == 121.6 and catalog.pick_tier(spark).name == "b"
     tiers = catalog.describe_tiers()
     assert [t["name"] for t in tiers] == ["a", "b", "c"]
+    assert not tiers[0]["ready"] and tiers[0]["missing"] == [catalog._H3]
+    assert tiers[1]["ready"] and tiers[2]["ready"]
 
 
 def test_video_submission_waits_while_server_storage_is_full(tmp_path: Path, monkeypatch):
@@ -184,6 +186,19 @@ def test_the_language_model_is_built_only_with_llm_local(tmp_path: Path, monkeyp
         cli.main([*common, "--bundle", f"vision={tmp_path / 'v.bundle'}"])
 
 
+def test_a_planned_tier_says_what_is_missing_before_it_starts(tmp_path: Path, monkeypatch):
+    from trtmc_short_drama import cli
+
+    monkeypatch.setattr(cli.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(catalog, "gpus", lambda: [catalog.parse_gpu("1, NVIDIA GB300, 262144, 10.3")])
+    (tmp_path / "trtmc-server").touch()
+    start = ["up", "--data", str(tmp_path / "data"), "--runtime-root", str(tmp_path)]
+    with pytest.raises(SystemExit, match="tier A is planned; TRTMC main still needs: MiniMax-H3 reference-to-video") as stopped:
+        cli.main(start)
+    assert "--allow-planned" in str(stopped.value)
+    assert cli.main([*start, "--dry-run"]) == 0
+
+
 def test_tier_b_builds_a_vertical_editor_and_wan_image_to_video(tmp_path: Path, monkeypatch, capsys):
     from trtmc_short_drama import cli
 
@@ -221,6 +236,7 @@ def test_h3_is_built_through_the_family_command(tmp_path: Path):
 
     command = cli.build_command(catalog.TIERS["a"].models["video"], tmp_path / "h3.bundle", tmp_path, "unused")
     assert command[1:5] == ["-m", "tensorrt_model_connect", "minimax_h3", "build-omniref"]
+    assert "--two-window" in command  # the app sends a continuation prompt with every shot
     assert command[command.index("--kernel-library") + 1] == str(tmp_path / "libtrtmc_minimax_h3_omniref_vsa.so")
     assert command[command.index("--bridge") + 1] == str(tmp_path / "libtrtmc_byok_tvm_ffi.so")
 

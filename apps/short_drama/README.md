@@ -31,7 +31,8 @@ second shot about 10 minutes (one H3 call renders 226 frames, 9.4 s, with audio)
   110 GB at 768x1344 and 226 frames); it was run on a GB300.
   Tiers B (80 GB, for example an RTX PRO 6000) and C (24 GB) render shots without voices. See
   [Tiers](#tiers).
-- A TRTMC build with the server, bring-your-own kernels and the H3 sparse-attention kernel:
+- A TRTMC build with the server, bring-your-own kernels and the H3 sparse-attention kernel (tier
+  A; see [The H3 bundle](#the-h3-bundle)):
 
   ```bash
   cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DTRTMC_BUILD_SERVER=ON \
@@ -66,6 +67,7 @@ and the build commands without running them.
 | --- | --- |
 | `--data DIR` | projects, bundles, settings and logs (default `./short-drama-data`) |
 | `--tier a\|b\|c` | force a tier instead of choosing by GPU memory |
+| `--allow-planned` | start a tier that TRTMC main cannot run end to end yet; without it `up` names what is missing and stops |
 | `--gpu N` | GPU index as `nvidia-smi` numbers it |
 | `--llm api\|local` | `api` (default): the chat API chosen in Settings; `local`: build and serve the tier's language model on this GPU |
 | `--bundle ROLE=PATH` | use an existing bundle for `llm` (with `--llm local`), `image`, `video`, `asr` or `tts` |
@@ -105,13 +107,14 @@ generation config forces `<|zh|>`; the bundle is named `whisper-zh-sm<arch>.bund
 
 ### The H3 bundle
 
-MiniMax H3 reference-to-video is an explicit experimental build in the `minimax_h3` family
-(see `families/minimax_h3/README.md`). `up` runs the family command
-`python -m tensorrt_model_connect minimax_h3 build-omniref`: the original `MiniMaxAI/MiniMax-H3`
-two-window bundle first (kept in `bundles/scratch/`), then the FastH3 OmniRef 8-step student
-that reuses six of its eight plans. Plan for about 250 GB of
-disk and 100 GB of host memory while it builds, or pass an existing bundle with
-`--bundle video=PATH`.
+MiniMax H3 reference-to-video is an explicit experimental build in the `minimax_h3` family.
+TRTMC main does not have it yet: reference-to-video, the FastH3-Omni-8-Step student and
+two-window continuation are under review, so tier A needs a TRTMC build that has all three and
+starts only with `--allow-planned`. `up` runs the family command
+`python -m tensorrt_model_connect minimax_h3 build-omniref --two-window`: the original
+`MiniMaxAI/MiniMax-H3` two-window bundle first (kept in `bundles/scratch/`), then the FastH3
+OmniRef 8-step student that reuses six of its eight plans. Plan for about 250 GB of disk and
+100 GB of host memory while it builds, or pass an existing bundle with `--bundle video=PATH`.
 
 ## Use
 
@@ -222,12 +225,11 @@ to the browser.
 ## Tiers
 
 `up` picks the largest tier the GPU's memory holds; GPUs that share system memory (DGX Spark,
-Jetson Thor) count their system memory. Settings shows the table below, without its last column, for
-the running GPU.
+Jetson Thor) count their system memory. Settings shows the table below for the running GPU.
 
 | Tier | GPU memory | For example | Shots | Speech | Status |
 | --- | --- | --- | --- | --- | --- |
-| A | 140 GB or more | GB300, B200, H200 | MiniMax H3 films each shot from up to 6 reference pictures | native audio from the video model | runs end to end |
+| A | 140 GB or more | GB300, B200, H200 | MiniMax H3 films each shot from up to 6 reference pictures | native audio from the video model | runs end to end on a TRTMC build with MiniMax-H3 reference-to-video, the FastH3-Omni-8-Step student and two-window continuation; start it with `--allow-planned` until TRTMC main has them |
 | B | 80 GB or more | RTX PRO 6000, H100, DGX Spark | Qwen-Image-Edit draws each shot's first frame from the reference pictures; Wan2.2-TI2V-5B animates it | none yet: each line is a subtitle | runs end to end |
 | C | 24 GB or more | RTX 4090, RTX 5090, L40S | Wan2.2-TI2V-5B animates each shot from its speaker's reference picture | none yet: each line is a subtitle | runs end to end in 24 GB (peak 22.0 GiB) |
 

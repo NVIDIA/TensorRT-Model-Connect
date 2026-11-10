@@ -47,6 +47,9 @@ def parser() -> argparse.ArgumentParser:
     up.add_argument("--server-port", type=int, default=8701)
     up.add_argument("--plugins", type=Path, default=Path(__file__).resolve().parents[1] / "plugins")
     up.add_argument("--dry-run", action="store_true", help="print the plan and the build commands only")
+    up.add_argument("--allow-planned", action="store_true",
+                    help="start a tier that TRTMC main cannot run end to end yet (shots fail unless the "
+                         "TRTMC build has what the tier still needs)")
     return result
 
 
@@ -107,7 +110,7 @@ def checkpoint_view(model: catalog.Model, data: Path, *, create: bool) -> str:
 def build_command(model: catalog.Model, output: Path, runtime: Path, checkpoint: str) -> list[str]:
     if model.builder == "minimax_h3":  # the family's explicit FastH3 OmniRef build command
         return [sys.executable, "-m", "tensorrt_model_connect", "minimax_h3", "build-omniref",
-                "-o", str(output), "--scratch", str(output.parent / "scratch"),
+                "-o", str(output), "--scratch", str(output.parent / "scratch"), "--two-window",
                 "--bridge", str(runtime / "libtrtmc_byok_tvm_ffi.so"),
                 "--kernel-library", str(runtime / model.byok[0])]
     return [sys.executable, "-m", "tensorrt_model_connect", "build", checkpoint,
@@ -159,6 +162,10 @@ def main(argv: list[str] | None = None) -> int:
     tier = catalog.pick_tier(gpu, args.tier)
     print(f"GPU {gpu.index}: {gpu.name}, {gpu.memory_gib:.0f} GiB, sm{gpu.compute_capability} -> "
           f"tier {tier.name.upper()} ({tier.summary})", flush=True)
+    if tier.missing and not (args.allow_planned or args.dry_run):
+        raise SystemExit(f"tier {tier.name.upper()} is planned; TRTMC main still needs: " + "; ".join(tier.missing) +
+                         ". Start it anyway with --allow-planned (stories, plans and pictures work; shots need a "
+                         "TRTMC build that has these), or choose another tier with --tier.")
     if args.vision == "local" and "vision" not in tier.models:
         raise SystemExit(f"tier {tier.name.upper()} has no vision model to serve; name one from a chat API in "
                          "Settings instead")
