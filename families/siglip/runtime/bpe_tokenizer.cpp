@@ -33,9 +33,10 @@ std::size_t utf8_length(std::string_view text, std::size_t pos) {
     const auto first = static_cast<unsigned char>(text[pos]);
     if (first < 0x80)
         return 1;
-    const std::size_t length = first >= 0xc2 && first <= 0xdf ? 2 :
-                               first >= 0xe0 && first <= 0xef ? 3 :
-                               first >= 0xf0 && first <= 0xf4 ? 4 : 0;
+    const std::size_t length = first >= 0xc2 && first <= 0xdf   ? 2
+                               : first >= 0xe0 && first <= 0xef ? 3
+                               : first >= 0xf0 && first <= 0xf4 ? 4
+                                                                : 0;
     if (length == 0 || length > text.size() - pos)
         return 0;
     for (std::size_t index = 1; index < length; ++index) {
@@ -71,16 +72,22 @@ class BpeTokenizer final : public ITokenizer {
                     model.value("fuse_unk", false) && !model.value("ignore_merges", false) &&
                     model.value("dropout", Json()).is_null() &&
                     model.value("continuing_subword_prefix", Json()).is_null() &&
-                    model.value("end_of_word_suffix", Json()).is_null(), "model options");
-        require(tokenizer.value("normalizer", Json()) == Json::parse(
-                    R"({"type":"Replace","pattern":{"String":" "},"content":"\u2581"})"),
-                "normalizer");
-        require(tokenizer.value("pre_tokenizer", Json()) == Json::parse(
+                    model.value("end_of_word_suffix", Json()).is_null(),
+                "model options");
+        require(
+            tokenizer.value("normalizer", Json()) ==
+                Json::parse(R"({"type":"Replace","pattern":{"String":" "},"content":"\u2581"})"),
+            "normalizer");
+        require(
+            tokenizer.value("pre_tokenizer", Json()) ==
+                Json::parse(
                     R"({"type":"Split","pattern":{"String":" "},"behavior":"MergedWithPrevious","invert":false})"),
-                "pre_tokenizer");
-        require(tokenizer.value("decoder", Json()) == Json::parse(
+            "pre_tokenizer");
+        require(
+            tokenizer.value("decoder", Json()) ==
+                Json::parse(
                     R"({"type":"Sequence","decoders":[{"type":"Replace","pattern":{"String":"\u2581"},"content":" "},{"type":"ByteFallback"},{"type":"Fuse"}]})"),
-                "decoder");
+            "decoder");
         const auto& vocab = model.at("vocab");
         require(vocab.is_object() && vocab.size() <= static_cast<std::size_t>(INT32_MAX), "vocab");
         id_to_token_.resize(vocab.size());
@@ -96,18 +103,20 @@ class BpeTokenizer final : public ITokenizer {
         eos_ = id_for_token("<eos>");
         require(eos_ >= 0, "missing EOS");
         const auto& post = tokenizer.at("post_processor");
-        require(post.value("type", "") == "TemplateProcessing" &&
-                    post.value("single", Json()) == Json::parse(
+        require(
+            post.value("type", "") == "TemplateProcessing" &&
+                post.value("single", Json()) ==
+                    Json::parse(
                         R"([{"Sequence":{"id":"A","type_id":0}},{"SpecialToken":{"id":"<eos>","type_id":0}}])") &&
-                    post.at("special_tokens").at("<eos>").at("ids") == Json::array({eos_}) &&
-                    post.at("special_tokens").at("<eos>").at("tokens") == Json::array({"<eos>"}),
-                "post_processor");
+                post.at("special_tokens").at("<eos>").at("ids") == Json::array({eos_}) &&
+                post.at("special_tokens").at("<eos>").at("tokens") == Json::array({"<eos>"}),
+            "post_processor");
         for (std::size_t byte = 0; byte < byte_ids_.size(); ++byte) {
             char token[7];
             std::snprintf(token, sizeof(token), "<0x%02X>", static_cast<unsigned>(byte));
             byte_ids_[byte] = id_for_token(token);
-            require(byte_ids_[byte] >= 0 || (byte < 128 &&
-                        id_for_token(std::string(1, static_cast<char>(byte))) >= 0),
+            require(byte_ids_[byte] >= 0 ||
+                        (byte < 128 && id_for_token(std::string(1, static_cast<char>(byte))) >= 0),
                     "incomplete byte fallback vocabulary");
         }
         const auto& merges = model.at("merges");
@@ -167,7 +176,10 @@ class BpeTokenizer final : public ITokenizer {
             bool valid = true;
             for (std::size_t pos = 0; pos < bytes.size();) {
                 const auto length = utf8_length(bytes, pos);
-                if (length == 0) { valid = false; break; }
+                if (length == 0) {
+                    valid = false;
+                    break;
+                }
                 pos += length;
             }
             if (valid)
@@ -198,12 +210,20 @@ class BpeTokenizer final : public ITokenizer {
         return found == token_to_id_.end() ? -1 : found->second;
     }
     std::string token_for_id(std::int32_t id) const override {
-        return id >= 0 && static_cast<std::size_t>(id) < id_to_token_.size() ? id_to_token_[id] : "";
+        return id >= 0 && static_cast<std::size_t>(id) < id_to_token_.size() ? id_to_token_[id]
+                                                                             : "";
     }
 
   private:
-    struct Merge { std::size_t rank; std::int32_t id; };
-    struct Node { std::int32_t id; std::size_t prev, next; bool active{true}; };
+    struct Merge {
+        std::size_t rank;
+        std::int32_t id;
+    };
+    struct Node {
+        std::int32_t id;
+        std::size_t prev, next;
+        bool active{true};
+    };
     struct Candidate {
         std::size_t rank, left, right;
         std::int32_t left_id, right_id, result;
@@ -220,7 +240,8 @@ class BpeTokenizer final : public ITokenizer {
             auto length = utf8_length(text, pos);
             if (length == 0)
                 length = 1;
-            const auto piece = text[pos] == ' ' ? std::string(kMetaspace) : std::string(text.substr(pos, length));
+            const auto piece =
+                text[pos] == ' ' ? std::string(kMetaspace) : std::string(text.substr(pos, length));
             const auto id = id_for_token(piece);
             if (id >= 0)
                 append(id);
@@ -241,7 +262,8 @@ class BpeTokenizer final : public ITokenizer {
             const auto right = nodes[left].next;
             const auto found = merges_.find(pair_key(nodes[left].id, nodes[right].id));
             if (found != merges_.end())
-                queue.push({found->second.rank, left, right, nodes[left].id, nodes[right].id, found->second.id});
+                queue.push({found->second.rank, left, right, nodes[left].id, nodes[right].id,
+                            found->second.id});
         };
         for (std::size_t index = 0; index < nodes.size(); ++index)
             enqueue(index);
@@ -278,7 +300,7 @@ class BpeTokenizer final : public ITokenizer {
 } // namespace
 
 std::unique_ptr<ITokenizer> CreateSiglipBpeTokenizer(const nlohmann::json& tokenizer,
-                                                  bool add_special_tokens) {
+                                                     bool add_special_tokens) {
     return std::make_unique<BpeTokenizer>(tokenizer, add_special_tokens);
 }
 } // namespace trtmc

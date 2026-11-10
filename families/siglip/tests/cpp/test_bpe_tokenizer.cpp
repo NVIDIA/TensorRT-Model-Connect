@@ -4,9 +4,10 @@
  */
 
 #include "families/siglip/runtime/tokenizer.h"
-#include <nlohmann/json.hpp>
+
 #include <fstream>
 #include <iostream>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 
 using Json = nlohmann::json;
@@ -26,13 +27,16 @@ int main(int argc, char** argv) {
         const auto tokenizer_json = argc == 3 ? read_json(argv[2]) : fixture.at("tokenizer");
         const auto data = tokenizer_json.dump();
         for (bool add_special : {false, true}) {
-            const auto tokenizer = trtmc::CreateSiglipTokenizer(data.data(), data.size(), add_special);
+            const auto tokenizer =
+                trtmc::CreateSiglipTokenizer(data.data(), data.size(), add_special);
             for (const auto& test : fixture.at("cases")) {
                 const auto text = test.at("text").get<std::string>();
-                const auto expected = test.at(add_special ? "ids_special" : "ids").get<std::vector<std::int32_t>>();
+                const auto expected =
+                    test.at(add_special ? "ids_special" : "ids").get<std::vector<std::int32_t>>();
                 const auto actual = tokenizer->encode(text);
                 if (actual != expected)
-                    throw std::runtime_error("Encode mismatch: " + test.dump() + " actual=" + Json(actual).dump());
+                    throw std::runtime_error("Encode mismatch: " + test.dump() +
+                                             " actual=" + Json(actual).dump());
                 if (tokenizer->decode(actual) != test.at("decoded").get<std::string>())
                     throw std::runtime_error("Decode mismatch: " + test.dump());
             }
@@ -41,7 +45,8 @@ int main(int argc, char** argv) {
                     test.at("decoded").get<std::string>())
                     throw std::runtime_error("Byte fallback decode mismatch: " + test.dump());
             }
-            if (tokenizer->id_for_token("<pad>") != 0 || tokenizer->id_for_token("absent-token") != -1 ||
+            if (tokenizer->id_for_token("<pad>") != 0 ||
+                tokenizer->id_for_token("absent-token") != -1 ||
                 tokenizer->token_for_id(-1) != "" || tokenizer->token_for_id(0) != "<pad>")
                 throw std::runtime_error("Token lookup mismatch");
         }
@@ -63,8 +68,10 @@ int main(int argc, char** argv) {
                 "model":{"type":"Unigram","unk_id":2,"vocab":[
                     ["<pad>",0],["</s>",0],["<unk>",-100],["▁ab",-1],["▁c",-1]]},
                 "normalizer":{"type":"Lowercase"}
-            })").dump();
-            const auto tokenizer = trtmc::CreateSiglipTokenizer(unigram.data(), unigram.size(), true);
+            })")
+                                     .dump();
+            const auto tokenizer =
+                trtmc::CreateSiglipTokenizer(unigram.data(), unigram.size(), true);
             if (tokenizer->encode("AB C") != std::vector<std::int32_t>{3, 4, 1} ||
                 tokenizer->decode({3, 4, 1}) != "ab c" ||
                 tokenizer->encode("") != std::vector<std::int32_t>{1})

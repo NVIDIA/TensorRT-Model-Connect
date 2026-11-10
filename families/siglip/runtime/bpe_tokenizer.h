@@ -6,9 +6,10 @@
 #pragma once
 
 #include "families/siglip/runtime/tokenizer.h"
+
 #include <nlohmann/json.hpp>
 
 namespace trtmc {
 std::unique_ptr<ITokenizer> CreateSiglipBpeTokenizer(const nlohmann::json& tokenizer,
-                                                  bool add_special_tokens);
+                                                     bool add_special_tokens);
 } // namespace trtmc

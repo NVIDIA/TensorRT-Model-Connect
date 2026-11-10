@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "families/siglip/runtime/tokenizer.h"
 #include "families/siglip/runtime/bpe_tokenizer.h"
+#include "families/siglip/runtime/tokenizer.h"
 
 #include <algorithm>
 #include <cassert>

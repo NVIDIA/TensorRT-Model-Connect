@@ -7,8 +7,8 @@
 
 #include <cmath>
 #include <fstream>
-#include <nlohmann/json.hpp>
 #include <iostream>
+#include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <vector>
 
@@ -147,7 +147,7 @@ void test_pillow_pixels(const char* fixture_path) {
         for (int value : test.at("pixels"))
             pixels.push_back(static_cast<float>(value) / 255.0F);
         const auto actual = trtmc::preprocess_siglip_image(pixels.data(), test.at("height"),
-                                                         test.at("width"), config);
+                                                           test.at("width"), config);
         const auto expected = test.at("expected").get<std::vector<int>>();
         const auto plane = static_cast<std::size_t>(config.input_image_h) * config.input_image_w;
         for (std::size_t index = 0; index < expected.size(); ++index) {
