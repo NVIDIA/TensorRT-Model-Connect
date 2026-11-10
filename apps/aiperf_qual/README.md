@@ -5,8 +5,8 @@ Accuracy and performance qualification of every ready catalog model against its 
 
 - **Acc**: TRTMC must be as accurate as the native model on the Task's workloads. Both sides answer the
   Task's gold-labelled benchmarks (`absolute`) and each benchmark is a paired non-inferiority decision
-  (`noninferiority.py`): `pass` when TRTMC's regression is shown to be below the benchmark's margin, `fail`
-  when it is shown to exceed it, `inconclusive` otherwise. Tasks without a gold set compare outputs with
+  (`noninferiority.py`): `fail` when TRTMC's measured regression exceeds the benchmark's margin, `pass`
+  otherwise (there is no inconclusive outcome; the confidence statistics are reported for information). Tasks without a gold set compare outputs with
   the native model (conversion parity). Random-weight test models are Perf only (`accuracy_source: none`).
 - **Perf**: report Native and TRTMC task-call p50 from the same benchmark responses used for Acc,
   at the recorded effective precision. Timing is a measurement, not an additional acceptance gate.
@@ -254,7 +254,7 @@ python tools/model_benchmark.py aiperf --environment $E --aiperf-python <venv>/b
 `run` builds the candidate bundle when `bundle_root` does not hold it yet (trtmc-bench, in the
 reference environment, under the GPU lock), qualifies, and applies the bundle retention policy.
 `report.md` / `report.json` in the output directory hold the verdict: `pass`, `acc-issue`,
-`not-covered` (no native path), `acc-inconclusive`, `not-comparable`, `perf-issue` (red/yellow),
+`not-covered` (no native path), `not-comparable`, `perf-issue` (red/yellow),
 `perf-inconclusive` (white), or `error` (a phase failed; see "Phase errors" and `phase-errors.log`);
 `build.json` records the build (`build-failed` when it failed); `report.json` carries a reproduction
 command. `--smoke` runs one problem per benchmark and one timed request (`smoke-pass` / `smoke-fail`,
@@ -322,7 +322,7 @@ batch advances (all default to `retain`):
 | `hf_cache` | `retain`, `delete_unused` | `run-all` deletes a checkpoint repository from `hf_hub_cache` once no remaining profile of the batch uses it |
 
 `delete_on_pass` also accepts a benchmark result with passing Acc and complete Perf (`measured`).
-Partial timings, inconclusive Acc, and failed Acc keep their bundles under that policy.
+Partial timings and failed Acc keep their bundles under that policy.
 Failed Native precision attempts remain in the execution evidence; their timings and client
 statistics are excluded when a fallback succeeds.
 

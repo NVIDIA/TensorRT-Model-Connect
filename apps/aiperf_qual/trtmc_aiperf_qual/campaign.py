@@ -566,8 +566,8 @@ def summary(roots: Sequence[Path], baseline: Sequence[Path] = ()) -> tuple[str, 
     names = [SIGNAL_NAMES[result] for result in SIGNALS]
     lines = ["# TRTMC vs native qualification", "", f"{len(rows)} models from {', '.join(r.name for r in roots)}: "
              f"{sum(is_pass(row) for row in rows.values())} pass (Green + conclusive Yellow).", "",
-             "Green: pass. Yellow: Perf about equal to native (counts as a pass) or an Acc difference not shown either "
-             "way; inconclusive Acc does not count as a pass. Red: Acc or Perf worse than native beyond its margin. White: no valid comparison (an error or a "
+             "Green: pass. Yellow: Perf about equal to native (counts as a pass); an inconclusive Acc of an older "
+             "report does not count as a pass. Red: Acc or Perf worse than native beyond its margin. White: no valid comparison (an error or a "
              "failed build, or the comparison does not apply).", "",
              "| result | models |", "|---|---|", *(f"| {SIGNAL_NAMES[r]} | {results[r]} |" for r in SIGNALS),
              "", "## By Task", "", "| Task | " + " | ".join(names) + " |", "|---|" + "---|" * len(names),

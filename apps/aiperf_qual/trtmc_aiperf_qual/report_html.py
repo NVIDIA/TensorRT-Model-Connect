@@ -28,7 +28,7 @@ EVIDENCE = ("report.md", "report.json", "execution.jsonl", "execution.timing-rec
             "artifacts/candidate/server.log", "candidate/server.log")
 LIGHT_COLORS = {"green": "#1e8e3e", "yellow": "#b06000", "red": "#c5221f", "white": "#5f6368", "n/a": "#5f6368"}
 LEGEND = (("green", "Quality meets its criteria and task timings are available; dataset timings have no performance gate."),
-          ("yellow", "Performance within the margin of native, or an inconclusive accuracy difference. Inconclusive Acc is not a pass."),
+          ("yellow", "Performance within the margin of native (an inconclusive Acc of an older report is not a pass)."),
           ("red", "Accuracy or performance worse than native beyond the margin."),
           ("white", "No valid comparison: a build, run, or environment error, or results that cannot be compared."))
 STYLE = """

@@ -242,7 +242,8 @@ def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: 
             for entry in result.get("accuracy", []):
                 removed_floor = (entry.get("gate") or {}).pop("min_native", None) is not None
                 changed |= removed_floor
-                if ((entry.get("source") == "absolute" or removed_floor)
+                # Task checks (the TTS ASR round trip) carry the same non-inferiority test.
+                if ((entry.get("source") in ("absolute", "task") or removed_floor)
                         and (entry.get("metrics") or {}).get("test") and entry.get("status") != "error"):
                     status, reasons = absolute.status(entry)
                     changed |= status != entry.get("status")
@@ -317,6 +318,9 @@ def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: 
                     elif item["gate"] != judged:  # a corpus bootstrap needs the outputs: rerun the model
                         item["metrics"]["test"] = {"outcome": None}
                     item["status"], item["reasons"] = absolute.status(item)
+            elif (item.get("source") == "task" and (item.get("metrics") or {}).get("test")
+                  and item.get("status") != "error"):  # a task check's test (the TTS ASR round trip)
+                item["status"], item["reasons"] = absolute.status(item)
         result["accuracy"] = [item for item in result.get("accuracy", []) if item.get("source") != "missing"]
         if model.get("accuracy_source") == "none":  # re-derived from today's output checks
             result["accuracy"] = [item for item in result["accuracy"] if item.get("suite") != CONVERSION_PARITY]
