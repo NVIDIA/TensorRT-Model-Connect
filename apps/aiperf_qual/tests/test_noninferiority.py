@@ -8,9 +8,11 @@ from trtmc_aiperf_qual import noninferiority
 numpy = pytest.importorskip("numpy")
 
 
-def test_the_score_test_passes_fails_or_stays_inconclusive():
+def test_right_wrong_pairs_fail_only_when_the_measured_regression_exceeds_the_margin():
     assert noninferiority.binary(0, 0, 100, 3.0)["outcome"] == "pass"  # no disagreement on 100 problems
-    assert noninferiority.binary(1, 0, 100, 3.0)["outcome"] == "inconclusive"
+    assert noninferiority.binary(1, 0, 100, 3.0)["outcome"] == "pass"  # 1 point: within the margin
+    assert noninferiority.binary(3, 0, 100, 3.0)["outcome"] == "pass"  # at the margin
+    assert noninferiority.binary(4, 0, 100, 3.0)["outcome"] == "fail"
     # v7's defects: gpt2 on LAMBADA (53 vs 0 of 5,153) and gemma-3-4b on MMLU (65 vs 3 of 1,140)
     assert noninferiority.binary(53, 0, 5153, 0.5)["outcome"] == "fail"
     assert noninferiority.binary(65, 3, 1140, 1.0)["outcome"] == "fail"
@@ -30,10 +32,11 @@ def test_sampled_models_use_the_t_bound_over_problems():
     steady = noninferiority.paired_means([0.0] * 50 + [50.0, -50.0] * 5, 5.0)
     assert steady["outcome"] == "pass" and steady["regression_points"] == 0.0
     assert noninferiority.paired_means([100.0] * 30, 5.0)["outcome"] == "fail"
-    assert noninferiority.paired_means([1.0], 5.0)["outcome"] == "inconclusive"
-    # The exact t(0.95, 123) quantile: this upper bound is 2.0005, just above the margin of 2
+    assert noninferiority.paired_means([1.0], 5.0)["outcome"] == "pass"
+    assert noninferiority.paired_means([6.0], 5.0)["outcome"] == "fail"
+    # The exact t(0.95, 123) quantile: the upper bound 2.0005 is reported; the mean (0) decides
     edge = noninferiority.paired_means([100 / 3, -100 / 3] * 10 + [0.0] * 104, 2.0)
-    assert edge["outcome"] == "inconclusive" and edge["upper"] == pytest.approx(2.000511, abs=1e-5)
+    assert edge["outcome"] == "pass" and edge["upper"] == pytest.approx(2.000511, abs=1e-5)
 
 
 def test_moving_blocks_keep_consecutive_windows_and_the_sample_size():

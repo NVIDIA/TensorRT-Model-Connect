@@ -242,7 +242,8 @@ def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: 
             for entry in result.get("accuracy", []):
                 removed_floor = (entry.get("gate") or {}).pop("min_native", None) is not None
                 changed |= removed_floor
-                if ((entry.get("source") == "absolute" or removed_floor)
+                # Task checks (the TTS ASR round trip) carry the same non-inferiority test.
+                if ((entry.get("source") in ("absolute", "task") or removed_floor)
                         and (entry.get("metrics") or {}).get("test") and entry.get("status") != "error"):
                     status, reasons = absolute.status(entry)
                     changed |= status != entry.get("status")

@@ -10,9 +10,9 @@ problems, and each side is scored against the gold answers:
 - ``metric`` entries send a suite with gold labels (images, audio, sentence pairs) through AIPerf's
   trtmc_task endpoint and score the outputs here (gold_metrics).
 
-Each entry is a paired non-inferiority decision (``noninferiority``): pass when
-TRTMC's regression against the native model is shown to be below the benchmark's margin, fail when it
-is shown to exceed it, inconclusive otherwise. Native absolute capability does not veto the comparison.
+Each entry is a paired non-inferiority decision (``noninferiority``): fail when TRTMC's measured
+regression against the native model exceeds the benchmark's margin, pass otherwise. Native absolute
+capability does not veto the comparison.
 A sampled model answers once per seed on each side and
 is judged on the per-problem seed means.
 """
@@ -559,7 +559,8 @@ def status(entry: Mapping[str, Any]) -> tuple[str, list[str]]:
     """Compare the conversion's scored difference, regardless of native absolute capability.
 
     Old reports may carry ``min_native``; it no longer overrides the difference
-    test. Missing answers and statistical uncertainty retain their own outcomes.
+    test. Missing answers retain their own outcome. An ``inconclusive`` test of a report written before
+    pass/fail-only judging is decided on its measured regression.
     """
     metrics, gate = entry.get("metrics") or {}, entry.get("gate") or {}
     expected, paired = int(entry.get("expected_samples") or 0), int(entry.get("samples") or 0)
@@ -570,10 +571,13 @@ def status(entry: Mapping[str, Any]) -> tuple[str, list[str]]:
     test = metrics.get("test") or {}
     if test.get("outcome") is None:
         return "error", ["no non-inferiority outcome"]
-    reasons = [] if test["outcome"] == "pass" else [
+    result = test["outcome"]
+    if result == "inconclusive":
+        result = noninferiority.outcome(float(test.get("regression_points", 0.0)), noninferiority.margin(gate, native))
+    reasons = [] if result == "pass" else [
         f"regression {test.get('regression_points', 0.0):+.3f} points against margin "
-        f"{noninferiority.margin(gate, native):g}: {test['outcome']}"]
-    return test["outcome"], reasons
+        f"{noninferiority.margin(gate, native):g}: {result}"]
+    return result, reasons
 
 
 def binary_test(entry: Mapping[str, Any]) -> dict[str, Any]:
