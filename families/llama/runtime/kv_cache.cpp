@@ -54,6 +54,12 @@ void validate_native_cache_pair(ITrtModule& module, const std::string& cache_nam
     }
 }
 
+// Runtime-sized engines accept any cache row count from one row through the
+// allocation. Binding the valid prefix rounded up to this bucket keeps the cost
+// of each step proportional to the context while changing the bound shape (and
+// recapturing a decoder CUDA graph) only once per bucket.
+constexpr int32_t kRuntimeCacheRowBucket = 32;
+
 bool all_tensors_ok(const std::vector<DeviceTensor>& tensors) {
     for (const auto& tensor : tensors) {
         if (!tensor.ok())
@@ -198,6 +204,30 @@ void LlamaKvCache::write_native_kv_inputs(TensorMap& inputs, int32_t seq_len) {
 // Masked score constant is model-local.
 static constexpr float kMaskedScore = -1.0e4F;
 
+int32_t LlamaKvCache::step_cache_rows() const {
+    if (!dynamic_binding_enabled_)
+        return max_length_;
+    const int32_t valid = std::max(1, std::min(position_, max_length_));
+    const int32_t buckets = (valid + kRuntimeCacheRowBucket - 1) / kRuntimeCacheRowBucket;
+    return std::min(buckets * kRuntimeCacheRowBucket, max_length_);
+}
+
+void LlamaKvCache::bind_dynamic_cache_rows(ITrtModule& module, int32_t cache_rows) {
+    const std::vector<int64_t> cache_shape{cache_rows, kv_dim_};
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        const auto layer = static_cast<std::size_t>(i);
+        module.bind_external(names_.cache_k[layer], cache_k_[layer].data(), cache_shape);
+        module.bind_external(names_.cache_v[layer], cache_v_[layer].data(), cache_shape);
+    }
+    bound_cache_rows_ = cache_rows;
+}
+
+void LlamaKvCache::rebind_cache_rows(int32_t cache_rows) {
+    if (!dynamic_binding_enabled_ || bound_module_ == nullptr || cache_rows == bound_cache_rows_)
+        return;
+    bind_dynamic_cache_rows(*bound_module_, cache_rows);
+}
+
 void LlamaKvCache::write_position_input(TensorMap& inputs, int32_t seq_len) {
     if (!has_position_input_)
         return;
@@ -212,12 +242,14 @@ void LlamaKvCache::write_position_input(TensorMap& inputs, int32_t seq_len) {
 }
 
 void LlamaKvCache::write_batched_mask(TensorMap& inputs, int32_t seq_len) {
-    // Batched prefill mask: (seq_len, max_length + seq_len). Columns
-    // [0, valid) are visible cache, [valid, max_length) are stale slots,
-    // [max_length, max_length+seq_len) are the new tokens — causal so
-    // token i sees tokens 0..i.
+    // Batched prefill mask: (seq_len, rows + seq_len), rows = bound cache rows.
+    // Columns [0, valid) are visible cache, [valid, rows) are stale slots,
+    // [rows, rows+seq_len) are the new tokens — causal so token i sees
+    // tokens 0..i.
+    const int32_t rows = step_cache_rows();
+    rebind_cache_rows(rows);
     const int32_t valid = std::max(0, std::min(position_, max_length_));
-    const int32_t kv_len = max_length_ + seq_len;
+    const int32_t kv_len = rows + seq_len;
     const std::size_t total = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(kv_len);
     mask_buf_.assign(total, kMaskedScore);
     for (int32_t i = 0; i < seq_len; ++i) {
@@ -225,8 +257,7 @@ void LlamaKvCache::write_batched_mask(TensorMap& inputs, int32_t seq_len) {
         for (int32_t j = 0; j < valid; ++j)
             mask_buf_[row + static_cast<std::size_t>(j)] = 0.0f;
         for (int32_t j = 0; j <= i; ++j)
-            mask_buf_[row + static_cast<std::size_t>(max_length_) + static_cast<std::size_t>(j)] =
-                0.0f;
+            mask_buf_[row + static_cast<std::size_t>(rows) + static_cast<std::size_t>(j)] = 0.0f;
     }
     Tensor mask_t;
     mask_t.data = mask_buf_.data();
@@ -239,8 +270,10 @@ void LlamaKvCache::write_bidirectional_mask(TensorMap& inputs, int32_t seq_len) 
     // Diffusion block mask: all valid prefix cache rows are visible, stale cache
     // rows are hidden, and every token in the current block can see every other
     // token in the current block.
+    const int32_t rows = step_cache_rows();
+    rebind_cache_rows(rows);
     const int32_t valid = std::max(0, std::min(position_, max_length_));
-    const int32_t kv_len = max_length_ + seq_len;
+    const int32_t kv_len = rows + seq_len;
     const std::size_t total = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(kv_len);
     mask_buf_.assign(total, kMaskedScore);
     for (int32_t i = 0; i < seq_len; ++i) {
@@ -248,8 +281,7 @@ void LlamaKvCache::write_bidirectional_mask(TensorMap& inputs, int32_t seq_len) 
         for (int32_t j = 0; j < valid; ++j)
             mask_buf_[row + static_cast<std::size_t>(j)] = 0.0f;
         for (int32_t j = 0; j < seq_len; ++j)
-            mask_buf_[row + static_cast<std::size_t>(max_length_) + static_cast<std::size_t>(j)] =
-                0.0f;
+            mask_buf_[row + static_cast<std::size_t>(rows) + static_cast<std::size_t>(j)] = 0.0f;
     }
     Tensor mask_t;
     mask_t.data = mask_buf_.data();
@@ -265,8 +297,10 @@ void LlamaKvCache::write_decode_mask(TensorMap& inputs) {
         throw std::runtime_error("Llama standard decoder has an invalid attention-mask contract");
     }
 
+    const int32_t rows = step_cache_rows();
+    rebind_cache_rows(rows);
     const int32_t valid = std::max(0, std::min(position_, max_length_));
-    const int32_t mask_width = max_length_ + 1;
+    const int32_t mask_width = rows + 1;
     if (mask_buf_.size() != static_cast<std::size_t>(mask_width))
         mask_buf_.resize(static_cast<std::size_t>(mask_width));
     std::fill(mask_buf_.begin(), mask_buf_.end(), kMaskedScore);
@@ -339,16 +373,15 @@ void LlamaKvCache::bind_to(ITrtModule& module) {
             module.tensor_shape(names_.present_v[layer]) != present_shape) {
             throw std::runtime_error("Llama standard decoder has an invalid KV contract");
         }
-        if (dynamic_binding_enabled_) {
-            module.bind_external(names_.cache_k[layer], cache_k_[layer].data(), cache_shape);
-            module.bind_external(names_.cache_v[layer], cache_v_[layer].data(), cache_shape);
-        } else {
+        if (!dynamic_binding_enabled_) {
             module.bind_external(names_.cache_k[layer], cache_k_[layer].data());
             module.bind_external(names_.cache_v[layer], cache_v_[layer].data());
         }
         module.bind_external(names_.present_k[layer], present_k_[layer].data());
         module.bind_external(names_.present_v[layer], present_v_[layer].data());
     }
+    if (dynamic_binding_enabled_)
+        bind_dynamic_cache_rows(module, step_cache_rows());
 }
 
 void LlamaKvCache::bind_cache_inputs(ITrtModule& module) {
@@ -374,14 +407,13 @@ void LlamaKvCache::bind_cache_inputs(ITrtModule& module) {
               module.tensor_shape(names_.cache_v[layer]) != cache_shape))) {
             throw std::runtime_error("Llama standard prefill has an invalid KV contract");
         }
-        if (dynamic_binding_enabled_) {
-            module.bind_external(names_.cache_k[layer], cache_k_[layer].data(), cache_shape);
-            module.bind_external(names_.cache_v[layer], cache_v_[layer].data(), cache_shape);
-        } else {
+        if (!dynamic_binding_enabled_) {
             module.bind_external(names_.cache_k[layer], cache_k_[layer].data());
             module.bind_external(names_.cache_v[layer], cache_v_[layer].data());
         }
     }
+    if (dynamic_binding_enabled_)
+        bind_dynamic_cache_rows(module, step_cache_rows());
 }
 
 void LlamaKvCache::write_prefill_kv(const std::vector<const void*>& prefill_k,
