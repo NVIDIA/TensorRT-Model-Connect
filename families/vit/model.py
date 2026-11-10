@@ -174,7 +174,7 @@ def build(request, writer) -> None:
         # the image size and is not a free parameter.
         raise NotImplementedError("vit derives its sequence length from the image size")
 
-    # fp32 (the default) or fp16. An fp16 engine is too noisy for the fp32
+    # fp16 (the default, support.py) or fp32. An fp16 engine is too noisy for the fp32
     # logit tolerance alone to catch the weakest defect, the tanh GELU:
     # measured on the E2E image it is 5.2e-03 to 1.3e-02 off the reference,
     # and a tanh-GELU fp16 build 1.6e-02 to 2.5e-02. So the fp16 E2E case
