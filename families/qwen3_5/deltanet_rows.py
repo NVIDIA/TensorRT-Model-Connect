@@ -246,13 +246,24 @@ def add_chunked_delta_rule(
         sum_op,
     )
 
-    total = network.add_reduce(g, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True).get_output(0)
+    # gamma_S is the last cumulative sum, not a separate reduction: summed in
+    # another order it can exceed gamma_i by many ulps at large |g|, and
+    # exp(gamma_S - gamma_i) would then overflow. A float running sum of
+    # non-positive terms never increases, and the clamp keeps the exponent at
+    # most zero regardless.
+    last = _ew(network, rows, _i64(network, [1]), trt.ElementWiseOperation.SUB)
+    total = dynamic_slice(network, gamma, (_i64(network, [0]), last), (num_heads, 1))  # [H, 1]
     tail = network.add_unary(
         _ew(
             network,
-            _shuffle(network, total, reshape=(0, 0, 1)),
-            gamma_rows,
-            trt.ElementWiseOperation.SUB,
+            _ew(
+                network,
+                _shuffle(network, total, reshape=(0, 0, 1)),
+                gamma_rows,
+                trt.ElementWiseOperation.SUB,
+            ),
+            _const(network, np.zeros((1, 1, 1), np.float32)),
+            trt.ElementWiseOperation.MIN,
         ),
         trt.UnaryOperation.EXP,
     ).get_output(0)  # exp(gamma_S - gamma_i): [H, S, 1]
