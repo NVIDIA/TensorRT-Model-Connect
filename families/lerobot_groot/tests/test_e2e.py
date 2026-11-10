@@ -6,7 +6,8 @@
 Every case builds the pinned ``nvidia/gr00t17-lerobot-libero_spatial-640`` checkpoint straight
 from its directory, runs a recorded LIBERO-spatial observation through the bundle with the
 reference's flow noise, and compares all 16 x 7 action values with the LeRobot float32 oracle
-(and, for a bfloat16 bundle, with LeRobot's own bfloat16 policy).
+(and, for a bfloat16 bundle, with LeRobot's own bfloat16 policy). The FP8 manifest builds the
+same checkpoint with ``quantization="fp8"``.
 """
 
 from __future__ import annotations
@@ -199,6 +200,7 @@ def bundles(tmp_path_factory, model_dirs):
                         family=FAMILY,
                         task=manifest["task"],
                         precision=manifest["precision"],
+                        quantization=manifest.get("quantization"),
                     )
                 )
             assert output.is_file()
