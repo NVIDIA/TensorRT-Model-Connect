@@ -455,18 +455,29 @@ def test_machine_model_list_excludes_checkpoints_above_the_size_limit():
                          "reason": "checkpoint 54 GiB > models.max_checkpoint_gib 30"}]
 
 
-def test_a_profile_definition_excludes_the_profile_from_every_machines_list():
+def test_a_profile_definition_excludes_the_profile_from_every_machines_list(tmp_path):
     """``exclude: <reason>`` in a profile's own definition: a profile AIPerf cannot qualify as cataloged."""
-    reason = "its catalog testcase has no prompt or image, so no request can be built"
-    declared = selection.Profile("qwen35-moe-gptq-edge", "vision_language_generation", "Qwen/x", None, reason)
+    from trtmc_aiperf_qual.models import profile_override
+
+    reason = "its catalog testcase has no prompt, so no request can be built"
+    definition = tmp_path / "families/f/tests/aiperf/p.yaml"
+    definition.parent.mkdir(parents=True)
+    definition.write_text(f"exclude: {reason}\n")
+    assert profile_override("p", "f", tmp_path, root=tmp_path / "config")["exclude"] == reason
+    declared = selection.Profile("p", "vision_language_generation", "Org/p", None, reason)
     selected, excluded = selection.select({}, [*CATALOG, declared])
     assert _names(selected) == _names(CATALOG)
-    assert excluded == [{"profile": "qwen35-moe-gptq-edge", "task": "vision_language_generation", "reason": reason}]
+    assert excluded == [{"profile": "p", "task": "vision_language_generation", "reason": reason}]
     # A machine whose list does not include it still records the profile's own reason.
     _, excluded = selection.select({"include": ["qwen3-0.6b-fp16"]}, [*CATALOG, declared])
-    assert {item["profile"]: item["reason"] for item in excluded}["qwen35-moe-gptq-edge"] == reason
+    assert {item["profile"]: item["reason"] for item in excluded}["p"] == reason
+
+
+def test_the_vision_language_profiles_whose_catalog_cases_gained_a_request_are_qualified():
+    """Their catalog cases now carry a prompt and an image, so no definition excludes them any more."""
     declared_here = {profile.name: profile.excluded for profile in selection.catalog(REPOSITORY)}
-    assert declared_here["qwen35-moe-gptq-edge"] == reason and declared_here["qwen3-0.6b-fp16"] is None
+    for name in ("nemotron-omni-nvfp4-text-image", "qwen35-moe-gptq-edge", "qwen3-0.6b-fp16"):
+        assert declared_here[name] is None, name
 
 
 def test_an_unreadable_profile_definition_is_an_error_of_that_profile_alone(tmp_path):
