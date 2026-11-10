@@ -153,3 +153,28 @@ def test_a_bare_cuda_device_loads_onto_the_current_device(monkeypatch):
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 2)
     assert [ReferenceSpec(operation="generate", model="checkpoint", device=device).device_map
             for device in ("cuda", "cuda:1", "cpu")] == ["cuda:2", "cuda:1", "cpu"]
+
+
+@pytest.mark.parametrize("options, values, shape", [
+    ({}, [1.0, 2.0], [1, 2]),
+    ({"all_tokens": True}, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [3, 2]),
+])
+def test_encode_returns_the_first_token_or_every_token_with_all_tokens(tmp_path, options, values, shape):
+    from types import SimpleNamespace
+
+    from trtmc_perf_serving.backends.reference.common import ReferenceSpec
+    from trtmc_perf_serving.backends.reference.text import TextEncoder
+
+    class Batch(dict):
+        def to(self, _device):
+            return self
+
+    hidden = torch.tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]])
+    encoder = TextEncoder.__new__(TextEncoder)
+    encoder.spec = ReferenceSpec(operation="encode", model="encoder", device="cpu", options=options)
+    encoder.tokenizer = lambda *_args, **_kwargs: Batch(input_ids=torch.tensor([[7, 8, 9]]))
+    encoder.model = lambda **_kwargs: SimpleNamespace(last_hidden_state=hidden)
+    encoder.forward_kwargs, encoder.max_length = {}, None
+    observation = encoder.invoke({"prompt": "a b"}, tmp_path / "out").observation
+    assert (observation["values"], observation["shape"], observation["dim"]) == (values, shape, 2)
+    assert observation["feature_kind"] == "token"

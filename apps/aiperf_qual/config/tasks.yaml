@@ -151,9 +151,17 @@ tasks:
     absolute: [encoder_parity]
     performance: {output_grader: parity_vector}
   text_to_pooled_features: *encode  # the migrated encoders pool the first token, as encode did
-  embedding:
+  # Every token's features, compared as one matrix: a family that frames the text otherwise than its checkpoint's
+  # tokenizer (a different token count) states `exclude`
+  text_to_token_features:
+    <<: *encode
+    reference: {options: {all_tokens: true}}
+  embedding: &embed
     absolute: [sts, retrieval]
     performance: {output_grader: parity_vector}
+  # The generic embed reference mean-pools and L2-normalizes the unprefixed text: profiles of a family that pools
+  # otherwise or needs a query/document role state `exclude`.
+  text_to_embedding: *embed
 
   image_features:
     performance: {output_grader: parity_numeric, output_grader_params: {min_cosine: 0.99}}

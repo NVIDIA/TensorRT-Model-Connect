@@ -1,0 +1,4 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+exclude: the generic embed reference sends unprefixed text; nomic-embed needs a query or document role, and its catalog testcase has no prompt
