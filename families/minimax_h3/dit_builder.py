@@ -305,6 +305,8 @@ def _transformer_block(
     profile: MiniMaxH3Config,
     index: int,
     quant=None,
+    *,
+    attention=None,
 ):
     """Add one native H3 transformer block and return its residual stream."""
 
@@ -322,17 +324,22 @@ def _transformer_block(
         profile.norm_eps,
     )
     normalized = op.modulate(network, normalized, shift_msa, scale_msa)
-    update = _attention_block(
-        network,
-        normalized,
-        weights,
-        prefix,
-        profile,
-        rows,
-        cos=cos,
-        sin=sin,
-        quant=quant,
-    )
+    if attention is None:
+        update = _attention_block(
+            network,
+            normalized,
+            weights,
+            prefix,
+            profile,
+            rows,
+            cos=cos,
+            sin=sin,
+            quant=quant,
+        )
+    elif quant is not None:
+        raise NotImplementedError("MiniMax-H3 fp8 quantizes only the native attention block")
+    else:
+        update = attention(network, normalized, weights, prefix, profile, rows, cos=cos, sin=sin)
     hidden = op.gated_residual(network, hidden, update, gate_msa)
 
     normalized = op.rms_norm(
@@ -494,7 +501,8 @@ def _serialize(
     weights: dict,
     consume_weights: bool,
     label: str,
-) -> bytes:
+    output=None,
+) -> bytes | None:
     try:
         plan = builder.build_serialized_network(network, config)
     finally:
@@ -505,7 +513,7 @@ def _serialize(
         raise RuntimeError(f"TensorRT failed to build MiniMax-H3 {label} engine")
     del network, config, builder, logger
     gc.collect()
-    return bytes(plan)
+    return op.emit_serialized_plan(plan, output)
 
 
 def _add_reference_profile(builder, config, profile, reference):

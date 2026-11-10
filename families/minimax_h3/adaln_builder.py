@@ -51,7 +51,8 @@ def build_adaln_precompute_engine(
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
     input_timesteps: bool = False,
-) -> bytes:
+    output=None,
+) -> bytes | None:
     profile.validate()
     if not isinstance(input_timesteps, bool) or (
         input_timesteps and profile.timestep_input_dim % 2
@@ -131,9 +132,9 @@ def build_adaln_precompute_engine(
             6,
             profile.hidden_size,
         )
-        output = reshape.get_output(0)
-        output.name = f"block_modulation_{index}"
-        network.mark_output(output)
+        block_output = reshape.get_output(0)
+        block_output.name = f"block_modulation_{index}"
+        network.mark_output(block_output)
 
     final_modulation = op.linear(
         network,
@@ -167,4 +168,4 @@ def build_adaln_precompute_engine(
         raise RuntimeError("TensorRT failed to build MiniMax-H3 AdaLN precompute engine")
     del network, config, builder
     gc.collect()
-    return bytes(plan)
+    return op.emit_serialized_plan(plan, output)

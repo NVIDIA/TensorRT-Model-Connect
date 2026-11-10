@@ -1,16 +1,50 @@
 # MiniMax-H3 reference-to-video (experimental)
 
-This explicit build turns reference images and a prompt into video with stereo
-audio through the original `MiniMaxAI/MiniMax-H3` image-reference path (Ref2VA),
-124 frames per request.
+These explicit builds turn reference images and a prompt into video with stereo
+audio:
 
-It is experimental and not qualified end to end with the complete trained
-model. Automatic discovery in `support.py` does not select it; do not present it
-as production support or quality-equivalent inference. It needs the original
-`transformer_ref` checkpoint partition; a text-only checkpoint does not replace
+- the original `MiniMaxAI/MiniMax-H3` image-reference path (Ref2VA), 124 frames
+  per request;
+- the `FastVideo/FastVideo-FastH3-Omni-8-Step-V1` student (OmniRef): eight
+  denoiser forwards instead of 49, with 128-token video sparse attention (VSA).
+
+Both are experimental and not qualified end to end with the complete trained
+model. Automatic discovery in `support.py` does not select them; do not present
+them as production support, quality-equivalent inference or real-time
+generation. They need the original `transformer_ref` checkpoint partition; a
+text-only checkpoint, including a text-only FastH3 checkpoint, does not replace
 it. Initial-frame editing is not supported.
 
-## Build from Python
+## Build the OmniRef bundle
+
+`build-omniref` builds the original bundle once, then the student,
+which rebuilds its AdaLN and DiT plans and copies the other six:
+
+```sh
+python -m tensorrt_model_connect minimax_h3 build-omniref \
+  --output h3-omniref.bundle --scratch h3-scratch \
+  --bridge build/libtrtmc_byok_tvm_ffi.so \
+  --kernel-library build/libtrtmc_minimax_h3_omniref_vsa.so
+```
+
+It downloads the pinned revisions of both checkpoints, or takes local snapshots
+through `--base` and `--student`, and builds the `minimal` preset with the
+`six_portrait` capacity. Each bundle is about 130 GB: plan for about 250 GB of
+disk and 100 GB of host memory while it builds. The original bundle stays in
+`--scratch` for the next build.
+
+Configure with `-DTRTMC_ENABLE_BYOK=ON -DTRTMC_BUILD_MINIMAX_H3_OMNIREF_VSA=ON`
+for the kernel library, and add `-DTRTMC_BUILD_MINIMAX_H3_OMNIREF_VSA_SM100A=ON`
+for the Blackwell cubins (see `kernels/README.md`). A server registers the
+kernel before loading the bundle:
+
+```sh
+trtmc-server --model video=h3-omniref.bundle \
+  --byok-library build/libtrtmc_minimax_h3_omniref_vsa.so \
+  --byok-function run --byok-name minimax_h3.omniref_vsa128
+```
+
+## Build the original path from Python
 
 With `core/builder` and the repository root on `PYTHONPATH`:
 
@@ -117,6 +151,51 @@ The original recipe uses 50 schedule points (49 denoiser forwards) and produces
 1344 high by 768 wide (4:7); an explicit 1536-by-864 build gives 9:16, untested
 with trained output. Audio and video keep their native endpoints;
 neither is stretched to match the other.
+
+## OmniRef student
+
+`reference_pdd.py` owns the sampling contract and build-time output-head math of
+`FastVideo/FastVideo-FastH3-Omni-8-Step-V1` at revision
+`53e0d26a1691aa473b6262d8196a8feb2c297df0`. The student partitions a
+32-interval base grid into eight blocks with separate video and audio shifts.
+Each block normalizes and combines its trained output heads in FP32, rounds the
+fused parameters to BF16, and keeps H3's separate FP32 score and scheduler
+clocks. Target noise starts at 0.999; fixed conditioning rows stay unchanged.
+
+`reference_pdd_builder.py` adds a strongly typed output-head selector: it stores
+the eight precomposed banks in BF16, selects one bank per forward, accumulates
+the linear operation and bias in FP32 and rounds the velocity to BF16 before
+widening it for the scheduler. `reference_vsa.py` defines the 128-token segment
+transport, separate reference-video regions, the zero-valid partner tile and the
+TVM-FFI graph boundary; `kernels/omniref_vsa.cu` implements routing, sparse
+attention and the learned compression branch.
+
+`reference_pdd_dit_builder.py` composes the student DiT: dense text refinement,
+one VSA binding per transformer block, target-only output selection and the
+eight fused heads. The native denoiser selects the trained head banks, scales
+only target noise by the initial sigma, prepares matching AdaLN times and keeps
+fixed image, video and audio conditioning. The bundle schema is
+`minimax_h3.omniref_pdd/v1`. The factory requires the released checkpoint and
+sampling contract and an explicit VSA tile capacity. The original-H3 schema
+keeps its 49-forward recipe.
+
+`reference_pdd_build.build` checks both released contracts, the widened-head
+transformer config and the complete 688-tensor index before loading student
+weights, and rebuilds AdaLN and DiT from the student. It copies the six common
+plans from an original-H3 bundle after checking that bundle's header and
+complete section layout, that its `runtime.json` equals the original profile
+for this request, that its provenance names an unquantized BF16 build of an
+admitted base checkpoint, and that its tokenizer bytes match. Only base
+revisions `9bfb6693f2cf6de171db46d1aa586f67d773a1da` and
+`48d93ede732756e404a3b1b2f3b3a9b5a22f6cfc` are admitted; their text encoder,
+tokenizer and video/audio VAE files are identical. The source must match the
+requested memory preset and reference capacity.
+
+The build writes the serialized AdaLN and DiT plans straight into the bundle and
+streams the common sections in bounded chunks, avoiding a second plan-sized copy
+in Python and another full bundle copy. `denoiser_workspace_bytes` caps only the
+DiT's TensorRT tactic scratch memory (default 8 GiB, as for AdaLN); large VSA
+fusions can need more. The reuse receipt records both rebuilt plans' limits.
 
 ## Tests
 

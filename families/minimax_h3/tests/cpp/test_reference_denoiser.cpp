@@ -6,6 +6,7 @@
 // Explicit engine/RNG doubles: this test qualifies orchestration, not a model.
 #include "families/minimax_h3/runtime/pipeline.h"
 #include "families/minimax_h3/runtime/reference_denoiser.h"
+#include "families/minimax_h3/runtime/reference_vsa_geometry.h"
 #include "families/minimax_h3/runtime/torch_cuda_normal.h"
 
 #include <algorithm>
@@ -42,6 +43,11 @@ struct State {
     std::vector<std::array<uint64_t, 3>> draws;
     std::vector<float> prefix;
     std::vector<int32_t> tags = {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1};
+    bool pdd() const { return config.recipe == ReferenceSamplingRecipe::OmniRefPdd8; }
+    int forwards() const { return pdd() ? 8 : 49; }
+    MiniMaxH3Schedule schedule(float shift) const {
+        return pdd() ? make_minimax_h3_pdd_schedule(shift) : make_minimax_h3_schedule(50, shift);
+    }
 };
 State* rng_state = nullptr;
 
@@ -73,8 +79,8 @@ class Module final : public ITrtModule {
         if (adaln_) {
             require(input.size() == 1 && input.at("timesteps").shape == std::vector<int64_t>({4}),
                     "native time values, not CPU trig features");
-            const auto vs = make_minimax_h3_schedule(50, 12.0F);
-            const auto as = make_minimax_h3_schedule(50, 3.0F);
+            const auto vs = state_.schedule(12.0F);
+            const auto as = state_.schedule(3.0F);
             const auto plan = make_image_reference_timesteps(
                 expected_layout(state_), vs.timesteps[step_], as.timesteps[step_]);
             std::array<float, 4> times{};
@@ -88,9 +94,10 @@ class Module final : public ITrtModule {
             return {{"block_modulation_0", Tensor{block_.data(), {12, 6, 8}, DType::kBFloat16}},
                     {"final_modulation", Tensor{final_.data(), {4, 2, 8}, DType::kBFloat16}}};
         }
-        if (state_.fail && step_ == 10)
+        if (state_.fail && step_ == (state_.pdd() ? 3 : 10))
             throw std::runtime_error("fixture forward failure");
-        require(input.size() == 11, "all reference DiT operands supplied exactly once");
+        require(input.size() == (state_.pdd() ? 16 : 11),
+                "all reference DiT operands supplied exactly once");
         const auto& video = input.at("video_hidden_states");
         const auto layout = expected_layout(state_);
         const auto video_targets = static_cast<int64_t>(layout.target_video_indices.size());
@@ -104,8 +111,38 @@ class Module final : public ITrtModule {
         require(input.at("target_video_indices").shape == std::vector<int64_t>({video_targets}),
                 "only generated rows are projected");
         const auto* values = static_cast<const float*>(video.data);
+        const auto* audio = static_cast<const float*>(input.at("audio_hidden_states").data);
         if (step_ == 0)
             state_.prefix.assign(values, values + layout.condition_video_rows * 96);
+        if (state_.pdd()) {
+            require(*static_cast<const int32_t*>(input.at("pdd_step").data) == step_,
+                    "each PDD forward selects its own trained output-head bank");
+            std::vector<ReferenceVsaSegment> segments{static_cast<int32_t>(state_.tags.size()), 6,
+                                                      2};
+            segments.emplace_back(2 * state_.config.target.audio_latents);
+            segments.emplace_back(ReferenceVsaVideoGrid{state_.config.target.frames, 4, 6});
+            const auto expected = make_reference_vsa_layout(segments, state_.config.max_vsa_tiles);
+            const auto check = [&](const char* name, const std::vector<int32_t>& wanted) {
+                const auto& got = input.at(name);
+                require(got.dtype == DType::kInt32 && got.numel() == wanted.size() &&
+                            std::equal(wanted.begin(), wanted.end(),
+                                       static_cast<const int32_t*>(got.data)),
+                        "immutable native VSA geometry reaches every DiT forward");
+            };
+            check("vsa_gather_indices", expected.gather_indices);
+            check("vsa_untile_indices", expected.untile_indices);
+            check("vsa_block_sizes", expected.block_sizes);
+            check("vsa_regions", expected.regions);
+            if (step_ == 0) {
+                for (int modality = 0; modality < 2; ++modality) {
+                    const auto& draw = state_.draws[state_.draws.size() - 2 + modality];
+                    const float raw = static_cast<float>(draw[1] + draw[2]) / 4096.0F;
+                    const float got =
+                        modality == 0 ? values[layout.condition_video_rows * 96] : audio[0];
+                    require(got == raw * 0.999F, "PDD scales only freshly drawn target noise");
+                }
+            }
+        }
         require(std::equal(state_.prefix.begin(), state_.prefix.end(), values),
                 "reference prefix never updated by scheduler");
         require(*static_cast<const uint16_t*>(input.at("block_modulation_0").data) ==
@@ -117,8 +154,8 @@ class Module final : public ITrtModule {
         require(std::equal(positions.begin(), positions.end(),
                            static_cast<const float*>(input.at("position_ids").data)),
                 "references and target share one media clock");
-        const auto vs = make_minimax_h3_schedule(50, 12.0F);
-        const auto as = make_minimax_h3_schedule(50, 3.0F);
+        const auto vs = state_.schedule(12.0F);
+        const auto as = state_.schedule(3.0F);
         const auto expected =
             make_image_reference_timesteps(layout, vs.timesteps[step_], as.timesteps[step_]);
         require(std::equal(expected.timestep_indices.begin(), expected.timestep_indices.end(),
@@ -154,13 +191,18 @@ class Module final : public ITrtModule {
     DType tensor_dtype(const std::string& name) const override {
         if (name.find("modulation") != std::string::npos)
             return DType::kBFloat16;
-        if (name.find("indices") != std::string::npos)
+        if (name.find("indices") != std::string::npos || name == "pdd_step" ||
+            name == "vsa_regions" || name == "vsa_block_sizes")
             return DType::kInt32;
         return DType::kFloat32;
     }
     std::vector<int64_t> tensor_shape(const std::string& name) const override {
         if (name == "timesteps")
             return {4};
+        if (name == "pdd_step")
+            return {1};
+        if (name == "vsa_regions")
+            return {-1, 3};
         if (name == "final_modulation")
             return {4, 2, 8};
         if (name == "block_modulation_0")
@@ -184,9 +226,16 @@ class Module final : public ITrtModule {
                                              ProfileShapeSelector selector) const override {
         auto shape = tensor_shape(name);
         for (auto& value : shape)
-            if (value < 0)
-                value =
-                    selector == ProfileShapeSelector::kMin ? 1 : state_.config.max_sequence_rows;
+            if (value < 0) {
+                int32_t cap = state_.config.max_sequence_rows;
+                if (name == "vsa_gather_indices")
+                    cap = state_.config.max_vsa_tiles * 128;
+                if (name == "vsa_block_sizes")
+                    cap = state_.config.max_vsa_tiles;
+                if (name == "vsa_regions")
+                    cap = 2;
+                value = selector == ProfileShapeSelector::kMin ? 1 : cap;
+            }
         return shape;
     }
     int32_t optimization_profile_count() const override { return 1; }
@@ -215,8 +264,10 @@ class Module final : public ITrtModule {
     std::vector<float> video_, audio_;
 };
 
-void run_case(ReferenceDenoiserResidency residency) {
+void run_case(ReferenceDenoiserResidency residency, ReferenceSamplingRecipe recipe) {
     State state;
+    state.config.recipe = recipe;
+    state.config.max_vsa_tiles = state.pdd() ? 32 : 0;
     rng_state = &state;
     ReferenceModuleLoader load = [&](const std::string& name, cudaStream_t) {
         require(name == "adaln.plan" || name == "denoiser.plan", "declared Ref2VA plans only");
@@ -233,7 +284,7 @@ void run_case(ReferenceDenoiserResidency residency) {
     {
         ImageReferenceDenoiser owner(load, state.config, nullptr, residency);
         const auto first = owner.run(text, images, 77);
-        require(first.forwards == 49 && first.video_rows.size() == 12 * 96 &&
+        require(first.forwards == state.forwards() && first.video_rows.size() == 12 * 96 &&
                     first.audio_rows.size() == 6 * 32,
                 "generated-only result and full requested forward count");
         require(state.draws ==
@@ -275,7 +326,7 @@ void run_case(ReferenceDenoiserResidency residency) {
         require(state.adaln_live == 0 && state.dit_live == 0,
                 "failure releases contexts and modulation cache");
         state.fail = false;
-        require(owner.run(text, images, 79).forwards == 49,
+        require(owner.run(text, images, 79).forwards == state.forwards(),
                 "mid-loop failure does not poison retry");
     }
     require(state.adaln_live == 0 && state.dit_live == 0, "destructor releases resident module");
@@ -302,9 +353,12 @@ uint64_t torch_cuda_normal_consumed_offset(std::size_t count) {
 
 int main() {
     try {
-        for (const auto residency :
-             {ReferenceDenoiserResidency::Staged, ReferenceDenoiserResidency::Resident})
-            run_case(residency);
+        for (const auto recipe :
+             {ReferenceSamplingRecipe::OriginalH3, ReferenceSamplingRecipe::OmniRefPdd8})
+            for (const auto residency :
+                 {ReferenceDenoiserResidency::Staged, ReferenceDenoiserResidency::Resident}) {
+                run_case(residency, recipe);
+            }
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

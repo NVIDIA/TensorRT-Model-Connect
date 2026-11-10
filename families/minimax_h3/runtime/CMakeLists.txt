@@ -16,6 +16,7 @@ add_library(trtmc_model_minimax_h3 SHARED
   reference_layout.cpp
   reference_pipeline.cpp
   reference_visual_encoder.cpp
+  reference_vsa_geometry.cpp
   visual_reference.cpp
   video_decode_math.cpp
   video_decoder.cpp
@@ -53,11 +54,76 @@ install(TARGETS trtmc_model_minimax_h3
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
+option(TRTMC_BUILD_MINIMAX_H3_OMNIREF_VSA
+  "Build the OmniRef 128-token VSA TVM-FFI binding" OFF)
+option(TRTMC_BUILD_MINIMAX_H3_OMNIREF_VSA_SM100A
+  "Embed optimized sm100a/sm103a cubins in the OmniRef VSA binding" OFF)
+if(TRTMC_BUILD_MINIMAX_H3_OMNIREF_VSA OR TRTMC_BUILD_MINIMAX_H3_OMNIREF_VSA_SM100A)
+  if(NOT TRTMC_TVM_FFI_INCLUDE_DIR OR NOT TRTMC_TVM_FFI_LIBRARY)
+    message(FATAL_ERROR "OmniRef VSA requires TRTMC_ENABLE_BYOK=ON")
+  endif()
+  add_library(trtmc_minimax_h3_omniref_vsa SHARED
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/kernels/omniref_vsa.cu
+  )
+  target_include_directories(trtmc_minimax_h3_omniref_vsa PRIVATE
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/kernels
+  )
+  target_include_directories(trtmc_minimax_h3_omniref_vsa SYSTEM PRIVATE
+    ${CUDAToolkit_INCLUDE_DIRS}
+    ${TRTMC_TVM_FFI_INCLUDE_DIR}
+  )
+  target_link_libraries(trtmc_minimax_h3_omniref_vsa PRIVATE
+    CUDA::cuda_driver CUDA::cudart CUDA::cublas ${TRTMC_TVM_FFI_LIBRARY}
+  )
+  target_compile_features(trtmc_minimax_h3_omniref_vsa PRIVATE cxx_std_17 cuda_std_17)
+  target_compile_options(trtmc_minimax_h3_omniref_vsa PRIVATE
+    "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra;--generate-code=arch=compute_80,code=compute_80>"
+  )
+  set_target_properties(trtmc_minimax_h3_omniref_vsa PROPERTIES
+    CUDA_ARCHITECTURES OFF
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    BUILD_RPATH "\$ORIGIN;${TRTMC_TVM_FFI_LIBRARY_DIR}"
+    INSTALL_RPATH "\$ORIGIN;${TRTMC_TVM_FFI_LIBRARY_DIR}"
+  )
+  install(TARGETS trtmc_minimax_h3_omniref_vsa
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+  )
+  if(TRTMC_BUILD_MINIMAX_H3_OMNIREF_VSA_SM100A)
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_LESS 13.0)
+      message(FATAL_ERROR "OmniRef Blackwell cubins require CUDA 13.0 or newer")
+    endif()
+    target_compile_definitions(trtmc_minimax_h3_omniref_vsa PRIVATE
+      TRTMC_MINIMAX_H3_VSA_HAS_BLACKWELL=1
+    )
+    target_compile_options(trtmc_minimax_h3_omniref_vsa PRIVATE
+      "$<$<COMPILE_LANGUAGE:CUDA>:--generate-code=arch=compute_100a,code=sm_100a;--generate-code=arch=compute_103a,code=sm_103a>"
+    )
+  endif()
+endif()
 install(FILES ${PROJECT_SOURCE_DIR}/families/minimax_h3/NOTICE
   DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/trtmc_model_minimax_h3
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_minimax_h3_vsa_workspace
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_vsa_workspace.cpp
+  )
+  target_include_directories(test_minimax_h3_vsa_workspace PRIVATE ${PROJECT_SOURCE_DIR})
+  target_compile_options(test_minimax_h3_vsa_workspace PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_vsa_workspace COMMAND test_minimax_h3_vsa_workspace)
+
+  add_executable(test_minimax_h3_reference_vsa_geometry
+    reference_vsa_geometry.cpp diffusion_schedule.cpp
+    ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_vsa_geometry.cpp
+  )
+  target_include_directories(test_minimax_h3_reference_vsa_geometry PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_minimax_h3_reference_vsa_geometry SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_minimax_h3_reference_vsa_geometry PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_minimax_h3_reference_vsa_geometry PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME minimax_h3_reference_vsa_geometry COMMAND test_minimax_h3_reference_vsa_geometry)
+
   add_executable(test_minimax_h3_reference_bundle
     reference_bundle.cpp
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_bundle.cpp
@@ -75,6 +141,7 @@ if(TRTMC_BUILD_TESTS)
     reference_denoiser.cpp reference_image.cpp reference_layout.cpp qwen_reference.cpp
     diffusion_schedule.cpp audio_decoder.cpp video_decoder.cpp video_decode_math.cpp
     visual_reference.cpp
+    reference_vsa_geometry.cpp
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_pipeline.cpp
   )
   target_include_directories(test_minimax_h3_reference_pipeline PRIVATE
@@ -176,6 +243,7 @@ if(TRTMC_BUILD_TESTS)
 
   add_executable(test_minimax_h3_reference_denoiser
     diffusion_schedule.cpp reference_layout.cpp reference_denoiser.cpp
+    reference_vsa_geometry.cpp
     ${PROJECT_SOURCE_DIR}/families/minimax_h3/tests/cpp/test_reference_denoiser.cpp
   )
   target_include_directories(test_minimax_h3_reference_denoiser PRIVATE

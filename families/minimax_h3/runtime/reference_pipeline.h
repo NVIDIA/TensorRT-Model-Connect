@@ -19,9 +19,12 @@ struct ReferencePipelineConfig {
     int32_t max_text_rows{0};
     int32_t max_condition_video_rows{16384};
     ReferenceMemoryPreset memory{ReferenceMemoryPreset::Minimal};
+
+    void validate_forward_count(int32_t forwards) const;
 };
 
-// Native original-H3 image Ref2VA composition. This class uses the existing
+// Native image Ref2VA composition with an explicit original or student recipe.
+// This class uses the existing
 // semantic contract. The family factory accepts its explicit reference bundle,
 // but support.py does not advertise it before complete trained gates pass.
 // The stream and loader's borrowed backend must outlive this model.

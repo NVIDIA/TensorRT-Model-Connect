@@ -57,6 +57,22 @@ void rejects(Call call) {
     throw std::runtime_error("expected pipeline rejection did not occur");
 }
 
+void forward_counts() {
+    for (const auto& [recipe, forwards] : {std::pair{ReferenceSamplingRecipe::OriginalH3, 49},
+                                           std::pair{ReferenceSamplingRecipe::OmniRefPdd8, 8}}) {
+        auto config = configuration(ReferenceMemoryPreset::Minimal);
+        config.denoiser.recipe = recipe;
+        config.validate_forward_count(forwards);
+        for (const int32_t actual : {-1, 0, 8, 16, 49, 50, 98, 100, forwards - 1, forwards + 1}) {
+            if (actual != forwards)
+                rejects<std::runtime_error>([&] { config.validate_forward_count(actual); });
+        }
+    }
+    auto config = configuration(ReferenceMemoryPreset::Minimal);
+    config.denoiser.recipe = static_cast<ReferenceSamplingRecipe>(99);
+    rejects<std::invalid_argument>([&] { config.validate_forward_count(49); });
+}
+
 void exercise(ReferenceMemoryPreset preset) {
     int loads = 0;
     const auto stream = reinterpret_cast<cudaStream_t>(uintptr_t{0x1234});
@@ -204,9 +220,10 @@ uint64_t torch_cuda_normal_consumed_offset(std::size_t) {
 
 int main() {
     try {
+        forward_counts();
         exercise(ReferenceMemoryPreset::Minimal);
         exercise(ReferenceMemoryPreset::Original);
-        std::cout << "original H3 pipeline preflight and first-phase recovery passed\n";
+        std::cout << "H3 recipe counts, pipeline preflight and first-phase recovery passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

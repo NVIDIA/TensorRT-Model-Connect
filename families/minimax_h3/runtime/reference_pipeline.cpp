@@ -6,8 +6,10 @@
 #include "families/minimax_h3/runtime/reference_pipeline.h"
 
 #include "families/minimax_h3/runtime/audio_decoder.h"
+#include "families/minimax_h3/runtime/reference_vsa_geometry.h"
 #include "families/minimax_h3/runtime/video_decoder.h"
 
+#include <algorithm>
 #include <chrono>
 #include <limits>
 #include <utility>
@@ -16,7 +18,7 @@ namespace trtmc::minimax_h3 {
 namespace {
 const internal::ConfigField kFields[] = {
     {"seed", internal::ConfigKind::I64, internal::ConfigValue{int64_t{42}},
-     "Nonnegative original-H3 request seed; reference posterior seeds remain 42."},
+     "Nonnegative H3 request seed; reference posterior seeds remain 42."},
 };
 
 // Validate every borrowed operand and both packed sequence caps before image
@@ -51,8 +53,28 @@ void preflight(const internal::ReferencesTextToAudioVideoRequest& request,
                                     config.denoiser.target, config.denoiser.max_sequence_rows);
     if (layout.condition_video_rows > config.max_condition_video_rows)
         throw std::length_error("MiniMax-H3 reference images exceed their own DiT operand profile");
+    if (config.denoiser.recipe == ReferenceSamplingRecipe::OmniRefPdd8)
+        (void)make_reference_vsa_layout(static_cast<int32_t>(presentation.h3_token_tags.size()),
+                                        latent_shapes, config.denoiser.target,
+                                        config.denoiser.max_vsa_tiles);
 }
 } // namespace
+
+void ReferencePipelineConfig::validate_forward_count(int32_t forwards) const {
+    int32_t expected;
+    switch (denoiser.recipe) {
+    case ReferenceSamplingRecipe::OriginalH3:
+        expected = 49;
+        break;
+    case ReferenceSamplingRecipe::OmniRefPdd8:
+        expected = 8;
+        break;
+    default:
+        throw std::invalid_argument("MiniMax-H3 Ref2VA sampling recipe is unknown");
+    }
+    if (forwards != expected)
+        throw std::runtime_error("MiniMax-H3 Ref2VA forward count differs from its recipe");
+}
 
 struct ImageReferencePipeline::State {
     ReferenceImageConditioner conditioner;
@@ -154,8 +176,7 @@ ImageReferencePipeline::run(const internal::ReferencesTextToAudioVideoRequest& r
         // request for releasing their host storage before full video decoding.
         if (config_.memory == ReferenceMemoryPreset::Minimal)
             state_->denoiser.reset();
-        if (generated.forwards != 49)
-            throw std::runtime_error("MiniMax-H3 original Ref2VA requires 49 denoiser forwards");
+        config_.validate_forward_count(generated.forwards);
         auto video = state_->video.run(generated.video_rows);
         std::vector<float>().swap(generated.video_rows);
         auto audio = state_->audio.run(generated.audio_rows);
@@ -167,7 +188,7 @@ ImageReferencePipeline::run(const internal::ReferencesTextToAudioVideoRequest& r
         result.audio.samples = std::move(audio.interleaved_samples);
         result.audio.sample_rate = static_cast<uint32_t>(audio.sample_rate);
         result.audio.channels = static_cast<uint32_t>(audio.channels);
-        // Original 124/24 video and 165600/32000 audio have different endpoints.
+        // Native video and cumulative integer audio clocks have different endpoints.
         // Preserve both native durations; no stretching, truncation or padding.
         result.audio_start_seconds = 0.0;
         const auto elapsed =

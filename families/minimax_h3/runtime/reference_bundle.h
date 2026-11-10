@@ -14,6 +14,7 @@ namespace trtmc::minimax_h3 {
 // Validate the explicit original image-reference bundle ABI before any plan
 // deserialization. Parsing metadata is not trained-model qualification.
 ReferencePipelineConfig parse_image_reference_config(const nlohmann::json& runtime);
+ReferencePipelineConfig parse_omniref_pdd_config(const nlohmann::json& runtime);
 std::vector<std::string> image_reference_plan_names();
 
 } // namespace trtmc::minimax_h3
