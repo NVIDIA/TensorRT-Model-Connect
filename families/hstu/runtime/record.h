@@ -46,6 +46,7 @@ struct Request {
 // {"user": {<contextual feature>: id, ...},
 //  "history": {<item feature>: [H ids], <action feature>: [H ids]},
 //  "candidates": {<item feature>: [C ids]}, "model": optional string}
-Request parse_request(const Json& document, const Geometry& geometry);
+// Read in one SAX pass (no document tree); a field may appear once.
+Request parse_request(const std::string& document, const Geometry& geometry);
 
 } // namespace trtmc::hstu

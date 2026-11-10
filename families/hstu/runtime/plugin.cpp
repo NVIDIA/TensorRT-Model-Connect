@@ -96,7 +96,7 @@ class Pipeline final : public IStructuredDecision {
         if (request.max_state_tokens != -1)
             throw std::invalid_argument(
                 "an HSTU ranking request takes no max_state_tokens: its geometry is the bundle's");
-        auto ids = parse_request(Json::parse(request.document), geometry_);
+        auto ids = parse_request(request.document, geometry_);
         auto host = [](std::vector<std::int32_t>& values) {
             return Tensor{values.data(), {static_cast<int64_t>(values.size())}, DType::kInt32};
         };
