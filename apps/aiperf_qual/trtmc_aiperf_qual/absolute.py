@@ -20,9 +20,14 @@ is judged on the per-problem seed means.
 from __future__ import annotations
 
 import functools
+import errno
+import hashlib
 import json
+import os
 import re
+import shutil
 import statistics
+import tempfile
 import threading
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -31,7 +36,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from . import cancel, execution, gold_metrics, noninferiority
 from .aiperf_runner import run_aiperf
-from .config import Environment
+from .config import ConfigError, Environment
 from .judge import light
 from .services import serving_replicas
 from .suites import SELECTION_SEED, build_suite, request_sha
@@ -65,9 +70,48 @@ def _has_tokenizer(name: str, revision: str | None, trust_remote_code: bool) -> 
     return True
 
 
+def _json_tokenizer_source(settings: Mapping[str, Any]) -> str:
+    if (not isinstance(settings, Mapping) or set(settings) != {"repo_id", "revision"}
+            or not isinstance(settings["repo_id"], str) or not settings["repo_id"].strip()
+            or not isinstance(settings["revision"], str) or not COMMIT.fullmatch(settings["revision"])):
+        raise ConfigError("candidate.tokenizer_json requires repo_id and a full commit revision")
+    from huggingface_hub import constants, hf_hub_download
+
+    cache = Path(os.environ.get("HF_HUB_CACHE", constants.HF_HUB_CACHE)).expanduser().resolve()
+    root = cache / "trtmc-qualification-tokenizers"
+    config_asset = hf_hub_download(repo_id=settings["repo_id"], filename="tokenizer_config.json",
+                                   revision=settings["revision"], cache_dir=str(cache))
+    configuration = json.loads(Path(config_asset).read_text(encoding="utf-8"))
+    if not isinstance(configuration, dict):
+        raise ConfigError("candidate.tokenizer_json needs a tokenizer_config.json mapping")
+    configuration.pop("auto_map", None)
+    configuration["tokenizer_class"] = "PreTrainedTokenizerFast"
+    identity = hashlib.sha256(json.dumps([dict(settings), configuration], sort_keys=True).encode()).hexdigest()
+    directory = root / identity
+    if not directory.is_dir():
+        asset = hf_hub_download(repo_id=settings["repo_id"], filename="tokenizer.json",
+                                revision=settings["revision"], cache_dir=str(cache))
+        root.mkdir(parents=True, exist_ok=True)
+        # Note (Jiaxin Deng): Concurrent planners must not observe a half-written tokenizer.
+        with tempfile.TemporaryDirectory(dir=root) as temporary:
+            shutil.copyfile(asset, Path(temporary) / "tokenizer.json")
+            (Path(temporary) / "tokenizer_config.json").write_text(
+                json.dumps(configuration) + "\n", encoding="utf-8")
+            try:
+                os.rename(temporary, directory)
+            except OSError as error:
+                if error.errno not in (errno.EEXIST, errno.ENOTEMPTY):
+                    raise
+    if not all((directory / name).is_file() for name in ("tokenizer.json", "tokenizer_config.json")):
+        raise ConfigError(f"candidate.tokenizer_json cache is incomplete: {directory}")
+    return str(directory)
+
+
 def tokenizer_source(model: Mapping[str, Any]) -> tuple[str, str | None]:
-    """The checkpoint whose tokenizer counts and formats the prompts: the candidate's, unless it carries
-    none (an adapter on a base model), then the native reference model's (that base model)."""
+    """Note (Jiaxin Deng): Explicit JSON avoids version-dependent remote conversion.
+    Otherwise use the candidate's tokenizer, or an adapter's base model tokenizer."""
+    if model["candidate"].get("tokenizer_json") is not None:
+        return _json_tokenizer_source(model["candidate"]["tokenizer_json"]), None
     candidate = (str(model["candidate"]["checkpoint"]), model["candidate"].get("revision") or None)
     reference = model["reference"]
     if reference.get("model") and not _has_tokenizer(*candidate, bool(reference.get("trust_remote_code"))):

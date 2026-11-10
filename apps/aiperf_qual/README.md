@@ -77,6 +77,15 @@ EOS included.
 The evidence is written to
 `artifacts/build/benchmark-capacity.json`; request truncation and accuracy tolerances do not change.
 Dataset or tokenizer failures stop capacity planning rather than falling back to the catalog size.
+
+A family profile may declare `candidate.tokenizer_json` with a `repo_id` and a full commit
+`revision` when remote tokenizer conversion differs from its native bundle. Qualification prepares
+that revision's `tokenizer.json` and `tokenizer_config.json` under
+`HF_HUB_CACHE/trtmc-qualification-tokenizers`, retaining special tokens and chat templates while
+selecting `PreTrainedTokenizerFast` without a remote class mapping. Selection, fit helpers,
+near-capacity sizing, and AIPerf client metrics use this same local directory; its file contents
+identify the selection cache. InternLM2 uses the pinned JSON dependency also used by its family.
+
 Lance uses the `Lance_3B` tokenizer subfolder and reserves its image, template, and generation tokens.
 Its Native adapter loads the pinned upstream model once and serves the same MMStar requests at the
 public Task's 448x448 image size, with image decode before timing and preparation/generation inside it.
