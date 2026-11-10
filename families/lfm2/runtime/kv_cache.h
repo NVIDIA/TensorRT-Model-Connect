@@ -22,7 +22,12 @@ struct Lfm2KvCacheNames {
     std::string cache_write_indices{"cache_write_indices"};
     std::string key_value_lengths{"key_value_lengths"};
     std::string position_id{"position_id"};
+    std::string key_positions{"key_positions"};
 };
+
+// Granularity of the key-row slice bound through `key_positions`. Rounding the
+// valid context up limits input-shape changes to one per 32 tokens.
+inline constexpr int32_t kLfm2ActiveKeyRowBucket = 32;
 
 // Fixed-capacity cache for the attention layers in LFM2. The TensorRT
 // IKVCacheUpdate outputs alias the cache inputs, so no per-step KV copy is
@@ -38,6 +43,10 @@ class Lfm2KvCache : public Lfm2InferenceState {
     void advance(int32_t n_tokens = 1) override;
 
     int32_t position() const override { return position_; }
+    // Key rows the engine attends over for a step ending at `valid_rows`:
+    // the valid context rounded up to kLfm2ActiveKeyRowBucket, capped at
+    // capacity.
+    int32_t active_key_rows(int32_t valid_rows) const;
     int32_t max_length() const override { return max_length_; }
     int32_t num_layers() const override { return num_layers_; }
     bool needs_attention_mask() const override { return false; }
@@ -62,6 +71,11 @@ class Lfm2KvCache : public Lfm2InferenceState {
     int32_t cache_write_index_{0};
     int32_t key_value_length_{0};
     std::vector<int32_t> positions_;
+    // 0..capacity-1; a prefix is bound as `key_positions` when the engine
+    // slices attention to the active rows (bundles built before that input
+    // existed attend over the full capacity).
+    std::vector<int32_t> key_positions_;
+    bool slices_active_rows_{false};
     cudaStream_t stream_{nullptr};
     DType dtype_{DType::kFloat16};
     Lfm2KvCacheNames names_;

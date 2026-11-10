@@ -17,6 +17,7 @@ import pytest
 trt = pytest.importorskip("tensorrt")
 
 from .. import calibrate_fp8_scales, quantization  # noqa: E402
+from .. import model as lfm2_model  # noqa: E402
 from ..checkpoint_mapper import WeightDict  # noqa: E402
 from ..config import validate_dense_lfm2_config  # noqa: E402
 from ..model import build_lfm2_engine  # noqa: E402
@@ -280,6 +281,28 @@ def test_engine_builds_with_fp8_weights(monkeypatch, precision: str) -> None:
     assert {"token_id", "logits", "present_k_0", "present_conv_0", "conv_state_0"} <= names
     # FP8 halves the bytes of every quantized projection.
     assert len(quantized) < len(plain)
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_engine_attends_over_a_runtime_sized_key_row_slice(monkeypatch) -> None:
+    """Attention reads ``len(key_positions)`` cache rows, from one row to the capacity."""
+    capacity, optimum = 64, 32
+    monkeypatch.setattr(lfm2_model, "ACTIVE_KEY_ROWS_OPTIMUM", optimum)
+    plan = build_lfm2_engine(_config(), _weights(), capacity, precision="bf16")
+
+    engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(plan)
+    assert engine is not None
+    assert engine.get_tensor_mode("key_positions") == trt.TensorIOMode.INPUT
+    assert engine.get_tensor_dtype("key_positions") == trt.int32
+    assert tuple(engine.get_tensor_shape("key_positions")) == (-1,)
+    assert [tuple(shape) for shape in engine.get_tensor_profile_shape("key_positions", 0)] == [
+        (1,),
+        (optimum,),
+        (capacity,),
+    ]
+    # The cache itself keeps its full static capacity.
+    assert tuple(engine.get_tensor_shape("cache_k_0")) == (1, KV_HEADS, capacity, HIDDEN // HEADS)
 
 
 def test_build_requires_calibrated_scales_for_fp8(monkeypatch) -> None:
