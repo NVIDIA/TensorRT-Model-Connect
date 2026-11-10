@@ -175,9 +175,6 @@ class Graph:
     def logical_not(self, x):
         return self.n.add_unary(x, trt.UnaryOperation.NOT).get_output(0)
 
-    def select(self, condition, then, otherwise):
-        return self.n.add_select(condition, then, otherwise).get_output(0)
-
     def output(self, x, name: str):
         x.name = name
         self.n.mark_output(x)

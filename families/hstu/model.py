@@ -75,9 +75,15 @@ def build_embedding_engine(cfg: HstuConfig, tensors, work, *, verbose: bool) -> 
 
 def _valid_attention(g: Graph, cfg: HstuConfig):
     """recsys-examples' ``_get_valid_attn_mask`` (causal, one target group per
-    candidate, no contextual prefix) over the unpadded sequence, as [1, N, N]:
-    a token sees itself and every earlier token, except that a candidate is
-    seen only by itself."""
+    candidate, no contextual prefix) over the unpadded sequence, as [1, N, N]
+    of 0 and 1 in the work dtype: a token sees itself and every earlier token,
+    except that a candidate is seen only by itself.
+
+    The attention multiplies it in: with a select on the bool mask between
+    the two GEMMs, TensorRT 11.4's Myelin takes a much slower fused-attention
+    kernel. The mask stays a graph expression of index compares: the same 0/1
+    mask as a build-time constant produced logits outside the BF16 tolerance
+    on TensorRT 11.4."""
     n = cfg.tokens
     rows = g.i32(np.arange(n), (n, 1))
     cols = g.i32(np.arange(n), (1, n))
@@ -88,7 +94,7 @@ def _valid_attention(g: Graph, cfg: HstuConfig):
     itself = g.compare(cols, rows, trt.ElementWiseOperation.EQUAL)
     visible = g.compare(before_candidates, itself, trt.ElementWiseOperation.OR)
     valid = g.compare(causal, visible, trt.ElementWiseOperation.AND)
-    return g.reshape(valid, (1, n, n))
+    return g.cast(g.reshape(valid, (1, n, n)), g.work)
 
 
 def _hstu_layer(g: Graph, cfg: HstuConfig, tensors, x, valid, index: int):
@@ -120,7 +126,7 @@ def _hstu_layer(g: Graph, cfg: HstuConfig, tensors, x, valid, index: int):
     scores = g.mul(
         g.matmul(query, key, transpose_b=True), g.work_scalar(1.0 / math.sqrt(cfg.head_dim), 3)
     )
-    probs = g.select(valid, g.silu(scores), g.work_scalar(0.0, 3))
+    probs = g.mul(g.silu(scores), valid)  # x * 1 = x, x * 0 = +-0
     attended = g.div(
         g.to_f32(g.merge_heads(g.matmul(probs, value), n, width)),
         g.scalar(float(cfg.scaling_seqlen), 2),

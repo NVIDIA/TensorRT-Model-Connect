@@ -65,7 +65,11 @@ The attention keeps its pointwise arithmetic between the two GEMMs (scale,
 SiLU, mask) in the GEMM dtype, as recsys-examples' padded `pytorch_hstu_mha`
 does: with an FP32 pointwise there, TensorRT 11.4's Myelin fused-attention
 codegen fails (`FMHA IR verification failed`, operands of mixed type). The
-linear 1/scaling_seqlen factor scales P·V in FP32 instead.
+linear 1/scaling_seqlen factor scales P·V in FP32 instead. The valid mask is
+multiplied in as 0/1 in the work dtype: a select on the bool mask makes Myelin
+pick a much slower fused-attention kernel, and the mask stays a graph
+expression because the same mask as a build-time constant gave wrong logits
+with TensorRT 11.4.
 
 ## Validation
 
