@@ -275,9 +275,9 @@ def test_models_are_derived_from_the_catalog_and_task_defaults():
     small = resolve_model("falcon-rw-1b", environment)  # MMLU is near chance: LAMBADA
     assert [item["suite"] for item in small["absolute"]] == ["lambada"] and small["candidate"]["max_sequence_length"] == 256
     detr = resolve_model("detr-resnet-50", environment)
-    coco, = detr["absolute"]  # COCO mAP in DETR's own class numbering at its score threshold
+    coco, = detr["absolute"]  # COCO mAP in DETR's own class numbering at the threshold its bundle fixes
     assert coco["metric_params"] == {"label_space": "coco-category-id"}
-    assert coco["suite_definition"]["request"] == {"score_threshold": 0.5}
+    assert coco["suite_definition"]["request"] == {}
     assert detr["reference"]["backend"] == "reference" and detr["reference"]["requirements"] == "families/detr/requirements.txt"
     stories = resolve_model("mixtral-stories-15m", environment)
     assert [item["suite"] for item in stories["absolute"]] == ["tinystories"]
@@ -351,14 +351,20 @@ def test_task_sdk_migrations_keep_their_tasks_qualification():
     assert rerank["performance"]["output_grader"] == "parity_scores"
 
 
-def test_image_to_boxes_keeps_object_detection_qualification():
-    """The YOLO families migrate object_detection to image_to_boxes; detect and its benchmarks stay the same."""
-    import yaml
+def test_image_to_boxes_keeps_coco_without_the_threshold_its_tasks_do_not_declare():
+    """The Task SDK detection families fix their score threshold in the bundle and reject a score_threshold config
+    (422): image_to_boxes keeps COCO mAP and the box parity, and no longer sends the suite's threshold."""
+    from trtmc_aiperf_qual.models import resolve_model
 
-    from trtmc_aiperf_qual.config import CONFIG_ROOT
-
-    tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
-    assert tasks["image_to_boxes"] == tasks["object_detection"]
+    environment = _environment()
+    for profile in ("yolov8n", "yolov10n", "yolov5n"):
+        model = resolve_model(profile, environment)
+        coco, = model["absolute"]
+        assert (coco["suite"], coco["metric"], model["performance"]["output_grader"]) == (
+            "coco-map", "coco_map", "parity_boxes")
+        assert "score_threshold" not in coco["suite_definition"].get("request", {})
+    yolo11, = resolve_model("yolo11n", environment)["absolute"]  # object_detection still takes it
+    assert yolo11["suite_definition"]["request"] == {"score_threshold": 0.25}
 
 
 def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():

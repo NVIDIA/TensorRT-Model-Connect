@@ -162,10 +162,14 @@ tasks:
   image_features:
     performance: {output_grader: parity_numeric, output_grader_params: {min_cosine: 0.99}}
 
-  object_detection: &detect
+  object_detection:
     absolute: [coco]
     performance: {output_grader: parity_boxes}
-  image_to_boxes: *detect  # the migrated YOLO families still detect and return boxes
+  # The Task SDK detection families (YOLO, DETR) fix their score threshold in the bundle, as their native references
+  # default it, and declare no score_threshold config: the suite's field is not sent.
+  image_to_boxes:
+    absolute: [{name: coco, request: {score_threshold: null}}]
+    performance: {output_grader: parity_boxes}
 
   segmentation:
     absolute: [ade20k]
