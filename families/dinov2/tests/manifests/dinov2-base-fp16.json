@@ -1,0 +1,17 @@
+{
+  "name": "dinov2-base-fp16",
+  "hf_id": "facebook/dinov2-base",
+  "hf_revision": "f9e44c814b77203eaa57a6bdbbd535f21ede1415",
+  "bundle": "dinov2-base-fp16.bundle",
+  "family": "dinov2",
+  "task": "image_to_token_and_pooled_features",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "dinov2-base-fp16",
+      "premerge": true,
+      "test_image": "data/test_img.png"
+    }
+  ],
+  "tensor_parallel_size": 1
+}

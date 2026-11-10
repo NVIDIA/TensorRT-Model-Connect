@@ -150,21 +150,86 @@ def test_a_table_of_the_wrong_length_is_refused() -> None:
         position.interpolate_position_table(np.zeros((10, 4), np.float32), _TRAINED_GRID, 16)
 
 
-def test_fp16_is_refused(tmp_path: Path) -> None:
-    """fp16 is refused at build time, not merely left out of the manifests.
-
-    Measured against the reference, an all-fp16 engine is about 1.0 off on
-    features whose peak is 25.6, where a correct fp32 one is 4.5e-04 and the
-    weakest defect the E2E gate catches is 6.2e-02. fp16's error is the
-    larger of the two, so an fp16 gate would pass a broken build.
-    model.build carries the numbers.
-    """
+def test_bf16_is_refused(tmp_path: Path) -> None:
+    """fp16 (the default) and fp32 are built; bf16 is refused at build time."""
     request = BuildRequest(
         model_dir=tmp_path,
         output_path=tmp_path / "dinov2.bundle",
         family="dinov2",
         task="image_to_token_and_pooled_features",
-        precision="fp16",
+        precision="bf16",
     )
-    with pytest.raises(NotImplementedError, match="fp32 only"):
+    with pytest.raises(NotImplementedError, match="fp16 or fp32"):
         model_module.build(request, writer=None)
+
+
+def _tiny_checkpoint() -> tuple[dict, dict]:
+    """A random two-layer DINOv2 at the real 224-pixel geometry, and its config."""
+    rng = np.random.default_rng(0)
+
+    def rand(*shape, scale=0.02):
+        return (rng.standard_normal(shape) * scale).astype(np.float32)
+
+    weights = {
+        "embeddings.cls_token": rand(1, 1, _HIDDEN),
+        "embeddings.position_embeddings": rand(1, _TRAINED_GRID * _TRAINED_GRID + 1, _HIDDEN),
+        "embeddings.patch_embeddings.projection.weight": rand(_HIDDEN, 3, _PATCH, _PATCH),
+        "embeddings.patch_embeddings.projection.bias": rand(_HIDDEN),
+        "layernorm.weight": np.ones((_HIDDEN,), np.float32),
+        "layernorm.bias": np.zeros((_HIDDEN,), np.float32),
+    }
+    for index in range(_LAYERS):
+        layer = f"encoder.layer.{index}"
+        for norm in ("norm1", "norm2"):
+            weights[f"{layer}.{norm}.weight"] = np.ones((_HIDDEN,), np.float32)
+            weights[f"{layer}.{norm}.bias"] = np.zeros((_HIDDEN,), np.float32)
+        for name in ("attention.attention.query", "attention.attention.key",
+                     "attention.attention.value", "attention.output.dense"):
+            weights[f"{layer}.{name}.weight"] = rand(_HIDDEN, _HIDDEN)
+            weights[f"{layer}.{name}.bias"] = rand(_HIDDEN)
+        weights[f"{layer}.mlp.fc1.weight"] = rand(_INTERMEDIATE, _HIDDEN)
+        weights[f"{layer}.mlp.fc1.bias"] = rand(_INTERMEDIATE)
+        weights[f"{layer}.mlp.fc2.weight"] = rand(_HIDDEN, _INTERMEDIATE)
+        weights[f"{layer}.mlp.fc2.bias"] = rand(_HIDDEN)
+        weights[f"{layer}.layer_scale1.lambda1"] = np.full((_HIDDEN,), 0.1, np.float32)
+        weights[f"{layer}.layer_scale2.lambda1"] = np.full((_HIDDEN,), 0.1, np.float32)
+    cfg = {
+        "hidden_size": _HIDDEN, "intermediate_size": _INTERMEDIATE, "num_layers": _LAYERS,
+        "num_heads": _HEADS, "head_dim": _HIDDEN // _HEADS, "patch_size": _PATCH,
+        "trained_grid": _TRAINED_GRID, "grid": _CROP // _PATCH, "image_size": _CROP,
+        "eps": 1e-6,
+    }
+    return weights, cfg
+
+
+def _run(plan: bytes, pixels):
+    import tensorrt as trt
+    import torch
+
+    engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
+    io = {engine.get_tensor_name(i): engine.get_tensor_dtype(engine.get_tensor_name(i))
+          for i in range(engine.num_io_tensors)}
+    assert io == {"pixel_values": trt.float32, "last_hidden_state": trt.float32}
+    context = engine.create_execution_context()
+    out = torch.empty(tuple(engine.get_tensor_shape("last_hidden_state")), device="cuda")
+    context.set_tensor_address("pixel_values", pixels.data_ptr())
+    context.set_tensor_address("last_hidden_state", out.data_ptr())
+    context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+    torch.cuda.synchronize()
+    return out
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_fp16_engine_keeps_float32_io_and_tracks_fp32() -> None:
+    """The fp16 network narrows only between float32 input and output, and stays finite."""
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    weights, cfg = _tiny_checkpoint()
+    pixels = torch.randn(1, 3, _CROP, _CROP, device="cuda")
+    full = _run(model_module.build_engine(weights, cfg), pixels)
+    half = _run(model_module.build_engine(weights, cfg, dtype=np.float16), pixels)
+    assert torch.isfinite(half).all()
+    cosine = torch.nn.functional.cosine_similarity(full.flatten(), half.flatten(), dim=0)
+    assert cosine.item() > 0.999, cosine.item()

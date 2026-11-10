@@ -12,6 +12,8 @@ def test_the_token_and_pooled_task_is_offered():
     assert support is not None
     assert support.tasks == ("image_to_token_and_pooled_features",)
     assert support.default_task == "image_to_token_and_pooled_features"
+    # fp16 is the default build precision; fp32 stays selectable with --precision fp32.
+    assert support.default_precision == "fp16"
 
 
 def test_architecture_also_resolves():
