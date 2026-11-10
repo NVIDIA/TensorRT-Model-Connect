@@ -749,6 +749,10 @@ class _SamModel:
         cross_attn_dim = decoder_hidden // downsample_rate  # 128
         num_mask_outputs = num_multimask + 1  # 4
         work_np_dtype, work_trt_dtype = _precision_types(precision)
+        # The two-way transformer runs in fp32 for every precision: in fp16 it moves
+        # the masks away from the reference, and in fp32 it is not slower. The mask
+        # upscaling, the hypernetwork MLPs and the IoU head run in ``precision``.
+        tx_np_dtype = np.float32
 
         # Sparse prompt: single point + padding point (pad=True when no box)
         num_output_tokens = 1 + num_mask_outputs  # 5
@@ -776,9 +780,6 @@ class _SamModel:
         )
         image_embeddings = image_embeddings_in
         sparse_prompt_work = sparse_prompt
-        if work_trt_dtype != trt.float32:
-            image_embeddings = network.add_cast(image_embeddings_in, work_trt_dtype).get_output(0)
-            sparse_prompt_work = network.add_cast(sparse_prompt, work_trt_dtype).get_output(0)
 
         # --- Build image positional embeddings ---
         # HF: SamPositionalEmbedding generates PE over a [0,1] grid
@@ -801,7 +802,7 @@ class _SamModel:
             np.float32
         )  # [H*W, 256]
         image_pe_flat_c = graph_ops.add_constant(
-            network, (img_seq, decoder_hidden), image_pe_flat, dtype=work_np_dtype
+            network, (img_seq, decoder_hidden), image_pe_flat, dtype=tx_np_dtype
         )
 
         # --- Add dense prompt (no_mask_embed) to image embeddings ---
@@ -811,9 +812,7 @@ class _SamModel:
         no_mask_4d = no_mask_embed.reshape(1, decoder_hidden, 1, 1) * np.ones(
             (1, decoder_hidden, image_embedding_size, image_embedding_size), dtype=np.float32
         )
-        no_mask_c = graph_ops.add_constant(
-            network, no_mask_4d.shape, no_mask_4d, dtype=work_np_dtype
-        )
+        no_mask_c = graph_ops.add_constant(network, no_mask_4d.shape, no_mask_4d, dtype=tx_np_dtype)
         img_plus_dense = network.add_elementwise(
             image_embeddings, no_mask_c, trt.ElementWiseOperation.SUM
         ).get_output(0)
@@ -831,7 +830,7 @@ class _SamModel:
         output_tokens_np[1 : 1 + num_mask_outputs] = mask_tokens[:num_mask_outputs]
 
         output_tokens = graph_ops.add_constant(
-            network, (num_output_tokens, decoder_hidden), output_tokens_np, dtype=work_np_dtype
+            network, (num_output_tokens, decoder_hidden), output_tokens_np, dtype=tx_np_dtype
         )
         token_concat = network.add_concatenation([output_tokens, sparse_prompt_work])
         token_concat.axis = 0
@@ -893,7 +892,7 @@ class _SamModel:
                 weights[f"{w_prefix}.norm1.weight"],
                 weights[f"{w_prefix}.norm1.bias"],
                 eps_t,
-                dtype=work_np_dtype,
+                dtype=tx_np_dtype,
             )
 
             # --- Cross-attention: token-to-image ---
@@ -932,7 +931,7 @@ class _SamModel:
                 weights[f"{w_prefix}.norm2.weight"],
                 weights[f"{w_prefix}.norm2.bias"],
                 eps_t,
-                dtype=work_np_dtype,
+                dtype=tx_np_dtype,
             )
 
             # --- MLP on queries ---
@@ -969,7 +968,7 @@ class _SamModel:
                 weights[f"{w_prefix}.norm3.weight"],
                 weights[f"{w_prefix}.norm3.bias"],
                 eps_t,
-                dtype=work_np_dtype,
+                dtype=tx_np_dtype,
             )
 
             # --- Cross-attention: image-to-token ---
@@ -1008,7 +1007,7 @@ class _SamModel:
                 weights[f"{w_prefix}.norm4.weight"],
                 weights[f"{w_prefix}.norm4.bias"],
                 eps_t,
-                dtype=work_np_dtype,
+                dtype=tx_np_dtype,
             )
 
         # --- Final cross-attention: token-to-image ---
@@ -1046,7 +1045,7 @@ class _SamModel:
             weights["decoder.final_norm.weight"],
             weights["decoder.final_norm.bias"],
             eps_t,
-            dtype=work_np_dtype,
+            dtype=tx_np_dtype,
         )
 
         # --- Extract mask tokens and IoU token ---
@@ -1059,6 +1058,11 @@ class _SamModel:
             queries, start=(1, 0), shape=(num_mask_outputs, decoder_hidden), stride=(1, 1)
         )
         mask_tokens_out = mask_tok_slice.get_output(0)
+
+        if work_trt_dtype != trt.float32:
+            keys = network.add_cast(keys, work_trt_dtype).get_output(0)
+            mask_tokens_out = network.add_cast(mask_tokens_out, work_trt_dtype).get_output(0)
+            iou_token_out = network.add_cast(iou_token_out, work_trt_dtype).get_output(0)
 
         # --- Upscale image embeddings ---
         # keys: [img_seq, C] -> [1, C, H, W]
