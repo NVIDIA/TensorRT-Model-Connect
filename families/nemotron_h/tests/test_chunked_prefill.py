@@ -166,3 +166,64 @@ def test_prefill_engine_rejects_paired_draft_features(tmp_path: Path) -> None:
         )
     with pytest.raises(ValueError, match="prefill_rows"):
         instance.build_engine(config, weights, MAX_CACHE, prefill_rows=model.PREFILL_MAX_TOKENS + 1)
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_chunked_ssd_state_stays_finite_at_large_decays() -> None:
+    """At |dt A| in the millions the chunk state matches the recurrence instead of overflowing."""
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    from .. import ssd_rows
+
+    heads, rows, head_dim, state_dim = 2, ssd_rows.MAX_ROWS, 4, 3
+    rng = np.random.default_rng(3)
+    x = rng.standard_normal((heads, rows, head_dim)).astype(np.float32)
+    b = rng.standard_normal((heads, rows, state_dim)).astype(np.float32)
+    c = rng.standard_normal((heads, rows, state_dim)).astype(np.float32)
+    dt = rng.uniform(1.0, 30.0, (heads, rows)).astype(np.float32)
+    a = np.array([-0.5, -5.0e4], np.float32)  # the second head decays by ~1e6 per row
+    d = np.ones(heads, np.float32)
+    state = rng.standard_normal((heads, head_dim, state_dim)).astype(np.float32)
+
+    builder = trt.Builder(trt.Logger(trt.Logger.WARNING))
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    inputs = {
+        name: network.add_input(name, trt.float32, value.shape)
+        for name, value in (("x", x), ("b", b), ("c", c), ("dt", dt), ("state", state))
+    }
+    y, final = ssd_rows.add_chunked_ssd(
+        network, x=inputs["x"], b=inputs["b"], c=inputs["c"], dt=inputs["dt"], a=a, d=d,
+        state=inputs["state"], num_heads=heads,
+    )
+    # gamma_S is read from the cumulative sum: a separate reduction sums in another order
+    # and can exceed gamma_i, which overflows exp(gamma_S - gamma_i) on some tactics.
+    layers = [network.get_layer(i).type for i in range(network.num_layers)]
+    assert trt.LayerType.REDUCE not in layers
+    y.name, final.name = "y", "final"
+    network.mark_output(y)
+    network.mark_output(final)
+    config = builder.create_builder_config()
+    config.clear_flag(trt.BuilderFlag.TF32)
+    engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(
+        builder.build_serialized_network(network, config)
+    )
+    context = engine.create_execution_context()
+    device = {name: torch.from_numpy(value).cuda() for name, value in
+              (("x", x), ("b", b), ("c", c), ("dt", dt), ("state", state))}
+    out = {
+        name: torch.empty(tuple(engine.get_tensor_shape(name)), device="cuda")
+        for name in ("y", "final")
+    }
+    for name, value in {**device, **out}.items():
+        context.set_tensor_address(name, value.data_ptr())
+    assert context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+    torch.cuda.synchronize()
+
+    want = state.astype(np.float64)
+    for t in range(rows):  # the one-token recurrence
+        decay = np.exp(dt[:, t] * a)[:, None, None]
+        want = decay * want + (dt[:, t, None, None] * x[:, t, :, None]) * b[:, t, None, :]
+    got = out["final"].cpu().numpy()
+    assert np.isfinite(got).all()
+    np.testing.assert_allclose(got, want, rtol=1e-3, atol=1e-3)

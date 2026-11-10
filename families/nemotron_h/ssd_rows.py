@@ -195,14 +195,22 @@ def add_chunked_ssd(
         sum_op,
     )
 
-    total = network.add_reduce(
-        log_decay, trt.ReduceOperation.SUM, 1 << 1, keep_dims=True
-    ).get_output(0)
+    # gamma_S is the last cumulative sum, not a separate reduction: summed in
+    # another order it can exceed gamma_i by many ulps at large |dt A|, and
+    # exp(gamma_S - gamma_i) then overflows into a non-finite state. A float
+    # running sum of non-positive terms never increases, and the clamp keeps
+    # the exponent at most zero regardless.
+    last = _ew(network, rows, _i64(network, [1]), trt.ElementWiseOperation.SUB)
+    total = dynamic_slice(network, gamma, (0, last), (num_heads, 1))  # [H, 1]
+    tail = _ew(
+        network,
+        _ew(network, total, gamma, trt.ElementWiseOperation.SUB),
+        _const(network, np.zeros((1, 1), np.float32)),
+        trt.ElementWiseOperation.MIN,
+    )
     weights = _ew(
         network,
-        network.add_unary(
-            _ew(network, total, gamma, trt.ElementWiseOperation.SUB), trt.UnaryOperation.EXP
-        ).get_output(0),
+        network.add_unary(tail, trt.UnaryOperation.EXP).get_output(0),
         dt,
         prod_op,
     )  # exp(gamma_S - gamma_i) dt_i: [H, S]
