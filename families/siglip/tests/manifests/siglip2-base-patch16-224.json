@@ -1,0 +1,19 @@
+{
+  "name": "siglip2-base-patch16-224",
+  "hf_id": "google/siglip2-base-patch16-224",
+  "hf_revision": "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2",
+  "bundle": "siglip2-base-patch16-224.bundle",
+  "family": "siglip",
+  "task": "text_image_to_relevance",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "siglip2-base-patch16-224",
+      "premerge": true,
+      "test_image": "data/test_img.png",
+      "query": "a photo of a car",
+      "negative_query": "a photo of a cat"
+    }
+  ],
+  "tensor_parallel_size": 1
+}

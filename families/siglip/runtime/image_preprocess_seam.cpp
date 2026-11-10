@@ -17,10 +17,8 @@ namespace trtmc {
 
 namespace {
 
-// Pillow's bicubic resize, reproduced coefficient for coefficient: the
-// reference processor resamples with PIL (resample=3), and a float bilinear or
-// a Catmull-Rom cubic lands a few least-significant bits away on every pixel,
-// which is enough to move the last digits of a cosine.
+// Note (Jiaxin Deng): Pillow rounds each resize pass to uint8; retaining floats
+// between passes changes the model input even with the same filter kernel.
 constexpr std::int32_t kPillowPrecisionBits = 22;
 constexpr std::int64_t kPillowScale = std::int64_t{1} << kPillowPrecisionBits;
 constexpr std::int64_t kPillowRounding = std::int64_t{1} << (kPillowPrecisionBits - 1);
@@ -40,10 +38,10 @@ double pillow_cubic(double value) {
     return 0.0;
 }
 
-std::vector<PillowSpan> make_pillow_plan(std::int32_t input_size, std::int32_t output_size) {
+std::vector<PillowSpan> make_pillow_plan(std::int32_t input_size, std::int32_t output_size, std::int32_t resample) {
     const double scale = static_cast<double>(input_size) / output_size;
     const double filter_scale = std::max(scale, 1.0);
-    const double support = 2.0 * filter_scale;
+    const double support = (resample == 2 ? 1.0 : 2.0) * filter_scale;
     const double inverse_filter_scale = 1.0 / filter_scale;
     std::vector<PillowSpan> plan(static_cast<std::size_t>(output_size));
     for (std::int32_t output_index = 0; output_index < output_size; ++output_index) {
@@ -60,8 +58,9 @@ std::vector<PillowSpan> make_pillow_plan(std::int32_t input_size, std::int32_t o
         std::vector<double> floating(static_cast<std::size_t>(end - first));
         double total = 0.0;
         for (std::int32_t index = first; index < end; ++index) {
-            const double weight =
-                pillow_cubic((static_cast<double>(index) - center + 0.5) * inverse_filter_scale);
+            const double distance = (static_cast<double>(index) - center + 0.5) * inverse_filter_scale;
+            const double weight = resample == 2 ? std::max(0.0, 1.0 - std::abs(distance))
+                                                 : pillow_cubic(distance);
             floating[static_cast<std::size_t>(index - first)] = weight;
             total += weight;
         }
@@ -95,15 +94,15 @@ std::uint8_t apply_pillow_span(const std::uint8_t* source, std::int32_t stride,
     return static_cast<std::uint8_t>(std::min<std::int64_t>(sum >> kPillowPrecisionBits, 255));
 }
 
-std::vector<float> resize_pillow_bicubic(const float* source, std::int32_t input_h,
+std::vector<float> resize_pillow(const float* source, std::int32_t input_h,
                                          std::int32_t input_w, std::int32_t output_h,
-                                         std::int32_t output_w) {
+                                         std::int32_t output_w, std::int32_t resample) {
     std::vector<std::uint8_t> input(static_cast<std::size_t>(input_h) * input_w * 3U);
     std::transform(source, source + input.size(), input.begin(), [](float value) {
         return static_cast<std::uint8_t>(std::lround(std::clamp(value, 0.0F, 1.0F) * 255.0F));
     });
 
-    const auto horizontal_plan = make_pillow_plan(input_w, output_w);
+    const auto horizontal_plan = make_pillow_plan(input_w, output_w, resample);
     std::vector<std::uint8_t> horizontal(static_cast<std::size_t>(input_h) * output_w * 3U);
     for (std::int32_t y = 0; y < input_h; ++y) {
         for (std::int32_t x = 0; x < output_w; ++x) {
@@ -116,7 +115,7 @@ std::vector<float> resize_pillow_bicubic(const float* source, std::int32_t input
         }
     }
 
-    const auto vertical_plan = make_pillow_plan(input_h, output_h);
+    const auto vertical_plan = make_pillow_plan(input_h, output_h, resample);
     std::vector<float> output(static_cast<std::size_t>(output_h) * output_w * 3U);
     for (std::int32_t y = 0; y < output_h; ++y) {
         const auto& span = vertical_plan[static_cast<std::size_t>(y)];
@@ -134,6 +133,8 @@ std::vector<float> resize_pillow_bicubic(const float* source, std::int32_t input
 }
 
 void validate(const SiglipPreprocessConfig& config) {
+    if (config.resample != 2 && config.resample != 3)
+        throw std::invalid_argument("siglip resize requires bilinear (2) or bicubic (3)");
     if (config.input_image_h <= 0 || config.input_image_w <= 0)
         throw std::invalid_argument("siglip input dimensions must be positive");
     if (config.image_mean.size() != 3 || config.image_std.size() != 3)
@@ -158,8 +159,8 @@ std::vector<float> preprocess_siglip_image(const float* image_pixels, std::int32
     // of the original is represented, squashed. Preserving the aspect ratio
     // here - the habit a CLIP seam brings with it - would feed the tower a
     // different image than the reference saw.
-    const auto resized = resize_pillow_bicubic(image_pixels, image_height, image_width,
-                                               config.input_image_h, config.input_image_w);
+    const auto resized = resize_pillow(image_pixels, image_height, image_width,
+                                               config.input_image_h, config.input_image_w, config.resample);
 
     const auto plane = static_cast<std::size_t>(config.input_image_h) * config.input_image_w;
     std::vector<float> pixel_values(3U * plane);

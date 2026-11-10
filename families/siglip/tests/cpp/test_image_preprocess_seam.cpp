@@ -6,6 +6,8 @@
 #include "families/siglip/runtime/image_preprocess_seam.h"
 
 #include <cmath>
+#include <fstream>
+#include <nlohmann/json.hpp>
 #include <iostream>
 #include <stdexcept>
 #include <vector>
@@ -131,9 +133,48 @@ void test_invalid_input_is_refused() {
     check(threw, "a two-channel mean is refused");
 }
 
+void test_pillow_pixels(const char* fixture_path) {
+    std::ifstream stream(fixture_path);
+    if (!stream)
+        throw std::runtime_error("Cannot read Pillow fixture");
+    const auto fixture = nlohmann::json::parse(stream);
+    for (const auto& test : fixture.at("cases")) {
+        trtmc::SiglipPreprocessConfig config;
+        config.input_image_h = test.at("output_height");
+        config.input_image_w = test.at("output_width");
+        config.resample = test.at("resample");
+        std::vector<float> pixels;
+        for (int value : test.at("pixels"))
+            pixels.push_back(static_cast<float>(value) / 255.0F);
+        const auto actual = trtmc::preprocess_siglip_image(pixels.data(), test.at("height"),
+                                                         test.at("width"), config);
+        const auto expected = test.at("expected").get<std::vector<int>>();
+        const auto plane = static_cast<std::size_t>(config.input_image_h) * config.input_image_w;
+        for (std::size_t index = 0; index < expected.size(); ++index) {
+            const auto channel = index % 3;
+            const auto pixel = index / 3;
+            const float value = (static_cast<float>(expected[index]) / 255.0F - 0.5F) / 0.5F;
+            check_close(actual[channel * plane + pixel], value, 1e-7F, "Pillow pixel parity");
+        }
+    }
+    auto config = base_config(2);
+    config.resample = 1;
+    const std::vector<float> pixels(12, 0.5F);
+    bool refused = false;
+    try {
+        trtmc::preprocess_siglip_image(pixels.data(), 2, 2, config);
+    } catch (const std::invalid_argument&) {
+        refused = true;
+    }
+    check(refused, "unsupported resize filter is refused");
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc != 2)
+        throw std::runtime_error("Expected Pillow fixture path");
+    test_pillow_pixels(argv[1]);
     test_a_wide_image_is_squashed_not_cropped();
     test_a_tall_image_is_squashed_too();
     test_normalisation_is_per_channel();

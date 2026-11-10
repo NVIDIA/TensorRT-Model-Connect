@@ -60,26 +60,57 @@ def _require_weights(weights: dict) -> None:
         raise KeyError("siglip checkpoint is missing expected tensors: " + ", ".join(missing))
 
 
-def _pad_token_id(model_dir: Path) -> int:
+def _validate_bpe(tokenizer: dict) -> None:
+    model = tokenizer["model"]
+    expected = {
+        "normalizer": {"type": "Replace", "pattern": {"String": " "}, "content": "▁"},
+        "pre_tokenizer": {"type": "Split", "pattern": {"String": " "},
+                          "behavior": "MergedWithPrevious", "invert": False},
+        "decoder": {"type": "Sequence", "decoders": [
+            {"type": "Replace", "pattern": {"String": "▁"}, "content": " "},
+            {"type": "ByteFallback"}, {"type": "Fuse"}]},
+    }
+    for field, value in expected.items():
+        if tokenizer.get(field) != value:
+            raise NotImplementedError(f"unsupported siglip BPE {field}")
+    if (not model.get("byte_fallback") or not model.get("fuse_unk")
+            or model.get("ignore_merges") or model.get("dropout") is not None
+            or model.get("continuing_subword_prefix") is not None
+            or model.get("end_of_word_suffix") is not None):
+        raise NotImplementedError("unsupported siglip BPE model options")
+    eos = model.get("vocab", {}).get("<eos>")
+    post = tokenizer.get("post_processor") or {}
+    special = post.get("special_tokens", {}).get("<eos>", {})
+    if (eos is None or post.get("type") != "TemplateProcessing"
+            or post.get("single") != [{"Sequence": {"id": "A", "type_id": 0}},
+                                      {"SpecialToken": {"id": "<eos>", "type_id": 0}}]
+            or special.get("ids") != [eos] or special.get("tokens") != ["<eos>"]):
+        raise NotImplementedError("unsupported siglip BPE post_processor")
+    for token in tokenizer.get("added_tokens", []):
+        if any(token.get(field) for field in ("single_word", "lstrip", "rstrip", "normalized")):
+            raise NotImplementedError("unsupported siglip BPE added token options")
+
+
+def _pad_token_id(model_dir: Path, *, quantization: str | None = None) -> int:
     """The id the reference pads the window with, read from the checkpoint.
 
     It matters which id this is even though the padded rows are never pooled
     directly: the text tower is bidirectional and unmasked, so every padding
     row takes part in the attention that produces the row that *is* pooled.
     """
-    tokenizer = json.loads((model_dir / "tokenizer.json").read_text())
-    if tokenizer.get("model", {}).get("type") != "Unigram":
-        # SigLIP 2 reuses this model_type but ships a Gemma BPE tokenizer and
-        # a 256k vocabulary. The towers would build; the text would not
-        # tokenise. Refused by name rather than mis-tokenised.
-        raise NotImplementedError(
-            "siglip is qualified for the unigram tokenizer; this checkpoint ships "
-            f"{tokenizer.get('model', {}).get('type')!r} (SigLIP 2 is not yet supported)")
+    tokenizer = json.loads((model_dir / "tokenizer.json").read_text(encoding="utf-8"))
+    model = tokenizer.get("model", {})
+    if model.get("type") == "BPE":
+        if quantization not in (None, "none"):
+            raise NotImplementedError("siglip BPE checkpoints require unquantized fp32")
+        _validate_bpe(tokenizer)
+    elif model.get("type") != "Unigram":
+        raise NotImplementedError(f"unsupported siglip tokenizer: {model.get('type')!r}")
 
     config_path = model_dir / "tokenizer_config.json"
     if not config_path.is_file():
         raise FileNotFoundError(f"missing siglip tokenizer config: {config_path}")
-    pad_token = json.loads(config_path.read_text()).get("pad_token")
+    pad_token = json.loads(config_path.read_text(encoding="utf-8")).get("pad_token")
     if isinstance(pad_token, dict):
         pad_token = pad_token.get("content")
     if not pad_token:
@@ -87,7 +118,9 @@ def _pad_token_id(model_dir: Path) -> int:
     for entry in tokenizer.get("added_tokens", []):
         if entry.get("content") == pad_token:
             return int(entry["id"])
-    for index, entry in enumerate(tokenizer["model"]["vocab"]):
+    if model["type"] == "BPE" and pad_token in model["vocab"]:
+        return int(model["vocab"][pad_token])
+    for index, entry in enumerate(model["vocab"] if model["type"] == "Unigram" else []):
         if entry[0] == pad_token:
             return index
     raise ValueError(f"siglip pad token {pad_token!r} is not in the vocabulary")
@@ -209,7 +242,7 @@ def build(request, writer) -> None:
     tokenizer = model_dir / "tokenizer.json"
     if not tokenizer.is_file():
         raise FileNotFoundError(f"missing siglip tokenizer: {tokenizer}")
-    pad_token_id = _pad_token_id(model_dir)
+    pad_token_id = _pad_token_id(model_dir, quantization=request.quantization)
 
     # Both are stored the way the reference applies them: the scale is kept in
     # log space and every use is exp() of it, and the bias is added after.

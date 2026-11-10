@@ -4,6 +4,7 @@
  */
 
 #include "families/siglip/runtime/tokenizer.h"
+#include "families/siglip/runtime/bpe_tokenizer.h"
 
 #include <algorithm>
 #include <cassert>
@@ -413,11 +414,11 @@ std::vector<int32_t> viterbi_encode(const std::string& text, const Trie& trie, i
 
 class UnigramTokenizer final : public ITokenizer {
   public:
-    static std::unique_ptr<UnigramTokenizer> Create(const char* json_data, std::size_t json_size,
+    static std::unique_ptr<UnigramTokenizer> Create(const nlohmann::json& j,
                                                     bool add_special_tokens) {
         auto tok = std::unique_ptr<UnigramTokenizer>(new UnigramTokenizer());
         tok->mAddSpecialTokens = add_special_tokens;
-        tok->parse_tokenizer_json(json_data, json_size);
+        tok->parse_tokenizer_json(j);
         return tok;
     }
 
@@ -500,14 +501,7 @@ class UnigramTokenizer final : public ITokenizer {
 
     // ─── JSON parsing ───
 
-    void parse_tokenizer_json(const char* json_data, std::size_t json_size) {
-        nlohmann::json j;
-        try {
-            j = nlohmann::json::parse(json_data, json_data + json_size);
-        } catch (const std::exception& e) {
-            throw std::runtime_error(std::string("Failed to parse tokenizer.json: ") + e.what());
-        }
-
+    void parse_tokenizer_json(const nlohmann::json& j) {
         validate_model(j);
         parse_vocab(j);
         build_trie();
@@ -782,7 +776,15 @@ class UnigramTokenizer final : public ITokenizer {
 std::unique_ptr<ITokenizer> CreateSiglipTokenizer(const char* tokenizer_json_data,
                                                   std::size_t tokenizer_json_size,
                                                   bool add_special_tokens) {
-    return UnigramTokenizer::Create(tokenizer_json_data, tokenizer_json_size, add_special_tokens);
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(tokenizer_json_data, tokenizer_json_data + tokenizer_json_size);
+    } catch (const std::exception& e) {
+        throw std::runtime_error(std::string("Failed to parse tokenizer.json: ") + e.what());
+    }
+    if (j.contains("model") && j["model"].value("type", "") == "BPE")
+        return CreateSiglipBpeTokenizer(j, add_special_tokens);
+    return UnigramTokenizer::Create(j, add_special_tokens);
 }
 
 } // namespace trtmc

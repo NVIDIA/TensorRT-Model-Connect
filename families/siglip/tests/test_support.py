@@ -21,12 +21,7 @@ def test_architecture_also_resolves():
     assert support.default_task == "text_image_to_relevance"
 
 
-def test_siglip2_is_claimed_here_and_refused_at_build_time():
-    # SigLIP 2 reuses this exact model_type, so discovery cannot tell the two
-    # apart and this family does claim it. The difference is the tokenizer - a
-    # 256k Gemma BPE rather than a 32k unigram - and the builder refuses it by
-    # name there, where the tokenizer is actually in hand. Claiming it and
-    # failing loudly is better than claiming it and tokenising it wrongly.
+def test_siglip2_is_owned_by_the_siglip_family():
     support = describe(ModelMetadata(config={"model_type": "siglip"}, model_index={}))
     assert support is not None
 

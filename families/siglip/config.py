@@ -187,12 +187,8 @@ def resolve(model_dir: Path, weights: dict) -> dict:
     # bicubic and 2 is bilinear in the reference's enumeration, and the two
     # checkpoint generations do not agree on which, so it is carried rather
     # than assumed.
-    if resample != 3:
-        # 3 is Pillow's bicubic, which the runtime reproduces coefficient for
-        # coefficient. SigLIP 2 asks for 2 (bilinear); resampling it with the
-        # wrong filter would move every pixel a little and nothing loudly.
-        raise NotImplementedError(
-            f"siglip is qualified for bicubic resize (3), not {resample}")
+    if resample not in (2, 3):
+        raise NotImplementedError(f"siglip resize requires bilinear (2) or bicubic (3), not {resample}")
 
     return {
         "text": text,
