@@ -198,7 +198,7 @@ class ModelRegistry:
         capabilities = metadata.get("capabilities")
         if (not isinstance(capabilities, list) or not capabilities or
                 not all(isinstance(value, str) for value in capabilities) or
-                not {"text_generation", "embeddings", "reranking", "audio_transcription", "object_detection", "vision_language_generation", "image_generation", "image_edit", *VIDEO_CAPABILITIES}.intersection(capabilities)):
+                not {"text_generation", "embeddings", "reranking", "audio_transcription", "object_detection", "vision_language_generation", "image_generation", "image_edit", "reference_video_generation", *VIDEO_CAPABILITIES}.intersection(capabilities)):
             raise WorkerProtocolError("worker does not advertise a supported capability")
         if VIDEO_CAPABILITIES.intersection(capabilities):
             ModelRegistry._checked_video_geometry(metadata)
