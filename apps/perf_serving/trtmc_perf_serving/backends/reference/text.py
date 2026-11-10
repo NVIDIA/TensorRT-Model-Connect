@@ -230,7 +230,7 @@ class TextEncoder:
         def run() -> torch.Tensor:
             outputs = self.model(**batch, **self.forward_kwargs)
             hidden = getattr(outputs, "last_hidden_state", None)
-            if hidden is None and getattr(outputs, "pooler_output", None) is not None:
+            if hidden is None and not all_tokens and getattr(outputs, "pooler_output", None) is not None:
                 return outputs.pooler_output  # DPR encoders return only the pooled first-token representation
             if hidden is None:
                 if getattr(outputs, "hidden_states", None) is None:

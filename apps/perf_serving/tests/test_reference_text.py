@@ -178,3 +178,22 @@ def test_encode_returns_the_first_token_or_every_token_with_all_tokens(tmp_path,
     observation = encoder.invoke({"prompt": "a b"}, tmp_path / "out").observation
     assert (observation["values"], observation["shape"], observation["dim"]) == (values, shape, 2)
     assert observation["feature_kind"] == "token"
+
+
+def test_all_tokens_never_reports_a_pooled_output_as_token_features(tmp_path):
+    from types import SimpleNamespace
+
+    from trtmc_perf_serving.backends.reference.common import ReferenceSpec
+    from trtmc_perf_serving.backends.reference.text import TextEncoder
+
+    class Batch(dict):
+        def to(self, _device):
+            return self
+
+    encoder = TextEncoder.__new__(TextEncoder)
+    encoder.spec = ReferenceSpec(operation="encode", model="dpr", device="cpu", options={"all_tokens": True})
+    encoder.tokenizer = lambda *_args, **_kwargs: Batch(input_ids=torch.tensor([[7, 8]]))
+    encoder.model = lambda **_kwargs: SimpleNamespace(pooler_output=torch.ones(1, 2))  # no token states
+    encoder.forward_kwargs, encoder.max_length = {}, None
+    with pytest.raises(BackendError, match="no hidden states"):
+        encoder.invoke({"prompt": "a b"}, tmp_path / "out")
