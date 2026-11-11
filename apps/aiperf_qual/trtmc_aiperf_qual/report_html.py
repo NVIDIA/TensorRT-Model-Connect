@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import aiperf_metrics
-from .campaign import NO_VERDICT, SIGNAL_NAMES, SIGNALS, is_pass, measurement_note, ms, reported_perf, request_label, signal, signal_reason
+from .campaign import (NO_VERDICT, SIGNAL_NAMES, SIGNALS, is_pass, measurement_note, ms, native_mode, native_mode_counts,
+                       reported_perf, request_label, signal, signal_reason)
 from .report import _fmt, counted
 
 EVIDENCE = ("report.md", "report.json", "execution.jsonl", "execution.timing-recovered.jsonl",
@@ -345,7 +346,7 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
         row, result = rows[profile], results[profile]
         perf = reported_perf(row)
         issue = _issue(profile, row, result)
-        key = f"{profile} {row.get('task') or ''} {result} {row.get('root')}".lower()
+        key = f"{profile} {row.get('task') or ''} {result} {row.get('root')} {native_mode(row)}".lower()
         metrics = row.get("aiperf_metrics", [])
         metrics_link = f"<div class='detail'><a href='#aiperf-{index}'>AIPerf client metrics</a></div>" if metrics else ""
         if metrics:
@@ -357,7 +358,8 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
                     + (f"<div class='detail'>{_e(issue)}</div>" if issue else "")
                     + f"</td><td><code>{_e(profile)}</code><div class='detail'>{_e(row.get('task') or '—')}</div>"
                     f"{metrics_link}</td>"
-                    f"<td>{_precision(row)}</td><td>{_accuracy_values(row.get('accuracy', []))}</td>"
+                    f"<td>{_precision(row)}</td><td>{_e(native_mode(row))}</td>"
+                    f"<td>{_accuracy_values(row.get('accuracy', []))}</td>"
                     f"<td class='timing'>{_latency(profile, perf, 'reference')}</td>"
                     f"<td class='timing'>{_latency(profile, perf, 'candidate')}</td>"
                     f"{rerun}"
@@ -372,7 +374,8 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
              f"<span class='card-item'>Pass {_light('green')}<span class='none'>+</span>{_light('yellow')}"
              f"<strong>{passed}</strong></span><span class='card-item'>Pass rate <strong>{rate}</strong></span>"
              f"<span class='card-item'>Valid comparisons <strong>{len(rows) - tally['white']} / {len(rows)}"
-             "</strong></span></div></section>")
+             "</strong></span></div><div class='card'><span class='card-label'>Native mode</span>"
+             f"<span class='card-item'>{_e(native_mode_counts(rows))}</span></div></section>")
     legend = "<dl class='legend'>" + "".join(f"<div><dt>{_signal(result)}</dt><dd>{_e(text)}</dd></div>"
                                              for result, text in LEGEND) + "</dl>"
     related = " · ".join(f'<a href="{_e(href)}">{_e(label)}</a>' for label, href in links)
@@ -384,7 +387,8 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
     native_section = ("<h2>AIPerf native client metrics (informational; no gate)</h2>"
                       f"<p class='purpose'>{_e(aiperf_metrics.NOTE)}</p>{''.join(client_metrics)}"
                       if client_metrics else "")
-    columns = ["Result", "Model / Task", "Precision", "Quality (TRTMC / native)", "Native task p50", "TRTMC task p50",
+    columns = ["Result", "Model / Task", "Precision", "Native mode", "Quality (TRTMC / native)", "Native task p50",
+               "TRTMC task p50",
                *(["Rerun"] if reruns else []), "Evidence"]
     document = ("<!doctype html><html lang='en'><meta charset='utf-8'><meta name='viewport' "
                 f"content='width=device-width,initial-scale=1'><title>{_e(title)}</title><style>{STYLE}</style>"

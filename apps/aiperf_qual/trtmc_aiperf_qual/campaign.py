@@ -353,6 +353,35 @@ def _row(directory: Path) -> dict[str, Any] | None:
     return None
 
 
+NO_NATIVE_MODE = "—"
+FELL_BACK = "eager (compile failed)"
+
+
+def native_mode(row: Mapping[str, Any]) -> str:
+    """The native mode that answered a profile: ``compile``, ``eager`` (configured, or pinned), ``eager (compile
+    failed)`` where eager replaced a failed torch.compile, ``compile, eager`` when the evidence mixes them, or
+    ``—``."""
+    # An entry that errored records the mode it would have run; only evidence names the mode that answered.
+    accuracy = [item.get("native") or {} for item in row.get("accuracy", []) if item.get("status") != "error"]
+    perf = [item for item in row.get("perf", []) if item.get("light") != "n/a"
+            and (item.get("reference") or {}).get("p50_ms") is not None]  # a native side that timed requests
+    modes = {str(item["mode"]) for item in accuracy if item.get("mode")}
+    modes |= {mode for item in perf for mode in str(item.get("reference_mode") or "").split("+") if mode}
+    fell_back = (any(item.get("compile_fallback") for item in accuracy)
+                 or any(item.get("compile_fallback") or item.get("configured_mode") for item in perf))
+    if not modes:
+        return NO_NATIVE_MODE
+    if fell_back and modes == {"eager"}:
+        return FELL_BACK
+    return ", ".join(sorted(modes)) + (" (a compile failed)" if fell_back else "")
+
+
+def native_mode_counts(rows: Mapping[str, Mapping[str, Any]]) -> str:
+    """``compile 160, eager 48, ...``: how many profiles each native mode answered."""
+    counts = collections.Counter(native_mode(row) for row in rows.values())
+    return ", ".join(f"{mode} {count}" for mode, count in counts.most_common())
+
+
 def _accuracy_text(items: Sequence[Mapping[str, Any]]) -> str:
     return "; ".join(acc_value(item) for item in items if not item.get("informational"))
 
@@ -569,16 +598,19 @@ def summary(roots: Sequence[Path], baseline: Sequence[Path] = ()) -> tuple[str, 
              "Green: pass. Yellow: Perf about equal to native (counts as a pass); an inconclusive Acc of an older "
              "report does not count as a pass. Red: Acc or Perf worse than native beyond its margin. White: no valid comparison (an error or a "
              "failed build, or the comparison does not apply).", "",
+             f"Native mode (torch.compile by default; eager where pinned or where compile failed): "
+             f"{native_mode_counts(rows)}.", "",
              "| result | models |", "|---|---|", *(f"| {SIGNAL_NAMES[r]} | {results[r]} |" for r in SIGNALS),
              "", "## By Task", "", "| Task | " + " | ".join(names) + " |", "|---|" + "---|" * len(names),
              *(f"| {task} | " + " | ".join(str(by_task[task].get(r) or "") for r in SIGNALS) + " |"
                for task in sorted(by_task)),
-             "", "## Per model", "", "| result | model | Task | host | Acc (TRTMC · native) | Perf p50 (TRTMC · native) | "
-             "reason |", "|---|---|---|---|---|---|---|"]
+             "", "## Per model", "", "| result | model | Task | native mode | host | Acc (TRTMC · native) | "
+             "Perf p50 (TRTMC · native) | reason |", "|---|---|---|---|---|---|---|---|"]
     for profile in sorted(rows, key=lambda p: (SIGNALS.index(signal(rows[p])), rows[p]["task"] or "", p)):
         row = rows[profile]
         reason = signal_reason(profile, row).replace("|", "/").replace("\n", " ")
-        lines.append(f"| {SIGNAL_NAMES[signal(row)]} | {profile} | {row['task'] or '-'} | {row['root']} | "
+        lines.append(f"| {SIGNAL_NAMES[signal(row)]} | {profile} | {row['task'] or '-'} | {native_mode(row)} | "
+                     f"{row['root']} | "
                      f"{_accuracy_text(row['accuracy'])} | {_perf_text(profile, reported_perf(row))} | {reason} |")
     native = {profile: row["aiperf_metrics"] for profile, row in rows.items() if row.get("aiperf_metrics")}
     if native:
