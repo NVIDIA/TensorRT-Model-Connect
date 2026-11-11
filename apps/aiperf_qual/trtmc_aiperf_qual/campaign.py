@@ -174,24 +174,31 @@ def _sandbox_run_key(environment: Environment, model: Mapping[str, Any], out: Pa
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
 
 
+def _sandbox_blocked_result(environment: Environment, model: Mapping[str, Any], out: Path,
+                            started: float, error: gold_metrics.SandboxUnavailable) -> dict[str, Any]:
+    record = {"profile": model["model"], "task": model.get("task"), "category": "environment-blocked",
+              "failure_type": "environment", "blocked_by": "code_sandbox", "reason": _error(error),
+              "seconds": round(time.time() - started)}
+    (out / RUN_KEY).write_text(_sandbox_run_key(environment, model, out, str(error)) + "\n")
+    (out / "error.json").write_text(json.dumps(record, indent=2))
+    return record
+
+
 def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[str, Any]:
     """Build the bundle when missing, qualify, and apply the bundle retention policy. A previous run
     in ``out`` is set aside first."""
     started = time.time()
+    configured_model = model
     model = copy.deepcopy(model)  # resolved build capacity must not mutate the caller's resume configuration
     set_aside(out)
     out.mkdir(parents=True, exist_ok=True)
-    record: dict[str, Any] = {"profile": model["model"], "task": model.get("task")}
     try:
         gold_metrics.preflight_code_sandbox(model, environment.values, out)
     except gold_metrics.SandboxUnavailable as error:
-        record.update(category="environment-blocked", failure_type="environment", blocked_by="code_sandbox",
-                      reason=_error(error), seconds=round(time.time() - started))
-        (out / RUN_KEY).write_text(_sandbox_run_key(environment, model, out, str(error)) + "\n")
-        (out / "error.json").write_text(json.dumps(record, indent=2))
-        return record
+        return _sandbox_blocked_result(environment, configured_model, out, started, error)
     (out / RUN_KEY).write_text(run_key(environment, model) + "\n")
     bundle_policy, hf_policy = retention.policies(environment)
+    record: dict[str, Any] = {"profile": model["model"], "task": model.get("task")}
     with ThreadPoolExecutor(max_workers=1) as warm:
         warm.submit(warm_selections, environment, model)  # CPU work while the GPU builds
         try:
@@ -207,6 +214,8 @@ def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[
         try:
             verdict = qualify(model, environment, out)["verdict"]
             record.update(verdict)
+        except gold_metrics.SandboxUnavailable as error:
+            return _sandbox_blocked_result(environment, configured_model, out, started, error)
         except Exception as error:  # noqa: BLE001
             record.update(category="error", reason=_error(error))
             (out / "error.json").write_text(json.dumps({**record, "traceback": traceback.format_exc()}, indent=2))

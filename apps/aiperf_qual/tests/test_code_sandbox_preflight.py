@@ -148,3 +148,48 @@ def test_resume_replaces_a_stale_environment_diagnostic_when_the_boundary_failur
     record, = campaign.run_all(Environment({}), [model], root)
     assert record.get("status") != "skipped" and "can write" in record["reason"]
     assert "can write" in json.loads((root / "codegen/error.json").read_text())["reason"]
+
+
+def test_qualification_preflight_failure_keeps_the_environment_category_and_blocked_key(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual import runner
+
+    prepared = []
+    reason = "code sandbox: nobody can write the new bundle root"
+
+    def boundary(paths):
+        if prepared:
+            raise gold_metrics.SandboxUnavailable(reason)
+
+    def build(environment, resolved, out, python=None):
+        resolved["candidate"]["max_sequence_length"] = 257
+        prepared.append(True)
+        return {"status": "built"}
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("blocked qualification executed work or deleted evidence")
+
+    monkeypatch.setattr(gold_metrics, "_sandbox_verified", boundary)
+    monkeypatch.setattr(campaign, "run_key", lambda *args: "normal-key")
+    monkeypatch.setattr(campaign, "reference_python", lambda *args: "python")
+    monkeypatch.setattr(campaign, "warm_selections", lambda *args: None)
+    monkeypatch.setattr(campaign, "prefetch", lambda *args: None)
+    monkeypatch.setattr(campaign.bundles, "ensure_bundle", build)
+    monkeypatch.setattr(runner, "_qualify", forbidden)
+    monkeypatch.setattr(campaign.retention, "delete_bundle", forbidden)
+    model = {"model": "codegen", "task": "text_generation", "candidate": {}, "reference": {},
+             "absolute": [{"metric": "code_pass"}]}
+    directory = tmp_path / "results/codegen"
+    environment = Environment({"retention": {"bundle": "delete_built_unless_error"}})
+    record = campaign.run_one(environment, model, directory)
+    assert prepared and record["category"] == "environment-blocked"
+    assert record["failure_type"] == "environment" and record["blocked_by"] == "code_sandbox"
+    key = (directory / campaign.RUN_KEY).read_text().strip()
+    assert key != "normal-key" and campaign._finished(directory, key) == "environment-blocked"
+    assert key == campaign._sandbox_run_key(environment, model, directory, reason)
+    resumed, = campaign.run_all(environment, [model], directory.parent)
+    assert resumed["status"] == "skipped" and len(prepared) == 1
+    assert json.loads((directory / "error.json").read_text())["category"] == "environment-blocked"
+    assert json.loads((directory / "build.json").read_text())["status"] == "built"
+    rows, _, _ = campaign.collect([tmp_path / "results"])
+    assert campaign.signal(rows["codegen"]) == "white" and not campaign.is_pass(rows["codegen"])
+    assert campaign.exit_code([record], []) == 1
