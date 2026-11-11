@@ -222,7 +222,7 @@ class _GemmaModel:
         quant_ctx=None,
         verbose: bool = False,
         parallel_config=None,
-    ) -> bytes:
+    ) -> memoryview | bytes:
         activation = _checkpoint_gated_activation(config)
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
@@ -512,6 +512,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     weights = model.load_weights(
         str(model_dir), config, precision=precision, quant_ctx=quant_ctx
     )
+    # A 27B checkpoint's host weights plus TensorRT's device copy exceed a 128 GB unified-memory GPU.
+    from tensorrt_model_connect.weight_spill import spill_if_large
+
+    spill_if_large(weights, request.output_path)
 
     writer.set_header(family="gemma", task=request.task, backend=request.backend)
     if parallel.enabled:
