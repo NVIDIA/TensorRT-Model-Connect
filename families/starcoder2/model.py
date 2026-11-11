@@ -294,8 +294,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if str(config.model_type).lower() != "starcoder2":
         raise ValueError(f"StarCoder2 does not support model_type={config.model_type!r}")
     precision = str(request.precision).lower()
-    if precision not in {"fp32", "fp16", "bf16"}:
-        raise ValueError("StarCoder2 precision must be fp32, fp16, or bf16")
+    if precision not in {"fp32", "bf16"}:
+        raise ValueError("StarCoder2 precision must be fp32 or bf16 (fp16 is not supported)")
     max_sequence_length = _positive_int(
         request.max_sequence_length or min(config.max_position_embeddings, 256),
         "max_sequence_length",
@@ -307,8 +307,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             f"StarCoder2 does not support quantization={request.quantization!r}"
         )
     quantized = request.quantization == "fp8"
-    if quantized and precision not in {"fp16", "bf16"}:
-        raise NotImplementedError("StarCoder2 fp8 quantization requires precision fp16 or bf16")
+    if quantized and precision != "bf16":
+        raise NotImplementedError("StarCoder2 fp8 quantization requires precision bf16")
     if quantized and request.tensor_parallel_size != 1:
         raise NotImplementedError("StarCoder2 fp8 quantization does not support tensor parallelism")
     if quantized and config.raw.get("quantization_config"):
