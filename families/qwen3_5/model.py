@@ -2463,9 +2463,13 @@ _TWO_ENGINE_MEMORY_FRACTION = 0.8
 def _two_engines_fit(weight_bytes: int, gpu_bytes: int | None) -> bool:
     """Whether the prefill engine, which carries its own copy of every weight, fits beside the decode engine.
 
-    Without it, prompts run through the decode engine one token at a time (the bundle stays loadable).
+    Without it, prompts run through the decode engine one token at a time (the bundle stays loadable). An
+    unknown GPU capacity keeps that single-engine layout, which every earlier bundle had.
     """
-    if gpu_bytes is None or 2 * weight_bytes <= gpu_bytes * _TWO_ENGINE_MEMORY_FRACTION:
+    if gpu_bytes is None:
+        print("Skipping the prefill engine: the GPU memory could not be queried", file=sys.stderr)
+        return False
+    if 2 * weight_bytes <= gpu_bytes * _TWO_ENGINE_MEMORY_FRACTION:
         return True
     print(f"Skipping the prefill engine: the decode and prefill engines need about {2 * weight_bytes / 1024**3:.0f} "
           f"GiB of weights and the GPU has {gpu_bytes / 1024**3:.0f} GiB; prompts run through the decode engine",
