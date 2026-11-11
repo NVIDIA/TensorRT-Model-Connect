@@ -1,0 +1,418 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Direct build, native-runtime, and official-reference E2E for table_transformer."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from tensorrt_model_connect import BuildRequest, build
+
+FAMILY = "table_transformer"
+TASKS = frozenset({"image_to_boxes"})
+TEST_ROOT = Path(__file__).resolve().parent
+MANIFEST_ROOT = TEST_ROOT / "manifests"
+
+
+def _case_index() -> dict[str, tuple[Path, dict, dict]]:
+    result = {}
+    for path in sorted(MANIFEST_ROOT.glob("*.json")):
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        assert manifest["family"] == FAMILY
+        assert manifest["task"] in TASKS
+        for case in manifest["testcases"]:
+            name = str(case["name"])
+            assert name not in result
+            result[name] = (path, manifest, case)
+    return result
+
+
+CASES = _case_index()
+
+
+def _selected_cases(config) -> tuple[list[str], bool]:
+    model_filters = set()
+    for raw in config.getoption("--e2e-model") or []:
+        model_filters.update((item.strip() for item in str(raw).split(",") if item.strip()))
+    models_file = config.getoption("--e2e-models-file")
+    if models_file:
+        model_filters.update(
+            (
+                line.strip()
+                for line in Path(models_file).read_text(encoding="utf-8").splitlines()
+                if line.strip() and (not line.lstrip().startswith("#"))
+            )
+        )
+    testcase_filters = set()
+    for raw in config.getoption("--e2e-testcase") or []:
+        testcase_filters.update((item.strip() for item in str(raw).split(",") if item.strip()))
+    if not model_filters and (not testcase_filters):
+        return (sorted(CASES), False)
+    selected = []
+    for name, (_, manifest, _) in CASES.items():
+        model_match = (
+            not model_filters
+            or FAMILY in model_filters
+            or name in model_filters
+            or (manifest["name"] in model_filters)
+        )
+        testcase_match = not testcase_filters or name in testcase_filters
+        if model_match and testcase_match:
+            selected.append(name)
+    return (sorted(selected), True)
+
+
+def pytest_generate_tests(metafunc) -> None:
+    if "case_name" in metafunc.fixturenames:
+        names, enabled = _selected_cases(metafunc.config)
+        parameters = names
+        if not enabled:
+            parameters = [
+                pytest.param(
+                    name,
+                    marks=pytest.mark.skip(
+                        reason="direct E2E requires one of the three explicit E2E selectors"
+                    ),
+                )
+                for name in names
+            ]
+        metafunc.parametrize("case_name", parameters, ids=names)
+
+
+def _required_path(value: str | None, label: str) -> Path:
+    assert value, f"selected {FAMILY} E2E requires {label}"
+    path = Path(value)
+    assert path.exists(), f"selected {FAMILY} E2E {label} does not exist: {path}"
+    return path
+
+
+def _model_dir(manifest: dict) -> Path:
+    explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+    if explicit:
+        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+    from huggingface_hub import snapshot_download
+
+    try:
+        snapshot = snapshot_download(
+            repo_id=manifest["hf_id"], revision=manifest.get("hf_revision"), local_files_only=True
+        )
+    except Exception as error:
+        raise AssertionError(
+            f"selected {FAMILY} E2E requires the exact cached checkpoint {manifest['hf_id']}"
+        ) from error
+    return Path(snapshot)
+
+
+def _runtime() -> tuple[Path, Path]:
+    binary = _required_path(os.environ.get("TRTMC_BINARY"), "TRTMC_BINARY")
+    runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
+    assert (runtime_root / "libtrtmc_backend_trt.so").is_file()
+    assert (runtime_root / f"libtrtmc_model_{FAMILY}.so").is_file()
+    # The native TensorRT backend executes on CUDA; the independent official
+    # reference deliberately runs on CPU and does not require a CUDA Torch wheel.
+    return (binary, runtime_root)
+
+
+def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
+    build(
+        BuildRequest(
+            model_dir=model_dir,
+            output_path=bundle,
+            family=FAMILY,
+            task=manifest["task"],
+            precision=manifest["precision"],
+            max_sequence_length=manifest.get("max_sequence_length"),
+            image_height=manifest.get("image_height"),
+            image_width=manifest.get("image_width"),
+            video_num_frames=manifest.get("video_num_frames"),
+            max_batch_size=int(manifest.get("max_batch_size", 1)),
+            tensor_parallel_size=int(manifest["tensor_parallel_size"]),
+            quantization=manifest.get("quantization"),
+            fp32_layers=tuple((int(layer) for layer in manifest.get("fp32_layers", ()))),
+        )
+    )
+
+
+def _run_json(
+    binary: Path,
+    runtime_root: Path,
+    bundle: Path,
+    case: dict,
+    command: str,
+    *arguments: str,
+) -> dict:
+    invocation = [
+        str(binary),
+        command,
+        str(bundle),
+        "--runtime-root",
+        str(runtime_root),
+        *arguments,
+    ]
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = ":".join(
+        (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
+    )
+    completed = subprocess.run(
+        invocation,
+        check=True,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=int(case.get("runtime_timeout_s", 3600)),
+    )
+    payloads = []
+    for line in completed.stdout.splitlines():
+        start = line.find("{")
+        if start >= 0:
+            try:
+                payloads.append(json.loads(line[start:]))
+            except json.JSONDecodeError:
+                pass
+    assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
+    assert all((payload == payloads[0] for payload in payloads))
+    return payloads[0]
+
+
+def _asset(raw: str) -> Path:
+    path = Path(raw)
+    if not path.is_absolute():
+        path = TEST_ROOT / path
+    assert path.is_file(), f"selected {FAMILY} E2E asset does not exist: {path}"
+    return path
+
+
+def _native(binary: Path, runtime_root: Path, bundle: Path, case: dict) -> dict:
+    return _run_json(
+        binary,
+        runtime_root,
+        bundle,
+        case,
+        "detect",
+        "--image",
+        str(_asset(case["test_image"])),
+    )
+
+
+def _official_reference(model_dir: Path, case: dict) -> list[dict]:
+    import torch
+    from PIL import Image
+    from transformers import TableTransformerForObjectDetection, DetrImageProcessor
+
+    image = Image.open(_asset(case["test_image"])).convert("RGB")
+    processor = DetrImageProcessor.from_pretrained(str(model_dir))
+    model = TableTransformerForObjectDetection.from_pretrained(str(model_dir)).eval()
+    encoding = processor(images=image, return_tensors="pt")
+    with torch.no_grad():
+        outputs = model(**encoding)
+    target_sizes = torch.tensor([[image.height, image.width]])
+    results = processor.post_process_object_detection(
+        outputs, threshold=float(case.get("score_threshold", 0.5)), target_sizes=target_sizes
+    )[0]
+    return [
+        {
+            "score": float(score),
+            "label": int(label),
+            "box": [float(value) for value in box.tolist()],
+        }
+        for score, label, box in zip(results["scores"], results["labels"], results["boxes"])
+    ]
+
+
+def _box_iou(left: list[float], right: list[float]) -> float:
+    left_x1, left_y1, left_x2, left_y2 = left
+    right_x1, right_y1, right_x2, right_y2 = right
+    inter_x1 = max(left_x1, right_x1)
+    inter_y1 = max(left_y1, right_y1)
+    inter_x2 = min(left_x2, right_x2)
+    inter_y2 = min(left_y2, right_y2)
+    inter_area = max(0.0, inter_x2 - inter_x1) * max(0.0, inter_y2 - inter_y1)
+    left_area = max(0.0, left_x2 - left_x1) * max(0.0, left_y2 - left_y1)
+    right_area = max(0.0, right_x2 - right_x1) * max(0.0, right_y2 - right_y1)
+    union_area = left_area + right_area - inter_area
+    return inter_area / union_area if union_area > 0.0 else 0.0
+
+
+def _assert_parity(actual: dict, expected: list[dict]) -> dict:
+    boxes = actual.get("boxes", [])
+    scores = actual.get("scores", [])
+    classes = actual.get("classes", [])
+    assert boxes and scores and classes, "native Table Transformer returned no detections"
+    assert len(boxes) == len(scores) * 4 == len(classes) * 4, (
+        "native Table Transformer returned inconsistent detection arrays"
+    )
+    assert int(actual["image_height"]) > 0 and int(actual["image_width"]) > 0
+    native = [
+        {
+            "score": float(scores[index]),
+            "label": int(classes[index]),
+            "box": [float(value) for value in boxes[index * 4 : index * 4 + 4]],
+        }
+        for index in range(len(scores))
+    ]
+    assert expected, "official Table Transformer reference returned no detections"
+    native = sorted(native, key=lambda item: -item["score"])
+    reference = sorted(expected, key=lambda item: -item["score"])
+    assert len(native) == len(reference), (
+        f"detection count mismatch: native={len(native)} reference={len(reference)}"
+    )
+    matched = set()
+    overlaps, score_errors, box_errors = [], [], []
+    for detection in native:
+        best_match = None
+        best_iou = 0.0
+        for index, ref_detection in enumerate(reference):
+            if index in matched:
+                continue
+            if int(detection["label"]) != int(ref_detection["label"]):
+                continue
+            iou = _box_iou(detection["box"], ref_detection["box"])
+            if iou > best_iou:
+                best_iou = iou
+                best_match = index
+        assert best_match is not None, (
+            f"native detection label={detection['label']} has no reference match"
+        )
+        assert best_iou >= 0.95, (
+            f"native detection label={detection['label']} box={detection['box']} "
+            f"does not overlap reference box={reference[best_match]['box']}"
+        )
+        assert abs(float(detection["score"]) - float(reference[best_match]["score"])) <= 0.01
+        matched.add(best_match)
+        overlaps.append(best_iou)
+        score_errors.append(abs(detection["score"] - reference[best_match]["score"]))
+        box_errors.extend(
+            abs(a - b) for a, b in zip(detection["box"], reference[best_match]["box"])
+        )
+    return {
+        "detections": len(native),
+        "min_iou": min(overlaps),
+        "max_score_error": max(score_errors),
+        "max_box_error_pixels": max(box_errors),
+    }
+
+
+def _sdk_detections(runtime_root: Path, bundle: Path, image: Path, tmp_path: Path) -> list[dict]:
+    """Run the public C and C++ consumers on the reference's own decoded pixels."""
+    import numpy as np
+    from PIL import Image
+
+    native_build = _required_path(
+        os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR"
+    )
+    pixels = np.asarray(Image.open(image).convert("RGB"), dtype=np.float32) / np.float32(255.0)
+    raw = tmp_path / "sdk-input.rgb.f32"
+    np.ascontiguousarray(pixels).tofile(raw)
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = os.pathsep.join(
+        value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value
+    )
+    outputs = []
+    for language in ("c", "cpp"):
+        consumer = native_build / f"test_table_transformer_sdk_{language}"
+        assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
+        completed = subprocess.run(
+            [
+                str(consumer),
+                str(bundle),
+                str(runtime_root),
+                str(raw),
+                str(pixels.shape[0]),
+                str(pixels.shape[1]),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=600,
+        )
+        payloads = [line for line in completed.stdout.splitlines() if line.startswith("{")]
+        assert len(payloads) == 1, f"the {language} consumer must print one result"
+        result = json.loads(payloads[0])
+        assert result["task"] == "image_to_boxes"
+        assert (result["image_height"], result["image_width"]) == pixels.shape[:2]
+        outputs.append(result)
+    assert outputs[0] == outputs[1], "the C and C++ SDK consumers disagree"
+    return outputs
+
+
+def _assert_preprocessing(model_dir: Path, image: Path, work: Path) -> float:
+    """Check the first native boundary directly against the official processor."""
+    import numpy as np
+    from PIL import Image
+    from transformers import DetrImageProcessor
+
+    source = Image.open(image).convert("RGB")
+    pixels = np.asarray(source, dtype=np.float32) / np.float32(255.0)
+    raw, output = work / "preprocess-input.f32", work / "preprocess-output.f32"
+    pixels.tofile(raw)
+    build_dir = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    subprocess.run(
+        [
+            str(build_dir / "test_table_transformer_preprocess_consumer"),
+            str(raw),
+            str(output),
+            str(source.height),
+            str(source.width),
+        ],
+        check=True,
+        timeout=60,
+    )
+    expected = DetrImageProcessor.from_pretrained(str(model_dir))(
+        images=source, return_tensors="np"
+    )["pixel_values"][0]
+    actual = np.fromfile(output, dtype=np.float32).reshape(expected.shape)
+    np.testing.assert_allclose(actual, expected, rtol=0, atol=1e-6)
+    return float(np.max(np.abs(actual - expected)))
+
+
+def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
+    """Verify end-to-end detection output against official PyTorch reference and SDK consumers."""
+    _, manifest, case = CASES[case_name]
+    model_dir = _model_dir(manifest)
+    binary, runtime_root = _runtime()
+    bundle = tmp_path / manifest["bundle"]
+    _build(model_dir, bundle, manifest)
+    preprocess_error = _assert_preprocessing(model_dir, _asset(case["test_image"]), tmp_path)
+    actual = _native(binary, runtime_root, bundle, case)
+    expected = _official_reference(model_dir, case)
+    evidence = {"cli": _assert_parity(actual, expected), "preprocess_max_error": preprocess_error}
+    for index, sdk in enumerate(
+        _sdk_detections(runtime_root, bundle, _asset(case["test_image"]), tmp_path)
+    ):
+        evidence[("c_sdk", "cpp_sdk")[index]] = _assert_parity(sdk, expected)
+
+    # The same bundle must accept images outside the original single fixture's
+    # aspect ratio, with the official resize and unchanged parity criteria.
+    from PIL import Image, ImageOps
+
+    with Image.open(_asset(case["test_image"])) as image:
+        variants = {
+            "portrait": ImageOps.expand(image, border=(40, 300, 40, 300), fill="white"),
+            "square": ImageOps.pad(image, (max(image.size), max(image.size))),
+        }
+        for name, variant in variants.items():
+            path = tmp_path / f"{name}.png"
+            variant.save(path)
+            variant_case = {**case, "test_image": str(path)}
+            _assert_preprocessing(model_dir, path, tmp_path)
+            evidence[name] = _assert_parity(
+                _native(binary, runtime_root, bundle, variant_case),
+                _official_reference(model_dir, variant_case),
+            )
+
+    evidence.update(
+        {
+            "checkpoint": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        }
+    )
+    (tmp_path / "parity.json").write_text(json.dumps(evidence, indent=2) + "\n")
+    print(json.dumps(evidence, sort_keys=True))

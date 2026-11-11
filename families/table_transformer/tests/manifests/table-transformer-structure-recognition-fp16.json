@@ -1,0 +1,21 @@
+{
+  "name": "table-transformer-structure-recognition-fp16",
+  "hf_id": "microsoft/table-transformer-structure-recognition",
+  "hf_revision": "f4d4bdc85c3fe4b1fa49658882a5d38bbdd0f343",
+  "bundle": "table-transformer-structure-recognition-fp16.bundle",
+  "family": "table_transformer",
+  "task": "image_to_boxes",
+  "precision": "fp16",
+  "image_height": 1000,
+  "image_width": 1000,
+  "max_sequence_length": 1,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "table-transformer-structure-recognition-fp16",
+      "premerge": true,
+      "test_image": "data/structure-table.jpeg",
+      "score_threshold": 0.5
+    }
+  ]
+}
