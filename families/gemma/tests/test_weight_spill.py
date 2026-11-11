@@ -79,25 +79,41 @@ def test_overlapping_builds_keep_their_own_spill_directory(monkeypatch, tmp_path
 
     monkeypatch.setattr(weight_spill, "SPILL_MIN_BYTES", 1024)
     monkeypatch.setattr(weight_spill, "physical_memory_bytes", lambda: 3 * 4096 - 3)
-    seen = {}
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    seen, failures = {}, []
     inside = threading.Event()
-    other_done = threading.Event()
 
-    def other_build() -> None:  # a build in another thread sees no spill directory of this one
-        inside.wait()
-        seen["other"] = weight_spill._SPILL_DIRECTORY.get()
-        other_done.set()
+    def second_build() -> (
+        None
+    ):  # a whole build in another thread while the first one is inside spilled
+        try:
+            assert inside.wait(timeout=10)
+            weights = {"w": np.ones((64, 32), dtype=np.float16)}
+            with weight_spill.spilled(weights, second / "model.bundle"):
+                seen["second"] = weight_spill._SPILL_DIRECTORY.get()
+            seen["second after"] = weight_spill._SPILL_DIRECTORY.get()
+        except BaseException as error:  # reported by the test thread
+            failures.append(error)
 
-    thread = threading.Thread(target=contextvars.copy_context().run, args=(other_build,))
-    thread.start()
-    with weight_spill.spilled(
-        {"w": np.ones((64, 32), dtype=np.float16)}, tmp_path / "model.bundle"
-    ):
+    worker = threading.Thread(
+        target=contextvars.copy_context().run, args=(second_build,), daemon=True
+    )
+    worker.start()
+    try:
+        with weight_spill.spilled(
+            {"w": np.ones((64, 32), dtype=np.float16)}, first / "model.bundle"
+        ):
+            inside.set()
+            worker.join(timeout=10)
+            # The second build entered and left its own spill: the first build's directory is untouched.
+            seen["first"] = weight_spill._SPILL_DIRECTORY.get()
+    finally:
         inside.set()
-        other_done.wait()
-        seen["own"] = weight_spill._SPILL_DIRECTORY.get()
-    thread.join()
-    assert seen == {"other": None, "own": tmp_path.resolve()}
+        worker.join(timeout=10)
+    assert not failures and not worker.is_alive()
+    assert seen == {"second": second.resolve(), "second after": None, "first": first.resolve()}
 
 
 def test_a_symlinked_bundle_spills_next_to_its_own_entry(tmp_path) -> None:
