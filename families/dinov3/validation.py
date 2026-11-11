@@ -19,6 +19,11 @@ def _cosine(left, right) -> float:
     return float(np.dot(a, b) / denominator)
 
 
+def _assert_at_least(name: str, value: float, thresholds: dict, key: str) -> None:
+    limit = float(thresholds[key])
+    assert value >= limit, f"{name} {value:.6f} < {limit}"
+
+
 def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
     manifest["task"]
     actual_hidden = np.asarray(actual["last_hidden_state"], dtype=np.float64).reshape(
@@ -35,23 +40,32 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
     assert np.isfinite(expected_hidden).all() and np.isfinite(expected_pooler).all()
     assert np.array_equal(actual_pooler, actual_hidden[:, 0, :])
     assert np.array_equal(expected_pooler, expected_hidden[:, 0, :])
-    assert _cosine(actual_hidden, expected_hidden) >= float(thresholds["full_cosine"])
-    assert _cosine(actual_hidden[:, 0, :], expected_hidden[:, 0, :]) >= float(
-        thresholds["cls_cosine"]
+    _assert_at_least("full cosine", _cosine(actual_hidden, expected_hidden), thresholds, "full_cosine")
+    _assert_at_least(
+        "CLS cosine",
+        _cosine(actual_hidden[:, 0, :], expected_hidden[:, 0, :]),
+        thresholds,
+        "cls_cosine",
     )
-    assert _cosine(actual_pooler, expected_pooler) >= float(thresholds["pooler_cosine"])
+    _assert_at_least("pooler cosine", _cosine(actual_pooler, expected_pooler), thresholds, "pooler_cosine")
     relative_frobenius = np.linalg.norm(actual_hidden - expected_hidden) / max(
         float(np.linalg.norm(expected_hidden)), 1e-12
     )
-    assert float(relative_frobenius) <= float(thresholds["relative_frobenius"])
+    limit = float(thresholds["relative_frobenius"])
+    assert float(relative_frobenius) <= limit, (
+        f"relative Frobenius error {float(relative_frobenius):.6f} > {limit}"
+    )
     register_count = int(expected["num_register_tokens"])
     assert register_count == int(case["num_register_tokens"])
     patch_start = 1 + register_count
     assert 0 <= register_count and patch_start < actual_hidden.shape[1]
     if register_count:
-        assert _cosine(
-            actual_hidden[:, 1:patch_start, :], expected_hidden[:, 1:patch_start, :]
-        ) >= float(thresholds["register_cosine"])
+        _assert_at_least(
+            "register cosine",
+            _cosine(actual_hidden[:, 1:patch_start, :], expected_hidden[:, 1:patch_start, :]),
+            thresholds,
+            "register_cosine",
+        )
     actual_patches = actual_hidden[:, patch_start:, :].reshape(-1, actual_hidden.shape[-1])
     expected_patches = expected_hidden[:, patch_start:, :].reshape(-1, expected_hidden.shape[-1])
     assert actual_patches.shape[0] > 0 and expected_patches.shape[0] > 0
@@ -62,8 +76,13 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
         out=np.zeros_like(denominators),
         where=denominators != 0.0,
     )
-    assert float(np.mean(patch_cosines)) >= float(thresholds["mean_patch_cosine"])
-    assert float(np.percentile(patch_cosines, 1.0)) >= float(thresholds["p01_patch_cosine"])
+    _assert_at_least("mean patch cosine", float(np.mean(patch_cosines)), thresholds, "mean_patch_cosine")
+    _assert_at_least(
+        "1st-percentile patch cosine",
+        float(np.percentile(patch_cosines, 1.0)),
+        thresholds,
+        "p01_patch_cosine",
+    )
 
 
 @lru_cache(maxsize=None)
