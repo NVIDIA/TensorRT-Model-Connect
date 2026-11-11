@@ -119,6 +119,80 @@ def _dataset_payload(*, image: Path, prompt: str, instruction: str, count: int) 
     return {f"{index:04d}": dict(sample) for index in range(count)}
 
 
+def _sdpa_varlen_attention(
+    q: Any,
+    k: Any,
+    v: Any,
+    cu_seqlens_q: Any,
+    cu_seqlens_k: Any,
+    max_seqlen_q: int | None = None,
+    max_seqlen_k: int | None = None,
+    causal: bool = False,
+    softmax_scale: float | None = None,
+    **_: Any,
+) -> Any:
+    """``flash_attn_varlen_func`` on PyTorch SDPA.
+
+    Packed ``[tokens, heads, head_dim]`` sequences bounded by ``cu_seqlens_*``, grouped key/value heads,
+    and flash-attn's causal mask, which aligns the queries with the end of the keys (query ``i`` of
+    ``Lq`` sees keys ``0 .. i + Lk - Lq``).
+    """
+    import torch
+    import torch.nn.functional as functional
+
+    del max_seqlen_q, max_seqlen_k
+    output = torch.empty_like(q)
+    groups = q.shape[1] // k.shape[1]
+    bounds_q, bounds_k = cu_seqlens_q.tolist(), cu_seqlens_k.tolist()
+    for index in range(len(bounds_q) - 1):
+        q_start, q_end = bounds_q[index], bounds_q[index + 1]
+        k_start, k_end = bounds_k[index], bounds_k[index + 1]
+        if q_end == q_start:
+            continue
+        query = q[q_start:q_end].transpose(0, 1)
+        key = k[k_start:k_end].transpose(0, 1).repeat_interleave(groups, dim=0)
+        value = v[k_start:k_end].transpose(0, 1).repeat_interleave(groups, dim=0)
+        mask = None
+        if causal:
+            rows, columns = q_end - q_start, k_end - k_start
+            mask = torch.ones(rows, columns, dtype=torch.bool, device=q.device).tril(columns - rows)
+        context = functional.scaled_dot_product_attention(
+            query, key, value, attn_mask=mask, scale=softmax_scale)
+        output[q_start:q_end] = context.transpose(0, 1)
+    return output
+
+
+def _flash_attention_runs() -> bool:
+    """True when the installed flash-attn has kernels for this GPU."""
+    try:
+        import torch
+        from flash_attn import flash_attn_varlen_func
+
+        rows = torch.zeros(2, 1, 64, device="cuda", dtype=torch.bfloat16)
+        bounds = torch.tensor([0, 2], device="cuda", dtype=torch.int32)
+        flash_attn_varlen_func(rows, rows, rows, bounds, bounds, 2, 2)
+        torch.cuda.synchronize()
+        return True
+    except Exception:  # noqa: BLE001 - for example "no kernel image is available" on an unlisted GPU
+        return False
+
+
+def _use_sdpa_without_flash_kernels() -> bool:
+    """Route the upstream language model's flash-attn calls through PyTorch SDPA when flash-attn cannot run.
+
+    The pinned flash-attn source build has no kernels for some GPUs (Jetson AGX Thor, sm_110), and the
+    upstream ``qwen2_navit`` attention calls ``flash_attn_varlen_func`` unconditionally. Returns whether the
+    fallback is active. Call after ``_load_upstream``.
+    """
+    if _flash_attention_runs():
+        return False
+    navit = sys.modules.get("modeling.lance.qwen2_navit")
+    if navit is None:
+        raise RuntimeError("the upstream Lance language model module is not loaded")
+    navit.flash_attn_varlen_func = _sdpa_varlen_attention
+    return True
+
+
 def _load_upstream(reference_repo: Path) -> Any:
     try:
         source = reference_repo / "inference_lance.py"
@@ -258,6 +332,7 @@ def _run_upstream(
     sys.path.insert(0, str(reference_repo))
     _configure_upstream_vae(reference_repo, vae_path)
     upstream = _load_upstream(reference_repo)
+    _use_sdpa_without_flash_kernels()
     upstream.MAX_GENERATION_LENGTH = arguments.max_new_tokens
     original = upstream.validate_on_fixed_batch
     samples: list[float] = []
