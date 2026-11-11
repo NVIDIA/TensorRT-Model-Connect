@@ -9,6 +9,7 @@
 #include "families/magpie_tts/runtime/plugin_helpers.h"
 #include "trtmc/runtime/family_factory.h"
 
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -22,6 +23,12 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
     if (section == nullptr || section->length == 0)
         throw std::runtime_error("bundle section is missing or empty: " + std::string(name));
     return bundle.read_section(name);
+}
+
+bool is_single_frame_profile(const ITrtModule& module) {
+    const auto opt =
+        module.input_profile_shape("input_embed", module.profile_idx(), ProfileShapeSelector::kOpt);
+    return !opt.empty() && opt[0] == 1;
 }
 
 } // namespace
@@ -65,16 +72,27 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     if (!decoder_profiles.prefill || !decoder_profiles.prefill->ok() || !decoder_profiles.decode ||
         !decoder_profiles.decode->ok())
         throw std::runtime_error("Magpie decoder plan must contain prefill and decode profiles");
-    decoder_profiles.decode->keep_alive(stream_owner);
+    // The decoder plan puts the one-frame step in its first profile and the
+    // whole-context prefill in its second. Run each phase in the context of its
+    // own profile. Tensor-parallel plans keep the one-context sequential path.
+    std::unique_ptr<ITrtModule> step_decoder = std::move(decoder_profiles.decode);
+    std::unique_ptr<ITrtModule> prefill_decoder;
+    if (tp_size == 1 && magpie_factory::is_single_frame_profile(*decoder_profiles.prefill) &&
+        !magpie_factory::is_single_frame_profile(*step_decoder)) {
+        prefill_decoder = std::move(step_decoder);
+        step_decoder = std::move(decoder_profiles.prefill);
+        prefill_decoder->keep_alive(stream_owner);
+    }
+    step_decoder->keep_alive(stream_owner);
     auto codec = load("codec.plan");
 
     auto config = build_magpie_config(runtime);
     const auto max_cache = document.at("max_cache_length").get<std::int32_t>();
-    const auto shape = decoder_profiles.decode->tensor_shape("cache_k_0");
+    const auto shape = step_decoder->tensor_shape("cache_k_0");
     if (max_cache <= 0 || shape.size() < 2 || shape[1] <= 0)
         throw std::runtime_error("Magpie decoder cache geometry is invalid");
     const auto kv_dim = static_cast<std::int32_t>(shape[1]);
-    const auto cache_dtype = decoder_profiles.decode->tensor_dtype("cache_k_0");
+    const auto cache_dtype = step_decoder->tensor_dtype("cache_k_0");
     auto state = std::make_unique<MagpieKvCache>(config.decoder_layers, max_cache, kv_dim,
                                                  options.stream, cache_dtype);
     std::unique_ptr<MagpieInferenceState> unconditional_state;
@@ -112,11 +130,13 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         context_lengths.empty())
         throw std::runtime_error("Magpie embedding sections are invalid");
 
-    return new MagpiePipeline(
-        std::move(encoder), std::move(decoder_profiles.decode), std::move(state), std::move(codec),
+    auto pipeline = std::make_unique<MagpiePipeline>(
+        std::move(encoder), std::move(step_decoder), std::move(state), std::move(codec),
         std::move(unconditional_state), std::move(cross_k), std::move(cross_v),
         std::move(unconditional_k), std::move(unconditional_v), std::move(encoder_output),
         std::move(unconditional_output), std::move(audio_embed), std::move(text_embed),
         std::move(context_embed), std::move(context_lengths), std::move(config), options.stream,
         make_ipa_tok(context.reader));
+    pipeline->set_context_prefill_decoder(std::move(prefill_decoder));
+    return pipeline.release();
 }
