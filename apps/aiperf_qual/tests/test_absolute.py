@@ -1560,6 +1560,47 @@ def test_rerank_documents_keep_their_head_so_each_pair_fits_the_bundle(monkeypat
     assert absolute._pairs_fitted({"candidate": {}, "reference": {}}, [sample], "{query}{document}") == [sample]
 
 
+
+def test_truncated_documents_fit_the_bundle_with_its_special_tokens(monkeypatch):
+    """Documents keep their first ``truncate_tokens`` tokens, fewer when the bundle cannot hold that many plus the
+    tokenizer's special tokens (less the margin); a bundle without a length keeps the suite's cut."""
+    from trtmc_aiperf_qual.suites import request_sha
+
+    class Words:  # one token per word, plus two special tokens around them
+        def __call__(self, text, add_special_tokens=True):
+            ids = list(range(1, len(text.split()) + 1))
+            return {"input_ids": [0, *ids, 0] if add_special_tokens else ids}
+
+        def decode(self, ids, skip_special_tokens=True):
+            return " ".join(f"w{index}" for index in ids)
+
+    monkeypatch.setattr(absolute, "_candidate_tokenizer", lambda model: Words())
+    request = {"prompt": " ".join(f"w{index}" for index in range(1, 41))}
+    sample = {"sample_id": "d", "request": request, "request_sha": request_sha(request)}
+
+    def kept(length):
+        model = {"candidate": {"max_sequence_length": length} if length else {}, "reference": {}}
+        cut = absolute._head_truncated(model, [sample], 30)[0]
+        assert cut["request_sha"] == request_sha(cut["request"])
+        return len(cut["request"]["prompt"].split())
+
+    assert kept(None) == 30 and kept(64) == 30
+    assert kept(32) == 32 - 2 - absolute.PAIR_MARGIN_TOKENS  # 30 words and 2 specials would fill it exactly
+    assert kept(2 + absolute.PAIR_MARGIN_TOKENS + 1) == 1  # the smallest bundle that holds a document token
+    # A bundle that leaves no room (budget 0) or less than none (budget -3) is rejected, never sliced.
+    for length in (2 + absolute.PAIR_MARGIN_TOKENS, 3 + absolute.PAIR_MARGIN_TOKENS - 4):
+        with pytest.raises(ValueError, match="no room for document tokens"):
+            kept(length)
+    with pytest.raises(ValueError, match="no room for a query-document pair"):
+        absolute._pairs_fitted({"candidate": {"max_sequence_length": absolute.PAIR_MARGIN_TOKENS}, "reference": {}},
+                               [sample], "{query}{document}")
+    # A positive budget that the query alone exceeds cannot be met by emptying the document either.
+    long_query = {"query": " ".join(["q"] * 20), "documents": ["d1 d2"]}
+    crowded = {"sample_id": "q2", "request": long_query, "request_sha": request_sha(long_query)}
+    with pytest.raises(ValueError, match="sample q2 needs"):
+        absolute._pairs_fitted({"candidate": {"max_sequence_length": 10}, "reference": {}}, [crowded], "{query} {document}")
+
+
 def _rejection(session, message):
     body = '{"error":{"message":"%s","type":"invalid_request_error","code":"backend_rejected_request"}}' % message
     return {"metadata": {"session_num": session}, "status": 422, "responses": [],

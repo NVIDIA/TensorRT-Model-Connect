@@ -222,7 +222,8 @@ def _fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]], min_
     return kept
 
 
-PAIR_MARGIN_TOKENS = 4  # the bundle's own tokenizer may count a pair a few tokens apart from Transformers'
+# The bundle's own tokenizer may count a pair or a cut document a few tokens apart from Transformers'.
+PAIR_MARGIN_TOKENS = 4
 
 
 def _candidate_tokenizer(model: Mapping[str, Any]) -> Any:
@@ -245,6 +246,9 @@ def _pairs_fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]
         return list(samples)
     tokenizer = _candidate_tokenizer(model)
     limit = length - PAIR_MARGIN_TOKENS
+    if limit <= 0:
+        raise ValueError(f"no room for a query-document pair: max_sequence_length {length} with "
+                         f"{PAIR_MARGIN_TOKENS} tokens of margin")
 
     def excess(query: str, document: str) -> int:
         text = pair_format.format(query=query, document=document)
@@ -260,6 +264,10 @@ def _pairs_fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]
             while keep > 0 and (over := excess(query, text)) > 0:  # decoding can merge tokens: check again
                 keep = max(0, keep - over)
                 text = tokenizer.decode(ids[:keep], skip_special_tokens=True)
+            if excess(query, text) > 0:  # the query and the format alone exceed the bundle
+                raise ValueError(f"no room for a query-document pair: sample {sample.get('sample_id')} needs "
+                                 f"{excess(query, text)} tokens more than max_sequence_length {length} allows "
+                                 f"with {PAIR_MARGIN_TOKENS} tokens of margin")
             documents.append(text)
         request["documents"] = documents
         result.append({**sample, "request": request, "request_sha": request_sha(request)})
@@ -267,12 +275,16 @@ def _pairs_fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]
 
 
 def _head_truncated(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]], limit: int) -> list[dict[str, Any]]:
-    """Samples whose ``prompt`` keeps only its first ``limit`` tokens (the model's tokenizer)."""
-    from transformers import AutoTokenizer
-
-    name, revision = tokenizer_source(model)
-    tokenizer = AutoTokenizer.from_pretrained(name, revision=revision,
-                                              trust_remote_code=bool(model["reference"].get("trust_remote_code")))
+    """Samples whose ``prompt`` keeps only its first ``limit`` tokens (the model's tokenizer), fewer when the
+    bundle's max_sequence_length cannot hold that many with the tokenizer's special tokens (less the margin)."""
+    tokenizer = _candidate_tokenizer(model)
+    length = int(model["candidate"].get("max_sequence_length") or 0)
+    if length:
+        specials = len(tokenizer("", add_special_tokens=True)["input_ids"])
+        limit = min(limit, length - specials - PAIR_MARGIN_TOKENS)
+    if limit <= 0:  # a negative slice would keep most of the text, an empty one all of it away
+        raise ValueError(f"no room for document tokens: limit {limit} (max_sequence_length {length or 'unset'}, "
+                         f"{PAIR_MARGIN_TOKENS} tokens of margin)")
     result = []
     for sample in samples:
         request = dict(sample["request"])
