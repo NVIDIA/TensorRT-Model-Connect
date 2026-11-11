@@ -311,7 +311,8 @@ def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference:
     # none when the native side recorded nothing.
     # Only a native batch with a valid timed request names a mode (an eager floor batch that answered nothing
     # does not).
-    answered = [batch["identity"] for batch in reference if any(row.get("valid") for row in batch["records"])]
+    answered = [batch["identity"] for batch in reference
+                if any(row.get("valid") and str(row["sample_id"]) not in excluded for row in batch["records"])]
     modes = sorted({str(item.get("mode") or "eager") for item in answered})
     fallbacks = sorted({str(item["compile_fallback"]) for item in answered if item.get("compile_fallback")})
     result: dict[str, Any] = {"request": name, "reference_mode": "+".join(modes), "kind": "natural_dataset", "gate": False,

@@ -219,6 +219,13 @@ def test_natural_timings_name_the_native_mode_that_answered(tmp_path):
     collect(evidence, "reference", [raw(0, 20)], mode="compile")
     collect(evidence, "reference", [], mode="eager")
     assert evidence.natural_performance()[0]["reference_mode"] == "compile"
+    evidence = new_session(tmp_path / "excluded")  # an eager batch of capacity-rejected samples names no mode
+    body = json.dumps({"error": {"message": "prompt exceeds the prefill profile", "code": "backend_rejected_request"}})
+    rejected = {**raw(1, 10), "status": 422, "responses": [], "error": {"code": 422, "message": body}}
+    collect(evidence, "candidate", [raw(0, 10), rejected])
+    collect(evidence, "reference", [raw(0, 20)], mode="compile")
+    collect(evidence, "reference", [raw(1, 20)], mode="eager")
+    assert evidence.natural_performance([{"suite": "evaluation", "out_of_capacity": 1}])[0]["reference_mode"] == "compile"
     evidence = new_session(tmp_path / "failed")  # no native mode answered: none is named
     collect(evidence, "candidate", [raw(0, 10)])
     row, = evidence.natural_performance()
