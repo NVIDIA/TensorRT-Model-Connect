@@ -182,6 +182,10 @@ class _ModernBertModel:
             parallel.validate()
             if quant_ctx is not None:
                 raise ValueError("ModernBERT tensor-parallel builds do not support quantization")
+            if precision != "fp32":
+                raise NotImplementedError(
+                    "ModernBERT tensor-parallel builds require fp32 precision"
+                )
             from .parallel import build_tp_modernbert_engine
 
             return build_tp_modernbert_engine(
@@ -204,6 +208,8 @@ class _ModernBertModel:
             raise ValueError("ModernBERT max_cache_length must be positive")
         if precision == "fp16":
             work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "bf16":
+            work_np_dtype, work_trt_dtype = np.float32, trt.bfloat16
         elif precision == "fp32":
             work_np_dtype, work_trt_dtype = np.float32, trt.float32
         else:
@@ -225,6 +231,12 @@ class _ModernBertModel:
         if quant_ctx is not None:
             quant_ctx.configure_build(trt_config)
 
+        def work_constant(shape, values):
+            tensor = graph_ops.add_constant(network, shape, values, dtype=work_np_dtype)
+            if tensor.dtype != work_trt_dtype:
+                tensor = network.add_cast(tensor, work_trt_dtype).get_output(0)
+            return tensor
+
         # Inputs
         input_ids = network.add_input("input_ids", trt.int32, (-1,))
         attention_mask_input = network.add_input("attention_mask", trt.int32, (-1,))
@@ -237,13 +249,9 @@ class _ModernBertModel:
 
         # Attention mask: [seq] int -> [1, 1, 1, seq] additive float mask.
         mask_float = network.add_cast(attention_mask_input, work_trt_dtype)
-        ones_c = graph_ops.add_constant(
-            network, (1,), np.array([1.0], dtype=work_np_dtype), dtype=work_np_dtype
-        )
+        ones_c = work_constant((1,), np.array([1.0], dtype=work_np_dtype))
         mask_penalty = -1e4 if precision == "fp16" else -1e10
-        neg_large = graph_ops.add_constant(
-            network, (1,), np.array([mask_penalty], dtype=work_np_dtype), dtype=work_np_dtype
-        )
+        neg_large = work_constant((1,), np.array([mask_penalty], dtype=work_np_dtype))
         inv_mask = network.add_elementwise(
             ones_c, mask_float.get_output(0), trt.ElementWiseOperation.SUB
         )
@@ -256,17 +264,13 @@ class _ModernBertModel:
         # Pre-compute RoPE tables for both theta values
         rope_tables = {}
         for theta in set([full_theta, sliding_theta]):
-            cos = graph_ops.add_constant(
-                network,
+            cos = work_constant(
                 (max_seq, head_dim // 2),
                 graph_ops.make_rope_table_half_dim(max_seq, head_dim, theta, cosine=True),
-                dtype=work_np_dtype,
             )
-            sin = graph_ops.add_constant(
-                network,
+            sin = work_constant(
                 (max_seq, head_dim // 2),
                 graph_ops.make_rope_table_half_dim(max_seq, head_dim, theta, cosine=False),
-                dtype=work_np_dtype,
             )
             rope_tables[theta] = (cos, sin)
 
@@ -283,9 +287,7 @@ class _ModernBertModel:
             )
 
         # Embedding
-        embed_table = graph_ops.add_constant(
-            network, (vocab, hidden), weights["embedding"], dtype=work_np_dtype
-        )
+        embed_table = work_constant((vocab, hidden), weights["embedding"])
         word_embed = network.add_gather(embed_table, input_ids, 0)
         hidden_state = _add_layernorm_no_bias(
             network,
@@ -571,6 +573,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     parallel.validate()
     if quantization is not None and parallel.enabled:
         raise ValueError("ModernBERT tensor-parallel builds do not support quantization")
+    if parallel.enabled and precision != "fp32":
+        raise NotImplementedError("ModernBERT tensor-parallel builds require fp32 precision")
     if quantization is not None:
         from .quantization import calibrate_modernbert, refuse_quantized_checkpoint
 
