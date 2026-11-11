@@ -15,8 +15,7 @@ namespace trtmc {
 namespace {
 
 constexpr int32_t kHeadDim = 128;
-// Rows of one call: decode blocks use at most 8, prompt chunks up to 64.
-constexpr int32_t kMaximumCallRows = 64;
+constexpr int32_t kMaximumCallRows = K2HorizonUnoKvCache::kMaximumCallRows;
 constexpr int32_t kNumKvHeads = 8;
 constexpr int32_t kNumLayers = 36;
 

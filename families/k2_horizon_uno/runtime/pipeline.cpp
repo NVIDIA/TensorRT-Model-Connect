@@ -60,7 +60,9 @@ K2HorizonUnoTextGenerationPipeline::K2HorizonUnoTextGenerationPipeline(
         "token_id", base_decoder_->profile_idx(), ProfileShapeSelector::kMax);
     if (maximum.size() != 1 || maximum.front() < 1)
         throw std::runtime_error("K2HorizonUnoTextGenerationPipeline: invalid base token profile");
-    prompt_rows_ = static_cast<int32_t>(maximum.front());
+    // A larger base profile is fine, but one cache call takes at most kMaximumCallRows rows.
+    prompt_rows_ = static_cast<int32_t>(
+        std::min<int64_t>(maximum.front(), K2HorizonUnoKvCache::kMaximumCallRows));
     // The engine has no data-dependent shapes or host reads, so a call is a
     // fixed kernel sequence for its row count and a context can replay it as
     // a CUDA graph; a context keeps one graph and recaptures when its row
