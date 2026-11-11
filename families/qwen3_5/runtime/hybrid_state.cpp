@@ -32,6 +32,18 @@ void Qwen35HybridState::advance(int32_t n_tokens) {
     ssm_->advance(n_tokens);
 }
 
+void Qwen35HybridState::bind_prefill(ITrtModule& module) {
+    // The prefill context reads the shared caches and recurrent state; its
+    // present K/V rows stay in its own buffers until commit_prefill().
+    kv_->bind_cache_inputs(module);
+    ssm_->bind_to(module);
+}
+
+void Qwen35HybridState::commit_prefill(ITrtModule& module, int32_t rows) {
+    kv_->append_prefill_from(module, rows);
+    ssm_->advance(rows);
+}
+
 int32_t Qwen35HybridState::position() const {
     return kv_->position();
 }
