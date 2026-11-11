@@ -330,7 +330,7 @@ def _build_native(request, writer, *, require_mtp: bool = False, draft_dir: Path
         fp8_cache=bool(weights.get("_fp8_kv_cache", False)),
         prepared_mtp=has_mtp and _owned(quant_ctx, "mtp_layer.fc"),
     )
-    if request.tensor_parallel_size == 1:
+    if request.tensor_parallel_size == 1 and quant_ctx is None:  # host bytes size an unquantized engine only
         prefill_chunk_len = _fit_prefill_engine(
             request, prefill_chunk_len, host_weight_bytes(weights), _gpu_memory_bytes())
     if request.tensor_parallel_size == 2:

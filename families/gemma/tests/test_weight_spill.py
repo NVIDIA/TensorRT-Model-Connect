@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from families.gemma import weight_spill
 
@@ -55,3 +56,18 @@ def test_spill_if_large_uses_the_bundle_directory_only_when_needed(monkeypatch, 
         weights["w"], np.memmap
     )
     assert list(output.parent.iterdir()) == []
+
+
+def test_the_spill_directory_is_in_effect_only_inside_the_build(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(weight_spill, "SPILL_MIN_BYTES", 1024)
+    monkeypatch.setattr(weight_spill, "physical_memory_bytes", lambda: 3 * 4096 - 3)
+    output = tmp_path / "model.bundle"
+    with weight_spill.spilled({"w": np.ones((64, 32), dtype=np.float16)}, output) as moved:
+        assert moved == 4096 and weight_spill._spill_directory == tmp_path.resolve()
+        assert isinstance(weight_spill.file_backed_empty((64, 32), np.uint16), np.memmap)
+    assert weight_spill._spill_directory is None
+    assert not isinstance(weight_spill.file_backed_empty((64, 32), np.uint16), np.memmap)
+    with pytest.raises(RuntimeError):  # a failed build leaves no directory behind either
+        with weight_spill.spilled({"w": np.ones((64, 32), dtype=np.float16)}, output):
+            raise RuntimeError("build failed")
+    assert weight_spill._spill_directory is None

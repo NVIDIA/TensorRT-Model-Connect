@@ -14,7 +14,8 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-from collections.abc import MutableMapping
+from contextlib import contextmanager
+from collections.abc import Iterator, MutableMapping
 from pathlib import Path
 
 import numpy as np
@@ -25,7 +26,7 @@ SPILL_MIN_BYTES = 64 * 1024**2
 SPILL_MEMORY_FRACTION = 1 / 3
 
 # Directory of the current build's spill, or None when the build keeps its weights in anonymous memory.
-# Set by spill_if_large; graph code that derives large constants (file_backed_empty) follows it.
+# Set only inside ``spilled``; graph code that derives large constants (file_backed_empty) follows it.
 _spill_directory: Path | None = None
 
 
@@ -89,3 +90,13 @@ def spill_if_large(weights: MutableMapping[str, object], output_path: Path) -> i
         file=sys.stderr,
     )
     return moved
+
+
+@contextmanager
+def spilled(weights: MutableMapping[str, object], output_path: Path) -> Iterator[int]:
+    """``spill_if_large`` for the duration of a build; afterwards no spill directory is in effect."""
+    global _spill_directory
+    try:
+        yield spill_if_large(weights, output_path)
+    finally:
+        _spill_directory = None

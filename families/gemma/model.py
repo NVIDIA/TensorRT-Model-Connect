@@ -513,10 +513,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         str(model_dir), config, precision=precision, quant_ctx=quant_ctx
     )
     # A 27B checkpoint's host weights plus TensorRT's device copy exceed a 128 GB unified-memory GPU.
-    from .weight_spill import spill_if_large
+    from .weight_spill import spilled
 
-    spill_if_large(weights, request.output_path)
+    with spilled(weights, request.output_path):
+        _write_engines(request, writer, model, config, weights, model_dir, max_sequence_length, precision,
+                       quant_ctx, parallel)
 
+
+def _write_engines(request, writer, model, config, weights, model_dir, max_sequence_length, precision,
+                   quant_ctx, parallel) -> None:
+    """Build the decoder engines into the bundle (the spill, if any, stays in effect throughout)."""
     writer.set_header(family="gemma", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):

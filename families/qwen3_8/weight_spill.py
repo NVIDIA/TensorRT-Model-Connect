@@ -24,10 +24,6 @@ SPILL_MIN_BYTES = 64 * 1024**2
 # Spill when the host weights exceed this share of physical memory.
 SPILL_MEMORY_FRACTION = 1 / 3
 
-# Directory of the current build's spill, or None when the build keeps its weights in anonymous memory.
-# Set by spill_if_large; graph code that derives large constants (file_backed_empty) follows it.
-_spill_directory: Path | None = None
-
 
 def physical_memory_bytes() -> int:
     return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
@@ -61,14 +57,6 @@ def spill_large_weights(weights: MutableMapping[str, object], directory: Path) -
     return moved
 
 
-def file_backed_empty(shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
-    """An uninitialized array, file-backed when the current build spilled and the array is large."""
-    nbytes = int(np.prod(shape, dtype=np.int64)) * np.dtype(dtype).itemsize
-    if _spill_directory is None or nbytes < SPILL_MIN_BYTES:
-        return np.empty(shape, dtype=dtype)
-    return _anonymous_mapping(shape, dtype, _spill_directory)
-
-
 def _anonymous_mapping(shape: tuple[int, ...], dtype: np.dtype, directory: Path) -> np.memmap:
     # An anonymous temporary file (O_TMPFILE where available) is never reachable by name, and the
     # mapping stays valid after the file object is closed.
@@ -78,12 +66,9 @@ def _anonymous_mapping(shape: tuple[int, ...], dtype: np.dtype, directory: Path)
 
 def spill_if_large(weights: MutableMapping[str, object], output_path: Path) -> int:
     """Spill the large host weights next to the bundle when they exceed SPILL_MEMORY_FRACTION of memory."""
-    global _spill_directory
-    _spill_directory = None
     if not should_spill(weights):
         return 0
-    _spill_directory = Path(output_path).resolve().parent
-    moved = spill_large_weights(weights, _spill_directory)
+    moved = spill_large_weights(weights, Path(output_path).resolve().parent)
     print(
         f"Moved {moved / 1024**3:.1f} GiB of host weights to file-backed pages for the build",
         file=sys.stderr,
