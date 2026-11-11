@@ -162,8 +162,8 @@ def _sdpa_varlen_attention(
     return output
 
 
-def _flash_attention_runs() -> bool:
-    """True when the installed flash-attn has kernels for this GPU."""
+def _flash_attention_failure() -> str | None:
+    """Why the installed flash-attn cannot run on this GPU, or None when it runs."""
     try:
         import torch
         from flash_attn import flash_attn_varlen_func
@@ -172,9 +172,9 @@ def _flash_attention_runs() -> bool:
         bounds = torch.tensor([0, 2], device="cuda", dtype=torch.int32)
         flash_attn_varlen_func(rows, rows, rows, bounds, bounds, 2, 2)
         torch.cuda.synchronize()
-        return True
-    except Exception:  # noqa: BLE001 - for example "no kernel image is available" on an unlisted GPU
-        return False
+        return None
+    except Exception as exc:  # noqa: BLE001 - for example "no kernel image is available" on an unlisted GPU
+        return f"{type(exc).__name__}: {exc}"
 
 
 def _use_sdpa_without_flash_kernels() -> bool:
@@ -184,11 +184,14 @@ def _use_sdpa_without_flash_kernels() -> bool:
     upstream ``qwen2_navit`` attention calls ``flash_attn_varlen_func`` unconditionally. Returns whether the
     fallback is active. Call after ``_load_upstream``.
     """
-    if _flash_attention_runs():
+    failure = _flash_attention_failure()
+    if failure is None:
         return False
     navit = sys.modules.get("modeling.lance.qwen2_navit")
     if navit is None:
         raise RuntimeError("the upstream Lance language model module is not loaded")
+    print(f"lance reference: flash-attn cannot run on this GPU ({failure}); using PyTorch SDPA attention",
+          file=sys.stderr)
     navit.flash_attn_varlen_func = _sdpa_varlen_attention
     return True
 

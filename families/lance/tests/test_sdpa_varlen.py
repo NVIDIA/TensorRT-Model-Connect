@@ -61,15 +61,19 @@ def test_sdpa_varlen_matches_per_sequence_attention(causal: bool) -> None:
 
 
 def test_fallback_replaces_the_language_model_attention_only_when_flash_attn_cannot_run(
-    monkeypatch,
+    monkeypatch, capsys
 ) -> None:
     navit = SimpleNamespace(flash_attn_varlen_func="flash")
     monkeypatch.setitem(sys.modules, "modeling.lance.qwen2_navit", navit)
 
-    monkeypatch.setattr(reference, "_flash_attention_runs", lambda: True)
+    monkeypatch.setattr(reference, "_flash_attention_failure", lambda: None)
     assert not reference._use_sdpa_without_flash_kernels()
     assert navit.flash_attn_varlen_func == "flash"
+    assert capsys.readouterr().err == ""
 
-    monkeypatch.setattr(reference, "_flash_attention_runs", lambda: False)
+    reason = "RuntimeError: no kernel image is available for execution on the device"
+    monkeypatch.setattr(reference, "_flash_attention_failure", lambda: reason)
     assert reference._use_sdpa_without_flash_kernels()
     assert navit.flash_attn_varlen_func is reference._sdpa_varlen_attention
+    # The reference reports which attention it uses and why.
+    assert f"({reason}); using PyTorch SDPA attention" in capsys.readouterr().err
