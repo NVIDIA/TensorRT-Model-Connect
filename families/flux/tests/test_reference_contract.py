@@ -57,6 +57,11 @@ def _framework(monkeypatch: pytest.MonkeyPatch) -> tuple[dict, object, object]:
     torch.float32 = fp32
     torch.bfloat16 = bf16
     torch.from_numpy = _Tensor
+    torch.backends = SimpleNamespace(
+        cuda=SimpleNamespace(matmul=SimpleNamespace(allow_tf32=True)),
+        cudnn=SimpleNamespace(allow_tf32=True),
+    )
+    calls["torch"] = torch
 
     class Generator:
         def __init__(self, device: str):
@@ -82,6 +87,7 @@ def _framework(monkeypatch: pytest.MonkeyPatch) -> tuple[dict, object, object]:
 
     diffusers.FluxPipeline = pipeline_class("flux1")
     diffusers.Flux2Pipeline = pipeline_class("flux2")
+    diffusers.Flux2KleinPipeline = pipeline_class("flux2_klein")
     monkeypatch.setitem(sys.modules, "torch", torch)
     monkeypatch.setitem(sys.modules, "diffusers", diffusers)
     return calls, fp32, bf16
@@ -101,6 +107,9 @@ def test_single_image_latents_use_the_family_numpy_contract(case_name: str, shap
 def test_reference_precision_matches_the_flux_variant_contract() -> None:
     for name, (_, manifest, case) in e2e.CASES.items():
         expected = "bf16" if e2e._is_flux2(manifest) else "fp32"
+        if e2e._is_flux2_klein(manifest):
+            # BF16 sampling drift of the official pipeline exceeds the native one (report).
+            expected = "fp32"
         if name == "flux-schnell":
             expected = "fp16"
         assert case["reference_precision"] == expected
@@ -173,3 +182,58 @@ def test_batch_reference_keeps_per_sample_generators(monkeypatch, tmp_path: Path
     assert [generator.seed for generator in calls["kwargs"]["generator"]] == case["inputs"][
         "batch_seeds"
     ]
+
+
+def test_klein_reference_uses_fp32_without_tf32_and_default_true_cfg(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls, fp32, _ = _framework(monkeypatch)
+    _, manifest, case = e2e.CASES["flux-2-klein-base-4b-l0"]
+    latents = e2e._initial_latents(manifest, case)
+    e2e._official_reference(Path("model"), manifest, case, tmp_path, latents)
+
+    assert calls["kind"] == "flux2_klein"
+    assert calls["load"]["torch_dtype"] is fp32
+    assert calls["torch"].backends.cuda.matmul.allow_tf32 is False
+    assert calls["torch"].backends.cudnn.allow_tf32 is False
+    assert calls["kwargs"]["guidance_scale"] == 4.0
+    assert "negative_prompt" not in calls["kwargs"]
+    np.testing.assert_array_equal(calls["kwargs"]["latents"].values, latents)
+    assert latents.shape == (1, 128, 24, 24)
+
+
+def _gradient_png(path: Path) -> np.ndarray:
+    from PIL import Image
+
+    ramp = np.linspace(0, 255, 16, dtype=np.uint8)
+    pixels = np.stack([np.tile(ramp, (16, 1))] * 3, axis=-1)
+    Image.fromarray(pixels).save(path)
+    return pixels.astype(np.float32) / 255.0
+
+
+@pytest.mark.parametrize(
+    ("thresholds", "offset", "passes"),
+    (
+        ({}, 0.2, True),
+        ({"min_psnr_db": 20.0}, 0.0, True),
+        ({"min_psnr_db": 20.0}, 0.2, False),
+    ),
+)
+def test_contract_enforces_psnr_only_when_the_threshold_is_set(
+    tmp_path: Path, thresholds: dict, offset: float, passes: bool
+) -> None:
+    _, manifest, case = e2e.CASES["flux-2-klein-base-4b-l0"]
+    native = tmp_path / "native.png"
+    expected = {"images": [_gradient_png(native) + offset]}
+
+    if passes:
+        e2e._assert_contract({"artifact": str(native)}, expected, manifest, case, thresholds)
+    else:
+        with pytest.raises(AssertionError, match="PSNR"):
+            e2e._assert_contract({"artifact": str(native)}, expected, manifest, case, thresholds)
+
+
+def test_psnr_matches_the_mean_squared_error_definition() -> None:
+    image = np.full((4, 4, 3), 0.5, dtype=np.float32)
+    assert e2e._psnr_db(image, image) == float("inf")
+    assert e2e._psnr_db(image, image + 0.01) == pytest.approx(40.0, abs=1e-3)

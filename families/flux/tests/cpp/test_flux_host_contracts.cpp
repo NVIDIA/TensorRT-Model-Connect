@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 
 namespace {
@@ -20,7 +21,9 @@ class PadTokenizer final : public trtmc::ITokenizer {
     std::vector<int32_t> encode(const std::string&) const override { return {}; }
     std::string decode(const std::vector<int32_t>&) const override { return {}; }
     int32_t id_for_token(std::string_view token) const override {
-        return token == "<pad>" ? 11 : -1;
+        if (token == "<pad>")
+            return 11;
+        return token == "<|endoftext|>" ? 151643 : -1;
     }
     std::string token_for_id(int32_t) const override { return {}; }
 };
@@ -87,10 +90,44 @@ void test_flux2_rope_coordinates_match_diffusers_contract() {
 
 } // namespace
 
+void test_flux2_klein_text_contract() {
+    using trtmc::diffusion::flux_text::apply_flux2_template;
+    using trtmc::diffusion::flux_text::resolve_pad_token_id;
+
+    PadTokenizer tokenizer;
+    check(resolve_pad_token_id(&tokenizer, true, "<|endoftext|>") == 151643,
+          "FLUX.2-klein resolves the Qwen pad token");
+    // Qwen3 apply_chat_template(add_generation_prompt=True, enable_thinking=False).
+    check(apply_flux2_template("a cat", "qwen3_chat") ==
+              "<|im_start|>user\na cat<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n",
+          "FLUX.2-klein Qwen3 chat template");
+    check(apply_flux2_template("x", "").rfind("<s>[SYSTEM_PROMPT]", 0) == 0,
+          "FLUX.2-dev keeps the Mistral template");
+    bool threw = false;
+    try {
+        (void)apply_flux2_template("x", "unknown");
+    } catch (const std::runtime_error&) {
+        threw = true;
+    }
+    check(threw, "unknown FLUX.2 template is rejected");
+}
+
+void test_flux2_true_cfg_matches_diffusers_formula() {
+    using trtmc::diffusion::flux_text::combine_true_cfg;
+
+    std::vector<float> positive{1.0F, -2.0F, 0.5F};
+    const std::vector<float> negative{0.5F, 1.0F, 0.5F};
+    combine_true_cfg(positive, negative, 4.0F);
+    // neg + 4 * (pos - neg)
+    check(positive == std::vector<float>({2.5F, -11.0F, 0.5F}), "true CFG combination");
+}
+
 int main() {
     test_clip_padding_preserves_eos_when_truncated();
     test_flux2_text_padding_matches_tokenizer_contract();
     test_flux2_rope_coordinates_match_diffusers_contract();
+    test_flux2_klein_text_contract();
+    test_flux2_true_cfg_matches_diffusers_formula();
     if (failures > 0) {
         std::cerr << failures << " flux host contract test(s) FAILED\n";
     }

@@ -572,6 +572,17 @@
       "architecture_source": "model_index._class_name"
     },
     {
+      "hf_id": "black-forest-labs/FLUX.2-klein-base-4B",
+      "revision": "a3b4f4849157f664bdbc776fd7453c2783562f4d",
+      "revision_source": "declared",
+      "metadata_file": "model_index.json",
+      "model_type": null,
+      "architectures": [
+        "Flux2KleinPipeline"
+      ],
+      "architecture_source": "model_index._class_name"
+    },
+    {
       "hf_id": "bytedance-research/Lance",
       "revision": "7395315758865e6f56ab87ad06a88c7ac172f056",
       "revision_source": "declared",

@@ -3,8 +3,8 @@
 
 """FLUX family build.
 
-Supports FLUX.1-dev, FLUX.1-schnell, FLUX.2-dev, FLUX.2-klein, and similar
-models using the FluxPipeline / Flux2Pipeline from diffusers.
+Supports FLUX.1-dev, FLUX.1-schnell, FLUX.2-dev, FLUX.2-klein-base, and similar
+models using the FluxPipeline / Flux2Pipeline / Flux2KleinPipeline from diffusers.
 
 FLUX.1 components:
     - CLIP text encoder (pooled output for conditioning)
@@ -16,6 +16,13 @@ FLUX.2 components:
     - Mistral 3 text encoder (multi-layer hidden state extraction -> 15360d)
     - FLUX.2 DiT denoiser (8 joint + 48 single, 6144-dim, global modulation)
     - AutoencoderKLFlux2 VAE decoder (32 latent ch, patch=[2,2])
+
+FLUX.2-klein-base components (Flux2KleinPipeline):
+    - Qwen3 text encoder (hidden states 9, 18, 27 -> 3 * hidden), chat template
+      without thinking, right padding with <|endoftext|>
+    - FLUX.2 DiT without a guidance embedding, run twice per step for true
+      classifier-free guidance against the empty prompt
+    - the FLUX.2 VAE decoder
 """
 
 from __future__ import annotations
@@ -118,6 +125,7 @@ class _FluxModel:
 
         if (model_path / "model_index.json").exists():
             weights["_model_format"] = "diffusers"
+            config.raw["_model_index"] = json.loads((model_path / "model_index.json").read_text())
             if (model_path / "text_encoder").exists():
                 weights["_text_encoder_dir"] = str(model_path / "text_encoder")
             if (model_path / "text_encoder_2").exists():
@@ -128,8 +136,6 @@ class _FluxModel:
             raise ValueError(f"Expected diffusers format with model_index.json in {model_dir}")
 
         # Read transformer config to get exact architecture params
-        import json
-
         transformer_config_path = model_path / "transformer" / "config.json"
         if transformer_config_path.exists():
             tc = json.loads(transformer_config_path.read_text())
@@ -149,11 +155,12 @@ class _FluxModel:
             weights["_scheduler_config"] = scheduler_config
             config.raw["_scheduler_config"] = scheduler_config
 
-        # Read text_encoder config for Mistral detection
+        # Read text_encoder config for Mistral / Qwen3 detection
         te_config_path = model_path / "text_encoder" / "config.json"
         if te_config_path.exists():
             tec = json.loads(te_config_path.read_text())
             weights["_text_encoder_config"] = tec
+            config.raw["_text_encoder_config"] = tec
 
         return weights
 
@@ -321,7 +328,7 @@ class _FluxModel:
                         )
                     text_encoders.append(("clip", clip_plan))
                 else:
-                    # text_encoder is T5 (FLUX.2-klein only has T5)
+                    # FLUX.1 checkpoints whose only text encoder is T5
                     print("[flux] text_encoder is T5, loading ...", file=sys.stderr)
                     with timed_weight_loading(build_timing, "t5_encoder"):
                         t5_weights = load_t5_weights(
@@ -580,34 +587,20 @@ class _FluxModel:
 
         text_encoders = []
 
-        # Gather Mistral 3 text encoder metadata before building components.
+        # Gather the text encoder metadata before building components.
         # The DiT is the largest FLUX.2 compile, so build it before the text
         # encoder to avoid carrying prior TensorRT builder allocations into
         # DiT serialization.
         te_dir = weights.get("_text_encoder_dir")
-        m_hidden = self._MISTRAL_HIDDEN
-        m_heads = self._MISTRAL_NUM_HEADS
-        m_kv_heads = self._MISTRAL_NUM_KV_HEADS
-        m_head_dim = self._MISTRAL_HEAD_DIM
-        m_intermediate = self._MISTRAL_INTERMEDIATE
-        m_num_layers = self._MISTRAL_NUM_LAYERS
-        m_vocab = 131072
-        m_extract = self._MISTRAL_EXTRACT_LAYERS
-        m_rope_theta = 1000000000.0
-        if te_dir:
-            tec = weights.get("_text_encoder_config", {})
-            # Mistral3ForConditionalGeneration nests text model params under text_config
-            tc_text = tec.get("text_config", tec)
-            # Read architecture from text_encoder config.json
-            m_hidden = tc_text.get("hidden_size", self._MISTRAL_HIDDEN)
-            m_heads = tc_text.get("num_attention_heads", self._MISTRAL_NUM_HEADS)
-            m_kv_heads = tc_text.get("num_key_value_heads", self._MISTRAL_NUM_KV_HEADS)
-            m_head_dim = tc_text.get("head_dim", m_hidden // m_heads)
-            m_intermediate = tc_text.get("intermediate_size", self._MISTRAL_INTERMEDIATE)
-            m_num_layers = tc_text.get("num_hidden_layers", self._MISTRAL_NUM_LAYERS)
-            m_vocab = tc_text.get("vocab_size", 131072)
-            m_extract = self._MISTRAL_EXTRACT_LAYERS
-            m_rope_theta = tc_text.get("rope_theta", 1000000000.0)
+        te_spec = _flux2_text_encoder_spec(weights.get("_text_encoder_config", {}))
+        if te_spec["kind"] == "qwen3":
+            _reject_unvalidated_klein_options(
+                fp8_scales=fp8_scales,
+                nvfp4_checkpoint=nvfp4_checkpoint,
+                parallel_enabled=parallel.enabled,
+                max_batch_size=max_batch_size,
+                is_distilled=bool(config.raw.get("_model_index", {}).get("is_distilled", False)),
+            )
 
         # 1. FLUX.2 DiT denoiser
         print("[flux] Loading FLUX.2 DiT weights ...", file=sys.stderr)
@@ -632,8 +625,8 @@ class _FluxModel:
 
         # packed_channels = z_dim * patch_h * patch_w (2x2 packing)
         packed_channels = vae_latent_channels * 4
-        # t5_dim = Mistral hidden * num_extract_layers
-        text_encoder_dim = len(self._MISTRAL_EXTRACT_LAYERS) * m_hidden
+        # Text encoder output = hidden * number of extracted hidden states
+        text_encoder_dim = len(te_spec["extract_layers"]) * te_spec["hidden_size"]
         _freq_dim = tc.get("timestep_guidance_channels", 256)
 
         import gc
@@ -700,42 +693,42 @@ class _FluxModel:
             dit_plan = None  # type: ignore[assignment]
         gc.collect()
 
-        # 2. Mistral 3 text encoder
+        # 2. Mistral 3 / Qwen3 text encoder
         _te_tmp = None
         if te_dir:
             print(
-                f"[flux] Loading Mistral 3 encoder ({m_hidden}d, {m_num_layers}L) ...",
+                f"[flux] Loading {te_spec['kind']} text encoder "
+                f"({te_spec['hidden_size']}d, {te_spec['num_layers']}L) ...",
                 file=sys.stderr,
             )
+            te_arch = {
+                key: te_spec[key]
+                for key in (
+                    "hidden_size",
+                    "num_heads",
+                    "num_kv_heads",
+                    "head_dim",
+                    "intermediate_size",
+                    "num_layers",
+                    "vocab_size",
+                )
+            }
             with timed_weight_loading(build_timing, "mistral_encoder"):
                 mistral_weights = load_mistral_encoder_weights(
-                    te_dir,
-                    precision=precision,
-                    hidden_size=m_hidden,
-                    num_heads=m_heads,
-                    num_kv_heads=m_kv_heads,
-                    head_dim=m_head_dim,
-                    intermediate_size=m_intermediate,
-                    num_layers=m_num_layers,
-                    vocab_size=m_vocab,
+                    te_dir, precision=precision, **te_arch
                 )
             with timed_trt_compile(build_timing, "mistral_encoder"):
                 mistral_plan = build_mistral_encoder_engine(
                     mistral_weights,
                     precision=precision,
-                    hidden_size=m_hidden,
-                    num_heads=m_heads,
-                    num_kv_heads=m_kv_heads,
-                    head_dim=m_head_dim,
-                    intermediate_size=m_intermediate,
-                    num_layers=m_num_layers,
-                    vocab_size=m_vocab,
                     max_seq_len=text_seq_len,
-                    extract_layers=m_extract,
-                    rope_theta=m_rope_theta,
+                    extract_layers=te_spec["extract_layers"],
+                    eps=te_spec["eps"],
+                    rope_theta=te_spec["rope_theta"],
                     verbose=verbose,
+                    **te_arch,
                 )
-            text_encoders.append(("mistral", mistral_plan))
+            text_encoders.append((te_spec["kind"], mistral_plan))
 
             _te_tmp = tempfile.NamedTemporaryFile(suffix=".plan", delete=False)
             _te_tmp.write(text_encoders[0][1])  # write plan bytes
@@ -893,14 +886,16 @@ class _FluxModel:
         vae_scaling = vc.get("scaling_factor", self._VAE_SCALING_FACTOR)
         vae_shift = vc.get("shift_factor", self._VAE_SHIFT_FACTOR)
 
-        # Mistral encoder output dimension: extract_layers * hidden_size
-        text_encoder_dim = len(self._MISTRAL_EXTRACT_LAYERS) * self._MISTRAL_HIDDEN
+        te_spec = _flux2_text_encoder_spec(config.raw.get("_text_encoder_config", {}))
+        text_encoder_dim = len(te_spec["extract_layers"]) * te_spec["hidden_size"]
+        is_klein = te_spec["kind"] == "qwen3"
+        guidance_embeds = bool(tc.get("guidance_embeds", True))
 
-        return {
+        result = {
             "diffusion_backend_type": "flux_2d",
             "scheduler": "flow_match_euler",
-            "num_inference_steps": config.raw.get("num_inference_steps", 28),
-            "guidance_scale": 3.5,
+            "num_inference_steps": config.raw.get("num_inference_steps", 50 if is_klein else 28),
+            "guidance_scale": 4.0 if is_klein else 3.5,
             "flow_shift": float(scheduler.get("shift", 3.0)),
             "use_dynamic_shifting": int(bool(scheduler.get("use_dynamic_shifting", True))),
             "base_shift": float(scheduler.get("base_shift", 0.5)),
@@ -926,12 +921,74 @@ class _FluxModel:
             "text_encoder_dim": text_encoder_dim,
             "vae_scaling_factor": vae_scaling,
             "vae_shift_factor": vae_shift,
-            "guidance_embeds": 1,
+            "guidance_embeds": 1 if guidance_embeds else 0,
             "flux2_global_modulation": 1,
             "axes_dims_rope": list(tc.get("axes_dims_rope", self._FLUX2_AXES_DIMS_ROPE)),
             "rope_theta": tc.get("rope_theta", 2000.0),
             "num_vae_caches": 0,
         }
+        if is_klein:
+            # Flux2KleinPipeline: Qwen3 chat template without thinking, right
+            # padding with <|endoftext|>, and true CFG against the empty prompt.
+            result["text_template"] = "qwen3_chat"
+            result["pad_token"] = "<|endoftext|>"
+            result["true_cfg"] = 1
+        return result
+
+
+_QWEN3_EXTRACT_HIDDEN_STATES = (9, 18, 27)
+
+
+def _flux2_text_encoder_spec(tec: dict) -> dict:
+    """Describe the FLUX.2 text encoder from text_encoder/config.json.
+
+    Mistral 3 (FLUX.2-dev) nests the text model under ``text_config``;
+    Qwen3ForCausalLM (FLUX.2-klein) is flat. The extracted hidden-state indices
+    follow the diffusers pipelines (Flux2Pipeline / Flux2KleinPipeline).
+    """
+    architectures = tec.get("architectures") or []
+    is_qwen3 = tec.get("model_type") == "qwen3" or "Qwen3ForCausalLM" in architectures
+    text = tec if is_qwen3 else tec.get("text_config", tec)
+    hidden = int(text.get("hidden_size", _FluxModel._MISTRAL_HIDDEN))
+    heads = int(text.get("num_attention_heads", _FluxModel._MISTRAL_NUM_HEADS))
+    return {
+        "kind": "qwen3" if is_qwen3 else "mistral",
+        "hidden_size": hidden,
+        "num_heads": heads,
+        "num_kv_heads": int(text.get("num_key_value_heads", _FluxModel._MISTRAL_NUM_KV_HEADS)),
+        "head_dim": int(text.get("head_dim") or hidden // heads),
+        "intermediate_size": int(text.get("intermediate_size", _FluxModel._MISTRAL_INTERMEDIATE)),
+        "num_layers": int(text.get("num_hidden_layers", _FluxModel._MISTRAL_NUM_LAYERS)),
+        "vocab_size": int(text.get("vocab_size", 131072)),
+        "rope_theta": float(text.get("rope_theta", 1000000000.0)),
+        "eps": float(text.get("rms_norm_eps", 1e-6 if is_qwen3 else 1e-5)),
+        "extract_layers": (
+            _QWEN3_EXTRACT_HIDDEN_STATES if is_qwen3 else _FluxModel._MISTRAL_EXTRACT_LAYERS
+        ),
+    }
+
+
+def _reject_unvalidated_klein_options(
+    *,
+    fp8_scales,
+    nvfp4_checkpoint,
+    parallel_enabled: bool,
+    max_batch_size: int,
+    is_distilled: bool = False,
+) -> None:
+    """FLUX.2-klein is validated as the base (CFG) model, one native-precision rank, batch 1."""
+    if is_distilled:
+        # Step-distilled Klein checkpoints skip CFG in Flux2KleinPipeline; the
+        # runtime here implements the base model's true CFG only.
+        raise NotImplementedError("FLUX.2-klein supports the base (non-distilled) model only")
+    if fp8_scales is not None or nvfp4_checkpoint is not None:
+        raise NotImplementedError(
+            "FLUX.2-klein supports native-precision builds only (no FP8 scales or NVFP4)"
+        )
+    if parallel_enabled:
+        raise NotImplementedError("FLUX.2-klein supports tensor_parallel_size=1 only")
+    if int(max_batch_size) > 1:
+        raise NotImplementedError("FLUX.2-klein supports max_batch_size=1 only")
 
 
 def _is_flux2(tc: dict) -> bool:
