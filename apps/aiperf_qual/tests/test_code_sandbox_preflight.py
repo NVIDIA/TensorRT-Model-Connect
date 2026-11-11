@@ -132,3 +132,19 @@ def test_sandbox_probe_precedes_reference_environment_setup_in_the_real_run_key(
     record = (campaign.run_all(env, [model], tmp_path / "results")[0] if batch else
               campaign.run_one(env, model, tmp_path / "results/codegen"))
     assert record["category"] == "environment-blocked"
+
+
+def test_resume_replaces_a_stale_environment_diagnostic_when_the_boundary_failure_changes(tmp_path, monkeypatch):
+    reason = ["code sandbox: cannot switch to nobody"]
+
+    def unavailable(paths):
+        raise gold_metrics.SandboxUnavailable(reason[0])
+
+    monkeypatch.setattr(gold_metrics, "_sandbox_verified", unavailable)
+    model = {"model": "codegen", "reference": {}, "candidate": {}, "absolute": [{"metric": "code_pass"}]}
+    root = tmp_path / "results"
+    campaign.run_all(Environment({}), [model], root)
+    reason[0] = "code sandbox: nobody can write the result root"
+    record, = campaign.run_all(Environment({}), [model], root)
+    assert record.get("status") != "skipped" and "can write" in record["reason"]
+    assert "can write" in json.loads((root / "codegen/error.json").read_text())["reason"]

@@ -166,10 +166,11 @@ def warm_selections(environment: Environment, model: Mapping[str, Any]) -> None:
                 pass
 
 
-def _sandbox_run_key(environment: Environment, model: Mapping[str, Any], out: Path) -> str:
+def _sandbox_run_key(environment: Environment, model: Mapping[str, Any], out: Path, reason: str) -> str:
     # Note (Jiaxin Deng): A blocked run must not prepare reference dependencies just to identify its result.
     value = {"model": model, "harness": harness_digest(), "smoke": bool(environment.values.get("smoke")),
-             "blocked_by": "code_sandbox", "protected_roots": gold_metrics.protected_roots(environment.values, out)}
+             "blocked_by": "code_sandbox", "reason": reason,
+             "protected_roots": gold_metrics.protected_roots(environment.values, out)}
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
 
 
@@ -186,7 +187,7 @@ def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[
     except gold_metrics.SandboxUnavailable as error:
         record.update(category="environment-blocked", failure_type="environment", blocked_by="code_sandbox",
                       reason=_error(error), seconds=round(time.time() - started))
-        (out / RUN_KEY).write_text(_sandbox_run_key(environment, model, out) + "\n")
+        (out / RUN_KEY).write_text(_sandbox_run_key(environment, model, out, str(error)) + "\n")
         (out / "error.json").write_text(json.dumps(record, indent=2))
         return record
     (out / RUN_KEY).write_text(run_key(environment, model) + "\n")
@@ -287,8 +288,8 @@ def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root
             if out.is_dir():
                 try:
                     gold_metrics.preflight_code_sandbox(model, environment.values, out)
-                except gold_metrics.SandboxUnavailable:
-                    key = _sandbox_run_key(environment, model, out)
+                except gold_metrics.SandboxUnavailable as error:
+                    key = _sandbox_run_key(environment, model, out, str(error))
                 else:
                     key = run_key(environment, model)
                 finished = _finished(out, key)
