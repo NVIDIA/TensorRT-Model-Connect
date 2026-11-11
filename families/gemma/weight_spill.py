@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Keep a large checkpoint's host weights in file-backed pages during the TensorRT build.
+"""Keep a large checkpoint's host weights in file-backed pages during the TensorRT build (family-owned copy).
 
 TensorRT references the host weight arrays for the whole build while it also places a device copy of
 them. On a GPU that shares its memory with the CPU (DGX Spark, Jetson Thor) the two copies of a 27B

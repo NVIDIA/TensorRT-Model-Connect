@@ -9,10 +9,9 @@ import json
 import sys
 from pathlib import Path
 
-from tensorrt_model_connect.weight_spill import host_weight_bytes, spill_if_large
-
 from .config import ModelConfig
 from .engine_builder import Qwen38Model, _owned
+from .weight_spill import host_weight_bytes, spill_if_large
 
 
 _BUNDLE_FILES = (

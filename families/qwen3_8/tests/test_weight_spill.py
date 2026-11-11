@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from tensorrt_model_connect import weight_spill
+from families.qwen3_8 import weight_spill
 
 
 def test_spill_moves_only_large_arrays_and_leaves_no_files(monkeypatch, tmp_path) -> None:

@@ -12,7 +12,8 @@ import weakref
 
 import numpy as np
 import tensorrt as trt
-from tensorrt_model_connect.weight_spill import file_backed_empty
+
+from .weight_spill import file_backed_empty
 
 # trt.Weights built from a pointer does not own its data: the BF16 arrays stay referenced by their
 # network until the network itself is released.

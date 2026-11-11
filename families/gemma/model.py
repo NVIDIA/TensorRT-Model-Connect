@@ -513,7 +513,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         str(model_dir), config, precision=precision, quant_ctx=quant_ctx
     )
     # A 27B checkpoint's host weights plus TensorRT's device copy exceed a 128 GB unified-memory GPU.
-    from tensorrt_model_connect.weight_spill import spill_if_large
+    from .weight_spill import spill_if_large
 
     spill_if_large(weights, request.output_path)
 
