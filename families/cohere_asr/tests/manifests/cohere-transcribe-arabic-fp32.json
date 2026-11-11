@@ -1,0 +1,22 @@
+{
+  "name": "cohere-transcribe-arabic-fp32",
+  "hf_id": "CohereLabs/cohere-transcribe-arabic-07-2026",
+  "hf_revision": "c3e911b42149bf7a1e53d5cef9878aee87515a23",
+  "bundle": "cohere-transcribe-arabic-fp32.bundle",
+  "family": "cohere_asr",
+  "task": "speech_transcription",
+  "precision": "fp32",
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "cohere-transcribe-arabic-fp32",
+      "premerge": true,
+      "source_language": "ar",
+      "audio_files": [
+        "examples/sample1.wav",
+        "examples/sample2.wav"
+      ]
+    }
+  ]
+}
