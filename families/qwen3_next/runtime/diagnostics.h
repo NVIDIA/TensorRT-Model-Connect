@@ -12,6 +12,7 @@ struct LogitTrace {
     std::vector<std::int32_t> prompt_ids;
     std::vector<std::int32_t> generated_ids;
     std::vector<std::vector<float>> rows;
+    std::uint64_t routing_retries{0};
 };
 
 // Family-local diagnostic contract used by the exact-checkpoint oracle.

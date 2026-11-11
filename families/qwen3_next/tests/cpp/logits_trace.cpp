@@ -42,6 +42,7 @@ int main(int argc, char** argv) {
                                    {"columns", trace.rows.front().size()},
                                    {"prefill_ms", actual.prefill_ms},
                                    {"decode_ms", actual.decode_ms},
+                                   {"routing_retries", trace.routing_retries},
                                    {"request_replay", true}};
         std::ofstream data(std::string(argv[3]) + ".f32", std::ios::binary);
         for (const auto& row : trace.rows)

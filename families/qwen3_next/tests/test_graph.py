@@ -28,7 +28,11 @@ def test_checkpoint_layer(index):
     plan = engine(Weights(root), config, index, 1024)
     random = np.random.default_rng(20261111)
     hidden = random.normal(0, 0.2, (1, config.hidden_size)).astype(ml_dtypes.bfloat16)
-    inputs = {"hidden": hidden}
+    inputs = {
+        "hidden": hidden,
+        "force_routing": np.array([0], dtype=np.int32),
+        "forced_experts": np.zeros(config.num_experts_per_tok, dtype=np.int32),
+    }
     if config.layer_types[index] == "linear_attention":
         inputs["conv_state"] = random.normal(
             0, 0.1, (config.conv_dim, config.linear_conv_kernel_dim - 1)
@@ -50,6 +54,19 @@ def test_checkpoint_layer(index):
         inputs["mask"][..., 0] = -1e30
         inputs["position"] = np.array([3], dtype=np.int32)
     actual = run(plan, inputs)
+    selected = (
+        torch.topk(
+            torch.from_numpy(actual["router_probabilities"].reshape(-1)),
+            config.num_experts_per_tok,
+        )
+        .indices.numpy()
+        .astype(np.int32)
+    )
+    if not np.array_equal(actual["selected_experts"].reshape(-1), selected):
+        inputs["force_routing"] = np.array([1], dtype=np.int32)
+        inputs["forced_experts"] = selected
+        actual = run(plan, inputs)
+    assert np.array_equal(actual["selected_experts"].reshape(-1), selected)
 
     def tensor(value):
         t = torch.from_numpy(value.astype(np.float32))
@@ -58,7 +75,11 @@ def test_checkpoint_layer(index):
     reference = OfficialReference(root).run_layer(
         index,
         tensor(hidden),
-        {key: tensor(value) for key, value in inputs.items() if key not in {"hidden", "position"}},
+        {
+            key: tensor(value)
+            for key, value in inputs.items()
+            if key not in {"hidden", "position", "force_routing", "forced_experts"}
+        },
         3,
     )
     metrics = {}

@@ -97,7 +97,16 @@ class Graph:
         ).get_output(0)
 
     def linear(self, value, name):
-        return self.mm(value, self.weight(name, value.dtype))
+        # Accumulate dense projections in FP32, then round once to BF16.
+        # BF16 GEMV rounding differences perturb the recurrent mixer and can
+        # change which experts are selected at tied router cutoffs.
+        kernel = self.weight(name, trt.float32)
+        width = value.shape[-1]
+        products = self.mul(
+            self.reshape(self.cast(value, trt.float32), (1, 1, width)),
+            self.reshape(kernel, (1, kernel.shape[0], width)),
+        )
+        return self.cast(self.reduce(products, trt.ReduceOperation.SUM, 2, False), value.dtype)
 
     def inverse_root(self, value):
         return self.unary(self.unary(value, trt.UnaryOperation.SQRT), trt.UnaryOperation.RECIP)
@@ -287,29 +296,42 @@ class Graph:
         )
         return self.linear(self.reshape(normalized, (1, vh * vd)), prefix + ".out_proj.weight")
 
+    def routing(self, scores, c):
+        # Export the unmodified probabilities so the family runtime can resolve
+        # cutoff ties with the reference selection algorithm before state commits.
+        scores.name = "router_probabilities"
+        self.n.mark_output(scores)
+        top = self.n.add_topk(scores, trt.TopKOperation.MAX, c.num_experts_per_tok, 1 << 1)
+        forced = self.n.add_input("forced_experts", trt.int32, (c.num_experts_per_tok,))
+        control = self.n.add_input("force_routing", trt.int32, (1,))
+        use_forced = self.binary(control, self.integers([0]), trt.ElementWiseOperation.GREATER)
+        selected = self.n.add_select(
+            self.reshape(use_forced, (1, 1)),
+            self.reshape(forced, (1, c.num_experts_per_tok)),
+            top.get_output(1),
+        ).get_output(0)
+        selected.name = "selected_experts"
+        self.n.mark_output(selected)
+        probabilities = self.n.add_gather(
+            self.reshape(scores, (c.num_experts,)),
+            self.reshape(selected, (c.num_experts_per_tok,)),
+            0,
+        ).get_output(0)
+        probabilities = self.reshape(probabilities, (1, c.num_experts_per_tok))
+        probabilities = self.divide(
+            probabilities, self.reduce(probabilities, trt.ReduceOperation.SUM, 1)
+        )
+        return selected, probabilities
+
     def moe(self, value, prefix, c):
         scores = self.n.add_softmax(
             self.cast(self.linear(value, prefix + ".gate.weight"), trt.float32)
         )
         scores.axes = 1 << 1
-        top = self.n.add_topk(
-            scores.get_output(0), trt.TopKOperation.MAX, c.num_experts_per_tok, 1 << 1
-        )
-        probabilities = self.divide(
-            top.get_output(0), self.reduce(top.get_output(0), trt.ReduceOperation.SUM, 1)
-        )
-        # The official eager expert loop accumulates in ascending expert ID.
-        order = self.n.add_topk(
-            self.cast(top.get_output(1), trt.float32),
-            trt.TopKOperation.MIN,
-            c.num_experts_per_tok,
-            1 << 1,
-        )
-        ids = self.reshape(self.cast(order.get_output(0), trt.int32), (c.num_experts_per_tok,))
-        order_ids = self.reshape(order.get_output(1), (c.num_experts_per_tok,))
-        probabilities = self.n.add_gather(
-            self.reshape(probabilities, (c.num_experts_per_tok,)), order_ids, 0
-        ).get_output(0)
+        selected, probabilities = self.routing(scores.get_output(0), c)
+        # The full upstream model uses grouped expert execution. Preserve the
+        # router slot order through FP32 weighting and reduction.
+        ids = self.reshape(selected, (c.num_experts_per_tok,))
         projections = []
         for projection in ("gate_proj", "up_proj", "down_proj"):
             values = []
@@ -324,19 +346,11 @@ class Graph:
         gate = self.silu(self.mm(expanded, projections[0]))
         up = self.mm(expanded, projections[1])
         outputs = self.mm(self.mul(gate, up), projections[2])
-        weighted = self.cast(
-            self.mul(
-                self.cast(outputs, trt.float32),
-                self.reshape(probabilities, (c.num_experts_per_tok, 1, 1)),
-            ),
-            trt.bfloat16,
+        weighted = self.mul(
+            self.cast(outputs, trt.float32),
+            self.reshape(probabilities, (c.num_experts_per_tok, 1, 1)),
         )
-        total = self.constant(np.zeros((1, c.hidden_size)), trt.bfloat16)
-        for i in range(c.num_experts_per_tok):
-            term = self.reshape(
-                self.slice(weighted, (i, 0, 0), (1, 1, c.hidden_size)), (1, c.hidden_size)
-            )
-            total = self.add(total, term)
+        total = self.cast(self.reduce(weighted, trt.ReduceOperation.SUM, 0, False), trt.bfloat16)
         shared = self.swiglu(value, prefix + ".shared_expert")
         shared = self.mul(
             shared, self.sigmoid(self.linear(value, prefix + ".shared_expert_gate.weight"))

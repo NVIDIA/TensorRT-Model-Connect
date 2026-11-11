@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "families/qwen3_next/runtime/diagnostics.h"
+#include "families/qwen3_next/runtime/routing.h"
 #include "families/qwen3_next/runtime/sampler.h"
 #include "families/qwen3_next/runtime/tokenizer.h"
 #include "trtmc/runtime/family_factory.h"
@@ -36,6 +37,10 @@ class Pipeline final : public ITextGeneration, public Diagnostics {
     explicit Pipeline(const FamilyContext& context) {
         const auto raw = context.reader.read_section("runtime.json");
         config_ = nlohmann::json::parse(raw.begin(), raw.end());
+        if (config_.value("routing_contract", "") != "reference_topk_retry_v1")
+            throw std::runtime_error("Qwen3Next bundle has an incompatible routing contract");
+        experts_ = config_.at("num_experts");
+        experts_per_token_ = config_.at("num_experts_per_tok");
         hidden_ = config_.at("hidden_size");
         heads_ = config_.at("num_key_value_heads");
         dim_ = config_.at("head_dim");
@@ -92,6 +97,7 @@ class Pipeline final : public ITextGeneration, public Diagnostics {
             if (i + 1 < steps)
                 logits = step(token);
         }
+        trace.routing_retries = routing_retries_;
         return trace;
     }
 
@@ -147,6 +153,7 @@ class Pipeline final : public ITextGeneration, public Diagnostics {
   private:
     void reset() {
         position_ = 0;
+        routing_retries_ = 0;
         caches_.assign(layers_.size(), {});
         for (std::size_t i = 0; i < caches_.size(); ++i) {
             auto& cache = caches_[i];
@@ -159,6 +166,33 @@ class Pipeline final : public ITextGeneration, public Diagnostics {
                 cache.v.assign(static_cast<std::size_t>(heads_) * dim_, 0);
             }
         }
+    }
+
+    TensorMap route_layer(ITrtModule& layer, TensorMap inputs) {
+        std::int32_t force = 0;
+        std::vector<std::int32_t> forced(static_cast<std::size_t>(experts_per_token_), 0);
+        inputs["forced_experts"] = {forced.data(), {experts_per_token_}, DType::kInt32};
+        inputs["force_routing"] = {&force, {1}, DType::kInt32};
+        auto outputs = layer.forward(inputs);
+        const auto* probabilities =
+            static_cast<const float*>(outputs.at("router_probabilities").data);
+        forced = select_experts(probabilities, experts_, experts_per_token_);
+        const auto matches = [&] {
+            const auto* actual =
+                static_cast<const std::int32_t*>(outputs.at("selected_experts").data);
+            return std::equal(forced.begin(), forced.end(), actual);
+        };
+        if (!matches()) {
+            force = 1;
+            ++routing_retries_;
+            inputs.at("forced_experts").data = forced.data();
+            // The first forward is speculative: original hidden and cache inputs
+            // are still intact. Only the final forward may update sequence state.
+            outputs = layer.forward(inputs);
+            if (!matches())
+                throw std::runtime_error("Qwen3Next forced expert routing was not applied");
+        }
+        return outputs;
     }
 
     std::vector<float> step(std::int32_t token) {
@@ -175,7 +209,7 @@ class Pipeline final : public ITextGeneration, public Diagnostics {
                 inputs["conv_state"] = {cache.conv.data(), {conv_dim_, history_}, DType::kBFloat16};
                 inputs["recurrent_state"] = {
                     cache.recurrent.data(), {linear_heads_, key_dim_, value_dim_}, DType::kFloat32};
-                const auto outputs = layers_[i]->forward(inputs);
+                const auto outputs = route_layer(*layers_[i], inputs);
                 std::memcpy(hidden.data(), outputs.at("hidden_out").data, hidden_ * 2);
                 std::memcpy(cache.conv.data(), outputs.at("present_conv").data,
                             cache.conv.size() * 2);
@@ -189,7 +223,7 @@ class Pipeline final : public ITextGeneration, public Diagnostics {
                 inputs["past_k"] = {cache.k.data(), {heads_, cache.length, dim_}, DType::kBFloat16};
                 inputs["past_v"] = {cache.v.data(), {heads_, cache.length, dim_}, DType::kBFloat16};
                 inputs["mask"] = {mask.data(), {1, 1, cache.length + 1}, DType::kFloat32};
-                const auto outputs = layers_[i]->forward(inputs);
+                const auto outputs = route_layer(*layers_[i], inputs);
                 std::memcpy(hidden.data(), outputs.at("hidden_out").data, hidden_ * 2);
                 ++cache.length;
                 cache.k.resize(static_cast<std::size_t>(heads_) * cache.length * dim_);
@@ -207,6 +241,8 @@ class Pipeline final : public ITextGeneration, public Diagnostics {
     }
 
     nlohmann::json config_;
+    std::uint64_t routing_retries_{0};
+    std::int32_t experts_, experts_per_token_;
     std::int32_t hidden_, heads_, dim_, vocab_, limit_, position_{0};
     std::int32_t conv_dim_, history_, linear_heads_, key_dim_, value_dim_;
     std::vector<std::int32_t> eos_;

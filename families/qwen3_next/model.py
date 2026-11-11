@@ -61,6 +61,7 @@ def build(request, writer):
             "conv_dim": config.conv_dim,
             "max_sequence_length": limit,
             "precision": request.precision,
+            "routing_contract": "reference_topk_retry_v1",
         },
     )
     for name in ("tokenizer.json", "tokenizer_config.json", "generation_config.json"):

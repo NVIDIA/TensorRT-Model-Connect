@@ -22,7 +22,9 @@ class OfficialReference:
         self.root = Path(directory)
         self.config = AutoConfig.from_pretrained(self.root, trust_remote_code=False)
         self.config._attn_implementation = "eager"
-        self.config._experts_implementation = "eager"
+        # Match the active backend of the pinned full-model reference. Eager
+        # experts round and accumulate differently from grouped execution.
+        self.config._experts_implementation = "grouped_mm"
         self.files = json.loads((self.root / "model.safetensors.index.json").read_text())[
             "weight_map"
         ]
