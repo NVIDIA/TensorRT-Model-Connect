@@ -46,6 +46,47 @@ audio, and all 13 whisper-large-v3-turbo transcripts are identical to the
 one-step path (WER 2.35% for both). The other sentences change because a few
 logits differ in the last bits and a sample flips. No non-finite samples.
 
+## Cross-attention K and V
+
+The cross-attention K and V of a decoder layer depend only on the encoder
+output (2048 padded rows). Single-GPU bundles carry a `cross_kv.plan` that
+applies each layer's memory LayerNorm and K and V projections to the encoder
+output, with the same ops and dtypes as the decoder used. The runtime runs it
+once per request for the text and once for the classifier-free-guidance null
+text, and binds the per-layer K and V rows to the decoder's `cross_k_<i>` and
+`cross_v_<i>` inputs, which now have shape [2048, 128] (xa_n_heads x
+xa_d_head) in the layer's compute dtype. Before, every decoder step normalized
+and projected all 2048 rows in every layer. Padded rows are zero in both
+cases. Bundles without `cross_kv.plan` (built before this change, and
+tensor-parallel bundles) keep the old inputs and path. The decoder with
+projected inputs is stored as `decoder.cross_kv.plan` instead of
+`decoder.plan`, so a runtime from before this change stops at load with
+`bundle section is missing or empty: decoder.plan` instead of binding the raw
+encoder output to it.
+
+Same measurement as "Context prefill" (TensorRT 11.4, fp32 manifest bundle):
+
+| GPU | Sentence | Before (prefill change only) | This change | Speedup | vs one-step prefill |
+|---|---|---|---|---|---|
+| B200 | short | 302 ms | 276 ms | 1.09x | 3.24x |
+| B200 | medium | 509 ms | 464 ms | 1.10x | 2.44x |
+| B200 | long | 1496 ms | 1341 ms | 1.12x | 1.68x |
+| B300 | short | 309 ms | 287 ms | 1.08x | 3.00x |
+| B300 | medium | 521 ms | 486 ms | 1.07x | 2.24x |
+
+The two decoder passes of a frame go from 4.67 to 4.17 ms (B200) and from
+4.83 to 4.44 ms (B300); fp16 bundles: 2.93 to 2.65 ms and 2.83 to 2.64 ms. On
+B300 the long sentence ends at 295 frames instead of 309 (one sample flips),
+so its time is not compared. TensorRT 11.1 (B300): 4.84 to 4.52 ms per frame.
+The fp32 decoder plan is 394 MiB instead of 403 MiB, plus 9 MiB for
+`cross_kv.plan`. The runtime's cross-attention buffers take 50 MiB instead of
+302 MiB.
+
+Output: all 13 whisper-large-v3-turbo transcripts are identical (WER 2.35%),
+no non-finite samples. On B300, 12 of 13 sentences give bit-identical audio.
+On B200, 12 of 13 have the same length and differ by at most 1.1e-3 (the
+codec plan of the separately built bundle picks other kernels).
+
 ## FP8 quantization study (not shipped)
 
 FP8 self-quantization of the encoder and decoder projections was built and
@@ -212,10 +253,11 @@ study:
   1.46 ms (fp16, B300). The sequential path took about 358 ms. The fp16 KV
   cache matched to a relative error of 6e-4. The runtime now uses it (see
   "Context prefill").
-- The cross-attention K and V projections of the 2048 padded encoder rows are
+- The cross-attention K and V projections of the 2048 padded encoder rows were
   recomputed in every decoder step. Computing them once per sentence in a
   separate engine (0.11 ms) makes the step 13% faster (1.091 to 0.953 ms, CUDA
-  graph, B300, TensorRT 11.1).
+  graph, B300, TensorRT 11.1). Single-GPU bundles now do this (see
+  "Cross-attention K and V").
 
 With FP8, the batched prefill and the sequential prefill disagree more: KV
 relative error 3.8% (fp16: 0.06%). The activation scales are static, so this is

@@ -5,8 +5,10 @@
 
 #include "families/magpie_tts/runtime/audio_helpers.h"
 #include "families/magpie_tts/runtime/distributed_runtime.h"
+#include "families/magpie_tts/runtime/magpie_decoder_plan.h"
 #include "families/magpie_tts/runtime/pipeline.h"
 #include "families/magpie_tts/runtime/plugin_helpers.h"
+#include "families/magpie_tts/runtime/tensor_names.h"
 #include "trtmc/runtime/family_factory.h"
 
 #include <memory>
@@ -45,8 +47,11 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     if (tp_size <= 0)
         throw std::runtime_error("Magpie tensor_parallel_size must be positive");
     const auto group = magpie_tts::initialize_tensor_parallel_group(tp_size);
+    const auto* cross_kv_section = context.reader.find_section(kMagpieCrossKvSection);
+    const bool has_cross_kv_plan =
+        tp_size == 1 && cross_kv_section != nullptr && cross_kv_section->length != 0;
     const std::string decoder_section =
-        tp_size == 1 ? "decoder.plan" : "decoder.rank" + std::to_string(group.rank) + ".plan";
+        magpie_decoder_section(tp_size, group.rank, has_cross_kv_plan);
 
     auto stream_owner = std::make_shared<MagpieCudaStream>();
     if (!stream_owner->ok())
@@ -103,13 +108,42 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
 
     const auto encoder_bytes = static_cast<std::size_t>(config.max_source_positions) *
                                static_cast<std::size_t>(config.hidden_size) * sizeof(float);
+    // Bundles with cross_kv.plan project the encoder output to per-layer cross
+    // K/V once per request; the decoder's cross_k/cross_v inputs are those rows.
+    std::unique_ptr<ITrtModule> cross_kv_projector;
+    std::size_t cross_kv_bytes = encoder_bytes;
+    const std::vector<std::int64_t> raw_memory_shape{config.max_source_positions,
+                                                     config.hidden_size};
+    if (has_cross_kv_plan) {
+        cross_kv_projector = load(kMagpieCrossKvSection);
+        const std::vector<std::int64_t> projected_shape{config.max_source_positions,
+                                                        config.xa_n_heads * config.xa_d_head};
+        if (cross_kv_projector->tensor_shape("encoder_output") != raw_memory_shape)
+            throw std::runtime_error("Magpie cross-attention K/V plan has an invalid input");
+        for (std::int32_t layer = 0; layer < config.decoder_layers; ++layer) {
+            for (const char* stem : {"cross_k", "cross_v"}) {
+                const auto name = magpie_layer_tensor_name(stem, layer);
+                if (step_decoder->tensor_shape(name) != projected_shape ||
+                    cross_kv_projector->tensor_shape(name) != projected_shape ||
+                    step_decoder->tensor_dtype(name) != cross_kv_projector->tensor_dtype(name))
+                    throw std::runtime_error(
+                        "Magpie cross-attention K/V plan does not match the decoder plan");
+            }
+        }
+        // Sized for fp32 rows, which also holds layers built in fp16.
+        cross_kv_bytes = static_cast<std::size_t>(config.max_source_positions) *
+                         static_cast<std::size_t>(projected_shape[1]) * sizeof(float);
+    } else if (step_decoder->tensor_shape("cross_k_0") != raw_memory_shape) {
+        throw std::runtime_error("Magpie decoder expects projected cross K/V but the bundle has "
+                                 "no cross_kv.plan");
+    }
     std::vector<MagpieCudaBuffer> cross_k;
     std::vector<MagpieCudaBuffer> cross_v;
-    allocate_cross_kv_buffers(config.decoder_layers, encoder_bytes, cross_k, cross_v);
+    allocate_cross_kv_buffers(config.decoder_layers, cross_kv_bytes, cross_k, cross_v);
     std::vector<MagpieCudaBuffer> unconditional_k;
     std::vector<MagpieCudaBuffer> unconditional_v;
     if (config.cfg_scale > 1.0F)
-        allocate_cross_kv_buffers(config.decoder_layers, encoder_bytes, unconditional_k,
+        allocate_cross_kv_buffers(config.decoder_layers, cross_kv_bytes, unconditional_k,
                                   unconditional_v);
     MagpieCudaBuffer encoder_output(encoder_bytes);
     MagpieCudaBuffer unconditional_output(config.cfg_scale > 1.0F ? encoder_bytes : 0);
@@ -138,5 +172,6 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         std::move(context_embed), std::move(context_lengths), std::move(config), options.stream,
         make_ipa_tok(context.reader));
     pipeline->set_context_prefill_decoder(std::move(prefill_decoder));
+    pipeline->set_cross_kv_projector(std::move(cross_kv_projector));
     return pipeline.release();
 }

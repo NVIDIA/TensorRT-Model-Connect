@@ -130,6 +130,12 @@ void MagpiePipeline::set_context_prefill_decoder(std::unique_ptr<ITrtModule> pre
     prefill_decoder_ = std::move(prefill_decoder);
 }
 
+void MagpiePipeline::set_cross_kv_projector(std::unique_ptr<ITrtModule> cross_kv_projector) {
+    if (cross_kv_projector && !cross_kv_projector->ok())
+        throw std::runtime_error("MagpiePipeline: invalid cross-attention K/V module");
+    cross_kv_projector_ = std::move(cross_kv_projector);
+}
+
 // The rest of the MagpiePipeline methods (lines 1421-2633 of original audio_pipeline.cpp)
 // are included verbatim below.
 
@@ -281,18 +287,44 @@ void MagpiePipeline::run_encoder(const std::vector<int32_t>& text_ids) {
 // ---------------------------------------------------------------------------
 
 void MagpiePipeline::compute_cross_kv() {
-    // All decoder layers receive the SAME encoder output as cross_k and cross_v
-    // (the per-layer K/V projections are baked into the TRT decoder graph).
-    // Instead of copying encoder output into N separate buffers (2*N D2D copies),
-    // we now bind all layers directly to the encoder output buffer in bind_cross_kv().
-    // No copies needed.
+    // With a projector plan, run the per-layer K/V projections of the encoder
+    // output once for this request. Otherwise all decoder layers receive the
+    // SAME encoder output as cross_k and cross_v (the per-layer K/V projections
+    // are baked into the TRT decoder graph) and bind_cross_kv() binds it
+    // directly. No copies needed.
+    if (cross_kv_projector_)
+        project_cross_kv(encoder_output_.data(), cross_k_, cross_v_);
+}
+
+void MagpiePipeline::project_cross_kv(void* memory, std::vector<MagpieCudaBuffer>& cross_k,
+                                      std::vector<MagpieCudaBuffer>& cross_v) {
+    cross_kv_projector_->bind_external("encoder_output", memory);
+    for (std::size_t i = 0; i < cross_k.size(); ++i) {
+        const auto layer = static_cast<int32_t>(i);
+        cross_kv_projector_->bind_external(magpie_layer_tensor_name("cross_k", layer),
+                                           cross_k[i].data());
+        cross_kv_projector_->bind_external(magpie_layer_tensor_name("cross_v", layer),
+                                           cross_v[i].data());
+    }
+    // Same stream as the decoder, so later decoder steps see the results.
+    cross_kv_projector_->forward_device_async({});
 }
 
 void MagpiePipeline::bind_cross_inputs(ITrtModule& module, bool unconditional) {
+    auto& cross_k = unconditional ? cross_k_uncond_ : cross_k_;
+    auto& cross_v = unconditional ? cross_v_uncond_ : cross_v_;
+    if (cross_kv_projector_) {
+        // Per-layer projected K/V rows from project_cross_kv().
+        for (std::size_t i = 0; i < cross_k.size(); ++i) {
+            const auto layer = static_cast<int32_t>(i);
+            module.bind_external(magpie_layer_tensor_name("cross_k", layer), cross_k[i].data());
+            module.bind_external(magpie_layer_tensor_name("cross_v", layer), cross_v[i].data());
+        }
+        return;
+    }
     // Bind all layers to the SAME encoder output buffer (shared cross-KV).
     void* memory = unconditional ? encoder_output_uncond_.data() : encoder_output_.data();
-    const int32_t dec_layers =
-        static_cast<int32_t>(unconditional ? cross_k_uncond_.size() : cross_k_.size());
+    const int32_t dec_layers = static_cast<int32_t>(cross_k.size());
     for (int32_t i = 0; i < dec_layers; ++i) {
         module.bind_external(magpie_layer_tensor_name("cross_k", i), memory);
         module.bind_external(magpie_layer_tensor_name("cross_v", i), memory);
@@ -313,8 +345,9 @@ void MagpiePipeline::bind_cross_kv() {
 }
 
 void MagpiePipeline::compute_cross_kv_uncond() {
-    // Same optimization as compute_cross_kv(): no copies needed.
-    // bind_cross_kv_uncond() will bind directly to encoder_output_uncond_.
+    // Same as compute_cross_kv() for the null-text encoder output.
+    if (cross_kv_projector_)
+        project_cross_kv(encoder_output_uncond_.data(), cross_k_uncond_, cross_v_uncond_);
 }
 
 void MagpiePipeline::bind_cross_kv_uncond() {
@@ -1604,7 +1637,9 @@ void MagpiePipeline::log_pipeline_profiling(int32_t num_frames, int32_t num_samp
 
     std::cerr << "\n[magpie-tts] ===== PROFILING REPORT =====\n"
               << "[magpie-tts]   Encoder:        " << ms_encoder << " ms\n"
-              << "[magpie-tts]   Cross-KV:       D2D copies (per-layer buffers)\n"
+              << "[magpie-tts]   Cross-KV:       "
+              << (cross_kv_projector_ ? "projected once per request" : "projected in every step")
+              << "\n"
               << "[magpie-tts]   Decoder:        " << ms_decoder << " ms (" << num_frames
               << " frames, " << ms_per_frame << " ms/frame)\n"
               << "[magpie-tts]   Codec:          " << ms_codec << " ms\n"

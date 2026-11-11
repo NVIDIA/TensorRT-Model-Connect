@@ -56,6 +56,12 @@ class MagpiePipeline final : public IAudioGeneration, public IStreamingAudioGene
     // one frame at a time with the step decoder.
     void set_context_prefill_decoder(std::unique_ptr<ITrtModule> prefill_decoder);
 
+    // Optional plan that maps the encoder output to the per-layer cross_k /
+    // cross_v rows of a decoder plan built with projected cross K/V inputs.
+    // It runs once per request into the cross_k/cross_v buffers. Without it the
+    // decoder binds the raw encoder output and projects it in every step.
+    void set_cross_kv_projector(std::unique_ptr<ITrtModule> cross_kv_projector);
+
   private:
     struct DecoderLoopState {
         int32_t hidden{0};
@@ -113,6 +119,8 @@ class MagpiePipeline final : public IAudioGeneration, public IStreamingAudioGene
     void compute_cross_kv_uncond();
     void bind_cross_kv_uncond();
     void bind_cross_inputs(ITrtModule& module, bool unconditional);
+    void project_cross_kv(void* memory, std::vector<MagpieCudaBuffer>& cross_k,
+                          std::vector<MagpieCudaBuffer>& cross_v);
 
     DecoderLoopState init_decoder_state() const;
     int32_t prefill_context(DecoderLoopState& state);
@@ -187,6 +195,7 @@ class MagpiePipeline final : public IAudioGeneration, public IStreamingAudioGene
     std::unique_ptr<MagpieInferenceState> decoder_state_;
     std::unique_ptr<ITrtModule> codec_;
     std::unique_ptr<ITrtModule> prefill_decoder_;
+    std::unique_ptr<ITrtModule> cross_kv_projector_;
 
     std::unique_ptr<MagpieInferenceState> decoder_state_uncond_;
 
