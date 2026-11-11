@@ -133,7 +133,9 @@ golden data.
 ## LibriSpeech accuracy fixture
 
 `families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav`
-is utterance `6930-75918-0003` from the LibriSpeech `test-clean` split,
+and its byte-identical copy
+`families/wavlm/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+are utterance `6930-75918-0003` from the LibriSpeech `test-clean` split,
 distributed by OpenSLR as SLR12 under the Creative Commons Attribution 4.0
 International license. LibriSpeech was prepared by Vassil Panayotov with the
 assistance of Daniel Povey and is derived from LibriVox public-domain

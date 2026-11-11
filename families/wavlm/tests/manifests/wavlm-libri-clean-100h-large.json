@@ -1,0 +1,17 @@
+{
+  "name": "wavlm-libri-clean-100h-large",
+  "hf_id": "patrickvonplaten/wavlm-libri-clean-100h-large",
+  "hf_revision": "e70e3a062ec399c46008ee55d1fb52c7ba338d5c",
+  "bundle": "wavlm-libri-clean-100h-large.bundle",
+  "family": "wavlm",
+  "task": "speech_transcription",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "wavlm-libri-clean-100h-large",
+      "premerge": true,
+      "test_input_audio": "data/librispeech-test-clean-6930-75918-0003.wav"
+    }
+  ],
+  "tensor_parallel_size": 1
+}
