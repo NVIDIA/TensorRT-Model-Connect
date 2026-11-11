@@ -4,9 +4,32 @@ This family builds `google/timesfm-2.0-500m-pytorch` (TimesFM 2.0, 500M) as one
 TensorRT engine for the `time_series_forecast` task. The engine takes a context
 of up to 2048 values (left padded, with a padding mask) and a frequency index,
 and returns the mean and quantile forecasts for a horizon of 128 steps in one
-forward pass; there is no decode loop. The family build accepts precision fp32
-only, and the manifests build fp32 (tensor parallel size 1 and 4). Batch size is
-1.
+forward pass; there is no decode loop. FP32 remains the default; FP16 builds
+are also supported. Batch size is 1. Existing FP32 manifests cover tensor
+parallel size 1 and 4; the FP16 manifest uses one GPU.
+
+## Guarded FP16
+
+The input residual block, frequency embedding, first decoder block, decoder
+residual stream, normalization, and horizon residual block stay FP32. The other
+decoder projections use FP16 unless selected by `fp32_layers`. The input and horizon
+block weights and biases remain FP32
+because their activations can exceed FP16's range after first-patch
+normalization. This preserves the model computation without clipping or
+rescaling histories. Per-dimension query scaling, attention scores and softmax
+also use FP32, preserving finite masks for fully padded query rows. The FP16
+graph expresses attention with TensorRT matrix multiply and softmax operations;
+TensorRT owns their lowering and fusion. Both engine outputs remain float32.
+
+The `timesfm-2.0-500m-official-fp16` testcase uses the original ten ETTh1 windows
+and their unchanged gates (`relative_l2 <= 4e-3`, maximum absolute error
+`<= 7e-3`). It also checks four histories with constant or nearly constant first
+patches, short histories, both signs and all three frequency indices, plus a
+masked request. CLI predictions and every mean/quantile channel of the exact
+built plan are compared with the official FP32 model.
+
+The FP8 study below used an unprotected FP16 graph. Its timing and quality
+numbers do not qualify the guarded FP16 implementation.
 
 ## FP8 quantization study (not shipped)
 
@@ -18,8 +41,8 @@ and the numbers, so that the study does not have to be repeated. The FP8 code
 was not merged; this family has no FP8 build. All numbers come from a local
 study.
 
-The study also found an fp16 overflow that is independent of FP8: an fp16
-engine gives non-finite forecasts for series with large normalized values (see
+The study also found an fp16 overflow that is independent of FP8: its unprotected
+fp16 engine gave non-finite forecasts for series with large normalized values (see
 [fp16 overflow found on the way](#fp16-overflow-found-on-the-way)).
 
 ### Summary and decision
@@ -42,8 +65,8 @@ Decision: do not ship FP8 (or NVFP4) for TimesFM.
 - Quality: MASE on M4 hourly rises from 0.5859 to 0.6490 (+11%). No tested
   subset of projections keeps the fp16 deviation level (sensitivity table).
 - The large speed gain is fp32 to fp16 (3.2x to 3.5x at batch 1, 11.5x to 12.4x
-  at batch 32), not fp16 to FP8. fp16 first needs an overflow guard (see the
-  last section).
+  at batch 32), not fp16 to FP8. The study's fp16 graph lacked an overflow
+  guard (see the last section).
 
 ### Model
 
@@ -52,7 +75,7 @@ Decision: do not ship FP8 (or NVFP4) for TimesFM.
 | Checkpoint | `google/timesfm-2.0-500m-pytorch`, revision `dc2443792ce5516872b89b37cf1bc058c3bf0c10` (fp32 weights) |
 | Model config | 50 layers, hidden 1280, intermediate 1280, 16 heads (head dim 80), context 2048, patch 32, horizon 128 |
 | Tokens per forecast | 64 patches |
-| Family default precision | fp32 (the network builder also has an fp16 path; the family build rejects it) |
+| Family default precision | fp32 (at study time, the public family build rejected the internal fp16 path) |
 | Execution | one forward pass per forecast, no decode loop |
 
 ### Recipe that was measured
@@ -182,9 +205,9 @@ unpadded patch, so a series with a nearly flat start can get very large
 normalized values (likely cause, not verified per series). `fp32_layers`
 cannot fix it, because the residual stream of every layer is out of range.
 
-Only fp32 is safe today. fp32 to fp16 is the large speed gain (3.2x to 3.5x at
-batch 1, 11.5x to 12.4x at batch 32) once an overflow guard is added, for
-example input scaling before the input residual block.
+These findings motivated the [guarded FP16 implementation](#guarded-fp16).
+The study's fp32-to-fp16 speed gains (3.2x to 3.5x at batch 1, 11.5x to 12.4x
+at batch 32) apply to its unprotected graph and measured hardware.
 
 ### What was not tried
 

@@ -189,7 +189,13 @@ def _run_json(
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
     record_evidence("commands", {"argv": getattr(completed, "args", None)})
-    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
+    record_evidence(
+        "native",
+        {
+            "stdout": getattr(completed, "stdout", None),
+            "stderr": getattr(completed, "stderr", None),
+        },
+    )
     payloads = []
     for line in completed.stdout.splitlines():
         start = line.find("{")
@@ -228,7 +234,7 @@ def _native(
     manifest["task"]
     inputs = case["inputs"]
     values = np.asarray(inputs["past_values"], dtype=np.float32)
-    mask = np.ones_like(values)
+    mask = np.asarray(inputs.get("observed_mask", np.ones_like(values)), dtype=np.float32)
     input_path = tmp_path / "values.f32"
     mask_path = tmp_path / "mask.f32"
     values.tofile(input_path)
@@ -275,7 +281,9 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     series = [0.0] * context_length
     series[-min(len(raw), context_length) :] = raw[-context_length:]
     padding = [1] * context_length
-    padding[-min(len(raw), context_length) :] = [0] * min(len(raw), context_length)
+    observed = list(inputs.get("observed_mask", [1] * len(raw)))
+    assert len(observed) == len(raw) and all(value in (0, 1) for value in observed)
+    padding[-min(len(raw), context_length) :] = [1 - value for value in observed[-context_length:]]
     freq = int(inputs["frequency"])
     with torch.no_grad():
         decoded = model.decoder(
@@ -286,7 +294,8 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
             output_hidden_states=False,
         )
         output = model._postprocess_output(decoded.last_hidden_state, (decoded.loc, decoded.scale))
-    return {"values": output[:, -1, : model.config.horizon_length, 0].float().cpu().numpy()}
+    full = output[:, -1, : model.config.horizon_length].float().cpu().numpy()
+    return {"values": full[..., 0], "full_values": full}
 
 
 def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
@@ -318,18 +327,43 @@ def test_forecast_contract_requires_matching_shape() -> None:
         )
 
 
-def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
+def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, monkeypatch) -> None:
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     model_dir = _model_dir(manifest)
-    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
+    engine = None
+    if manifest["precision"] == "fp16":
+        from families.timesfm import model as family_model
+        from families.timesfm.tests.engine import ForecastEngine
+
+        serialized = family_model.build_serialized_network
+        captured = []
+
+        def capture_plan(*args, **kwargs):
+            plan = serialized(*args, **kwargs)
+            captured.append(plan)
+            return plan
+
+        monkeypatch.setattr(family_model, "build_serialized_network", capture_plan)
     with evidence_stage("build"):
         _build(model_dir, bundle, manifest)
+    if manifest["precision"] == "fp16":
+        assert len(captured) == 1
+        config = json.loads((model_dir / "config.json").read_text())
+        engine = ForecastEngine(captured.pop(), int(config["context_length"]))
     from families.timesfm.tests.etth1 import CASE as ETTH1_CASE
 
-    if case_name == ETTH1_CASE:
+    if case_name in (ETTH1_CASE, ETTH1_CASE + "-fp16"):
         from families.timesfm.tests.etth1 import GATES, windows
 
         for index, inputs in enumerate(windows()):
@@ -348,6 +382,45 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             with evidence_stage("compare"):
                 record_evidence("thresholds", GATES)
                 _assert_parity(actual, expected, manifest, window_case, GATES)
+                if engine is not None:
+                    _assert_engine_parity(engine, inputs, expected, manifest, window_case, GATES)
+        if engine is not None:
+            from families.timesfm.tests.overflow import histories
+
+            extra = list(histories(int(config["context_length"]), int(config["patch_length"])))
+            extra.append(
+                {
+                    "past_values": [
+                        0.05,
+                        0.15,
+                        0.3,
+                        0.5,
+                        0.65,
+                        0.8,
+                        0.95,
+                        1.1,
+                        1.18,
+                        1.24,
+                        1.28,
+                        1.31,
+                    ],
+                    "observed_mask": [1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1],
+                    "frequency": 1,
+                }
+            )
+            for index, inputs in enumerate(extra):
+                root = tmp_path / f"dynamic-range-{index}"
+                root.mkdir()
+                stress_case = {**case, "inputs": inputs}
+                record_evidence("inputs", {"dynamic_range_case": index, "case": stress_case})
+                actual = _native(
+                    binary, runtime_root, bundle, model_dir, manifest, stress_case, root
+                )
+                expected = _official_reference(model_dir, manifest, stress_case, root)
+                record_evidence("native", actual)
+                record_evidence("reference", expected)
+                _assert_parity(actual, expected, manifest, stress_case, GATES)
+                _assert_engine_parity(engine, inputs, expected, manifest, stress_case, GATES)
         return
     with evidence_stage("native"):
         actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
@@ -356,4 +429,22 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         expected = _official_reference(model_dir, manifest, case, tmp_path)
     record_evidence("reference", expected)
     with evidence_stage("compare"):
-        _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+        _assert_parity(
+            actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name))
+        )
+
+
+def _assert_engine_parity(engine, inputs, expected, manifest, case, gates):
+    outputs = engine.run(inputs)
+    assert set(outputs) == {"mean_predictions", "full_predictions"}
+    record_evidence("native", {"engine_outputs": outputs})
+    mean = outputs["mean_predictions"]
+    _assert_parity({"values": mean, "shape": mean.shape}, expected, manifest, case, gates)
+    full = outputs["full_predictions"]
+    _assert_parity(
+        {"values": full, "shape": full.shape},
+        {"values": expected["full_values"]},
+        manifest,
+        case,
+        gates,
+    )
