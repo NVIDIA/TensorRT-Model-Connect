@@ -1504,6 +1504,17 @@
         "DeepseekV3ForCausalLM"
       ],
       "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "CohereLabs/cohere-transcribe-arabic-07-2026",
+      "revision": "c3e911b42149bf7a1e53d5cef9878aee87515a23",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "cohere_asr",
+      "architectures": [
+        "CohereAsrForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
     }
   ]
 }
