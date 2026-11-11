@@ -37,6 +37,7 @@ struct BartRuntimeConfig {
     int32_t decoder_start_token_id;
     int32_t eos_token_id;
     int32_t bos_token_id;
+    int32_t forced_bos_token_id;
     int32_t pad_token_id;
     int32_t max_cache_length;
     int32_t tensor_parallel_size;
@@ -65,7 +66,7 @@ BartRuntimeConfig parse_runtime_config(std::string_view text) {
     }
     if (!json.is_object())
         throw std::runtime_error("bart runtime.json must be an object");
-    if (json.size() != 21)
+    if (json.size() != 22)
         throw std::runtime_error("bart runtime.json has an unexpected field set");
     const int32_t encoder_layers = require_value<int32_t>(json, "encoder_layers");
     const int32_t encoder_heads = require_value<int32_t>(json, "encoder_attention_heads");
@@ -84,6 +85,7 @@ BartRuntimeConfig parse_runtime_config(std::string_view text) {
         require_value<int32_t>(json, "decoder_start_token_id"),
         require_value<int32_t>(json, "eos_token_id"),
         require_value<int32_t>(json, "bos_token_id"),
+        require_value<int32_t>(json, "forced_bos_token_id"),
         require_value<int32_t>(json, "pad_token_id"),
         require_value<int32_t>(json, "max_cache_length"),
         require_value<int32_t>(json, "tensor_parallel_size"),
@@ -95,6 +97,7 @@ BartRuntimeConfig parse_runtime_config(std::string_view text) {
         config.decoder_attention_heads <= 0 ||
         config.hidden_size % config.decoder_attention_heads != 0 || config.max_source_length <= 0 ||
         config.vocab_size <= 0 || config.max_cache_length <= 0 ||
+        config.forced_bos_token_id < -1 || config.forced_bos_token_id >= config.vocab_size ||
         config.tensor_parallel_size <= 0 || encoder_layers <= 0 || encoder_heads <= 0 ||
         encoder_ffn <= 0 || decoder_ffn <= 0 || max_positions <= 0 || !has_encoder ||
         !is_encoder_decoder || position_offset != 2 ||
@@ -142,13 +145,14 @@ class BartPipeline final : public ITextGeneration {
                  std::unique_ptr<BartInferenceState> state, int32_t hidden_size,
                  int32_t num_decoder_layers, int32_t max_source_length,
                  int32_t decoder_start_token_id, int32_t eos_token_id, int32_t bos_token_id,
-                 int32_t pad_token_id, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
-                 std::string model_id_str)
+                 int32_t forced_bos_token_id, int32_t pad_token_id, cudaStream_t stream,
+                 std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
         : encoder_(std::move(encoder)), decoder_(std::move(decoder)), state_(std::move(state)),
           hidden_size_(hidden_size), num_decoder_layers_(num_decoder_layers),
           max_source_length_(max_source_length), decoder_start_token_id_(decoder_start_token_id),
-          eos_token_id_(eos_token_id), bos_token_id_(bos_token_id), pad_token_id_(pad_token_id),
-          stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)) {
+          eos_token_id_(eos_token_id), bos_token_id_(bos_token_id),
+          forced_bos_token_id_(forced_bos_token_id), pad_token_id_(pad_token_id), stream_(stream),
+          tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)) {
         if (!encoder_ || !encoder_->ok())
             throw std::runtime_error("BartPipeline: invalid encoder");
         if (!decoder_ || !decoder_->ok())
@@ -268,6 +272,9 @@ class BartPipeline final : public ITextGeneration {
         for (int32_t step = 0; step < max_new_tokens; ++step) {
             run_decoder_step(current_token, logits);
             int32_t next = bart_select_argmax_token(logits);
+            // Transformers forces this token at the first generated position.
+            if (step == 0 && forced_bos_token_id_ >= 0)
+                next = forced_bos_token_id_;
             if (next == eos_token_id_)
                 break;
             output_ids.push_back(next);
@@ -310,6 +317,7 @@ class BartPipeline final : public ITextGeneration {
     int32_t decoder_start_token_id_;
     int32_t eos_token_id_;
     int32_t bos_token_id_;
+    int32_t forced_bos_token_id_;
     int32_t pad_token_id_;
     int32_t actual_enc_len_{0};
     cudaStream_t stream_;
@@ -352,8 +360,8 @@ ITask* create_bart(const FamilyContext& context) {
     return new BartPipeline(std::move(encoder), std::move(decoder), std::move(state),
                             config.hidden_size, config.decoder_layers, config.max_source_length,
                             config.decoder_start_token_id, config.eos_token_id, config.bos_token_id,
-                            config.pad_token_id, stream, bart::create_tokenizer(context.reader),
-                            std::string{});
+                            config.forced_bos_token_id, config.pad_token_id, stream,
+                            bart::create_tokenizer(context.reader), std::string{});
 }
 
 } // namespace trtmc
