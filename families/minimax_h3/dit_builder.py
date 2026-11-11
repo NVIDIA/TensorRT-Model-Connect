@@ -184,7 +184,8 @@ def _attention_block(
     cos=None,
     sin=None,
 ):
-    q, k, v = op.fused_qkv(network, hidden, weights, f"{prefix}.attn")
+    v_scale = op.attention_v_scale()
+    q, k, v = op.fused_qkv(network, hidden, weights, f"{prefix}.attn", v_scale=v_scale)
     q = _per_head_norm(network, q, weights[f"{prefix}.attn.norm_q.weight"], profile, rows)
     k = _per_head_norm(network, k, weights[f"{prefix}.attn.norm_k.weight"], profile, rows)
     if cos is not None:
@@ -234,7 +235,10 @@ def _attention_block(
             profile=profile,
             name=f"{prefix}.attn.native_attention",
         )
-    return op.linear(network, attended, weights[f"{prefix}.attn.to_out.0.weight"])
+    to_out = weights[f"{prefix}.attn.to_out.0.weight"]
+    if v_scale != 1.0:
+        to_out = (to_out.astype(np.float32) * v_scale).astype(to_out.dtype)
+    return op.linear(network, attended, to_out)
 
 
 def _refine_text(network, text, weights, profile: MiniMaxH3Config):

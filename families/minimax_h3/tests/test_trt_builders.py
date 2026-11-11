@@ -349,3 +349,22 @@ def test_native_network_contract_counts_iattention_and_fails_closed() -> None:
     }
     with pytest.raises(RuntimeError, match="native layer contract failed"):
         op.validate_native_network(network, expected_attentions=2, label="test network")
+
+
+@pytest.mark.parametrize("value", ["0.5", "3", "-2", "0"])
+def test_attention_v_scale_must_be_a_power_of_two(monkeypatch, value) -> None:
+    monkeypatch.setenv("MINIMAX_H3_ATTENTION_V_SCALE", value)
+    with pytest.raises(ValueError):
+        op.attention_v_scale()
+
+
+def test_attention_v_scale_fold_is_exact_in_bf16(monkeypatch) -> None:
+    """V/s then to_out*s is a bit-exact no-op in BF16 (power of two, no under/overflow)."""
+
+    monkeypatch.setenv("MINIMAX_H3_ATTENTION_V_SCALE", "256")
+    scale = op.attention_v_scale()
+    assert scale == 256.0
+    rng = np.random.default_rng(0)
+    weight = rng.normal(0, 0.05, (24, 8)).astype(ml_dtypes.bfloat16)
+    folded = ((weight.astype(np.float32) / scale).astype(weight.dtype).astype(np.float32) * scale)
+    assert np.array_equal(folded.astype(weight.dtype), weight)

@@ -299,12 +299,21 @@ def swiglu(network, tensor, weight_in, weight_out, ffn_dim: int):
     return linear(network, hidden, weight_out)
 
 
-def fused_qkv(network, tensor, weights: dict, prefix: str):
-    """Pack Q/K/V into one TensorRT GEMM, matching Sol-Engine's lossless path."""
+def fused_qkv(network, tensor, weights: dict, prefix: str, *, v_scale: float = 1.0):
+    """Pack Q/K/V into one TensorRT GEMM, matching Sol-Engine's lossless path.
+
+    ``v_scale`` divides the V projection (see ``attention_v_scale``); the caller
+    multiplies it back into the output projection.
+    """
 
     packed_weight = np.concatenate(
         [weights[f"{prefix}.to_{name}.weight"] for name in ("q", "k", "v")], axis=0
     )
+    if v_scale != 1.0:
+        width = packed_weight.shape[0] // 3
+        packed_weight[2 * width :] = (
+            packed_weight[2 * width :].astype(np.float32) / v_scale
+        ).astype(packed_weight.dtype)
     packed = linear(network, tensor, packed_weight)
     width = int(packed.shape[1]) // 3
     return tuple(
@@ -385,7 +394,18 @@ def _attention_dtype():
     return trt.float16 if choice == "fp16" else trt.bfloat16
 
 
-def _attention_v_scale() -> float:
+def attention_v_scale() -> float:
+    """Exact power-of-two factor folded out of V (and back into ``to_out``).
+
+    TRT-RTX's fused FP16 attention returns +-inf for rows whose logits are all
+    large and positive (massive-activation heads in the last blocks of the real
+    checkpoint) although q/k/v and the true result are far inside FP16 range
+    (block 45 head 22: q<=6, k<=134, v<=708, true |out|<=99, kernel output
+    inf). Attention is linear in V, so V' = V / s with to_out' = to_out * s is
+    mathematically identical; folding both scales into the weights is exact
+    (power of two) and free at runtime. ``MINIMAX_H3_ATTENTION_V_SCALE=1`` disables.
+    """
+
     value = float(os.environ.get("MINIMAX_H3_ATTENTION_V_SCALE", "256"))
     if value < 1.0 or math.log2(value) != int(math.log2(value)):
         raise ValueError("MINIMAX_H3_ATTENTION_V_SCALE must be a power of two >= 1")
@@ -406,17 +426,6 @@ def attention_core(network, q, k, v, *, head_dim: int, name: str):
     q = cast(network, q, attention_dtype)
     k = cast(network, k, attention_dtype)
     v = cast(network, v, attention_dtype)
-    # TRT-RTX's fused FP16 attention overflows to +-inf for rows whose logits are
-    # all large and positive (massive-activation heads in the last blocks) even
-    # though every operand and the true result are far inside FP16 range. Scaling
-    # V by an exact power of two keeps the kernel finite; the result is rescaled
-    # in FP32 below. Set MINIMAX_H3_ATTENTION_V_SCALE=1 to disable.
-    v_scale = _attention_v_scale()
-    if v_scale != 1.0:
-        shrink = cast(
-            network, constant(network, np.full((1, 1, 1, 1), 1.0 / v_scale, np.float32)), v.dtype
-        )
-        v = network.add_elementwise(v, shrink, trt.ElementWiseOperation.PROD).get_output(0)
     scale = constant(
         network,
         np.full((1, 1, 1, 1), 1.0 / math.sqrt(head_dim), dtype=np.float32),
@@ -431,10 +440,6 @@ def attention_core(network, q, k, v, *, head_dim: int, name: str):
     layer.get_output(0).name = f"{name}.output"
     layer.decomposable = False
     result = layer.get_output(0)
-    if v_scale != 1.0:
-        wide = cast(network, result, trt.float32)
-        grow = constant(network, np.full((1, 1, 1, 1), v_scale, np.float32))
-        result = network.add_elementwise(wide, grow, trt.ElementWiseOperation.PROD).get_output(0)
     if os.environ.get("MINIMAX_H3_DEBUG_ATTENTION") and os.environ["MINIMAX_H3_DEBUG_ATTENTION"] in name:
         # Bisecting aid: expose the FP16 attention operands/result of the named layer.
         for label, tensor in (("q", q), ("k", k), ("v", v), ("out", result)):
