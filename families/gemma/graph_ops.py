@@ -8,8 +8,18 @@ Tensor names and shapes must stay compatible with the C++ bundle runtime.
 
 from __future__ import annotations
 
+import weakref
+
 import numpy as np
 import tensorrt as trt
+
+from .weight_spill import file_backed_empty
+
+# trt.Weights built from a pointer does not own its data: the BF16 arrays stay referenced by their
+# network until the network itself is released.
+_BF16_DATA: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+# Elements converted per step, which bounds the FP32 temporary of one conversion to 64 MiB.
+_BF16_STEP = 1 << 24
 
 
 
@@ -40,6 +50,33 @@ def add_constant(
     return layer.get_output(0)
 
 
+def bf16_bits(values: np.ndarray) -> np.ndarray:
+    """BF16 bit patterns (uint16) of ``values``, rounded to nearest even like TensorRT's cast."""
+    source = np.ascontiguousarray(values).reshape(-1)
+    bits = file_backed_empty(np.shape(values), np.uint16)
+    flat = bits.reshape(-1)
+    for start in range(0, source.size, _BF16_STEP):
+        word = source[start:start + _BF16_STEP].astype(np.float32).view(np.uint32)
+        flat[start:start + _BF16_STEP] = ((word + 0x7FFF + ((word >> 16) & 1)) >> 16).astype(np.uint16)
+    return bits
+
+
+def add_bf16_constant(
+    network: trt.INetworkDefinition,
+    shape: tuple[int, ...],
+    values: np.ndarray,
+) -> trt.ITensor:
+    """Add a BF16 constant directly.
+
+    The FP16-storage-plus-cast form makes TensorRT fold the cast into a second, BF16 host copy of
+    the weights during the build, which a 27B checkpoint cannot afford on a 128 GB GPU.
+    """
+    bits = bf16_bits(np.asarray(values).reshape(shape))
+    _BF16_DATA.setdefault(network, []).append(bits)
+    layer = network.add_constant(shape, trt.Weights(trt.bfloat16, bits.ctypes.data, bits.size))
+    return layer.get_output(0)
+
+
 def add_matmul_rhs_constant(
     network: trt.INetworkDefinition,
     lhs: trt.ITensor,
@@ -55,12 +92,15 @@ def add_matmul_rhs_constant(
         if rank <= 2
         else (1,) * (rank - 2) + (lhs_width, rhs_width)
     )
-    rhs = add_constant(
-        network,
-        rhs_shape,
-        np.asarray(rhs_weights).reshape(rhs_shape),
-        dtype=dtype,
-    )
+    if lhs.dtype == trt.bfloat16 and np.dtype(dtype) == np.float16:
+        rhs = add_bf16_constant(network, rhs_shape, rhs_weights)
+    else:
+        rhs = add_constant(
+            network,
+            rhs_shape,
+            np.asarray(rhs_weights).reshape(rhs_shape),
+            dtype=dtype,
+        )
     rhs = _cast_back_to_trt_dtype(network, rhs, lhs.dtype)
     mm = network.add_matrix_multiply(
         lhs, trt.MatrixOperation.NONE,
