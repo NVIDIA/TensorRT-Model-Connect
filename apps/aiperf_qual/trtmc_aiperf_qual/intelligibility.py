@@ -70,7 +70,7 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
 
     suite = build_suite(model_suite(check["suite"], model), environment)
     reuse = bool(check.get("reuse_outputs"))
-    native, _, _ = generate_native(environment, model, suite, python, out, "tts", reuse=reuse)
+    native, *_ = generate_native(environment, model, suite, python, out, "tts", reuse=reuse)
     audio = {side: [_audio(workdir, record) for workdir, record in outputs] for side, outputs in (
         ("candidate", generate(environment, model, "trtmc", out / "tts-candidate", suite, reuse=reuse)), ("native", native))}
     heard = {}

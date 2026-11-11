@@ -31,6 +31,10 @@ _SUPPORTED_TASKS = ("text_to_embedding",)
 # without putting an inf into the graph.
 _MASK_FLOOR = -1.0e4
 
+# Work type per build precision. fp16 keeps the int32 inputs and the float32
+# output, so the runtime and the bundle do not change.
+_WORK_TYPES = {"fp32": np.float32, "fp16": np.float16}
+
 
 def _open_checkpoint(model_dir: Path) -> dict:
     """Load the safetensors checkpoint this family publishes."""
@@ -65,9 +69,12 @@ def _builder(verbose):
     return builder, network, config
 
 
-def build_engine(weights, cfg, *, seq_len, verbose=False) -> bytes:
+def build_engine(weights, cfg, *, seq_len, precision="fp32", verbose=False) -> bytes:
     builder, network, config = _builder(verbose)
-    work_np = np.float32
+    # The work type of the embeddings, the projections, the rotary and the
+    # attention matmuls. The layer norms and the attention softmax run in
+    # float32 either way (graph.py), and the engine I/O stays the same.
+    work_np = _WORK_TYPES[precision]
     width = cfg["hidden_size"]
     head_dim = cfg["head_dim"]
 
@@ -91,16 +98,17 @@ def build_engine(weights, cfg, *, seq_len, verbose=False) -> bytes:
 
     # (1 - mask) * floor, shaped to broadcast over [1, heads, seq, seq]: the
     # mask selects which *keys* may be attended, so it varies along the last
-    # axis and is flat along the query axis.
+    # axis and is flat along the query axis. It stays float32 at every
+    # precision, because the scores it is added to are float32 (graph.py).
     mask_float = network.add_cast(attention_mask, trt.float32).get_output(0)
     keep = network.add_shuffle(mask_float)
     keep.reshape_dims = (1, 1, 1, seq_len)
-    ones = g.add_constant(network, (1, 1, 1, 1), np.full((1,), 1.0), dtype=work_np)
+    ones = g.add_constant(network, (1, 1, 1, 1), np.full((1,), 1.0))
     dropped = network.add_elementwise(ones, keep.get_output(0),
                                       trt.ElementWiseOperation.SUB).get_output(0)
     additive = g.add_product(
         network, dropped,
-        g.add_constant(network, (1, 1, 1, 1), np.full((1,), _MASK_FLOOR), dtype=work_np))
+        g.add_constant(network, (1, 1, 1, 1), np.full((1,), _MASK_FLOOR)))
 
     cos_table, sin_table = rope.tables(seq_len, head_dim, cfg["rotary_base"])
     shape = (1, 1, seq_len, head_dim)
@@ -109,6 +117,8 @@ def build_engine(weights, cfg, *, seq_len, verbose=False) -> bytes:
 
     hidden = encoder_builder.build_layers(network, hidden, weights, cfg, mask=additive,
                                           cos=cos, sin=sin, dtype=work_np)
+    if hidden.dtype != trt.float32:
+        hidden = network.add_cast(hidden, trt.float32).get_output(0)
     hidden.name = "last_hidden_state"
     network.mark_output(hidden)
 
@@ -143,13 +153,16 @@ def build(request, writer) -> None:
     if request.mtp_seq_len is not None:
         raise NotImplementedError("nomic_bert does not support MTP speculative decoding")
 
-    # fp32 only, for the same reason the three vision families next door are
-    # fp32 only: no fp16 number has been measured against the reference here,
-    # and an accepted-but-unmeasured precision builds a bundle nothing checks.
+    # fp32 (the default) or fp16. Measured on nomic-embed-text-v1.5 against
+    # the reference on held-out retrieval data (SciFact at 512 tokens,
+    # 2WikiMQA at 2048), fp16 keeps the mean-pooled cosine at 0.99999 or
+    # higher and the same nDCG@10, with no non-finite output. The layer-norm
+    # statistics and the attention softmax stay float32 (graph.py). The fp16
+    # E2E case has its own tolerance (tests/test_e2e.py).
     precision = str(request.precision).lower()
-    if precision != "fp32":
+    if precision not in _WORK_TYPES:
         raise NotImplementedError(
-            f"nomic_bert builds fp32 only; {precision} is not qualified for this family")
+            f"nomic_bert builds fp32 or fp16; {precision} is not qualified for this family")
 
     # Checked before the checkpoint is opened: the request is either
     # buildable or it is not, and that does not depend on the weights.
@@ -172,7 +185,7 @@ def build(request, writer) -> None:
 
     writer.set_header(family="nomic_bert", task=request.task, backend=request.backend)
     writer.add_bytes("model.plan", build_engine(
-        weights, cfg, seq_len=seq_len, verbose=bool(request.verbose)))
+        weights, cfg, seq_len=seq_len, precision=precision, verbose=bool(request.verbose)))
     tokenizer = model_dir / "tokenizer.json"
     if not tokenizer.is_file():
         raise FileNotFoundError(f"missing nomic_bert tokenizer: {tokenizer}")

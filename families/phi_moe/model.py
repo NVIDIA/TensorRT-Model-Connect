@@ -47,6 +47,7 @@ from . import graph_blocks
 from .parallel import normalize_parallel_config
 from .default_decoder import _apply_norm, _mark_debug_output
 from .default_dual_profile_decoder import build_dual_profile_decoder_engine
+from .utils import decode_builder_optimization_level
 
 
 if TYPE_CHECKING:
@@ -59,8 +60,14 @@ class _PhiMoEModel:
         self,
         model_dir: str,
         config: ModelConfig,
+        quant_ctx=None,
     ) -> WeightDict:
-        """Load Phi-MoE weights: standard attention + per-expert MLP weights."""
+        """Load Phi-MoE weights: standard attention + per-expert MLP weights.
+
+        Weights owned by ``quant_ctx`` are not loaded: the engine consumes the FP8 bytes the
+        context quantized itself, so the weight dict keeps a shape-only placeholder for the
+        attention projections and nothing for the routed experts.
+        """
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
 
@@ -104,26 +111,27 @@ class _PhiMoEModel:
                     readers, post_norm_bias_key
                 ).astype(np.float32)
 
-            # Q/K/V/O projections (separate, not fused) with biases
-            q_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.q_proj.weight")
-            k_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.k_proj.weight")
-            v_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.v_proj.weight")
-            o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
+            # Q/K/V/O projections (separate, not fused) with biases, transposed
+            # [out, in] -> [in, out]. A projection owned by quant_ctx is a shape-only
+            # placeholder: the engine reads its FP8 bytes from quant_ctx.
+            for stem, hf_stem in (
+                ("w_q", "q_proj"),
+                ("w_k", "k_proj"),
+                ("w_v", "v_proj"),
+                ("w_o", "o_proj"),
+            ):
+                name = f"{prefix}.{stem}"
+                if quant_ctx is not None and quant_ctx.should_quantize(name):
+                    entry = quant_ctx.scales[name]
+                    shape = (entry.weight.in_features, entry.weight.out_features)
+                    weights[name] = np.broadcast_to(np.zeros((), dtype=np.float32), shape)
+                else:
+                    raw = _load_tensor(readers, f"{hf_prefix}.self_attn.{hf_stem}.weight")
+                    weights[name] = _transpose_2d(raw, hf_stem)
+                    del raw
 
             if attention_size == 0:
-                attention_size = q_raw.shape[0]
-
-            # Transpose [out, in] -> [in, out]
-            q_t = _transpose_2d(q_raw, "q_proj")
-            k_t = _transpose_2d(k_raw, "k_proj")
-            v_t = _transpose_2d(v_raw, "v_proj")
-            o_t = _transpose_2d(o_raw, "o_proj")
-            del q_raw, k_raw, v_raw, o_raw
-
-            weights[f"{prefix}.w_q"] = q_t
-            weights[f"{prefix}.w_k"] = k_t
-            weights[f"{prefix}.w_v"] = v_t
-            weights[f"{prefix}.w_o"] = o_t
+                attention_size = weights[f"{prefix}.w_q"].shape[1]
 
             # Attention biases
             for proj, tag in [
@@ -143,8 +151,11 @@ class _PhiMoEModel:
             weights[f"{prefix}.router"] = _transpose_2d(router_raw, "router")
             del router_raw
 
-            # Per-expert weights
-            for e in range(num_experts):
+            # Per-expert weights; quantized experts are stacked in quant_ctx instead.
+            quantized_experts = quant_ctx is not None and quant_ctx.should_quantize(
+                f"{prefix}.experts.w_gate"
+            )
+            for e in range(0 if quantized_experts else num_experts):
                 exp_prefix = f"{hf_prefix}.block_sparse_moe.experts.{e}"
                 # w1 = gate projection [intermediate, hidden]
                 w1_raw = _load_tensor(readers, f"{exp_prefix}.w1.weight")
@@ -249,7 +260,13 @@ class _PhiMoEModel:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
-        trt_config.builder_optimization_level = 1
+        trt_config.builder_optimization_level = decode_builder_optimization_level(
+            quant_ctx is not None
+        )
+        if quant_ctx is not None:
+            from .quantization import configure_fp8_build
+
+            configure_fp8_build(trt_config, quant_ctx)
 
         # -----------------------------------------------------------
         # Inputs
@@ -345,6 +362,7 @@ class _PhiMoEModel:
                 norm_type=norm_type,
                 dtype=work_np_dtype,
                 work_trt_dtype=work_trt_dtype,
+                quant_ctx=quant_ctx,
             )
 
             hidden_state = result["hidden"]
@@ -428,6 +446,7 @@ class _PhiMoEModel:
         max_cache_length: int,
         *,
         precision: str = "fp32",
+        quant_ctx=None,
         verbose: bool = False,
     ) -> bytes:
         """Build the batched prefill engine of a split bundle.
@@ -459,6 +478,7 @@ class _PhiMoEModel:
                 jitter_eps,
                 work_np_dtype,
                 work_trt_dtype,
+                quant_ctx=quant_ctx,
             )
 
         return build_dual_profile_decoder_engine(
@@ -466,6 +486,7 @@ class _PhiMoEModel:
             weights,
             max_cache_length,
             precision=precision,
+            quant_ctx=quant_ctx,
             norm_type="layernorm",
             position_type="rope",
             verbose=verbose,
@@ -657,8 +678,14 @@ def _add_moe_block(
     jitter_eps: float = 0.01,
     dtype: np.dtype = np.float32,
     work_trt_dtype=None,
+    quant_ctx=None,
+    weight_name: str = "",
 ) -> trt.ITensor:
     """Add Mixture of Experts block with SparseMixer routing (top-2).
+
+    With ``quant_ctx`` owning this layer's experts the two gathered experts come from the FP8
+    grid route of ``quantization.py`` (stored as FP8 in the plan, dequantized to the compute
+    type) instead of an fp16 constant; everything else is unchanged.
 
     Only the two experts chosen by the router are evaluated: their gate, up and
     down weights are gathered from the stacked expert constants by the router
@@ -684,7 +711,15 @@ def _add_moe_block(
     )
 
     # 4. Gather the selected experts' weights: [1, 2, in, out]
+    fp8_gather = (
+        quant_ctx.expert_gatherer(network, weight_name, top_indices, inp.dtype)
+        if quant_ctx is not None and quant_ctx.should_quantize(f"{weight_name}.experts.w_gate")
+        else None
+    )
+
     def gathered(name: str) -> trt.ITensor:
+        if fp8_gather is not None:
+            return fp8_gather(name)  # [1, 2, in, out], FP8 grid route, dequantized to fp16
         stack = _expert_stack(weights, prefix, name, num_experts, dtype)
         const = graph_ops.add_constant(network, stack.shape, stack, dtype=dtype)
         return network.add_gather(const, top_indices, 0).get_output(0)  # [1, 2, in, out]
@@ -732,6 +767,7 @@ def _add_prefill_moe_block(
     jitter_eps: float,
     dtype: np.dtype,
     work_trt_dtype,
+    quant_ctx=None,
 ) -> trt.ITensor:
     """Add the Mixture of Experts block of the batched prefill engine (top-2).
 
@@ -754,7 +790,15 @@ def _add_prefill_moe_block(
         network, inp, weights, prefix, hidden_size, num_experts, jitter_eps, dtype, work_trt_dtype
     )
 
+    fp8_stacked = (
+        quant_ctx.expert_stacker(network, prefix, top_indices, inp.dtype)
+        if quant_ctx is not None and quant_ctx.should_quantize(f"{prefix}.experts.w_gate")
+        else None
+    )
+
     def stacked(name: str) -> trt.ITensor:
+        if fp8_stacked is not None:
+            return fp8_stacked(name)  # [E, in, out], FP8 constant dequantized to fp16
         stack = _expert_stack(weights, prefix, name, num_experts, dtype)
         return graph_ops.add_constant(network, stack.shape, stack, dtype=dtype)  # [E, in, out]
 
@@ -824,6 +868,7 @@ def _add_moe_decoder_layer(
     norm_type: str = "layernorm",
     dtype: np.dtype = np.float32,
     work_trt_dtype=None,
+    quant_ctx=None,
 ) -> dict[str, trt.ITensor]:
     """Add one decoder layer with MoE MLP. Attention is standard."""
 
@@ -851,6 +896,8 @@ def _add_moe_decoder_layer(
         sin_half_tensor=sin_half_tensor,
         rotary_embedding_dim=head_dim,
         dtype=dtype,
+        quant_ctx=quant_ctx,
+        layer_prefix=prefix,
     )
     attn_out = attn["attn_out"]
 
@@ -882,6 +929,8 @@ def _add_moe_decoder_layer(
         jitter_eps=jitter_eps,
         dtype=dtype,
         work_trt_dtype=work_trt_dtype,
+        quant_ctx=quant_ctx,
+        weight_name=prefix,
     )
 
     # Residual connection
@@ -986,8 +1035,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("Phi-MoE max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Phi-MoE quantization requires a family-owned qualified path")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(f"Phi-MoE does not support quantization={request.quantization!r}")
+    quantized = request.quantization == "fp8"
+    if quantized and precision != "fp16":
+        raise NotImplementedError("Phi-MoE fp8 quantization requires precision fp16")
+    if quantized and request.tensor_parallel_size != 1:
+        raise NotImplementedError("Phi-MoE fp8 quantization does not support tensor parallelism")
     if request.fp32_layers:
         raise NotImplementedError("Phi-MoE does not expose mixed-precision layer selection")
     if request.mtp_seq_len is not None:
@@ -999,8 +1053,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_resolved_build_precision"] = precision
     config.raw["_parallel_build_enabled"] = parallel.enabled
-    config.raw["_quantized_build_requested"] = False
-    weights = model.load_weights(str(model_dir), config)
+    config.raw["_quantized_build_requested"] = quantized
+    quant_ctx = None
+    if quantized:
+        from .quantization import calibrate_phi_moe
+
+        quant_ctx = calibrate_phi_moe(model_dir, config, graph_ops, request.quantization)
+    # ``quant_ctx`` is passed on only for FP8 builds, so unquantized builds call the loader
+    # exactly as before.
+    load_options = {"quant_ctx": quant_ctx} if quantized else {}
+    weights = model.load_weights(str(model_dir), config, **load_options)
     writer.set_header(family="phi_moe", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -1022,7 +1084,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,
@@ -1038,6 +1100,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 weights,
                 max_sequence_length,
                 precision=precision,
+                quant_ctx=quant_ctx,
                 verbose=bool(request.verbose),
             ),
         )

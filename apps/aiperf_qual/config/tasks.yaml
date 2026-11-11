@@ -20,14 +20,18 @@
 defaults:
   reference:
     backend: auto              # the generic adapter of the operation (unsupported: no native path)
+    # The native model runs torch.compiled (PyTorch's default mode): its quality answers and their timings come
+    # from one run. A compile run that fails is run again in eager mode in its place, and reports name the mode
+    # that answered. A profile whose native model cannot compile sets `reference.mode: eager`.
+    mode: compile
   performance:
     suite: catalog
-    reference_modes: [eager]
+    # reference_modes: the fixed request's native modes (default: [reference.mode]); the first one qualifies.
     # settle_s: the request sent back to back first (a fresh server times short requests slower at first).
     # min_run_s: a request faster than the settle's pace gets enough requests per run to last this long (12
     # sub-millisecond requests spread their run's median by more than max_ci_percent).
     measurement: {settle_s: 10, warmup: 3, requests: 12, runs: 5, min_run_s: 1.0}
-    aggregation: {candidate: mean, eager: mean, compile: best}
+    aggregation: {candidate: mean, eager: mean, compile: mean}
     margin_percent: 5
     # The green / red bounds widen by this (multiplicatively): the largest speedup effect of server instances and
     # timing order that the order check measured on the formal hosts (October 2026: 11.4%).
@@ -151,15 +155,28 @@ tasks:
     absolute: [encoder_parity]
     performance: {output_grader: parity_vector}
   text_to_pooled_features: *encode  # the migrated encoders pool the first token, as encode did
-  embedding:
+  # Every token's features, compared as one matrix: a family that frames the text otherwise than its checkpoint's
+  # tokenizer (a different token count) states `exclude`
+  text_to_token_features:
+    <<: *encode
+    reference: {options: {all_tokens: true}}
+  embedding: &embed
     absolute: [sts, retrieval]
     performance: {output_grader: parity_vector}
+  # The generic embed reference mean-pools and L2-normalizes the unprefixed text: profiles of a family that pools
+  # otherwise or needs a query/document role state `exclude`.
+  text_to_embedding: *embed
 
   image_features:
     performance: {output_grader: parity_numeric, output_grader_params: {min_cosine: 0.99}}
 
   object_detection:
     absolute: [coco]
+    performance: {output_grader: parity_boxes}
+  # The Task SDK detection families (YOLO, DETR) fix their score threshold in the bundle, as their native references
+  # default it, and declare no score_threshold config: the suite's field is not sent.
+  image_to_boxes:
+    absolute: [{name: coco, request: {score_threshold: null}}]
     performance: {output_grader: parity_boxes}
 
   segmentation:
@@ -254,9 +271,10 @@ tasks:
     absolute: [etth1]
     # The catalog testcases are a few values, not the models' context: Perf times the first ETTh1 window.
     performance: {suite: {from_benchmark: etth1-mse}, output_grader: parity_numeric}
-  reranking:
+  reranking: &rerank_documents
     absolute: [rerank]
     performance: {output_grader: parity_scores}
+  text_query_documents_to_relevance: *rerank_documents  # eagle_vlm (#1939) still reranks and returns scores
 
   robot_control: &control
     absolute: [action_parity]

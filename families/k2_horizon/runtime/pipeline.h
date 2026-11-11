@@ -37,10 +37,13 @@ void k2_horizon_validate_generation_inputs(const std::vector<int32_t>& token_ids
 
 class K2HorizonTextGenerationPipeline final : public ITextGeneration {
   public:
+    // ``prefill`` is the multi-token context of a two-profile engine; without
+    // it (single-profile bundles) the prompt is fed one token per launch.
     K2HorizonTextGenerationPipeline(std::unique_ptr<ITrtModule> decoder,
                                     std::unique_ptr<K2HorizonKvCache> cache,
                                     K2HorizonTextGenConfig config,
-                                    std::shared_ptr<ITokenizer> tokenizer = nullptr);
+                                    std::shared_ptr<ITokenizer> tokenizer = nullptr,
+                                    std::unique_ptr<ITrtModule> prefill = nullptr);
 
     TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg = {}) override;
     int32_t default_max_new_tokens() const override { return 128; }
@@ -63,12 +66,17 @@ class K2HorizonTextGenerationPipeline final : public ITextGeneration {
                                      const TextGenerationConfig& cfg);
     void reset_generation_context();
     void run_step(int32_t token_id, std::vector<float>& logits);
+    void run_prefill(const std::vector<int32_t>& input_ids, std::vector<float>& logits);
+    void run_prefill_chunk(const int32_t* token_ids, int32_t count, std::vector<float>& logits);
+    void read_logits(const TensorMap& outputs, std::vector<float>& logits) const;
     int32_t run_decode_loop(K2HorizonISampler& sampler, const K2HorizonSamplingParams& params,
                             std::vector<int32_t>& output, std::vector<float>& logits,
                             int32_t max_new_tokens);
     void log_decode_summary(int32_t steps, double milliseconds) const;
 
     std::unique_ptr<ITrtModule> decoder_;
+    std::unique_ptr<ITrtModule> prefill_;
+    int32_t prefill_chunk_tokens_{1};
     std::unique_ptr<K2HorizonKvCache> cache_;
     K2HorizonTextGenConfig config_;
     std::shared_ptr<ITokenizer> tokenizer_;

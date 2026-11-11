@@ -10,9 +10,9 @@ problems, and each side is scored against the gold answers:
 - ``metric`` entries send a suite with gold labels (images, audio, sentence pairs) through AIPerf's
   trtmc_task endpoint and score the outputs here (gold_metrics).
 
-Each entry is a paired non-inferiority decision (``noninferiority``): pass when
-TRTMC's regression against the native model is shown to be below the benchmark's margin, fail when it
-is shown to exceed it, inconclusive otherwise. Native absolute capability does not veto the comparison.
+Each entry is a paired non-inferiority decision (``noninferiority``): fail when TRTMC's measured
+regression against the native model exceeds the benchmark's margin, pass otherwise. Native absolute
+capability does not veto the comparison.
 A sampled model answers once per seed on each side and
 is judged on the per-problem seed means.
 """
@@ -559,7 +559,8 @@ def status(entry: Mapping[str, Any]) -> tuple[str, list[str]]:
     """Compare the conversion's scored difference, regardless of native absolute capability.
 
     Old reports may carry ``min_native``; it no longer overrides the difference
-    test. Missing answers and statistical uncertainty retain their own outcomes.
+    test. Missing answers retain their own outcome. An ``inconclusive`` test of a report written before
+    pass/fail-only judging is decided on its measured regression.
     """
     metrics, gate = entry.get("metrics") or {}, entry.get("gate") or {}
     expected, paired = int(entry.get("expected_samples") or 0), int(entry.get("samples") or 0)
@@ -570,10 +571,13 @@ def status(entry: Mapping[str, Any]) -> tuple[str, list[str]]:
     test = metrics.get("test") or {}
     if test.get("outcome") is None:
         return "error", ["no non-inferiority outcome"]
-    reasons = [] if test["outcome"] == "pass" else [
+    result = test["outcome"]
+    if result == "inconclusive":
+        result = noninferiority.outcome(float(test.get("regression_points", 0.0)), noninferiority.margin(gate, native))
+    reasons = [] if result == "pass" else [
         f"regression {test.get('regression_points', 0.0):+.3f} points against margin "
-        f"{noninferiority.margin(gate, native):g}: {test['outcome']}"]
-    return test["outcome"], reasons
+        f"{noninferiority.margin(gate, native):g}: {result}"]
+    return result, reasons
 
 
 def binary_test(entry: Mapping[str, Any]) -> dict[str, Any]:
@@ -820,47 +824,49 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
                precisions: Sequence[str] | None = None, started: Callable[[Mapping[str, Any]], None] | None = None,
                go: threading.Event | None = None, finished: threading.Event | None = None,
                release: threading.Event | None = None, copies: int | None = None) -> dict[str, Any]:
-    """Every benchmark on the native model: the reference adapter, eager, at the first precision of
-    ``timing_precisions`` it serves. The adapter runs as up to ``native_replicas`` (environment) copies
-    that fit on the GPU, each answering one problem at a time: the answers do not change, its model-call
-    times are then not comparable."""
-    from .runner import timing_precisions
+    """Every benchmark on the native model: the reference adapter at the first precision of
+    ``timing_precisions`` and mode of ``native_modes`` it serves (torch.compile, else eager in its place). The
+    adapter runs as up to ``native_replicas`` (environment) copies that fit on the GPU, each answering one
+    problem at a time: the answers do not change, its model-call times are then not comparable."""
+    from .runner import first_native
 
-    errors = []
-    for precision in precisions or timing_precisions(model["reference"]):
-        evidence_start = execution.checkpoint()
-        try:
-            count = copies or native_copies(environment)
-            with serving_replicas(environment, dict(model), "reference", out / f"absolute-native-server-{precision}",
-                                  count=count, mode="eager", precision=precision, python=python,
-                                  keep_artifacts=keeps_artifacts(model), mps_env=mps_env) as service:
-                try:
-                    if started is not None:  # the copies hold their memory, idle: the other side may size its own
-                        started(service)
-                    while go is not None and not go.wait(1):  # the other side's copies are starting
-                        cancel.check()
-                    if probe_request is not None:
-                        _probe(service, model["operation"], probe_request)
-                    runs = {item["suite"]: run_side(environment, service, model, item, plans[item["suite"]],
-                                                    out / f"absolute-native-{precision}")
-                            for item in model["absolute"]}
-                    for name, side in runs.items():
-                        answers = side.get("observations") or side.get("records") or {}
-                        if side.get("failed") and not any(answers.values()):
-                            raise RuntimeError(f"{name}: no successful native responses "
-                                               f"({next(iter(side['failed'].values()))})")
-                finally:  # sharing an MPS daemon, no copy leaves while the other side's copies still answer
-                    if finished is not None:
-                        finished.set()
-                    while release is not None and not release.wait(1):
-                        cancel.check()
-            return {"backend": "reference", "precision": precision, "runs": runs, "replicas": service["replicas"],
-                    "mps": bool(service.get("mps")),
-                    **({"fallback_from": "; ".join(errors)[:600]} if errors else {})}
-        except Exception as error:  # noqa: BLE001 - the next precision
-            execution.supersede(evidence_start)
-            errors.append(f"{precision}: {type(error).__name__}: {str(error)[-300:]}")
-    raise RuntimeError("; ".join(errors)[:1500])
+    def answer(attempt: Any) -> dict[str, Any]:
+        tag = f"{attempt.mode}-{attempt.precision}"
+        count = copies or native_copies(environment)
+        with serving_replicas(environment, dict(model), "reference", out / f"absolute-native-server-{tag}",
+                              count=count, mode=attempt.mode, precision=attempt.precision, python=python,
+                              compile_fallback=attempt.compile_fallback, keep_artifacts=keeps_artifacts(model),
+                              mps_env=mps_env) as service:
+            try:
+                if started is not None:  # the copies hold their memory, idle: the other side may size its own
+                    started(service)
+                while go is not None and not go.wait(1):  # the other side's copies are starting
+                    cancel.check()
+                if probe_request is not None:
+                    _probe(service, model["operation"], probe_request)
+                runs = {item["suite"]: run_side(environment, service, model, item, plans[item["suite"]],
+                                                out / f"absolute-native-{tag}")
+                        for item in model["absolute"]}
+                for name, side in runs.items():
+                    answers = side.get("observations") or side.get("records") or {}
+                    if side.get("failed") and not any(answers.values()):
+                        raise RuntimeError(f"{name}: no successful native responses "
+                                           f"({next(iter(side['failed'].values()))})")
+                # A compiled run that left problems unanswered (a request timed out while it compiled, say) answers
+                # again in eager mode; an incomplete eager run is returned (fewer copies may then answer it).
+                if attempt.mode == "compile" and (gap := incomplete(model, plans, runs)):
+                    raise RuntimeError(f"incomplete under torch.compile: {gap}")
+            finally:  # sharing an MPS daemon, no copy leaves while the other side's copies still answer
+                if finished is not None:
+                    finished.set()
+                while release is not None and not release.wait(1):
+                    cancel.check()
+        return {"runs": runs, "replicas": service["replicas"], "mps": bool(service.get("mps"))}
+
+    native, attempt = first_native(model["reference"], answer, precisions=precisions)
+    return {"backend": "reference", "precision": attempt.precision, "mode": attempt.mode, **native,
+            **({"compile_fallback": attempt.compile_fallback} if attempt.compile_fallback else {}),
+            **({"fallback_from": attempt.precision_fallback} if attempt.precision_fallback else {})}
 
 
 def native_copies(environment: Environment) -> int:
@@ -1026,8 +1032,14 @@ def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: 
             entry = judge_in_capacity(item, problems, candidate[item["suite"]], runs[item["suite"]])
             if item.get("precision_note"):
                 entry["notes"] = [*entry.get("notes", []), item["precision_note"]]
-            entry["native"] = {"backend": native.get("backend"), "precision": native.get("precision"), "mode": "eager",
+            if native.get("compile_fallback"):
+                entry["notes"] = [*entry.get("notes", []), "native torch.compile failed; eager answered in its "
+                                  f"place: {str(native['compile_fallback'])[:200]}"]
+            entry["native"] = {"backend": native.get("backend"), "precision": native.get("precision"),
+                               "mode": native.get("mode", "eager"),
                                "replicas": native.get("replicas", 1), "mps": bool(native.get("mps")),
+                               **({"compile_fallback": native["compile_fallback"]} if native.get("compile_fallback")
+                                  else {}),
                                **({"fallback_from": native["fallback_from"]} if native.get("fallback_from") else {}),
                                **({"copies_reduced": native["copies_reduced"]} if native.get("copies_reduced") else {})}
             concurrent = [f"{side} ran as {copies} concurrent copies" for side, copies in

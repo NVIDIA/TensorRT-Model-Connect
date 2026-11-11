@@ -3,9 +3,10 @@
 
 """Build-side unit tests for ESM-2.
 
-Two subjects: ``config.resolve``, which has to refuse the ESM variants that
-load every tensor and still run, and ``graph.rotary_tables``, where a wrong
-answer is an array of the right shape full of the wrong numbers.
+Three subjects: ``config.resolve``, which has to refuse the ESM variants that
+load every tensor and still run, ``graph.rotary_tables``, where a wrong
+answer is an array of the right shape full of the wrong numbers, and the
+build precision (fp32 by default, fp16 accepted, the engine I/O unchanged).
 """
 
 from __future__ import annotations
@@ -147,12 +148,101 @@ def test_the_rotary_schedule_is_the_roformer_one() -> None:
     assert np.allclose(cos[0, 2, :4], np.cos(2.0 * inv_freq), atol=1e-6)
 
 
-def test_fp16_is_refused(tmp_path: Path) -> None:
-    request = BuildRequest(model_dir=tmp_path, output_path=tmp_path / "b.bundle", family="esm",
-                           task="masked_text_to_token_scores", precision="fp16",
-                           max_sequence_length=32)
-    with pytest.raises(NotImplementedError, match="fp32"):
-        model_module.build(request, object())
+def _request(tmp_path: Path, precision: str) -> BuildRequest:
+    return BuildRequest(model_dir=tmp_path, output_path=tmp_path / "b.bundle", family="esm",
+                        task="masked_text_to_token_scores", precision=precision,
+                        max_sequence_length=32)
+
+
+def test_bf16_is_refused(tmp_path: Path) -> None:
+    """fp32 and fp16 are the qualified precisions; bf16 is refused at build time."""
+    with pytest.raises(NotImplementedError, match="fp32 or fp16"):
+        model_module.build(_request(tmp_path, "bf16"), object())
+
+
+def test_fp16_is_accepted(tmp_path: Path) -> None:
+    """fp16 passes the precision check and goes on to read the checkpoint."""
+    with pytest.raises(FileNotFoundError, match="missing esm checkpoint"):
+        model_module.build(_request(tmp_path, "fp16"), object())
+
+
+def test_the_default_precision_is_fp32() -> None:
+    from families.esm.support import describe
+    from tensorrt_model_connect.model_support import ModelMetadata
+
+    support = describe(ModelMetadata(config={"model_type": "esm"}, model_index={}))
+    assert support.default_precision == "fp32"
+
+
+def _tiny_checkpoint(seed: int = 0) -> dict:
+    """A small random ESM-2 checkpoint with every tensor ``build_engine`` reads."""
+    rng = np.random.default_rng(seed)
+
+    def mat(*shape):
+        return (rng.standard_normal(shape) * 0.05).astype(np.float32)
+
+    weights = _weights(**{
+        "esm.embeddings.word_embeddings.weight": mat(_VOCAB, _HIDDEN),
+        "esm.encoder.emb_layer_norm_after.weight": np.ones(_HIDDEN, np.float32),
+        "esm.encoder.emb_layer_norm_after.bias": mat(_HIDDEN),
+        "lm_head.dense.weight": mat(_HIDDEN, _HIDDEN),
+        "lm_head.dense.bias": mat(_HIDDEN),
+        "lm_head.layer_norm.weight": np.ones(_HIDDEN, np.float32),
+        "lm_head.layer_norm.bias": mat(_HIDDEN),
+        "lm_head.decoder.weight": mat(_VOCAB, _HIDDEN),
+        "lm_head.bias": mat(_VOCAB),
+    })
+    for index in range(_LAYERS):
+        layer = f"esm.encoder.layer.{index}."
+        for name, rows, columns in (("attention.self.query", _HIDDEN, _HIDDEN),
+                                    ("attention.self.key", _HIDDEN, _HIDDEN),
+                                    ("attention.self.value", _HIDDEN, _HIDDEN),
+                                    ("attention.output.dense", _HIDDEN, _HIDDEN),
+                                    ("intermediate.dense", _INTERMEDIATE, _HIDDEN),
+                                    ("output.dense", _HIDDEN, _INTERMEDIATE)):
+            weights[f"{layer}{name}.weight"] = mat(rows, columns)
+            weights[f"{layer}{name}.bias"] = mat(rows)
+        for name in ("attention.LayerNorm", "LayerNorm"):
+            weights[f"{layer}{name}.weight"] = np.ones(_HIDDEN, np.float32)
+            weights[f"{layer}{name}.bias"] = mat(_HIDDEN)
+    return weights
+
+
+def test_an_fp16_engine_keeps_the_io_and_the_values(tmp_path: Path) -> None:
+    """fp16 changes only the work type: int32 in, float32 logits out, close to fp32."""
+    trt = pytest.importorskip("tensorrt")
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("engine build needs a GPU")
+    weights = _tiny_checkpoint()
+    cfg = config_module.resolve(_config(tmp_path), weights, "esm.")
+    window, length = 16, 11
+    ids = torch.ones(window, dtype=torch.int32, device="cuda")
+    ids[:length] = torch.tensor([0, 5, 6, 32, 7, 8, 9, 32, 10, 11, 2], dtype=torch.int32)
+    mask = torch.zeros(window, dtype=torch.int32, device="cuda")
+    mask[:length] = 1
+
+    def run(precision):
+        plan = model_module.build_engine(weights, cfg, seq_len=window, precision=precision)
+        engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
+        io = {engine.get_tensor_name(i): (engine.get_tensor_dtype(engine.get_tensor_name(i)),
+                                          tuple(engine.get_tensor_shape(engine.get_tensor_name(i))))
+              for i in range(engine.num_io_tensors)}
+        logits = torch.empty((window, _VOCAB), dtype=torch.float32, device="cuda")
+        context = engine.create_execution_context()
+        for name, tensor in (("input_ids", ids), ("attention_mask", mask), ("logits", logits)):
+            context.set_tensor_address(name, tensor.data_ptr())
+        context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+        torch.cuda.synchronize()
+        return io, logits[:length].cpu()
+
+    io32, logits32 = run("fp32")
+    io16, logits16 = run("fp16")
+    assert io16 == io32 == {"input_ids": (trt.int32, (window,)),
+                            "attention_mask": (trt.int32, (window,)),
+                            "logits": (trt.float32, (window, _VOCAB))}
+    assert torch.isfinite(logits16).all()
+    assert float((logits16 - logits32).abs().max()) < 1e-2
 
 
 def test_a_sequence_length_is_required(tmp_path: Path) -> None:
@@ -160,3 +250,163 @@ def test_a_sequence_length_is_required(tmp_path: Path) -> None:
                            task="masked_text_to_token_scores", precision="fp32")
     with pytest.raises(ValueError, match="max_sequence_length"):
         model_module.build(request, object())
+
+
+def test_open_checkpoint_single_safetensors(tmp_path: Path) -> None:
+    """A single model.safetensors checkpoint is loaded as a numpy dictionary."""
+    from safetensors.numpy import save_file
+
+    tensors = {
+        "esm.embeddings.word_embeddings.weight": np.ones((8, 16), dtype=np.float32),
+        "lm_head.bias": np.arange(8, dtype=np.float32),
+    }
+    save_file(tensors, str(tmp_path / "model.safetensors"))
+    loaded = model_module._open_checkpoint(tmp_path)
+    assert set(loaded.keys()) == set(tensors.keys())
+    assert np.array_equal(
+        loaded["esm.embeddings.word_embeddings.weight"],
+        tensors["esm.embeddings.word_embeddings.weight"],
+    )
+    assert np.array_equal(loaded["lm_head.bias"], tensors["lm_head.bias"])
+
+
+def test_open_checkpoint_sharded_safetensors(tmp_path: Path) -> None:
+    """Sharded safetensors checkpoints mapped by model.safetensors.index.json are merged."""
+    from safetensors.numpy import save_file
+
+    shard1 = {"esm.embeddings.word_embeddings.weight": np.ones((8, 16), dtype=np.float32)}
+    shard2 = {"lm_head.bias": np.arange(8, dtype=np.float32)}
+    save_file(shard1, str(tmp_path / "model-00001-of-00002.safetensors"))
+    save_file(shard2, str(tmp_path / "model-00002-of-00002.safetensors"))
+
+    index_content = {
+        "metadata": {"total_size": 1024},
+        "weight_map": {
+            "esm.embeddings.word_embeddings.weight": "model-00001-of-00002.safetensors",
+            "lm_head.bias": "model-00002-of-00002.safetensors",
+        },
+    }
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(index_content), encoding="utf-8"
+    )
+
+    loaded = model_module._open_checkpoint(tmp_path)
+    assert set(loaded.keys()) == {"esm.embeddings.word_embeddings.weight", "lm_head.bias"}
+    assert np.array_equal(
+        loaded["esm.embeddings.word_embeddings.weight"],
+        shard1["esm.embeddings.word_embeddings.weight"],
+    )
+    assert np.array_equal(loaded["lm_head.bias"], shard2["lm_head.bias"])
+
+
+def test_open_checkpoint_single_pytorch_bin(tmp_path: Path) -> None:
+    """A single pytorch_model.bin checkpoint is loaded and converted to numpy float32."""
+    import torch
+
+    tensors = {
+        "esm.embeddings.word_embeddings.weight": torch.ones((8, 16), dtype=torch.float32),
+        "lm_head.bias": torch.arange(8, dtype=torch.float32),
+    }
+    torch.save(tensors, tmp_path / "pytorch_model.bin")
+    loaded = model_module._open_checkpoint(tmp_path)
+    assert set(loaded.keys()) == set(tensors.keys())
+    assert isinstance(loaded["esm.embeddings.word_embeddings.weight"], np.ndarray)
+    assert np.array_equal(
+        loaded["esm.embeddings.word_embeddings.weight"],
+        tensors["esm.embeddings.word_embeddings.weight"].numpy(),
+    )
+
+
+def test_open_checkpoint_sharded_pytorch_bin(tmp_path: Path) -> None:
+    """Sharded pytorch checkpoints (ESM-2 3B and 15B layout) are merged into one dictionary."""
+    import torch
+
+    shard1 = {"esm.embeddings.word_embeddings.weight": torch.ones((8, 16), dtype=torch.float32)}
+    shard2 = {"lm_head.bias": torch.arange(8, dtype=torch.float32)}
+    torch.save(shard1, tmp_path / "pytorch_model-00001-of-00002.bin")
+    torch.save(shard2, tmp_path / "pytorch_model-00002-of-00002.bin")
+
+    index_content = {
+        "metadata": {"total_size": 2048},
+        "weight_map": {
+            "esm.embeddings.word_embeddings.weight": "pytorch_model-00001-of-00002.bin",
+            "lm_head.bias": "pytorch_model-00002-of-00002.bin",
+        },
+    }
+    (tmp_path / "pytorch_model.bin.index.json").write_text(
+        json.dumps(index_content), encoding="utf-8"
+    )
+
+    loaded = model_module._open_checkpoint(tmp_path)
+    assert set(loaded.keys()) == {"esm.embeddings.word_embeddings.weight", "lm_head.bias"}
+    assert isinstance(loaded["esm.embeddings.word_embeddings.weight"], np.ndarray)
+    assert np.array_equal(
+        loaded["esm.embeddings.word_embeddings.weight"],
+        shard1["esm.embeddings.word_embeddings.weight"].numpy(),
+    )
+    assert np.array_equal(loaded["lm_head.bias"], shard2["lm_head.bias"].numpy())
+
+
+def test_open_checkpoint_missing_all_raises(tmp_path: Path) -> None:
+    """An empty directory raises FileNotFoundError naming all supported checkpoint files."""
+    with pytest.raises(FileNotFoundError, match="missing esm checkpoint"):
+        model_module._open_checkpoint(tmp_path)
+
+
+def test_open_checkpoint_missing_shard_raises(tmp_path: Path) -> None:
+    """A missing shard referenced by an index file raises FileNotFoundError."""
+    index_content = {
+        "weight_map": {"weight1": "missing_shard.safetensors"},
+    }
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps(index_content), encoding="utf-8"
+    )
+    with pytest.raises(FileNotFoundError, match="missing esm checkpoint shard"):
+        model_module._open_checkpoint(tmp_path)
+
+
+def test_open_checkpoint_invalid_index_raises(tmp_path: Path) -> None:
+    """An invalid index JSON or missing weight_map raises ValueError."""
+    (tmp_path / "pytorch_model.bin.index.json").write_text("not json", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid JSON"):
+        model_module._open_checkpoint(tmp_path)
+
+    (tmp_path / "pytorch_model.bin.index.json").write_text(
+        json.dumps({"no_weight_map": {}}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="has no valid weight_map"):
+        model_module._open_checkpoint(tmp_path)
+
+
+def test_open_checkpoint_rejects_path_traversal_and_empty_shards(tmp_path: Path) -> None:
+    """Index files specifying paths outside the directory or empty strings raise ValueError."""
+    # PyTorch index traversal
+    (tmp_path / "pytorch_model.bin.index.json").write_text(
+        json.dumps({"weight_map": {"weight1": "../escaped_shard.bin"}}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="must be non-empty checkpoint-local filenames"):
+        model_module._open_checkpoint(tmp_path)
+
+    # PyTorch index empty shard name
+    (tmp_path / "pytorch_model.bin.index.json").write_text(
+        json.dumps({"weight_map": {"weight1": ""}}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="must be non-empty checkpoint-local filenames"):
+        model_module._open_checkpoint(tmp_path)
+
+    (tmp_path / "pytorch_model.bin.index.json").unlink()
+
+    # Safetensors index traversal
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"weight1": "../escaped.safetensors"}}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="must be non-empty checkpoint-local filenames"):
+        model_module._open_checkpoint(tmp_path)
+
+    # Safetensors index empty shard name
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"weight1": "   "}}), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="must be non-empty checkpoint-local filenames"):
+        model_module._open_checkpoint(tmp_path)
+

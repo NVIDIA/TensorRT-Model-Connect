@@ -199,8 +199,9 @@ def encoder_input_limit(tokenizer: Any, config: Any) -> int | None:
 
 
 class TextEncoder:
-    """``encode`` (first-token hidden state, TRTMC ``feature_kind: token``) and ``embed``
-    (attention-mask mean pool, L2-normalized, ``feature_kind: pooled``); both report ``values``."""
+    """``encode`` (first-token hidden state, TRTMC ``feature_kind: token``; every token's with the
+    ``all_tokens`` option, as ``text_to_token_features`` returns them) and ``embed`` (attention-mask mean pool,
+    L2-normalized, ``feature_kind: pooled``); both report ``values``."""
 
     def __init__(self, spec: ReferenceSpec) -> None:
         import transformers
@@ -224,11 +225,12 @@ class TextEncoder:
         batch = self.tokenizer(str(required(request, "prompt")), return_tensors="pt", truncation=self.max_length is not None,
                                max_length=self.max_length).to(self.spec.device)
         pooled = self.spec.operation == "embed"
+        all_tokens = not pooled and bool(self.spec.options.get("all_tokens"))
 
         def run() -> torch.Tensor:
             outputs = self.model(**batch, **self.forward_kwargs)
             hidden = getattr(outputs, "last_hidden_state", None)
-            if hidden is None and getattr(outputs, "pooler_output", None) is not None:
+            if hidden is None and not all_tokens and getattr(outputs, "pooler_output", None) is not None:
                 return outputs.pooler_output  # DPR encoders return only the pooled first-token representation
             if hidden is None:
                 if getattr(outputs, "hidden_states", None) is None:
@@ -237,6 +239,8 @@ class TextEncoder:
                 if getattr(outputs, "hidden_states", None) is None:
                     raise BackendError(f"{type(outputs).__name__} exposes no hidden states to pool")
                 hidden = outputs.hidden_states[-1]
+            if all_tokens:
+                return hidden[0]
             if not pooled:
                 return hidden[:, 0]
             mask = batch["attention_mask"].unsqueeze(-1).to(hidden.dtype)
@@ -245,8 +249,9 @@ class TextEncoder:
         output, model_ms = timed(run)
         observation = tensor_observation(output, artifact_base)
         # Same fields the TRTMC worker reports for TextToEmbedding / pooled or token features.
-        observation.update(dim=int(output.shape[-1]), values=output[0].float().tolist(),
-                           feature_kind="pooled" if pooled else "token")
+        # Every token's features are row-major [tokens, dim], as TRTMC returns them.
+        values = output.float().flatten() if all_tokens else output[0].float()
+        observation.update(dim=int(output.shape[-1]), values=values.tolist(), feature_kind="pooled" if pooled else "token")
         return invocation(observation, model_ms)
 
 

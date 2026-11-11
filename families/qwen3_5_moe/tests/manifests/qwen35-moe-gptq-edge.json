@@ -9,7 +9,10 @@
   "testcases": [
     {
       "name": "qwen35-moe-gptq-edge-vlm",
-      "premerge": true
+      "premerge": true,
+      "prompt": "Describe this image.",
+      "max_new_tokens": 32,
+      "test_image": "data/test_img.jpeg"
     }
   ],
   "bundle": "qwen35-moe-gptq-edge.bundle",

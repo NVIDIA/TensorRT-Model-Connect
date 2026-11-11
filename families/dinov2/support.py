@@ -11,4 +11,5 @@ describe = family_support(
     architectures=("Dinov2Model",),
     tasks=("image_to_token_and_pooled_features",),
     default_task="image_to_token_and_pooled_features",
+    default_precision="fp16",
 )

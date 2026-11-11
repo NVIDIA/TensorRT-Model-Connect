@@ -21,6 +21,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import config as config_module, encoder_builder, graph as g, position
+from .quantization import calibrate_dinov2
 
 _SUPPORTED_TASKS = ("image_to_token_and_pooled_features",)
 
@@ -54,7 +55,17 @@ def _require_weights(weights: dict) -> None:
         raise KeyError("dinov2 checkpoint is missing expected tensors: " + ", ".join(missing))
 
 
-def _builder(verbose):
+_DUAL_GEMM_KNOB = "peep:match_dual_gemm"
+
+# Work precision per build precision. fp16 (the default) keeps float32 engine
+# I/O and float32 layer-norm statistics. Measured on the fp32 reference over
+# 200 ImageNet validation images and 16 noise and flat images, the largest
+# activation (the residual stream) is 520, 126x below the fp16 limit, and the
+# layer norm squares it only after the float32 cast.
+_WORK_DTYPES = {"fp32": np.float32, "fp16": np.float16}
+
+
+def _builder(verbose, quant_ctx=None):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -63,20 +74,31 @@ def _builder(verbose):
     # TF32 caps a conv-and-matmul graph near 0.99998 cosine by default,
     # which hides real graph error behind a plausible-looking number.
     config.clear_flag(trt.BuilderFlag.TF32)
+    if quant_ctx is not None:
+        # Keep layer names so the plan inspector shows which kernels run.
+        config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+        if quant_ctx.has_fp8_weights and _DUAL_GEMM_KNOB in getattr(config, "all_build_routes", ""):
+            # TensorRT's fused dual-GEMM kernel fails to compile with scalar-scale FP8.
+            # The route is set only when this TensorRT build lists the knob.
+            config.build_route = f"-{_DUAL_GEMM_KNOB}=off"
     return builder, network, config
 
 
-def build_engine(weights, cfg, *, verbose=False) -> bytes:
-    builder, network, config = _builder(verbose)
-    # fp32 throughout. build() refuses every other precision and records the
-    # measurement behind that refusal.
-    work_np = np.float32
+def build_engine(weights, cfg, *, verbose=False, quant_ctx=None, dtype=np.float32) -> bytes:
+    builder, network, config = _builder(verbose, quant_ctx)
+    # The work precision of every layer: float32, or float16 for precision=fp16.
+    # Layer-norm statistics are taken in float32 either way (graph.add_layer_norm).
+    work_np = np.dtype(dtype).type
     width = cfg["hidden_size"]
     patch = cfg["patch_size"]
     grid = cfg["grid"]
     size = cfg["image_size"]
 
+    # The engine I/O stays float32 at every precision, so the runtime and the
+    # bundle contract do not change; only the network between them narrows.
     source = network.add_input("pixel_values", trt.float32, (1, 3, size, size))
+    if work_np != np.float32:
+        source = network.add_cast(source, trt.float16).get_output(0)
 
     patches = g.add_conv2d(network, source,
                            weights["embeddings.patch_embeddings.projection.weight"],
@@ -102,9 +124,12 @@ def build_engine(weights, cfg, *, verbose=False) -> bytes:
     hidden = g.add_sum(network, hidden,
                        g.add_constant(network, (grid * grid + 1, width), table, dtype=work_np))
 
-    hidden = encoder_builder.build_layers(network, hidden, weights, cfg, dtype=work_np)
+    hidden = encoder_builder.build_layers(network, hidden, weights, cfg, dtype=work_np,
+                                          quant=quant_ctx)
     hidden = g.add_layer_norm(network, hidden, weights["layernorm.weight"],
                               weights["layernorm.bias"], cfg["eps"])
+    if hidden.dtype != trt.float32:
+        hidden = network.add_cast(hidden, trt.float32).get_output(0)
 
     hidden.name = "last_hidden_state"
     network.mark_output(hidden)
@@ -131,8 +156,9 @@ def build(request, writer) -> None:
         raise NotImplementedError("dinov2 does not support context parallelism")
     if request.video_num_frames is not None:
         raise NotImplementedError("dinov2 does not support video_num_frames")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("dinov2 does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"dinov2 supports quantization fp8 or none; got {request.quantization!r}")
     if request.fp32_layers:
         raise NotImplementedError("dinov2 does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -143,18 +169,22 @@ def build(request, writer) -> None:
         raise NotImplementedError(
             "dinov2 derives its sequence length from the image size")
 
-    # fp32 only, and this family is the clearest case for refusing fp16.
-    # Against the reference a correct fp32 engine is 4.5e-04 off; an all-fp16
-    # one is about 1.0, on features whose own peak is 25.6. The weakest
-    # defect the E2E gate catches - the tanh GELU - is 6.2e-02, so fp16's
-    # error is sixteen times larger than the break it would have to catch: an
-    # fp16 gate would pass a broken build. Cosine stays above 0.9999 through
-    # all of it, which is exactly why cosine is not the gate. Taking the
-    # attention softmax in fp32 was measured and moves nothing.
+    # fp16 (the default) or fp32. On dinov2-base the fp16 engine is 5.2x
+    # (B200) and 4.6x (B300) faster than fp32, and kNN top-1 stays within 0.2
+    # points of the reference. Its features are 0.35 to 1.16 off the
+    # reference on the E2E image, where the weakest defect - the tanh GELU -
+    # is 6.2e-02, so no feature tolerance can catch that defect in fp16; the
+    # fp16 E2E case adds a check that does not depend on that margin
+    # (test_e2e.py). A float32 residual stream or a float32 softmax was
+    # measured and recovers nothing: the error is in the fp16 matmuls.
     precision = str(request.precision).lower()
-    if precision != "fp32":
+    if precision not in _WORK_DTYPES:
         raise NotImplementedError(
-            f"dinov2 builds fp32 only; {precision} is not qualified for this family")
+            f"dinov2 builds fp16 or fp32; {precision} is not qualified for this family")
+    if request.quantization == "fp8" and precision != "fp32":
+        # The FP8 scales, the graph and its measurements are float32 (fp32 Dequantize).
+        raise NotImplementedError(
+            f"dinov2 fp8 builds fp32 only; pass --precision fp32 (got {precision})")
 
     model_dir = Path(request.model_dir)
     weights = _open_checkpoint(model_dir)
@@ -171,9 +201,17 @@ def build(request, writer) -> None:
         raise NotImplementedError(
             f"dinov2 input size is fixed at the preprocessor's {cfg['image_size']}")
 
+    # fp8: the projections are quantized from the original checkpoint, one at a time, with
+    # the stored activation scales. FP8 weights are never stored, and the engine still
+    # works in float32 around the quantized projections.
+    quant_ctx = None
+    if request.quantization == "fp8":
+        quant_ctx = calibrate_dinov2(weights, cfg, "fp8")
+
     writer.set_header(family="dinov2", task=request.task, backend=request.backend)
     writer.add_bytes("model.plan", build_engine(
-        weights, cfg, verbose=bool(request.verbose)))
+        weights, cfg, verbose=bool(request.verbose), quant_ctx=quant_ctx,
+        dtype=_WORK_DTYPES[precision]))
     writer.add_json(
         "runtime.json",
         {

@@ -15,15 +15,13 @@ from PIL import Image
 
 class Adapter:
     def __init__(self, spec: Any, host: Any) -> None:
-        if spec.mode != "eager":
-            raise host.Error("BiRefNet reference supports only eager mode")
         from transformers import AutoModelForImageSegmentation
 
         self.spec, self.host = spec, host
         self.size = int(spec.options["input_size"])
-        self.model = AutoModelForImageSegmentation.from_pretrained(
+        self.model = host.maybe_compile(AutoModelForImageSegmentation.from_pretrained(
             spec.model, **spec.model_kwargs()
-        ).eval().to(device=spec.device, dtype=spec.dtype)
+        ).eval().to(device=spec.device, dtype=spec.dtype), spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         image = self.host.load_image(str(self.host.required(request, "image_path")))

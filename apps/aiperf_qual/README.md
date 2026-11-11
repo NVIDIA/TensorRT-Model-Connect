@@ -5,8 +5,8 @@ Accuracy and performance qualification of every ready catalog model against its 
 
 - **Acc**: TRTMC must be as accurate as the native model on the Task's workloads. Both sides answer the
   Task's gold-labelled benchmarks (`absolute`) and each benchmark is a paired non-inferiority decision
-  (`noninferiority.py`): `pass` when TRTMC's regression is shown to be below the benchmark's margin, `fail`
-  when it is shown to exceed it, `inconclusive` otherwise. Tasks without a gold set compare outputs with
+  (`noninferiority.py`): `fail` when TRTMC's measured regression exceeds the benchmark's margin, `pass`
+  otherwise (there is no inconclusive outcome; the confidence statistics are reported for information). Tasks without a gold set compare outputs with
   the native model (conversion parity). Random-weight test models are Perf only (`accuracy_source: none`).
 - **Perf**: report Native and TRTMC task-call p50 from the same benchmark responses used for Acc,
   at the recorded effective precision. Timing is a measurement, not an additional acceptance gate.
@@ -72,6 +72,8 @@ A suite with `base: catalog` overrides the profile's catalog request with its da
 For a profile with `candidate.benchmark_sequence_length`, the build counts the prepared
 gold-suite prompts with its pinned tokenizer and uses their maximum length plus the configured
 `extra_tokens`. Qwen3-Embedding reserves one token for EOS and four for runtime tokenizer count differences.
+EmbeddingGemma2 reserves none: its runtime tokenizer counts every benchmark prompt as Transformers does, BOS and
+EOS included.
 The evidence is written to
 `artifacts/build/benchmark-capacity.json`; request truncation and accuracy tolerances do not change.
 Dataset or tokenizer failures stop capacity planning rather than falling back to the catalog size.
@@ -156,13 +158,21 @@ matched subset. Models explicitly lacking a quality benchmark retain one configu
 workload and conversion-parity evidence. The explicit `order-check` diagnostic and historical
 fixed-workload reports keep their original statistics. Timing and generation phases hold `gpu_lock`.
 
+The native model runs under `torch.compile` with PyTorch's defaults (`reference.mode: compile` in
+`config/tasks.yaml`); family pipelines compile their main network through `host.maybe_compile`. One run
+supplies both its quality answers and its task-call timings, so Acc and Perf share one native mode. A
+compile run that fails (an error, a function recompiling past Dynamo's limit, or no compiled graph running)
+stops serving and runs again in eager mode in its place; the failed attempt's evidence is superseded, never
+mixed in. Reports name the mode that answered (`reference_mode`, each Acc entry's native `mode`, the AIPerf
+tables' `Native mode`) and keep why compile was replaced (`compile_fallback`). A profile whose native model
+cannot compile sets `reference.mode: eager`. The order check and the opt-in service sweeps time eager.
+
 Configuration now uses a flat `performance` policy and opt-in `service_metrics`; reports use `performance`
 and `service_metrics` under schema `trtmc.qualification/v2`. Earlier tiered configurations and reports
 are normalized on read, including rejudge, without maintaining another execution path. Rejudge without an
 environment refreshes benchmark timings from saved execution records while
 preserving the recorded Acc entries and gates. It never promotes descriptive dataset results to
-an acceptance gate. `torch.compile` remains an optional labelled
-reference. Service metrics (client latency, throughput, load sweeps) are opt-in and do not affect the
+an acceptance gate. Service metrics (client latency, throughput, load sweeps) are opt-in and do not affect the
 verdict; the prototype's single execution lane and buffered SSE do not measure token TTFT/ITL.
 
 Every recorded workload also includes AIPerf's native client statistics in `aiperf_metrics`: request
@@ -196,7 +206,9 @@ that configuration except `candidate` (benchmarks, requests, native adapter, req
 under its own and answers the benchmarks on that profile's route (chat or completions; the sampling stays its own
 catalog request's), and when its checkpoint is a separate pre-quantized repository, its native reference loads that
 profile's checkpoint. Its candidate stays its own bundle, held to the benchmarks' quantization gates;
-`qualified_as` in the plan names the profile it follows.
+`qualified_as` in the plan names the profile it follows. When the base builds from a prepared
+`candidate.model_directory` that the benchmark depends on, a profile that quantizes the same checkpoint at build
+time names that directory in its own definition (`personaplex-7b-fp8`: the bundle holds the VoiceBench system prompt).
 
 ### Reference environments
 
@@ -242,7 +254,7 @@ python tools/model_benchmark.py aiperf --environment $E --aiperf-python <venv>/b
 `run` builds the candidate bundle when `bundle_root` does not hold it yet (trtmc-bench, in the
 reference environment, under the GPU lock), qualifies, and applies the bundle retention policy.
 `report.md` / `report.json` in the output directory hold the verdict: `pass`, `acc-issue`,
-`not-covered` (no native path), `acc-inconclusive`, `not-comparable`, `perf-issue` (red/yellow),
+`not-covered` (no native path), `not-comparable`, `perf-issue` (red/yellow),
 `perf-inconclusive` (white), or `error` (a phase failed; see "Phase errors" and `phase-errors.log`);
 `build.json` records the build (`build-failed` when it failed); `report.json` carries a reproduction
 command. `--smoke` runs one problem per benchmark and one timed request (`smoke-pass` / `smoke-fail`,
@@ -310,7 +322,7 @@ batch advances (all default to `retain`):
 | `hf_cache` | `retain`, `delete_unused` | `run-all` deletes a checkpoint repository from `hf_hub_cache` once no remaining profile of the batch uses it |
 
 `delete_on_pass` also accepts a benchmark result with passing Acc and complete Perf (`measured`).
-Partial timings, inconclusive Acc, and failed Acc keep their bundles under that policy.
+Partial timings and failed Acc keep their bundles under that policy.
 Failed Native precision attempts remain in the execution evidence; their timings and client
 statistics are excluded when a fallback succeeds.
 

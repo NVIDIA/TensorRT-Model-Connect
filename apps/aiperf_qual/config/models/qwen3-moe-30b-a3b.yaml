@@ -2,3 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # GSM8K is off for now (config/tasks.yaml).
 absolute: [mmlu]
+
+reference:
+  mode: eager  # torch.compile: Dynamo cannot trace the MoE experts' torch._grouped_mm

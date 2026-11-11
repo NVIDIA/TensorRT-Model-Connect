@@ -129,6 +129,10 @@ class FakeLfm2Module final : public trtmc::ITrtModule {
         resources_.push_back(std::move(resource));
     }
 
+    void add_input_tensor(std::string name, std::vector<int64_t> shape, trtmc::DType dtype) {
+        add(std::move(name), std::move(shape), dtype, true);
+    }
+
     void set_tensor(const std::string& name, std::vector<int64_t> shape, trtmc::DType dtype) {
         auto& entry = entries_.at(name);
         entry.shape = std::move(shape);
@@ -271,6 +275,64 @@ void test_native_contract_rejection_and_capacity(cudaStream_t stream) {
     }
 }
 
+void test_active_key_rows_bucket_and_cap(cudaStream_t stream) {
+    trtmc::Lfm2KvCache cache(1, 100, 2, 4, stream, trtmc::DType::kFloat16);
+    check(cache.active_key_rows(1) == 32 && cache.active_key_rows(32) == 32 &&
+              cache.active_key_rows(33) == 64 && cache.active_key_rows(97) == 100 &&
+              cache.active_key_rows(100) == 100,
+          "active key rows round the valid context up to 32 and cap at capacity");
+    for (const int32_t invalid : {0, 101}) {
+        bool rejected = false;
+        try {
+            static_cast<void>(cache.active_key_rows(invalid));
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        check(rejected, "active key rows reject counts outside the cache capacity");
+    }
+}
+
+void test_key_positions_binding(cudaStream_t stream) {
+    {
+        FakeLfm2Module legacy(stream, trtmc::DType::kFloat16);
+        trtmc::Lfm2KvCache cache(1, 8, 2, 4, stream, trtmc::DType::kFloat16);
+        cache.bind_to(legacy);
+        trtmc::TensorMap inputs;
+        cache.prepare_step(inputs);
+        check(inputs.count("key_positions") == 0,
+              "engines without key_positions keep the full-capacity contract");
+    }
+    {
+        FakeLfm2Module module(stream, trtmc::DType::kFloat16);
+        module.add_input_tensor("key_positions", {-1}, trtmc::DType::kInt32);
+        trtmc::Lfm2KvCache cache(1, 8, 2, 4, stream, trtmc::DType::kFloat16);
+        cache.bind_to(module);
+        for (int32_t step = 0; step < 3; ++step) {
+            trtmc::TensorMap inputs;
+            cache.prepare_step(inputs);
+            const auto& rows = inputs.at("key_positions");
+            const auto* values = static_cast<const int32_t*>(rows.data);
+            bool iota = rows.shape == std::vector<int64_t>{8} && rows.dtype == trtmc::DType::kInt32;
+            for (int32_t index = 0; iota && index < 8; ++index)
+                iota = values[index] == index;
+            check(iota, "key_positions binds 0..R-1 for the bucketed active rows");
+            cache.advance();
+        }
+    }
+    {
+        FakeLfm2Module malformed(stream, trtmc::DType::kFloat16);
+        malformed.add_input_tensor("key_positions", {-1, 1}, trtmc::DType::kInt32);
+        trtmc::Lfm2KvCache cache(1, 8, 2, 4, stream, trtmc::DType::kFloat16);
+        bool rejected = false;
+        try {
+            cache.bind_to(malformed);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        check(rejected, "native KV rejects a key_positions input that is not int32 [R]");
+    }
+}
+
 void test_pipeline_uses_safe_one_token_progression(cudaStream_t stream) {
     auto module = std::make_unique<FakeLfm2Module>(stream, trtmc::DType::kFloat16);
     module->set_tensor("logits", {1, 6}, trtmc::DType::kFloat32);
@@ -397,6 +459,8 @@ int main() {
     }
     test_native_kv_and_double_buffered_conv(stream);
     test_native_contract_rejection_and_capacity(stream);
+    test_active_key_rows_bucket_and_cap(stream);
+    test_key_positions_binding(stream);
     test_pipeline_uses_safe_one_token_progression(stream);
     test_pipeline_chat_and_raw_bos_dedup(stream);
     test_pipeline_rejects_logits_contract_mismatch(stream);

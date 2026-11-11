@@ -27,8 +27,9 @@ class Adapter:
         config = AutoConfig.from_pretrained(spec.model, **options)
         config._attn_implementation = "eager"
         config._attn_implementation_internal = "eager"
-        self.model = AutoModelForCausalLM.from_pretrained(spec.model, torch_dtype=spec.dtype, config=config,
-                                                          attn_implementation="eager", **options).eval().to(spec.device)
+        self.model = host.maybe_compile(AutoModelForCausalLM.from_pretrained(
+            spec.model, torch_dtype=spec.dtype, config=config, attn_implementation="eager",
+            **options).eval().to(spec.device), spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         prompt = str(request.get("prompt", ""))

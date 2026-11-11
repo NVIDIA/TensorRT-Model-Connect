@@ -72,8 +72,8 @@ def test_equal_scores_pass_and_report_both_accuracies_and_agreement():
     assert entry["status"] == "pass" and entry["samples"] == 200
     assert entry["metrics"]["trtmc_score"] == entry["metrics"]["native_score"] == 75.0
     assert entry["metrics"]["answer_agreement"] == 1.0 and entry["metrics"]["test"]["outcome"] == "pass"
-    # 200 problems cannot show a 1-point margin even without disagreement: inconclusive, not pass.
-    assert absolute.judge(ITEM, problems, side(answers), side(answers))["status"] == "inconclusive"
+    # No regression passes whatever the problem count: there is no inconclusive outcome.
+    assert absolute.judge(ITEM, problems, side(answers), side(answers))["status"] == "pass"
 
 
 def test_a_regression_beyond_the_margin_fails_and_a_missing_answer_is_trtmcs_miss_or_an_error():
@@ -84,7 +84,7 @@ def test_a_regression_beyond_the_margin_fails_and_a_missing_answer_is_trtmcs_mis
     assert entry["status"] == "fail" and entry["metrics"]["regression_points"] == 4.0
     assert len(entry["reasons"]) == 1 and entry["failures"][0]["sample_id"] == "t/0"
     within = absolute.judge({**ITEM, "gate": {"margin": 5.0}}, problems, side(trtmc), side(native))
-    assert within["status"] == "inconclusive"  # below the margin, but not shown to be
+    assert within["status"] == "pass"  # 4 points against a margin of 5
     assert "TRTMC 96.00 vs native 100.00" in counted(entry)
     missed = absolute.judge(ITEM, problems, side({index: True for index in range(199)}), side(native))
     assert missed["samples"] == 200 and missed["counts"]["native_only"] == 1  # TRTMC's miss is a wrong answer
@@ -100,7 +100,9 @@ def test_rejudge_reapplies_a_gate_to_the_recorded_counts():
     assert absolute.status(entry)[0] == "pass"
     tight = {**entry, "gate": {"margin": 0.2}}
     tight["metrics"] = {**entry["metrics"], "test": absolute.binary_test(tight)}
-    assert absolute.status(tight)[0] == "inconclusive"
+    assert absolute.status(tight)[0] == "fail"  # 0.3 points against a margin of 0.2
+    old = {**entry, "metrics": {**entry["metrics"], "test": {"outcome": "inconclusive", "regression_points": 0.3}}}
+    assert absolute.status(old)[0] == "pass"  # a report written before: decided on its regression
 
 
 def test_sampled_models_are_judged_on_per_problem_seed_means():
@@ -109,8 +111,8 @@ def test_sampled_models_are_judged_on_per_problem_seed_means():
     native = {"records": {f"seed{s}": {i: {"passed": i < 7} for i in range(10)} for s in (1, 2)}, "exit": {}}
     entry = absolute.judge({**ITEM, "gate": {"margin": 15.0}}, problems, candidate, native)
     assert entry["metrics"]["regression_points"] == pytest.approx(10.0)
-    assert len(entry["metrics"]["per_problem_regression"]) == 10 and entry["status"] == "inconclusive"
-    assert absolute.judge({**ITEM, "gate": {"margin": 30.0}}, problems, candidate, native)["status"] == "pass"
+    assert len(entry["metrics"]["per_problem_regression"]) == 10 and entry["status"] == "pass"
+    assert absolute.judge({**ITEM, "gate": {"margin": 5.0}}, problems, candidate, native)["status"] == "fail"
 
 
 DEFINITIONS = {"mmlu": {"plugin": "trtmc_mmlu", "suite": "mmlu-0shot", "gate": {"margin": 1.0},
@@ -406,7 +408,7 @@ def test_precomputed_scores_compare_as_a_corpus_mean():
     entry = absolute.judge(item, problems, side([80, 82, 84, 86]), side([81, 83, 85, 87]))
     assert entry["metrics"]["test"]["regression_points"] == 1.0 and entry["status"] == "pass"
     tight = absolute.judge({**item, "gate": {"margin": 1.0}}, problems, side([80, 82, 84, 86]), side([81, 83, 85, 87]))
-    assert tight["status"] == "inconclusive"  # exactly at the margin
+    assert tight["status"] == "pass"  # exactly at the margin
 
 
 def test_trtmcs_failed_requests_are_wrong_answers_with_their_reason(tmp_path):
@@ -497,6 +499,65 @@ def test_the_native_side_tries_the_next_precision(tmp_path):
     assert started[-1] == ("reference", "fp32", 1)  # smoke mode: one copy
 
 
+@pytest.mark.parametrize("compiles", [True, False])
+def test_the_native_side_answers_compiled_or_else_eager_in_its_place(tmp_path, monkeypatch, compiles):
+    from contextlib import contextmanager
+
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.services import ServiceError
+
+    started, superseded = [], []
+
+    @contextmanager
+    def serving_replicas(environment, model, backend, out, *, mode, precision, compile_fallback=None, **kwargs):
+        started.append((out.name, mode, compile_fallback))
+        yield {"replicas": 1}
+        if mode == "compile" and not compiles:  # as serving() does when the server stopped serving
+            raise ServiceError("the torch.compile reference stopped serving: FailOnRecompileLimitHit")
+
+    monkeypatch.setattr(absolute, "serving_replicas", serving_replicas)
+    monkeypatch.setattr(absolute, "run_side", lambda *args: {"records": {"greedy": {0: {"passed": True}}}, "failed": {}})
+    monkeypatch.setattr(absolute.execution, "supersede", lambda start: superseded.append(start))
+    model = {"absolute": [{"suite": "s"}], "reference": {"mode": "compile", "perf_precision": "fp16", "precision": "fp32"}}
+    native = absolute.run_native(Environment({"native_replicas": 1}), model, "python", {"s": [{}]}, tmp_path)
+    assert native["precision"] == "fp16" and "fallback_from" not in native
+    if compiles:
+        assert native["mode"] == "compile" and "compile_fallback" not in native and not superseded
+        assert started == [("absolute-native-server-compile-fp16", "compile", None)]
+        return
+    assert native["mode"] == "eager" and "FailOnRecompileLimitHit" in native["compile_fallback"] and superseded
+    assert [call[:2] for call in started] == [("absolute-native-server-compile-fp16", "compile"),
+                                             ("absolute-native-server-eager-fp16", "eager")]
+    assert started[1][2] == native["compile_fallback"]  # the eager server's evidence says what it replaced
+    monkeypatch.setattr(absolute, "judge_in_capacity", lambda *args: {"status": "pass"})
+    entry, = absolute.entries(model, {"s": [{}]}, {"s": {}}, native, None)
+    assert entry["native"]["mode"] == "eager" and "FailOnRecompileLimitHit" in entry["native"]["compile_fallback"]
+    assert any(note.startswith("native torch.compile failed") for note in entry["notes"])
+
+
+def test_an_incomplete_compiled_run_answers_again_in_eager_mode(tmp_path, monkeypatch):
+    """A request that timed out while the compiled model kept compiling leaves the compiled run incomplete:
+    eager answers in its place, and its own incomplete answers are returned (fewer copies may answer them)."""
+    from contextlib import contextmanager
+
+    from trtmc_aiperf_qual.config import Environment
+
+    modes = []
+
+    @contextmanager
+    def serving_replicas(environment, model, backend, out, *, mode, **kwargs):
+        modes.append(mode)
+        yield {"replicas": 1}
+
+    partial = {"records": {"greedy": {0: {"passed": True}}}, "failed": {"greedy": "1 of 2 requests timed out"}}
+    monkeypatch.setattr(absolute, "serving_replicas", serving_replicas)
+    monkeypatch.setattr(absolute, "run_side", lambda *args: partial)
+    model = {"absolute": [{"suite": "s"}], "reference": {"mode": "compile", "perf_precision": "fp16", "precision": "fp32"}}
+    native = absolute.run_native(Environment({"native_replicas": 1}), model, "python", {"s": [{}, {}]}, tmp_path)
+    assert modes == ["compile", "eager"] and native["mode"] == "eager" and native["runs"] == {"s": partial}
+    assert "incomplete under torch.compile: s: 1 of 2 requests timed out" in native["compile_fallback"]
+
+
 def test_native_copies_fit_the_free_gpu_memory():
     from trtmc_aiperf_qual.services import replicas_that_fit
 
@@ -527,7 +588,7 @@ def test_workload_timings_of_concurrent_native_copies_are_informational_only():
     native = {"backend": "reference", "precision": "fp16", "runs": {"s": side}, "replicas": 4}
     [entry] = absolute.entries(model, {"s": problems}, {"s": side}, native, None)
     assert entry["native"]["replicas"] == 4 and entry["workload_perf"]["light"] == "white"
-    assert "not comparable" in entry["workload_perf"]["note"] and entry["status"] == "inconclusive"
+    assert "not comparable" in entry["workload_perf"]["note"] and entry["status"] == "pass"
 
 
 def test_an_adapter_checkpoint_without_a_tokenizer_uses_the_base_models(monkeypatch):
@@ -556,10 +617,9 @@ def test_native_absolute_score_does_not_override_conversion_difference():
         value["metrics"]["test"] = absolute.binary_test(value)
         return value
 
-    status, reasons = absolute.status(entry(0.53, {"margin": 1.0, "min_native": 30.0}))  # gpt-oss on MMLU
-    assert status == "inconclusive" and "regression" in reasons[0]
-    assert absolute.status(entry(44.0, {"margin": 1.0, "min_native": 30.0}))[0] == "inconclusive"  # 10 problems
-    assert absolute.status(entry(0.0, {"margin": 1.0}))[0] == "inconclusive"  # no floor declared
+    assert absolute.status(entry(0.53, {"margin": 1.0, "min_native": 30.0})) == ("pass", [])  # gpt-oss on MMLU
+    assert absolute.status(entry(44.0, {"margin": 1.0, "min_native": 30.0}))[0] == "pass"  # 10 problems
+    assert absolute.status(entry(0.0, {"margin": 1.0}))[0] == "pass"  # no floor declared
 
     large = entry(0.0, {"margin": 5.0, "min_native": 10.0})
     large.update(samples=200, expected_samples=200, counts={"both_wrong": 200})

@@ -151,6 +151,18 @@ def make_inputs(ids, directory):
     return requests, expected
 
 
+def test_catalog_image_case_is_the_golden_image_request():
+    """trtmc-bench, and AIPerf's bundle build, run the catalog case: the golden snapshot's image request."""
+    golden = next(row for row in REFERENCE["cases"] if row["id"] == "image")
+    cases = [case for _, case in CASES.values() if "test_image" in case]
+    assert cases
+    for case in cases:
+        assert case["prompt"] == golden["prompt"]
+        assert case["max_new_tokens"] == REFERENCE["sampling"]["max_tokens"]
+        assert Path(case["test_image"]).name in REFERENCE["assets"]
+        assert (ROOT / case["test_image"]).is_file()
+
+
 def _ned(a, b):
     row = list(range(len(b) + 1))
     for i, x in enumerate(a, 1):

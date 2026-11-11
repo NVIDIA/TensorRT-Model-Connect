@@ -283,3 +283,44 @@ def test_ltx_rotate_half_matrix_rotates_within_each_head() -> None:
 
     with pytest.raises(ValueError, match="divisible"):
         _make_ltx_rotate_half_matrix(7, 2, interleaved=True)
+
+
+def _rope_oracle(x: np.ndarray, cos: np.ndarray, sin: np.ndarray, num_heads: int) -> np.ndarray:
+    matrix = _make_ltx_rotate_half_matrix(x.shape[1], num_heads, interleaved=True)
+    return x * cos + (x @ matrix) * sin
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_rope_slice_concat_matches_the_rotate_half_matrix() -> None:
+    """The slice/concat rotate-half gives the matrix result (exact in float32, fp16 in and out)."""
+    import tensorrt as trt
+    import torch
+
+    from families.ltx_video.ltx_dit_builder import _apply_ltx_rope
+
+    seq, dim, heads = 12, 64, 2
+    rng = np.random.default_rng(0)
+    x = rng.normal(0.0, 1.0, (seq, dim)).astype(np.float16)
+    cos = rng.uniform(-1.0, 1.0, (seq, dim)).astype(np.float32)
+    sin = rng.uniform(-1.0, 1.0, (seq, dim)).astype(np.float32)
+
+    builder = trt.Builder(trt.Logger(trt.Logger.ERROR))
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    x_in = network.add_input("x", trt.float16, (seq, dim))
+    cos_c = network.add_constant((seq, dim), trt.Weights(cos)).get_output(0)
+    sin_c = network.add_constant((seq, dim), trt.Weights(sin)).get_output(0)
+    out = _apply_ltx_rope(network, x_in, cos_c, sin_c)
+    out.name = "y"
+    network.mark_output(out)
+    plan = builder.build_serialized_network(network, builder.create_builder_config())
+    engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
+    context = engine.create_execution_context()
+    x_dev = torch.from_numpy(x).cuda()
+    y_dev = torch.empty((seq, dim), dtype=torch.float16, device="cuda")
+    context.set_tensor_address("x", x_dev.data_ptr())
+    context.set_tensor_address("y", y_dev.data_ptr())
+    assert context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+    torch.cuda.synchronize()
+    expected = _rope_oracle(x.astype(np.float32), cos, sin, heads)
+    np.testing.assert_allclose(y_dev.float().cpu().numpy(), expected, rtol=2e-3, atol=2e-3)

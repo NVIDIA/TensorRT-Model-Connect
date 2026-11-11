@@ -28,7 +28,7 @@ EVIDENCE = ("report.md", "report.json", "execution.jsonl", "execution.timing-rec
             "artifacts/candidate/server.log", "candidate/server.log")
 LIGHT_COLORS = {"green": "#1e8e3e", "yellow": "#b06000", "red": "#c5221f", "white": "#5f6368", "n/a": "#5f6368"}
 LEGEND = (("green", "Quality meets its criteria and task timings are available; dataset timings have no performance gate."),
-          ("yellow", "Performance within the margin of native, or an inconclusive accuracy difference. Inconclusive Acc is not a pass."),
+          ("yellow", "Performance within the margin of native (an inconclusive Acc of an older report is not a pass)."),
           ("red", "Accuracy or performance worse than native beyond the margin."),
           ("white", "No valid comparison: a build, run, or environment error, or results that cannot be compared."))
 STYLE = """
@@ -183,13 +183,16 @@ def _accuracy_values(items: Sequence[Mapping[str, Any]]) -> str:
 
 
 def _latency(profile: str, items: Sequence[Mapping[str, Any]], side: str) -> str:
-    """One side's p50 of each reported request (labelled when there are several)."""
+    """One side's p50 of each reported request (labelled when there are several); the native side's with the mode
+    that answered (compile, or eager)."""
     lines = []
     for item in items:
         timing = item.get(side) or {}
         unit = " / audio s" if timing.get("unit") or (item.get("candidate") or {}).get("unit") else ""
         label = f"<span class='detail'>{_e(request_label(profile, item))}</span> " if len(items) > 1 else ""
-        lines.append(f"<div>{label}{_e(ms(timing.get('p50_ms')))}{unit}</div>")
+        mode = (f" <span class='detail'>{_e(item['reference_mode'])}</span>"
+                if side == "reference" and item.get("reference_mode") and timing.get("p50_ms") is not None else "")
+        lines.append(f"<div>{label}{_e(ms(timing.get('p50_ms')))}{unit}{mode}</div>")
         if side == "candidate" and (note := measurement_note(item)):
             lines.append(f"<span class='detail'>{_e(note)}</span>")
     return "".join(lines) or "<span class='none'>—</span>"
@@ -248,7 +251,8 @@ def _performance(items: Sequence[Mapping[str, Any]]) -> str:
                 reasons += f" · {item['out_of_capacity']} capacity rejections excluded on both sides"
         else:
             reasons += " · repeated fixed-workload gate"
-        rows.append(f"<tr><td>{_e(item.get('request') or item.get('reference_mode'))}</td><td><span class='badge' "
+        name = " · ".join(str(part) for part in (item.get("reference_mode"), item.get("request")) if part)
+        rows.append(f"<tr><td>{_e(name)}</td><td><span class='badge' "
                     f"style='background:{color}'>{_e(light)}</span></td>"
                     f"<td>{_e(_ms(candidate.get('p50_ms')))}{unit}</td><td>{_e(_ms(reference.get('p50_ms')))}{unit}"
                     f" {_e(reference.get('precision') or '')}</td><td>{_e(reasons)}</td></tr>")

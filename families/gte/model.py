@@ -23,6 +23,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import config as config_module, encoder_builder, graph as g, rope
+from .quantization import calibrate_gte
 
 _SUPPORTED_TASKS = ("text_to_embedding",)
 
@@ -32,6 +33,10 @@ _SUPPORTED_TASKS = ("text_to_embedding",)
 # padded columns come out as exactly zero weight without putting a value
 # near the edge of the format into the graph.
 _MASK_FLOOR = -1.0e4
+
+# Work type per build precision. fp16 keeps the int32 inputs and the float32
+# output, so the runtime and the bundle do not change.
+_WORK_TYPES = {"fp32": np.float32, "fp16": np.float16}
 
 
 def _open_checkpoint(model_dir: Path) -> dict:
@@ -54,7 +59,10 @@ def _require_weights(weights: dict) -> None:
         raise KeyError("gte checkpoint is missing expected tensors: " + ", ".join(missing))
 
 
-def _builder(verbose):
+_DUAL_GEMM_KNOB = "peep:match_dual_gemm"
+
+
+def _builder(verbose, quant_ctx=None):
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
@@ -63,12 +71,23 @@ def _builder(verbose):
     # TF32 caps a matmul graph near 0.99998 cosine by default, which hides
     # real graph error behind a plausible-looking number.
     config.clear_flag(trt.BuilderFlag.TF32)
+    if quant_ctx is not None:
+        # Keep layer names so the plan inspector shows which kernels run.
+        config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+        if quant_ctx.has_fp8_weights and _DUAL_GEMM_KNOB in getattr(config, "all_build_routes", ""):
+            # TensorRT's fused dual-GEMM kernel fails to compile with scalar-scale FP8.
+            # The route is set only when this TensorRT build lists the knob.
+            config.build_route = f"-{_DUAL_GEMM_KNOB}=off"
     return builder, network, config
 
 
-def build_engine(weights, cfg, *, seq_len, verbose=False) -> bytes:
-    builder, network, config = _builder(verbose)
-    work_np = np.float32
+def build_engine(weights, cfg, *, seq_len, precision="fp32", verbose=False,
+                 quant_ctx=None) -> bytes:
+    builder, network, config = _builder(verbose, quant_ctx)
+    # The work type of the embedding, the projections, the rotary and the
+    # attention matmuls. The layer norms, the gelu and the attention softmax
+    # run in float32 either way (graph.py), and the engine I/O stays the same.
+    work_np = _WORK_TYPES[precision]
     head_dim = cfg["head_dim"]
 
     input_ids = network.add_input("input_ids", trt.int32, (seq_len,))
@@ -87,16 +106,17 @@ def build_engine(weights, cfg, *, seq_len, verbose=False) -> bytes:
 
     # (1 - mask) * floor, shaped to broadcast over [1, heads, seq, seq]: the
     # mask selects which *keys* may be attended, so it varies along the last
-    # axis and is flat along the query axis.
+    # axis and is flat along the query axis. It stays float32 at every
+    # precision, because the scores it is added to are float32 (graph.py).
     mask_float = network.add_cast(attention_mask, trt.float32).get_output(0)
     keep = network.add_shuffle(mask_float)
     keep.reshape_dims = (1, 1, 1, seq_len)
-    ones = g.add_constant(network, (1, 1, 1, 1), np.full((1,), 1.0), dtype=work_np)
+    ones = g.add_constant(network, (1, 1, 1, 1), np.full((1,), 1.0))
     dropped = network.add_elementwise(ones, keep.get_output(0),
                                       trt.ElementWiseOperation.SUB).get_output(0)
     additive = g.add_product(
         network, dropped,
-        g.add_constant(network, (1, 1, 1, 1), np.full((1,), _MASK_FLOOR), dtype=work_np))
+        g.add_constant(network, (1, 1, 1, 1), np.full((1,), _MASK_FLOOR)))
 
     cos_table, sin_table = rope.tables(seq_len, head_dim, cfg["rope_theta"],
                                        cfg["rope_scaling_factor"])
@@ -105,7 +125,9 @@ def build_engine(weights, cfg, *, seq_len, verbose=False) -> bytes:
     sin = g.add_constant(network, shape, sin_table.reshape(shape), dtype=work_np)
 
     hidden = encoder_builder.build_layers(network, hidden, weights, cfg, mask=additive,
-                                          cos=cos, sin=sin, dtype=work_np)
+                                          cos=cos, sin=sin, dtype=work_np, quant=quant_ctx)
+    if hidden.dtype != trt.float32:
+        hidden = network.add_cast(hidden, trt.float32).get_output(0)
     hidden.name = "last_hidden_state"
     network.mark_output(hidden)
 
@@ -133,20 +155,32 @@ def build(request, writer) -> None:
         raise NotImplementedError("gte does not take an image")
     if request.video_num_frames is not None:
         raise NotImplementedError("gte does not support video_num_frames")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("gte does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"gte supports quantization fp8 or none; got {request.quantization!r}")
     if request.fp32_layers:
         raise NotImplementedError("gte does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
         raise NotImplementedError("gte does not support MTP speculative decoding")
 
-    # fp32 only, for the same reason the rotary encoder next door is fp32
-    # only: no fp16 number has been measured against the reference here, and
-    # an accepted-but-unmeasured precision builds a bundle nothing checks.
+    # fp32 (the default) or fp16. Measured on gte-base-en-v1.5 against the
+    # reference on held-out retrieval data (SciFact at 512 tokens, 2WikiMQA at
+    # 8192), fp16 keeps the [CLS] cosine at 0.99999 or higher and the same
+    # nDCG@10, with no non-finite output. Three parts stay float32 (graph.py):
+    # the layer-norm statistics, because they must (the residual before mlp_ln
+    # reaches 474 and its squared deviation from the mean, 2.2e+05, overflows
+    # fp16; an all-fp16 layer norm drops the cosine to 0.36), the gelu (a wrong fused
+    # fp16 kernel on TensorRT 11.1 and B200) and the attention softmax (faster).
+    # The fp16 E2E case has its own tolerance (tests/test_e2e.py).
     precision = str(request.precision).lower()
-    if precision != "fp32":
+    if precision not in _WORK_TYPES:
         raise NotImplementedError(
-            f"gte builds fp32 only; {precision} is not qualified for this family")
+            f"gte builds fp32 or fp16; {precision} is not qualified for this family")
+    # FP8 is built on the fp16 graph: Dequantize and the quantized matmuls run in
+    # fp16, and the parts the fp16 graph keeps in float32 stay float32.
+    if request.quantization == "fp8" and precision != "fp16":
+        raise NotImplementedError(
+            f"gte builds fp8 with --precision fp16 only, not {precision}")
 
     # Checked before the checkpoint is opened: the request is either
     # buildable or it is not, and that does not depend on the weights.
@@ -168,9 +202,16 @@ def build(request, writer) -> None:
         raise NotImplementedError(
             f"gte was trained to {cfg['max_positions']} positions, not {seq_len}")
 
+    # fp8: the projections are quantized from the original checkpoint, so the weights
+    # above stay float32 and only the Q/DQ constants of quantized projections are new.
+    quant_ctx = None
+    if request.quantization == "fp8":
+        quant_ctx = calibrate_gte(weights, cfg, "fp8")
+
     writer.set_header(family="gte", task=request.task, backend=request.backend)
     writer.add_bytes("model.plan", build_engine(
-        weights, cfg, seq_len=seq_len, verbose=bool(request.verbose)))
+        weights, cfg, seq_len=seq_len, precision=precision, verbose=bool(request.verbose),
+        quant_ctx=quant_ctx))
     tokenizer = model_dir / "tokenizer.json"
     if not tokenizer.is_file():
         raise FileNotFoundError(f"missing gte tokenizer: {tokenizer}")

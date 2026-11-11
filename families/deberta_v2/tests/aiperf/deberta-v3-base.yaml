@@ -1,0 +1,4 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+exclude: TRTMC frames the text with [CLS] and [SEP]; the checkpoint's tokenizer.json adds neither, so the generic encode reference returns two rows fewer

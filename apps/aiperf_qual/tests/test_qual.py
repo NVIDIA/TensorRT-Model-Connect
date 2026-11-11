@@ -198,6 +198,37 @@ def test_verdict_categories(accuracy, lights, category):
     assert judge.verdict(result, expected_suites=["s"], expected_modes=1)["category"] == category
 
 
+@pytest.mark.parametrize("performance, perf", [
+    ([{"reference_mode": "compile", "qualifying": True, "light": "green"}], "green"),
+    # eager timed in place of a failed torch.compile decides Perf as the configured mode would have
+    ([{"reference_mode": "eager", "configured_mode": "compile", "qualifying": True, "light": "red"}], "red"),
+    ([{"reference_mode": "eager", "qualifying": True, "light": "green"},
+      {"reference_mode": "compile", "qualifying": False, "light": "red"}], "green"),  # a second mode: reported only
+    ([{"reference_mode": "compile", "qualifying": True, "light": "n/a"}], "error"),
+])
+def test_the_first_configured_native_mode_decides_perf(performance, perf):
+    result = {"accuracy": [{"suite": "s", "status": "pass"}], "performance": performance}
+    assert judge.verdict(result, expected_suites=["s"], expected_modes=1)["perf"] == perf
+
+
+def test_a_profile_pins_its_native_model_to_eager(tmp_path):
+    import shutil
+
+    import yaml
+
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.models import CONFIG_ROOT, resolve_model
+
+    root = tmp_path / "config"
+    shutil.copytree(CONFIG_ROOT, root)
+    override = root / "models" / "gpt2-125m.yaml"
+    config = yaml.safe_load(override.read_text()) or {}
+    config["reference"] = {**(config.get("reference") or {}), "mode": "eager"}
+    override.write_text(yaml.safe_dump(config))
+    gpt2 = resolve_model("gpt2-125m", Environment({"repo": str(REPOSITORY)}), root)
+    assert gpt2["reference"]["mode"] == "eager" and gpt2["performance"]["reference_modes"] == ["eager"]
+
+
 def test_numeric_parity_matches_shapes_exactly_and_vectors_by_cosine():
     from trtmc_aiperf_plugins.accuracy import compare_numeric
 
@@ -239,13 +270,14 @@ def test_models_are_derived_from_the_catalog_and_task_defaults():
     assert [(item["suite"], item["endpoint"]) for item in qwen["absolute"]] == [("mmlu-0shot", "chat")]
     assert qwen["candidate"]["bundle"] == "qwen3-0.6b-fp16/qwen3-0.6b-fp16.bundle" and not qwen["candidate"]["build"]
     assert qwen["performance"]["suite"]["source"] == {"kind": "catalog_testcase", "profile": "qwen3-0.6b-fp16"}
-    assert qwen["performance"]["reference_modes"] == ["eager"] and "service_metrics" not in qwen["performance"]
+    assert qwen["reference"]["mode"] == "compile" and qwen["performance"]["reference_modes"] == ["compile"]
+    assert "service_metrics" not in qwen["performance"]
     small = resolve_model("falcon-rw-1b", environment)  # MMLU is near chance: LAMBADA
     assert [item["suite"] for item in small["absolute"]] == ["lambada"] and small["candidate"]["max_sequence_length"] == 256
     detr = resolve_model("detr-resnet-50", environment)
-    coco, = detr["absolute"]  # COCO mAP in DETR's own class numbering at its score threshold
+    coco, = detr["absolute"]  # COCO mAP in DETR's own class numbering at the threshold its bundle fixes
     assert coco["metric_params"] == {"label_space": "coco-category-id"}
-    assert coco["suite_definition"]["request"] == {"score_threshold": 0.5}
+    assert coco["suite_definition"]["request"] == {}
     assert detr["reference"]["backend"] == "reference" and detr["reference"]["requirements"] == "families/detr/requirements.txt"
     stories = resolve_model("mixtral-stories-15m", environment)
     assert [item["suite"] for item in stories["absolute"]] == ["tinystories"]
@@ -298,8 +330,9 @@ def test_a_family_definition_is_merged_over_config_models(tmp_path):
 
 
 def test_task_sdk_migrations_keep_their_tasks_qualification():
-    """Encoders migrated to text_to_pooled_features and Bark to text_to_audio keep encode's and audio
-    generation's benchmarks, and a profile's own suites still replace them (dpr-ctx-encoder)."""
+    """Encoders migrated to text_to_pooled_features, Bark to text_to_audio and the eagle_vlm reranker to
+    text_query_documents_to_relevance keep their old benchmarks, and a profile's own suites still replace them
+    (dpr-ctx-encoder)."""
     from trtmc_aiperf_qual.models import resolve_model
 
     for profile in ("fnet-base", "deberta-base", "distilbert-base-uncased"):
@@ -312,6 +345,47 @@ def test_task_sdk_migrations_keep_their_tasks_qualification():
     assert (bark["task"], bark["operation"]) == ("text_to_audio", "generate_audio")
     assert [item["check"] for item in bark["supplementary"]] == ["tts_intelligibility"]
     assert bark["performance"]["output_grader"] == "parity_audio"
+    rerank = resolve_model("nemotron-rerank-vl-1b-v2", _environment())
+    assert (rerank["task"], rerank["operation"]) == ("text_query_documents_to_relevance", "rerank")
+    assert [item["suite"] for item in rerank["absolute"]] == ["scifact-rerank"]
+    assert rerank["performance"]["output_grader"] == "parity_scores"
+
+
+def test_image_to_boxes_keeps_coco_without_the_threshold_its_tasks_do_not_declare():
+    """The Task SDK detection families fix their score threshold in the bundle and reject a score_threshold config
+    (422): image_to_boxes keeps COCO mAP and the box parity, and no longer sends the suite's threshold."""
+    from trtmc_aiperf_qual.models import resolve_model
+
+    environment = _environment()
+    for profile in ("yolov8n", "yolov10n", "yolov5n"):
+        model = resolve_model(profile, environment)
+        coco, = model["absolute"]
+        assert (coco["suite"], coco["metric"], model["performance"]["output_grader"]) == (
+            "coco-map", "coco_map", "parity_boxes")
+        assert "score_threshold" not in coco["suite_definition"].get("request", {})
+    yolo11, = resolve_model("yolo11n", environment)["absolute"]  # object_detection still takes it
+    assert yolo11["suite_definition"]["request"] == {"score_threshold": 0.25}
+
+
+def test_migrated_text_encoders_keep_their_benchmarks():
+    """text_to_embedding keeps embedding's benchmarks; text_to_token_features keeps encode's on every token."""
+    import yaml
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+
+    tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
+    assert tasks["text_to_embedding"] == tasks["embedding"]
+    assert tasks["text_to_token_features"] == {**tasks["encoding"], "reference": {"options": {"all_tokens": True}}}
+
+
+def test_text_encoders_the_generic_references_cannot_serve_are_excluded_with_a_reason():
+    from trtmc_aiperf_qual.selection import catalog
+
+    excluded = {profile.name: profile.excluded for profile in catalog(REPOSITORY)}
+    assert all(excluded[name] for name in ("gte-base-en-v1_5", "gte-base-en-v1_5-fp16", "gte-base-en-v1_5-fp8",
+                                           "nomic-embed-text-v1_5", "nomic-embed-text-v1_5-fp16",
+                                           "deberta-v3-base", "deberta-v3-base-fp16"))
+    assert not any(excluded[name] for name in ("nemotron-embed-vl-1b-v2", "albert-base-token-features"))
 
 
 def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():
@@ -325,9 +399,7 @@ def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():
     not_qualified = {  # Tasks no generic native reference or benchmark serves yet
         "structured_decision": "no generic native adapter for decide",
         "image_text_to_boxes": "no generic native adapter for detect_prompted",
-        "text_to_token_features": "the generic encode reference returns the first token's features only",
         "image_to_token_and_pooled_features": "no image feature benchmark outside the families that state one",
-        "text_to_embedding": "query and document roles; the generic embed reference mean-pools",
         "speech_transcription": "the generic transcribe reference loads Whisper-style speech-seq2seq models only",
     }
     tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
@@ -610,11 +682,13 @@ def test_quantized_profiles_take_their_bases_native_reference_and_benchmarks():
     assert canary["qualified_as"] == "canary-1b-v2" and "model" not in canary["reference"]
     assert canary["reference"]["adapter"] == "families/canary/reference/adapter.py"
     assert canary["reference"]["revision"] == canary["candidate"]["revision"]
-    # The base's candidate settings stay its own: the variant builds its catalog bundle.
-    personaplex = resolve_model("personaplex-7b-fp8", environment)
-    assert personaplex["reference"]["adapter"] == resolve_model("personaplex-7b", environment)["reference"]["adapter"]
+    # The base's candidate settings stay its own. PersonaPlex FP8 quantizes its base's checkpoint at build time and
+    # names the base's prepared model directory itself, so both bundles hold the benchmark's system prompt.
+    personaplex, base = resolve_model("personaplex-7b-fp8", environment), resolve_model("personaplex-7b", environment)
+    assert personaplex["reference"]["adapter"] == base["reference"]["adapter"]
     assert personaplex["candidate"]["bundle"] == "personaplex-7b-fp8/personaplex-7b-fp8.bundle"
-    assert "model_directory" not in personaplex["candidate"]
+    assert personaplex["candidate"]["model_directory"] == base["candidate"]["model_directory"]
+    assert personaplex["candidate"]["quantization"] == "fp8"
     # Without an unquantized profile, the highest precision there is.
     nvfp4 = resolve_model("llama-3.1-8b-nvfp4", environment)
     assert (nvfp4["qualified_as"], nvfp4["reference"]["model"]) == ("llama-3.1-8b-fp8", "nvidia/Llama-3.1-8B-Instruct-FP8")

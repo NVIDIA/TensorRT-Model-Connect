@@ -23,7 +23,8 @@ from . import encoder_builder, graph as g
 PREFIX = "vision_model"
 
 
-def build_vision_tower(network, pixel_values, weights, cfg, projection, *, dtype=np.float32):
+def build_vision_tower(network, pixel_values, weights, cfg, projection, *, dtype=np.float32,
+                       quant_ctx=None):
     """``[1, 3, H, W]`` pixels to an unnormalised ``[1, projection_dim]`` embedding."""
     width = cfg["hidden_size"]
     patch = cfg["patch_size"]
@@ -51,7 +52,8 @@ def build_vision_tower(network, pixel_values, weights, cfg, projection, *, dtype
     hidden = g.add_layer_norm(network, hidden, weights[f"{PREFIX}.pre_layrnorm.weight"],
                               weights[f"{PREFIX}.pre_layrnorm.bias"], cfg["eps"])
 
-    hidden = encoder_builder.build_layers(network, hidden, weights, PREFIX, cfg, dtype=dtype)
+    hidden = encoder_builder.build_layers(network, hidden, weights, PREFIX, cfg, dtype=dtype,
+                                          quant_ctx=quant_ctx)
 
     class_row = network.add_slice(hidden, start=(0, 0), shape=(1, width), stride=(1, 1))
     pooled = g.add_layer_norm(network, class_row.get_output(0),

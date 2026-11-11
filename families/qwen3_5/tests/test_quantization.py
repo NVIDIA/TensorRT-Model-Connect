@@ -147,6 +147,7 @@ def test_calibrate_reads_every_projection_bit_exact(tmp_path: Path) -> None:
     tensors = _write_checkpoint(tmp_path, quantized=True)
     ctx = _calibrate(tmp_path)
 
+    assert ctx.has_nvfp4_weights
     # deltanet: 5 mixer + 3 mlp; attention: q split into 2, k, v, o + 3 mlp
     assert len(ctx.scales) == 8 + 8
     qkv = ctx.scales["layer.0.deltanet_in_proj_qkv"]
@@ -351,6 +352,7 @@ def test_fp8_calibrate_quantizes_every_projection(tmp_path: Path, monkeypatch) -
     tensors = _write_checkpoint(tmp_path, quantized=False)
     ctx = _fp8_context(tmp_path, monkeypatch)
     assert ctx.has_fp8_weights
+    assert not ctx.has_nvfp4_weights
     assert set(ctx.scales) == set(_all_projection_names()) | {"layer.1.w_gate_attn"}
 
     raw = tensors[f"{PREFIX}.0.mlp.down_proj.weight"].float().numpy()

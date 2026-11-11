@@ -29,6 +29,10 @@ from .quantization import append_build_route, configure_fp8_build
 from .config import resolve_rope_layer_schedule
 from .utils import const_in_work_dtype
 
+# Tactic-selection point for the native-KV active key-row count (typical chat
+# and benchmark contexts); any count from 1 to the cache capacity is valid.
+NATIVE_KV_ACTIVE_KEY_ROWS_OPTIMUM = 256
+
 
 _SCATTER_ND_KNOB = "kgen:fuse_scatter_nd"
 
@@ -192,9 +196,12 @@ def build_dual_profile_decoder_engine(
     attention_mask: trt.ITensor | None = None
     cache_write_indices: trt.ITensor | None = None
     key_value_lengths: trt.ITensor | None = None
+    key_positions: trt.ITensor | None = None
     if native_kv_cache:
         cache_write_indices = network.add_input("cache_write_indices", trt.int32, (1,))
         key_value_lengths = network.add_input("key_value_lengths", trt.int32, (1,))
+        # 0..R-1 for the cache rows attention reads; R is bucketed by the runtime.
+        key_positions = network.add_input("key_positions", trt.int32, (-1,))
     else:
         attention_mask = network.add_input("attention_mask", trt.float32, (-1, -1))
 
@@ -229,6 +236,13 @@ def build_dual_profile_decoder_engine(
         opt_cache_rows = max_cache_length
         prof.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
         prof.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
+        if native_kv_cache:
+            prof.set_shape(
+                "key_positions",
+                (1,),
+                (min(NATIVE_KV_ACTIVE_KEY_ROWS_OPTIMUM, max_cache_length),),
+                (max_cache_length,),
+            )
         if not native_kv_cache:
             prof.set_shape(
                 "attention_mask",
@@ -414,6 +428,7 @@ def build_dual_profile_decoder_engine(
             cache_write_indices,
             key_value_lengths,
             max_cache_length,
+            key_positions=key_positions,
         )
 
     present_k_outs: list[trt.ITensor] = []
@@ -520,6 +535,7 @@ def build_dual_profile_decoder_engine(
                 cache_v_inputs[layer_idx],
                 cache_write_indices,
                 native_attention_masks,
+                key_positions=key_positions,
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,

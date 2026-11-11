@@ -27,6 +27,7 @@ import tensorrt as trt
 
 from . import graph
 from .checkpoint import Checkpoint
+from .quantization import check_not_quantized, configure_fp8_build, create_quant_context
 
 
 if TYPE_CHECKING:
@@ -191,18 +192,23 @@ def _weights(checkpoint: Checkpoint, dtype: np.dtype) -> dict[str, np.ndarray]:
     return result
 
 
-def _conv(network, tensor, weights, prefix: str, dtype, *, stride: int = 1, padding=None):
+def _conv(
+    network, tensor, weights, prefix: str, dtype, *, stride: int = 1, padding=None, quant_ctx=None
+):
     weight = weights[f"{prefix}.weight"]
     kernel = (int(weight.shape[2]), int(weight.shape[3]))
     pad = _SAME_PADDING[kernel] if padding is None else padding
     vertical, horizontal = (pad, pad) if isinstance(pad, int) else pad
-    layer = network.add_convolution_nd(
-        tensor,
-        num_output_maps=int(weight.shape[0]),
-        kernel_shape=kernel,
-        kernel=trt.Weights(np.ascontiguousarray(weight, dtype=dtype)),
-        bias=trt.Weights(np.ascontiguousarray(weights[f"{prefix}.bias"], dtype=dtype)),
-    )
+    if quant_ctx is not None and quant_ctx.should_quantize(prefix):
+        layer = quant_ctx.convolution(network, tensor, prefix, weights[f"{prefix}.bias"])
+    else:
+        layer = network.add_convolution_nd(
+            tensor,
+            num_output_maps=int(weight.shape[0]),
+            kernel_shape=kernel,
+            kernel=trt.Weights(np.ascontiguousarray(weight, dtype=dtype)),
+            bias=trt.Weights(np.ascontiguousarray(weights[f"{prefix}.bias"], dtype=dtype)),
+        )
     if layer is None:
         raise RuntimeError("TensorRT rejected an Inception-v4 convolution")
     layer.stride_nd = (stride, stride)
@@ -210,11 +216,11 @@ def _conv(network, tensor, weights, prefix: str, dtype, *, stride: int = 1, padd
     return graph.relu(network, layer.get_output(0))
 
 
-def _chain(network, tensor, weights, prefix: str, dtype):
+def _chain(network, tensor, weights, prefix: str, dtype, quant_ctx=None):
     """Apply prefix.0, prefix.1, ... for as many steps as the weights define."""
     step = 0
     while f"{prefix}.{step}.weight" in weights:
-        tensor = _conv(network, tensor, weights, f"{prefix}.{step}", dtype)
+        tensor = _conv(network, tensor, weights, f"{prefix}.{step}", dtype, quant_ctx=quant_ctx)
         step += 1
     if step == 0:
         raise ValueError(f"Inception-v4 {prefix} has no convolutions")
@@ -236,8 +242,23 @@ def _chain_then_valid(network, tensor, weights, prefix: str, dtype):
     return tensor
 
 
-def _block(network, tensor, weights, index: int, kind: str, dtype):
+def _pool_source(network, tensor, prefix: str, quant_ctx):
+    """The input of a quantized block's pooling branch: the dequantized FP8 block input.
+
+    The convolutions of the block quantize the same tensor with the same scale, so the
+    block input is needed only in FP8 and its producers can write FP8 directly.
+    """
+    if quant_ctx is None or not quant_ctx.should_quantize(prefix):
+        return tensor
+    return quant_ctx.dequantized_input(network, tensor, prefix)
+
+
+def _block(network, tensor, weights, index: int, kind: str, dtype, quant_ctx=None):
     name = f"features.{index}"
+
+    def branch_conv(source, prefix: str, **options):
+        return _conv(network, source, weights, prefix, dtype, quant_ctx=quant_ctx, **options)
+
     if kind == "mixed3a":
         pool = graph.max_pool(network, tensor, kernel=3, stride=2, padding=0)
         conv = _conv(network, tensor, weights, f"{name}.conv", dtype, stride=2, padding=0)
@@ -254,54 +275,57 @@ def _block(network, tensor, weights, index: int, kind: str, dtype):
         left = _conv(network, left, weights, f"{name}.branch0.1", dtype, padding=0)
         right = _chain_then_valid(network, tensor, weights, f"{name}.branch1", dtype)
         return graph.concatenate(network, [left, right])
+    # The pooling branch of a quantized block reads the same FP8 input as its convolutions.
+    first = f"{name}.branch0.0" if kind == "reduction_b" else f"{name}.branch0"
+    pooled = _pool_source(network, tensor, first, quant_ctx)
     if kind == "inception_ab":
         # InceptionA and InceptionB share a shape: a 1x1 branch, two chains of
         # differing depth, and a pooled branch. Walk whatever depth the
         # checkpoint declares rather than tabulating it.
-        branch0 = _conv(network, tensor, weights, f"{name}.branch0", dtype)
-        branch1 = _chain(network, tensor, weights, f"{name}.branch1", dtype)
-        branch2 = _chain(network, tensor, weights, f"{name}.branch2", dtype)
-        branch3 = graph.average_pool(network, tensor, kernel=3, stride=1, padding=1)
-        branch3 = _conv(network, branch3, weights, f"{name}.branch3.1", dtype)
+        branch0 = branch_conv(tensor, f"{name}.branch0")
+        branch1 = _chain(network, tensor, weights, f"{name}.branch1", dtype, quant_ctx)
+        branch2 = _chain(network, tensor, weights, f"{name}.branch2", dtype, quant_ctx)
+        branch3 = graph.average_pool(network, pooled, kernel=3, stride=1, padding=1)
+        branch3 = branch_conv(branch3, f"{name}.branch3.1")
         return graph.concatenate(network, [branch0, branch1, branch2, branch3])
     if kind == "reduction_a":
-        branch0 = _conv(network, tensor, weights, f"{name}.branch0", dtype, stride=2, padding=0)
-        branch1 = _conv(network, tensor, weights, f"{name}.branch1.0", dtype)
-        branch1 = _conv(network, branch1, weights, f"{name}.branch1.1", dtype)
-        branch1 = _conv(network, branch1, weights, f"{name}.branch1.2", dtype, stride=2, padding=0)
-        pool = graph.max_pool(network, tensor, kernel=3, stride=2, padding=0)
+        branch0 = branch_conv(tensor, f"{name}.branch0", stride=2, padding=0)
+        branch1 = branch_conv(tensor, f"{name}.branch1.0")
+        branch1 = branch_conv(branch1, f"{name}.branch1.1")
+        branch1 = branch_conv(branch1, f"{name}.branch1.2", stride=2, padding=0)
+        pool = graph.max_pool(network, pooled, kernel=3, stride=2, padding=0)
         return graph.concatenate(network, [branch0, branch1, pool])
     if kind == "reduction_b":
-        branch0 = _conv(network, tensor, weights, f"{name}.branch0.0", dtype)
-        branch0 = _conv(network, branch0, weights, f"{name}.branch0.1", dtype, stride=2, padding=0)
-        branch1 = _conv(network, tensor, weights, f"{name}.branch1.0", dtype)
-        branch1 = _conv(network, branch1, weights, f"{name}.branch1.1", dtype)
-        branch1 = _conv(network, branch1, weights, f"{name}.branch1.2", dtype)
-        branch1 = _conv(network, branch1, weights, f"{name}.branch1.3", dtype, stride=2, padding=0)
-        pool = graph.max_pool(network, tensor, kernel=3, stride=2, padding=0)
+        branch0 = branch_conv(tensor, f"{name}.branch0.0")
+        branch0 = branch_conv(branch0, f"{name}.branch0.1", stride=2, padding=0)
+        branch1 = branch_conv(tensor, f"{name}.branch1.0")
+        branch1 = branch_conv(branch1, f"{name}.branch1.1")
+        branch1 = branch_conv(branch1, f"{name}.branch1.2")
+        branch1 = branch_conv(branch1, f"{name}.branch1.3", stride=2, padding=0)
+        pool = graph.max_pool(network, pooled, kernel=3, stride=2, padding=0)
         return graph.concatenate(network, [branch0, branch1, pool])
     # inception_c: two branches split into asymmetric pairs and rejoin.
-    branch0 = _conv(network, tensor, weights, f"{name}.branch0", dtype)
-    branch1 = _conv(network, tensor, weights, f"{name}.branch1_0", dtype)
+    branch0 = branch_conv(tensor, f"{name}.branch0")
+    branch1 = branch_conv(tensor, f"{name}.branch1_0")
     branch1 = graph.concatenate(
         network,
         [
-            _conv(network, branch1, weights, f"{name}.branch1_1a", dtype),
-            _conv(network, branch1, weights, f"{name}.branch1_1b", dtype),
+            branch_conv(branch1, f"{name}.branch1_1a"),
+            branch_conv(branch1, f"{name}.branch1_1b"),
         ],
     )
-    branch2 = _conv(network, tensor, weights, f"{name}.branch2_0", dtype)
-    branch2 = _conv(network, branch2, weights, f"{name}.branch2_1", dtype)
-    branch2 = _conv(network, branch2, weights, f"{name}.branch2_2", dtype)
+    branch2 = branch_conv(tensor, f"{name}.branch2_0")
+    branch2 = branch_conv(branch2, f"{name}.branch2_1")
+    branch2 = branch_conv(branch2, f"{name}.branch2_2")
     branch2 = graph.concatenate(
         network,
         [
-            _conv(network, branch2, weights, f"{name}.branch2_3a", dtype),
-            _conv(network, branch2, weights, f"{name}.branch2_3b", dtype),
+            branch_conv(branch2, f"{name}.branch2_3a"),
+            branch_conv(branch2, f"{name}.branch2_3b"),
         ],
     )
-    branch3 = graph.average_pool(network, tensor, kernel=3, stride=1, padding=1)
-    branch3 = _conv(network, branch3, weights, f"{name}.branch3.1", dtype)
+    branch3 = graph.average_pool(network, pooled, kernel=3, stride=1, padding=1)
+    branch3 = branch_conv(branch3, f"{name}.branch3.1")
     return graph.concatenate(network, [branch0, branch1, branch2, branch3])
 
 
@@ -310,6 +334,7 @@ def _build_engine(
     checkpoint: Checkpoint,
     precision: str,
     verbose: bool,
+    quantization: str | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     if precision == "fp16":
         numpy_dtype, tensor_dtype = np.float16, trt.float16
@@ -319,6 +344,16 @@ def _build_engine(
         raise ValueError(f"unsupported timm Inception-v4 precision: {precision}")
     config = _preprocess_config(raw)
     blocks = _layout(checkpoint)
+    quant_ctx = None
+    if quantization is not None:
+        quant_ctx = create_quant_context(
+            config,
+            blocks,
+            checkpoint,
+            lambda prefix: _fold(checkpoint, prefix, np.float32),
+            quantization,
+            precision=precision,
+        )
     weights = _weights(checkpoint, numpy_dtype)
     if weights["classifier.weight"].shape[0] != config["num_classes"]:
         raise ValueError("Inception-v4 classifier dimensions do not match config.json")
@@ -342,6 +377,7 @@ def _build_engine(
     builder_config.max_aux_streams = 0
     builder_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+    configure_fp8_build(builder_config, quant_ctx)
 
     pixels = network.add_input("pixel_values", trt.float32, (1, 3, height, width))
     if pixels is None:
@@ -362,7 +398,7 @@ def _build_engine(
                 stride=stride, padding=padding,
             )
             continue
-        hidden = _block(network, hidden, weights, index, kind, numpy_dtype)
+        hidden = _block(network, hidden, weights, index, kind, numpy_dtype, quant_ctx)
 
     shape = hidden.shape
     hidden = graph.global_average_pool(network, hidden, int(shape[2]), int(shape[3]))
@@ -410,8 +446,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_inception_v4 does not support context parallelism")
     if request.task != "image_to_class_scores":
         raise ValueError("timm_inception_v4 supports only task=image_to_class_scores")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("timm_inception_v4 does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"timm_inception_v4 supports quantization fp8 or none, got {request.quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("timm_inception_v4 does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -419,11 +457,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     _positive_int(request.max_sequence_length or 1, "max_sequence_length")
     model_dir = Path(request.model_dir)
     raw = _read_config(model_dir)
+    checkpoint = Checkpoint.open(model_dir)
+    quantization = None if request.quantization in {None, "none"} else str(request.quantization)
+    if quantization is not None:
+        check_not_quantized(model_dir, raw, checkpoint)
     plan, runtime = _build_engine(
         raw,
-        Checkpoint.open(model_dir),
+        checkpoint,
         str(request.precision).lower(),
         bool(request.verbose),
+        quantization,
     )
     # Class identity is checkpoint-owned; an absent vocabulary stays unknown.
     vocabulary_id = raw.get("vocabulary_id", "")

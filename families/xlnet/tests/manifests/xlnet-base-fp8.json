@@ -1,0 +1,20 @@
+{
+  "name": "xlnet-base-fp8",
+  "hf_id": "xlnet/xlnet-base-cased",
+  "hf_revision": "ceaa69c7bc5e512b5007106a7ccbb7daf24b2c79",
+  "bundle": "xlnet-base-fp8.bundle",
+  "family": "xlnet",
+  "task": "text_to_pooled_features",
+  "precision": "fp16",
+  "quantization": "fp8",
+  "testcases": [
+    {
+      "name": "xlnet-base-fp8",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is Paris"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 256
+}

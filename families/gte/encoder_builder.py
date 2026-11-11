@@ -35,26 +35,43 @@ def split_qkv(packed: np.ndarray, hidden: int) -> tuple[np.ndarray, np.ndarray, 
     return packed[:hidden], packed[hidden:2 * hidden], packed[2 * hidden:]
 
 
-def build_layers(network, hidden, weights, cfg, *, mask, cos, sin, dtype=np.float32):
+def build_layers(network, hidden, weights, cfg, *, mask, cos, sin, dtype=np.float32,
+                 quant=None):
+    """Run the post-norm blocks over rows ``[seq, width]``.
+
+    ``quant`` (a ``GteQuantContext``) routes its projections through FP8 Q/DQ.
+    """
     num_heads = cfg["num_heads"]
     head_dim = cfg["head_dim"]
     width = cfg["hidden_size"]
     intermediate = cfg["intermediate_size"]
 
+    def matmul(name, part=None):
+        return None if quant is None else quant.matmul(name, part)
+
     for index in range(cfg["num_layers"]):
         prefix = f"encoder.layer.{index}."
-        query, key, value = split_qkv(weights[f"{prefix}attention.qkv_proj.weight"], width)
+        qkv_name = f"{prefix}attention.qkv_proj"
+        if matmul(qkv_name) is None:
+            query, key, value = split_qkv(weights[f"{qkv_name}.weight"], width)
+        else:
+            query = key = value = None
         q_bias, k_bias, v_bias = split_qkv(
-            np.asarray(weights[f"{prefix}attention.qkv_proj.bias"]).reshape(3 * width, 1), width)
+            np.asarray(weights[f"{qkv_name}.bias"]).reshape(3 * width, 1), width)
         attended = g.add_attention(
             network,
-            g.add_linear(network, hidden, query, q_bias.reshape(width), dtype=dtype),
-            g.add_linear(network, hidden, key, k_bias.reshape(width), dtype=dtype),
-            g.add_linear(network, hidden, value, v_bias.reshape(width), dtype=dtype),
+            g.add_linear(network, hidden, query, q_bias.reshape(width), dtype=dtype,
+                         matmul=matmul(qkv_name, "q")),
+            g.add_linear(network, hidden, key, k_bias.reshape(width), dtype=dtype,
+                         matmul=matmul(qkv_name, "k")),
+            g.add_linear(network, hidden, value, v_bias.reshape(width), dtype=dtype,
+                         matmul=matmul(qkv_name, "v")),
             mask, num_heads=num_heads, head_dim=head_dim, cos=cos, sin=sin)
+        o_name = f"{prefix}attention.o_proj"
         projected = g.add_linear(network, attended,
-                                 weights[f"{prefix}attention.o_proj.weight"],
-                                 weights[f"{prefix}attention.o_proj.bias"], dtype=dtype)
+                                 weights[f"{o_name}.weight"],
+                                 weights[f"{o_name}.bias"], dtype=dtype,
+                                 matmul=matmul(o_name))
         hidden = g.add_layer_norm(network, g.add_sum(network, projected, hidden),
                                   weights[f"{prefix}attn_ln.weight"],
                                   weights[f"{prefix}attn_ln.bias"], cfg["eps"])
@@ -63,7 +80,9 @@ def build_layers(network, hidden, weights, cfg, *, mask, cos, sin, dtype=np.floa
                               weights[f"{prefix}mlp.up_gate_proj.weight"],
                               weights[f"{prefix}mlp.down_proj.weight"],
                               weights[f"{prefix}mlp.down_proj.bias"],
-                              intermediate=intermediate, dtype=dtype)
+                              intermediate=intermediate, dtype=dtype,
+                              up_gate_matmul=matmul(f"{prefix}mlp.up_gate_proj"),
+                              down_matmul=matmul(f"{prefix}mlp.down_proj"))
         hidden = g.add_layer_norm(network, g.add_sum(network, mlp, hidden),
                                   weights[f"{prefix}mlp_ln.weight"],
                                   weights[f"{prefix}mlp_ln.bias"], cfg["eps"])

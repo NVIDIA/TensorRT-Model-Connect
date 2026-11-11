@@ -307,7 +307,11 @@ def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference:
     unknown = sum(not equal and any(not known_work(row) for row in pair) for pair, equal in zip(pairs, matches))
     if pairs and matched != len(pairs):
         reasons.append(f"actual work differs or is unknown on {len(pairs) - matched} paired responses")
-    result: dict[str, Any] = {"request": name, "reference_mode": "eager", "kind": "natural_dataset", "gate": False,
+    # The native mode that answered (torch.compile, or eager in its place; eager in records written before),
+    # none when the native side recorded nothing.
+    modes = sorted({str(item.get("mode") or "eager") for item in identities[1]})
+    fallbacks = sorted({str(item["compile_fallback"]) for item in identities[1] if item.get("compile_fallback")})
+    result: dict[str, Any] = {"request": name, "reference_mode": "+".join(modes), "kind": "natural_dataset", "gate": False,
                               "timing_contract": TIMING_CONTRACT, "pairs": len(pairs), "matched_pairs": matched,
                               "different_work_pairs": len(pairs) - matched - unknown, "unknown_work_pairs": unknown,
                               "complete": bool(complete and exported),
@@ -315,7 +319,9 @@ def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference:
                               "out_of_capacity": len(excluded),
                               "reasons": list(dict.fromkeys(reasons)), "notes": [
                                   "Shared quality outputs; not an additional performance gate.",
-                                  "Interval across evaluation units, not repeated-run timing stability."],
+                                  "Interval across evaluation units, not repeated-run timing stability.",
+                                  *(f"Native torch.compile failed; eager answered in its place: {reason[:300]}"
+                                    for reason in fallbacks)],
                               "candidate": {}, "reference": {}}
     # Report each side's entire valid workload, including unpaired responses.
     # Pair filtering is only for comparability, never for the displayed timings.

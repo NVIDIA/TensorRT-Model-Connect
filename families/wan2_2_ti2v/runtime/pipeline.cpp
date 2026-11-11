@@ -6,6 +6,7 @@
 #include "families/wan2_2_ti2v/runtime/pipeline.h"
 
 #include "families/wan2_2_ti2v/runtime/easycache.h"
+#include "families/wan2_2_ti2v/runtime/image_conditioning.h"
 #include "families/wan2_2_ti2v/runtime/prompt_cleaner.h"
 #include "families/wan2_2_ti2v/runtime/torch_cuda_normal.h"
 #include "families/wan2_2_ti2v/runtime/vae_cache_storage.h"
@@ -14,12 +15,15 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -37,6 +41,7 @@ constexpr int32_t kVideoChannels = 3;
 constexpr int32_t kVaeCacheCount = 32;
 constexpr int32_t kVaeFirstFrameOutputFrames = 1;
 constexpr int32_t kVaeStepOutputFrames = 4;
+constexpr int64_t kTimeFeatures = 256;
 
 struct VaeCacheSpec {
     int32_t channels;
@@ -165,17 +170,46 @@ void validate_text_encoder_contract(const ITrtModule& module) {
     }
 }
 
-void validate_denoiser_contract(const ITrtModule& module, const Wan22TI2VRuntimeShape& shape) {
+// Returns the time-feature rows: 1 for a scalar-timestep DiT, 2 when the first
+// latent frame has its own timestep (row 0) and the later frames share row 1.
+int64_t validate_denoiser_contract(const ITrtModule& module, const Wan22TI2VRuntimeShape& shape) {
     const std::vector<int64_t> latent_shape = {1, kLatentChannels, shape.latent_frames,
                                                shape.latent_height, shape.latent_width};
-    const std::vector<int64_t> time_shape = {1, 256};
     const std::vector<int64_t> context_shape = {1, kTextSequenceLength, kTextDimension};
-    if (!has_input_contract(module, "latents", latent_shape, DType::kFloat32) ||
-        !has_input_contract(module, "time_features", time_shape, DType::kFloat32) ||
+    int64_t time_rows = 0;
+    for (const int64_t rows : {1, 2}) {
+        if (has_input_contract(module, "time_features", {rows, kTimeFeatures}, DType::kFloat32))
+            time_rows = rows;
+    }
+    if (time_rows == 0 || !has_input_contract(module, "latents", latent_shape, DType::kFloat32) ||
         !has_input_contract(module, "encoder_hidden_states", context_shape, DType::kFloat32) ||
         !has_output_contract(module, "noise_prediction", latent_shape, DType::kFloat32)) {
         throw std::invalid_argument("Wan2.2 DiT engine has an invalid tensor contract");
     }
+    return time_rows;
+}
+
+void validate_vae_encoder_contract(const ITrtModule& module, const Wan22TI2VRuntimeShape& shape) {
+    const std::vector<int64_t> image_shape = {1, kVideoChannels, 1, shape.video_height,
+                                              shape.video_width};
+    const std::vector<int64_t> latent_shape = {1, kLatentChannels, 1, shape.latent_height,
+                                               shape.latent_width};
+    if (!has_input_contract(module, "image", image_shape, DType::kFloat32) ||
+        !has_output_contract(module, "image_latent", latent_shape, DType::kFloat32)) {
+        throw std::invalid_argument("Wan2.2 VAE encoder engine has an invalid tensor contract");
+    }
+}
+
+internal::VideoResult video_result(ImageResult frames, uint64_t conditioned_frames,
+                                   int32_t frame_rate, double inference_ms) {
+    internal::VideoResult result;
+    result.timestamps_seconds.reserve(static_cast<std::size_t>(frames.num_frames));
+    for (int32_t frame = 0; frame < frames.num_frames; ++frame)
+        result.timestamps_seconds.push_back(static_cast<double>(frame) / frame_rate);
+    result.frames = std::move(frames);
+    result.conditioned_prefix_frames = conditioned_frames;
+    result.inference_ms = inference_ms;
+    return result;
 }
 
 std::vector<float> run_vae_latent(const std::vector<float>& latents,
@@ -367,7 +401,12 @@ make_wan22_vae_cache_bindings(const std::vector<void*>& input_addresses,
     l0_request.video_width = kWan22L0VideoWidth;
     l0_request.video_num_frames = kWan22L0VideoFrames;
     const auto l0_shape = make_wan22_runtime_shape(l0_request);
-    if (!same_runtime_shape(shape, official_shape) && !same_runtime_shape(shape, l0_shape)) {
+    Wan22TI2VRequest portrait_request;
+    portrait_request.video_height = kWan22PortraitVideoHeight;
+    portrait_request.video_width = kWan22PortraitVideoWidth;
+    const auto portrait_shape = make_wan22_runtime_shape(portrait_request);
+    if (!same_runtime_shape(shape, official_shape) && !same_runtime_shape(shape, l0_shape) &&
+        !same_runtime_shape(shape, portrait_shape)) {
         throw std::invalid_argument(
             "Wan2.2 VAE prebinding requires an exact qualified runtime shape");
     }
@@ -394,12 +433,38 @@ Wan22TI2VPipeline::Wan22TI2VPipeline(Wan22ModuleLoader module_loader,
                                      std::unique_ptr<ITokenizer> tokenizer,
                                      Wan22TI2VOptions options,
                                      wan2_2_ti2v::RuntimeConfig runtime_config,
-                                     std::string model_id)
+                                     std::string model_id, std::string primary_task,
+                                     bool image_encoder)
     : module_loader_(std::move(module_loader)), tokenizer_(std::move(tokenizer)),
       options_(std::move(options)), runtime_config_(std::move(runtime_config)),
-      model_id_(std::move(model_id)) {
+      model_id_(std::move(model_id)), primary_task_(std::move(primary_task)),
+      image_encoder_(image_encoder) {
     if (!module_loader_ || !tokenizer_)
         throw std::invalid_argument("Wan2.2 requires a tokenizer and staged TensorRT loader");
+    if (primary_task_ != IImageGeneration::kTask &&
+        primary_task_ != internal::ITextToVideo::kTask &&
+        primary_task_ != internal::IInitialImageTextToVideo::kTask) {
+        throw std::invalid_argument("Wan2.2 bundle declares an unsupported task: " + primary_task_);
+    }
+    if (primary_task_ == internal::IInitialImageTextToVideo::kTask && !image_encoder_)
+        throw std::invalid_argument("Wan2.2 image-to-video bundle lacks its VAE encoder");
+    // The CLI passes these settings to every Wan2.2 request; the profile-bound ones must match
+    // the bundle, as for image_generation bundles.
+    using internal::ConfigField;
+    using internal::ConfigKind;
+    config_fields_ = {
+        {"seed", ConfigKind::I64, std::int64_t{options_.seed}, "Noise seed, 0 to 2147483647"},
+        {"negative_prompt", ConfigKind::String, std::string_view{options_.negative_prompt},
+         "Classifier-free guidance negative prompt"},
+        {"num_steps", ConfigKind::I64, std::int64_t{options_.num_inference_steps},
+         "Denoising steps; fixed by the bundle profile"},
+        {"guidance_scale", ConfigKind::F64, static_cast<double>(options_.guidance_scale),
+         "Classifier-free guidance scale; fixed by the bundle profile"},
+        {"height", ConfigKind::I64, std::int64_t{options_.video_height},
+         "Video height; fixed by the bundle profile"},
+        {"width", ConfigKind::I64, std::int64_t{options_.video_width},
+         "Video width; fixed by the bundle profile"},
+    };
     const auto status = cudaStreamCreate(&stream_);
     if (status != cudaSuccess) {
         stream_ = nullptr;
@@ -438,6 +503,66 @@ void Wan22TI2VPipeline::synchronize_stream(const char* transition) const {
 void Wan22TI2VPipeline::synchronize_stream_noexcept() const noexcept {
     if (stream_ != nullptr)
         (void)cudaStreamSynchronize(stream_);
+}
+
+std::vector<internal::TaskInstance> Wan22TI2VPipeline::task_bindings() {
+    const Span<const internal::ConfigField> fields{config_fields_.data(), config_fields_.size()};
+    std::vector<internal::TaskInstance> bindings{
+        internal::bind<internal::ITextToVideo>(*this, fields)};
+    if (image_encoder_)
+        bindings.push_back(internal::bind<internal::IInitialImageTextToVideo>(*this, fields));
+    return bindings;
+}
+
+Wan22TI2VRequest Wan22TI2VPipeline::resolve_config(internal::ConfigView config) const {
+    const Span<const internal::ConfigField> fields{config_fields_.data(), config_fields_.size()};
+    internal::validate_config(fields, config);
+    const auto int32_field = [&](std::string_view name, int64_t minimum) {
+        const auto value = *internal::config_get<std::int64_t>(config, fields, name);
+        if (value < minimum || value > std::numeric_limits<int32_t>::max())
+            throw internal::ConfigError("Wan2.2 config " + std::string(name) + " is out of range");
+        return static_cast<int32_t>(value);
+    };
+    ImageGenerationConfig legacy;
+    legacy.seed = int32_field("seed", 0);
+    legacy.negative_prompt =
+        std::string(*internal::config_get<std::string_view>(config, fields, "negative_prompt"));
+    legacy.num_steps = int32_field("num_steps", 1);
+    legacy.height = int32_field("height", 1);
+    legacy.width = int32_field("width", 1);
+    const auto guidance = *internal::config_get<double>(config, fields, "guidance_scale");
+    if (!std::isfinite(guidance) || guidance < 0.0)
+        throw internal::ConfigError("Wan2.2 config guidance_scale must be finite and non-negative");
+    legacy.guidance_scale = static_cast<float>(guidance);
+    return resolve_wan22_request(options_, legacy);
+}
+
+internal::VideoResult Wan22TI2VPipeline::run(const internal::TextToVideoRequest& input,
+                                             internal::ConfigView config) {
+    if (!input.initial_latents.empty())
+        throw std::invalid_argument("Wan2.2-TI2V-5B does not accept initial latents");
+    std::lock_guard<std::mutex> generation_lock(generation_mutex_);
+    const auto request = resolve_config(config);
+    const auto begin = Clock::now();
+    auto frames = generate(std::string(input.prompt), request, nullptr);
+    return video_result(std::move(frames), 0, request.frame_rate,
+                        milliseconds(begin, Clock::now()));
+}
+
+internal::VideoResult Wan22TI2VPipeline::run(const internal::InitialImageTextToVideoRequest& input,
+                                             internal::ConfigView config) {
+    if (!image_encoder_)
+        throw internal::UnsupportedTask(
+            "this Wan2.2 bundle has no VAE encoder; rebuild it for image-to-video");
+    std::lock_guard<std::mutex> generation_lock(generation_mutex_);
+    const auto request = resolve_config(config);
+    const auto pixels = wan2_2_ti2v::first_frame_pixels(input.initial_image, request.video_height,
+                                                        request.video_width);
+    const auto begin = Clock::now();
+    auto frames = generate(std::string(input.prompt), request, &pixels);
+    // The first frame is the decoded conditioning latent, not a predicted frame.
+    return video_result(std::move(frames), 1, request.frame_rate,
+                        milliseconds(begin, Clock::now()));
 }
 
 std::vector<int32_t> Wan22TI2VPipeline::tokenize(const std::string& text) const {
@@ -480,8 +605,9 @@ std::vector<float> Wan22TI2VPipeline::run_denoiser(const std::vector<float>& lat
                                                    const std::vector<float>& time,
                                                    const Wan22TI2VRuntimeShape& shape,
                                                    ITrtModule& denoiser) {
+    const auto time_rows = static_cast<int64_t>(time.size()) / kTimeFeatures;
     if (latents.size() != shape.latent_count || context.size() != kContextCount ||
-        time.size() != 256) {
+        (time.size() != kTimeFeatures && time.size() != 2 * kTimeFeatures)) {
         throw std::invalid_argument("Wan2.2 denoiser input shape is invalid");
     }
     TensorMap inputs;
@@ -489,8 +615,9 @@ std::vector<float> Wan22TI2VPipeline::run_denoiser(const std::vector<float>& lat
                                      {1, kLatentChannels, shape.latent_frames, shape.latent_height,
                                       shape.latent_width},
                                      DType::kFloat32});
-    inputs.emplace("time_features",
-                   Tensor{const_cast<float*>(time.data()), {1, 256}, DType::kFloat32});
+    inputs.emplace(
+        "time_features",
+        Tensor{const_cast<float*>(time.data()), {time_rows, kTimeFeatures}, DType::kFloat32});
     inputs.emplace("encoder_hidden_states", Tensor{const_cast<float*>(context.data()),
                                                    {1, kTextSequenceLength, kTextDimension},
                                                    DType::kFloat32});
@@ -502,6 +629,7 @@ std::vector<float> Wan22TI2VPipeline::run_denoiser(const std::vector<float>& lat
 void Wan22TI2VPipeline::run_denoising(std::vector<float>& latents,
                                       const std::vector<float>& prompt_context,
                                       const std::vector<float>& negative_context,
+                                      const std::vector<float>* first_frame_latent,
                                       const Wan22TI2VRequest& request,
                                       const Wan22TI2VRuntimeShape& shape, double& denoiser_ms,
                                       double& scheduler_ms) {
@@ -513,7 +641,13 @@ void Wan22TI2VPipeline::run_denoising(std::vector<float>& latents,
     wan2_2_ti2v::FlowUniPCCuda scheduler(stream_, request.num_inference_steps, request.flow_shift,
                                          1000);
     auto denoiser = load_module("denoiser.plan");
-    validate_denoiser_contract(*denoiser, shape);
+    const auto time_rows = validate_denoiser_contract(*denoiser, shape);
+    if (first_frame_latent != nullptr && time_rows != 2)
+        throw std::invalid_argument("Wan2.2 image-to-video needs a DiT with first-frame timesteps");
+    // Upstream i2v runs the clean first latent frame's tokens at timestep 0.
+    const auto first_frame_time = first_frame_latent != nullptr
+                                      ? wan2_2_ti2v::torch_cuda_timestep_features(0)
+                                      : std::vector<float>{};
 
     auto easycache_config = runtime_config_.easycache;
     easycache_config.total_steps = request.num_inference_steps;
@@ -550,7 +684,11 @@ void Wan22TI2VPipeline::run_denoising(std::vector<float>& latents,
     try {
         for (int32_t step = 0; step < request.num_inference_steps; ++step) {
             const int64_t timestep = scheduler.timesteps()[static_cast<std::size_t>(step)];
-            const auto time = wan2_2_ti2v::torch_cuda_timestep_features(timestep);
+            const auto later_time = wan2_2_ti2v::torch_cuda_timestep_features(timestep);
+            std::vector<float> time;
+            if (time_rows == 2)
+                time = first_frame_latent != nullptr ? first_frame_time : later_time;
+            time.insert(time.end(), later_time.begin(), later_time.end());
             std::vector<float> conditional;
             std::vector<float> unconditional;
             const auto denoiser_begin = Clock::now();
@@ -568,6 +706,8 @@ void Wan22TI2VPipeline::run_denoising(std::vector<float>& latents,
                 apply_cfg(conditional, unconditional, request.guidance_scale, guided);
             scheduler.step(guided.data(), latents.data(), next.data(), shape.latent_count);
             latents.swap(next);
+            if (first_frame_latent != nullptr)
+                wan2_2_ti2v::keep_first_frame(latents, *first_frame_latent, shape.latent_frames);
             const auto scheduler_end = Clock::now();
             scheduler_ms += milliseconds(scheduler_begin, scheduler_end);
             std::cerr << "[wan2.2-ti2v] step " << (step + 1) << '/' << request.num_inference_steps
@@ -676,10 +816,42 @@ ImageResult Wan22TI2VPipeline::decode_video(const std::vector<float>& latents,
     return result;
 }
 
+std::vector<float> Wan22TI2VPipeline::encode_first_frame(const std::vector<float>& pixels,
+                                                         const Wan22TI2VRuntimeShape& shape) {
+    auto encoder = load_module("vae.encoder.plan");
+    validate_vae_encoder_contract(*encoder, shape);
+    try {
+        TensorMap inputs;
+        inputs.emplace("image",
+                       Tensor{const_cast<float*>(pixels.data()),
+                              {1, kVideoChannels, 1, shape.video_height, shape.video_width},
+                              DType::kFloat32});
+        const auto outputs = encoder->forward(inputs);
+        auto latent = copy_as_float(required_output(outputs, "image_latent", "VAE encoder"),
+                                    static_cast<std::size_t>(kLatentChannels) *
+                                        shape.latent_height * shape.latent_width,
+                                    "VAE encoder output");
+        synchronize_stream("finishing the first-frame VAE encoding");
+        return latent;
+    } catch (...) {
+        synchronize_stream_noexcept();
+        throw;
+    }
+}
+
 ImageResult Wan22TI2VPipeline::generate_image(const std::string& prompt,
                                               const ImageGenerationConfig& cfg) {
     std::lock_guard<std::mutex> generation_lock(generation_mutex_);
-    const auto request = resolve_wan22_request(options_, cfg);
+    return generate(prompt, resolve_wan22_request(options_, cfg), nullptr);
+}
+
+ImageResult Wan22TI2VPipeline::generate(const std::string& prompt, const Wan22TI2VRequest& request,
+                                        const std::vector<float>* first_frame_pixels) {
+    if (first_frame_pixels != nullptr &&
+        (runtime_config_.easycache.enabled || runtime_config_.late_cfg_enabled)) {
+        throw std::invalid_argument(
+            "Wan2.2 EasyCache and late CFG are qualified for text-to-video only");
+    }
     const auto shape = make_wan22_runtime_shape(request);
 
     const auto total_begin = Clock::now();
@@ -702,15 +874,27 @@ ImageResult Wan22TI2VPipeline::generate_image(const std::string& prompt,
     }
     const auto text_end = Clock::now();
 
+    // Upstream i2v draws the same noise as text-to-video, then puts the encoded
+    // image in the first latent frame before and after every scheduler step.
+    std::vector<float> first_frame_latent;
+    double vae_encoder_ms = 0.0;
+    if (first_frame_pixels != nullptr) {
+        const auto encoder_begin = Clock::now();
+        first_frame_latent = encode_first_frame(*first_frame_pixels, shape);
+        vae_encoder_ms = milliseconds(encoder_begin, Clock::now());
+    }
     auto latents =
         wan2_2_ti2v::torch_cuda_normal(shape.latent_count, static_cast<uint64_t>(request.seed));
+    if (first_frame_pixels != nullptr)
+        wan2_2_ti2v::keep_first_frame(latents, first_frame_latent, shape.latent_frames);
 
     // The scheduler, DiT, and their host workspaces are destroyed before VAE
     // allocation, preserving the staged-memory contract on Thor.
     double denoiser_ms = 0.0;
     double scheduler_ms = 0.0;
-    run_denoising(latents, prompt_context, negative_context, request, shape, denoiser_ms,
-                  scheduler_ms);
+    run_denoising(latents, prompt_context, negative_context,
+                  first_frame_pixels != nullptr ? &first_frame_latent : nullptr, request, shape,
+                  denoiser_ms, scheduler_ms);
 
     // These host-side workspaces are no longer needed once DiT has been
     // destroyed. Release them before the recurrent VAE cache allocation.
@@ -725,7 +909,8 @@ ImageResult Wan22TI2VPipeline::generate_image(const std::string& prompt,
     const auto total_end = Clock::now();
     std::cerr << std::fixed << std::setprecision(3)
               << "[wan2.2-ti2v.perf] text_encoder_ms=" << milliseconds(text_begin, text_end)
-              << " denoiser_ms=" << denoiser_ms << " scheduler_cfg_ms=" << scheduler_ms
+              << " vae_encoder_ms=" << vae_encoder_ms << " denoiser_ms=" << denoiser_ms
+              << " scheduler_cfg_ms=" << scheduler_ms
               << " vae_decoder_ms=" << milliseconds(vae_begin, vae_end)
               << " total_ms=" << milliseconds(total_begin, total_end) << '\n';
     return result;

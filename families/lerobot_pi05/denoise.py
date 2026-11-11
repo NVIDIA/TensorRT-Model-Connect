@@ -53,8 +53,17 @@ def _modulation(network, cond, dense_weight, dense_bias):
     return tuple(graph.slice_static(network, mod, (0, i * WIDTH), (1, WIDTH)) for i in range(3))
 
 
-def build_denoise(network, weights, cfg, *, dtype, prefix_len):
-    """Declare the denoise engine's inputs and outputs on ``network``."""
+def build_denoise(network, weights, cfg, *, dtype, prefix_len, quant=None):
+    """Declare the denoise engine's inputs and outputs on ``network``.
+
+    ``quant`` (a ``quantization.Pi05QuantContext``) makes the expert projections FP8.
+    """
+
+    def project(x, name):
+        if quant is None:
+            return graph.linear(network, x, weights[name + ".weight"])
+        return quant.linear(network, x, name, weights)
+
     steps = cfg.chunk_size
     action_dim = cfg.max_action_dim
 
@@ -88,9 +97,9 @@ def build_denoise(network, weights, cfg, *, dtype, prefix_len):
         scale, shift, gate = _modulation(
             network, cond, weights[p + "input_layernorm.dense.weight"], weights[p + "input_layernorm.dense.bias"])
         norm = graph.ada_rms_norm(network, h, scale, shift, RMS_EPS)
-        q = graph.apply_rope(network, graph.linear(network, norm, weights[p + "self_attn.q_proj.weight"]), cos, sin, HEADS, HEAD_DIM)
-        k = graph.apply_rope(network, graph.linear(network, norm, weights[p + "self_attn.k_proj.weight"]), cos, sin, 1, HEAD_DIM)
-        v = graph.linear(network, norm, weights[p + "self_attn.v_proj.weight"])
+        q = graph.apply_rope(network, project(norm, p + "self_attn.q_proj"), cos, sin, HEADS, HEAD_DIM)
+        k = graph.apply_rope(network, project(norm, p + "self_attn.k_proj"), cos, sin, 1, HEAD_DIM)
+        v = project(norm, p + "self_attn.v_proj")
         prefix_k = graph.shuffle(network, graph.slice_static(
             network, k_cache, (index, 0, 0), (1, prefix_len, HEAD_DIM)), reshape=(prefix_len, HEAD_DIM))
         prefix_v = graph.shuffle(network, graph.slice_static(
@@ -98,15 +107,15 @@ def build_denoise(network, weights, cfg, *, dtype, prefix_len):
         keys = graph.concat(network, [prefix_k, k], 0)
         values = graph.concat(network, [prefix_v, v], 0)
         context = graph.attention_mqa(network, q, keys, values, bias, heads=HEADS, head_dim=HEAD_DIM)
-        out = graph.linear(network, context, weights[p + "self_attn.o_proj.weight"])
+        out = project(context, p + "self_attn.o_proj")
         h = graph.add(network, h, graph.mul(network, out, graph.cast(network, gate, dtype)))
 
         scale, shift, gate = _modulation(
             network, cond, weights[p + "post_attention_layernorm.dense.weight"], weights[p + "post_attention_layernorm.dense.bias"])
         norm = graph.ada_rms_norm(network, h, scale, shift, RMS_EPS)
-        act = graph.gelu_tanh(network, graph.linear(network, norm, weights[p + "mlp.gate_proj.weight"]))
-        hidden = graph.mul(network, act, graph.linear(network, norm, weights[p + "mlp.up_proj.weight"]))
-        out = graph.linear(network, hidden, weights[p + "mlp.down_proj.weight"])
+        act = graph.gelu_tanh(network, project(norm, p + "mlp.gate_proj"))
+        hidden = graph.mul(network, act, project(norm, p + "mlp.up_proj"))
+        out = project(hidden, p + "mlp.down_proj")
         h = graph.add(network, h, graph.mul(network, out, graph.cast(network, gate, dtype)))
 
     scale, shift, _ = _modulation(network, cond, weights[_ROOT + "norm.dense.weight"], weights[_ROOT + "norm.dense.bias"])

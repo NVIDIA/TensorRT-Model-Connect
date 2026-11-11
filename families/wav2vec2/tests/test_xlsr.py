@@ -202,3 +202,69 @@ def test_missing_xlsr_bias_is_rejected_before_build(tmp_path):
     del weights["wav2vec2.feature_extractor.conv_layers.1.conv.bias"]
     with pytest.raises(KeyError, match="conv_layers.1.conv.bias"):
         model._require_weights(weights, resolved)
+
+
+def _engine_logits(plan, waveform):
+    trt = pytest.importorskip("tensorrt")
+    engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
+    context = engine.create_execution_context()
+    audio = waveform.reshape(1, 1, 1, -1).float().contiguous().cuda()
+    context.set_input_shape("audio", tuple(audio.shape))
+    context.set_tensor_address("audio", audio.data_ptr())
+    logits = torch.empty(tuple(context.get_tensor_shape("logits")), device="cuda")
+    context.set_tensor_address("logits", logits.data_ptr())
+    assert context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+    torch.cuda.synchronize()
+    return engine, logits.cpu()
+
+
+@pytest.mark.parametrize("stable, norm", [(False, "group"), (True, "layer")])
+def test_fp16_engine_follows_the_reference(tmp_path, stable, norm):
+    if not torch.cuda.is_available():
+        pytest.skip("engine build needs a GPU")
+    trt = pytest.importorskip("tensorrt")
+    cfg, reference = _reference(stable=stable, norm=norm)
+    resolved, weights = _resolved(tmp_path, cfg, reference)
+    # Current torch stores the weight-normed kernel as parametrizations; the
+    # checkpoints name the same two tensors weight_g and weight_v.
+    for old, new in (("parametrizations.weight.original0", "weight_g"),
+                     ("parametrizations.weight.original1", "weight_v")):
+        for name in [name for name in weights if name.endswith(old)]:
+            weights[name[: -len(old)] + new] = weights.pop(name)
+    waveform = torch.sin(torch.linspace(0, 400, config_module.MIN_SAMPLES)) * 0.5
+
+    # Every reduction (the norms' mean and variance) runs in fp32 inside the
+    # fp16 graph; the matmuls run in fp16; the engine still takes and returns fp32.
+    seen = {}
+    original = trt.Builder.build_serialized_network
+
+    def capture(builder, network, config):
+        layers = [network.get_layer(index) for index in range(network.num_layers)]
+        seen["reduce"] = {layer.get_output(0).dtype for layer in layers
+                          if layer.type == trt.LayerType.REDUCE}
+        seen["matmul"] = {layer.get_output(0).dtype for layer in layers
+                          if layer.type == trt.LayerType.MATRIX_MULTIPLY}
+        return original(builder, network, config)
+
+    trt.Builder.build_serialized_network = capture
+    try:
+        half = model.build_engine(weights, resolved, max_samples=config_module.MIN_SAMPLES * 2,
+                                  precision="fp16")
+    finally:
+        trt.Builder.build_serialized_network = original
+    assert seen["reduce"] == {trt.float32}
+    assert seen["matmul"] == {trt.float16}
+
+    engine, logits = _engine_logits(half, waveform)
+    assert engine.get_tensor_dtype("audio") == trt.float32
+    assert engine.get_tensor_dtype("logits") == trt.float32
+    with torch.no_grad():
+        expected = reference(waveform[None]).logits[0]
+    assert torch.isfinite(logits).all()
+    assert torch.nn.functional.cosine_similarity(
+        logits.reshape(-1), expected.reshape(-1), dim=0) > 0.999
+
+
+def test_unsupported_precision_is_refused(tmp_path):
+    with pytest.raises(NotImplementedError, match="fp32 or fp16, not bf16"):
+        model.build_engine({}, {}, max_samples=config_module.MIN_SAMPLES, precision="bf16")

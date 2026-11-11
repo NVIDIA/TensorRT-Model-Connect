@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A quantized profile does not take its base's candidate settings. This one quantizes personaplex-7b's checkpoint at
+# build time, so it builds from the same prepared directory, whose config.json adds what the build stores in the
+# bundle: the VoiceBench system prompt, listen-before-answer and the capacity the questions need.
+candidate:
+  model_directory: trtmc-reference/personaplex-model

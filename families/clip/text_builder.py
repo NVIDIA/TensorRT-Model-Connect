@@ -25,7 +25,7 @@ PREFIX = "text_model"
 
 
 def build_text_tower(network, input_ids, eos_index, weights, cfg, projection, *,
-                     dtype=np.float32):
+                     dtype=np.float32, quant_ctx=None):
     """``[seq]`` token ids to an unnormalised ``[1, projection_dim]`` embedding."""
     width = cfg["hidden_size"]
     seq = int(input_ids.shape[0])
@@ -40,7 +40,7 @@ def build_text_tower(network, input_ids, eos_index, weights, cfg, projection, *,
 
     mask = encoder_builder.causal_mask(network, seq, dtype=dtype)
     hidden = encoder_builder.build_layers(network, hidden, weights, PREFIX, cfg, mask=mask,
-                                          dtype=dtype)
+                                          dtype=dtype, quant_ctx=quant_ctx)
     hidden = g.add_layer_norm(network, hidden, weights[f"{PREFIX}.final_layer_norm.weight"],
                               weights[f"{PREFIX}.final_layer_norm.bias"], cfg["eps"])
 

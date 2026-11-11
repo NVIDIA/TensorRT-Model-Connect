@@ -8,12 +8,22 @@ normalisation is taken over that axis, so a clip cannot be padded to a fixed
 window and trimmed afterwards the way a mel-spectrogram family would: the
 padding changes the statistics and therefore every frame. The engine takes the
 true sample count instead, and each reshape leaves the time extent as ``-1``.
+
+The helpers follow the type of the tensor they are given: weights and biases
+are stored as fp16 constants next to an fp16 tensor and as fp32 constants
+otherwise, so an fp32 build is the same graph as before fp16 existed. The
+normalisations always compute in fp32 (see ``add_norm``).
 """
 
 from __future__ import annotations
 
 import numpy as np
 import tensorrt as trt
+
+
+def numpy_dtype(tensor):
+    """numpy dtype for constants that meet ``tensor``: fp16 next to fp16, fp32 otherwise."""
+    return np.float16 if tensor.dtype == trt.float16 else np.float32
 
 
 def add_constant(network, shape, values, dtype=np.float32):
@@ -33,17 +43,18 @@ def add_gelu(network, inp):
 
 def add_linear(network, inp, weight, bias=None):
     """y = x @ W^T + b, matching torch.nn.Linear's weight layout."""
+    dtype = numpy_dtype(inp)
     weight = np.ascontiguousarray(np.asarray(weight, dtype=np.float32))
     rank = len(inp.shape)
     shape = (1,) * (rank - 2) + tuple(weight.shape)
     out = network.add_matrix_multiply(
-        inp, trt.MatrixOperation.NONE, add_constant(network, shape, weight),
+        inp, trt.MatrixOperation.NONE, add_constant(network, shape, weight, dtype),
         trt.MatrixOperation.TRANSPOSE).get_output(0)
     if bias is None:
         return out
     bias = np.asarray(bias, dtype=np.float32)
     return add_sum(network, out,
-                   add_constant(network, (1,) * (rank - 1) + (bias.shape[0],), bias))
+                   add_constant(network, (1,) * (rank - 1) + (bias.shape[0],), bias, dtype))
 
 
 def add_norm(network, inp, gamma, beta, eps, axis, *, param_axis=None):
@@ -56,7 +67,15 @@ def add_norm(network, inp, gamma, beta, eps, axis, *, param_axis=None):
     axis. Deriving the second from the first - for instance by assuming the
     affine always rides the last axis - puts the scale on the time axis for a
     ``[1, C, 1, T]`` tensor, where it is both wrong and dynamic.
+
+    An fp16 input is cast to fp32 for the statistics and the affine term and
+    cast back afterwards. The feature encoder's first norm averages over every
+    time step of the clip, and an fp16 mean and variance over that many values
+    is not accurate enough.
     """
+    source_type = inp.dtype
+    if source_type == trt.float16:
+        inp = network.add_cast(inp, trt.float32).get_output(0)
     rank = len(inp.shape)
     mask = 1 << axis
     mean = network.add_reduce(inp, trt.ReduceOperation.AVG, mask, True).get_output(0)
@@ -74,17 +93,21 @@ def add_norm(network, inp, gamma, beta, eps, axis, *, param_axis=None):
     shape = tuple(width if index == param_axis else 1 for index in range(rank))
     scaled = network.add_elementwise(normed, add_constant(network, shape, gamma),
                                      trt.ElementWiseOperation.PROD).get_output(0)
-    return add_sum(network, scaled, add_constant(network, shape, beta))
+    out = add_sum(network, scaled, add_constant(network, shape, beta))
+    if source_type == trt.float16:
+        out = network.add_cast(out, trt.float16).get_output(0)
+    return out
 
 
 def add_conv1d(network, inp, weight, *, stride=1, padding=0, groups=1, bias=None):
     """Conv1d over ``[1, C, 1, T]``; ``weight`` is torch's ``[out, in/groups, k]``."""
-    weight = np.ascontiguousarray(np.asarray(weight, dtype=np.float32))
+    dtype = numpy_dtype(inp)
+    weight = np.ascontiguousarray(np.asarray(weight, dtype=np.float32).astype(dtype))
     out_channels, _, kernel = weight.shape
     layer = network.add_convolution_nd(
         inp, int(out_channels), (1, int(kernel)),
         trt.Weights(np.ascontiguousarray(weight[:, :, None, :])),
-        trt.Weights(np.ascontiguousarray(np.asarray(bias, dtype=np.float32)))
+        trt.Weights(np.ascontiguousarray(np.asarray(bias, dtype=np.float32).astype(dtype)))
         if bias is not None else trt.Weights())
     layer.stride_nd = (1, int(stride))
     layer.padding_nd = (0, int(padding))
@@ -123,7 +146,7 @@ def add_attention(network, query, key, value, *, num_heads, head_dim):
         to_heads(query), trt.MatrixOperation.NONE,
         to_heads(key), trt.MatrixOperation.TRANSPOSE).get_output(0)
     scores = network.add_elementwise(
-        scores, add_constant(network, (1, 1, 1), [head_dim ** -0.5]),
+        scores, add_constant(network, (1, 1, 1), [head_dim ** -0.5], numpy_dtype(query)),
         trt.ElementWiseOperation.PROD).get_output(0)
     weights = network.add_softmax(scores)
     weights.axes = 1 << 2

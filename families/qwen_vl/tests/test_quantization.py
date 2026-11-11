@@ -121,6 +121,7 @@ def test_calibrate_reads_checkpoint_bytes(tmp_path: Path, quantization: str) -> 
     tensors = _write_checkpoint(tmp_path, quantization)
     ctx = _calibrate(tmp_path, quantization)
 
+    assert ctx.has_nvfp4_weights == (quantization == "nvfp4")
     assert len(ctx.scales) == LAYERS * len(_PROJECTIONS)
     entry = ctx.scales["layer.1.w_down"]
     out_f, in_f = _PROJECTIONS["mlp.down_proj"]

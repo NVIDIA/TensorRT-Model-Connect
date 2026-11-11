@@ -313,6 +313,12 @@ std::vector<float> k2_horizon_uno_draft_lora_mask(int32_t block_length) {
     return mask;
 }
 
+bool k2_horizon_uno_mask_uses_lora(const std::vector<float>& lora_mask) {
+    // NaN compares unequal to 0 and keeps the LoRA profile, as before.
+    return std::any_of(lora_mask.begin(), lora_mask.end(),
+                       [](float value) { return value != 0.0F; });
+}
+
 K2HorizonUnoCommitDecision
 k2_horizon_uno_decide_greedy_commit(const std::vector<int32_t>& proposal_tokens,
                                     const std::vector<int32_t>& verifier_next_tokens) {
