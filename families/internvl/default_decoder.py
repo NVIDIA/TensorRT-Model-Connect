@@ -139,6 +139,8 @@ def build_standard_decoder_engine(
             embed_input=embed_input,
             verbose=verbose,
             profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
+            valid_prefix_attention=bool(config.raw.get("_valid_prefix_attention", False)),
+            opt_prefill_length=int(config.raw.get("_opt_prefill_length", 64)),
         )
 
     attention_size: int = weights.get("_attention_size", config.attention_size)

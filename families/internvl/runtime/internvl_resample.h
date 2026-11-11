@@ -21,11 +21,34 @@
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 #include <vector>
 
 namespace trtmc {
 namespace internvl {
+
+// Run fn(begin, end) over [0, count) split into contiguous chunks on up to
+// eight threads (the caller's thread takes the first chunk). fn must not throw.
+template <typename Fn>
+inline void parallel_chunks(int32_t count, int32_t min_chunk, Fn&& fn) {
+    const auto cores = static_cast<int32_t>(std::max(1U, std::thread::hardware_concurrency()));
+    const int32_t workers =
+        std::clamp(count / std::max(min_chunk, int32_t{1}), int32_t{1}, std::min(cores, 8));
+    if (workers <= 1) {
+        fn(0, count);
+        return;
+    }
+    const int32_t chunk = (count + workers - 1) / workers;
+    std::vector<std::thread> threads;
+    threads.reserve(static_cast<std::size_t>(workers - 1));
+    for (int32_t begin = chunk; begin < count; begin += chunk)
+        threads.emplace_back(
+            [&fn, begin, end = std::min(count, begin + chunk)] { fn(begin, end); });
+    fn(0, std::min(count, chunk));
+    for (auto& thread : threads)
+        thread.join();
+}
 
 struct ResampleTaps {
     int32_t first{0};
@@ -112,24 +135,27 @@ inline std::vector<uint8_t> resample_rgb_axis(const std::vector<uint8_t>& src, i
     const auto out_width = along_width ? static_cast<int32_t>(plan.rows.size()) : width;
     std::vector<uint8_t> out(static_cast<std::size_t>(out_height) * out_width * 3U);
     const int64_t half = int64_t{1} << (plan.precision - 1);
-    for (int32_t y = 0; y < out_height; ++y) {
-        for (int32_t x = 0; x < out_width; ++x) {
-            const auto& row = plan.rows[static_cast<std::size_t>(along_width ? x : y)];
-            for (int32_t c = 0; c < 3; ++c) {
-                int64_t sum = half;
-                for (std::size_t tap = 0; tap < row.weights.size(); ++tap) {
-                    const auto source = static_cast<int32_t>(tap) + row.first;
-                    const auto sy = along_width ? y : source;
-                    const auto sx = along_width ? source : x;
-                    sum += static_cast<int64_t>(
-                               src[(static_cast<std::size_t>(sy) * width + sx) * 3U + c]) *
-                           row.weights[tap];
+    // Output rows are independent: split them across threads (same arithmetic).
+    parallel_chunks(out_height, 8, [&](int32_t y_begin, int32_t y_end) {
+        for (int32_t y = y_begin; y < y_end; ++y) {
+            for (int32_t x = 0; x < out_width; ++x) {
+                const auto& row = plan.rows[static_cast<std::size_t>(along_width ? x : y)];
+                for (int32_t c = 0; c < 3; ++c) {
+                    int64_t sum = half;
+                    for (std::size_t tap = 0; tap < row.weights.size(); ++tap) {
+                        const auto source = static_cast<int32_t>(tap) + row.first;
+                        const auto sy = along_width ? y : source;
+                        const auto sx = along_width ? source : x;
+                        sum += static_cast<int64_t>(
+                                   src[(static_cast<std::size_t>(sy) * width + sx) * 3U + c]) *
+                               row.weights[tap];
+                    }
+                    out[(static_cast<std::size_t>(y) * out_width + x) * 3U + c] =
+                        static_cast<uint8_t>(std::clamp<int64_t>(sum >> plan.precision, 0, 255));
                 }
-                out[(static_cast<std::size_t>(y) * out_width + x) * 3U + c] =
-                    static_cast<uint8_t>(std::clamp<int64_t>(sum >> plan.precision, 0, 255));
             }
         }
-    }
+    });
     return out;
 }
 
