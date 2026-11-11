@@ -52,3 +52,20 @@ def test_document_and_media_order_are_preserved(tmp_path):
 def test_invalid_decision_request_fails_before_execution(tmp_path, inputs):
     with pytest.raises(BenchmarkError):
         resolve_task_case("structured_decision", {"inputs": inputs}, tmp_path)
+
+
+def test_independent_batch_requests(tmp_path):
+    items = [{"document": '{"state":"first"}'}, {"document": '{"state":"second"}'}]
+    result = resolve_task_case("structured_decision", {"inputs": {"requests": items}}, tmp_path)
+    assert [item["document"] for item in result.request["requests"]] == [item["document"] for item in items]
+    assert result.operation == "decide"
+
+
+@pytest.mark.parametrize("inputs", [
+    {"requests": []}, {"requests": ["{}"]},
+    {"requests": [{"requests": [{"document": "{}"}]}]},
+    {"requests": [{"document": "{}"}], "document": "{}"},
+])
+def test_reject_invalid_batch(tmp_path, inputs):
+    with pytest.raises(BenchmarkError):
+        resolve_task_case("structured_decision", {"inputs": inputs}, tmp_path)

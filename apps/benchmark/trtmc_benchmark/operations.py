@@ -80,7 +80,7 @@ def _generated_media_metrics(
 _OPERATIONS = (
     OperationSpec(
         name="decide",
-        rate_metrics=(RateMetric("questions", "questions_per_s"), RateMetric("options", "options_per_s")),
+        rate_metrics=(RateMetric("questions", "questions_per_s"), RateMetric("options", "options_per_s"), RateMetric("requests", "requests_per_s")),
     ),
     OperationSpec(
         name="generate",

@@ -1,0 +1,25 @@
+{
+  "name": "d3-flash",
+  "hf_id": "vllm-sr/d3-flash",
+  "hf_revision": "67e03e1bc157961c582ee7c6a35d9b15fada3dec",
+  "bundle": "d3-flash.bundle",
+  "family": "d3",
+  "task": "structured_decision",
+  "precision": "bf16",
+  "max_sequence_length": 512,
+  "max_batch_size": 2,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "d3-flash-text-image",
+      "premerge": true,
+      "inputs": {
+        "requests": [
+          {
+            "document_path": "fixtures/record.json"
+          }
+        ]
+      }
+    }
+  ]
+}

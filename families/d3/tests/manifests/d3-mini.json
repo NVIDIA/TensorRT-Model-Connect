@@ -1,0 +1,25 @@
+{
+  "name": "d3-mini",
+  "hf_id": "vllm-sr/d3-mini",
+  "hf_revision": "df99bf4ca4418bc6908ee68e9b7479af1f3b8800",
+  "bundle": "d3-mini.bundle",
+  "family": "d3",
+  "task": "structured_decision",
+  "precision": "bf16",
+  "max_sequence_length": 512,
+  "max_batch_size": 2,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "d3-mini-text-image",
+      "premerge": true,
+      "inputs": {
+        "requests": [
+          {
+            "document_path": "fixtures/record.json"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "name": "d3-lite",
+  "hf_id": "vllm-sr/d3-lite",
+  "hf_revision": "6c01fba14e74f63b70e1ef442b0b6d1b934339d5",
+  "bundle": "d3-lite.bundle",
+  "family": "d3",
+  "task": "structured_decision",
+  "precision": "bf16",
+  "max_sequence_length": 512,
+  "max_batch_size": 2,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "d3-lite-text-image",
+      "premerge": true,
+      "inputs": {
+        "requests": [
+          {
+            "document_path": "fixtures/record.json"
+          }
+        ]
+      }
+    }
+  ]
+}

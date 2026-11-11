@@ -23,6 +23,8 @@ _VISION_SUPPORT = FamilySupport(
 
 
 def describe(metadata: ModelMetadata) -> FamilySupport | None:
+    if "decision_config.json" in metadata.files:
+        return None
     if "joint_head_config.json" in metadata.files:
         return None
     if support := _ALIASES(metadata):

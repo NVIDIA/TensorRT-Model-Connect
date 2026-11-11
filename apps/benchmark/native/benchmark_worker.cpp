@@ -772,11 +772,10 @@ Json run_rerank(trtmc::ITask& task, const Json& request, const Timing& timing) {
 }
 
 Json run_decide(trtmc::ITask& task, const Json& request, const Timing& timing) {
-    auto& interface = require_interface<trtmc::IStructuredDecision>(task, "IStructuredDecision");
-    auto prepare = [&]() {
+    auto prepare = [&](const Json& item) {
         trtmc::StructuredDecisionRequest value;
-        value.document = request.at("document").get<std::string>();
-        value.max_state_tokens = request.value("max_state_tokens", -1);
+        value.document = item.at("document").get<std::string>();
+        value.max_state_tokens = item.value("max_state_tokens", -1);
         auto load = [](const std::string& path) {
             const auto image = read_image(path);
             trtmc::ImageResult result;
@@ -787,10 +786,10 @@ Json run_decide(trtmc::ITask& task, const Json& request, const Timing& timing) {
                 result.pixels.push_back(std::nearbyint(pixel * 255.0F));
             return result;
         };
-        for (const auto& path : request.value("image_paths", std::vector<std::string>{}))
+        for (const auto& path : item.value("image_paths", std::vector<std::string>{}))
             value.images.push_back(load(path));
         for (const auto& paths :
-             request.value("video_frame_paths", std::vector<std::vector<std::string>>{})) {
+             item.value("video_frame_paths", std::vector<std::vector<std::string>>{})) {
             if (paths.empty())
                 throw std::invalid_argument("video frames must not be empty");
             trtmc::ImageResult video;
@@ -809,33 +808,70 @@ Json run_decide(trtmc::ITask& task, const Json& request, const Timing& timing) {
         }
         return value;
     };
+    auto summarize = [](const trtmc::StructuredDecisionResult& result) {
+        Json scores = Json::array();
+        std::size_t options = 0;
+        for (const auto& score : result.scores) {
+            options += score.option_ids.size();
+            scores.push_back({{"question_id", score.question_id},
+                              {"option_ids", score.option_ids},
+                              {"logits", score.logits},
+                              {"probabilities", score.probabilities}});
+        }
+        return Json{{"requests", 1},      {"questions", result.scores.size()},
+                    {"options", options}, {"input_tokens", result.input_tokens},
+                    {"scores", scores},   {"response", Json::parse(result.document)}};
+    };
+    if (request.contains("requests")) {
+        auto& interface =
+            require_interface<trtmc::IBatchStructuredDecision>(task, "IBatchStructuredDecision");
+        auto prepare_batch = [&]() {
+            std::vector<trtmc::StructuredDecisionRequest> values;
+            for (const auto& item : request.at("requests"))
+                values.push_back(prepare(item));
+            return values;
+        };
+        std::optional<std::vector<trtmc::StructuredDecisionRequest>> cached;
+        if (!timing.asset_loading_included)
+            cached = prepare_batch();
+        return measure(
+            timing,
+            [&]() {
+                if (cached)
+                    return interface.decide_batch(*cached);
+                const auto values = prepare_batch();
+                return interface.decide_batch(values);
+            },
+            [&](const std::vector<trtmc::StructuredDecisionResult>& results) {
+                Json items = Json::array();
+                std::size_t questions = 0, options = 0, tokens = 0;
+                for (const auto& result : results) {
+                    auto item = summarize(result);
+                    questions += item.at("questions").get<std::size_t>();
+                    options += item.at("options").get<std::size_t>();
+                    tokens += result.input_tokens;
+                    items.push_back(std::move(item));
+                }
+                return Json{{"requests", results.size()},
+                            {"questions", questions},
+                            {"options", options},
+                            {"input_tokens", tokens},
+                            {"responses", items}};
+            });
+    }
+    auto& interface = require_interface<trtmc::IStructuredDecision>(task, "IStructuredDecision");
     std::optional<trtmc::StructuredDecisionRequest> cached;
     if (!timing.asset_loading_included)
-        cached = prepare();
+        cached = prepare(request);
     return measure(
         timing,
         [&]() {
             if (cached)
                 return interface.decide(*cached);
-            const auto value = prepare();
+            const auto value = prepare(request);
             return interface.decide(value);
         },
-        [](const trtmc::StructuredDecisionResult& result) {
-            Json scores = Json::array();
-            std::size_t options = 0;
-            for (const auto& score : result.scores) {
-                options += score.option_ids.size();
-                scores.push_back({{"question_id", score.question_id},
-                                  {"option_ids", score.option_ids},
-                                  {"logits", score.logits},
-                                  {"probabilities", score.probabilities}});
-            }
-            return Json{{"questions", result.scores.size()},
-                        {"options", options},
-                        {"input_tokens", result.input_tokens},
-                        {"scores", scores},
-                        {"response", Json::parse(result.document)}};
-        });
+        summarize);
 }
 
 Json run_embedding(trtmc::ITask& task, const Json& request, const Timing& timing, bool pooled) {

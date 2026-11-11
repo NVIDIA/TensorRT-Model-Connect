@@ -1,0 +1,26 @@
+{
+  "state": "A red square is visible.",
+  "questions": {
+    "color": {
+      "type": "choice",
+      "instructions": "What color is the square?",
+      "criteria": {
+        "red": "Red",
+        "blue": "Blue"
+      }
+    },
+    "red": {
+      "type": "noul",
+      "instructions": "Is the square red?"
+    },
+    "brightness": {
+      "type": "score",
+      "instructions": "Rate the brightness.",
+      "criteria": [
+        "dark",
+        "medium",
+        "bright"
+      ]
+    }
+  }
+}

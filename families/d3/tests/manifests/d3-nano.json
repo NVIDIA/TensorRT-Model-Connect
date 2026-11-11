@@ -1,0 +1,25 @@
+{
+  "name": "d3-nano",
+  "hf_id": "vllm-sr/d3-nano",
+  "hf_revision": "8198c9f763b046605b2f4827b4999971fa2c92c4",
+  "bundle": "d3-nano.bundle",
+  "family": "d3",
+  "task": "structured_decision",
+  "precision": "bf16",
+  "max_sequence_length": 512,
+  "max_batch_size": 2,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "d3-nano-text-image",
+      "premerge": true,
+      "inputs": {
+        "requests": [
+          {
+            "document_path": "fixtures/record.json"
+          }
+        ]
+      }
+    }
+  ]
+}

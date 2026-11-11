@@ -1,0 +1,15 @@
+{
+  "source": "https://huggingface.co/collections/vllm-sr/decision-30",
+  "revisions": {
+    "edge": "bee5e872f75b9c5d1405767bf244a6948b95c0af",
+    "lite": "6c01fba14e74f63b70e1ef442b0b6d1b934339d5",
+    "nano": "8198c9f763b046605b2f4827b4999971fa2c92c4",
+    "mini": "df99bf4ca4418bc6908ee68e9b7479af1f3b8800",
+    "flash": "67e03e1bc157961c582ee7c6a35d9b15fada3dec"
+  },
+  "files": [
+    "config.json",
+    "decision_config.json",
+    "preprocessor_config.json"
+  ]
+}
