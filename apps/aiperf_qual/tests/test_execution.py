@@ -214,6 +214,11 @@ def test_natural_timings_name_the_native_mode_that_answered(tmp_path):
     assert row["reference_mode"] == "eager"
     assert any(note.startswith("Native torch.compile failed") and note.endswith("X") for note in row["notes"])
     assert row["compile_fallback"] == "compile fp16: ServiceError: X"  # structured for the summary
+    evidence = new_session(tmp_path / "floor")  # a timed compile batch and an eager batch that answered nothing
+    collect(evidence, "candidate", [raw(0, 10)])
+    collect(evidence, "reference", [raw(0, 20)], mode="compile")
+    collect(evidence, "reference", [], mode="eager")
+    assert evidence.natural_performance()[0]["reference_mode"] == "compile"
     evidence = new_session(tmp_path / "failed")  # no native mode answered: none is named
     collect(evidence, "candidate", [raw(0, 10)])
     row, = evidence.natural_performance()

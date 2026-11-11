@@ -309,8 +309,11 @@ def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference:
         reasons.append(f"actual work differs or is unknown on {len(pairs) - matched} paired responses")
     # The native mode that answered (torch.compile, or eager in its place; eager in records written before),
     # none when the native side recorded nothing.
-    modes = sorted({str(item.get("mode") or "eager") for item in identities[1]})
-    fallbacks = sorted({str(item["compile_fallback"]) for item in identities[1] if item.get("compile_fallback")})
+    # Only a native batch with a valid timed request names a mode (an eager floor batch that answered nothing
+    # does not).
+    answered = [batch["identity"] for batch in reference if any(row.get("valid") for row in batch["records"])]
+    modes = sorted({str(item.get("mode") or "eager") for item in answered})
+    fallbacks = sorted({str(item["compile_fallback"]) for item in answered if item.get("compile_fallback")})
     result: dict[str, Any] = {"request": name, "reference_mode": "+".join(modes), "kind": "natural_dataset", "gate": False,
                               "timing_contract": TIMING_CONTRACT, "pairs": len(pairs), "matched_pairs": matched,
                               "different_work_pairs": len(pairs) - matched - unknown, "unknown_work_pairs": unknown,
