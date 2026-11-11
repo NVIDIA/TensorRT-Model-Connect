@@ -63,11 +63,47 @@ def test_the_spill_directory_is_in_effect_only_inside_the_build(monkeypatch, tmp
     monkeypatch.setattr(weight_spill, "physical_memory_bytes", lambda: 3 * 4096 - 3)
     output = tmp_path / "model.bundle"
     with weight_spill.spilled({"w": np.ones((64, 32), dtype=np.float16)}, output) as moved:
-        assert moved == 4096 and weight_spill._spill_directory == tmp_path.resolve()
+        assert moved == 4096 and weight_spill._SPILL_DIRECTORY.get() == tmp_path.resolve()
         assert isinstance(weight_spill.file_backed_empty((64, 32), np.uint16), np.memmap)
-    assert weight_spill._spill_directory is None
+    assert weight_spill._SPILL_DIRECTORY.get() is None
     assert not isinstance(weight_spill.file_backed_empty((64, 32), np.uint16), np.memmap)
     with pytest.raises(RuntimeError):  # a failed build leaves no directory behind either
         with weight_spill.spilled({"w": np.ones((64, 32), dtype=np.float16)}, output):
             raise RuntimeError("build failed")
-    assert weight_spill._spill_directory is None
+    assert weight_spill._SPILL_DIRECTORY.get() is None
+
+
+def test_overlapping_builds_keep_their_own_spill_directory(monkeypatch, tmp_path) -> None:
+    import contextvars
+    import threading
+
+    monkeypatch.setattr(weight_spill, "SPILL_MIN_BYTES", 1024)
+    monkeypatch.setattr(weight_spill, "physical_memory_bytes", lambda: 3 * 4096 - 3)
+    seen = {}
+    inside = threading.Event()
+    other_done = threading.Event()
+
+    def other_build() -> None:  # a build in another thread sees no spill directory of this one
+        inside.wait()
+        seen["other"] = weight_spill._SPILL_DIRECTORY.get()
+        other_done.set()
+
+    thread = threading.Thread(target=contextvars.copy_context().run, args=(other_build,))
+    thread.start()
+    with weight_spill.spilled(
+        {"w": np.ones((64, 32), dtype=np.float16)}, tmp_path / "model.bundle"
+    ):
+        inside.set()
+        other_done.wait()
+        seen["own"] = weight_spill._SPILL_DIRECTORY.get()
+    thread.join()
+    assert seen == {"other": None, "own": tmp_path.resolve()}
+
+
+def test_a_symlinked_bundle_spills_next_to_its_own_entry(tmp_path) -> None:
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    (tmp_path / "out").mkdir()
+    link = tmp_path / "out" / "model.bundle"
+    link.symlink_to(target / "model.bundle")
+    assert weight_spill.spill_directory(link) == (tmp_path / "out").resolve()

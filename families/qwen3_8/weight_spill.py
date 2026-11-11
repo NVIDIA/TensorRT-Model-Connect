@@ -68,7 +68,8 @@ def spill_if_large(weights: MutableMapping[str, object], output_path: Path) -> i
     """Spill the large host weights next to the bundle when they exceed SPILL_MEMORY_FRACTION of memory."""
     if not should_spill(weights):
         return 0
-    moved = spill_large_weights(weights, Path(output_path).resolve().parent)
+    # The directory holding the bundle's own entry: a symlinked bundle stays where BundleWriter stages it.
+    moved = spill_large_weights(weights, Path(output_path).parent.resolve())
     print(
         f"Moved {moved / 1024**3:.1f} GiB of host weights to file-backed pages for the build",
         file=sys.stderr,

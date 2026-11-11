@@ -14,8 +14,9 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
-from contextlib import contextmanager
 from collections.abc import Iterator, MutableMapping
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 
 import numpy as np
@@ -26,8 +27,9 @@ SPILL_MIN_BYTES = 64 * 1024**2
 SPILL_MEMORY_FRACTION = 1 / 3
 
 # Directory of the current build's spill, or None when the build keeps its weights in anonymous memory.
-# Set only inside ``spilled``; graph code that derives large constants (file_backed_empty) follows it.
-_spill_directory: Path | None = None
+# Set only inside ``spilled``, per context (overlapping builds keep their own); graph code that derives large
+# constants (file_backed_empty) follows it.
+_SPILL_DIRECTORY: ContextVar[Path | None] = ContextVar("gemma_weight_spill_directory", default=None)
 
 
 def physical_memory_bytes() -> int:
@@ -65,9 +67,10 @@ def spill_large_weights(weights: MutableMapping[str, object], directory: Path) -
 def file_backed_empty(shape: tuple[int, ...], dtype: np.dtype) -> np.ndarray:
     """An uninitialized array, file-backed when the current build spilled and the array is large."""
     nbytes = int(np.prod(shape, dtype=np.int64)) * np.dtype(dtype).itemsize
-    if _spill_directory is None or nbytes < SPILL_MIN_BYTES:
+    directory = _SPILL_DIRECTORY.get()
+    if directory is None or nbytes < SPILL_MIN_BYTES:
         return np.empty(shape, dtype=dtype)
-    return _anonymous_mapping(shape, dtype, _spill_directory)
+    return _anonymous_mapping(shape, dtype, directory)
 
 
 def _anonymous_mapping(shape: tuple[int, ...], dtype: np.dtype, directory: Path) -> np.memmap:
@@ -77,14 +80,16 @@ def _anonymous_mapping(shape: tuple[int, ...], dtype: np.dtype, directory: Path)
         return np.memmap(backing, dtype=dtype, mode="w+", shape=shape)
 
 
+def spill_directory(output_path: Path) -> Path:
+    """The directory that holds the bundle's own entry (a symlinked bundle stays where BundleWriter stages it)."""
+    return Path(output_path).parent.resolve()
+
+
 def spill_if_large(weights: MutableMapping[str, object], output_path: Path) -> int:
     """Spill the large host weights next to the bundle when they exceed SPILL_MEMORY_FRACTION of memory."""
-    global _spill_directory
-    _spill_directory = None
     if not should_spill(weights):
         return 0
-    _spill_directory = Path(output_path).resolve().parent
-    moved = spill_large_weights(weights, _spill_directory)
+    moved = spill_large_weights(weights, spill_directory(output_path))
     print(
         f"Moved {moved / 1024**3:.1f} GiB of host weights to file-backed pages for the build",
         file=sys.stderr,
@@ -94,9 +99,11 @@ def spill_if_large(weights: MutableMapping[str, object], output_path: Path) -> i
 
 @contextmanager
 def spilled(weights: MutableMapping[str, object], output_path: Path) -> Iterator[int]:
-    """``spill_if_large`` for the duration of a build; afterwards no spill directory is in effect."""
-    global _spill_directory
+    """``spill_if_large`` for the duration of a build: inside it (in this context only) large derived
+    constants are file-backed too; on exit the previous directory is restored."""
+    moved = spill_if_large(weights, output_path)
+    token = _SPILL_DIRECTORY.set(spill_directory(output_path) if moved else None)
     try:
-        yield spill_if_large(weights, output_path)
+        yield moved
     finally:
-        _spill_directory = None
+        _SPILL_DIRECTORY.reset(token)
