@@ -410,72 +410,95 @@ class _Qwen3OmniModel:
 # ---------------------------------------------------------------------------
 
 
-def _add_routed_swiglu_experts(
+def _add_expert_weights(
+    network: trt.INetworkDefinition,
+    work_dtype: trt.DataType,
+    w_gate: np.ndarray,
+    w_up: np.ndarray,
+    w_down: np.ndarray,
+    dtype: np.dtype,
+) -> tuple[trt.ITensor, trt.ITensor, trt.ITensor]:
+    """Packed ``[experts, in, out]`` expert weights in the working dtype."""
+
+    def packed_weight(values: np.ndarray) -> trt.ITensor:
+        tensor = graph_ops.add_constant(network, values.shape, values, dtype=dtype)
+        if tensor.dtype != work_dtype:
+            tensor = network.add_cast(tensor, work_dtype).get_output(0)
+        return tensor
+
+    return packed_weight(w_gate), packed_weight(w_up), packed_weight(w_down)
+
+
+def _add_swiglu(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    gate_w: trt.ITensor,
+    up_w: trt.ITensor,
+    down_w: trt.ITensor,
+) -> trt.ITensor:
+    """Batched ``down(silu(inp @ gate) * (inp @ up))``."""
+    none = trt.MatrixOperation.NONE
+    gate = network.add_matrix_multiply(inp, none, gate_w, none).get_output(0)
+    up = network.add_matrix_multiply(inp, none, up_w, none).get_output(0)
+    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID).get_output(0)
+    swish = network.add_elementwise(gate, sigmoid, trt.ElementWiseOperation.PROD).get_output(0)
+    gated = network.add_elementwise(swish, up, trt.ElementWiseOperation.PROD).get_output(0)
+    return network.add_matrix_multiply(gated, none, down_w, none).get_output(0)
+
+
+def _add_dense_experts(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
     top_indices: trt.ITensor,
     routing_weights: trt.ITensor,
     hidden_size: int,
-    top_k: int,
-    w_gate: np.ndarray,
-    w_up: np.ndarray,
-    w_down: np.ndarray,
-    dtype: np.dtype = np.float32,
+    num_experts: int,
+    gate_w: trt.ITensor,
+    up_w: trt.ITensor,
+    down_w: trt.ITensor,
 ) -> trt.ITensor:
-    """Compute only the top-k routed experts for each token."""
-    inp_4d = network.add_shuffle(inp)
-    inp_4d.reshape_dims = (-1, 1, 1, hidden_size)
+    """Run every expert on every row, then sum with each row's top-k weights.
 
-    def packed_weight(values: np.ndarray) -> trt.ITensor:
-        tensor = graph_ops.add_constant(network, values.shape, values, dtype=dtype)
-        if tensor.dtype != inp.dtype:
-            tensor = network.add_cast(tensor, inp.dtype).get_output(0)
-        return tensor
-
-    gate_weights = packed_weight(w_gate)
-    up_weights = packed_weight(w_up)
-    down_weights = packed_weight(w_down)
-    selected_gate = network.add_gather(gate_weights, top_indices, 0)
-    selected_up = network.add_gather(up_weights, top_indices, 0)
-    gate = network.add_matrix_multiply(
-        inp_4d.get_output(0),
-        trt.MatrixOperation.NONE,
-        selected_gate.get_output(0),
-        trt.MatrixOperation.NONE,
+    Reads each expert matrix once per launch whatever the row count;
+    unselected experts get weight zero. Gathering each row's top-k matrices
+    instead copies ``rows * top_k`` of them, which dominates a multi-token
+    prefill launch. One engine serves both profiles, and switching paths on
+    the row count (``IIfConditional`` or empty-tensor splits) does not build
+    reliably in bf16, so single-row decode also takes this path.
+    """
+    expert_ids = graph_ops.add_constant(
+        network,
+        (1, 1, num_experts),
+        np.arange(num_experts, dtype=np.int32).reshape(1, 1, num_experts),
+        dtype=np.int32,
     )
-    up = network.add_matrix_multiply(
-        inp_4d.get_output(0),
-        trt.MatrixOperation.NONE,
-        selected_up.get_output(0),
-        trt.MatrixOperation.NONE,
-    )
-
-    sigmoid = network.add_activation(gate.get_output(0), trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(
-        gate.get_output(0), sigmoid.get_output(0), trt.ElementWiseOperation.PROD
-    )
-    gated = network.add_elementwise(
-        swish.get_output(0), up.get_output(0), trt.ElementWiseOperation.PROD
-    )
-
-    selected_down = network.add_gather(down_weights, top_indices, 0)
-    down = network.add_matrix_multiply(
-        gated.get_output(0),
-        trt.MatrixOperation.NONE,
-        selected_down.get_output(0),
-        trt.MatrixOperation.NONE,
-    )
-    output = network.add_shuffle(down.get_output(0))
-    output.reshape_dims = (-1, top_k, hidden_size)
-
-    route_weights = network.add_shuffle(routing_weights)
-    route_weights.reshape_dims = (-1, top_k, 1)
-    weighted = network.add_elementwise(
-        output.get_output(0), route_weights.get_output(0), trt.ElementWiseOperation.PROD
-    )
-    return network.add_reduce(
-        weighted.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=False
+    indices_3d = network.add_shuffle(top_indices)
+    indices_3d.reshape_dims = (0, 0, 1)
+    selected = network.add_elementwise(
+        indices_3d.get_output(0), expert_ids, trt.ElementWiseOperation.EQUAL
     ).get_output(0)
+    one_hot = network.add_cast(selected, routing_weights.dtype).get_output(0)
+    weights_3d = network.add_shuffle(routing_weights)
+    weights_3d.reshape_dims = (0, 0, 1)
+    weighted = network.add_elementwise(
+        one_hot, weights_3d.get_output(0), trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    dense = network.add_reduce(
+        weighted, trt.ReduceOperation.SUM, 1 << 1, keep_dims=False
+    ).get_output(0)  # [rows, experts]
+
+    rows_3d = network.add_shuffle(inp)
+    rows_3d.reshape_dims = (1, -1, hidden_size)
+    outputs = _add_swiglu(network, rows_3d.get_output(0), gate_w, up_w, down_w)
+
+    # [rows, experts] -> [experts, rows, 1]; sum the scaled outputs over experts.
+    dense_t = network.add_shuffle(dense)
+    dense_t.first_transpose = (1, 0)
+    dense_t.reshape_dims = (0, 0, 1)
+    scaled = network.add_elementwise(
+        outputs, dense_t.get_output(0), trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    return network.add_reduce(scaled, trt.ReduceOperation.SUM, 1, keep_dims=False).get_output(0)
 
 
 def _add_omni_moe_block(
@@ -509,18 +532,16 @@ def _add_omni_moe_block(
     )
     routing_weights = norm_weights.get_output(0)
 
-    # Gather each token's routed expert weights before the expert matmuls.
-    routed = _add_routed_swiglu_experts(
+    gate_w, up_w, down_w = _add_expert_weights(
         network,
-        inp,
-        top_indices,
-        routing_weights,
-        hidden_size,
-        top_k,
+        inp.dtype,
         weights[f"{prefix}.experts.w_gate"],
         weights[f"{prefix}.experts.w_up"],
         weights[f"{prefix}.experts.w_down"],
-        dtype=dtype,
+        dtype,
+    )
+    routed = _add_dense_experts(
+        network, inp, top_indices, routing_weights, hidden_size, num_experts, gate_w, up_w, down_w
     )
     shared_gate_key = f"{prefix}.shared_expert_gate"
     if shared_gate_key not in weights:
