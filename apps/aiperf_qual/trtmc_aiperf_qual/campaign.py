@@ -359,7 +359,8 @@ FELL_BACK = "eager (compile failed)"
 
 def native_mode(row: Mapping[str, Any]) -> str:
     """The native mode that answered a profile: ``compile``, ``eager`` (configured, or pinned), ``eager (compile
-    failed)`` where eager replaced a failed torch.compile, both when the evidence mixes them, or ``—``."""
+    failed)`` where eager replaced a failed torch.compile, ``compile, eager`` when the evidence mixes them, or
+    ``—``."""
     # An entry that errored records the mode it would have run; only evidence names the mode that answered.
     accuracy = [item.get("native") or {} for item in row.get("accuracy", []) if item.get("status") != "error"]
     perf = [item for item in row.get("perf", []) if item.get("light") != "n/a"

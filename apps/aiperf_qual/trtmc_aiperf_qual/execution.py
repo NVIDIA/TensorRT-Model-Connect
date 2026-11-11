@@ -322,7 +322,9 @@ def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference:
                                   "Interval across evaluation units, not repeated-run timing stability.",
                                   *(f"Native torch.compile failed; eager answered in its place: {reason[:300]}"
                                     for reason in fallbacks)],
-                              "candidate": {}, "reference": {}}
+                              "candidate": {}, "reference": {},
+                              # Structured as well as noted, so a summary can name the replaced compile.
+                              **({"compile_fallback": fallbacks[0][:300]} if fallbacks else {})}
     # Report each side's entire valid workload, including unpaired responses.
     # Pair filtering is only for comparability, never for the displayed timings.
     for side, values, original, precision in zip(("candidate", "reference"), rows, all_rows, precisions):

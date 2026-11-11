@@ -413,6 +413,10 @@ TIMED = {"reference": {"p50_ms": 9.0}}
     ([{"native": {"mode": "compile"}}], [{"reference_mode": "compile+eager", "light": "green", **TIMED}],
      "compile, eager"),
     ([], [{"reference_mode": "eager", "light": "n/a", **TIMED}], "—"),
+    # Accuracy errored, but the natural-dataset Perf shows eager answering after a failed compile.
+    ([{"status": "error", "native": {"mode": "compile"}}],
+     [{"reference_mode": "eager", "light": "informational", "compile_fallback": "Dynamo recompile limit", **TIMED}],
+     "eager (compile failed)"),
     # The native side never answered: an errored entry, or a Perf row without native timings.
     ([{"status": "error", "native": {"mode": "eager"}}], [{"reference_mode": "eager", "light": "informational",
                                                           "reference": {"p50_ms": None}}], "—"),
