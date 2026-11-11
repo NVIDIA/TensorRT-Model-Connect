@@ -48,6 +48,15 @@ if(TRTMC_BUILD_TESTS)
   target_compile_options(test_qwen_chat_templates PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME test_qwen_chat_templates COMMAND test_qwen_chat_templates)
 
+  add_executable(test_qwen_tokenizer
+    ${PROJECT_SOURCE_DIR}/families/qwen/tests/cpp/test_qwen_tokenizer.cpp
+    bpe_tokenizer.cpp
+  )
+  target_include_directories(test_qwen_tokenizer PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(test_qwen_tokenizer PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_qwen_tokenizer PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME test_qwen_tokenizer COMMAND test_qwen_tokenizer)
+
   foreach(test_name IN ITEMS
       test_qwen_embedding_pipeline
       test_qwen_native_kv_cache
