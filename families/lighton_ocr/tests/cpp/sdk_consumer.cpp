@@ -27,6 +27,7 @@ int main(int argc, char** argv) {
             trtmc::ImageInput{{pixels.get(), static_cast<std::size_t>(height) * width * 3},
                               static_cast<std::uint32_t>(height),
                               static_cast<std::uint32_t>(width)}};
+        parts.emplace_back(trtmc::TextPart{""});
         const auto media = trtmc::ImagesTextToTextRequest::from_parts(parts);
         auto result = [&]() {
             const auto model = trtmc::Model::load(argv[1], {argv[2]});
