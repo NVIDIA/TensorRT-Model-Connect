@@ -222,6 +222,10 @@ def _pairs_fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]
             while keep > 0 and (over := excess(query, text)) > 0:  # decoding can merge tokens: check again
                 keep = max(0, keep - over)
                 text = tokenizer.decode(ids[:keep], skip_special_tokens=True)
+            if excess(query, text) > 0:  # the query and the format alone exceed the bundle
+                raise ValueError(f"no room for a query-document pair: sample {sample.get('sample_id')} needs "
+                                 f"{excess(query, text)} tokens more than max_sequence_length {length} allows "
+                                 f"with {PAIR_MARGIN_TOKENS} tokens of margin")
             documents.append(text)
         request["documents"] = documents
         result.append({**sample, "request": request, "request_sha": request_sha(request)})

@@ -1529,6 +1529,11 @@ def test_truncated_documents_fit_the_bundle_with_its_special_tokens(monkeypatch)
     with pytest.raises(ValueError, match="no room for a query-document pair"):
         absolute._pairs_fitted({"candidate": {"max_sequence_length": absolute.PAIR_MARGIN_TOKENS}, "reference": {}},
                                [sample], "{query}{document}")
+    # A positive budget that the query alone exceeds cannot be met by emptying the document either.
+    long_query = {"query": " ".join(["q"] * 20), "documents": ["d1 d2"]}
+    crowded = {"sample_id": "q2", "request": long_query, "request_sha": request_sha(long_query)}
+    with pytest.raises(ValueError, match="sample q2 needs"):
+        absolute._pairs_fitted({"candidate": {"max_sequence_length": 10}, "reference": {}}, [crowded], "{query} {document}")
 
 
 def _rejection(session, message):
