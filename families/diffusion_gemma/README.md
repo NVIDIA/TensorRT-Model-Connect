@@ -12,10 +12,7 @@ Every canvas contains 256 tokens. As in the official
 implementation, the generation budget rounds up to a complete canvas and output
 ends at the first configured EOS token.
 
-BF16 attempts failed the unchanged numerical qualification gates. The public
-builder accepts FP32; BF16 is not a qualified build mode for this family.
-The [historical BF16 recipe](tests/reports/evidence/historical-bf16-manifest.json)
-is retained as evidence of the failed attempt.
+The public builder accepts FP32 only; BF16 builds are not supported.
 
 ## Build
 
