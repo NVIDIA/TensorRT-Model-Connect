@@ -19,6 +19,7 @@ from .checkpoint_mapper import (
     _target_np_dtype,
 )
 from .config import ModelConfig
+from .support import _normalize_task_type, semantic_task
 from .time_series_trt import (
     LinearConstants,
     add_batch_norm_last_dim,
@@ -36,44 +37,6 @@ from .time_series_trt import (
 if TYPE_CHECKING:
     from tensorrt_model_connect.build import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
-
-
-def _config_value(config: Any, key: str, fallback: Any = None) -> Any:
-    if isinstance(config, dict):
-        return config.get(key, fallback)
-    return getattr(config, key, fallback)
-
-
-def _normalize_task_type(config: Any) -> str:
-    explicit = str(
-        _config_value(config, "patchtst_task", _config_value(config, "task_type", ""))
-    ).lower()
-    if explicit:
-        if "class" in explicit:
-            return "classification"
-        if "regress" in explicit:
-            return "regression"
-        if "forecast" in explicit or "predict" in explicit:
-            return "forecast"
-
-    problem_type = str(_config_value(config, "problem_type", "")).lower()
-    if "class" in problem_type:
-        return "classification"
-    if "regress" in problem_type:
-        return "regression"
-
-    architectures = _config_value(config, "architectures", [])
-    if isinstance(architectures, str):
-        architectures = [architectures]
-    for arch in architectures or []:
-        arch_l = str(arch).lower()
-        if "class" in arch_l:
-            return "classification"
-        if "regress" in arch_l:
-            return "regression"
-        if "forecast" in arch_l or "predict" in arch_l:
-            return "forecast"
-    return "forecast"
 
 
 def _load_all_tensors(
@@ -541,7 +504,10 @@ def _build_patchtst_network(
             )
             pred3 = network.add_shuffle(pred)
             pred3.reshape_dims = (1, int(raw.get("num_targets", 1)))
-            add_named_output(network, pred3.get_output(0), "regression_outputs")
+            output = pred3.get_output(0)
+            if output.dtype != trt.float32:
+                output = network.add_cast(output, trt.float32).get_output(0)
+            add_named_output(network, output, "regression_outputs")
         else:
             outputs = _apply_distribution_domain_map(
                 network,
@@ -555,7 +521,10 @@ def _build_patchtst_network(
                 reshaped_outputs.append(pred3.get_output(0))
             cat = network.add_concatenation(reshaped_outputs)
             cat.axis = 2
-            add_named_output(network, cat.get_output(0), "regression_outputs")
+            output = cat.get_output(0)
+            if output.dtype != trt.float32:
+                output = network.add_cast(output, trt.float32).get_output(0)
+            add_named_output(network, output, "regression_outputs")
 
     return build_serialized_network(
         builder, network, precision=precision, verbose=verbose, tag="patchtst"
@@ -584,12 +553,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task != "time_series_forecast":
-        raise ValueError("PatchTST supports only time_series_forecast")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if config.model_type != "patchtst":
         raise ValueError(f"PatchTST requires model_type='patchtst', got {config.model_type!r}")
+    expected_task = semantic_task(config.raw)
+    if request.task != expected_task:
+        raise ValueError(f"PatchTST checkpoint supports only {expected_task}")
     precision = request.precision.lower()
     if precision not in {"fp16", "fp32"}:
         raise ValueError("PatchTST supports only fp16 and fp32 builds")
@@ -631,7 +601,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "prediction_length": int(
                 config.raw.get("prediction_length", config.raw.get("num_targets", 1))
             ),
-            "task": task_type,
+            "task": expected_task,
+            "num_targets": (int(config.raw.get("num_targets", 1))
+                            if expected_task != "series_to_point_forecast" else 1),
+            "distribution_output": (
+                str(config.raw["distribution_output"]).lower()
+                if expected_task == "series_to_regression_distribution" else ""
+            ),
             "tensor_parallel_size": request.tensor_parallel_size,
         },
     )

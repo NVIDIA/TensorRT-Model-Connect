@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from functools import cache
 from pathlib import Path
 import pytest
@@ -17,7 +18,9 @@ import numpy as np
 from tensorrt_model_connect import BuildRequest, build
 
 FAMILY = "patchtst"
-TASKS = frozenset({"time_series_forecast"})
+TASKS = frozenset(
+    {"series_to_point_forecast", "series_to_regression_values", "series_to_regression_distribution"}
+)
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
@@ -174,6 +177,8 @@ def _run_json(
             "LD_LIBRARY_PATH",
             "-np",
             str(manifest["tensor_parallel_size"]),
+            sys.executable,
+            str(TEST_ROOT / "rank_exec.py"),
             *invocation,
         ]
     env = os.environ.copy()
@@ -189,7 +194,13 @@ def _run_json(
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
     record_evidence("commands", {"argv": getattr(completed, "args", None)})
-    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
+    record_evidence(
+        "native",
+        {
+            "stdout": getattr(completed, "stdout", None),
+            "stderr": getattr(completed, "stderr", None),
+        },
+    )
     payloads = []
     for line in completed.stdout.splitlines():
         start = line.find("{")
@@ -198,9 +209,106 @@ def _run_json(
                 payloads.append(json.loads(line[start:]))
             except json.JSONDecodeError:
                 pass
-    assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
+    assert len(payloads) == int(manifest["tensor_parallel_size"]), (
+        f"native {command} must return one result per rank"
+    )
     assert all((payload == payloads[0] for payload in payloads))
     return payloads[0]
+
+
+def _to_reference_layout(payload: dict, manifest: dict, config: dict) -> dict:
+    """Validate complete Task metadata, then restore the official model's batch layout."""
+    task = manifest["task"]
+    assert payload["task"] == task
+    if task == "series_to_point_forecast":
+        horizon = int(config["prediction_length"])
+        channels = int(config["num_input_channels"])
+        assert payload["kind"] == "point" and payload["shape"] == [horizon, channels]
+        assert payload["axes"] == ["horizon", "channel"]
+        assert payload["horizon_steps"] == list(range(1, horizon + 1))
+        assert payload["channel_names"] == payload["channel_units"] == []
+        data = np.asarray(payload["values"])
+        assert data.ndim == 1 and data.size == horizon * channels
+        data = data.reshape(1, horizon, channels)
+    else:
+        targets = int(config.get("num_targets", 1))
+        assert payload["target_count"] == targets
+        assert payload["target_names"] == payload["target_units"] == []
+        if task == "series_to_regression_values":
+            assert payload["kind"] == "regression_values"
+            data = np.asarray(payload["values"])
+            assert data.shape == (targets,)
+            data = data.reshape(1, targets)
+        else:
+            assert payload["kind"] == "regression_distribution"
+            distribution = str(config["distribution_output"]).lower()
+            assert payload["distribution"] == distribution
+            names = {
+                "normal": ("location", "scale"),
+                "student_t": ("degrees_of_freedom", "location", "scale"),
+                "negative_binomial": ("total_count", "logits"),
+            }[distribution]
+            assert set(payload["parameters"]) == set(names)
+            vectors = [np.asarray(payload["parameters"][name]) for name in names]
+            assert all(value.shape == (targets,) for value in vectors)
+            data = np.stack(vectors, axis=-1)
+            # DistributionOutput squeezes the final target axis when num_targets=1.
+            data = data.reshape((1, len(names)) if targets == 1 else (1, targets, len(names)))
+    return {"task_output": payload, "values": data, "shape": list(data.shape)}
+
+
+def _assert_sdk_consumers(
+    runtime_root, bundle, model_dir, manifest, case, tmp_path, expected, thresholds
+):
+    build_root = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    config = json.loads((model_dir / "config.json").read_text())
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = str(runtime_root) + ":" + env.get("LD_LIBRARY_PATH", "")
+    for language in ("c", "cpp"):
+        executable = build_root / f"test_patchtst_sdk_{language}"
+        assert executable.is_file(), f"build the {language} SDK consumer first"
+        invocation = [
+            str(executable),
+            str(bundle),
+            str(runtime_root),
+            str(tmp_path / "values.f32"),
+            str(tmp_path / "mask.f32"),
+            manifest["task"],
+            str(config["num_input_channels"]),
+        ]
+        if int(manifest["tensor_parallel_size"]) > 1:
+            mpirun = shutil.which("mpirun")
+            assert mpirun, "multi-GPU SDK tests require mpirun"
+            invocation = [
+                mpirun,
+                "--tag-output",
+                "-x",
+                "LD_LIBRARY_PATH",
+                "-np",
+                str(manifest["tensor_parallel_size"]),
+                sys.executable,
+                str(TEST_ROOT / "rank_exec.py"),
+                *invocation,
+            ]
+        completed = subprocess.run(
+            invocation,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=int(case.get("runtime_timeout_s", 3600)),
+        )
+        record_evidence("commands", {"argv": invocation})
+        payloads = []
+        for line in completed.stdout.splitlines():
+            offset = line.find("{")
+            if offset >= 0:
+                payloads.append(json.loads(line[offset:]))
+        assert len(payloads) == int(manifest["tensor_parallel_size"])
+        assert all(payload == payloads[0] for payload in payloads)
+        actual = _to_reference_layout(payloads[0], manifest, config)
+        record_evidence("native", {"sdk_language": language, **actual})
+        _assert_parity(actual, expected, manifest, case, thresholds)
 
 
 def _thresholds(case_name: str) -> dict:
@@ -228,7 +336,7 @@ def _native(
     manifest["task"]
     inputs = case["inputs"]
     values = np.asarray(inputs["past_values"], dtype=np.float32)
-    mask = np.ones_like(values)
+    mask = np.asarray(inputs.get("observed_mask", np.ones_like(values)), dtype=np.float32)
     input_path = tmp_path / "values.f32"
     mask_path = tmp_path / "mask.f32"
     values.tofile(input_path)
@@ -248,6 +356,9 @@ def _native(
         str(mask_path),
         "--frequency",
         str(inputs.get("frequency", 0)),
+    )
+    payload = _to_reference_layout(
+        payload, manifest, json.loads((model_dir / "config.json").read_text())
     )
     payload["input_values"] = values.tolist()
     payload["input_mask"] = mask.tolist()
@@ -283,7 +394,9 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     values = np.zeros(context * channels, dtype=np.float32)
     values[-min(len(raw), values.size) :] = raw[-values.size :]
     mask = np.zeros_like(values)
-    mask[-min(len(raw), values.size) :] = 1.0
+    observed = list(inputs.get("observed_mask", [1] * len(raw)))
+    assert len(observed) == len(raw) and all(value in (0, 1) for value in observed)
+    mask[-min(len(raw), values.size) :] = observed[-values.size :]
     kwargs = {
         "past_values": torch.tensor(values).reshape(1, context, channels),
         "return_dict": True,
@@ -318,7 +431,7 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
 
 
 def test_regression_contract_requires_shape_and_sign_match() -> None:
-    manifest = {"task": "time_series_forecast"}
+    manifest = {"task": "series_to_regression_distribution"}
     case = {"name": "patchtst-regression"}
     thresholds = {"relative_l2": 1.0, "max_pointwise_error": 1.0}
     expected = {"values": np.asarray([[0.1, -0.1]], dtype=np.float32)}
@@ -353,7 +466,14 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     model_dir = _model_dir(manifest)
-    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
@@ -377,7 +497,50 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
                 expected = _official_reference(model_dir, manifest, window_case, window_root)
             record_evidence("reference", expected)
             with evidence_stage("compare"):
-                _assert_parity(actual, expected, manifest, window_case, record_evidence("thresholds", gates(case_name)))
+                _assert_parity(
+                    actual,
+                    expected,
+                    manifest,
+                    window_case,
+                    record_evidence("thresholds", gates(case_name)),
+                )
+                if index == 0:
+                    _assert_sdk_consumers(
+                        runtime_root,
+                        bundle,
+                        model_dir,
+                        manifest,
+                        window_case,
+                        window_root,
+                        expected,
+                        gates(case_name),
+                    )
+        masked_inputs = dict(windows(case_name)[0])
+        masked_inputs["observed_mask"] = [
+            int(index % 11 != 0) for index in range(len(masked_inputs["past_values"]))
+        ]
+        masked_case = {**case, "inputs": masked_inputs}
+        masked_root = tmp_path / "masked"
+        masked_root.mkdir()
+        actual = _native(
+            binary, runtime_root, bundle, model_dir, manifest, masked_case, masked_root
+        )
+        expected = _official_reference(model_dir, manifest, masked_case, masked_root)
+        record_evidence("native", actual)
+        record_evidence("reference", expected)
+        _assert_parity(actual, expected, manifest, masked_case, gates(case_name))
+        _assert_sdk_consumers(
+            runtime_root,
+            bundle,
+            model_dir,
+            manifest,
+            masked_case,
+            masked_root,
+            expected,
+            gates(case_name),
+        )
+        if manifest["task"] == "series_to_point_forecast":
+            _check_regression_values(binary, runtime_root, tmp_path)
         return
     with evidence_stage("native"):
         actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
@@ -386,4 +549,85 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         expected = _official_reference(model_dir, manifest, case, tmp_path)
     record_evidence("reference", expected)
     with evidence_stage("compare"):
-        _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+        _assert_parity(
+            actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name))
+        )
+        _assert_sdk_consumers(
+            runtime_root,
+            bundle,
+            model_dir,
+            manifest,
+            case,
+            tmp_path,
+            expected,
+            _thresholds(case_name),
+        )
+
+
+def _check_regression_values(binary: Path, runtime_root: Path, tmp_path: Path) -> None:
+    """Exercise the already-supported deterministic regression head using a fixed-seed official model."""
+    import torch
+    from transformers import PatchTSTConfig, PatchTSTForRegression
+
+    model_root = tmp_path / "generated-regression-values"
+    config = PatchTSTConfig(
+        context_length=32,
+        num_input_channels=2,
+        num_targets=3,
+        patch_length=8,
+        patch_stride=8,
+        d_model=8,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        ffn_dim=16,
+        norm_type="layernorm",
+        loss="mse",
+        dropout=0,
+        attention_dropout=0,
+        ff_dropout=0,
+        head_dropout=0,
+        positional_dropout=0,
+        path_dropout=0,
+    )
+    torch.manual_seed(1495)
+    model = PatchTSTForRegression(config).eval()
+    with torch.no_grad():
+        model.head.projection.bias.copy_(torch.tensor([1.0, -1.0, 0.25]))
+    model.save_pretrained(model_root)
+    for precision in ("fp32", "fp16"):
+        manifest = {
+            "family": FAMILY,
+            "task": "series_to_regression_values",
+            "precision": precision,
+            "tensor_parallel_size": 1,
+        }
+        case = {
+            "name": "patchtst-regression-values",
+            "inputs": {"past_values": np.sin(np.arange(64, dtype=np.float32) / 7).tolist()},
+        }
+        root = tmp_path / ("regression-values-" + precision)
+        root.mkdir()
+        bundle = root / "regression-values.bundle"
+        _build(model_root, bundle, manifest)
+        actual = _native(binary, runtime_root, bundle, model_root, manifest, case, root)
+        expected = _official_reference(model_root, manifest, case, root)
+        thresholds = {
+            "relative_l2": 1e-5 if precision == "fp32" else 1e-3,
+            "max_pointwise_error": 1e-5 if precision == "fp32" else 1e-3,
+        }
+        record_evidence(
+            "inputs",
+            {
+                "generated_model_config": config.to_dict(),
+                "seed": 1495,
+                "precision": precision,
+                "case": case,
+            },
+        )
+        record_evidence("native", actual)
+        record_evidence("reference", expected)
+        record_evidence("thresholds", thresholds)
+        _assert_parity(actual, expected, manifest, case, thresholds)
+        _assert_sdk_consumers(
+            runtime_root, bundle, model_root, manifest, case, root, expected, thresholds
+        )

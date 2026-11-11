@@ -39,9 +39,9 @@ RuntimeConfig parse_runtime_config(const std::vector<char>& data) {
         throw std::runtime_error("PatchTST runtime.json must be an object");
     const auto task = json.at("task").get<std::string>();
     std::string output_name;
-    if (task == "forecast")
+    if (task == "series_to_point_forecast")
         output_name = "prediction_outputs";
-    else if (task == "regression" || task == "classification")
+    else if (task == "series_to_regression_values" || task == "series_to_regression_distribution")
         output_name = "regression_outputs";
     else
         throw std::runtime_error("PatchTST runtime.json has unsupported task: " + task);
@@ -49,7 +49,10 @@ RuntimeConfig parse_runtime_config(const std::vector<char>& data) {
                          require_positive_int(json, "num_input_channels"),
                          require_positive_int(json, "prediction_length"),
                          require_positive_int(json, "tensor_parallel_size"),
-                         std::move(output_name)};
+                         std::move(output_name),
+                         task,
+                         require_positive_int(json, "num_targets"),
+                         json.at("distribution_output").get<std::string>()};
 }
 
 std::int32_t require_rank(std::int32_t tensor_parallel_size) {
