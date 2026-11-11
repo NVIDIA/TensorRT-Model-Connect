@@ -138,24 +138,33 @@ def _with_width(network, rows, width: int, keepalive: list[np.ndarray]):
 
 LORA_PROFILE = 0
 BASE_PROFILE = 1
+# Prompt rows per base-profile call; decode blocks stay at ``max_block_size``.
+PROMPT_CHUNK_ROWS = 64
 
 
-def add_lora_and_base_profiles(builder, builder_config, row_inputs, max_rows: int) -> None:
+def add_lora_and_base_profiles(
+    builder, builder_config, row_inputs, max_rows: int, base_max_rows: int | None = None
+) -> None:
     """Add the two optimization profiles of a ``1..max_rows`` row engine.
 
     ``LORA_PROFILE`` takes one ``lora_mask`` value per row and runs the LoRA
     branch. ``BASE_PROFILE`` takes an empty mask, for prompt and verify calls
     whose mask is all 0, so the LoRA GEMMs get no rows. The native runtime
-    keeps one execution context per profile.
+    keeps one execution context per profile. ``base_max_rows`` (default
+    ``max_rows``) lets prompt chunks on the base profile exceed a decode block;
+    its optimum stays ``max_rows``, the size of the decode-time base calls.
     """
 
-    for mask_rows in ((1, max_rows, max_rows), (0, 0, 0)):
+    base_max_rows = max_rows if base_max_rows is None else base_max_rows
+    if base_max_rows < max_rows:
+        raise ValueError("K2-Horizon-Uno base profile rows must cover a decode block")
+    for mask_rows, high in (((1, max_rows, max_rows), max_rows), ((0, 0, 0), base_max_rows)):
         profile = builder.create_optimization_profile()
         for name in row_inputs:
             # TensorRT 11.1 mutates the profile in place and returns ``None`` from
             # this Python binding.  Registration below is the authoritative
             # validation boundary.
-            profile.set_shape(name, (1,), (max_rows,), (max_rows,))
+            profile.set_shape(name, (1,), (max_rows,), (high,))
         profile.set_shape("lora_mask", *((rows,) for rows in mask_rows))
         if builder_config.add_optimization_profile(profile) < 0:
             raise RuntimeError("TensorRT rejected the K2-Horizon-Uno optimization profile")
@@ -486,7 +495,11 @@ def build_engine(
         raise RuntimeError("TensorRT failed to create K2-Horizon-Uno engine inputs")
 
     add_lora_and_base_profiles(
-        builder, builder_config, ("token_id", "position_id"), cfg.max_block_size
+        builder,
+        builder_config,
+        ("token_id", "position_id"),
+        cfg.max_block_size,
+        base_max_rows=max(cfg.max_block_size, min(PROMPT_CHUNK_ROWS, max_cache_length)),
     )
     lora_rows = _lora_rows(network, token_id, lora_mask)
 
