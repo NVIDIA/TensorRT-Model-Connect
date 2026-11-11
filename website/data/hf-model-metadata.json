@@ -1484,6 +1484,17 @@
       "architecture_source": "config.architecture"
     },
     {
+      "hf_id": "unsloth/Qwen-Image-2.1",
+      "revision": "20f5a734a394f0fce241bf2f9dc1b3d97ac18b2a",
+      "revision_source": "declared",
+      "metadata_file": "model_index.json",
+      "model_type": null,
+      "architectures": [
+        "QwenImage21Pipeline"
+      ],
+      "architecture_source": "model_index._class_name"
+    },
+    {
       "hf_id": "xlnet/xlnet-base-cased",
       "revision": "ceaa69c7bc5e512b5007106a7ccbb7daf24b2c79",
       "revision_source": "resolved",

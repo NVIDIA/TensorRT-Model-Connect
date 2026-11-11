@@ -1,0 +1,32 @@
+{
+  "name": "qwen-image-2.1-l0",
+  "hf_id": "unsloth/Qwen-Image-2.1",
+  "hf_revision": "20f5a734a394f0fce241bf2f9dc1b3d97ac18b2a",
+  "bundle": "qwen-image-2.1-l0.bundle",
+  "family": "qwen_image2_1",
+  "task": "text_to_image",
+  "precision": "bf16",
+  "image_height": 512,
+  "image_width": 512,
+  "max_sequence_length": 128,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "qwen-image-2.1-l0",
+      "premerge": true,
+      "prompt": "A cat holding a sign that says hello world",
+      "num_inference_steps": 20,
+      "seed": 42,
+      "reference_precision": "bf16"
+    },
+    {
+      "name": "qwen-image-2.1-l0-cfg",
+      "prompt": "A cat holding a sign that says hello world",
+      "negative_prompt": " ",
+      "cfg_scale": 4.0,
+      "num_inference_steps": 20,
+      "seed": 2026,
+      "reference_precision": "bf16"
+    }
+  ]
+}
