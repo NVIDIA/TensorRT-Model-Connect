@@ -1014,19 +1014,26 @@ def test_sampled_speech_is_valid_by_its_median_duration_not_each_utterance():
     assert validity([], [], [])["status"] == "error"
 
 
-def test_silent_speech_failure_reports_the_paired_native_baseline():
+def test_silence_the_native_model_shares_is_reported_not_failed():
     from trtmc_aiperf_qual.intelligibility import validity
 
-    problem = [{"sample_id": "same-request"}]
+    problems = [{"sample_id": "same-request"}, {"sample_id": "voiced"}]
     quiet = {"finite": True, "dbfs": -56.58, "seconds": 6.69}
-    native = {"finite": True, "dbfs": -56.52, "seconds": 6.69}
-    result = validity(problem, [quiet], [native])
-    assert result["status"] == "fail" and result["passed"] == 0
-    assert "native also silent (-56.5 dBFS)" in result["failures"][0]["explanation"]
-    assert result["failures"][0]["native_audio"] == native
-    # Native validity is evidence, not an additional absolute-quality floor.
+    native_quiet = {"finite": True, "dbfs": -56.52, "seconds": 6.69}
     good = {"finite": True, "dbfs": -20.0, "seconds": 6.69}
-    assert validity(problem, [good], [native])["status"] == "pass"
+    shared = validity(problems, [quiet, good], [native_quiet, good])
+    assert shared["status"] == "pass" and shared["passed"] == 2 and not shared["failures"]
+    assert "1 of 2 sentences silent on both sides (the model's own output): same-request" in shared["notes"]
+    # TRTMC silent where the native model speaks is still a failure, reported with the native baseline.
+    alone = validity(problems, [quiet, good], [good, good])
+    assert alone["status"] == "fail" and alone["passed"] == 1
+    assert alone["failures"][0]["explanation"] == "silent (-56.6 dBFS)" and alone["failures"][0]["native_audio"] == good
+    # Native silence never excuses missing or non-finite TRTMC audio.
+    broken = validity(problems, [{"finite": False, "dbfs": None, "seconds": 6.69}, good], [native_quiet, good])
+    assert broken["status"] == "fail" and broken["failures"][0]["explanation"] == "non-finite samples"
+    assert validity(problems, [None, good], [native_quiet, good])["status"] == "fail"
+    # Native validity is evidence, not an additional absolute-quality floor.
+    assert validity(problems[:1], [good], [native_quiet])["status"] == "pass"
 
 
 def test_reports_label_a_timing_normalized_per_audio_second(tmp_path):
