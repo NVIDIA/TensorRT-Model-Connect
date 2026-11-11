@@ -1,8 +1,8 @@
 /*
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-FileCopyrightText: Copyright (c) 2026 vLLM Semantic Router Team
  * SPDX-License-Identifier: Apache-2.0
  */
+// Copyright (c) 2026 vLLM Semantic Router Team
 #include "families/d3/runtime/record.h"
 
 #include <algorithm>
