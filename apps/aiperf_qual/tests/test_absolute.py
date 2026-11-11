@@ -1521,6 +1521,14 @@ def test_truncated_documents_fit_the_bundle_with_its_special_tokens(monkeypatch)
 
     assert kept(None) == 30 and kept(64) == 30
     assert kept(32) == 32 - 2 - absolute.PAIR_MARGIN_TOKENS  # 30 words and 2 specials would fill it exactly
+    assert kept(2 + absolute.PAIR_MARGIN_TOKENS + 1) == 1  # the smallest bundle that holds a document token
+    # A bundle that leaves no room (budget 0) or less than none (budget -3) is rejected, never sliced.
+    for length in (2 + absolute.PAIR_MARGIN_TOKENS, 3 + absolute.PAIR_MARGIN_TOKENS - 4):
+        with pytest.raises(ValueError, match="no room for document tokens"):
+            kept(length)
+    with pytest.raises(ValueError, match="no room for a query-document pair"):
+        absolute._pairs_fitted({"candidate": {"max_sequence_length": absolute.PAIR_MARGIN_TOKENS}, "reference": {}},
+                               [sample], "{query}{document}")
 
 
 def _rejection(session, message):

@@ -204,6 +204,9 @@ def _pairs_fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]
         return list(samples)
     tokenizer = _candidate_tokenizer(model)
     limit = length - PAIR_MARGIN_TOKENS
+    if limit <= 0:
+        raise ValueError(f"no room for a query-document pair: max_sequence_length {length} with "
+                         f"{PAIR_MARGIN_TOKENS} tokens of margin")
 
     def excess(query: str, document: str) -> int:
         text = pair_format.format(query=query, document=document)
@@ -233,6 +236,9 @@ def _head_truncated(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any
     if length:
         specials = len(tokenizer("", add_special_tokens=True)["input_ids"])
         limit = min(limit, length - specials - PAIR_MARGIN_TOKENS)
+    if limit <= 0:  # a negative slice would keep most of the text, an empty one all of it away
+        raise ValueError(f"no room for document tokens: limit {limit} (max_sequence_length {length or 'unset'}, "
+                         f"{PAIR_MARGIN_TOKENS} tokens of margin)")
     result = []
     for sample in samples:
         request = dict(sample["request"])
