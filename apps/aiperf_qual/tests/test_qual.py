@@ -1092,6 +1092,21 @@ def test_lance_qualification_has_a_native_path_and_sizes_the_multimodal_benchmar
     assert model["candidate"]["tokenizer_subfolder"] == "Lance_3B"
 
 
+@pytest.mark.parametrize("profile, extra_tokens", [
+    ("qwen3-vl-2b", 334), ("qwen3-vl-8b", 334),
+    ("qwen25vl-3b", 405), ("qwen25vl-7b-fp8", 405), ("qwen25vl-7b-nvfp4", 405),
+])
+def test_qwen_vl_benchmarks_reserve_image_template_and_answer_tokens(profile, extra_tokens):
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.models import resolve_model
+
+    repository = Path(__file__).resolve().parents[3]
+    model = resolve_model(profile, Environment({"repo": str(repository)}))
+    assert model["candidate"]["benchmark_sequence_length"]["extra_tokens"] == extra_tokens
+    # Its own bundle, so the catalog's smaller-cache bundle is never served for the benchmark.
+    assert model["candidate"]["bundle"].startswith(f"{profile}-benchmark/")
+
+
 def test_internlm2_counts_prompts_with_the_bundles_tokenizer_json():
     from trtmc_aiperf_qual.config import Environment
     from trtmc_aiperf_qual.models import resolve_model

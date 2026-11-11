@@ -7,3 +7,11 @@ reference:
   mode: eager  # torch.compile: generation recompiles past Dynamo's limit
   requirements: families/qwen_vl/requirements.txt  # the family's dependencies, layered on the serving interpreter
   options: {processor_kwargs: {max_pixels: 200704}}
+
+# The catalog bundle's KV cache holds an OCRBench prompt but not the prompt plus its 128-token answer; a full cache
+# slides and drops the image, and the answer degenerates into repetition. Reserve up to 256 image tokens (the
+# 200704-pixel budget in 28-pixel merged patches), 21 chat-template tokens (the default system turn included), and
+# 128 generated tokens.
+candidate:
+  build: {name: qwen25vl-3b-benchmark}
+  benchmark_sequence_length: {extra_tokens: 405}
