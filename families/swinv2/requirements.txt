@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The checkpoint is a pytorch_model.bin, read with torch. The E2E measures the
+# engine against the transformers reference, preprocessed with Pillow.
+torch==2.12.0
+transformers==5.2.0
+pillow==13.0.0

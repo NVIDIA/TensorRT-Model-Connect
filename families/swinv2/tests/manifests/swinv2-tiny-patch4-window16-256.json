@@ -1,0 +1,17 @@
+{
+  "name": "swinv2-tiny-patch4-window16-256",
+  "hf_id": "microsoft/swinv2-tiny-patch4-window16-256",
+  "hf_revision": "f4d3075206f2ad5eda586c30d6b4d0500f312421",
+  "bundle": "swinv2-tiny-patch4-window16-256.bundle",
+  "family": "swinv2",
+  "task": "image_to_class_scores",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "swinv2-tiny-patch4-window16-256",
+      "premerge": true,
+      "test_image": "data/test_img.png"
+    }
+  ],
+  "tensor_parallel_size": 1
+}
