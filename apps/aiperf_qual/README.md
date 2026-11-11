@@ -83,6 +83,8 @@ The evidence is written to
 `artifacts/build/benchmark-capacity.json`; request truncation and accuracy tolerances do not change.
 Dataset or tokenizer failures stop capacity planning rather than falling back to the catalog size.
 Lance uses the `Lance_3B` tokenizer subfolder and reserves its image, template, and generation tokens.
+The Qwen-VL profiles reserve theirs too: once a Qwen-VL KV cache is full it slides, dropping the image while
+the OCRBench answer is still being generated.
 Its Native adapter loads the pinned upstream model once and serves the same MMStar requests at the
 public Task's 448x448 image size, with image decode before timing and preparation/generation inside it.
 
