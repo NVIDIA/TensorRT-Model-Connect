@@ -101,11 +101,13 @@ def validity(problems: list[dict[str, Any]], candidate: list[Mapping[str, Any] |
     """Every TRTMC output is finite and not silent; the median of TRTMC's per-sentence duration ratios to the
     native outputs lies within VALID_DURATION_RATIO (outliers are reported, not failed: sampling). A sentence
     silent on both sides is the model's own output for that request, not a conversion defect: it is reported,
-    not failed. Without a sentence both sides voiced, the check has no duration evidence: an error."""
+    not failed. Without a sentence both sides voiced (silent sentences give no duration ratio), the check has no
+    duration evidence: an error."""
     low, high = VALID_DURATION_RATIO
     failures, ratios, shared_silence = [], [], []
     for problem, mine, theirs in zip(problems, candidate, native):
         reason = ("no audio" if not mine else "non-finite samples" if not mine["finite"]
+                  else "empty audio" if not mine.get("seconds")
                   else f"silent ({mine['dbfs']:.1f} dBFS)" if mine["dbfs"] < SILENCE_DBFS else None)
         if reason and _silent(mine) and _silent(theirs):
             shared_silence.append(problem["sample_id"])
@@ -137,5 +139,6 @@ def validity(problems: list[dict[str, Any]], candidate: list[Mapping[str, Any] |
 
 
 def _silent(audio: Mapping[str, Any] | None) -> bool:
-    """Finite audio quieter than SILENCE_DBFS."""
-    return bool(audio and audio.get("finite") and audio.get("dbfs") is not None and audio["dbfs"] < SILENCE_DBFS)
+    """Finite audio with samples, quieter than SILENCE_DBFS (empty audio is not silence)."""
+    return bool(audio and audio.get("finite") and audio.get("seconds") and audio.get("dbfs") is not None
+                and audio["dbfs"] < SILENCE_DBFS)

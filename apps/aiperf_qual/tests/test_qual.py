@@ -1032,6 +1032,10 @@ def test_silence_the_native_model_shares_is_reported_not_failed():
     broken = validity(problems, [{"finite": False, "dbfs": None, "seconds": 6.69}, good], [native_quiet, good])
     assert broken["status"] == "fail" and broken["failures"][0]["explanation"] == "non-finite samples"
     assert validity(problems, [None, good], [native_quiet, good])["status"] == "fail"
+    # Empty audio is not silence: it fails even where the native model is quiet.
+    empty = validity(problems, [{"finite": True, "dbfs": -1000.0, "seconds": 0.0}, good], [native_quiet, good])
+    assert empty["status"] == "fail" and empty["failures"][0]["explanation"] == "empty audio"
+    assert not any("silent on both sides" in note for note in empty["notes"])
     # Native validity is evidence, not an additional absolute-quality floor.
     assert validity(problems[:1], [good], [native_quiet])["status"] == "pass"
 
