@@ -141,6 +141,21 @@ SETPRIV = ["setpriv", f"--reuid={NOBODY}", f"--regid={NOBODY}", "--clear-groups"
            "--inh-caps=-all", "--bounding-set=-all"]
 
 
+class SandboxUnavailable(RuntimeError):
+    pass
+
+
+def protected_roots(environment: Mapping[str, Any], out: Path) -> list[Any]:
+    return [out, *(environment.get(key) for key in (
+        "bundle_root", "hf_hub_cache", "hf_datasets_cache", "data_root", "reference_env_root", "runtime_root"))]
+
+
+def preflight_code_sandbox(model: Mapping[str, Any], environment: Mapping[str, Any], out: Path) -> None:
+    # Note (Jiaxin Deng): Reject an unavailable grading boundary before spending model preparation or GPU work.
+    if any(item.get("metric") == "code_pass" for item in model.get("absolute", [])):
+        _sandbox_verified([str(path) for path in protected_roots(environment, out) if path])
+
+
 def protect(paths: Sequence[Any]) -> None:
     """Directories the generated programs must not be able to write (result, bundle, cache, data roots)."""
     PROTECTED_WRITE.update(str(path) for path in paths if path)
@@ -152,14 +167,19 @@ def _sandbox_verified(protected: Sequence[str]) -> None:
     Raises otherwise (fail closed)."""
     import subprocess
 
+    try:
+        identity = subprocess.run([*SETPRIV, "true"], capture_output=True)
+    except OSError as error:
+        raise SandboxUnavailable(f"code sandbox: setpriv is unavailable: {error}") from error
+    if identity.returncode != 0:
+        raise SandboxUnavailable("code sandbox: cannot switch to the nobody user (setpriv); "
+                                 "the host must provide the required UID/GID and capability boundary")
     for path in protected:
         if Path(path).exists() and subprocess.run([*SETPRIV, "test", "-w", path]).returncode == 0:
-            raise RuntimeError(f"code sandbox: nobody can write {path}")
+            raise SandboxUnavailable(f"code sandbox: nobody can write {path}")
     for path in PROTECTED_READ:
         if Path(path).exists() and subprocess.run([*SETPRIV, "ls", path], capture_output=True).returncode == 0:
-            raise RuntimeError(f"code sandbox: nobody can read {path}")
-    if subprocess.run([*SETPRIV, "true"]).returncode != 0:
-        raise RuntimeError("code sandbox: cannot switch to the nobody user (setpriv)")
+            raise SandboxUnavailable(f"code sandbox: nobody can read {path}")
 
 
 def code_pass(gold: Any, observation: Mapping[str, Any] | None, task: str | None = None) -> tuple[bool, str]:

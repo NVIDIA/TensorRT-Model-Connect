@@ -819,6 +819,9 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
     environment = Environment({**environment.values, "native_replicas": 1, "candidate_replicas": 1,
                                "acc_mps": False, "acc_overlap": False})
     out.mkdir(parents=True, exist_ok=True)
+    from . import gold_metrics
+
+    gold_metrics.preflight_code_sandbox(model, environment.values, out)
     (out / "execution.jsonl").write_text("")
     evidence = execution_session(model, environment, out)
     with execution.session(evidence):
@@ -878,8 +881,7 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
     fingerprint = platform_fingerprint(environment, python)["fingerprint"]
     from . import gold_metrics
 
-    gold_metrics.protect([out.parent, *(environment.values.get(key) for key in (
-        "bundle_root", "hf_hub_cache", "hf_datasets_cache", "data_root", "reference_env_root", "runtime_root"))])
+    gold_metrics.protect(gold_metrics.protected_roots(environment.values, root))
     accuracy: list[dict[str, Any]] = []
     performance: list[dict[str, Any]] = []
     unstated = unstated_defaults(perf_suite.samples[0]["request"], model["operation"]) if perf_suite else []
