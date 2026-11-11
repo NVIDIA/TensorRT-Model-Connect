@@ -71,7 +71,8 @@ ITask* create(const FamilyContext& context) {
     const std::string layout = require_value<std::string>(json, "decoder_engine_layout");
     if (hidden_size <= 0 || num_layers <= 0 || vocab_size <= 0 || tp_size <= 0 ||
         max_cache_length <= 0 || num_attention_heads <= 0 || num_key_value_heads <= 0 ||
-        head_dim <= 0 || (layout != "single" && layout != "dual_profile") ||
+        head_dim <= 0 || (layout != "single" && layout != "dual_profile" && layout != "split") ||
+        (layout == "split" && tp_size != 1) ||
         tp_mode != (tp_size > 1 ? "tensor_parallel" : "single") ||
         (precision != "fp16" && precision != "bf16" && precision != "fp32")) {
         throw std::runtime_error("rwkv runtime.json contains invalid geometry");
@@ -91,6 +92,18 @@ ITask* create(const FamilyContext& context) {
         throw std::runtime_error("rwkv failed to load decoder");
     decoder->set_timing_label("rwkv decoder");
     const cudaStream_t stream = decoder->stream();
+    std::unique_ptr<ITrtModule> prefill;
+    if (layout == "split") {
+        // The prefill engine shares the decoder's stream so state copies stay ordered.
+        ModuleCreateOptions prefill_options = options;
+        prefill_options.stream = stream;
+        const auto& prefill_plan = require_section(context.reader, "prefill.plan");
+        prefill = context.backend.create_module(prefill_plan.data(), prefill_plan.size(),
+                                                prefill_options);
+        if (prefill == nullptr || !prefill->ok())
+            throw std::runtime_error("rwkv failed to load the prefill engine");
+        prefill->set_timing_label("rwkv prefill");
+    }
 
     std::vector<RwkvRecurrentState::TensorSpec> specs = {
         {"attn_state", {hidden_size}, "present_attn"}, {"ff_state", {hidden_size}, "present_ff"},
@@ -109,7 +122,8 @@ ITask* create(const FamilyContext& context) {
     generation.chat_template_format =
         rwkv_detect_chat_template_format(chat_template(context.reader));
     return new RecurrentPipeline(std::move(decoder), std::move(state), std::move(generation),
-                                 stream, "RWKV", create_tokenizer(context.reader), std::string{});
+                                 stream, "RWKV", create_tokenizer(context.reader), std::string{},
+                                 std::move(prefill));
 }
 
 } // namespace trtmc::rwkv

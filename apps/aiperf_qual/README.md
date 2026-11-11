@@ -57,14 +57,19 @@ A family configuration can declare a complete local `benchmarks` entry (`suite`,
 `suite_definition`, `metric`, and `gate`) and select it through `absolute`, without adding
 family policy to the shared Task defaults. `family_parity` delegates
 to `gate.checker`, a `families.<family>.<module>:<function>` taking the two observations and gate;
-the ordinary parity decision still requires every selected sample to pass.
+the ordinary parity decision still requires every selected sample to pass, unless the gate declares
+`outliers` (`max_fraction` of the samples, each within `outliers.gate` merged over the gate): then that many
+single-sample outliers pass and are listed in every report, while a missing answer or a larger error still
+fails. A profile's family file declares it (DINOv3; camembert-base, roberta-large and fnet-base for
+encoder-parity); the shared Task defaults do not.
 DINOv3 uses 50 seeded COCO val2017 images, complete hidden and pooled features, and its existing
 family E2E criteria. Accuracy and task-call P50 come from the same extraction requests.
 
 Checks for every model of a Task (`supplementary`): text-to-speech round-trip WER (corpus, bootstrap) and
-audio validity (every output finite and not silent; the median per-sentence duration ratio to the native model
+audio validity (every output finite and not silent, unless the native model is silent for the same
+request; the median per-sentence duration ratio to the native model
 within 0.5-2, as a sampling model's single utterance may run to its length limit on either side; an error
-when no sentence has audio on both sides); GenEval-style pass rate for text-to-image families that take caller latents (the same
+when no sentence is voiced on both sides, so no duration can be compared); GenEval-style pass rate for text-to-image families that take caller latents (the same
 initial noise on both sides); CLIP-T and video validity for videos; MagicBrush CLIP-I and DINO for edits;
 world-model video parity. The pixel parity under latent replay is reported only (`informational`).
 
@@ -77,15 +82,6 @@ EOS included.
 The evidence is written to
 `artifacts/build/benchmark-capacity.json`; request truncation and accuracy tolerances do not change.
 Dataset or tokenizer failures stop capacity planning rather than falling back to the catalog size.
-
-A family profile may declare `candidate.tokenizer_json` with a `repo_id` and a full commit
-`revision` when remote tokenizer conversion differs from its native bundle. Qualification prepares
-that revision's `tokenizer.json` and `tokenizer_config.json` under
-`HF_HUB_CACHE/trtmc-qualification-tokenizers`, retaining special tokens and chat templates while
-selecting `PreTrainedTokenizerFast` without a remote class mapping. Selection, fit helpers,
-near-capacity sizing, and AIPerf client metrics use this same local directory; its file contents
-identify the selection cache. InternLM2 uses the pinned JSON dependency also used by its family.
-
 Lance uses the `Lance_3B` tokenizer subfolder and reserves its image, template, and generation tokens.
 Its Native adapter loads the pinned upstream model once and serves the same MMStar requests at the
 public Task's 448x448 image size, with image decode before timing and preparation/generation inside it.
@@ -431,6 +427,11 @@ A suite with media and neither `media_root` nor `hf_datasets_cache` configured i
   reaches the serving mechanics through `host`), named by `reference.adapter`.
 - Model needing a differently built bundle: `candidate.build` (or `candidate.model_directory`) in
   `config/models/<profile>.yaml`; the report names the bundle it qualified.
+- Model whose remote-code tokenizer counts differently from its bundle's tokenizer: `candidate.tokenizer_json`
+  (`{repo, revision}` of the `tokenizer.json` the bundle carries) in `config/models/<profile>.yaml`. The problem
+  selection, the fit helpers and AIPerf then count with it, loaded as a plain fast tokenizer with the
+  checkpoint's special tokens and chat template (InternLM2: its remote-code tokenizer splits text into characters
+  on transformers 5.x).
 - New machine: a new file under `config/environments/` (paths, Python interpreters, ports, lock, model list,
   retention); Docker or bare metal only differ in these paths. A run's own inputs (its ledger and multi-host
   assignment) stay with that run's results and are passed by path (`run-all --ledger`, `--assignment`).

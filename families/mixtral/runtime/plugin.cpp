@@ -180,6 +180,8 @@ DecoderModules load_modules(const FamilyContext& context, const RuntimeConfig& c
     }
     modules.prefill = std::move(dual.prefill);
     modules.decode = std::move(dual.decode);
+    modules.prefill->set_timing_label("mixtral prefill");
+    modules.decode->set_timing_label("mixtral decoder");
     return modules;
 }
 

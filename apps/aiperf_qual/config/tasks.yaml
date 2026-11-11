@@ -73,7 +73,8 @@ benchmarks:
                           metric: wer, gate: {margin: 0.5, relative_margin: 0.10}}
   sts: {suite: stsb, suite_definition: stsbenchmark-pairs-1379, metric: sts_spearman, gate: {margin: 0.5}}
   # Raw encoders (BERT, RoBERTa, ...: STS-B is not their task): conversion parity of the encode output (the
-  # first-token hidden state) on 400 STS-B test sentences, every sentence within the tolerance.
+  # first-token hidden state) on 400 STS-B test sentences, every sentence within the tolerance (a profile's family
+  # file may allow rare outliers: see the README).
   encoder_parity: {suite: encoder-parity, suite_definition: stsbenchmark-sentences-400, metric: vector_parity,
                    gate: {min_cosine: 0.999, max_relative_l2: 0.02},
                    # A native model that cannot run the candidate's precision (fp16) runs at fp32: TRTMC's half-

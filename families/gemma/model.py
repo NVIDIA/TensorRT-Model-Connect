@@ -222,7 +222,7 @@ class _GemmaModel:
         quant_ctx=None,
         verbose: bool = False,
         parallel_config=None,
-    ) -> bytes:
+    ) -> memoryview | bytes:
         activation = _checkpoint_gated_activation(config)
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
@@ -512,7 +512,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     weights = model.load_weights(
         str(model_dir), config, precision=precision, quant_ctx=quant_ctx
     )
+    # A 27B checkpoint's host weights plus TensorRT's device copy exceed a 128 GB unified-memory GPU.
+    from .weight_spill import spilled
 
+    with spilled(weights, request.output_path):
+        _write_engines(request, writer, model, config, weights, model_dir, max_sequence_length, precision,
+                       quant_ctx, parallel)
+
+
+def _write_engines(request, writer, model, config, weights, model_dir, max_sequence_length, precision,
+                   quant_ctx, parallel) -> None:
+    """Build the decoder engines into the bundle (the spill, if any, stays in effect throughout)."""
     writer.set_header(family="gemma", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):

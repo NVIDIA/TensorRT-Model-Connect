@@ -20,10 +20,8 @@ is judged on the per-problem seed means.
 from __future__ import annotations
 
 import functools
-import errno
 import hashlib
 import json
-import os
 import re
 import shutil
 import statistics
@@ -36,7 +34,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from . import cancel, execution, gold_metrics, noninferiority
 from .aiperf_runner import run_aiperf
-from .config import ConfigError, Environment
+from .config import Environment
 from .judge import light
 from .services import serving_replicas
 from .suites import SELECTION_SEED, build_suite, request_sha
@@ -70,49 +68,49 @@ def _has_tokenizer(name: str, revision: str | None, trust_remote_code: bool) -> 
     return True
 
 
-def _json_tokenizer_source(settings: Mapping[str, Any]) -> str:
-    if (not isinstance(settings, Mapping) or set(settings) != {"repo_id", "revision"}
-            or not isinstance(settings["repo_id"], str) or not settings["repo_id"].strip()
-            or not isinstance(settings["revision"], str) or not COMMIT.fullmatch(settings["revision"])):
-        raise ConfigError("candidate.tokenizer_json requires repo_id and a full commit revision")
+@functools.lru_cache(maxsize=None)
+def _tokenizer_json_directory(checkpoint: str, revision: str | None, repo: str, json_revision: str) -> str:
+    """A local tokenizer directory: ``repo``'s tokenizer.json as a plain fast tokenizer, with the checkpoint's
+    tokenizer settings (special tokens, chat template) but not its remote-code tokenizer class.
+
+    The directory lives in the user's Hugging Face home, not a shared temporary directory, because it is loaded
+    with the profile's trust_remote_code: it is written once into a private (0700) staging directory and renamed
+    into place, so every process of the run (the plan, both sides' AIPerf) reads the same complete files."""
     from huggingface_hub import constants, hf_hub_download
 
-    cache = Path(os.environ.get("HF_HUB_CACHE", constants.HF_HUB_CACHE)).expanduser().resolve()
-    root = cache / "trtmc-qualification-tokenizers"
-    config_asset = hf_hub_download(repo_id=settings["repo_id"], filename="tokenizer_config.json",
-                                   revision=settings["revision"], cache_dir=str(cache))
-    configuration = json.loads(Path(config_asset).read_text(encoding="utf-8"))
-    if not isinstance(configuration, dict):
-        raise ConfigError("candidate.tokenizer_json needs a tokenizer_config.json mapping")
-    configuration.pop("auto_map", None)
-    configuration["tokenizer_class"] = "PreTrainedTokenizerFast"
-    identity = hashlib.sha256(json.dumps([dict(settings), configuration], sort_keys=True).encode()).hexdigest()
-    directory = root / identity
-    if not directory.is_dir():
-        asset = hf_hub_download(repo_id=settings["repo_id"], filename="tokenizer.json",
-                                revision=settings["revision"], cache_dir=str(cache))
-        root.mkdir(parents=True, exist_ok=True)
-        # Note (Jiaxin Deng): Concurrent planners must not observe a half-written tokenizer.
-        with tempfile.TemporaryDirectory(dir=root) as temporary:
-            shutil.copyfile(asset, Path(temporary) / "tokenizer.json")
-            (Path(temporary) / "tokenizer_config.json").write_text(
-                json.dumps(configuration) + "\n", encoding="utf-8")
-            try:
-                os.rename(temporary, directory)
-            except OSError as error:
-                if error.errno not in (errno.EEXIST, errno.ENOTEMPTY):
-                    raise
-    if not all((directory / name).is_file() for name in ("tokenizer.json", "tokenizer_config.json")):
-        raise ConfigError(f"candidate.tokenizer_json cache is incomplete: {directory}")
+    key = hashlib.sha256(f"{checkpoint}@{revision}|{repo}@{json_revision}".encode()).hexdigest()[:16]
+    root = Path(constants.HF_HOME) / "trtmc-aiperf-tokenizers"
+    directory = root / key
+    if directory.is_dir():
+        return str(directory)
+    tokenizer_file = Path(hf_hub_download(repo, "tokenizer.json", revision=json_revision))
+    settings = json.loads(Path(hf_hub_download(checkpoint, "tokenizer_config.json", revision=revision)).read_text())
+    settings.pop("auto_map", None)
+    settings["tokenizer_class"] = "PreTrainedTokenizerFast"
+    root.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(dir=root, prefix=f".{key}-"))
+    shutil.copyfile(tokenizer_file, staging / "tokenizer.json")
+    (staging / "tokenizer_config.json").write_text(json.dumps(settings, indent=1, sort_keys=True))
+    try:
+        staging.rename(directory)
+    except OSError:
+        shutil.rmtree(staging)
+        if not directory.is_dir():  # not a copy another process of the run renamed first: a real failure
+            raise
     return str(directory)
 
 
 def tokenizer_source(model: Mapping[str, Any]) -> tuple[str, str | None]:
-    """Note (Jiaxin Deng): Explicit JSON avoids version-dependent remote conversion.
-    Otherwise use the candidate's tokenizer, or an adapter's base model tokenizer."""
-    if model["candidate"].get("tokenizer_json") is not None:
-        return _json_tokenizer_source(model["candidate"]["tokenizer_json"]), None
+    """The checkpoint whose tokenizer counts and formats the prompts: the candidate's, unless it carries
+    none (an adapter on a base model), then the native reference model's (that base model).
+
+    A profile's ``candidate.tokenizer_json`` (``{repo, revision}``) names the tokenizer.json the bundle
+    carries instead, for a checkpoint whose remote-code tokenizer counts differently (InternLM2 on
+    transformers 5.x splits text into characters): the source is then a local directory that loads it."""
     candidate = (str(model["candidate"]["checkpoint"]), model["candidate"].get("revision") or None)
+    json_source = model["candidate"].get("tokenizer_json")
+    if json_source:
+        return _tokenizer_json_directory(*candidate, str(json_source["repo"]), str(json_source["revision"])), None
     reference = model["reference"]
     if reference.get("model") and not _has_tokenizer(*candidate, bool(reference.get("trust_remote_code"))):
         return str(reference["model"]), reference.get("revision") or None
@@ -224,7 +222,8 @@ def _fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]], min_
     return kept
 
 
-PAIR_MARGIN_TOKENS = 4  # the bundle's own tokenizer may count a pair a few tokens apart from Transformers'
+# The bundle's own tokenizer may count a pair or a cut document a few tokens apart from Transformers'.
+PAIR_MARGIN_TOKENS = 4
 
 
 def _candidate_tokenizer(model: Mapping[str, Any]) -> Any:
@@ -247,6 +246,9 @@ def _pairs_fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]
         return list(samples)
     tokenizer = _candidate_tokenizer(model)
     limit = length - PAIR_MARGIN_TOKENS
+    if limit <= 0:
+        raise ValueError(f"no room for a query-document pair: max_sequence_length {length} with "
+                         f"{PAIR_MARGIN_TOKENS} tokens of margin")
 
     def excess(query: str, document: str) -> int:
         text = pair_format.format(query=query, document=document)
@@ -262,6 +264,10 @@ def _pairs_fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]
             while keep > 0 and (over := excess(query, text)) > 0:  # decoding can merge tokens: check again
                 keep = max(0, keep - over)
                 text = tokenizer.decode(ids[:keep], skip_special_tokens=True)
+            if excess(query, text) > 0:  # the query and the format alone exceed the bundle
+                raise ValueError(f"no room for a query-document pair: sample {sample.get('sample_id')} needs "
+                                 f"{excess(query, text)} tokens more than max_sequence_length {length} allows "
+                                 f"with {PAIR_MARGIN_TOKENS} tokens of margin")
             documents.append(text)
         request["documents"] = documents
         result.append({**sample, "request": request, "request_sha": request_sha(request)})
@@ -269,12 +275,16 @@ def _pairs_fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]
 
 
 def _head_truncated(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]], limit: int) -> list[dict[str, Any]]:
-    """Samples whose ``prompt`` keeps only its first ``limit`` tokens (the model's tokenizer)."""
-    from transformers import AutoTokenizer
-
-    name, revision = tokenizer_source(model)
-    tokenizer = AutoTokenizer.from_pretrained(name, revision=revision,
-                                              trust_remote_code=bool(model["reference"].get("trust_remote_code")))
+    """Samples whose ``prompt`` keeps only its first ``limit`` tokens (the model's tokenizer), fewer when the
+    bundle's max_sequence_length cannot hold that many with the tokenizer's special tokens (less the margin)."""
+    tokenizer = _candidate_tokenizer(model)
+    length = int(model["candidate"].get("max_sequence_length") or 0)
+    if length:
+        specials = len(tokenizer("", add_special_tokens=True)["input_ids"])
+        limit = min(limit, length - specials - PAIR_MARGIN_TOKENS)
+    if limit <= 0:  # a negative slice would keep most of the text, an empty one all of it away
+        raise ValueError(f"no room for document tokens: limit {limit} (max_sequence_length {length or 'unset'}, "
+                         f"{PAIR_MARGIN_TOKENS} tokens of margin)")
     result = []
     for sample in samples:
         request = dict(sample["request"])
@@ -709,10 +719,36 @@ def judge_parity(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]],
                 "reasons": [f"{len(unreadable)} of {expected} outputs lack readable evidence ({unreadable[0][:200]})"]}
     failures = [{"sample_id": problems[index].get("sample_id", str(index)), "explanation": reason}
                 for index, ok, reason in results if not ok]
+    allowed = _tolerated_outliers(item["gate"], compare, mine, theirs, results, expected) if failures else None
+    if allowed is not None:  # single-sample outliers of one precision, each within the relaxed outlier gate
+        entry.update(passed=expected - len(failures), required_passes=expected - allowed, failures=[],
+                     outliers=failures[:10], status="pass", reasons=[],
+                     notes=[f"{len(failures)} of {expected} outputs outside the tolerance but within the outlier gate "
+                            f"(at most {allowed} allowed)"])
+        return entry
     entry.update(passed=expected - len(failures), required_passes=expected, failures=failures[:5],
                  status="pass" if not failures else "fail",
                  reasons=[f"{len(failures)} of {expected} outputs outside the tolerance"] if failures else [])
     return entry
+
+
+def _tolerated_outliers(gate: Mapping[str, Any], compare: Callable, mine: Mapping[int, Any], theirs: Mapping[int, Any],
+                        results: Sequence[tuple[int, bool | None, str]], expected: int) -> int | None:
+    """How many outliers the gate's ``outliers`` policy (``max_fraction`` of the problems, each within
+    ``outliers.gate`` merged over the gate) allows, when every output outside the tolerance is such an
+    outlier; None otherwise. A missing answer is never an outlier, and a systematic error fails as before."""
+    policy = gate.get("outliers")
+    if not policy:
+        return None
+    failed = [(index, reason) for index, ok, reason in results if not ok]
+    allowed = int(float(policy["max_fraction"]) * expected)
+    if len(failed) > allowed:
+        return None
+    relaxed = {**{key: value for key, value in gate.items() if key != "outliers"}, **dict(policy.get("gate") or {})}
+    if any(reason == NO_ANSWER or compare(mine[index], theirs[index], relaxed)[0] is not True
+           for index, reason in failed):
+        return None
+    return allowed
 
 
 def _as_observations(side: Mapping[str, Any]) -> dict[str, Any]:

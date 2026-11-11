@@ -26,14 +26,16 @@ def _from_bits(bits: np.ndarray) -> torch.Tensor:
     return torch.from_numpy(bits.view(np.int16)).view(torch.bfloat16).float()
 
 
-def _build_projection_engine(table, weight, lora_a, lora_b):
+def _build_projection_engine(table, weight, lora_a, lora_b, base_max_rows=None):
     logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     config = builder.create_builder_config()
     token_id = network.add_input("token_id", trt.int32, (-1,))
     lora_mask = network.add_input("lora_mask", trt.float32, (-1,))
-    model.add_lora_and_base_profiles(builder, config, ("token_id",), _ROWS)
+    model.add_lora_and_base_profiles(
+        builder, config, ("token_id",), _ROWS, base_max_rows=base_max_rows
+    )
     keepalive: list[np.ndarray] = []
     embedding = model._work_constant(
         network, table.shape, table, work_dtype=trt.bfloat16, constant_keepalive=keepalive
@@ -111,3 +113,35 @@ def test_base_profile_skips_lora_and_lora_profile_applies_the_mask():
         torch.testing.assert_close(skipped, base[:rows], rtol=2e-2, atol=2e-2)
         if rows == 8:
             assert torch.equal(skipped, zero_mask)
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_base_profile_takes_prompt_chunks_longer_than_a_decode_block():
+    """The base profile can run more rows than a decode block; the LoRA profile cannot."""
+    rng = np.random.default_rng(1)
+    table = _bf16_bits(rng.standard_normal((_VOCAB, _IN)))
+    weight = _bf16_bits(rng.standard_normal((_IN, _OUT)) * 0.1)
+    lora_a = _bf16_bits(rng.standard_normal((_IN, _RANK)) * 0.1)
+    lora_b = _bf16_bits(rng.standard_normal((_RANK, _OUT)) * 0.1)
+    engine = _build_projection_engine(table, weight, lora_a, lora_b, base_max_rows=4 * _ROWS)
+    lora_shapes = engine.get_tensor_profile_shape("token_id", model.LORA_PROFILE)
+    base_shapes = engine.get_tensor_profile_shape("token_id", model.BASE_PROFILE)
+    assert [tuple(s) for s in lora_shapes] == [(1,), (_ROWS,), (_ROWS,)]
+    assert [tuple(s) for s in base_shapes] == [(1,), (_ROWS,), (4 * _ROWS,)]
+
+    tokens = rng.integers(0, _VOCAB, 4 * _ROWS - 3).tolist()
+    expected = _from_bits(table)[tokens] @ _from_bits(weight)
+    got = _run(engine, model.BASE_PROFILE, tokens, [])
+    torch.testing.assert_close(got, expected, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_base_profile_must_cover_a_decode_block():
+    """A base profile smaller than a decode block is rejected."""
+    builder = trt.Builder(trt.Logger(trt.Logger.WARNING))
+    with pytest.raises(ValueError, match="decode block"):
+        model.add_lora_and_base_profiles(
+            builder, builder.create_builder_config(), ("token_id",), _ROWS, base_max_rows=_ROWS - 1
+        )

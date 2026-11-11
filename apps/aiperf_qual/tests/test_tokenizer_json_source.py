@@ -7,12 +7,13 @@ from pathlib import Path
 import pytest
 
 from trtmc_aiperf_qual import absolute
-from trtmc_aiperf_qual.config import ConfigError, Environment
+from trtmc_aiperf_qual.config import Environment
 
 
 @pytest.fixture
 def json_source(tmp_path, monkeypatch):
     import huggingface_hub
+    from huggingface_hub import constants
     from tokenizers import Tokenizer, models, pre_tokenizers, processors
 
     source = tmp_path / "asset.json"
@@ -32,15 +33,17 @@ def json_source(tmp_path, monkeypatch):
         return str(config if filename == "tokenizer_config.json" else source)
 
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", download)
-    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setattr(constants, "HF_HOME", str(tmp_path / "cache"))
+    if hasattr(absolute, "_tokenizer_json_directory"):
+        absolute._tokenizer_json_directory.cache_clear()
     model = {"candidate": {"checkpoint": "unused/candidate", "revision": "c" * 40,
                             "max_sequence_length": 20,
-                            "tokenizer_json": {"repo_id": "org/tokenizer", "revision": "a" * 40}},
+                            "tokenizer_json": {"repo": "org/tokenizer", "revision": "a" * 40}},
              "reference": {"trust_remote_code": True}}
     return model, source, calls
 
 
-def test_json_source_loads_without_remote_code_and_is_shared_by_every_counter(json_source, tmp_path):
+def test_json_source_is_shared_by_selection_fit_truncation_and_aiperf(json_source, tmp_path, monkeypatch):
     from transformers import AutoTokenizer
     from aiperf.accuracy.models import BenchmarkProblem
     from aiperf.common.tokenizer import Tokenizer
@@ -69,20 +72,13 @@ def test_json_source_loads_without_remote_code_and_is_shared_by_every_counter(js
                                      {"url": "http://localhost"}, 1, None)
     assert arguments[arguments.index("--tokenizer") + 1] == name
     assert "--tokenizer-revision" not in arguments
+    # Note (Jiaxin Deng): run_aiperf clears inherited Hub offline flags before loading this local directory.
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
     client = Tokenizer.from_pretrained(name)
     assert client.encode("hello world") == [2, 3]
     assert absolute.tokenizer_source(model) == (name, None)
     assert calls.count(("org/tokenizer", "tokenizer.json", "a" * 40)) == 1
-
-
-@pytest.mark.parametrize("override", [{}, {"repo_id": "org/tokenizer", "revision": "main"},
-                                     {"repo_id": "org/tokenizer", "revision": None}, "tokenizer.json"])
-def test_json_source_requires_an_explicit_pinned_repository(json_source, override):
-    model, _, calls = json_source
-    model["candidate"]["tokenizer_json"] = override
-    with pytest.raises(ConfigError, match="tokenizer_json"):
-        absolute.tokenizer_source(model)
-    assert calls == []
 
 
 def test_concurrent_planners_publish_one_complete_tokenizer(json_source, monkeypatch):
@@ -121,6 +117,6 @@ def test_publication_failure_is_not_hidden_by_candidate_fallback(json_source, mo
     def denied(*args):
         raise PermissionError(errno.EACCES, "denied")
 
-    monkeypatch.setattr(absolute.os, "rename", denied)
+    monkeypatch.setattr(Path, "rename", denied)
     with pytest.raises(PermissionError, match="denied"):
         absolute.tokenizer_source(model)

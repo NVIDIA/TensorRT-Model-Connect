@@ -1014,19 +1014,30 @@ def test_sampled_speech_is_valid_by_its_median_duration_not_each_utterance():
     assert validity([], [], [])["status"] == "error"
 
 
-def test_silent_speech_failure_reports_the_paired_native_baseline():
+def test_silence_the_native_model_shares_is_reported_not_failed():
     from trtmc_aiperf_qual.intelligibility import validity
 
-    problem = [{"sample_id": "same-request"}]
+    problems = [{"sample_id": "same-request"}, {"sample_id": "voiced"}]
     quiet = {"finite": True, "dbfs": -56.58, "seconds": 6.69}
-    native = {"finite": True, "dbfs": -56.52, "seconds": 6.69}
-    result = validity(problem, [quiet], [native])
-    assert result["status"] == "fail" and result["passed"] == 0
-    assert "native also silent (-56.5 dBFS)" in result["failures"][0]["explanation"]
-    assert result["failures"][0]["native_audio"] == native
-    # Native validity is evidence, not an additional absolute-quality floor.
+    native_quiet = {"finite": True, "dbfs": -56.52, "seconds": 6.69}
     good = {"finite": True, "dbfs": -20.0, "seconds": 6.69}
-    assert validity(problem, [good], [native])["status"] == "pass"
+    shared = validity(problems, [quiet, good], [native_quiet, good])
+    assert shared["status"] == "pass" and shared["passed"] == 2 and not shared["failures"]
+    assert "1 of 2 sentences silent on both sides (the model's own output): same-request" in shared["notes"]
+    # TRTMC silent where the native model speaks is still a failure, reported with the native baseline.
+    alone = validity(problems, [quiet, good], [good, good])
+    assert alone["status"] == "fail" and alone["passed"] == 1
+    assert alone["failures"][0]["explanation"] == "silent (-56.6 dBFS)" and alone["failures"][0]["native_audio"] == good
+    # Native silence never excuses missing or non-finite TRTMC audio.
+    broken = validity(problems, [{"finite": False, "dbfs": None, "seconds": 6.69}, good], [native_quiet, good])
+    assert broken["status"] == "fail" and broken["failures"][0]["explanation"] == "non-finite samples"
+    assert validity(problems, [None, good], [native_quiet, good])["status"] == "fail"
+    # Empty audio is not silence: it fails even where the native model is quiet.
+    empty = validity(problems, [{"finite": True, "dbfs": -1000.0, "seconds": 0.0}, good], [native_quiet, good])
+    assert empty["status"] == "fail" and empty["failures"][0]["explanation"] == "empty audio"
+    assert not any("silent on both sides" in note for note in empty["notes"])
+    # Native validity is evidence, not an additional absolute-quality floor.
+    assert validity(problems[:1], [good], [native_quiet])["status"] == "pass"
 
 
 def test_reports_label_a_timing_normalized_per_audio_second(tmp_path):
@@ -1041,6 +1052,34 @@ def test_reports_label_a_timing_normalized_per_audio_second(tmp_path):
     assert "40.000 per audio second</td><td>90.000 per audio second" in report_html._performance([item])
 
 
+def test_a_family_file_adds_an_outlier_allowance_to_a_shared_benchmark_gate(tmp_path):
+    from trtmc_aiperf_qual.models import deep_merge, profile_override
+
+    family_file = tmp_path / "families" / "fam" / "tests" / "aiperf" / "enc.yaml"
+    family_file.parent.mkdir(parents=True)
+    family_file.write_text("benchmarks:\n  encoder_parity:\n"
+                           "    gate: {outliers: {max_fraction: 0.01, gate: {max_relative_l2: 0.04}}}\n")
+    shared = {"encoder_parity": {"metric": "vector_parity", "gate": {"min_cosine": 0.999, "max_relative_l2": 0.02}}}
+    override = profile_override("enc", "fam", tmp_path, root=tmp_path / "config")
+    gate = deep_merge(shared, override["benchmarks"])["encoder_parity"]["gate"]
+    assert gate == {"min_cosine": 0.999, "max_relative_l2": 0.02,
+                    "outliers": {"max_fraction": 0.01, "gate": {"max_relative_l2": 0.04}}}
+
+
+def test_reports_name_the_tolerated_outliers(tmp_path):
+    from trtmc_aiperf_qual import report_html
+    from trtmc_aiperf_qual.report import write_report
+
+    item = {"suite": "encoder-parity", "source": "absolute", "benchmark": "vector_parity", "status": "pass",
+            "samples": 400, "expected_samples": 400, "passed": 399, "required_passes": 396,
+            "notes": ["1 of 400 outputs outside the tolerance but within the outlier gate (at most 4 allowed)"],
+            "outliers": [{"sample_id": "136:sentence1", "explanation": "cosine 0.99940, relative L2 0.0346"}]}
+    write_report(tmp_path, {"model": "m", "provenance": {}, "accuracy": [item]})
+    assert "| tolerated outlier 136:sentence1: cosine 0.99940, relative L2 0.0346 |" in (tmp_path / "report.md").read_text()
+    page = report_html._accuracy([item])
+    assert "tolerated outlier" in page and "136:sentence1" in page and "relative L2 0.0346" in page
+
+
 def test_lance_qualification_has_a_native_path_and_sizes_the_multimodal_benchmark():
     from trtmc_aiperf_qual.config import Environment
     from trtmc_aiperf_qual.models import resolve_model
@@ -1051,3 +1090,15 @@ def test_lance_qualification_has_a_native_path_and_sizes_the_multimodal_benchmar
     assert (repository / model["reference"]["adapter"]).is_file()
     assert model["candidate"]["benchmark_sequence_length"]["extra_tokens"] == 288
     assert model["candidate"]["tokenizer_subfolder"] == "Lance_3B"
+
+
+def test_internlm2_counts_prompts_with_the_bundles_tokenizer_json():
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.models import resolve_model
+
+    repository = Path(__file__).resolve().parents[3]
+    model = resolve_model("internlm2-1.8b", Environment({"repo": str(repository)}))
+    assert model["reference"]["trust_remote_code"]
+    # The repository families/internlm/tokenizer_json.py builds the bundle's tokenizer from.
+    assert model["candidate"]["tokenizer_json"] == {
+        "repo": "internlm/internlm2-step-prover", "revision": "9e24972976836edf59be9eb14050437c60f50a6c"}

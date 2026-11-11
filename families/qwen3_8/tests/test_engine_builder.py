@@ -513,3 +513,23 @@ def test_native_tp_broadcast_requires_none_enum_and_root_zero() -> None:
     network.add_dist_collective.assert_called_once_with(
         value, trt.CollectiveOperation.BROADCAST, trt.ReduceOperation.NONE, 0, [])
     assert network.add_dist_collective.return_value.num_ranks == 2
+
+
+def test_default_prefill_engine_is_dropped_only_when_two_weight_copies_do_not_fit(tmp_path) -> None:
+    from dataclasses import replace
+
+    from families.qwen3_8 import model
+    from families.qwen3_8.build_request import BuildRequest
+
+    request = BuildRequest(tmp_path, tmp_path / "out", "qwen3_8", "text_generation", "fp16")
+    gib = 1024**3
+    # A 27B FP16 checkpoint (about 54 GiB) on a 121 GiB unified-memory GPU: decode engine only.
+    assert model._fit_prefill_engine(request, 128, 54 * gib, 121 * gib) == 0
+    # An 8B checkpoint fits twice, as does the 27B checkpoint on a large discrete GPU.
+    assert model._fit_prefill_engine(request, 128, 16 * gib, 121 * gib) == 128
+    assert model._fit_prefill_engine(request, 128, 54 * gib, 275 * gib) == 128
+    # No device to query, a single-token build, or an explicit chunk length is kept as is.
+    assert model._fit_prefill_engine(request, 128, 54 * gib, None) == 128
+    assert model._fit_prefill_engine(request, 0, 54 * gib, 121 * gib) == 0
+    explicit = replace(request, prefill_chunk_len=128)
+    assert model._fit_prefill_engine(explicit, 128, 54 * gib, 121 * gib) == 128

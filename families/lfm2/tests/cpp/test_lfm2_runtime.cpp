@@ -40,6 +40,7 @@ class FakeLfm2Module final : public trtmc::ITrtModule {
         int32_t position{0};
         int32_t write_index{0};
         int32_t kv_length{0};
+        int64_t token_count{0};
     };
 
     FakeLfm2Module(cudaStream_t stream, trtmc::DType state_dtype, int32_t vocab_size = 6)
@@ -70,7 +71,8 @@ class FakeLfm2Module final : public trtmc::ITrtModule {
     void forward_async(const trtmc::TensorMap& inputs) override {
         calls.push_back(Call{scalar(inputs, "token_id"), scalar(inputs, "position_id"),
                              scalar(inputs, "cache_write_indices"),
-                             scalar(inputs, "key_value_lengths")});
+                             scalar(inputs, "key_value_lengths"),
+                             inputs.at("token_id").shape.at(0)});
         std::vector<float> logits(static_cast<std::size_t>(vocab_size_), -10.0F);
         logits[2] = 10.0F;
         device_logits_.copy_from_host(logits.data());
@@ -99,7 +101,10 @@ class FakeLfm2Module final : public trtmc::ITrtModule {
         return found == entries_.end() ? std::vector<int64_t>{} : found->second.shape;
     }
     std::vector<int64_t> input_profile_shape(const std::string& name, int32_t,
-                                             trtmc::ProfileShapeSelector) const override {
+                                             trtmc::ProfileShapeSelector selector) const override {
+        const auto found = profile_max_.find(name);
+        if (found != profile_max_.end() && selector == trtmc::ProfileShapeSelector::kMax)
+            return found->second;
         return tensor_shape(name);
     }
     int32_t optimization_profile_count() const override { return 1; }
@@ -131,6 +136,12 @@ class FakeLfm2Module final : public trtmc::ITrtModule {
 
     void add_input_tensor(std::string name, std::vector<int64_t> shape, trtmc::DType dtype) {
         add(std::move(name), std::move(shape), dtype, true);
+    }
+
+    // Makes a token input dynamic [S] with an S range of 1..max_tokens.
+    void set_token_profile(const std::string& name, int64_t max_tokens) {
+        entries_.at(name).shape = {-1};
+        profile_max_[name] = {max_tokens};
     }
 
     void set_tensor(const std::string& name, std::vector<int64_t> shape, trtmc::DType dtype) {
@@ -166,6 +177,7 @@ class FakeLfm2Module final : public trtmc::ITrtModule {
     bool graph_enabled_{false};
     std::unordered_map<std::string, Entry> entries_;
     std::unordered_map<std::string, void*> bindings_;
+    std::unordered_map<std::string, std::vector<int64_t>> profile_max_;
     std::vector<std::shared_ptr<void>> resources_;
 };
 
@@ -365,6 +377,49 @@ void test_pipeline_uses_safe_one_token_progression(cudaStream_t stream) {
     }
 }
 
+void test_pipeline_prefills_prompt_in_chunks(cudaStream_t stream) {
+    auto decoder = std::make_unique<FakeLfm2Module>(stream, trtmc::DType::kFloat16);
+    auto prefill = std::make_unique<FakeLfm2Module>(stream, trtmc::DType::kFloat16);
+    for (auto* module : {decoder.get(), prefill.get()})
+        module->set_tensor("logits", {1, 6}, trtmc::DType::kFloat32);
+    for (const char* name : {"token_id", "position_id"}) {
+        decoder->set_token_profile(name, 1);
+        prefill->set_token_profile(name, 2);
+    }
+    auto* decode_trace = decoder.get();
+    auto* prefill_trace = prefill.get();
+    auto kv = std::make_unique<trtmc::Lfm2KvCache>(1, 8, 2, 4, stream, trtmc::DType::kFloat16);
+    auto conv = std::make_unique<trtmc::Lfm2ConvState>(1, 4, 3, stream, trtmc::DType::kFloat16);
+    auto state = std::make_unique<trtmc::Lfm2HybridState>(std::move(kv), std::move(conv));
+
+    trtmc::Lfm2TextGenConfig config;
+    config.vocab_size = 6;
+    config.id_eos = 5;
+    config.id_eos_ids = {5};
+    trtmc::Lfm2TextGenerationPipeline pipeline(std::move(decoder), std::move(state), config, stream,
+                                               nullptr, "", std::move(prefill));
+    check(prefill_trace->device_ptr("cache_k_0") == decode_trace->device_ptr("cache_k_0") &&
+              prefill_trace->device_ptr("conv_state_0") == decode_trace->device_ptr("conv_state_0"),
+          "prefill and decode contexts share the KV and convolution buffers");
+
+    trtmc::TextGenerationConfig request;
+    request.max_new_tokens = 2;
+    request.temperature = 0.0F;
+    const auto result = pipeline.generate_ids({4, 1, 3}, request);
+    check(result.token_ids == std::vector<int32_t>({4, 1, 3, 2, 2}),
+          "chunked prefill generates the expected continuation");
+    const auto& chunks = prefill_trace->calls;
+    check(chunks.size() == 2 && chunks[0].token_count == 2 && chunks[0].position == 0 &&
+              chunks[0].write_index == 0 && chunks[0].kv_length == 2 &&
+              chunks[1].token_count == 1 && chunks[1].position == 2 && chunks[1].write_index == 2 &&
+              chunks[1].kv_length == 3,
+          "the prompt is prefilled in chunks of the profile maximum");
+    const auto& steps = decode_trace->calls;
+    check(steps.size() == 1 && steps[0].token_count == 1 && steps[0].token == 2 &&
+              steps[0].position == 3 && steps[0].kv_length == 4,
+          "decode continues one token at a time after the prefilled rows");
+}
+
 void test_pipeline_chat_and_raw_bos_dedup(cudaStream_t stream) {
     auto module = std::make_unique<FakeLfm2Module>(stream, trtmc::DType::kFloat16);
     auto* trace = module.get();
@@ -462,6 +517,7 @@ int main() {
     test_active_key_rows_bucket_and_cap(stream);
     test_key_positions_binding(stream);
     test_pipeline_uses_safe_one_token_progression(stream);
+    test_pipeline_prefills_prompt_in_chunks(stream);
     test_pipeline_chat_and_raw_bos_dedup(stream);
     test_pipeline_rejects_logits_contract_mismatch(stream);
     cudaStreamDestroy(stream);

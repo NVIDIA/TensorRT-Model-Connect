@@ -540,7 +540,7 @@ class Qwen38Model:
         debug_layer_outputs: bool = False,
         target_feature_layers: tuple[int, ...] = (),
         media_inputs: bool = False,
-    ) -> bytes:
+    ) -> memoryview:
         """Build hybrid TRT engine with DeltaNet + attention layers."""
         hidden = config.hidden_size
         vocab = config.vocab_size
@@ -891,13 +891,13 @@ class Qwen38Model:
         if plan is None:
             raise RuntimeError("TensorRT engine build failed")
 
-        return bytes(plan)
+        return memoryview(plan)
 
     def build_mtp_engine(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False, media_inputs: bool = False,
-    ) -> bytes:
+    ) -> memoryview:
         """Build the MTP (multi-token-prediction) draft-head TRT engine.
 
         Mirrors vLLM's Qwen3-Next MTP forward pass (`qwen3_next_mtp.py`):
@@ -1139,13 +1139,13 @@ class Qwen38Model:
         if plan is None:
             raise RuntimeError("TensorRT MTP engine build failed")
 
-        return bytes(plan)
+        return memoryview(plan)
 
     def build_mtp_draft_chain_engine(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, num_draft_tokens: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
-    ) -> bytes:
+    ) -> memoryview:
         """Build an MTP engine that drafts `num_draft_tokens` tokens in one
         call, by repeating the single trained mtp.layers.0 block
         `num_draft_tokens` times against the SAME weights -- no extra
@@ -1428,13 +1428,13 @@ class Qwen38Model:
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
             raise RuntimeError("TensorRT MTP draft-chain engine build failed")
-        return bytes(plan)
+        return memoryview(plan)
 
     def build_engine_multi_token(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, seq_len: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False, media_inputs: bool = False,
-    ) -> bytes:
+    ) -> memoryview:
         """Build a TRT engine that processes `seq_len` NEW tokens in one call,
         emitting `seq_len` rows of logits -- one prediction per position.
 
@@ -1826,13 +1826,13 @@ class Qwen38Model:
         if plan is None:
             raise RuntimeError("TensorRT multi-token engine build failed")
 
-        return bytes(plan)
+        return memoryview(plan)
 
     def build_engine_prefill(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, chunk_len: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
-    ) -> bytes:
+    ) -> memoryview:
         """Build the multi-token prefill engine: `chunk_len` prompt tokens per call.
 
         Unlike `build_engine_multi_token` (which chains `chunk_len` single-token
@@ -2138,13 +2138,13 @@ class Qwen38Model:
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
             raise RuntimeError("TensorRT prefill engine build failed")
-        return bytes(plan)
+        return memoryview(plan)
 
     def build_mtp_prefill_engine(
         self, config: ModelConfig, weights: WeightDict,
         max_cache_length: int, chunk_len: int, *, precision: str = "fp32",
         quant_ctx=None, verbose: bool = False,
-    ) -> bytes:
+    ) -> memoryview:
         """Build the engine that warms MTP's KV cache for `chunk_len` prompt tokens at once.
 
         Prefill must leave MTP's own cache holding one K/V row per prompt
@@ -2270,7 +2270,7 @@ class Qwen38Model:
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
             raise RuntimeError("TensorRT MTP prefill engine build failed")
-        return bytes(plan)
+        return memoryview(plan)
 
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
         """Inject hybrid-specific config fields into the bundle."""

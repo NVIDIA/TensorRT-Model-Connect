@@ -135,11 +135,14 @@ class BundleWriter:
         finally:
             self._open_sections -= 1
 
-    def add_bytes(self, name: str, data: bytes) -> None:
-        """Add a complete in-memory binary section."""
+    def add_bytes(self, name: str, data: bytes | memoryview) -> None:
+        """Add a complete in-memory binary section.
 
-        if not isinstance(data, bytes):
-            raise TypeError("section data must be bytes")
+        A memoryview (for example over a serialized TensorRT plan) is written without copying it first.
+        """
+
+        if not isinstance(data, (bytes, memoryview)):
+            raise TypeError("section data must be bytes or a memoryview")
         with self.open_section(name) as section:
             section.write(data)
 

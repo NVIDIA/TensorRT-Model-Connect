@@ -188,8 +188,18 @@ class _MixtralModel:
         verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
+        dual_profile: bool = False,
     ) -> bytes:
+        """Build the Mixtral decoder engine.
+
+        ``dual_profile`` takes ``S`` token rows: profile 0 prefills
+        ``1..max_cache_length`` rows (attention over the cache plus the
+        prompt, every expert evaluated on all rows), profile 1 decodes one
+        row; logits come from the last row.
+        """
         parallel = normalize_parallel_config(parallel_config)
+        if dual_profile and (parallel.enabled or quant_ctx is not None):
+            raise NotImplementedError("Mixtral dual_profile is for unquantized single-GPU builds")
         if parallel.enabled:
             parallel.validate()
             from .tp_builder import build_mixtral_tp_engine
@@ -254,9 +264,27 @@ class _MixtralModel:
         # -----------------------------------------------------------
         # Inputs
         # -----------------------------------------------------------
-        token_id = network.add_input("token_id", trt.int32, (1,))
-        position_id = network.add_input("position_id", trt.int32, (1,))
-        attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
+        rows = None if dual_profile else 1
+        row_dim = -1 if dual_profile else 1
+        token_id = network.add_input("token_id", trt.int32, (row_dim,))
+        position_id = network.add_input("position_id", trt.int32, (row_dim,))
+        attention_mask = network.add_input(
+            "attention_mask", trt.float32, (row_dim, -1 if dual_profile else attention_window)
+        )
+        if dual_profile:
+            # The runtime prefills a whole prompt (up to the cache) in one launch.
+            opt_rows = min(PREFILL_OPT_TOKENS, max_cache_length)
+            for low, opt, high in ((1, opt_rows, max_cache_length), (1, 1, 1)):
+                profile = builder.create_optimization_profile()
+                for name in ("token_id", "position_id"):
+                    profile.set_shape(name, (low,), (opt,), (high,))
+                profile.set_shape(
+                    "attention_mask",
+                    (low, max_cache_length + low),
+                    (opt, max_cache_length + opt),
+                    (high, max_cache_length + high),
+                )
+                trt_config.add_optimization_profile(profile)
 
         cache_k_inputs = []
         cache_v_inputs = []
@@ -354,6 +382,7 @@ class _MixtralModel:
                 top_k=top_k,
                 dtype=layer_np_dtype,
                 quant_ctx=quant_ctx,
+                sequence_length=rows,
             )
 
             hidden_state = result["hidden"]
@@ -369,6 +398,10 @@ class _MixtralModel:
             if debug_layer_outputs:
                 _mark_debug_output(network, result["post_attn"], f"debug_post_attn_{layer_idx}")
                 _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
+
+        if dual_profile:
+            # Only the last row can affect the next token.
+            hidden_state = _last_row(network, hidden_state, hidden)
 
         # -----------------------------------------------------------
         # Final norm
@@ -471,8 +504,11 @@ def _add_mixtral_moe_block(
     top_k: int = 2,
     dtype: np.dtype = np.float32,
     quant_ctx=None,
+    sequence_length: int | None = 1,
 ) -> trt.ITensor:
     """Add Mixture of Experts block with standard top-k softmax routing.
+
+    ``sequence_length=None`` routes ``S`` rows (see :func:`_add_mixtral_moe_rows`).
 
     Steps:
       1. Router logits: inp @ router_weight -> [1, num_experts]
@@ -517,6 +553,12 @@ def _add_mixtral_moe_block(
     if quant_ctx is not None and quant_ctx.should_quantize(f"{prefix}.experts.w_gate"):
         return quant_ctx.routed_experts(
             network, inp, top_indices, norm_weights.get_output(0), prefix, hidden_size
+        )
+
+    if sequence_length is None:
+        return _add_mixtral_moe_rows(
+            network, inp, weights, prefix, hidden_size, num_experts, moe_intermediate,
+            top_indices, norm_weights.get_output(0), dtype=dtype,
         )
 
     # 5. Compute ALL expert outputs and stack
@@ -579,6 +621,90 @@ def _add_mixtral_moe_block(
     return result
 
 
+def _add_mixtral_moe_rows(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    hidden_size: int,
+    num_experts: int,
+    moe_intermediate: int,
+    top_indices: trt.ITensor,
+    routing_weights: trt.ITensor,
+    dtype: np.dtype = np.float32,
+) -> trt.ITensor:
+    """Routed experts for ``[S, hidden]`` rows, every expert evaluated once per launch.
+
+    ``routing_weights`` (FP32, renormalized) become dense ``[S, experts]``
+    weights, zero for unselected experts. Each expert's contribution is
+    scaled in FP32 and cast to the hidden dtype before the sum, as in the
+    one-row block; zeros add exactly, so top-2 rows sum the same two values.
+    """
+    expert_ids = graph_ops.add_constant(
+        network, (1, 1, num_experts),
+        np.arange(num_experts, dtype=np.int32).reshape(1, 1, num_experts), dtype=np.int32,
+    )
+    indices = network.add_shuffle(top_indices)
+    indices.reshape_dims = (0, 0, 1)
+    selected = network.add_elementwise(
+        indices.get_output(0), expert_ids, trt.ElementWiseOperation.EQUAL
+    ).get_output(0)
+    route = network.add_shuffle(routing_weights)
+    route.reshape_dims = (0, 0, 1)
+    weighted = network.add_elementwise(
+        network.add_cast(selected, trt.float32).get_output(0), route.get_output(0),
+        trt.ElementWiseOperation.PROD,
+    ).get_output(0)
+    dense = network.add_reduce(
+        weighted, trt.ReduceOperation.SUM, 1 << 1, keep_dims=False
+    ).get_output(0)  # [S, experts]
+    rows = network.add_slice(network.add_shape(dense).get_output(0), (0,), (1,), (1,)).get_output(0)
+    one = graph_ops.add_constant(network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
+    width = network.add_concatenation([rows, one])
+    width.axis = 0
+
+    result = None
+    for expert in range(num_experts):
+        output = _add_swiglu_expert(
+            network, inp, hidden_size, moe_intermediate,
+            weights[f"{prefix}.expert.{expert}.w_gate"],
+            weights[f"{prefix}.expert.{expert}.w_up"],
+            weights[f"{prefix}.expert.{expert}.w_down"],
+            dtype=dtype,
+        )
+        if output.dtype != trt.float32:
+            output = network.add_cast(output, trt.float32).get_output(0)
+        column = network.add_slice(dense, (0, expert), (1, 1), (1, 1))
+        column.set_input(2, width.get_output(0))
+        scaled = network.add_elementwise(
+            output, column.get_output(0), trt.ElementWiseOperation.PROD
+        ).get_output(0)
+        if scaled.dtype != inp.dtype:
+            scaled = network.add_cast(scaled, inp.dtype).get_output(0)
+        result = scaled if result is None else network.add_elementwise(
+            result, scaled, trt.ElementWiseOperation.SUM
+        ).get_output(0)
+    return result
+
+
+def _last_row(network: trt.INetworkDefinition, tensor: trt.ITensor, width: int) -> trt.ITensor:
+    """``[S, width]`` -> ``[1, width]``, the last row."""
+    shape = network.add_shape(tensor).get_output(0)
+    rows = network.add_slice(shape, (0,), (1,), (1,)).get_output(0)
+    one = graph_ops.add_constant(network, (1,), np.array([1], dtype=np.int64), dtype=np.int64)
+    last = network.add_elementwise(rows, one, trt.ElementWiseOperation.SUB).get_output(0)
+    zero = graph_ops.add_constant(network, (1,), np.array([0], dtype=np.int64), dtype=np.int64)
+    start = network.add_concatenation([last, zero])
+    start.axis = 0
+    size = graph_ops.add_constant(
+        network, (2,), np.array([1, width], dtype=np.int64), dtype=np.int64
+    )
+    sliced = network.add_slice(tensor, (0, 0), (1, 1), (1, 1))
+    sliced.set_input(1, start.get_output(0))
+    sliced.set_input(2, size)
+    return sliced.get_output(0)
+
+
 def _add_mixtral_decoder_layer(
     *,
     network: trt.INetworkDefinition,
@@ -604,9 +730,11 @@ def _add_mixtral_decoder_layer(
     top_k: int = 2,
     dtype: np.dtype = np.float32,
     quant_ctx=None,
+    sequence_length: int | None = 1,
 ) -> dict[str, trt.ITensor]:
-    """Add one decoder layer with Mixtral MoE MLP. Attention is standard."""
-    attention_window = max_cache_length + 1
+    """Add one decoder layer with Mixtral MoE MLP over one row, or ``S`` rows when None."""
+    rows = -1 if sequence_length is None else sequence_length
+    kv_rows = None if sequence_length is None else max_cache_length + sequence_length
 
     # Pre-attention RMSNorm
     norm1 = _apply_norm(
@@ -636,10 +764,12 @@ def _add_mixtral_decoder_layer(
     v = matmul(norm1, hidden_size, kv_attention_size, "w_v")
 
     q = graph_ops.add_apply_rope_native(
-        network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor, position_id, head_dim
+        network, q, num_heads, head_dim, cos_half_tensor, sin_half_tensor, position_id, head_dim,
+        sequence_length=sequence_length,
     )
     k = graph_ops.add_apply_rope_native(
-        network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor, position_id, head_dim
+        network, k, num_kv_heads, head_dim, cos_half_tensor, sin_half_tensor, position_id, head_dim,
+        sequence_length=sequence_length,
     )
 
     # Save present K/V
@@ -648,9 +778,9 @@ def _add_mixtral_decoder_layer(
 
     # Reshape current K, V for concatenation
     k_reshape = network.add_shuffle(k)
-    k_reshape.reshape_dims = (1, kv_attention_size)
+    k_reshape.reshape_dims = (rows, kv_attention_size)
     v_reshape = network.add_shuffle(v)
-    v_reshape.reshape_dims = (1, kv_attention_size)
+    v_reshape.reshape_dims = (rows, kv_attention_size)
 
     # Concatenate with cache
     all_k = network.add_concatenation([cache_k, k_reshape.get_output(0)])
@@ -667,8 +797,8 @@ def _add_mixtral_decoder_layer(
         num_heads=num_heads,
         head_dim=head_dim,
         num_kv_heads=num_kv_heads,
-        q_seq=1,
-        kv_seq=attention_window,
+        q_seq=sequence_length,
+        kv_seq=kv_rows,
         mask=mask_4d,
     )
 
@@ -702,6 +832,7 @@ def _add_mixtral_decoder_layer(
         top_k,
         dtype=dtype,
         quant_ctx=quant_ctx,
+        sequence_length=sequence_length,
     )
 
     # Residual connection
@@ -716,6 +847,9 @@ def _add_mixtral_decoder_layer(
         "present_v": present_v,
     }
 
+
+# Optimum prefill rows of the dual-profile engine (the maximum is the cache).
+PREFILL_OPT_TOKENS = 64
 
 _BUNDLE_FILES = (
     "tokenizer.json",
@@ -852,9 +986,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,
+            dual_profile=quant_ctx is None,
         )
         writer.add_bytes("engine.plan", plan)
-        layout = "single"
+        # Unquantized engines prefill the whole prompt in one launch.
+        layout = "dual_profile" if quant_ctx is None else "single"
     writer.add_json(
         "runtime.json",
         _runtime_config(

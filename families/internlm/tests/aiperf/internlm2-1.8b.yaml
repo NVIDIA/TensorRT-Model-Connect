@@ -1,8 +1,0 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-# Note (Jiaxin Deng): Count with the native bundle's JSON instead of converting remote tokenizer code.
-candidate:
-  tokenizer_json:
-    repo_id: internlm/internlm2-step-prover
-    revision: 9e24972976836edf59be9eb14050437c60f50a6c
