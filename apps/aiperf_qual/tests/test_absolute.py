@@ -637,6 +637,35 @@ def test_a_profile_tokenizer_json_is_loaded_without_the_checkpoints_remote_code(
     assert absolute.tokenizer_source(model) == (name, None) and len(downloads) == 2  # reused, not rewritten
 
 
+def test_a_failed_tokenizer_rename_is_raised_unless_another_process_won(monkeypatch, tmp_path):
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    (hub / "tokenizer.json").write_text("{}")
+    (hub / "tokenizer_config.json").write_text("{}")
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", lambda repo, filename, revision=None: str(hub / filename))
+    monkeypatch.setattr("huggingface_hub.constants.HF_HOME", str(tmp_path / "hf"))
+    root = tmp_path / "hf" / "trtmc-aiperf-tokenizers"
+
+    def refused(self, target):
+        raise PermissionError("denied")
+
+    absolute._tokenizer_json_directory.cache_clear()
+    monkeypatch.setattr(Path, "rename", refused)
+    with pytest.raises(PermissionError):
+        absolute._tokenizer_json_directory("org/remote", "c1", "org/files", "t1")
+    assert list(root.iterdir()) == []  # the staging copy is removed
+
+    def raced(self, target):  # another process of the run renames its copy first
+        Path(target).mkdir()
+        raise FileExistsError(target)
+
+    absolute._tokenizer_json_directory.cache_clear()
+    monkeypatch.setattr(Path, "rename", raced)
+    directory = absolute._tokenizer_json_directory("org/remote", "c1", "org/files", "t1")
+    assert Path(directory).is_dir() and [path.name for path in root.iterdir()] == [Path(directory).name]
+    absolute._tokenizer_json_directory.cache_clear()
+
+
 def test_an_empty_answer_is_a_wrong_answer_not_a_failed_request():
     empty = {"status": 200, "error": {"type": "InvalidInferenceResultError", "message": "no content"}}
     assert not absolute.unanswered(empty)  # AIPerf grades it (passed False)

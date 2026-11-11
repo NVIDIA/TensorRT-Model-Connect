@@ -93,8 +93,10 @@ def _tokenizer_json_directory(checkpoint: str, revision: str | None, repo: str, 
     (staging / "tokenizer_config.json").write_text(json.dumps(settings, indent=1, sort_keys=True))
     try:
         staging.rename(directory)
-    except OSError:  # another process of the run renamed its identical copy first
+    except OSError:
         shutil.rmtree(staging)
+        if not directory.is_dir():  # not a copy another process of the run renamed first: a real failure
+            raise
     return str(directory)
 
 
