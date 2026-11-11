@@ -1302,7 +1302,11 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
         result.pixels = std::move(pixels);
     } else {
         // Non-zero ranks return the empty "worker" result the CLI/server
-        // recognize (0x0, 0 frames), not an ImageResult with dimensions but no pixels.
+        // recognize (0x0, 0 frames, no pixels), not an ImageResult with
+        // dimensions but no pixels (ImageResult::num_frames defaults to 1).
+        result.height = 0;
+        result.width = 0;
+        result.num_frames = 0;
         std::cerr << "[minimax-h3] rank " << distributed_rank_ << "/" << distributed_world_size_
                   << " finished; rank 0 returns the decoded video\n";
     }
