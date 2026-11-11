@@ -83,6 +83,7 @@ def test_a_non_isolated_install_provides_the_build_backend_first(tmp_path, monke
     environments.reference_python(requirements, tmp_path / "isolated", build_isolation=True)
     pip = [command for command in commands if command[1:4] == ["-m", "pip", "install"]]
     assert [command[-2:] for command in pip] == [["-r", str(requirements.resolve())]]
+    assert "--no-build-isolation" not in pip[0]  # an isolated install keeps pip's build isolation
 
 
 def test_the_serving_cli_has_no_script_backend():
