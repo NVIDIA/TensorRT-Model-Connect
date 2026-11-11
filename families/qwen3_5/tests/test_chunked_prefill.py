@@ -203,3 +203,13 @@ def test_triangular_solve_matches_numpy_on_nearly_parallel_keys() -> None:
     want = np.linalg.inv(matrix.astype(np.float64))
     got = result.cpu().numpy()
     assert np.abs(got - want).max() <= 1e-4 * np.abs(want).max()
+
+
+def test_the_prefill_engine_is_built_only_when_a_second_weight_copy_fits() -> None:
+    gib = 1024**3
+    assert model._two_engines_fit(18 * gib, 121 * gib)  # 9B FP16 on a 128 GB unified-memory GPU
+    assert not model._two_engines_fit(54 * gib, 121 * gib)  # 27B FP16: the decode engine alone
+    assert model._two_engines_fit(54 * gib, 275 * gib)
+    assert model._two_engines_fit(54 * gib, None)  # no device to ask: keep the prefill engine
+    weights = {"w": np.zeros((4, 8), dtype=np.float16), "_rows": 4}
+    assert model._host_weight_bytes(weights) == 64

@@ -469,14 +469,24 @@ void RecurrentPipeline::run_prefill_chunks(const std::vector<int32_t>& input_ids
                                            std::vector<float>& logits) {
     const auto total = static_cast<int32_t>(input_ids.size());
     state_->bind_prefill(*prefill_);
-    for (int32_t start = 0; start < total; start += prefill_rows_) {
-        const int32_t rows = std::min(prefill_rows_, total - start);
-        TensorMap inputs;
-        inputs["token_id"] =
-            Tensor{const_cast<int32_t*>(input_ids.data() + start), {rows}, DType::kInt32};
-        state_->prepare_step(inputs, rows);
-        prefill_->forward_async(inputs);
-        state_->commit_prefill(*prefill_, rows);
+    try {
+        for (int32_t start = 0; start < total; start += prefill_rows_) {
+            const int32_t rows = std::min(prefill_rows_, total - start);
+            TensorMap inputs;
+            inputs["token_id"] =
+                Tensor{const_cast<int32_t*>(input_ids.data() + start), {rows}, DType::kInt32};
+            state_->prepare_step(inputs, rows);
+            prefill_->forward_async(inputs);
+            state_->commit_prefill(*prefill_, rows);
+        }
+    } catch (...) {
+        // Queued chunks may still read the request's tokens: drain them before the error
+        // releases the request. A failure of the drain must not replace the original error.
+        try {
+            prefill_->sync();
+        } catch (...) {
+        }
+        throw;
     }
     prefill_->sync();
     const auto* device_logits = prefill_->device_ptr("logits");

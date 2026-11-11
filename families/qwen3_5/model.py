@@ -2456,6 +2456,38 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     dispatch_build(request, writer, _build_native)
 
 
+# Share of GPU memory that the decode and prefill engines' weights may take together.
+_TWO_ENGINE_MEMORY_FRACTION = 0.8
+
+
+def _two_engines_fit(weight_bytes: int, gpu_bytes: int | None) -> bool:
+    """Whether the prefill engine, which carries its own copy of every weight, fits beside the decode engine.
+
+    Without it, prompts run through the decode engine one token at a time (the bundle stays loadable).
+    """
+    if gpu_bytes is None or 2 * weight_bytes <= gpu_bytes * _TWO_ENGINE_MEMORY_FRACTION:
+        return True
+    print(f"Skipping the prefill engine: the decode and prefill engines need about {2 * weight_bytes / 1024**3:.0f} "
+          f"GiB of weights and the GPU has {gpu_bytes / 1024**3:.0f} GiB; prompts run through the decode engine",
+          file=sys.stderr)
+    return False
+
+
+def _host_weight_bytes(weights) -> int:
+    return sum(value.nbytes for value in weights.values() if isinstance(value, np.ndarray))
+
+
+def _gpu_memory_bytes() -> int | None:
+    """Total memory of the current CUDA device, or None when no device can be queried."""
+    try:
+        import torch
+    except ImportError:
+        return None
+    if not torch.cuda.is_available():
+        return None
+    return int(torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory)
+
+
 def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mtp: bool = False,
                   draft_dir: Path | None = None, draft_variant: str = "dflash") -> None:
     """Build one Qwen3.5 hybrid bundle through family-owned code only."""
@@ -2581,7 +2613,8 @@ def _build_native(request: "BuildRequest", writer: "BundleWriter", *, require_mt
     # TensorRT 11.4 cannot lower NVFP4 dynamic activation quantization over a
     # runtime row count, so NVFP4 bundles keep the token loop.
     nvfp4 = quantization == "nvfp4" or getattr(quant_ctx, "has_nvfp4_weights", False)
-    split = not visual and not require_mtp and draft_config is None and not nvfp4
+    split = (not visual and not require_mtp and draft_config is None and not nvfp4
+             and _two_engines_fit(_host_weight_bytes(weights), _gpu_memory_bytes()))
     plan = model.build_engine(
         config,
         weights,
