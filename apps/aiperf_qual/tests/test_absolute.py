@@ -1770,6 +1770,32 @@ def test_a_parity_entry_with_a_capacity_rejection_keeps_its_own_sample_ids():
     assert [failure["sample_id"] for failure in entry["failures"]] == ["2:sentence1", "1:sentence1"]
 
 
+def test_a_few_outliers_within_the_outlier_gate_pass_a_parity_entry():
+    outliers = {"max_fraction": 0.01, "gate": {"min_cosine": 0.998, "max_relative_l2": 0.04}}
+    gate = {"min_cosine": 0.999, "max_relative_l2": 0.02, "outliers": outliers}
+    item = {"suite": "encoder-parity", "metric": "vector_parity", "gate": gate}
+    problems = [{"sample_id": f"{index}:sentence1"} for index in range(100)]  # 1% of 100: one outlier allowed
+    native = {"observations": {"greedy": {i: {"values": [1.0, 0.0]} for i in range(100)}}, "exit": {}}
+
+    def judged(changed, policy=True):
+        outputs = {i: {"values": [1.0, 0.0]} for i in range(100)}
+        outputs.update(changed)
+        entry_item = item if policy else {**item, "gate": {"min_cosine": 0.999, "max_relative_l2": 0.02}}
+        return absolute.judge_parity(entry_item, problems, {"observations": {"greedy": outputs}, "exit": {}}, native)
+
+    near, far = {"values": [1.0, 0.03]}, {"values": [1.0, 0.05]}  # relative L2 0.03 and 0.05
+    entry = judged({7: near})
+    assert entry["status"] == "pass" and entry["passed"] == 99 and entry["required_passes"] == 99
+    assert entry["outliers"][0]["sample_id"] == "7:sentence1" and "within the outlier gate" in entry["notes"][0]
+    assert judged({7: near, 8: near})["status"] == "fail"  # more outliers than allowed
+    assert judged({7: far})["status"] == "fail"  # beyond the outlier gate
+    missing = {i: {"values": [1.0, 0.0]} for i in range(100) if i != 7}
+    assert absolute.judge_parity(item, problems, {"observations": {"greedy": missing}, "exit": {}},
+                                 native)["status"] == "fail"  # a missing answer is never an outlier
+    assert judged({7: near}, policy=False)["status"] == "fail"  # without a policy every sample must pass
+    assert judged({})["status"] == "pass" and "outliers" not in judged({})
+
+
 def test_a_harmony_answer_is_graded_on_its_final_channel_only():
     import asyncio
     from types import SimpleNamespace

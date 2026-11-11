@@ -158,6 +158,9 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
         if item.get("reasons") or item.get("notes"):
             text = "; ".join([*item.get("reasons", []), *item.get("notes", [])])
             lines.append(f"|  | {text[:300].replace('|', '/')} |  |  |  |")
+        for outlier in item.get("outliers") or []:  # every sample a parity gate tolerated, with its measurement
+            text = f"{outlier.get('sample_id')}: {outlier.get('explanation')}".replace("|", "/")
+            lines.append(f"|  | tolerated outlier {text} |  |  |  |")
     lines += ["", "## Performance (server task-call time)", "",
               "| reference mode | light | TRTMC ms | CI % | reference ms (aggregation) | CI % | notes |",
               "|---|---|---|---|---|---|---|"]

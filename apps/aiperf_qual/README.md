@@ -57,7 +57,11 @@ A family configuration can declare a complete local `benchmarks` entry (`suite`,
 `suite_definition`, `metric`, and `gate`) and select it through `absolute`, without adding
 family policy to the shared Task defaults. `family_parity` delegates
 to `gate.checker`, a `families.<family>.<module>:<function>` taking the two observations and gate;
-the ordinary parity decision still requires every selected sample to pass.
+the ordinary parity decision still requires every selected sample to pass, unless the gate declares
+`outliers` (`max_fraction` of the samples, each within `outliers.gate` merged over the gate): then that many
+single-sample outliers pass and are listed in every report, while a missing answer or a larger error still
+fails. A profile's family file declares it (DINOv3; camembert-base, roberta-large and fnet-base for
+encoder-parity); the shared Task defaults do not.
 DINOv3 uses 50 seeded COCO val2017 images, complete hidden and pooled features, and its existing
 family E2E criteria. Accuracy and task-call P50 come from the same extraction requests.
 
