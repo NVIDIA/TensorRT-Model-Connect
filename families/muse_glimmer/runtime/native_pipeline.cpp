@@ -58,10 +58,7 @@ class NativePipeline final : public ITextGeneration {
             nlohmann::json::parse(section_text(context.reader, "tokenizer_config.json"));
         const auto& bos = tokenizer_config.at("bos_token");
         bos_text_ = bos.is_string() ? bos.get<std::string>() : bos.at("content").get<std::string>();
-        const auto plan = context.reader.read_section("engine.plan");
-        decoder_ = context.backend.create_module(plan.data(), plan.size(), {});
-        if (!decoder_ || !decoder_->ok())
-            throw std::runtime_error("Muse native decoder deserialization failed");
+        load_target(context);
         if (decoder_->tensor_shape("attention_mask") != std::vector<int64_t>{1, capacity_} ||
             decoder_->tensor_dtype("logits") != DType::kFloat32 ||
             decoder_->tensor_shape("logits") != std::vector<int64_t>{1, vocab_})
@@ -75,6 +72,7 @@ class NativePipeline final : public ITextGeneration {
                     throw std::invalid_argument("Muse native decoder has an incompatible cache: " +
                                                 name);
             }
+        bind_prefill_caches();
         decoder_->set_timing_label("muse_glimmer_native_target");
         if (variant == "dflash") {
             draft_version_ = config_.at("dflash_version");
@@ -169,9 +167,8 @@ class NativePipeline final : public ITextGeneration {
         const double setup_ms = milliseconds(setup);
         auto start = Clock::now();
         std::vector<float> logits(vocab_);
-        int position = 0;
-        for (const int token : input)
-            step(token, position++, logits);
+        prefill(input, logits);
+        int position = static_cast<int>(input.size());
         const double prefill_ms = milliseconds(start);
         start = Clock::now();
         std::vector<std::int32_t> output;
@@ -379,44 +376,115 @@ class NativePipeline final : public ITextGeneration {
         decoder_->sync();
     }
 
+    // Loads the target engine. A "dual_profile" bundle has one engine with a
+    // multi-row prefill profile and a single-row decode profile; older
+    // "single" bundles take one token per launch.
+    void load_target(const FamilyContext& context) {
+        const auto layout = config_.value("decoder_engine_layout", std::string("single"));
+        const auto plan = context.reader.read_section("engine.plan");
+        if (layout == "single") {
+            decoder_ = context.backend.create_module(plan.data(), plan.size(), {});
+            if (!decoder_ || !decoder_->ok())
+                throw std::runtime_error("Muse native decoder deserialization failed");
+            return;
+        }
+        if (layout != "dual_profile")
+            throw std::invalid_argument("Muse native bundle has an unknown decoder_engine_layout");
+        auto modules = context.backend.create_dual_profile_modules(plan.data(), plan.size(), {});
+        if (!modules.decode || !modules.decode->ok() || !modules.prefill || !modules.prefill->ok())
+            throw std::runtime_error("Muse native dual-profile decoder deserialization failed");
+        decoder_ = std::move(modules.decode);
+        prefill_ = std::move(modules.prefill);
+        const auto rows = prefill_->input_profile_shape("token_id", prefill_->profile_idx(),
+                                                        ProfileShapeSelector::kMax);
+        if (rows.size() != 1 || rows[0] < 1 ||
+            prefill_->tensor_shape("logits") != std::vector<int64_t>{1, vocab_})
+            throw std::invalid_argument("Muse native prefill profile is invalid");
+        prefill_rows_ = static_cast<int>(std::min<int64_t>(rows[0], capacity_));
+        prefill_->set_timing_label("muse_glimmer_native_prefill");
+    }
+
+    // Both execution contexts read the decode context's KV cache buffers.
+    void bind_prefill_caches() {
+        if (!prefill_)
+            return;
+        for (int i = 0; i < layers_; ++i)
+            for (const char* stem : {"k", "v"}) {
+                const auto name = "cache_" + std::string(stem) + "_" + std::to_string(i);
+                if (prefill_->tensor_dtype(name) != DType::kFloat16 ||
+                    prefill_->tensor_shape(name) != std::vector<int64_t>{capacity_, kv_width_})
+                    throw std::invalid_argument("Muse native prefill has an incompatible cache: " +
+                                                name);
+                prefill_->bind_external(name, decoder_->device_ptr(name));
+            }
+    }
+
+    void prefill(const std::vector<std::int32_t>& input, std::vector<float>& logits) {
+        const int total = static_cast<int>(input.size());
+        if (!prefill_) {
+            for (int position = 0; position < total; ++position)
+                run_rows(*decoder_, &input[position], 1, position, logits);
+            return;
+        }
+        for (int start = 0; start < total; start += prefill_rows_)
+            run_rows(*prefill_, &input[start], std::min(prefill_rows_, total - start), start,
+                     logits);
+    }
+
     void step(int32_t token, int32_t position, std::vector<float>& logits) {
-        if (token < 0 || token >= vocab_ || position < 0 || position >= capacity_)
+        run_rows(*decoder_, &token, 1, position, logits);
+    }
+
+    // Runs `rows` tokens at positions [position, position + rows) on `module`,
+    // commits their K/V (and draft features) to the shared caches, and returns
+    // the logits of the last row.
+    void run_rows(ITrtModule& module, const int32_t* tokens, int rows, int32_t position,
+                  std::vector<float>& logits) {
+        if (rows < 1 || position < 0 || position + rows > capacity_ ||
+            std::any_of(tokens, tokens + rows, [&](int32_t t) { return t < 0 || t >= vocab_; }))
             throw std::out_of_range("Muse token or cache position is out of range");
-        std::vector<float> mask(capacity_, -std::numeric_limits<float>::infinity());
-        std::fill(mask.begin(), mask.begin() + position + 1, 0.0F);
-        TensorMap inputs{{"token_id", {&token, {1}, DType::kInt32}},
-                         {"position_id", {&position, {1}, DType::kInt32}},
-                         {"attention_mask", {mask.data(), {1, capacity_}, DType::kFloat32}}};
-        decoder_->forward_async(inputs);
+        std::vector<int32_t> positions(static_cast<std::size_t>(rows));
+        std::vector<float> mask(static_cast<std::size_t>(rows) * capacity_,
+                                -std::numeric_limits<float>::infinity());
+        for (int row = 0; row < rows; ++row) {
+            positions[row] = position + row;
+            const auto begin = mask.begin() + static_cast<std::ptrdiff_t>(row) * capacity_;
+            std::fill(begin, begin + position + row + 1, 0.0F);
+        }
+        TensorMap inputs{{"token_id", {const_cast<int32_t*>(tokens), {rows}, DType::kInt32}},
+                         {"position_id", {positions.data(), {rows}, DType::kInt32}},
+                         {"attention_mask", {mask.data(), {rows, capacity_}, DType::kFloat32}}};
+        module.forward_async(inputs);
         for (int i = 0; i < layers_; ++i)
             for (const char* stem : {"k", "v"}) {
                 const auto suffix = std::string(stem) + "_" + std::to_string(i);
                 auto* destination = static_cast<char*>(decoder_->device_ptr("cache_" + suffix)) +
                                     static_cast<std::size_t>(position) * kv_width_ * 2;
-                checked(cudaMemcpyAsync(destination, decoder_->device_ptr("present_" + suffix),
-                                        static_cast<std::size_t>(kv_width_) * 2,
-                                        cudaMemcpyDeviceToDevice, decoder_->stream()));
+                checked(cudaMemcpyAsync(destination, module.device_ptr("present_" + suffix),
+                                        static_cast<std::size_t>(rows) * kv_width_ * 2,
+                                        cudaMemcpyDeviceToDevice, module.stream()));
             }
         if (draft_) {
             auto* destination = static_cast<char*>(draft_->device_ptr("target_hidden")) +
                                 static_cast<std::size_t>(position) * feature_width_ * 2;
-            checked(cudaMemcpyAsync(destination, decoder_->device_ptr("target_features"),
-                                    static_cast<std::size_t>(feature_width_) * 2,
-                                    cudaMemcpyDeviceToDevice, decoder_->stream()));
+            checked(cudaMemcpyAsync(destination, module.device_ptr("target_features"),
+                                    static_cast<std::size_t>(rows) * feature_width_ * 2,
+                                    cudaMemcpyDeviceToDevice, module.stream()));
         }
-        checked(cudaMemcpyAsync(logits.data(), decoder_->device_ptr("logits"),
+        checked(cudaMemcpyAsync(logits.data(), module.device_ptr("logits"),
                                 logits.size() * sizeof(float), cudaMemcpyDeviceToHost,
-                                decoder_->stream()));
-        decoder_->sync();
+                                module.stream()));
+        module.sync();
         if (std::any_of(logits.begin(), logits.end(),
                         [](float value) { return !std::isfinite(value); }))
             throw std::runtime_error("Muse native target produced nonfinite logits at position " +
-                                     std::to_string(position));
+                                     std::to_string(position + rows - 1));
     }
 
     nlohmann::json config_;
     Tokenizer tokenizer_;
-    std::unique_ptr<ITrtModule> decoder_, draft_, selector_;
+    std::unique_ptr<ITrtModule> decoder_, prefill_, draft_, selector_;
+    int prefill_rows_{1};
     int draft_version_{}, block_{}, feature_width_{}, mask_token_{}, draft_window_{}, rank_{},
         candidates_{};
     std::mutex mutex_;
