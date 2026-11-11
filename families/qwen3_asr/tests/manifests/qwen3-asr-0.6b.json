@@ -1,0 +1,31 @@
+{
+  "name": "qwen3-asr-0.6b",
+  "hf_id": "Qwen/Qwen3-ASR-0.6B-hf",
+  "hf_revision": "7f1569a48a89f3e3f4dc3a5c9d28bddd903bc76c",
+  "bundle": "qwen3-asr-0.6b.bundle",
+  "family": "qwen3_asr",
+  "task": "speech_transcription",
+  "precision": "bf16",
+  "max_sequence_length": 4096,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "qwen3-asr-0.6b",
+      "premerge": true,
+      "test_input_audio": "data/librispeech-test-clean-6930-75918-0003.wav",
+      "max_output_tokens": 512,
+      "reference_precision": "bf16",
+      "oracle": "transcript",
+      "max_word_error_rate": 0.0
+    },
+    {
+      "name": "qwen3-asr-0.6b-forced-english",
+      "test_input_audio": "data/librispeech-test-clean-6930-75918-0003.wav",
+      "source_language": "en",
+      "max_output_tokens": 512,
+      "reference_precision": "bf16",
+      "oracle": "transcript",
+      "max_word_error_rate": 0.0
+    }
+  ]
+}

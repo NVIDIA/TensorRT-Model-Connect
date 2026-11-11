@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Official reference for the E2E and parity tests: Qwen3ASRForConditionalGeneration first ships in
+# Transformers 5.13.0. The builder and the runtime do not need it.
+transformers==5.22.2
