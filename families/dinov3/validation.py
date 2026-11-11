@@ -21,7 +21,7 @@ def _cosine(left, right) -> float:
 
 def _assert_at_least(name: str, value: float, thresholds: dict, key: str) -> None:
     limit = float(thresholds[key])
-    assert value >= limit, f"{name} {value:.6f} < {limit}"
+    assert value >= limit, f"{name} {value!r} < {limit!r}"
 
 
 def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
@@ -53,7 +53,7 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
     )
     limit = float(thresholds["relative_frobenius"])
     assert float(relative_frobenius) <= limit, (
-        f"relative Frobenius error {float(relative_frobenius):.6f} > {limit}"
+        f"relative Frobenius error {float(relative_frobenius)!r} > {limit!r}"
     )
     register_count = int(expected["num_register_tokens"])
     assert register_count == int(case["num_register_tokens"])

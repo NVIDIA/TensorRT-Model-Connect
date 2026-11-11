@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from families.dinov3.validation import _assert_parity
+from families.dinov3.validation import _assert_at_least, _assert_parity
 
 THRESHOLDS = {
     "full_cosine": 0.999,
@@ -58,6 +58,24 @@ def test_a_failed_criterion_reports_its_value() -> None:
             {"num_register_tokens": 4},
             loose,
         )
+
+
+def test_a_relative_frobenius_failure_reports_its_value() -> None:
+    expected = np.random.default_rng(2).standard_normal((1, 1 + 4 + 16, 8))
+    # 2% larger features keep every cosine at 1 but exceed the 1.5% relative Frobenius error budget.
+    with pytest.raises(AssertionError, match=r"relative Frobenius error 0\.0200\d* > 0\.015"):
+        _assert_parity(
+            _features(expected * 1.02),
+            {**_features(expected), "num_register_tokens": 4},
+            {"task": "image_features"},
+            {"num_register_tokens": 4},
+            THRESHOLDS,
+        )
+
+
+def test_a_value_just_below_its_limit_is_reported_without_rounding() -> None:
+    with pytest.raises(AssertionError, match=r"^full cosine 0\.9989999 < 0\.999$"):
+        _assert_at_least("full cosine", 0.9989999, THRESHOLDS, "full_cosine")
 
 
 def test_identical_features_pass() -> None:
