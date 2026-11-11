@@ -1,0 +1,28 @@
+Qwen-Image 2.1 checkpoint, pipeline behaviour and model configuration:
+https://huggingface.co/Qwen/Qwen-Image-2.1
+Revision d26bb61231c349cf6b7896fa83353113880e1ba3.
+The family tests pin the mirror https://huggingface.co/unsloth/Qwen-Image-2.1 at
+revision 20f5a734a394f0fce241bf2f9dc1b3d97ac18b2a, whose weight, configuration,
+scheduler and tokenizer files are byte-identical to that revision.
+The checkpoint is distributed under its own license (qwen-research) and is not
+part of this repository.
+
+QwenImage21Pipeline and QwenImage21Transformer2DModel reference implementation
+in Hugging Face Diffusers 0.42.1; the layout tests transcribe its rotary-position
+computation:
+Copyright 2026 Qwen-Image Team, The HuggingFace Team.
+Licensed under Apache License 2.0.
+
+AutoencoderKLQwenImage21 reference implementation in Hugging Face Diffusers
+0.42.1; the layout tests transcribe its upsampling-shortcut computation:
+Copyright 2026 The Qwen Team and The HuggingFace Team.
+Licensed under Apache License 2.0.
+
+FlowMatchEulerDiscreteScheduler reference implementation in Hugging Face
+Diffusers 0.42.1:
+Copyright 2025 Stability AI, Katherine Crowson and The HuggingFace Team.
+Licensed under Apache License 2.0.
+
+Qwen3-VL reference implementation in Hugging Face Transformers 5.2.0:
+Copyright 2025 The Qwen Team and The HuggingFace Inc. team.
+Licensed under Apache License 2.0.
