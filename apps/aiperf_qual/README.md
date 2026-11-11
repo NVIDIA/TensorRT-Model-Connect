@@ -62,9 +62,10 @@ DINOv3 uses 50 seeded COCO val2017 images, complete hidden and pooled features, 
 family E2E criteria. Accuracy and task-call P50 come from the same extraction requests.
 
 Checks for every model of a Task (`supplementary`): text-to-speech round-trip WER (corpus, bootstrap) and
-audio validity (every output finite and not silent; the median per-sentence duration ratio to the native model
+audio validity (every output finite and not silent, unless the native model is silent for the same
+request; the median per-sentence duration ratio to the native model
 within 0.5-2, as a sampling model's single utterance may run to its length limit on either side; an error
-when no sentence has audio on both sides); GenEval-style pass rate for text-to-image families that take caller latents (the same
+when no sentence is voiced on both sides, so no duration can be compared); GenEval-style pass rate for text-to-image families that take caller latents (the same
 initial noise on both sides); CLIP-T and video validity for videos; MagicBrush CLIP-I and DINO for edits;
 world-model video parity. The pixel parity under latent replay is reported only (`informational`).
 
