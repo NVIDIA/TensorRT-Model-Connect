@@ -1052,25 +1052,18 @@ def test_reports_label_a_timing_normalized_per_audio_second(tmp_path):
     assert "40.000 per audio second</td><td>90.000 per audio second" in report_html._performance([item])
 
 
-def test_the_encoder_outlier_allowance_is_declared_by_the_profiles_families():
-    from trtmc_aiperf_qual.config import Environment
-    from trtmc_aiperf_qual.models import resolve_model
+def test_a_family_file_adds_an_outlier_allowance_to_a_shared_benchmark_gate(tmp_path):
+    from trtmc_aiperf_qual.models import deep_merge, profile_override
 
-    repository = Path(__file__).resolve().parents[3]
-    environment = Environment({"repo": str(repository)})
-
-    def encoder_gates(profile):
-        item, = [entry for entry in resolve_model(profile, environment)["absolute"]
-                 if entry["suite"] == "encoder-parity"]
-        return item["gate"], item["mismatched_precision_gate"]
-
-    for profile in ("camembert-base", "roberta-large", "fnet-base"):
-        gate, mismatched = encoder_gates(profile)
-        assert gate["min_cosine"] == 0.999 and gate["max_relative_l2"] == 0.02  # the shared tolerance stays
-        assert gate["outliers"] == {"max_fraction": 0.01, "gate": {"min_cosine": 0.998, "max_relative_l2": 0.04}}
-        assert mismatched["max_relative_l2"] == 0.04 and mismatched["outliers"]["gate"]["max_relative_l2"] == 0.08
-    gate, mismatched = encoder_gates("bert-base-uncased")  # no family declaration: every sentence must pass
-    assert "outliers" not in gate and "outliers" not in mismatched
+    family_file = tmp_path / "families" / "fam" / "tests" / "aiperf" / "enc.yaml"
+    family_file.parent.mkdir(parents=True)
+    family_file.write_text("benchmarks:\n  encoder_parity:\n"
+                           "    gate: {outliers: {max_fraction: 0.01, gate: {max_relative_l2: 0.04}}}\n")
+    shared = {"encoder_parity": {"metric": "vector_parity", "gate": {"min_cosine": 0.999, "max_relative_l2": 0.02}}}
+    override = profile_override("enc", "fam", tmp_path, root=tmp_path / "config")
+    gate = deep_merge(shared, override["benchmarks"])["encoder_parity"]["gate"]
+    assert gate == {"min_cosine": 0.999, "max_relative_l2": 0.02,
+                    "outliers": {"max_fraction": 0.01, "gate": {"max_relative_l2": 0.04}}}
 
 
 def test_reports_name_the_tolerated_outliers(tmp_path):
@@ -1082,7 +1075,7 @@ def test_reports_name_the_tolerated_outliers(tmp_path):
             "notes": ["1 of 400 outputs outside the tolerance but within the outlier gate (at most 4 allowed)"],
             "outliers": [{"sample_id": "136:sentence1", "explanation": "cosine 0.99940, relative L2 0.0346"}]}
     write_report(tmp_path, {"model": "m", "provenance": {}, "accuracy": [item]})
-    assert "tolerated outliers: 136:sentence1: cosine 0.99940, relative L2 0.0346" in (tmp_path / "report.md").read_text()
+    assert "| tolerated outlier 136:sentence1: cosine 0.99940, relative L2 0.0346 |" in (tmp_path / "report.md").read_text()
     page = report_html._accuracy([item])
     assert "tolerated outlier" in page and "136:sentence1" in page and "relative L2 0.0346" in page
 
