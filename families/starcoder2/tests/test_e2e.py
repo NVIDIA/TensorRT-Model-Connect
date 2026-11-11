@@ -53,6 +53,51 @@ def test_config_preserves_zero_token_ids() -> None:
     assert (config.bos_token_id, config.eos_token_id, config.pad_token_id) == (0, 0, -1)
 
 
+def test_build_refuses_fp16(monkeypatch, tmp_path: Path) -> None:
+    import sys
+    from types import SimpleNamespace
+
+    if "tensorrt" not in sys.modules:
+        sys.modules["tensorrt"] = SimpleNamespace()
+
+    from families.starcoder2 import model
+    from families.starcoder2.config import ModelConfig
+
+    config = ModelConfig(
+        vocab_size=100,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=128,
+        bos_token_id=0,
+        eos_token_id=1,
+        pad_token_id=2,
+        model_type="starcoder2",
+    )
+    monkeypatch.setattr(ModelConfig, "from_dir", classmethod(lambda cls, d: config))
+    request = SimpleNamespace(
+        task="text_generation",
+        model_dir=str(tmp_path),
+        precision="fp16",
+        max_sequence_length=64,
+        quantization=None,
+        fp32_layers=None,
+        mtp_seq_len=None,
+        tensor_parallel_size=1,
+        dynamic_kv_cache=False,
+        image_height=None,
+        image_width=None,
+        video_num_frames=None,
+        max_batch_size=1,
+        context_parallel_size=1,
+        backend="trt",
+    )
+    with pytest.raises(ValueError, match="StarCoder2 precision must be fp32 or bf16"):
+        model.build(request, writer=None)
+
+
 def _csv_values(values: list[str]) -> set[str]:
     return {item.strip() for value in values for item in str(value).split(",") if item.strip()}
 

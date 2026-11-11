@@ -319,7 +319,7 @@ def _build_request(**updates):
         context_parallel_size=1,
         task="text_generation",
         model_dir=Path("."),
-        precision="fp16",
+        precision="bf16",
         max_sequence_length=64,
         tensor_parallel_size=1,
         quantization="fp8",
@@ -352,7 +352,7 @@ def test_build_requires_calibrated_scales_for_fp8(monkeypatch) -> None:
     ("updates", "message"),
     [
         ({"quantization": "nvfp4"}, "quantization='nvfp4'"),
-        ({"precision": "fp32"}, "requires precision fp16"),
+        ({"precision": "fp32"}, "requires precision bf16"),
         ({"tensor_parallel_size": 2}, "does not support tensor parallelism"),
     ],
 )
@@ -361,6 +361,13 @@ def test_build_refuses_unsupported_fp8_requests(monkeypatch, updates, message) -
     _patch_tiny_model(monkeypatch)
     with pytest.raises(NotImplementedError, match=message):
         model.build(_build_request(**updates), writer=None)
+
+
+def test_build_refuses_fp16_precision(monkeypatch) -> None:
+    """StarCoder2 refuses fp16 due to numerical drift and engine build failures."""
+    _patch_tiny_model(monkeypatch)
+    with pytest.raises(ValueError, match="StarCoder2 precision must be fp32 or bf16"):
+        model.build(_build_request(precision="fp16", quantization=None), writer=None)
 
 
 def test_build_refuses_a_prequantized_checkpoint_config(monkeypatch) -> None:
