@@ -154,13 +154,19 @@ def _rope(graph, value, position_ids, tables):
     halves.axis = 2
     cosine = graph.reshape(cosine, (0, 1, width))
     sine = graph.reshape(sine, (0, 1, width))
-    return graph.op(graph.op(value, cosine, trt.ElementWiseOperation.PROD),
-                    graph.op(halves.get_output(0), sine, trt.ElementWiseOperation.PROD),
-                    trt.ElementWiseOperation.SUM)
+    # Eager BF16 RoPE rounds both products before their sum. Explicit casts
+    # preserve those boundaries when TensorRT contracts multiply/add chains.
+    left = graph.op(graph.cast(value, trt.float32), graph.cast(cosine, trt.float32),
+                    trt.ElementWiseOperation.PROD)
+    right = graph.op(graph.cast(halves.get_output(0), trt.float32),
+                     graph.cast(sine, trt.float32), trt.ElementWiseOperation.PROD)
+    left, right = graph.cast(left, graph.dtype), graph.cast(right, graph.dtype)
+    return graph.cast(graph.op(graph.cast(left, trt.float32), graph.cast(right, trt.float32),
+                               trt.ElementWiseOperation.SUM), graph.dtype)
 
 
-def _attention(graph, hidden, positions, mask, past_key, past_value, index, capacity):
-    n, config = graph.net, graph.config
+def _qkv(graph, hidden, positions, index, capacity):
+    config = graph.config
     full = config["layer_types"][index] == "full_attention"
     width = config["global_head_dim"] if full else config["head_dim"]
     kv_heads = config["num_global_key_value_heads"] if full else config["num_key_value_heads"]
@@ -175,6 +181,15 @@ def _attention(graph, hidden, positions, mask, past_key, past_value, index, capa
     query = graph.transpose(_rope(graph, query, positions, tables), (1, 0, 2))
     key = graph.transpose(_rope(graph, key, positions, tables), (1, 0, 2))
     value = graph.transpose(value, (1, 0, 2))
+    return query, key, value
+
+
+def _attention(graph, query, key, value, mask, past_key, past_value, index):
+    n, config = graph.net, graph.config
+    full = config["layer_types"][index] == "full_attention"
+    width = config["global_head_dim"] if full else config["head_dim"]
+    kv_heads = config["num_global_key_value_heads"] if full else config["num_key_value_heads"]
+    heads = config["num_attention_heads"]
     key_join = n.add_concatenation([past_key, key])
     key_join.axis = 1
     value_join = n.add_concatenation([past_value, value])
@@ -289,8 +304,29 @@ def _mark(graph, value, name):
     graph.net.mark_output(value)
 
 
+def build_qkv_engine(text_config, weights, layer_index, *, precision="bf16", max_sequence_length=1024, verbose=False):
+    """Materialize normalized, rotated Q/K/V at the activation dtype boundary."""
+    logger, builder, network, config = _create(precision, verbose)
+    graph = Graph(network, text_config, weights, precision)
+    hidden = text_config["hidden_size"]
+    value = network.add_input("hidden_states", graph.dtype, (-1, hidden))
+    positions = network.add_input("position_ids", trt.int32, (-1,))
+    query, key, cache_value = _qkv(graph, graph.norm(value, "input_layernorm"), positions,
+                                  layer_index, max_sequence_length)
+    # These used bindings preserve eager's post-RoPE BF16 query rounding before
+    # the following attention matmul, including when its producer is fused.
+    _mark(graph, query, "query")
+    _mark(graph, key, "key")
+    _mark(graph, cache_value, "value")
+    profile = builder.create_optimization_profile()
+    optimum = min(256, max_sequence_length)
+    profile.set_shape("hidden_states", (1, hidden), (optimum, hidden), (max_sequence_length, hidden))
+    profile.set_shape("position_ids", (1,), (optimum,), (max_sequence_length,))
+    return _serialize(builder, network, config, profile, graph.buffers)
+
+
 def build_layer_engine(text_config, weights, layer_index, *, precision="bf16", max_sequence_length=1024, verbose=False):
-    """One encoder/decoder layer; caller owns masks and cache commit policy."""
+    """Consume Q/K/V for attention and feedforward; caller owns cache commits."""
     logger, builder, network, config = _create(precision, verbose)
     graph = Graph(network, text_config, weights, precision)
     hidden = text_config["hidden_size"]
@@ -298,12 +334,14 @@ def build_layer_engine(text_config, weights, layer_index, *, precision="bf16", m
     heads = text_config["num_global_key_value_heads"] if full else text_config["num_key_value_heads"]
     width = text_config["global_head_dim"] if full else text_config["head_dim"]
     value = network.add_input("hidden_states", graph.dtype, (-1, hidden))
-    positions = network.add_input("position_ids", trt.int32, (-1,))
+    query = network.add_input("query", graph.dtype, (text_config["num_attention_heads"], -1, width))
+    key = network.add_input("key", graph.dtype, (heads, -1, width))
+    cache_value = network.add_input("value", graph.dtype, (heads, -1, width))
     mask = network.add_input("attention_mask", trt.float32, (-1, -1))
     past_key = network.add_input("past_key", graph.dtype, (heads, -1, width))
     past_value = network.add_input("past_value", graph.dtype, (heads, -1, width))
-    attention, key, cache_value = _attention(graph, graph.norm(value, "input_layernorm"), positions,
-                                             mask, past_key, past_value, layer_index, max_sequence_length)
+    attention, key, cache_value = _attention(graph, query, key, cache_value, mask,
+                                             past_key, past_value, layer_index)
     residual = graph.op(value, graph.norm(attention, "post_attention_layernorm"), trt.ElementWiseOperation.SUM)
     shared = graph.mlp(graph.norm(residual, "pre_feedforward_layernorm"), "mlp")
     shared = graph.norm(shared, "post_feedforward_layernorm_1")
@@ -318,7 +356,11 @@ def build_layer_engine(text_config, weights, layer_index, *, precision="bf16", m
     profile = builder.create_optimization_profile()
     optimum = min(256, max_sequence_length)
     profile.set_shape("hidden_states", (1, hidden), (optimum, hidden), (max_sequence_length, hidden))
-    profile.set_shape("position_ids", (1,), (optimum,), (max_sequence_length,))
+    profile.set_shape("query", (text_config["num_attention_heads"], 1, width),
+                      (text_config["num_attention_heads"], optimum, width),
+                      (text_config["num_attention_heads"], max_sequence_length, width))
+    for name in ("key", "value"):
+        profile.set_shape(name, (heads, 1, width), (heads, optimum, width), (heads, max_sequence_length, width))
     profile.set_shape("attention_mask", (1, 1), (optimum, optimum + 1), (max_sequence_length, 2 * max_sequence_length))
     for name in ("past_key", "past_value"):
         profile.set_shape(name, (heads, 0, width), (heads, 1, width), (heads, max_sequence_length, width))

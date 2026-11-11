@@ -25,6 +25,7 @@ struct RuntimeConfig {
     std::int32_t hidden_size{0};
     std::int32_t vocab_size{0};
     std::int32_t num_layers{0};
+    std::int32_t num_attention_heads{0};
     std::int32_t num_key_value_heads{0};
     std::int32_t num_global_key_value_heads{0};
     std::int32_t head_dim{0};

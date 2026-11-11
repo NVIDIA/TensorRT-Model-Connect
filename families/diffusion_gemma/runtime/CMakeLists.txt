@@ -22,6 +22,15 @@ if(TRTMC_BUILD_TESTS)
   target_link_libraries(test_diffusion_gemma_sampling PRIVATE trtmc_model_diffusion_gemma)
   add_test(NAME test_diffusion_gemma_sampling COMMAND test_diffusion_gemma_sampling)
 
+  add_executable(test_diffusion_gemma_pipeline
+    ${PROJECT_SOURCE_DIR}/families/diffusion_gemma/tests/cpp/test_pipeline.cpp)
+  target_include_directories(test_diffusion_gemma_pipeline PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include)
+  target_include_directories(test_diffusion_gemma_pipeline SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_diffusion_gemma_pipeline PRIVATE
+    trtmc_model_diffusion_gemma trtmc_core nlohmann_json::nlohmann_json)
+  add_test(NAME test_diffusion_gemma_pipeline COMMAND test_diffusion_gemma_pipeline)
+
   add_executable(test_diffusion_gemma_diagnostic
     ${PROJECT_SOURCE_DIR}/families/diffusion_gemma/tests/cpp/diagnostic.cpp)
   target_include_directories(test_diffusion_gemma_diagnostic PRIVATE
@@ -29,7 +38,8 @@ if(TRTMC_BUILD_TESTS)
   target_include_directories(test_diffusion_gemma_diagnostic SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
   target_link_libraries(test_diffusion_gemma_diagnostic PRIVATE
     trtmc_model_diffusion_gemma trtmc_runtime trtmc_core nlohmann_json::nlohmann_json)
-  set_target_properties(test_diffusion_gemma_sampling test_diffusion_gemma_diagnostic PROPERTIES
+  set_target_properties(test_diffusion_gemma_sampling test_diffusion_gemma_pipeline
+    test_diffusion_gemma_diagnostic PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
   add_executable(test_diffusion_gemma_sdk_cpp
     ${PROJECT_SOURCE_DIR}/families/diffusion_gemma/tests/sdk_consumer.cpp)

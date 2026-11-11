@@ -10,13 +10,13 @@ from families.diffusion_gemma.support import describe
 from tensorrt_model_connect.model_support import ModelMetadata, resolve_family
 
 
-def test_exact_checkpoint_resolves_to_diffusion_owner_and_bf16():
+def test_exact_checkpoint_resolves_to_diffusion_owner_and_fp32():
     config = json.loads((Path(__file__).parent / "data/diffusiongemma-26b-a4b-config.json").read_text())
     family, support = resolve_family(ModelMetadata(config=config, model_index={}))
     assert family == "diffusion_gemma"
     assert support.tasks == ("text_continuation",)
     assert support.default_task == "text_continuation"
-    assert support.default_precision == "bf16"
+    assert support.default_precision == "fp32"
 
 
 @pytest.mark.parametrize("model_type", ["gemma4", "gemma4_text", "gemma3", "diffusion_gemma_text", "diffusion_gemma_other"])

@@ -119,7 +119,7 @@ def test_layer_matches_official_module(index, precision):
     from transformers.models.diffusion_gemma.modeling_diffusion_gemma import (
         DiffusionGemmaDecoderTextLayer, DiffusionGemmaEncoderTextLayer, DiffusionGemmaTextRotaryEmbedding,
     )
-    from families.diffusion_gemma.graph import build_layer_engine
+    from families.diffusion_gemma.graph import build_layer_engine, build_qkv_engine
 
     torch.manual_seed(72)
     config = _tiny_config()
@@ -139,6 +139,7 @@ def test_layer_matches_official_module(index, precision):
                 parameter.normal_(0, 0.03)
         layer.layer_scalar.fill_(0.125)
     weights = {name: _numpy(value, precision) for name, value in layer.state_dict().items()}
+    qkv_plan = build_qkv_engine(_graph_config(config), weights, index, precision=precision, max_sequence_length=32)
     plan = build_layer_engine(_graph_config(config), weights, index, precision=precision, max_sequence_length=32)
     hidden = torch.randn((1, 5, 16), dtype=dtype, device="cuda")
     positions = torch.arange(3, 8, device="cuda").unsqueeze(0)
@@ -155,9 +156,13 @@ def test_layer_matches_official_module(index, precision):
     with torch.no_grad():
         expected = layer(hidden, position_embeddings=rotary(hidden, positions, config.layer_types[index]),
                          attention_mask=mask, position_ids=positions, past_key_values=cache)
-    actual = _run(plan, {
+    qkv = _run(qkv_plan, {
         "hidden_states": _numpy(hidden.squeeze(0), precision),
         "position_ids": positions.squeeze(0).cpu().numpy().astype(np.int32),
+    })
+    actual = _run(plan, {
+        **qkv,
+        "hidden_states": _numpy(hidden.squeeze(0), precision),
         "attention_mask": mask.squeeze(0).squeeze(0).float().cpu().numpy(),
         "past_key": _numpy(past_key.squeeze(0), precision),
         "past_value": _numpy(past_value.squeeze(0), precision),
@@ -183,8 +188,8 @@ def test_layer_matches_official_module(index, precision):
             attention_mask=bidirectional, position_ids=positions, past_key_values=read_only,
         )
     decoder_actual = _run(plan, {
+        **qkv,
         "hidden_states": _numpy(hidden.squeeze(0), precision),
-        "position_ids": positions.squeeze(0).cpu().numpy().astype(np.int32),
         "attention_mask": bidirectional.squeeze(0).squeeze(0).float().cpu().numpy(),
         "past_key": _numpy(past_key.squeeze(0), precision),
         "past_value": _numpy(past_value.squeeze(0), precision),

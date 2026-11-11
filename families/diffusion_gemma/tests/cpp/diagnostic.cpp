@@ -76,7 +76,14 @@ int main(int argc, char** argv) {
         auto* pipeline = dynamic_cast<trtmc::diffusion_gemma::Pipeline*>(task.get());
         if (pipeline == nullptr)
             throw std::runtime_error("diagnostic requires a diffusion_gemma pipeline");
-        json metadata{{"tensors", json::object()}, {"cache_readonly", true}};
+        const auto& config = pipeline->config();
+        json metadata{{"tensors", json::object()},
+                      {"cache_readonly", true},
+                      {"precision", config.dtype == trtmc::DType::kFloat32 ? "fp32" : "bf16"},
+                      {"max_sequence_length", config.max_sequence_length},
+                      {"canvas_length", config.canvas_length},
+                      {"format_version", 2},
+                      {"engine_layout", "qkv_layer"}};
         const bool trace_layers = request.value("trace_layers", false);
         auto trace = [&](const std::string& prefix) -> trtmc::diffusion_gemma::TraceCallback {
             if (!trace_layers)

@@ -10,5 +10,5 @@ describe = family_support(
     architectures=("DiffusionGemmaForBlockDiffusion",),
     tasks=("text_continuation",),
     default_task="text_continuation",
-    default_precision="bf16",
+    default_precision="fp32",
 )

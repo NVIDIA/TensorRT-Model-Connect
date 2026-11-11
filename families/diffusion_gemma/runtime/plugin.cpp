@@ -22,13 +22,15 @@ std::vector<char> require_section(const BundleReader& reader, const std::string&
 
 RuntimeConfig parse_config(const std::vector<char>& data) {
     const auto document = nlohmann::json::parse(data.begin(), data.end());
-    if (document.at("format_version").get<std::int32_t>() != 1)
+    if (document.at("format_version").get<std::int32_t>() != 2 ||
+        document.at("engine_layout").get<std::string>() != "qkv_layer")
         throw std::runtime_error("diffusion_gemma runtime configuration version is unsupported");
     const auto& text = document.at("text_config");
     RuntimeConfig config;
     config.hidden_size = text.at("hidden_size").get<std::int32_t>();
     config.vocab_size = text.at("vocab_size").get<std::int32_t>();
     config.num_layers = text.at("num_hidden_layers").get<std::int32_t>();
+    config.num_attention_heads = text.at("num_attention_heads").get<std::int32_t>();
     config.num_key_value_heads = text.at("num_key_value_heads").get<std::int32_t>();
     config.num_global_key_value_heads = text.at("num_global_key_value_heads").get<std::int32_t>();
     config.head_dim = text.at("head_dim").get<std::int32_t>();
@@ -41,8 +43,12 @@ RuntimeConfig parse_config(const std::vector<char>& data) {
     config.unsupported_token_ids =
         document.value("unsupported_token_ids", std::vector<std::int32_t>{});
     const auto precision = document.at("precision").get<std::string>();
-    if (precision != "bf16")
-        throw std::runtime_error("diffusion_gemma runtime requires the BF16 bundle contract");
+    if (precision == "bf16")
+        config.dtype = DType::kBFloat16;
+    else if (precision == "fp32")
+        config.dtype = DType::kFloat32;
+    else
+        throw std::runtime_error("diffusion_gemma runtime requires BF16 or FP32 precision");
     const auto& generation = document.at("generation_config");
     config.max_new_tokens = generation.at("max_new_tokens").get<std::int32_t>();
     config.max_denoising_steps = generation.at("max_denoising_steps").get<std::int32_t>();
@@ -53,8 +59,9 @@ RuntimeConfig parse_config(const std::vector<char>& data) {
     config.entropy_bound = generation.at("sampler_config").at("entropy_bound").get<float>();
     config.eos_token_ids = generation.at("eos_token_id").get<std::vector<std::int32_t>>();
     if (config.hidden_size <= 0 || config.vocab_size <= 0 || config.num_layers <= 0 ||
-        config.num_key_value_heads <= 0 || config.num_global_key_value_heads <= 0 ||
-        config.head_dim <= 0 || config.global_head_dim <= 0 || config.sliding_window < 2 ||
+        config.num_attention_heads <= 0 || config.num_key_value_heads <= 0 ||
+        config.num_global_key_value_heads <= 0 || config.head_dim <= 0 ||
+        config.global_head_dim <= 0 || config.sliding_window < 2 ||
         config.max_sequence_length <= config.canvas_length || config.canvas_length <= 0 ||
         config.max_new_tokens <= 0 || config.max_denoising_steps <= 0 ||
         config.stability_threshold < 0 || config.eos_token_ids.empty() ||

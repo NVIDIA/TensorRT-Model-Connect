@@ -5,11 +5,17 @@ its causal encoder, bidirectional block denoiser, shared checkpoint weights,
 self-conditioning, and entropy-bound sampler. The initial checkpoint revision
 is `f7f5b7f5fa82ffc52addd066915886d497f5517b`.
 
-The build uses BF16, batch size 1, tensor parallel size 1, and context parallel
-size 1. The default sequence capacity is 1024 tokens, covering the prompt and
-complete output canvases. Every canvas contains 256 tokens. As in the official
+The build uses FP32 compute with the original checkpoint weights, batch size 1,
+tensor parallel size 1, and context parallel size 1. The default sequence
+capacity is 512 tokens, shared by the prompt and complete output canvases.
+Every canvas contains 256 tokens. As in the official
 implementation, the generation budget rounds up to a complete canvas and output
 ends at the first configured EOS token.
+
+BF16 attempts failed the unchanged numerical qualification gates. The public
+builder accepts FP32; BF16 is not a qualified build mode for this family.
+The [historical BF16 recipe](tests/reports/evidence/historical-bf16-manifest.json)
+is retained as evidence of the failed attempt.
 
 ## Build
 
@@ -21,13 +27,22 @@ From the checkout root:
 PYTHONPATH=core/builder:. python3 -m tensorrt_model_connect build \
   google/diffusiongemma-26B-A4B-it \
   --revision f7f5b7f5fa82ffc52addd066915886d497f5517b \
-  --precision bf16 --max-sequence-length 1024 \
-  --output /tmp/diffusiongemma-26b-a4b-bf16.bundle
+  --precision fp32 --max-sequence-length 512 \
+  --output /tmp/diffusiongemma-26b-a4b-fp32-512.bundle
 ```
 
-The bundle contains an embedding/self-conditioning engine, 30 transformer
-layer engines, and an output/soft-conditioning engine. Layer execution uses
-the public backend interface. The runtime releases each layer module after
+The bundle contains 62 engines: embedding/self-conditioning, 30 QKV stages,
+30 attention/feedforward stages, and output/soft-conditioning. Its family-owned
+`runtime.json` declares format version 2 and the `qkv_layer` engine layout.
+For layer `i`, `qkv_i.plan` materializes normalized FP32 query, key, and value
+tensors, with RoPE applied to the query and key. `layer_i.plan` consumes all
+three tensors to perform attention and feedforward computation. These used
+bindings preserve the chosen activation boundary before attention and form
+the execution dataflow. TensorRT owns lowering and tactic selection within
+each stage.
+
+Both stages execute through the public backend interface, while the native
+Task contract stays unchanged. The runtime releases each stage module after
 copying its outputs, preserving the encoder caches independently of engine
 residency. Plan weights and selected-expert workspace are substantial; use a
 GPU with enough memory for the compiled layer profiles.
@@ -54,7 +69,7 @@ TRTMC_DIFFUSION_GEMMA_MODEL_DIR=/absolute/checkpoint \
 TRTMC_DIFFUSION_GEMMA_REFERENCE_PYTHON=/absolute/reference-env/bin/python \
 TRTMC_E2E_ARTIFACT_DIR=/tmp/diffusiongemma-evidence \
 python3 -m pytest families/diffusion_gemma/tests/test_e2e.py \
-  --e2e-testcase diffusiongemma-26b-a4b-bf16 -q
+  --e2e-testcase diffusiongemma-26b-a4b-fp32-512 -q
 ```
 
 The default E2E builds through the public Python API. Set

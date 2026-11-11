@@ -171,12 +171,35 @@ OwnedTensor Pipeline::transform(OwnedTensor hidden, bool decoder, const TraceCal
     std::iota(positions.begin(), positions.end(), static_cast<std::int32_t>(prefix_length_));
     Tensor position_tensor{positions.data(), {length}, DType::kInt32};
     for (std::size_t index = 0; index < layers_.size(); ++index) {
+        OwnedTensor query, key, value;
+        {
+            // These projection results are used inputs to the next engine,
+            // with storage owned by this pipeline across both module lifetimes.
+            auto qkv = load("qkv_" + std::to_string(index) + ".plan");
+            const auto projected =
+                qkv->forward({{"hidden_states", hidden.view()}, {"position_ids", position_tensor}});
+            query = OwnedTensor(require_output(projected, "query"));
+            key = OwnedTensor(require_output(projected, "key"));
+            value = OwnedTensor(require_output(projected, "value"));
+        }
+        const bool full = config_.layer_types[index] == "full_attention";
+        const auto heads = full ? config_.num_global_key_value_heads : config_.num_key_value_heads;
+        const auto dimension = full ? config_.global_head_dim : config_.head_dim;
+        if (query.dtype != config_.dtype || key.dtype != config_.dtype ||
+            value.dtype != config_.dtype ||
+            query.shape !=
+                std::vector<std::int64_t>{config_.num_attention_heads, length, dimension} ||
+            key.shape != std::vector<std::int64_t>{heads, length, dimension} ||
+            value.shape != key.shape)
+            throw std::runtime_error("diffusion_gemma QKV stage violates its tensor contract");
         const auto past = keys_[index].shape.at(1);
         const bool sliding = config_.layer_types[index] == "sliding_attention";
         auto mask = attention_mask(length, past, sliding ? config_.sliding_window : 0, decoder);
         Tensor mask_tensor{mask.data(), {length, past + length}, DType::kFloat32};
         auto outputs = layer(index).forward({{"hidden_states", hidden.view()},
-                                             {"position_ids", position_tensor},
+                                             {"query", query.view()},
+                                             {"key", key.view()},
+                                             {"value", value.view()},
                                              {"attention_mask", mask_tensor},
                                              {"past_key", keys_[index].view()},
                                              {"past_value", values_[index].view()}});

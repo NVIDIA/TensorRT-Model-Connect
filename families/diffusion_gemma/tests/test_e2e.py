@@ -19,7 +19,7 @@ from tensorrt_model_connect import BuildRequest, build
 
 FAMILY = "diffusion_gemma"
 ROOT = Path(__file__).resolve().parent
-MANIFEST = json.loads((ROOT / "manifests/diffusiongemma-26b-a4b-bf16.json").read_text())
+MANIFEST = json.loads((ROOT / "manifests/diffusiongemma-26b-a4b-fp32-512.json").read_text())
 CASES = {case["name"]: case for case in MANIFEST["testcases"]}
 
 
@@ -60,13 +60,13 @@ def _path(variable: str) -> Path:
     return path
 
 
-def _checkpoint() -> Path:
+def _checkpoint(manifest: dict) -> Path:
     if os.environ.get("TRTMC_DIFFUSION_GEMMA_MODEL_DIR"):
         return _path("TRTMC_DIFFUSION_GEMMA_MODEL_DIR")
     from huggingface_hub import snapshot_download
 
     return Path(snapshot_download(
-        MANIFEST["hf_id"], revision=MANIFEST["hf_revision"], local_files_only=True,
+        manifest["hf_id"], revision=manifest["hf_revision"], local_files_only=True,
     ))
 
 
@@ -84,6 +84,26 @@ def _read(directory: Path, metadata: dict, name: str):
     result = np.fromfile(directory / record["file"], dtype="<f4")
     assert result.size == int(np.prod(record["shape"]))
     return result.reshape(record["shape"])
+
+
+def reference_reusable(reference: Path, recorded: dict, *, checkpoint: Path,
+                       request: dict, precision: str, max_sequence_length: int,
+                       canvas_length: int) -> bool:
+    from families.diffusion_gemma.tests.original_reference import TRANSFORMERS_REVISION
+
+    embedding_dtype = {"bf16": "bfloat16", "fp32": "float32"}[precision]
+    return (
+        recorded.get("precision") == precision
+        and recorded.get("embedding_dtype") == embedding_dtype
+        and recorded.get("max_sequence_length") == max_sequence_length
+        and recorded.get("canvas_length") == canvas_length
+        and recorded.get("request") == request
+        and recorded.get("checkpoint_config") == json.loads((checkpoint / "config.json").read_text())
+        and recorded.get("checkpoint_index") == json.loads((checkpoint / "model.safetensors.index.json").read_text())
+        and recorded.get("transformers_revision") == TRANSFORMERS_REVISION
+        and bool(recorded.get("tensors"))
+        and all((reference / tensor["file"]).is_file() for tensor in recorded["tensors"].values())
+    )
 
 
 def compare_observations(native: Path, reference: Path) -> dict:
@@ -140,7 +160,8 @@ def test_checkpoint_native_and_reference(case_name: str, tmp_path: Path) -> None
     from transformers import AutoTokenizer
 
     case = CASES[case_name]
-    checkpoint = _checkpoint()
+    manifest = MANIFEST
+    checkpoint = _checkpoint(manifest)
     native_binary = _path("TRTMC_BINARY")
     runtime_root = _path("TRTMC_RUNTIME_ROOT")
     native_build = _path("TRTMC_NATIVE_BUILD_DIR")
@@ -153,12 +174,12 @@ def test_checkpoint_native_and_reference(case_name: str, tmp_path: Path) -> None
     if os.environ.get("TRTMC_DIFFUSION_GEMMA_BUNDLE"):
         bundle = _path("TRTMC_DIFFUSION_GEMMA_BUNDLE")
     else:
-        bundle = artifacts / MANIFEST["bundle"]
+        bundle = artifacts / manifest["bundle"]
         build(BuildRequest(
-            model_dir=checkpoint, output_path=bundle, family=MANIFEST["family"],
-            task=MANIFEST["task"], precision=MANIFEST["precision"],
-            max_sequence_length=MANIFEST["max_sequence_length"],
-            tensor_parallel_size=MANIFEST["tensor_parallel_size"],
+            model_dir=checkpoint, output_path=bundle, family=manifest["family"],
+            task=manifest["task"], precision=manifest["precision"],
+            max_sequence_length=manifest["max_sequence_length"],
+            tensor_parallel_size=manifest["tensor_parallel_size"],
         ))
     environment = os.environ.copy()
     environment["LD_LIBRARY_PATH"] = str(runtime_root) + ":" + environment.get("LD_LIBRARY_PATH", "")
@@ -182,24 +203,31 @@ def test_checkpoint_native_and_reference(case_name: str, tmp_path: Path) -> None
     native, reference = artifacts / "native", artifacts / "reference"
     _run([str(diagnostic), str(bundle), str(diagnostic_request), str(native), str(runtime_root)],
          output=artifacts / "native-diagnostic.log", environment=environment)
+    native_metadata = json.loads((native / "metadata.json").read_text())
+    assert native_metadata["precision"] == manifest["precision"]
+    assert native_metadata["max_sequence_length"] == manifest["max_sequence_length"]
+    assert native_metadata["canvas_length"] == config["canvas_length"]
     reference_python = os.environ.get("TRTMC_DIFFUSION_GEMMA_REFERENCE_PYTHON", sys.executable)
     reuse = False
     reference_metadata = reference / "metadata.json"
     if os.environ.get("TRTMC_DIFFUSION_GEMMA_REUSE_REFERENCE") == "1" and reference_metadata.is_file():
-        from families.diffusion_gemma.tests.original_reference import TRANSFORMERS_REVISION
-
         recorded = json.loads(reference_metadata.read_text())
-        reuse = (
-            recorded.get("request") == json.loads(diagnostic_request.read_text())
-            and recorded.get("checkpoint_config") == json.loads((checkpoint / "config.json").read_text())
-            and recorded.get("checkpoint_index") == json.loads((checkpoint / "model.safetensors.index.json").read_text())
-            and recorded.get("transformers_revision") == TRANSFORMERS_REVISION
-            and all((reference / tensor["file"]).is_file() for tensor in recorded["tensors"].values())
+        reuse = reference_reusable(
+            reference, recorded, checkpoint=checkpoint,
+            request=json.loads(diagnostic_request.read_text()), precision=manifest["precision"],
+            max_sequence_length=manifest["max_sequence_length"], canvas_length=config["canvas_length"],
         )
     if not reuse:
         _run([reference_python, str(ROOT / "original_reference.py"), str(checkpoint),
-              str(diagnostic_request), str(reference)],
+              str(diagnostic_request), str(reference), "--precision", manifest["precision"],
+              "--max-sequence-length", str(manifest["max_sequence_length"])],
              output=artifacts / "official-reference.log", environment=environment)
+    recorded = json.loads(reference_metadata.read_text())
+    assert reference_reusable(
+        reference, recorded, checkpoint=checkpoint,
+        request=json.loads(diagnostic_request.read_text()), precision=manifest["precision"],
+        max_sequence_length=manifest["max_sequence_length"], canvas_length=config["canvas_length"],
+    )
     metrics = compare_observations(native, reference)
     (artifacts / "reference-metrics.json").write_text(json.dumps(metrics, indent=2))
     generation_request = artifacts / "generation-request.json"
