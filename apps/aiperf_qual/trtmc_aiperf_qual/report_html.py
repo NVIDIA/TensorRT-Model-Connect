@@ -228,6 +228,10 @@ def _accuracy(items: Sequence[Mapping[str, Any]]) -> str:
                                                               "; ".join(item.get("notes", []))) if text)
         table = (f"<table><tr><th>sample</th><th>reason</th><th>TRTMC</th><th>native</th></tr>{rows}</table>"
                  if rows else "")
+        tolerated = "".join(f"<tr><td>{_e(o.get('sample_id'))}</td><td>{_e(o.get('explanation'))}</td></tr>"
+                            for o in item.get("outliers") or [])
+        if tolerated:
+            table += f"<table><tr><th>tolerated outlier</th><th>measurement</th></tr>{tolerated}</table>"
         parts.append(f"<div>{head}{error}{table}</div>")
     return "".join(parts)
 

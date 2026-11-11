@@ -1052,6 +1052,41 @@ def test_reports_label_a_timing_normalized_per_audio_second(tmp_path):
     assert "40.000 per audio second</td><td>90.000 per audio second" in report_html._performance([item])
 
 
+def test_the_encoder_outlier_allowance_is_declared_by_the_profiles_families():
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.models import resolve_model
+
+    repository = Path(__file__).resolve().parents[3]
+    environment = Environment({"repo": str(repository)})
+
+    def encoder_gates(profile):
+        item, = [entry for entry in resolve_model(profile, environment)["absolute"]
+                 if entry["suite"] == "encoder-parity"]
+        return item["gate"], item["mismatched_precision_gate"]
+
+    for profile in ("camembert-base", "roberta-large", "fnet-base"):
+        gate, mismatched = encoder_gates(profile)
+        assert gate["min_cosine"] == 0.999 and gate["max_relative_l2"] == 0.02  # the shared tolerance stays
+        assert gate["outliers"] == {"max_fraction": 0.01, "gate": {"min_cosine": 0.998, "max_relative_l2": 0.04}}
+        assert mismatched["max_relative_l2"] == 0.04 and mismatched["outliers"]["gate"]["max_relative_l2"] == 0.08
+    gate, mismatched = encoder_gates("bert-base-uncased")  # no family declaration: every sentence must pass
+    assert "outliers" not in gate and "outliers" not in mismatched
+
+
+def test_reports_name_the_tolerated_outliers(tmp_path):
+    from trtmc_aiperf_qual import report_html
+    from trtmc_aiperf_qual.report import write_report
+
+    item = {"suite": "encoder-parity", "source": "absolute", "benchmark": "vector_parity", "status": "pass",
+            "samples": 400, "expected_samples": 400, "passed": 399, "required_passes": 396,
+            "notes": ["1 of 400 outputs outside the tolerance but within the outlier gate (at most 4 allowed)"],
+            "outliers": [{"sample_id": "136:sentence1", "explanation": "cosine 0.99940, relative L2 0.0346"}]}
+    write_report(tmp_path, {"model": "m", "provenance": {}, "accuracy": [item]})
+    assert "tolerated outliers: 136:sentence1: cosine 0.99940, relative L2 0.0346" in (tmp_path / "report.md").read_text()
+    page = report_html._accuracy([item])
+    assert "tolerated outlier" in page and "136:sentence1" in page and "relative L2 0.0346" in page
+
+
 def test_lance_qualification_has_a_native_path_and_sizes_the_multimodal_benchmark():
     from trtmc_aiperf_qual.config import Environment
     from trtmc_aiperf_qual.models import resolve_model
