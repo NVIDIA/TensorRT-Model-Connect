@@ -439,15 +439,20 @@ preprocess_dynamic_tiles(const runtime::adapters::io::DecodedImage& image,
         static_cast<int32_t>(tiles.size()), 1, [&](int32_t begin, int32_t end) {
             for (int32_t index = begin; index < end; ++index) {
                 const auto slot = static_cast<std::size_t>(index);
-                std::vector<float> chw;
-                if (!normalize_to_chw(tiles[slot], tile, config, chw) ||
-                    chw.size() != tile_values) {
+                // No exception may leave a worker thread (std::terminate).
+                try {
+                    std::vector<float> chw;
+                    if (!normalize_to_chw(tiles[slot], tile, config, chw) ||
+                        chw.size() != tile_values) {
+                        failed[slot] = 1;
+                        continue;
+                    }
+                    std::copy(chw.begin(), chw.end(),
+                              result.pixel_values.begin() +
+                                  static_cast<std::ptrdiff_t>(slot * tile_values));
+                } catch (...) {
                     failed[slot] = 1;
-                    continue;
                 }
-                std::copy(chw.begin(), chw.end(),
-                          result.pixel_values.begin() +
-                              static_cast<std::ptrdiff_t>(slot * tile_values));
             }
         });
     if (std::any_of(failed.begin(), failed.end(), [](char value) { return value != 0; }))

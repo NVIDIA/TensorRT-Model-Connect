@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
+#include <system_error>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -29,7 +30,9 @@ namespace trtmc {
 namespace internvl {
 
 // Run fn(begin, end) over [0, count) split into contiguous chunks on up to
-// eight threads (the caller's thread takes the first chunk). fn must not throw.
+// eight threads. The caller's thread takes the first chunk and any chunk whose
+// thread cannot be started, so every started thread is always joined. fn must
+// not throw.
 template <typename Fn>
 inline void parallel_chunks(int32_t count, int32_t min_chunk, Fn&& fn) {
     const auto cores = static_cast<int32_t>(std::max(1U, std::thread::hardware_concurrency()));
@@ -42,9 +45,14 @@ inline void parallel_chunks(int32_t count, int32_t min_chunk, Fn&& fn) {
     const int32_t chunk = (count + workers - 1) / workers;
     std::vector<std::thread> threads;
     threads.reserve(static_cast<std::size_t>(workers - 1));
-    for (int32_t begin = chunk; begin < count; begin += chunk)
-        threads.emplace_back(
-            [&fn, begin, end = std::min(count, begin + chunk)] { fn(begin, end); });
+    for (int32_t begin = chunk; begin < count; begin += chunk) {
+        const int32_t end = std::min(count, begin + chunk);
+        try {
+            threads.emplace_back([&fn, begin, end] { fn(begin, end); });
+        } catch (const std::system_error&) {
+            fn(begin, end);
+        }
+    }
     fn(0, std::min(count, chunk));
     for (auto& thread : threads)
         thread.join();
