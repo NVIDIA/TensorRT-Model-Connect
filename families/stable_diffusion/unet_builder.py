@@ -190,6 +190,20 @@ def _cross_attention(network, query_source, kv_source, weights, prefix, heads, h
     return _linear(network, context, weights, f"{prefix}.to_out.0", dtype, quant)
 
 
+def _skip_concat(network, h, skip):
+    """Concatenate ``h`` and its skip on the channel axis, in FP32, back in ``h``'s dtype.
+
+    TensorRT 11.4 on sm_110 (Jetson Thor) cannot run a network that concatenates a convolution's
+    output with the output of a later convolution consuming it: createExecutionContext fails in
+    Myelin's cask6 initialize, or the engine faults on its first run. Every skip connection has that
+    shape. The same concatenation in FP32 runs there, and costs nothing measurable on GB10.
+    """
+    if h.dtype == trt.float32:
+        return g.concat(network, [h, skip], axis=1)
+    wide = [network.add_cast(tensor, trt.float32).get_output(0) for tensor in (h, skip)]
+    return network.add_cast(g.concat(network, wide, axis=1), h.dtype).get_output(0)
+
+
 def _has(weights, prefix: str) -> bool:
     return any(key.startswith(prefix) for key in weights)
 
@@ -276,7 +290,7 @@ def build_unet(network, weights, cfg, dtype, work_trt, quant=None):
         popped += take
         for layer in range(take):
             # Inside the block the skips are consumed from the end.
-            h = g.concat(network, [h, available.pop()], axis=1)
+            h = _skip_concat(network, h, available.pop())
             h = _resnet(network, h, temb, weights, f"up_blocks.{block}.resnets.{layer}",
                         groups, eps, dtype, quant)
             if _has(weights, f"up_blocks.{block}.attentions.{layer}."):
