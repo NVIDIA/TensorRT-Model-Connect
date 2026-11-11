@@ -1,0 +1,21 @@
+{
+  "name": "paligemma-3b-pt-224-bf16",
+  "hf_id": "google/paligemma-3b-pt-224",
+  "hf_revision": "35e4f46485b4d07967e7e9935bc3786aad50687c",
+  "bundle": "paligemma-3b-pt-224-bf16.bundle",
+  "family": "paligemma",
+  "task": "images_text_to_text",
+  "precision": "bf16",
+  "max_sequence_length": 1024,
+  "tensor_parallel_size": 1,
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "paligemma-3b-pt-224-bf16",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "reference_backend": "hf_transformers",
+      "oracle": "normalized_text_edit_distance"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+# Build: tokenizer.model conversion and exact BF16-to-FP32 weight reads.
+sentencepiece==0.2.3
+# sentencepiece 0.2.3 ships protobuf 7.36.1 generated code; an older runtime refuses to load it.
+protobuf>=7.36.1
+safetensors>=0.4.0
+torch==2.12.0
+# Reference implementation this family is measured against.
+transformers==5.2.0
+# Upper bounds follow the repository's own constraints (pyproject, CI image).
+Pillow>=12,<14
+numpy>=1.26,<2.5
