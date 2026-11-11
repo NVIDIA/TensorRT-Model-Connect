@@ -1,0 +1,58 @@
+The PaliGemma graphs and runtime re-implement the computation of the Hugging Face
+Transformers 5.2.0 reference, which this family's tests run as their oracle:
+models/paligemma/modeling_paligemma.py and processing_paligemma.py, models/gemma/
+modeling_gemma.py, models/siglip/modeling_siglip.py and image_processing_siglip.py:
+https://github.com/huggingface/transformers/tree/v5.2.0/src/transformers/models
+No source is copied. Those files carry these headers:
+
+Copyright 2024 the HuggingFace Inc. team. All rights reserved.
+Copyright 2024 Google Inc. HuggingFace Inc. team. All rights reserved.
+Copyright 2024 Google AI and The HuggingFace Team. All rights reserved.
+Licensed under the Apache License, Version 2.0 (the "License"); you may not
+use these files except in compliance with the License. You may obtain a copy
+of the License at http://www.apache.org/licenses/LICENSE-2.0 (also in this
+repository's LICENSE file). Unless required by applicable law or agreed to in
+writing, software distributed under the License is distributed on an "AS IS"
+BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
+The bicubic resize in runtime/image_preprocess.cpp (cubic filter with A = -0.5,
+filter support, 22-bit fixed-point weights, rounding and the separable pass order)
+is adapted from Pillow 13.0.0, src/libImaging/Resample.c:
+https://github.com/python-pillow/Pillow/blob/13.0.0/src/libImaging/Resample.c
+
+The Python Imaging Library (PIL) is
+
+    Copyright (c) 1997-2011 by Secret Labs AB
+    Copyright (c) 1995-2011 by Fredrik Lundh and contributors
+
+Pillow is the friendly PIL fork. It is
+
+    Copyright (c) 2010 by Jeffrey 'Alex' Clark and contributors
+
+Like PIL, Pillow is licensed under the open source MIT-CMU License:
+
+By obtaining, using, and/or copying this software and/or its associated
+documentation, you agree that you have read, understood, and will comply
+with the following terms and conditions:
+
+Permission to use, copy, modify and distribute this software and its
+documentation for any purpose and without fee is hereby granted,
+provided that the above copyright notice appears in all copies, and that
+both that copyright notice and this permission notice appear in supporting
+documentation, and that the name of Secret Labs AB or the author not be
+used in advertising or publicity pertaining to distribution of the software
+without specific, written prior permission.
+
+SECRET LABS AB AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS
+SOFTWARE, INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS.
+IN NO EVENT SHALL SECRET LABS AB OR THE AUTHOR BE LIABLE FOR ANY SPECIAL,
+INDIRECT OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
+LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE
+OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
+PERFORMANCE OF THIS SOFTWARE.
+
+The SentencePiece BPE flattening (tokenizer_export.py) and its C++ runtime
+(runtime/paligemma_bpe.h and paligemma_bpe.cpp) are copies of this repository's
+families/lerobot_pi05 files, with the pi0.5 prompt code removed and a decoder
+added; the resize also follows the arithmetic of families/siglip. Both are
+covered by this repository's license.

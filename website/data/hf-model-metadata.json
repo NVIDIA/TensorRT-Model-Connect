@@ -847,6 +847,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "google/paligemma-3b-pt-224",
+      "revision": "35e4f46485b4d07967e7e9935bc3786aad50687c",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "paligemma",
+      "architectures": [
+        "PaliGemmaForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "google/timesfm-2.0-500m-pytorch",
       "revision": "dc2443792ce5516872b89b37cf1bc058c3bf0c10",
       "revision_source": "resolved",
