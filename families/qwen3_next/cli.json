@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "help": "Build one Qwen3-Next BF16 TensorRT bundle",
+      "executor": "python",
+      "handler": "cli:build",
+      "arguments": [
+        {"name": "model", "type": "string", "help": "Hugging Face checkpoint or local snapshot"},
+        {"name": "output", "flags": ["-o", "--output"], "type": "path", "required": true},
+        {"name": "revision", "flags": ["--revision"], "type": "string"},
+        {"name": "max_sequence_length", "flags": ["--max-sequence-length"], "type": "int", "default": 1024},
+        {"name": "verbose", "flags": ["--verbose"], "type": "bool", "action": "store_true", "default": false}
+      ]
+    }
+  ]
+}
