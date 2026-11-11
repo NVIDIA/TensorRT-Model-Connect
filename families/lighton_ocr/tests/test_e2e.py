@@ -78,12 +78,22 @@ def _checkpoint():
 
 def _run(command, output, environment):
     error_output = output.with_suffix(output.suffix + ".stderr.log")
+    failure = None
+    executable = Path(str(command[0])).name
     try:
         with output.open("w") as stdout, error_output.open("w") as stderr:
             subprocess.run([str(value) for value in command], check=True, stdout=stdout, stderr=stderr,
                            env=environment, timeout=21600)
+    except subprocess.CalledProcessError as error:
+        failure = f"{executable} exited {error.returncode}"
+    except subprocess.TimeoutExpired:
+        failure = f"{executable} timed out"
+    except OSError as error:
+        failure = f"{executable} could not start ({type(error).__name__})"
     finally:
         record_evidence(output.stem, {"stdout": output, "stderr": error_output})
+    if failure is not None:
+        pytest.fail(f"{failure}; logs: {output} and {error_output}", pytrace=False)
 
 
 def _runtime(bundle):

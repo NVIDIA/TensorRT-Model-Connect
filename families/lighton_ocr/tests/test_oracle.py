@@ -247,13 +247,33 @@ def test_selected_e2e_rejects_missing_required_artifact(monkeypatch):
         e2e._path("TRTMC_LIGHTON_OCR_MODEL_DIR", directory=True)
 
 
-def test_failed_command_retains_both_logs_without_becoming_a_success(tmp_path, monkeypatch):
+def test_failed_command_retains_logs_without_exception_context_or_environment_values(tmp_path, monkeypatch):
     recorded = []
     monkeypatch.setattr(e2e, "record_evidence", lambda name, value: recorded.append((name, value)))
     output = tmp_path / "failed-command.log"
     program = "import sys; print('before failure'); print('actual failure', file=sys.stderr); sys.exit(3)"
-    with pytest.raises(subprocess.CalledProcessError) as failure:
-        e2e._run([sys.executable, "-c", program], output, os.environ.copy())
-    assert failure.value.returncode == 3
+    marker = "FAKE_ONLY_LIGHTON_ENVIRONMENT_SECRET_82741"
+    environment = {"PATH": os.defpath, "LIGHTON_TEST_SECRET": marker}
+    with pytest.raises(pytest.fail.Exception) as failure:
+        e2e._run([sys.executable, "-c", program], output, environment)
+    assert "exited 3" in str(failure.value)
+    assert failure.value.pytrace is False
+    assert failure.value.__context__ is None and failure.value.__cause__ is None
+    assert marker not in str(failure.value) + repr(recorded)
     assert output.read_text().strip() == "before failure"
     assert recorded[0][1]["stderr"].read_text().strip() == "actual failure"
+
+
+@pytest.mark.parametrize("kind", ["timeout", "os_error"])
+def test_other_process_failures_do_not_retain_sensitive_exception_details(tmp_path, monkeypatch, kind):
+    marker = "FAKE_ONLY_LIGHTON_ENVIRONMENT_SECRET_82741"
+    def fail_process(command, **_kwargs):
+        if kind == "timeout":
+            raise subprocess.TimeoutExpired(command, 1, output=marker, stderr=marker)
+        raise FileNotFoundError(2, marker, marker)
+    monkeypatch.setattr(e2e.subprocess, "run", fail_process)
+    with pytest.raises(pytest.fail.Exception) as failure:
+        e2e._run([sys.executable, "-c", "pass"], tmp_path / "failed.log", {"LIGHTON_TEST_SECRET": marker})
+    assert failure.value.pytrace is False
+    assert failure.value.__context__ is None and failure.value.__cause__ is None
+    assert marker not in str(failure.value)
