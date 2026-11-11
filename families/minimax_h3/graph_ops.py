@@ -376,6 +376,22 @@ def partial_rope(
     return heads_to_rows(network, result.get_output(0), rows, heads * head_dim)
 
 
+def _attention_dtype():
+    """FP16 (default) or BF16 (``MINIMAX_H3_ATTENTION_DTYPE=bf16``) fused-attention operands."""
+
+    choice = os.environ.get("MINIMAX_H3_ATTENTION_DTYPE", "fp16").lower()
+    if choice not in ("fp16", "bf16"):
+        raise ValueError("MINIMAX_H3_ATTENTION_DTYPE must be fp16 or bf16")
+    return trt.float16 if choice == "fp16" else trt.bfloat16
+
+
+def _attention_v_scale() -> float:
+    value = float(os.environ.get("MINIMAX_H3_ATTENTION_V_SCALE", "256"))
+    if value < 1.0 or math.log2(value) != int(math.log2(value)):
+        raise ValueError("MINIMAX_H3_ATTENTION_V_SCALE must be a power of two >= 1")
+    return value
+
+
 def attention_core(network, q, k, v, *, head_dim: int, name: str):
     """Fused attention on ``[1, heads, rows, head_dim]`` BF16 tensors.
 
@@ -386,9 +402,21 @@ def attention_core(network, q, k, v, *, head_dim: int, name: str):
     # TensorRT's fused FP16 attention has three additional mantissa bits over
     # BF16. Keep the surrounding block in checkpoint-native BF16 while
     # reducing recurrent numerical drift across 49 denoising evaluations.
-    q = cast(network, q, trt.float16)
-    k = cast(network, k, trt.float16)
-    v = cast(network, v, trt.float16)
+    attention_dtype = _attention_dtype()
+    q = cast(network, q, attention_dtype)
+    k = cast(network, k, attention_dtype)
+    v = cast(network, v, attention_dtype)
+    # TRT-RTX's fused FP16 attention overflows to +-inf for rows whose logits are
+    # all large and positive (massive-activation heads in the last blocks) even
+    # though every operand and the true result are far inside FP16 range. Scaling
+    # V by an exact power of two keeps the kernel finite; the result is rescaled
+    # in FP32 below. Set MINIMAX_H3_ATTENTION_V_SCALE=1 to disable.
+    v_scale = _attention_v_scale()
+    if v_scale != 1.0:
+        shrink = cast(
+            network, constant(network, np.full((1, 1, 1, 1), 1.0 / v_scale, np.float32)), v.dtype
+        )
+        v = network.add_elementwise(v, shrink, trt.ElementWiseOperation.PROD).get_output(0)
     scale = constant(
         network,
         np.full((1, 1, 1, 1), 1.0 / math.sqrt(head_dim), dtype=np.float32),
@@ -402,7 +430,17 @@ def attention_core(network, q, k, v, *, head_dim: int, name: str):
     layer.metadata = f"trtmc.native_op=IAttention;source={name}"
     layer.get_output(0).name = f"{name}.output"
     layer.decomposable = False
-    return cast(network, layer.get_output(0), trt.bfloat16)
+    result = layer.get_output(0)
+    if v_scale != 1.0:
+        wide = cast(network, result, trt.float32)
+        grow = constant(network, np.full((1, 1, 1, 1), v_scale, np.float32))
+        result = network.add_elementwise(wide, grow, trt.ElementWiseOperation.PROD).get_output(0)
+    if os.environ.get("MINIMAX_H3_DEBUG_ATTENTION") and os.environ["MINIMAX_H3_DEBUG_ATTENTION"] in name:
+        # Bisecting aid: expose the FP16 attention operands/result of the named layer.
+        for label, tensor in (("q", q), ("k", k), ("v", v), ("out", result)):
+            tensor.name = f"debug_attn_{label}"
+            network.mark_output(tensor)
+    return cast(network, result, trt.bfloat16)
 
 
 def native_attention(network, q, k, v, *, rows: int, heads: int, head_dim: int, name: str):

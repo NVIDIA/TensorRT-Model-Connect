@@ -45,6 +45,17 @@ def _f32_to_bf16(x):
     return (x.astype(np.float32).view(np.uint32) >> 16).astype(np.uint16)
 
 
+def _replay_input(directory, name, dtype, trt):
+    """Load a runtime-dumped input (MINIMAX_H3_DUMP_DIR) shaped for the plan, or None."""
+    if not directory:
+        return None
+    for suffix, np_dtype in ((".f32", np.float32), (".i32", np.int32), (".bf16", np.uint16)):
+        path = os.path.join(directory, name + suffix)
+        if os.path.exists(path):
+            return np.fromfile(path, dtype=np_dtype)
+    return None
+
+
 def _load_nccl(path):
     if os.name == "nt":
         # nccl.dll must be in the process before TRT-RTX looks for it.
@@ -151,6 +162,10 @@ def _worker_impl(rank, world, args, barrier, uid_queue, tmpdir):
                 else args.text_rows if d == -1 else d
                 for d in shape
             )
+            replay = _replay_input(args.inputs, name, engine.get_tensor_dtype(name), trt)
+            if replay is not None:
+                out[name] = replay.reshape(shape)
+                continue
             dt = engine.get_tensor_dtype(name)
             if name == "position_ids":
                 a = rng.uniform(0, 30, shape).astype(np.float32)
@@ -218,6 +233,21 @@ def _worker_impl(rank, world, args, barrier, uid_queue, tmpdir):
         prof1, plan1 = build(1)
         ref, t1 = run(plan1, prof1, args.iters, sync=False)
         del plan1
+        if args.ref_only:
+            if os.environ.get("MINIMAX_H3_SAVE_OUT"):
+                np.savez(os.environ["MINIMAX_H3_SAVE_OUT"], **ref)
+            for name, a in ref.items():
+                a = a.astype(np.float64)
+                bad = ~np.isfinite(a)
+                finite = a[~bad]
+                log(f"REF {name}: shape={a.shape} nonfinite={int(bad.sum())} "
+                    f"absmax={np.abs(finite).max() if finite.size else float('nan'):.4g}")
+                if bad.any():
+                    rows_axis = 2 if a.ndim == 4 else 0
+                    other = tuple(i for i in range(a.ndim) if i != rows_axis)
+                    bad_rows = np.flatnonzero(bad.any(axis=other))
+                    log(f"    non-finite rows: {bad_rows.size} first={bad_rows[:8].tolist()} last={bad_rows[-4:].tolist()}")
+            return
     barrier.wait()
 
     prof, plan = build(world)
@@ -269,6 +299,8 @@ def main():
     ap.add_argument("--real", help="Diffusers checkpoint dir (uses its transformer/ weights); default random")
     ap.add_argument("--component", choices=("dit", "vae"), default="dit",
                     help="vae: tile-parallel VAE decoder instead of the DiT")
+    ap.add_argument("--inputs", help="directory of MINIMAX_H3_DUMP_DIR runtime inputs to replay")
+    ap.add_argument("--ref-only", action="store_true", help="run only the cp=1 reference and print output statistics")
     ap.add_argument("--small", action="store_true", help="tiny profile (hidden 256)")
     ap.add_argument("--nccl", help="path to nccl.dll / libnccl.so.2")
     ap.add_argument("--no-reference", action="store_true")

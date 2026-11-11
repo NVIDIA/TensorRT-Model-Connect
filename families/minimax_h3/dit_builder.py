@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gc
 import math
+import os
 import sys
 
 import numpy as np
@@ -320,6 +321,9 @@ def _transformer_block(
         profile.norm_eps,
     )
     normalized = op.modulate(network, normalized, shift_msa, scale_msa)
+    debug = index in _debug_layer_outputs()
+    if debug:
+        network.mark_output(_named(normalized, f"debug_{index}_attn_in"))
     update = _attention_block(
         network,
         normalized,
@@ -330,7 +334,11 @@ def _transformer_block(
         cos=cos,
         sin=sin,
     )
+    if debug:
+        network.mark_output(_named(update, f"debug_{index}_attn_update"))
     hidden = op.gated_residual(network, hidden, update, gate_msa)
+    if debug:
+        network.mark_output(_named(hidden, f"debug_{index}_mid_hidden"))
 
     normalized = op.rms_norm(
         network,
@@ -347,6 +355,9 @@ def _transformer_block(
         weights[f"{prefix}.ff.net.2.weight"],
         profile.ffn_dim,
     )
+    if debug:
+        network.mark_output(_named(normalized, f"debug_{index}_mlp_in"))
+        network.mark_output(_named(update, f"debug_{index}_mlp_update"))
     return op.gated_residual(network, hidden, update, gate_mlp)
 
 
@@ -519,6 +530,16 @@ def _serialize(
     return bytes(plan)
 
 
+def _debug_layer_outputs() -> range:
+    """``MINIMAX_H3_DEBUG_LAYER_OUTPUTS=lo-hi`` exposes block outputs ``lo..hi`` (bisecting NaNs)."""
+
+    spec = os.environ.get("MINIMAX_H3_DEBUG_LAYER_OUTPUTS", "")
+    if not spec:
+        return range(0)
+    low, _, high = spec.partition("-")
+    return range(int(low), int(high or low) + 1)
+
+
 def construct_dit_network(
     weights: dict,
     profile: MiniMaxH3Config,
@@ -597,6 +618,8 @@ def construct_dit_network(
             profile,
             index,
         )
+        if index in _debug_layer_outputs():
+            network.mark_output(_named(hidden, f"debug_hidden_{index}"))
 
     hidden = _final_hidden(network, hidden, timestep_local, final_modulation, weights, profile)
     if cp > 1:

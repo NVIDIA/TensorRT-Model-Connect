@@ -13,7 +13,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <initializer_list>
 #include <iomanip>
 #include <iostream>
@@ -107,6 +109,39 @@ struct StepModulation {
     std::array<RawTensor, kLayers> blocks;
     RawTensor final;
 };
+
+
+// MINIMAX_H3_DEBUG_STATS=1 prints non-finite counts / ranges of the stage
+// boundaries so a NaN can be attributed to one plan.
+void debug_stats(const char* name, const float* data, std::size_t count) {
+    static const bool enabled = std::getenv("MINIMAX_H3_DEBUG_STATS") != nullptr;
+    if (!enabled)
+        return;
+    std::size_t bad = 0;
+    double absmax = 0.0, sum = 0.0;
+    for (std::size_t i = 0; i < count; ++i) {
+        const float v = data[i];
+        if (!std::isfinite(v)) {
+            ++bad;
+            continue;
+        }
+        absmax = std::max(absmax, static_cast<double>(std::fabs(v)));
+        sum += v;
+    }
+    std::cerr << "[minimax-h3.stats] " << name << " n=" << count << " nonfinite=" << bad
+              << " absmax=" << absmax << " mean=" << (count ? sum / static_cast<double>(count) : 0.0)
+              << '\n';
+}
+
+// MINIMAX_H3_DUMP_DIR=<dir> writes the exact step-0 denoiser inputs (raw
+// little-endian) so a single plan can be replayed outside the runtime.
+void debug_dump(const char* name, const void* data, std::size_t bytes) {
+    const char* dir = std::getenv("MINIMAX_H3_DUMP_DIR");
+    if (dir == nullptr || *dir == '\0')
+        return;
+    std::ofstream out(std::string(dir) + "/" + name, std::ios::binary | std::ios::trunc);
+    out.write(static_cast<const char*>(data), static_cast<std::streamsize>(bytes));
+}
 
 double milliseconds(Clock::time_point begin, Clock::time_point end) {
     return std::chrono::duration<double, std::milli>(end - begin).count();
@@ -707,6 +742,7 @@ void MiniMaxH3Pipeline::ResidentState::load_text_embeddings(const std::string& r
         copy_float(require_output(outputs, "encoder_hidden_states"),
                    static_cast<std::size_t>(requested_text_rows) * kTextDim, "text encoder");
     module->sync();
+    debug_stats("text_embeddings", text_embeddings.data(), text_embeddings.size());
     text_rows = requested_text_rows;
     prompt = requested_prompt;
 }
@@ -719,6 +755,20 @@ void MiniMaxH3Pipeline::ResidentState::load_modulations(const MiniMaxH3Schedule&
     module->set_timing_label("adaln.plan");
     modulations = precompute_modulations(*module, video_schedule, audio_schedule);
     module->sync();
+    for (std::size_t step : {std::size_t{0}, modulations.size() / 2, modulations.size() - 1}) {
+        for (int32_t layer : {0, 25, kLayers - 1}) {
+            const auto& raw = modulations[step].blocks[layer];
+            const auto* bits = reinterpret_cast<const std::uint16_t*>(raw.bytes.data());
+            std::vector<float> values(raw.bytes.size() / 2);
+            for (std::size_t i = 0; i < values.size(); ++i) {
+                const std::uint32_t word = static_cast<std::uint32_t>(bits[i]) << 16;
+                std::memcpy(&values[i], &word, sizeof(float));
+            }
+            const std::string label =
+                "modulation step=" + std::to_string(step) + " layer=" + std::to_string(layer);
+            debug_stats(label.c_str(), values.data(), values.size());
+        }
+    }
 }
 
 bool MiniMaxH3Pipeline::ResidentState::denoiser_is_resident(bool first_block_cache) const {
@@ -920,11 +970,41 @@ DenoiserStats MiniMaxH3Pipeline::ResidentState::run_monolithic_denoiser(
         inputs.emplace("timestep_indices",
                        Tensor{metadata.timestep_indices.data(), {sequence_rows}, DType::kInt32});
         append_modulation_inputs(inputs, modulations[step]);
+        if (step == 0) {
+            debug_stats("input video_hidden_states", video_rows_host.data(), video_rows_host.size());
+            debug_stats("input audio_hidden_states", audio_rows_host.data(), audio_rows_host.size());
+            debug_dump("video_hidden_states.f32", video_rows_host.data(),
+                       video_rows_host.size() * sizeof(float));
+            debug_dump("audio_hidden_states.f32", audio_rows_host.data(),
+                       audio_rows_host.size() * sizeof(float));
+            debug_dump("encoder_hidden_states.f32", text_embeddings.data(),
+                       text_embeddings.size() * sizeof(float));
+            debug_dump("position_ids.f32", metadata.positions.data(),
+                       metadata.positions.size() * sizeof(float));
+            debug_dump("adaln_indices.i32", metadata.adaln_indices.data(),
+                       metadata.adaln_indices.size() * sizeof(int32_t));
+            debug_dump("timestep_indices.i32", metadata.timestep_indices.data(),
+                       metadata.timestep_indices.size() * sizeof(int32_t));
+            for (int32_t layer = 0; layer < kLayers; ++layer) {
+                const auto& raw = modulations[0].blocks[layer];
+                debug_dump(("block_modulation_" + std::to_string(layer) + ".bf16").c_str(),
+                           raw.bytes.data(), raw.bytes.size());
+            }
+            debug_dump("final_modulation.bf16", modulations[0].final.bytes.data(),
+                       modulations[0].final.bytes.size());
+        }
         const auto outputs = module.forward(inputs);
         auto video_velocity_host = copy_float(require_output(outputs, "video_velocity"),
                                               video_rows_host.size(), "video velocity");
         auto audio_velocity_host = copy_float(require_output(outputs, "audio_velocity"),
                                               audio_rows_host.size(), "audio velocity");
+        if (step < 3 || step + 1 == video_schedule.timesteps.size()) {
+            const std::string label = "step " + std::to_string(step);
+            debug_stats((label + " video_velocity").c_str(), video_velocity_host.data(),
+                        video_velocity_host.size());
+            debug_stats((label + " audio_velocity").c_str(), audio_velocity_host.data(),
+                        audio_velocity_host.size());
+        }
         minimax_h3_scheduler_step(video_rows_host.data(), video_velocity_host.data(),
                                   video_rows_host.size(), video_schedule.timesteps[step],
                                   video_schedule.sigmas[step], video_schedule.sigmas[step + 1]);
@@ -1175,6 +1255,8 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
         resident_->run_denoiser(first_block_cache_, metadata, video_schedule, audio_schedule,
                                 video_rows, audio_rows, cache_threshold_, stream_);
     const auto denoiser_end = Clock::now();
+    debug_stats("denoised_video_rows", video_rows.data(), video_rows.size());
+    debug_stats("denoised_audio_rows", audio_rows.data(), audio_rows.size());
     audio_rows.clear();
     audio_rows.shrink_to_fit();
 
@@ -1183,6 +1265,7 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
         latent = unpatchify_video(video_rows);
         denormalize_latents(latent);
     }
+    debug_stats("latent", latent.data(), latent.size());
     video_rows.clear();
     video_rows.shrink_to_fit();
     const std::size_t expected_pixels =
@@ -1191,6 +1274,7 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
     const bool vae_resident_hit = resident_->prepare_vae(loader_, stream_, first_block_cache_);
     auto pixels = resident_->decode_vae(first_block_cache_, latent, expected_pixels, stream_);
     const auto vae_end = Clock::now();
+    debug_stats("pixels", pixels.data(), pixels.size());
     latent.clear();
     latent.shrink_to_fit();
 
@@ -1210,13 +1294,15 @@ ImageResult MiniMaxH3Pipeline::generate_image(const std::string& prompt,
               << " full_denoiser_steps=" << denoiser_stats.full_steps
               << " skipped_denoiser_steps=" << denoiser_stats.skipped_steps << '\n';
     ImageResult result;
-    result.height = kOutputHeight;
-    result.width = kOutputWidth;
     result.channels = 3;
-    result.num_frames = kOutputFrames;
     if (distributed_rank_ == 0) {
+        result.height = kOutputHeight;
+        result.width = kOutputWidth;
+        result.num_frames = kOutputFrames;
         result.pixels = std::move(pixels);
     } else {
+        // Non-zero ranks return the empty "worker" result the CLI/server
+        // recognize (0x0, 0 frames), not an ImageResult with dimensions but no pixels.
         std::cerr << "[minimax-h3] rank " << distributed_rank_ << "/" << distributed_world_size_
                   << " finished; rank 0 returns the decoded video\n";
     }
