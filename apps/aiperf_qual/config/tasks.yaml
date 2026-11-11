@@ -73,12 +73,17 @@ benchmarks:
                           metric: wer, gate: {margin: 0.5, relative_margin: 0.10}}
   sts: {suite: stsb, suite_definition: stsbenchmark-pairs-1379, metric: sts_spearman, gate: {margin: 0.5}}
   # Raw encoders (BERT, RoBERTa, ...: STS-B is not their task): conversion parity of the encode output (the
-  # first-token hidden state) on 400 STS-B test sentences, every sentence within the tolerance.
+  # first-token hidden state) on 400 STS-B test sentences, every sentence within the tolerance (or the outlier gate).
+  # Two FP16 implementations round differently: at most 1% of the sentences (4 of 400) may fall outside the
+  # tolerance if each stays within twice it.
   encoder_parity: {suite: encoder-parity, suite_definition: stsbenchmark-sentences-400, metric: vector_parity,
-                   gate: {min_cosine: 0.999, max_relative_l2: 0.02},
+                   gate: {min_cosine: 0.999, max_relative_l2: 0.02,
+                          outliers: {max_fraction: 0.01, gate: {min_cosine: 0.998, max_relative_l2: 0.04}}},
                    # A native model that cannot run the candidate's precision (fp16) runs at fp32: TRTMC's half-
                    # precision error is then not shared by the reference, so the tolerance doubles.
-                   mismatched_precision_gate: {min_cosine: 0.998, max_relative_l2: 0.04}}
+                   mismatched_precision_gate: {min_cosine: 0.998, max_relative_l2: 0.04,
+                                               outliers: {max_fraction: 0.01,
+                                                          gate: {min_cosine: 0.996, max_relative_l2: 0.08}}}}
   # SciFact reranking of fixed BM25 top-20 candidates (nDCG@10). Each document keeps its head so that the pair, as
   # the bundle's reranker forms it (`pair_format`, the eagle_vlm runtime's), fits the bundle; both sides get it.
   rerank: {suite: scifact-rerank, suite_definition: scifact-rerank-bm25-300, metric: rerank_ndcg, gate: {margin: 1.0},

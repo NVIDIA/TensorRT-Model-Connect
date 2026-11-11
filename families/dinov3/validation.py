@@ -85,6 +85,14 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
     )
 
 
+def _scaled(thresholds: dict, scale: float) -> dict:
+    """The criteria with ``scale`` times their error budget: a cosine floor's distance to 1 and the relative
+    Frobenius error limit scale; other entries stay."""
+    return {key: (1.0 - scale * (1.0 - float(value)) if key.endswith("cosine")
+                  else float(value) * scale if key == "relative_frobenius" else value)
+            for key, value in thresholds.items()}
+
+
 @lru_cache(maxsize=None)
 def _contract(profile: str) -> tuple[dict, dict, dict]:
     root = Path(__file__).resolve().parent / "tests"
@@ -109,6 +117,8 @@ def compare(candidate: dict | None, native: dict | None, gate: dict) -> tuple[bo
     if any(not side or not required <= side.keys() for side in (candidate, native)):
         return None, "complete hidden and pooled feature outputs are required"
     manifest, case, thresholds = _contract(str(gate["profile"]))
+    if gate.get("threshold_scale") is not None:  # the qualification's outlier gate
+        thresholds = _scaled(thresholds, float(gate["threshold_scale"]))
     try:
         expected = {
             "last_hidden_state": np.asarray(native["last_hidden_state"], dtype=np.float64).reshape(

@@ -707,10 +707,36 @@ def judge_parity(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]],
                 "reasons": [f"{len(unreadable)} of {expected} outputs lack readable evidence ({unreadable[0][:200]})"]}
     failures = [{"sample_id": problems[index].get("sample_id", str(index)), "explanation": reason}
                 for index, ok, reason in results if not ok]
+    allowed = _tolerated_outliers(item["gate"], compare, mine, theirs, results, expected) if failures else None
+    if allowed is not None:  # single-sample outliers of one precision, each within the relaxed outlier gate
+        entry.update(passed=expected - len(failures), required_passes=expected - allowed, failures=[],
+                     outliers=failures[:10], status="pass", reasons=[],
+                     notes=[f"{len(failures)} of {expected} outputs outside the tolerance but within the outlier gate "
+                            f"(at most {allowed} allowed)"])
+        return entry
     entry.update(passed=expected - len(failures), required_passes=expected, failures=failures[:5],
                  status="pass" if not failures else "fail",
                  reasons=[f"{len(failures)} of {expected} outputs outside the tolerance"] if failures else [])
     return entry
+
+
+def _tolerated_outliers(gate: Mapping[str, Any], compare: Callable, mine: Mapping[int, Any], theirs: Mapping[int, Any],
+                        results: Sequence[tuple[int, bool | None, str]], expected: int) -> int | None:
+    """How many outliers the gate's ``outliers`` policy (``max_fraction`` of the problems, each within
+    ``outliers.gate`` merged over the gate) allows, when every output outside the tolerance is such an
+    outlier; None otherwise. A missing answer is never an outlier, and a systematic error fails as before."""
+    policy = gate.get("outliers")
+    if not policy:
+        return None
+    failed = [(index, reason) for index, ok, reason in results if not ok]
+    allowed = int(float(policy["max_fraction"]) * expected)
+    if len(failed) > allowed:
+        return None
+    relaxed = {**{key: value for key, value in gate.items() if key != "outliers"}, **dict(policy.get("gate") or {})}
+    if any(reason == NO_ANSWER or compare(mine[index], theirs[index], relaxed)[0] is not True
+           for index, reason in failed):
+        return None
+    return allowed
 
 
 def _as_observations(side: Mapping[str, Any]) -> dict[str, Any]:
