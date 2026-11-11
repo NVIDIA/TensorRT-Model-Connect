@@ -318,8 +318,9 @@ def _assert_sdk_consumers(runtime_root: Path, bundle: Path, case: dict, expected
     for language in ("c", "cpp"):
         consumer = native_build / f"test_bart_sdk_{language}"
         assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
+        max_tokens = str(int(case.get("max_new_tokens", 20)))
         completed = subprocess.run(
-            [str(consumer), str(bundle), str(runtime_root), _case_text(case)],
+            [str(consumer), str(bundle), str(runtime_root), _case_text(case), max_tokens],
             check=True,
             capture_output=True,
             text=True,

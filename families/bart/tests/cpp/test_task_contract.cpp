@@ -278,11 +278,16 @@ void test_task_bindings_and_primary_task() {
     require(bindings.size() == 1, "pipeline must bind exactly 1 task");
     require(bindings[0].task == trtmc::internal::IConditionalTextGeneration::kTask,
             "bound task must be conditional_text_generation");
-    require(bindings[0].config_fields.size() == 1,
-            "bound task must expose 1 config field: max_new_tokens");
+    require(bindings[0].config_fields.size() == 3, "bound task must expose 3 config fields");
     require(bindings[0].config_fields[0].name == "max_new_tokens",
             "field name must be max_new_tokens");
     require(bindings[0].config_fields[0].kind == trtmc::internal::ConfigKind::I64,
+            "field kind must be I64");
+    require(bindings[0].config_fields[1].name == "temperature", "field name must be temperature");
+    require(bindings[0].config_fields[1].kind == trtmc::internal::ConfigKind::F64,
+            "field kind must be F64");
+    require(bindings[0].config_fields[2].name == "top_k", "field name must be top_k");
+    require(bindings[0].config_fields[2].kind == trtmc::internal::ConfigKind::I64,
             "field kind must be I64");
 }
 

@@ -67,6 +67,14 @@ internal::TextResult BartPipeline::run(const internal::ConditionalTextGeneration
                 "BartPipeline: max_new_tokens must be positive and fit in int32");
         max_tokens = static_cast<int32_t>(*val);
     }
+    if (const auto val = internal::config_get<double>(config, bart_config_fields, "temperature")) {
+        if (*val < 0.0)
+            throw internal::ConfigError("BartPipeline: temperature must be non-negative");
+    }
+    if (const auto val = internal::config_get<std::int64_t>(config, bart_config_fields, "top_k")) {
+        if (*val < 0)
+            throw internal::ConfigError("BartPipeline: top_k must be non-negative");
+    }
 
     auto [padded, copy_len] = prepare_encoder_input_semantic(request.source);
 

@@ -26,8 +26,8 @@ void json_string(std::string_view value) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 4) {
-        std::cerr << "Usage: " << argv[0] << " BUNDLE RUNTIME_ROOT TEXT\n";
+    if (argc != 4 && argc != 5) {
+        std::cerr << "Usage: " << argv[0] << " BUNDLE RUNTIME_ROOT TEXT [MAX_NEW_TOKENS]\n";
         return 2;
     }
     try {
@@ -36,9 +36,13 @@ int main(int argc, char** argv) {
             options.runtime_root = argv[2];
             auto model = trtmc::Model::load(argv[1], options);
             const auto task = model.task<trtmc::ConditionalTextGeneration>();
-            if (task.config_fields().size() != 1)
-                throw std::runtime_error("bart must expose exactly 1 config field: max_new_tokens");
-            return task.run({trtmc::TextSource{std::string(argv[3])}});
+            if (task.config_fields().size() != 3)
+                throw std::runtime_error("bart must expose exactly 3 config fields");
+            trtmc::RunConfig config;
+            if (argc >= 5) {
+                config.set("max_new_tokens", std::int64_t(std::stoll(argv[4])));
+            }
+            return task.run({trtmc::TextSource{std::string(argv[3])}}, config);
         }();
         std::cout << "{\"task\":\"conditional_text_generation\",\"text\":";
         json_string(result.text());

@@ -42,11 +42,13 @@ int main(int argc, char** argv) {
     trtmc_load_options_v1 options = {0};
     trtmc_conditional_text_generation_request_v1 request = {0};
     trtmc_text_result_view_v1 view = {0};
+    trtmc_config_entry_v1 config_entries[1] = {0};
+    trtmc_config_view_v1 config = {0};
     uint64_t i, field_count = 0;
     int status = 1;
 
-    if (argc != 4) {
-        fprintf(stderr, "Usage: %s BUNDLE RUNTIME_ROOT TEXT\n", argv[0]);
+    if (argc != 4 && argc != 5) {
+        fprintf(stderr, "Usage: %s BUNDLE RUNTIME_ROOT TEXT [MAX_NEW_TOKENS]\n", argv[0]);
         return 2;
     }
     if (trtmc_get_api(1, 0, &core) != TRTMC_OK || !core) {
@@ -68,14 +70,21 @@ int main(int argc, char** argv) {
     if (core->config_field_count(model, text(TRTMC_TASK_CONDITIONAL_TEXT_GENERATION), 1, 0,
                                  &field_count, &error) != TRTMC_OK)
         goto cleanup;
-    if (field_count != 1) {
-        fprintf(stderr, "bart must expose exactly 1 config field: max_new_tokens\n");
+    if (field_count != 3) {
+        fprintf(stderr, "bart must expose exactly 3 config fields\n");
         goto cleanup;
     }
 
     request.source.kind = TRTMC_TEXT_UTF8;
     request.source.as.text = text(argv[3]);
-    if (task->run(model, &request, NULL, &result, &error) != TRTMC_OK)
+    if (argc >= 5) {
+        config_entries[0].name = text("max_new_tokens");
+        config_entries[0].value.kind = TRTMC_CONFIG_I64;
+        config_entries[0].value.as.i64 = atoll(argv[4]);
+        config.entries = config_entries;
+        config.count = 1;
+    }
+    if (task->run(model, &request, argc >= 5 ? &config : NULL, &result, &error) != TRTMC_OK)
         goto cleanup;
 
     core->model_release(model);

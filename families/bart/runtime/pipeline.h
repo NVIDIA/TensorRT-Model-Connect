@@ -11,8 +11,8 @@
 #include "trtmc/internal/config.h"
 #include "trtmc/internal/model.h"
 #include "trtmc/internal/text.h"
-#include "trtmc/runtime/task.h"
 #include "trtmc/runtime/trt_module.h"
+#include "trtmc/task.h"
 
 #include <cstdint>
 #include <cuda_runtime_api.h>
@@ -26,6 +26,8 @@ namespace trtmc {
 
 inline constexpr internal::ConfigField bart_config_fields[] = {
     {"max_new_tokens", internal::ConfigKind::I64, std::int64_t{128}, "Generation token cap"},
+    {"temperature", internal::ConfigKind::F64, 1.0, "Sampling temperature"},
+    {"top_k", internal::ConfigKind::I64, std::int64_t{1}, "Top-k sampling cutoff"},
 };
 
 class BartPipeline final : public internal::IModel,
