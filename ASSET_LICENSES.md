@@ -183,6 +183,9 @@ audiobooks.
 A byte-identical copy is stored at
 `families/qwen3_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`.
 
+A byte-identical copy is stored at
+`families/wavlm/tests/data/librispeech-test-clean-6930-75918-0003.wav`.
+
 ## SANA world-model fixtures
 
 The following files are unmodified copies from NVlabs/Sana revision
