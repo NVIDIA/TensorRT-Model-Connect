@@ -7,16 +7,22 @@ from .support import describe, profile_name, PROFILES
 from tensorrt_model_connect.model_support import load_model_metadata
 
 
-def read_config(request):
-    if (request.family != "d3" or request.task != "structured_decision"
-            or request.backend != "trt" or request.precision != "bf16"):
+def read_config(request, options=None):
+    if options is None:
+        names = ("family", "task", "backend", "precision", "tensor_parallel_size",
+                 "context_parallel_size", "quantization", "fp32_layers", "dynamic_kv_cache",
+                 "video_num_frames", "mtp_seq_len", "max_batch_size", "max_sequence_length",
+                 "image_height", "image_width")
+        options = {name: getattr(request, name) for name in names}
+    if (options["family"] != "d3" or options["task"] != "structured_decision"
+            or options["backend"] != "trt" or options["precision"] != "bf16"):
         raise ValueError("D3 requires family=d3, structured_decision, trt and bf16")
-    if (request.tensor_parallel_size != 1 or request.context_parallel_size != 1
-            or request.quantization is not None
-            or request.fp32_layers or request.dynamic_kv_cache
-            or request.video_num_frames is not None or request.mtp_seq_len is not None):
+    if (options["tensor_parallel_size"] != 1 or options["context_parallel_size"] != 1
+            or options["quantization"] is not None
+            or options["fp32_layers"] or options["dynamic_kv_cache"]
+            or options["video_num_frames"] is not None or options["mtp_seq_len"] is not None):
         raise ValueError("D3 supports TP=CP=1 without quantization, video or MTP")
-    if not 1 <= request.max_batch_size <= 8:
+    if not 1 <= options["max_batch_size"] <= 8:
         raise ValueError("D3 batch capacity must be between 1 and 8")
     metadata = load_model_metadata(request.model_dir)
     if describe(metadata) is None:
@@ -67,11 +73,11 @@ def read_config(request):
     if (len(d.get("codes", [])) != 255 or len(set(d["codes"])) != 255
             or len(d.get("token_ids", [])) != 255 or len(set(d["token_ids"])) != 255):
         raise ValueError("D3 requires 255 unique answer codes and token IDs")
-    maximum = request.max_sequence_length or 2048
+    maximum = options["max_sequence_length"] or 2048
     if maximum > t["max_position_embeddings"]:
         raise ValueError("sequence capacity exceeds checkpoint position capacity")
     # Initial image profile accepts already-sized RGB images; never silently resize.
-    height, width = request.image_height or 256, request.image_width or 256
+    height, width = options["image_height"] or 256, options["image_width"] or 256
     if height % 32 or width % 32 or not 65536 <= height * width <= 1638400:
         raise ValueError("D3 image shape must be a multiple of 32 within checkpoint pixel limits")
     return c, d, maximum, height, width

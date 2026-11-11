@@ -14,6 +14,18 @@ int main(int argc, char** argv) {
     try {
         if (argc < 2 || argc > 3)
             throw std::invalid_argument("usage: host_probe RECORD [TOKENIZER]");
+        if (std::string(argv[1]) == "--tokenize") {
+            if (argc != 3)
+                throw std::invalid_argument("--tokenize requires TOKENIZER");
+            std::ifstream f(argv[2]);
+            if (!f)
+                throw std::invalid_argument("cannot read tokenizer");
+            const std::string bytes{std::istreambuf_iterator<char>(f), {}};
+            const std::string text{std::istreambuf_iterator<char>(std::cin), {}};
+            auto tokenizer = trtmc::d3::CreateBpeTokenizer(bytes.data(), bytes.size(), false);
+            std::cout << trtmc::d3::Record(tokenizer->encode(text)).dump() << '\n';
+            return 0;
+        }
         if (std::string(argv[1]) == "--batch") {
             using namespace trtmc::d3;
             std::vector<BatchRow> rows{{0, {}, {11, 12}, std::vector<float>(64, 1)},

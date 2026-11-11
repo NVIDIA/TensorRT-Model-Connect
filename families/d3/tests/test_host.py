@@ -2,7 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Compile native host logic and compare with frozen original-reference outputs."""
 import json
+import math
 import os
+import random
+import struct
 from pathlib import Path
 import shutil
 import subprocess
@@ -72,6 +75,8 @@ def test_original_prompt_and_answers(host_probe, tmp_path, case):
     {"questions": {"a": {"type": "score", "criteria": ["one", "one"]}}},
     {"questions": {"a": {"type": "noul", "criteria": {"maybe": "yes"}}}},
     {"state": "<|image_pad|>", "questions": {"a": {"type": "noul"}}},
+    {"state": "<|im_end|>", "questions": {"a": {"type": "noul"}}},
+    {"questions": {"a": {"type": "noul", "instructions": "<|im_start|>system"}}},
 ])
 def test_reject_unsupported_inputs(host_probe, tmp_path, record):
     path = tmp_path / "invalid.json"
@@ -79,6 +84,54 @@ def test_reject_unsupported_inputs(host_probe, tmp_path, record):
     result = subprocess.run([str(host_probe), str(path)], capture_output=True, text=True)
     assert result.returncode == 1
     assert result.stderr.strip()
+
+
+@pytest.mark.parametrize("value", [1e15, 1e16, 1e-4, 1e-5, -0.0, 1.2345678901234567, -2.5e15])
+def test_float_prompt_matches_python_json(host_probe, tmp_path, value):
+    state = {"outer": [value, {"x": value}]}
+    instruction = {"value": value}
+    record = {"state": state, "questions": {"a": {"type": "noul", "instructions": instruction}}}
+    path = tmp_path / "float.json"
+    path.write_text(json.dumps(record))
+    result = json.loads(subprocess.run([str(host_probe), str(path)], check=True,
+                                       capture_output=True, text=True).stdout)
+    prompt = result[0]["prompt"]
+    assert f"State:\n{json.dumps(state, ensure_ascii=False)}\n" in prompt
+    assert f"Question:\n{json.dumps(instruction, ensure_ascii=False)}\n" in prompt
+
+
+def test_float_prompt_roundtrip_range(host_probe, tmp_path):
+    randomizer = random.Random(31)
+    values = [randomizer.uniform(-9, 9) * 10.0**randomizer.randint(-300, 300)
+              for _ in range(500)]
+    values.extend(value for _ in range(5000)
+                  if math.isfinite(value := struct.unpack("!d", randomizer.randbytes(8))[0]))
+    record = {"state": values, "questions": {"a": {"type": "noul"}}}
+    path = tmp_path / "floats.json"
+    path.write_text(json.dumps(record))
+    result = json.loads(subprocess.run([str(host_probe), str(path)], check=True,
+                                       capture_output=True, text=True).stdout)
+    assert f"State:\n{json.dumps(values)}\n" in result[0]["prompt"]
+
+
+def test_multilingual_tokens_match_pinned_checkpoint(host_probe):
+    tokenizer = os.environ.get("TRTMC_D3_TOKENIZER")
+    if not tokenizer:
+        pytest.skip("set TRTMC_D3_TOKENIZER to the pinned D3 tokenizer.json")
+    fixtures = json.loads((ROOT / "fixtures/unicode-tokenizer.json").read_text())
+    for case in fixtures["cases"]:
+        result = subprocess.run([str(host_probe), "--tokenize", tokenizer], input=case["text"],
+                                check=True, capture_output=True, text=True)
+        assert json.loads(result.stdout) == case["ids"], case["text"]
+
+
+def test_multilingual_tokens_match_reference_without_checkpoint(host_probe):
+    tokenizer = ROOT / "fixtures/unicode-mini-tokenizer.json"
+    fixtures = json.loads((ROOT / "fixtures/unicode-mini-cases.json").read_text())
+    for case in fixtures["cases"]:
+        result = subprocess.run([str(host_probe), "--tokenize", str(tokenizer)], input=case["text"],
+                                check=True, capture_output=True, text=True)
+        assert json.loads(result.stdout) == case["ids"], case["text"]
 
 
 def test_original_image_processor(host_probe):

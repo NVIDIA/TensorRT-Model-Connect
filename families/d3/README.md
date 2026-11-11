@@ -1,10 +1,15 @@
 # D3 dense native vertical slices
 
+**Current qualification:** The selected Edge GPU E2E fails against the pinned
+original reference at the existing tolerances. None of the five profiles is
+qualified for serving. Results below are scoped to the specific historical
+bundles and experiments stated; native batch consistency is not reference parity.
+
 The first native vertical slice was validated with `vllm-sr/d3-edge` revision
 `bee5e872f75b9c5d1405767bf244a6948b95c0af` on an RTX 5090, driver 580.173.02,
 CUDA 12.9 and TensorRT 11.1.0.106. The original reference used PyTorch
 2.14.0+cu130 and Transformers 5.17.0, with the unmodified checkpoint runtime.
-The original single-row E2E passed for the fixed text and RGB8 256x256 image records,
+An earlier single-row bundle passed its then-current E2E for fixed text and RGB8 256x256 image records,
 covering all three question types and text/image/text reuse of one Task.
 This is evidence for that bounded case, not broader quality, performance,
 hardware or model-family qualification.
@@ -125,13 +130,15 @@ and validate each target profile on its intended hardware before serving it.
 
 ## Ownership and execution
 
-`support.py` selects `structured_decision` with BF16 by default. The Qwen3.5
-and Qwen3.8 recognizers reject decision checkpoints. The builder recognizes the released `edge`, `lite`, `nano`, `mini`, and `flash`
+`support.py` selects `structured_decision` with BF16 by default. Its explicit
+checkpoint marker takes precedence over a generic architecture match. The builder recognizes the released `edge`, `lite`, `nano`, `mini`, and `flash`
 dense geometries. `d3`, `turbo`, `ultra`, alternate geometries and quantized
 checkpoints remain outside this adapter. D3 owns its weight mapping, TensorRT graphs, tokenizer,
 request formatting, image preparation, orchestration and correctness oracle.
 The tokenizer, visual topology and DeltaNet graph were derived from this
 repository's Qwen3.5 family and are intentionally independent copies.
+The pre-tokenizer freezes Unicode 15.0 letter, mark and number categories;
+characters introduced in a later Unicode version have not been qualified.
 
 A bundle contains embedding, visual, per-layer and readout plans, a tokenizer
 and runtime configuration. Each full-attention layer consumes the complete
@@ -167,6 +174,8 @@ state crosses request boundaries.
 - The complete batch is validated before inference. An invalid request fails
   the whole call. Different text lengths and mixed text/image requests are
   supported; token usage excludes padding. Every call starts with fresh state.
+- Literal chat and media control tokens in request text are rejected before
+  tokenization. Checkpoints and their templates must come from trusted sources.
 
 Video, multiple images, alternate model geometries, prefix reuse, permutation
 averaging, Box/Track, quantization and generation are not implemented.

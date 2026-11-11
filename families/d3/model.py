@@ -28,6 +28,7 @@ class Graph:
         self.builder = trt.Builder(self.logger)
         self.net = self.builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         self.config = self.builder.create_builder_config()
+        self.config.builder_optimization_level = 3
         self.config.clear_flag(trt.BuilderFlag.TF32)
         self.config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 8 << 30)
         self.profile = self.builder.create_optimization_profile()
@@ -179,7 +180,18 @@ def attention(g, x, w, text):
 
 
 def build(request, writer):
-    config, decision, maximum, height, width = read_config(request)
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("d3 does not support dynamic_kv_cache")
+    options = {
+        "family": request.family, "task": request.task, "backend": request.backend,
+        "precision": request.precision, "tensor_parallel_size": request.tensor_parallel_size,
+        "context_parallel_size": request.context_parallel_size, "quantization": request.quantization,
+        "fp32_layers": request.fp32_layers, "dynamic_kv_cache": request.dynamic_kv_cache,
+        "video_num_frames": request.video_num_frames, "mtp_seq_len": request.mtp_seq_len,
+        "max_batch_size": request.max_batch_size, "max_sequence_length": request.max_sequence_length,
+        "image_height": request.image_height, "image_width": request.image_width,
+    }
+    config, decision, maximum, height, width = read_config(request, options)
     from tokenizers import Tokenizer
     tokenizer = Tokenizer.from_file(str(request.model_dir / "tokenizer.json"))
     for code, token in zip(decision["codes"], decision["token_ids"]):

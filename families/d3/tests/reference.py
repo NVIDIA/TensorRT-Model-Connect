@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Run the unconverted checkpoint in an explicitly separate reference interpreter."""
 import json
+import importlib.util
 import os
 from pathlib import Path
 import sys
@@ -12,8 +13,13 @@ def load_model(root, model_name="d3-edge"):
     import transformers
     if transformers.__version__ != "5.17.0":
         raise RuntimeError("D3 reference requires Transformers 5.17.0")
-    from d3_runtime import D3
-    return D3.from_pretrained(str(root), device="cuda:0", batch_size=1, model_name=model_name)
+    cached = sys.modules.get("d3_runtime")
+    spec = None if cached is not None else importlib.util.find_spec("d3_runtime")
+    origin = getattr(cached, "__file__", None) if cached is not None else getattr(spec, "origin", None)
+    if not origin or not Path(origin).resolve().is_relative_to(Path(root).resolve()):
+        raise RuntimeError("D3 reference module was loaded from outside the checkpoint")
+    import d3_runtime
+    return d3_runtime.D3.from_pretrained(str(root), device="cuda:0", batch_size=1, model_name=model_name)
 
 
 def evaluate(model, record, images=None):

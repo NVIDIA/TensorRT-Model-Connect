@@ -151,6 +151,8 @@ the same document and media fields. Batch inputs cannot be mixed with
 single-request fields or nested. The worker invokes `decide_batch` once per
 observation and retains results in request order. Rates include requests,
 questions and options per second; batch wall time covers the complete call.
+`request_throughput_per_s` counts individual requests in the measured batches,
+while `sample_count` and latency describe calls to the batch interface.
 Family-owned validation must establish batch correctness before timing.
 
 For semantic Task manifests, explicitly specified generation controls retain

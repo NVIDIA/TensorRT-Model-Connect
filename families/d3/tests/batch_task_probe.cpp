@@ -33,9 +33,13 @@ int main(int argc, char** argv) {
         if (!single || !batch)
             throw std::runtime_error("missing structured decision interfaces");
         std::ifstream file(argv[3]);
+        if (!file)
+            throw std::invalid_argument("cannot read D3 record");
         Json record;
         file >> record;
         std::ifstream rgb(argv[4], std::ios::binary);
+        if (!rgb)
+            throw std::invalid_argument("cannot read D3 image");
         const std::vector<unsigned char> pixels{std::istreambuf_iterator<char>(rgb), {}};
         if (pixels.size() != 256 * 256 * 3)
             throw std::invalid_argument("expected 256x256 RGB8 fixture");

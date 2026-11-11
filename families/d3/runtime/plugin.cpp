@@ -291,6 +291,6 @@ class Pipeline final : public IStructuredDecision, public IBatchStructuredDecisi
 } // namespace trtmc::d3
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
-        throw std::invalid_argument("D3 does not accept a KV cache budget");
+        throw std::invalid_argument("d3 does not support --kv-cache-size");
     return new trtmc::d3::Pipeline(context);
 }

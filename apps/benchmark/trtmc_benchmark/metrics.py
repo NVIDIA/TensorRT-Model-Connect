@@ -67,10 +67,16 @@ def reduce_metrics(
     total_seconds = sum(latency) / 1000.0
     if total_seconds <= 0:
         raise BenchmarkError("worker returned a non-positive total measured duration")
+    request_count = len(latency)
+    if operation_spec.request_count_field is not None:
+        counts = _numbers(observations, operation_spec.request_count_field)
+        if len(counts) != len(latency) or any(count <= 0 for count in counts):
+            raise BenchmarkError("worker must report a positive request count in every observation")
+        request_count = sum(counts)
     metrics: dict[str, Any] = {
         "sample_count": len(latency),
         "latency_ms": _summary(latency),
-        "request_throughput_per_s": len(latency) / total_seconds,
+        "request_throughput_per_s": request_count / total_seconds,
         "primary": {
             "name": "runtime_e2e_wall_ms.p50",
             "value": _percentile(latency, 0.50),

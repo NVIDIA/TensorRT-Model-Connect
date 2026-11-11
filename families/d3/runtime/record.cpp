@@ -6,13 +6,53 @@
 #include "families/d3/runtime/record.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <set>
 #include <stdexcept>
 namespace trtmc::d3 {
 namespace {
+// Python uses fixed notation for exponents -4 through 15 and retains .0 for
+// floating-point values. Both encoders otherwise use shortest-roundtrip digits.
+std::string python_float(double value) {
+    char buffer[64];
+    const auto magnitude = std::abs(value);
+    const auto format = magnitude != 0 && (magnitude < 1e-4 || magnitude >= 1e16)
+                            ? std::chars_format::scientific
+                            : std::chars_format::general;
+    const auto [end, error] = std::to_chars(std::begin(buffer), std::end(buffer), value, format);
+    if (error != std::errc{})
+        throw std::runtime_error("cannot format D3 floating-point value");
+    std::string result(buffer, end);
+    const auto exponent_at = result.find_first_of("eE");
+    if (exponent_at == std::string::npos) {
+        if (result.find('.') == std::string::npos)
+            result += ".0";
+        return result;
+    }
+    const int exponent = std::stoi(result.substr(exponent_at + 1));
+    if (exponent < -4 || exponent >= 16)
+        return result;
+    const bool negative = result.front() == '-';
+    const auto start = negative ? 1U : 0U;
+    auto digits = result.substr(start, exponent_at - start);
+    const auto point = digits.find('.');
+    const auto integer_digits = point == std::string::npos ? digits.size() : point;
+    if (point != std::string::npos)
+        digits.erase(point, 1);
+    const auto decimal = static_cast<int>(integer_digits) + exponent;
+    if (decimal <= 0)
+        digits = "0." + std::string(-decimal, '0') + digits;
+    else if (decimal >= static_cast<int>(digits.size()))
+        digits += std::string(decimal - digits.size(), '0') + ".0";
+    else
+        digits.insert(decimal, 1, '.');
+    return negative ? "-" + digits : digits;
+}
 // Python json.dumps(..., ensure_ascii=False) separators are part of the prompt.
 std::string python_json(const Record& v) {
+    if (v.is_number_float())
+        return python_float(v.get<double>());
     if (!v.is_object() && !v.is_array())
         return v.dump(-1, ' ', false, Record::error_handler_t::strict);
     std::string out = v.is_object() ? "{" : "[";
@@ -37,11 +77,11 @@ bool truthy(const Record& v) {
            !((v.is_array() || v.is_object()) && v.empty());
 }
 void literal_guard(const std::string& text) {
-    for (const auto* token :
-         {"<|image_pad|>", "<|video_pad|>", "<|vision_start|>", "<|vision_end|>"})
+    for (const auto* token : {"<|image_pad|>", "<|video_pad|>", "<|vision_start|>",
+                              "<|vision_end|>", "<|im_start|>", "<|im_end|>"})
         if (text.find(token) != std::string::npos)
             throw std::invalid_argument(
-                "literal media tokens are not allowed in D3 state/questions");
+                "literal control tokens are not allowed in D3 state/questions");
 }
 } // namespace
 std::vector<Question> questions(const Record& record) {

@@ -48,6 +48,7 @@ class OperationSpec:
     stage_timings: tuple[str, ...] = ()
     per_item_latency: PerItemLatencyMetric | None = None
     metric_factory: MetricFactory | None = None
+    request_count_field: str | None = None
 
     def metrics_for_request(
         self, request: Mapping[str, Any]
@@ -81,6 +82,7 @@ _OPERATIONS = (
     OperationSpec(
         name="decide",
         rate_metrics=(RateMetric("questions", "questions_per_s"), RateMetric("options", "options_per_s"), RateMetric("requests", "requests_per_s")),
+        request_count_field="requests",
     ),
     OperationSpec(
         name="generate",

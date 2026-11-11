@@ -40,9 +40,11 @@ def test_edge_text_image(request, tmp_path, manifest):
         local_files_only=os.environ.get("HF_HUB_OFFLINE") == "1"))
     family, support = resolve_family(load_model_metadata(checkpoint))
     assert (family, support.default_task, support.default_precision) == ("d3", "structured_decision", "bf16")
+    assert manifest["precision"] == "bf16" and manifest["tensor_parallel_size"] == 1
     bundle = tmp_path / manifest["bundle"]
     build(BuildRequest(checkpoint, bundle, family, support.default_task, support.default_precision,
-                       max_sequence_length=manifest["max_sequence_length"], max_batch_size=manifest["max_batch_size"], image_height=256, image_width=256))
+                       max_sequence_length=manifest["max_sequence_length"], max_batch_size=manifest["max_batch_size"],
+                       tensor_parallel_size=manifest["tensor_parallel_size"], image_height=256, image_width=256))
     assert bundle.is_file()
     pixels = np.zeros((256, 256, 3), np.uint8)
     pixels[..., 0] = 255

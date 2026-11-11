@@ -33,13 +33,18 @@ def test_unknown_d3_topologies_do_not_fall_back_to_generation(hidden, layers, ga
     if gate:
         c["text_config"]["output_gate_type"] = gate
         c["text_config"].pop("mlp_only_layers")
-    with pytest.raises(FamilyResolutionError, match="no family"):
+    with pytest.raises(FamilyResolutionError, match="unsupported D3 checkpoint"):
         resolve_family(metadata(c))
 
 
 def test_missing_readout_cannot_fall_back_to_qwen():
-    with pytest.raises(FamilyResolutionError, match="no family"):
+    with pytest.raises(FamilyResolutionError, match="unsupported D3 checkpoint"):
         resolve_family(metadata(files=("decision_config.json",)))
+
+
+def test_missing_decision_config_cannot_fall_back_to_qwen():
+    with pytest.raises(FamilyResolutionError, match="unsupported D3 checkpoint"):
+        resolve_family(metadata(files=("readout.safetensors",)))
 
 
 @pytest.mark.parametrize("name", ["edge", "lite", "nano", "mini", "flash"])

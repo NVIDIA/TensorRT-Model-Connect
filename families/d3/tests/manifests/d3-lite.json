@@ -16,7 +16,10 @@
       "inputs": {
         "requests": [
           {
-            "document_path": "fixtures/record.json"
+            "document_path": "fixtures/record.json",
+            "image_paths": [
+              "fixtures/red.png"
+            ]
           }
         ]
       }

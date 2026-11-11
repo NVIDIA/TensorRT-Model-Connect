@@ -154,9 +154,9 @@ def build_vision_engine(config, weights, max_patches, *, patches_per_image, debu
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     build = builder.create_builder_config()
+    build.builder_optimization_level = 3
     build.clear_flag(trt.BuilderFlag.TF32)
     build.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 30)
-    build.builder_optimization_level = 3
     h, heads, dim = config.hidden, config.heads, config.head_dim
     patches = network.add_input("patches", trt.bfloat16, (-1, config.patch_width))
     angles = network.add_input("rotary_angles", trt.float32, (-1, dim // 2))

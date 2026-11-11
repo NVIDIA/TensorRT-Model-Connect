@@ -20,8 +20,6 @@ _MULTIMODAL = family_support(
 
 
 def describe(metadata: ModelMetadata) -> FamilySupport | None:
-    if "decision_config.json" in metadata.files:
-        return None
     config = metadata.config.get("text_config", metadata.config)
     if isinstance(config, dict) and "output_gate_type" in config and (
         "mlp_only_layers" not in config
