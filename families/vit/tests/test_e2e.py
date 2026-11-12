@@ -330,12 +330,6 @@ def _check_logits(scores: list[float], reference: list[float], precision: str,
     assert worst <= tolerance, (
         f"{FAMILY} {precision} logits differ from the reference by {worst}"
     )
-    if precision == "fp16":
-        assert tanh_reference is not None, "the fp16 gate needs the tanh-GELU reference"
-        share = _tanh_share(scores, reference, tanh_reference)
-        assert share < _TANH_SHARE_LIMIT, (
-            f"{FAMILY} fp16 logits carry {share:.2f} of the tanh-GELU defect"
-        )
     record_evidence("thresholds", {"cosine_floor": floor, "max_abs_error": tolerance})
     record_reference_comparison(
         "Reference scores",
@@ -361,6 +355,8 @@ def _check_logits(scores: list[float], reference: list[float], precision: str,
         ],
     )
     if precision == "fp16":
+        assert tanh_reference is not None, "the fp16 gate needs the tanh-GELU reference"
+        share = _tanh_share(scores, reference, tanh_reference)
         record_evidence("thresholds", {"max_tanh_defect_share": _TANH_SHARE_LIMIT})
         record_evidence("diagnostics", {"counterfactual_control": {
             "name": "Tanh approximation control", "native": {"scores": scores},
@@ -368,6 +364,9 @@ def _check_logits(scores: list[float], reference: list[float], precision: str,
             "actual": share, "operator": "<", "expected": _TANH_SHARE_LIMIT,
             "passed": share < _TANH_SHARE_LIMIT,
         }})
+        assert share < _TANH_SHARE_LIMIT, (
+            f"{FAMILY} fp16 logits carry {share:.2f} of the tanh-GELU defect"
+        )
     return worst, cosine
 
 

@@ -41,7 +41,8 @@ def record_failed_reference_proof(output: Path) -> None:
     record_evidence("diagnostics", {"recorded_reference_results": rows})
     if not rows:
         return
-    row = next((row for row in rows if row.get("passed") is False), rows[-1])
+    failed_row = next((row for row in rows if row.get("passed") is False), None)
+    row = failed_row if failed_row is not None else rows[-1]
     requests = documents.get("public.requests.json")
     matched = [request for request in requests if isinstance(request, dict) and request.get("id") == row.get("id")] if isinstance(requests, list) else []
     current = matched[0] if len(matched) == 1 else {}
@@ -53,6 +54,12 @@ def record_failed_reference_proof(output: Path) -> None:
     })
     record_evidence("native", {"id": row.get("id"), "text": row.get("actual_text")})
     record_evidence("reference", {"id": row.get("id"), "text": row.get("text"), "token_ids": row.get("token_ids")})
-    record_evidence("diagnostics", {"failed_reference_comparison": row})
+    if failed_row is not None:
+        record_evidence("diagnostics", {"failed_reference_comparison": row})
+    else:
+        record_evidence("diagnostics", {"incomplete_reference_validation": {
+            "last_completed_result": row,
+            "reason": "The reference driver did not complete; no explicitly failed comparison was recorded.",
+        }})
     # These are saved observations, not a new successful/enforced comparison.
     # The caller re-raises the original validator exception unchanged.
