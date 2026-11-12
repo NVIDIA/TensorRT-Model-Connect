@@ -1,0 +1,25 @@
+{
+  "name": "stable-diffusion-3.5-medium",
+  "hf_id": "stabilityai/stable-diffusion-3.5-medium",
+  "hf_revision": "b940f670f0eda2d07fbb75229e779da1ad11eb80",
+  "bundle": "stable-diffusion-3.5-medium.bundle",
+  "family": "stable_diffusion_3",
+  "task": "text_to_image",
+  "precision": "bf16",
+  "trust_remote_code": false,
+  "image_height": 1024,
+  "image_width": 1024,
+  "max_sequence_length": 256,
+  "testcases": [
+    {
+      "name": "stable-diffusion-3.5-medium",
+      "premerge": true,
+      "prompt": "A capybara holding a sign that reads Hello World",
+      "negative_prompt": "blurry, low quality",
+      "num_steps": 40,
+      "guidance_scale": 4.5,
+      "seed": 0
+    }
+  ],
+  "tensor_parallel_size": 1
+}
