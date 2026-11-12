@@ -165,7 +165,7 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
 
     tokenizer = AutoTokenizer.from_pretrained(
         str(model_dir),
-        trust_remote_code=True,
+        trust_remote_code=False,
         use_fast=True,
     )
     default_ids = list(tokenizer.encode("hello"))
@@ -230,7 +230,7 @@ def _build_qwen3_vl_decoder(
     quant_ctx=None,
     verbose: bool = False,
     debug_layer_outputs: bool = False,
-) -> bytes:
+) -> memoryview:
     """Build Qwen3-VL text decoder with DeepStack injection.
 
     Uses graph_blocks composition instead of standard_decoder_builder so
@@ -647,7 +647,7 @@ def _build_qwen3_vl_decoder(
     if plan is None:
         raise RuntimeError("TensorRT engine build failed")
 
-    return bytes(plan)
+    return memoryview(plan)
 
 
 def _mark_debug_output(network, tensor, name):
@@ -938,10 +938,11 @@ def build(request, writer):
         or config.raw["text_config"].get("decoder_sparse_step") != 1
         or config.raw["text_config"].get("mlp_only_layers")
         or not _is_qwen3_vl(config)
+        or not get_rope_scaling(config.raw).get("mrope_section")
     ):
         raise ValueError("qwen3_vl_moe requires pure routed experts and DeepStack vision")
     max_length = int(request.max_sequence_length or 512)
-    if max_length > config.max_position_embeddings:
+    if max_length <= 0 or max_length > config.max_position_embeddings:
         raise ValueError("qwen3_vl_moe sequence capacity exceeds the position contract")
     config.raw["_model_dir"] = str(model_dir)
     weights = load_weights(model_dir, config, precision)

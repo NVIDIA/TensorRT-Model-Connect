@@ -9,6 +9,51 @@ import numpy as np
 import pytest
 
 
+@pytest.mark.parametrize("per_head", [False, True])
+def test_bf16_rms_norm_rounds_before_gamma(per_head):
+    if os.environ.get("TRTMC_QWEN3_VL_MOE_COMPONENTS") != "1":
+        pytest.skip("explicit component GPU execution is required")
+    import torch
+    import tensorrt as trt
+    from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextRMSNorm
+    from families.qwen3_vl_moe import graph_ops
+
+    torch.manual_seed(531)
+    rows, heads, dimension = 3, 4 if per_head else 1, 8 if per_head else 32
+    source = torch.randn(rows, heads * dimension, device="cuda", dtype=torch.bfloat16)
+    reference = Qwen3VLMoeTextRMSNorm(dimension).to(device="cuda", dtype=torch.bfloat16)
+    with torch.no_grad():
+        reference.weight.uniform_(0.2, 2)
+        expected = reference(source.reshape(rows, heads, dimension)).reshape_as(source)
+    gamma = reference.weight.detach().float().cpu().numpy()
+    logger = trt.Logger(trt.Logger.WARNING)
+    builder = trt.Builder(logger)
+    net = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    config = builder.create_builder_config()
+    config.builder_optimization_level = 1
+    inp = net.add_input("input", trt.bfloat16, (rows, heads * dimension))
+    eps = graph_ops.add_constant(net, (1, 1), np.array([[1e-6]], np.float32))
+    if per_head:
+        out = graph_ops.add_rms_norm_per_head(
+            net, inp, heads, dimension, gamma, eps, dtype=ml_dtypes.bfloat16, sequence_length=rows
+        )
+    else:
+        out = graph_ops.add_rms_norm(net, inp, dimension, gamma, eps, dtype=ml_dtypes.bfloat16)
+    out.name = "output"
+    net.mark_output(out)
+    plan = builder.build_serialized_network(net, config)
+    assert plan is not None
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(plan)
+    context = engine.create_execution_context()
+    actual = torch.empty_like(source)
+    context.set_tensor_address("input", source.data_ptr())
+    context.set_tensor_address("output", actual.data_ptr())
+    assert context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+    torch.cuda.synchronize()
+    np.testing.assert_array_equal(actual.float().cpu().numpy(), expected.float().cpu().numpy())
+
+
 def test_bf16_constants_preserve_checkpoint_range_and_storage_lifetime():
     if os.environ.get("TRTMC_QWEN3_VL_MOE_COMPONENTS") != "1":
         pytest.skip("explicit component GPU execution is required")

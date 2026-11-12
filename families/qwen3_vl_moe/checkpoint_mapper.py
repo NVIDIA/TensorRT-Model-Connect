@@ -26,7 +26,9 @@ from .config import ModelConfig
 
 def _target_np_dtype(precision: str) -> np.dtype:
     """Map precision string to numpy dtype for weight storage."""
-    if precision in ("fp16", "bf16"):
+    if precision == "bf16":
+        return ml_dtypes.bfloat16
+    if precision == "fp16":
         return np.float16
     return np.float32
 

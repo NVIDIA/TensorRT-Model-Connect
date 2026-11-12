@@ -1426,7 +1426,7 @@ def build_qwen3_vl_vision_engine(
         ds_hidden = deepstack_branches[layer_idx]
         if ds_hidden.dtype != work_trt_dtype:
             ds_hidden = network.add_cast(ds_hidden, work_trt_dtype).get_output(0)
-        merger_prefix = f"visual.deepstack_merger_list.{ds_idx}"
+        merger_prefix = f"visual.deepstack_merger_list.{deepstack_indexes.index(layer_idx)}"
 
         ds_features = _add_deepstack_merger(
             network,

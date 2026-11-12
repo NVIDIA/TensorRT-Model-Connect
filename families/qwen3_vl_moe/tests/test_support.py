@@ -16,6 +16,7 @@ def test_moe_owner_and_default():
         )
     )
     assert support.tasks == ("vision_language_generation",)
+    assert support.default_task == "vision_language_generation"
     assert support.default_precision == "bf16"
 
 

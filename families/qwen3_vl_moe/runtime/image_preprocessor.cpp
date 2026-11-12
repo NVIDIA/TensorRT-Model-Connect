@@ -70,14 +70,20 @@ static void parallel_for_ranges(int32_t count, int32_t min_grain, Function&& fun
 
     std::vector<std::thread> threads;
     threads.reserve(static_cast<std::size_t>(workers - 1));
+    struct JoinWorkers {
+        std::vector<std::thread>& threads;
+        ~JoinWorkers() {
+            for (auto& thread : threads)
+                if (thread.joinable())
+                    thread.join();
+        }
+    } join_workers{threads};
     for (int32_t worker = 0; worker < workers - 1; ++worker) {
         const int32_t begin = count * worker / workers;
         const int32_t end = count * (worker + 1) / workers;
         threads.emplace_back([&, begin, end] { function(begin, end); });
     }
     function(count * (workers - 1) / workers, count);
-    for (auto& thread : threads)
-        thread.join();
 }
 
 static int target_height(const Qwen3VlMoePreprocessConfig& config) {

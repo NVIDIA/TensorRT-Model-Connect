@@ -11,7 +11,8 @@ trt = pytest.importorskip("tensorrt")
 @pytest.mark.gpu
 @pytest.mark.trt
 @pytest.mark.parametrize("precision", ["fp32", "bf16"])
-def test_dynamic_qwen3_main_and_deepstack_outputs_match_hf(precision):
+@pytest.mark.parametrize("deepstack_indexes", [[0], [1, 0]])
+def test_dynamic_qwen3_main_and_deepstack_outputs_match_hf(precision, deepstack_indexes):
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():
         pytest.skip("requires a CUDA GPU")
@@ -30,13 +31,16 @@ def test_dynamic_qwen3_main_and_deepstack_outputs_match_hf(precision):
         spatial_merge_size=2,
         temporal_patch_size=2,
         num_position_embeddings=16,
-        deepstack_visual_indexes=[0],
+        deepstack_visual_indexes=deepstack_indexes,
         out_hidden_size=32,
         hidden_act="gelu_pytorch_tanh",
     )
     config._attn_implementation = "eager"
     torch.manual_seed(1731)
-    reference = Qwen3VLMoeVisionModel(config).eval().to(dtype=dtype, device="cuda")
+    reference = Qwen3VLMoeVisionModel(config).eval()
+    inv_freq = reference.rotary_pos_emb.inv_freq.clone()
+    reference = reference.to(dtype=dtype, device="cuda")
+    reference.rotary_pos_emb.inv_freq = inv_freq.to(device="cuda")
     weights = {
         "visual." + name: value.detach().cpu().float().numpy()
         for name, value in reference.state_dict().items()
@@ -90,7 +94,27 @@ def test_dynamic_qwen3_main_and_deepstack_outputs_match_hf(precision):
 
         with torch.inference_mode():
             expected = reference(values.to(dtype), grid_thw=grid)
-            rope = reference.rot_pos_emb(grid).reshape(patches, -1)
+            reference_rope = reference.rot_pos_emb(grid).reshape(patches, -1)
+        # Independently generate the native preprocessor's FP32 axial tables.
+        order = (
+            torch.arange(patches, device="cuda")
+            .reshape(height // 2, 2, width // 2, 2)
+            .permute(0, 2, 1, 3)
+            .flatten()
+        )
+        spatial_dim = config.hidden_size // config.num_heads // 2
+        frequencies = 1.0 / (
+            10000.0 ** (torch.arange(0, spatial_dim, 2, device="cuda").float() / spatial_dim)
+        )
+        rope = torch.cat(
+            [
+                (order // width).float()[:, None] * frequencies,
+                (order % width).float()[:, None] * frequencies,
+            ],
+            dim=-1,
+        )
+        assert reference.rotary_pos_emb.inv_freq.dtype == torch.float32
+        torch.testing.assert_close(rope, reference_rope, atol=1e-8, rtol=1e-7)
         # Native half precision rounds RoPE multiplications back to Q/K dtype.
         inputs = {
             "pixel_values": values,
@@ -111,7 +135,8 @@ def test_dynamic_qwen3_main_and_deepstack_outputs_match_hf(precision):
             name: torch.empty(
                 tuple(context.get_tensor_shape(name)), device="cuda", dtype=torch.float32
             )
-            for name in ("image_features", "deepstack_features_0")
+            for name in ["image_features"]
+            + [f"deepstack_features_{i}" for i in range(len(deepstack_indexes))]
         }
         for name, tensor in outputs.items():
             assert context.set_tensor_address(name, tensor.data_ptr())
@@ -128,9 +153,10 @@ def test_dynamic_qwen3_main_and_deepstack_outputs_match_hf(precision):
             atol=tolerance,
             rtol=tolerance,
         )
-        np.testing.assert_allclose(
-            outputs["deepstack_features_0"].cpu().numpy(),
-            deep[0].float().cpu().numpy(),
-            atol=tolerance,
-            rtol=tolerance,
-        )
+        for index, features in enumerate(deep):
+            np.testing.assert_allclose(
+                outputs[f"deepstack_features_{index}"].cpu().numpy(),
+                features.float().cpu().numpy(),
+                atol=tolerance,
+                rtol=tolerance,
+            )
