@@ -97,4 +97,8 @@ and land elsewhere in the spread above.
   VAE encoder and condition-image blocks in the denoiser.
 - Unicode normalisation of the prompt. The checkpoint's tokenizer normalises text to NFC before tokenizing; the
   runtime tokenizes the prompt as given, so text that is not already NFC is tokenized differently from the reference.
+- Exact pre-tokenization of uncommon text. The pre-tokenizer, copied from the `qwen_image` family, approximates the
+  reference's Unicode letter and number classes (for example, fullwidth digits are not treated as digits) and two of
+  its quote rules: a quote directly before letters that do not form a contraction, and upper-case contractions such
+  as `DON'T`. Prompts with such text can be tokenized differently from the reference.
 - Checkpoints whose scheduler does not use `num_train_timesteps = 1000`, or that configure `sample_sigmas`.
