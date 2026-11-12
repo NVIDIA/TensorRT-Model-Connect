@@ -99,6 +99,7 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"rerank", {CommandKind::kRerank, {"--query", "--document", "--image", "--documents"}}},
         {"classify", {CommandKind::kClassify, {"--image", "--audio"}}},
         {"detect", {CommandKind::kDetect, {"--image", "--prompt"}}},
+        {"layout", {CommandKind::kLayout, {"--image"}}},
         {"extract-features", {CommandKind::kExtractFeatures, {"--image"}}},
         {"predict-structure",
          {CommandKind::kPredictStructure,
@@ -916,6 +917,27 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
                             {"image_width", result.image_width}});
         return EXIT_SUCCESS;
     }
+    case CommandKind::kLayout: {
+        const io::LoadedImage image = read_image(require_option(command, "--image"));
+        const auto result = require_interface<IDocumentLayout>(task).analyze_layout(
+            image.pixels.data(), image.height, image.width);
+        nlohmann::json regions = nlohmann::json::array();
+        for (const auto& region : result.regions) {
+            const auto& box = region.box;
+            require_finite({box.x_min, box.y_min, box.x_max, box.y_max, box.score},
+                           "layout region");
+            for (const auto& vertex : region.polygon)
+                require_finite({vertex[0], vertex[1]}, "layout polygon");
+            regions.push_back({{"box", {box.x_min, box.y_min, box.x_max, box.y_max}},
+                               {"score", box.score},
+                               {"class_id", box.class_id},
+                               {"polygon", region.polygon}});
+        }
+        write_json(output, {{"regions", regions},
+                            {"image_height", result.image_height},
+                            {"image_width", result.image_width}});
+        return EXIT_SUCCESS;
+    }
     case CommandKind::kExtractFeatures: {
         const io::LoadedImage image = read_image(require_option(command, "--image"));
         const auto result = require_interface<IImageFeatureExtractor>(task).extract_image_features(
@@ -1614,7 +1636,7 @@ void print_usage(std::ostream& output) {
               "  trtmc inspect BUNDLE\n"
               "  trtmc COMMAND BUNDLE [--runtime-root DIR] [OPTIONS]\n\n"
               "Execution commands:\n"
-              "  run, encode, embed, rerank, classify, detect, extract-features,\n"
+              "  run, encode, embed, rerank, classify, detect, layout, extract-features,\n"
               "  predict-structure, disparity, depth, geometry,\n"
               "  segment,\n"
               "  segment-prompted, video-segment, generate-audio, transcribe,\n"

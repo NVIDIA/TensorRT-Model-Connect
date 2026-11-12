@@ -31,6 +31,7 @@ enum class CommandKind {
     kRerank,
     kClassify,
     kDetect,
+    kLayout,
     kExtractFeatures,
     kPredictStructure,
     kDisparity,
