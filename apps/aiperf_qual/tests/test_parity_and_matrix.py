@@ -339,6 +339,8 @@ def test_decision_parity_needs_the_same_choices_within_the_family_tolerance():
     assert gold_metrics.decision_parity({"scores": []}, native, gate)[0] is None
     missing = {"scores": native["scores"][:1]}
     assert gold_metrics.decision_parity(missing, native, gate)[0] is False
+    assert gold_metrics.decision_parity({"scores": []}, {"scores": []}, gate)[0] is True  # no questions
+    assert gold_metrics.decision_parity({}, {"scores": []}, gate)[0] is None
 
 
 def test_open_vocabulary_detections_score_by_their_category_names():

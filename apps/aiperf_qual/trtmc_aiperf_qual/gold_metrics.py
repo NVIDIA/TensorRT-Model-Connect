@@ -291,8 +291,13 @@ def decision_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, An
     """A structured decision (``scores``: per question, its options' probabilities) against the native one:
     the same questions and options, the same most probable option, and every probability within
     ``atol`` + ``rtol`` x native (the families' E2E gate, 0.015 and 0.01 by default)."""
-    mine = {str(item.get("question_id")): item for item in (candidate or {}).get("scores") or []}
-    theirs = {str(item.get("question_id")): item for item in (native or {}).get("scores") or []}
+    sides = [(side or {}).get("scores") for side in (candidate, native)]
+    if not all(isinstance(scores, list) for scores in sides):
+        return None, "no decision scores"
+    if sides == [[], []]:  # a schema without questions: both sides decide nothing
+        return True, "no questions on either side"
+    mine = {str(item.get("question_id")): item for item in sides[0]}
+    theirs = {str(item.get("question_id")): item for item in sides[1]}
     if not mine or not theirs:
         return None, f"no decision scores ({len(mine)} vs {len(theirs)} questions)"
     if mine.keys() != theirs.keys():

@@ -4,4 +4,5 @@
 reference:
   adapter: families/laya/reference/adapter.py  # the released laya package
   requirements: families/laya/requirements.txt
+  mode: eager  # the package runs its own modules; torch.compile has no graph to compile
   options: {variant: typed-decisions, max_sequence_length: 1024}  # the manifest's variant and capacity
