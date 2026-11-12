@@ -36,11 +36,12 @@ install(FILES ${PROJECT_SOURCE_DIR}/families/minicpmv4_7/NOTICE
   DESTINATION ${CMAKE_INSTALL_DATADIR}/trtmc/families/minicpmv4_7)
 
 if(TRTMC_BUILD_TESTS)
-  # Host-only preprocessing, prompt and canvas-position contract (no GPU, no bundle).
+  # Host-only preprocessing, prompt, canvas-position and generation contract (no GPU, no bundle).
   add_executable(test_minicpmv4_7_prompt
     ${PROJECT_SOURCE_DIR}/families/minicpmv4_7/tests/cpp/test_prompt.cpp
     image_preprocess.cpp
     prompt.cpp
+    sampler.cpp
   )
   target_include_directories(test_minicpmv4_7_prompt PRIVATE ${PROJECT_SOURCE_DIR})
   target_link_libraries(test_minicpmv4_7_prompt PRIVATE nlohmann_json::nlohmann_json)

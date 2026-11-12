@@ -126,8 +126,6 @@ RuntimeConfig parse_runtime(const BundleReader& bundle) {
     return config;
 }
 
-constexpr int64_t kDefaultMaxNewTokens = 128;
-
 const std::vector<internal::ConfigField>& config_fields() {
     static const std::vector<internal::ConfigField> fields{
         {"max_new_tokens", internal::ConfigKind::I64, std::nullopt,
@@ -277,13 +275,8 @@ class Model final : public internal::IModel, public internal::IImagesTextToText 
             format_conversation(config_.prompts.at(thinking ? "true" : "false"), messages);
         const auto expanded = expand_images(formatted, images, config_.processor.merge_factor);
         const auto ids = tokenizer_->encode(expanded);
-        // The last generated token is never fed back, so it needs no cache row.
-        const auto room =
-            static_cast<int64_t>(config_.capacity) + 1 - static_cast<int64_t>(ids.size());
-        const int64_t max_new = requested ? *requested : std::min(kDefaultMaxNewTokens, room);
-        if (ids.empty() || max_new < 1 || max_new > room)
-            throw std::invalid_argument(
-                "MiniCPM-V 4.7 prompt and output exceed the decoder capacity");
+        const int64_t max_new =
+            generation_budget(requested, config_.capacity, static_cast<int64_t>(ids.size()));
 
         // Host preparation above reads only immutable members; engines and state need the lock.
         std::lock_guard<std::mutex> lock(mutex_);
