@@ -34,7 +34,10 @@ class FakeEngine final : public trtmc::ITrtModule {
   public:
     trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
         ++calls;
-        input_shape = inputs.at("pixel_values").shape;
+        const auto& pixels = inputs.at("pixel_values");
+        input_shape = pixels.shape;
+        const auto* values = static_cast<const float*>(pixels.data);
+        input_values.assign(values, values + pixels.numel());
         const auto height = (input_shape[2] + 3) / 4, width = (input_shape[3] + 3) / 4;
         // Class 0 on the left third, 1 in the middle, 2 on the right of the stride-4 map.
         scores.assign(static_cast<std::size_t>(kClasses * height * width), 0.0F);
@@ -88,6 +91,7 @@ class FakeEngine final : public trtmc::ITrtModule {
     std::int64_t output_classes{kClasses};
     std::vector<float> scores;
     std::vector<int64_t> input_shape;
+    std::vector<float> input_values;
 };
 
 void require(bool value, const std::string& message) {
@@ -174,8 +178,13 @@ void test_uint8_and_float_inputs_agree() {
         floats[index] = static_cast<float>(bytes[index]) / 255.0F;
     }
     const auto from_float = made.model->run(request(floats, 64, 80), {});
+    const auto float_input = made.engine->input_values;
     const auto from_bytes =
         made.model->run({ImageView{bytes.data(), bytes.size(), 64, 80, 3, ImageFormat::UInt8}}, {});
+    // The fake engine's labels depend only on the input shape, so compare what it received.
+    require(float_input.size() == 3U * 1024U * 1280U, "64 x 80 is processed to 1024 x 1280");
+    require(made.engine->input_values == float_input,
+            "uint8 and float32 pixels give the engine the same pixel_values");
     require(from_float.labels == from_bytes.labels,
             "uint8 and float32 pixels give the same labels");
 }
