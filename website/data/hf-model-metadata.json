@@ -1352,6 +1352,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "swiss-ai/Apertus-8B-Instruct-2509",
+      "revision": "b946d40447b2b597999b9c86d44bee0b452c919f",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "apertus",
+      "architectures": [
+        "ApertusForCausalLM"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "tiiuae/Falcon3-1B-Base",
       "revision": "cb37ef3559b157b5c9d9226296ba01a5162da1f7",
       "revision_source": "resolved",
