@@ -14,11 +14,11 @@ import re
 from typing import Any
 
 from . import prompts
-from .editing import normalize
+from .editing import normalize, spoken_length
 from .media import MAX_REFERENCES, shot_keys, usage
 
 CLIP_SECONDS = 9.4  # one FastH3 clip; a shot cannot be longer
-SPEECH_CHARACTERS_PER_SECOND = 4.5
+SPEECH_CHARACTERS_PER_SECOND = 4.5  # Chinese characters; see editing.spoken_length
 SPEECH_MARGIN_SECONDS = 2.0  # the action before a line and the reaction after it
 NAMED_TIMES = 3  # a name this frequent in an episode's chapters is likely on screen
 TEXT_FIELDS = ("summary", "camera", "action", "after", "then")
@@ -79,7 +79,7 @@ def check_shot(plan: dict[str, Any], shot: dict[str, Any]) -> list[dict[str, str
         name = cast.get(speaker, {}).get("name") or speaker or "nobody"
         found.append(problem("warning", where, f"the line is spoken by {name}, who is not in the shot, so it "
                                                "becomes an off-screen voice", "add the speaker or change it"))
-    need = len(line) / SPEECH_CHARACTERS_PER_SECOND + SPEECH_MARGIN_SECONDS if line else 0
+    need = spoken_length(shot.get("line")) / SPEECH_CHARACTERS_PER_SECOND + SPEECH_MARGIN_SECONDS if line else 0
     if need > seconds(shot) > 0:
         found.append(problem("warning", where, f"the line needs about {need:.0f} s with the action around it; "
                                                f"the shot has {seconds(shot):g} s", "shorten the line"))

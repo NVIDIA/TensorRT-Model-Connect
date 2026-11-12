@@ -16,12 +16,25 @@ from .flow import Context, Step
 
 STEP_SECONDS = 0.1
 HEARD = 0.8  # share of the full-clip match a cut must keep to still contain the line
+# Line timing counts Chinese characters; an English word takes about as long to say or read as
+# WORD_IN_CHARACTERS of them (4.5 characters or 2.5 words a second).
+WORD_IN_CHARACTERS = 1.8
 SECONDS_PER_CHARACTER = 0.18  # a subtitle stays up at least this long per character
-READING_SECONDS = 1.5  # a line that is read, not heard, stays up at least this long
+READING_SECONDS_PER_CHARACTER = 0.28  # a line that is read, not heard, takes this long per character
+READING_SECONDS = 1.5  # and stays up at least this long
+CHINESE_CHARACTER = re.compile(r"[一-鿿]")
+OTHER_WORD = re.compile(r"[^\W一-鿿]+(?:['’][^\W一-鿿]+)*")
 
 
 def normalize(text: str) -> str:
     return "".join(re.findall(r"[\w一-鿿]", text or "")).lower()
+
+
+def spoken_length(line: str) -> float:
+    """A line's length for timing, in Chinese characters: an English word counts WORD_IN_CHARACTERS."""
+
+    text = str(line or "")
+    return len(CHINESE_CHARACTER.findall(text)) + WORD_IN_CHARACTERS * len(OTHER_WORD.findall(text))
 
 
 def coverage(heard: str, line: str) -> float:
@@ -66,7 +79,7 @@ def time_line(transcribe: Callable[[bytes], str], wav: bytes, line: str) -> dict
     full = coverage(heard, line)
     result = {"heard": heard, "match": round(full, 2)}
     if full < 0.3:
-        return {**result, "start": 0.3, "end": min(total, 0.3 + 0.28 * len(normalize(line))),
+        return {**result, "start": 0.3, "end": min(total, 0.3 + READING_SECONDS_PER_CHARACTER * spoken_length(line)),
                 "timing": "estimated"}
 
     def contains(start: float, end: float) -> bool:
@@ -88,14 +101,14 @@ def time_line(transcribe: Callable[[bytes], str], wav: bytes, line: str) -> dict
         else:
             high = middle - 1
     # A weak match (homophones, other scripts) can shrink the window; keep it readable.
-    start = min(low * STEP_SECONDS - 0.1, end - SECONDS_PER_CHARACTER * len(normalize(line)))
+    start = min(low * STEP_SECONDS - 0.1, end - SECONDS_PER_CHARACTER * spoken_length(line))
     return {**result, "start": round(max(0.0, start), 2), "end": round(end, 2), "timing": "asr"}
 
 
 def read_line(length: float, line: str) -> dict:
     """When a line nobody speaks is on screen: from 0.3 s for as long as it takes to read, within the clip."""
 
-    end = 0.3 + max(READING_SECONDS, 0.28 * len(normalize(line)))
+    end = 0.3 + max(READING_SECONDS, READING_SECONDS_PER_CHARACTER * spoken_length(line))
     return {"start": 0.3, "end": round(min(length, end), 2), "timing": "read"}
 
 

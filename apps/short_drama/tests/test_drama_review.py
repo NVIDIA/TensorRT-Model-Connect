@@ -15,7 +15,7 @@ PLAN = {
         {**SHOT, "id": "e1s1", "seconds": 6, "location": "dock", "characters": ["zhou"], "speaker": "zhou",
          "line": "I'll take you across!", "summary": "zhou waves to mei"},
         {**SHOT, "id": "e1s2", "seconds": 4, "location": "yard", "characters": ["zhou"], "speaker": "mei",
-         "line": "天都黑了你们两个怎么还不回家吃饭呀", "summary": "zhou is called home"}]}],
+         "line": "It is getting dark, why are you two not home for dinner?", "summary": "zhou is called home"}]}],
 }
 NOVEL = ("Chapter 1\nThe little apprentice runs in. Zhou pats the little apprentice on the head. "
          "The little apprentice laughs. Old Chen sits in the sun. Mei, I'll take you across!")
@@ -31,7 +31,7 @@ def test_checks_find_uncast_people_unknown_ids_and_lines_that_do_not_fit():
     assert ("warning", "e1s1") in found and "mentions Mei" in text  # mei acts in e1s1 without a still
     assert ("error", "e1s2") in found and "location:yard" in text
     assert "spoken by Mei, who is not in the shot" in text
-    assert "the line needs about 6 s" in text  # speech time counts Chinese characters
+    assert "the line needs about 7 s" in text  # 12 words of 1.8 characters at 4.5 a second, plus 2 s
     assert not [p for p in review.check(PLAN, NOVEL, max_seconds=10) if "over the" in p["message"]]
     assert [p for p in review.check(PLAN, NOVEL, max_seconds=8) if "over the 8 s limit" in p["message"]]
 

@@ -12,7 +12,7 @@ import pytest
 from trtmc_short_drama import editing, video
 
 RATE = 16000
-# The speech model is built for Chinese, and line timing counts Chinese characters.
+# The speech model is built for Chinese.
 LINE = "王总这是新的报告"
 
 
@@ -105,8 +105,15 @@ def test_subtitle_fonts_cannot_inject_filters(tmp_path: Path):
                              font="x',drawtext=text='y", font_size=12, crf=18)
 
 
+def test_timing_counts_chinese_characters_and_english_words():
+    word = editing.WORD_IN_CHARACTERS
+    assert editing.spoken_length("先排队。蛋糕三十八。") == 8
+    assert editing.spoken_length("Don't be scared, I'm here.") == pytest.approx(5 * word)
+    assert editing.spoken_length("蛋糕38") == pytest.approx(2 + word)
+    assert editing.read_line(5.04, "Don't be scared, I'm here.")["end"] == round(0.3 + 0.28 * 5 * word, 2)
+
+
 def test_a_line_nobody_speaks_is_read_and_names_its_speaker():
-    # reading time counts Chinese characters
     assert editing.read_line(5.04, "先排队。蛋糕三十八。") == {"start": 0.3, "end": 2.54, "timing": "read"}
     assert editing.read_line(5.04, "走！")["end"] == 1.8  # long enough to read
     assert editing.read_line(1.0, "先排队。蛋糕三十八。")["end"] == 1.0  # within the clip
