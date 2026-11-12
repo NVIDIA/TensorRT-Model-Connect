@@ -46,6 +46,17 @@ TEXTS = [
     for point in [0x85, 0x1680, *range(0x2000, 0x200B), 0x2028, 0x2029, 0x202F, 0x205F, 0x3000]
 ]
 
+NEWLINE_CASES = [
+    pytest.param("\n    \n", ["\n    \n"], id="indented-blank-line"),
+    pytest.param(" \r\n\t \n   ", [" \r\n\t \n", "   "], id="trailing-spaces"),
+    pytest.param("\n    \n  next", ["\n    \n", " ", " next"], id="following-word"),
+    pytest.param("\r\t\r\n\tword", ["\r\t\r\n", "\tword"], id="mixed-crlf"),
+    pytest.param("\n\u2003\n\u00a0x", ["\n\u2003\n", "\u00a0x"], id="unicode-indentation"),
+    pytest.param("\n    text", ["\n", "   ", " text"], id="single-newline-boundary"),
+    pytest.param(" \t\n \r\t\n\n  ", [" \t\n \r\t\n\n", "  "], id="multiple-newline-runs"),
+    pytest.param("\n\t\n\t}", ["\n\t\n", "\t", "}"], id="following-symbol"),
+]
+
 
 @pytest.fixture(scope="module")
 def tokenizer_probe(tmp_path_factory):
@@ -82,7 +93,8 @@ def tokenizer_probe(tmp_path_factory):
     return binary
 
 
-def test_native_unicode_regex_and_ids_match_reference(tokenizer_probe):
+@pytest.fixture(scope="module")
+def reference_tokenizer():
     split = pre_tokenizers.Split(Regex(PATTERN), behavior="isolated")
     reference = Tokenizer(models.BPE(unk_token="[UNK]"))
     reference.pre_tokenizer = pre_tokenizers.Sequence(
@@ -93,7 +105,7 @@ def test_native_unicode_regex_and_ids_match_reference(tokenizer_probe):
     )
     reference.decoder = decoders.ByteLevel()
     reference.train_from_iterator(
-        TEXTS * 20,
+        (TEXTS + [case.values[0] for case in NEWLINE_CASES]) * 20,
         trainers.BpeTrainer(
             vocab_size=2000,
             initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
@@ -101,15 +113,33 @@ def test_native_unicode_regex_and_ids_match_reference(tokenizer_probe):
             show_progress=False,
         ),
     )
+    return split, reference
+
+
+def _probe(tokenizer_probe, reference, texts):
     completed = subprocess.run(
         [str(tokenizer_probe)],
-        input=json.dumps({"tokenizer": reference.to_str(), "texts": TEXTS}),
+        input=json.dumps({"tokenizer": reference.to_str(), "texts": texts}),
         text=True,
         capture_output=True,
         check=True,
     )
-    results = json.loads(completed.stdout)
+    return json.loads(completed.stdout)
+
+
+def test_native_unicode_regex_and_ids_match_reference(tokenizer_probe, reference_tokenizer):
+    split, reference = reference_tokenizer
+    results = _probe(tokenizer_probe, reference, TEXTS)
     assert len(results) == len(TEXTS)
     for text, actual in zip(TEXTS, results):
         assert actual["pieces"] == [piece for piece, _ in split.pre_tokenize_str(text)], repr(text)
         assert actual["ids"] == reference.encode(text, add_special_tokens=False).ids, repr(text)
+
+
+@pytest.mark.parametrize("text,pieces", NEWLINE_CASES)
+def test_newline_match_ends_at_last_newline(tokenizer_probe, reference_tokenizer, text, pieces):
+    split, reference = reference_tokenizer
+    assert [piece for piece, _ in split.pre_tokenize_str(text)] == pieces
+    (actual,) = _probe(tokenizer_probe, reference, [text])
+    assert actual["pieces"] == pieces
+    assert actual["ids"] == reference.encode(text, add_special_tokens=False).ids
