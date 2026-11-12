@@ -1,0 +1,6 @@
+{
+  "threshold_overrides": {
+    "min_psnr_db_same_precision": 20.0,
+    "max_fp32_drift_margin_db": 12.0
+  }
+}
