@@ -12,6 +12,15 @@
 
 namespace trtmc::minicpmv4_7 {
 
+int64_t generation_budget(std::optional<int64_t> requested, int64_t capacity,
+                          int64_t prompt_tokens) {
+    const int64_t room = capacity + 1 - prompt_tokens;
+    const int64_t budget = requested ? *requested : std::min(kDefaultMaxNewTokens, room);
+    if (prompt_tokens < 1 || budget < 1 || budget > room)
+        throw std::invalid_argument("MiniCPM-V 4.7 prompt and output exceed the decoder capacity");
+    return budget;
+}
+
 Sampler::Sampler(const SamplingConfig& config) : config_(config) {
     if (!(config.temperature >= 0.0) || !std::isfinite(config.temperature) || config.top_k < 0 ||
         !(config.top_p > 0.0 && config.top_p <= 1.0))

@@ -5,10 +5,19 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <random>
 #include <vector>
 
 namespace trtmc::minicpmv4_7 {
+
+inline constexpr int64_t kDefaultMaxNewTokens = 128;
+
+// Generated-token budget for a prompt of `prompt_tokens` ids in a decoder of `capacity` cache rows:
+// the requested value, or up to kDefaultMaxNewTokens within the room the prompt leaves. The last
+// generated token is never fed back, so it needs no cache row. Throws when the budget does not fit.
+int64_t generation_budget(std::optional<int64_t> requested, int64_t capacity,
+                          int64_t prompt_tokens);
 
 struct SamplingConfig {
     double temperature{1.0};

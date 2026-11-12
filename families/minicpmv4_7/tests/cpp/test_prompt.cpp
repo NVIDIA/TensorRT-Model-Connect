@@ -8,10 +8,15 @@
 
 #include "families/minicpmv4_7/runtime/image_preprocess.h"
 #include "families/minicpmv4_7/runtime/prompt.h"
+#include "families/minicpmv4_7/runtime/sampler.h"
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <nlohmann/json.hpp>
+#include <optional>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -193,6 +198,37 @@ void conversation() {
            "image expansion");
 }
 
+void generation() {
+    expect(generation_budget(std::nullopt, 4096, 219) == 128, "default budget, large capacity");
+    expect(generation_budget(std::nullopt, 64, 30) == 35, "default budget limited by the capacity");
+    expect(generation_budget(8, 64, 30) == 8, "requested budget");
+    const auto rejected = [](std::optional<int64_t> requested, int64_t capacity, int64_t prompt) {
+        try {
+            (void)generation_budget(requested, capacity, prompt);
+        } catch (const std::invalid_argument&) {
+            return true;
+        }
+        return false;
+    };
+    expect(rejected(36, 64, 30), "requested budget beyond the capacity");
+    expect(rejected(std::nullopt, 64, 65), "prompt filling the capacity");
+    expect(rejected(std::nullopt, 64, 0), "empty prompt");
+
+    // Top-2 of three equal maxima keeps the lower ids 1 and 2, never id 4 or a smaller logit.
+    Sampler top_k(SamplingConfig{1.0, 2, 1.0, 7});
+    const std::vector<float> logits{1.0F, 3.0F, 3.0F, 2.0F, 3.0F, 0.0F};
+    std::array<int, 6> counts{};
+    for (int draw = 0; draw < 300; ++draw)
+        ++counts[static_cast<std::size_t>(top_k.sample(logits))];
+    expect(counts[1] > 0 && counts[2] > 0 && counts[1] + counts[2] == 300, "top-k ties by id");
+    // Nucleus over the full order: the dominant candidate alone covers top_p = 0.5.
+    Sampler nucleus(SamplingConfig{1.0, 0, 0.5, 7});
+    bool dominant = true;
+    for (int draw = 0; draw < 50; ++draw)
+        dominant = dominant && nucleus.sample({0.0F, 5.0F, 1.0F}) == 1;
+    expect(dominant, "nucleus keeps the dominant candidate");
+}
+
 } // namespace
 
 int main() {
@@ -200,6 +236,7 @@ int main() {
     positions();
     canvas();
     conversation();
+    generation();
     if (failures == 0)
         std::cout << "minicpmv4_7 host contract: all checks passed\n";
     return failures == 0 ? 0 : 1;
