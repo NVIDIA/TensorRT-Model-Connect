@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  adapter: families/clef/reference/adapter.py  # the checkpoint's release implementation (joint_schema_model.py)
+  requirements: families/clef/requirements.txt  # the Transformers release the reference is pinned to

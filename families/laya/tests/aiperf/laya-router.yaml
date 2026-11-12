@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  adapter: families/laya/reference/adapter.py  # the released laya package
+  requirements: families/laya/requirements.txt
+  options: {variant: router}  # the manifest's variant: the router picks each record's checkpoint

@@ -556,7 +556,7 @@ def workload_perf(candidate: Mapping[int, Mapping[str, Any]], native: Mapping[in
 
 NO_ANSWER = "(no TRTMC answer)"
 # Corpus metrics where a missing TRTMC output scores as an empty one (an empty transcript or translation).
-EMPTY_ANSWERS = {"wer": {"text": ""}, "chrf": {"text": ""}}
+EMPTY_ANSWERS = {"wer": {"text": ""}, "cer": {"text": ""}, "chrf": {"text": ""}}
 
 
 def _unanswered_note(count: int, candidate: Mapping[str, Any]) -> str:

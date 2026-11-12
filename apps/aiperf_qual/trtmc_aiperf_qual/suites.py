@@ -525,8 +525,16 @@ def unstated_defaults(request: Mapping[str, Any], operation: str | None = None) 
 
 def _catalog_testcase_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
     """The catalog testcase request (``profile`` is a catalog name or a model descriptor file),
-    resolved by trtmc-perf-serve exactly as trtmc-bench does."""
+    resolved by trtmc-perf-serve exactly as trtmc-bench does; ``all_testcases`` takes every testcase of a
+    catalog profile, one record each (the family's own inputs, for a Task with no public data set)."""
     repo = environment.path("repo")
+    if source.get("all_testcases"):
+        from trtmc_benchmark.catalog import ManifestCatalog  # importable wherever the catalog resolves profiles
+
+        model = ManifestCatalog(repo / "families").resolve(require(source, "profile", "source"))
+        names = [str(case["name"]) for case in model.testcases]
+        return [record for name in names for record in _catalog_testcase_records(
+            {"profile": source["profile"], "testcase": name}, environment)]
     env = {**os.environ, "HF_HUB_OFFLINE": "1",
            "PYTHONPATH": f"{repo}/apps/perf_serving:{repo}/apps/benchmark:{repo}/core/builder:{repo}"}
     with tempfile.TemporaryDirectory() as scratch:

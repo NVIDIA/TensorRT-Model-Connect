@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  adapter: families/grounding_dino/reference/adapter.py  # no generic open-vocabulary detection adapter
+  options: {image_size: [800, 800]}  # the bundle's fixed square input (manifest image_width, image_height)
+
+benchmarks:
+  # COCO mAP over the boxes above 0.1: a low box threshold for the AP sweep; the text threshold keeps the
+  # family's 0.25, below which a label merges neighbouring category phrases.
+  coco_prompted: {request: {box_threshold: 0.1, text_threshold: 0.25}}

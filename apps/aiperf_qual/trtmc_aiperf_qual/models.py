@@ -90,6 +90,8 @@ def _suite(reference: str | Mapping[str, Any], profile: str, catalog_request: Ma
     leaves to each side's default, in every suite built on that request (the suite's own request wins)."""
     if isinstance(reference, Mapping):
         suite = dict(reference)
+        if (suite.get("source") or {}).get("kind") == "catalog_testcase" and not suite["source"].get("profile"):
+            suite["source"] = {**suite["source"], "profile": profile}  # the profile's own testcases
     elif reference == "catalog":
         suite = {"suite": f"{profile}-catalog", "version": 1,
                  "source": {"kind": "catalog_testcase", "profile": profile},

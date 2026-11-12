@@ -312,3 +312,60 @@ def test_the_order_check_command_builds_a_missing_bundle_and_skips_a_failed_buil
     assert code == 0 and built == ["broken", "ok"] and checked == ["ok"]
     assert lines[0]["status"] == "build-failed" and lines[1]["status"] == "within-limit"
     assert json.loads((tmp_path / "order" / "ok" / "build.json").read_text())["status"] == "built"
+
+
+def test_cer_counts_characters_without_spaces_or_punctuation():
+    """Japanese has no word boundaries: the error rate is over NFKC characters, spaces and punctuation dropped."""
+    problems = [{"gold": "インターネットで 敵対的環境コース について"}, {"gold": "ＡＢ、C"}]
+    units = gold_metrics.cer_units(problems, {0: {"text": "インターネットで敵対的環境コースについて。"},
+                                              1: {"text": "abd"}})
+    assert units == [(0.0, 20.0), (1.0, 3.0)]  # full-width letters fold to ASCII; one substitution
+    assert gold_metrics.wer(units) == pytest.approx(100.0 / 23.0)
+    assert gold_metrics.CORPUS["cer"][2] is False  # lower is better
+
+
+def test_decision_parity_needs_the_same_choices_within_the_family_tolerance():
+    native = {"scores": [{"question_id": "status", "option_ids": ["paid", "overdue"], "probabilities": [0.2, 0.8]},
+                         {"question_id": "large", "probabilities": [0.6, 0.4]}]}
+
+    def candidate(status, large):
+        return {"scores": [{"question_id": "status", "option_ids": ["paid", "overdue"], "probabilities": status},
+                           {"question_id": "large", "option_ids": ["false", "true"], "probabilities": large}]}
+
+    gate = {"atol": 0.015, "rtol": 0.01}
+    assert gold_metrics.decision_parity(candidate([0.21, 0.79], [0.59, 0.41]), native, gate)[0] is True
+    assert gold_metrics.decision_parity(candidate([0.25, 0.75], [0.6, 0.4]), native, gate)[0] is False
+    assert gold_metrics.decision_parity(candidate([0.2, 0.8], [0.49, 0.51]), native, gate)[0] is False
+    assert gold_metrics.decision_parity({"scores": []}, native, gate)[0] is None
+    missing = {"scores": native["scores"][:1]}
+    assert gold_metrics.decision_parity(missing, native, gate)[0] is False
+
+
+def test_open_vocabulary_detections_score_by_their_category_names():
+    """coco-names-80: text labels map to contiguous COCO classes; a phrase naming no category drops its box."""
+    output = {"boxes": [0, 0, 10, 10, 5, 5, 20, 20, 1, 1, 2, 2], "scores": [0.9, 0.8, 0.7],
+              "labels": ["Dining Table", "car truck", "person."]}
+    named = gold_metrics._named_detections(output)
+    assert named["class_ids"] == [60, 0] and named["scores"] == [0.9, 0.7]
+    assert named["boxes"] == [[0, 0, 10, 10], [1, 1, 2, 2]]
+    problems = [{"gold": {"bbox": [[0, 0, 10, 10]], "category": [60], "area": [100.0]}}]
+    units = gold_metrics.coco_units(problems, {0: output}, {"label_space": "coco-names-80"})
+    assert units[0][1]["class_ids"] == [60, 0] and units[0][2] == "category_index"
+    assert len(gold_metrics.COCO_NAMES) == len(gold_metrics.COCO_IDS) == 80
+
+
+def test_dinov2_checker_applies_the_e2e_feature_tolerance_of_the_build_precision():
+    from families.dinov2.validation import compare
+
+    rng = np.random.default_rng(0)
+    hidden = rng.normal(size=(1, 5, 8))
+
+    def side(values):
+        return {"last_hidden_state": values.reshape(-1).tolist(), "last_hidden_state_shape": [1, 5, 8],
+                "pooler_output": values[:, 0].reshape(-1).tolist(), "pooler_output_shape": [1, 8]}
+
+    assert compare(side(hidden + 1e-3), side(hidden), {"precision": "fp32"})[0] is True
+    assert compare(side(hidden + 1e-2), side(hidden), {"precision": "fp32"})[0] is False
+    assert compare(side(hidden + 1e-2), side(hidden), {"precision": "fp16"})[0] is True
+    assert compare(side(hidden + 1.5e-2), side(hidden), {"precision": "fp32", "threshold_scale": 2.0})[0] is False
+    assert compare(None, side(hidden), {"precision": "fp32"})[0] is None
