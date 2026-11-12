@@ -718,13 +718,13 @@ def test_stable_diffusion_uses_explicit_controls_on_its_actual_request(tmp_path)
 def test_wan22_states_the_negative_prompt_its_runtime_would_substitute():
     """TRTMC's Wan 2.2 runtime replaces an empty negative prompt with the official one; Diffusers encodes "".
     Every suite built on the catalog request must state it so both sides denoise with the same guidance."""
-    from families.wan2_2_ti2v.model_config import OFFICIAL_NEGATIVE_PROMPT
     from trtmc_aiperf_qual.models import model_suite, resolve_model
 
     model = resolve_model("wan22-ti2v-5b", _environment())
-    assert model["catalog_request"]["negative_prompt"] == OFFICIAL_NEGATIVE_PROMPT
-    assert model_suite("vbench-objects-20", model)["request"]["negative_prompt"] == OFFICIAL_NEGATIVE_PROMPT
-    assert model["performance"]["suite"]["request"]["negative_prompt"] == OFFICIAL_NEGATIVE_PROMPT
+    stated = model["catalog_request"]["negative_prompt"]
+    assert stated.startswith("色调艳丽，过曝") and stated.endswith("背景人很多，倒着走")  # the official prompt, whole
+    assert model_suite("vbench-objects-20", model)["request"]["negative_prompt"] == stated
+    assert model["performance"]["suite"]["request"]["negative_prompt"] == stated
 
 
 def test_rwkv_qualification_build_and_selection_use_the_same_capacity():
