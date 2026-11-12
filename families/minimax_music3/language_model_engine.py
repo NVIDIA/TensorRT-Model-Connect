@@ -86,8 +86,12 @@ def model_config() -> ModelConfig:
 
 def build_engine(tensors: dict, *, max_cache_length: int = DEFAULT_MAX_CACHE_LENGTH,
                  precision: str = "fp32", num_layers: int | None = None,
-                 verbose: bool = False) -> bytes:
-    """Build the cached decoder engine from the checkpoint's tensors."""
+                 verbose: bool = False, quant_ctx=None) -> bytes:
+    """Build the cached decoder engine from the checkpoint's tensors.
+
+    ``quant_ctx`` (FP8 builds only, see :mod:`.quantization`) routes the
+    projections that have a calibrated scale through FP8 Q/DQ matmuls.
+    """
 
     from .default_decoder import build_standard_decoder_engine
     from .language_model_weights import build_weight_dict
@@ -105,6 +109,7 @@ def build_engine(tensors: dict, *, max_cache_length: int = DEFAULT_MAX_CACHE_LEN
         weights,
         max_cache_length,
         precision=precision,
+        quant_ctx=quant_ctx,
         norm_type="rmsnorm",
         mlp_type="swiglu",
         position_type="rope",
