@@ -359,6 +359,33 @@ def test_resolve_reads_the_pad_token_as_an_added_token(tmp_path):
     assert config_module.resolve(directory, shapes)["blank_token_id"] == 0
 
 
+def test_resolve_reads_the_pad_token_as_the_reference_tokenizer_merges_it(tmp_path):
+    # Without added_tokens_decoder, Transformers lets special_tokens_map.json
+    # override tokenizer_config.json, so the blank follows the map.
+    directory, shapes = _official_shapes(tmp_path, pad_token_id=1)
+    (directory / "special_tokens_map.json").write_text(json.dumps({"pad_token": "<s>"}))
+    assert config_module.resolve(directory, shapes)["blank_token_id"] == 1
+
+
+def test_resolve_ignores_the_special_tokens_map_when_the_decoder_is_recorded(tmp_path):
+    # With added_tokens_decoder, Transformers does not read special_tokens_map.json.
+    directory, shapes = _official_shapes(tmp_path)
+    (directory / "tokenizer_config.json").write_text(json.dumps(
+        {**_TOKENIZER, "added_tokens_decoder": {"0": {"content": "<pad>", "special": True}}}))
+    (directory / "special_tokens_map.json").write_text(json.dumps({"pad_token": "<s>"}))
+    assert config_module.resolve(directory, shapes)["blank_token_id"] == 0
+
+
+def test_resolve_refuses_a_special_tokens_map_that_moves_the_blank(tmp_path):
+    # Control: the map names another pad token than config.pad_token_id; the
+    # reference tokenizer would drop that token, so the checkpoint is refused
+    # instead of decoded with tokenizer_config.json's value.
+    directory, shapes = _official_shapes(tmp_path)
+    (directory / "special_tokens_map.json").write_text(json.dumps({"pad_token": "<s>"}))
+    with pytest.raises(NotImplementedError, match="CTC blank"):
+        config_module.resolve(directory, shapes)
+
+
 def test_resolve_defaults_the_layout_as_the_reference_does(tmp_path):
     # Without the keys, HubertConfig gives the base layout: group norm, post-norm
     # blocks, no convolution bias, a projection norm.

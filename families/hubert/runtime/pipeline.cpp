@@ -25,6 +25,13 @@ const Tensor& require_output(const TensorMap& outputs, const char* name) {
     return found->second;
 }
 
+std::string shape_text(const std::vector<std::int64_t>& shape) {
+    std::string text = "[";
+    for (std::size_t index = 0; index < shape.size(); ++index)
+        text += (index ? ", " : "") + std::to_string(shape[index]);
+    return text + "]";
+}
+
 } // namespace
 
 HubertPipeline::HubertPipeline(std::unique_ptr<ITrtModule> engine, HubertRuntimeConfig config)
@@ -56,17 +63,19 @@ TextResult HubertPipeline::run(const internal::SpeechTranscriptionRequest& reque
     }
 
     const auto channels = static_cast<std::int32_t>(audio.channels == 0 ? 1U : audio.channels);
-    auto samples = hubert::mix_mono(audio.samples.data(),
-                                    static_cast<std::int64_t>(audio.samples.size()), channels);
-
-    const auto count = static_cast<std::int64_t>(samples.size());
+    const auto values = static_cast<std::int64_t>(audio.samples.size());
+    if (values % channels != 0)
+        throw std::invalid_argument("hubert input is not a whole number of audio frames");
+    const auto count = values / channels;
     if (count < config_.min_samples || count > config_.max_samples) {
         // The engine's profile is built for a sample range; a clip outside it
-        // is refused by name rather than failing inside TensorRT.
+        // is refused by name, before it is mixed down, rather than failing
+        // inside TensorRT.
         throw std::invalid_argument("hubert accepts " + std::to_string(config_.min_samples) +
                                     " to " + std::to_string(config_.max_samples) +
                                     " samples, not " + std::to_string(count));
     }
+    auto samples = hubert::mix_mono(audio.samples.data(), values, channels);
 
     if (config_.do_normalize)
         hubert::normalize_waveform(samples);
@@ -77,11 +86,13 @@ TextResult HubertPipeline::run(const internal::SpeechTranscriptionRequest& reque
     const Tensor& logits = require_output(outputs, "logits");
     const auto vocab_size = static_cast<std::int64_t>(config_.vocabulary.tokens.size());
     const auto expected = hubert::feature_frames(count, config_.conv_kernel, config_.conv_stride);
-    const auto expected_logits = static_cast<std::size_t>(expected * vocab_size);
-    if (expected <= 0 || logits.numel() != expected_logits) {
-        throw std::runtime_error("hubert engine returned " + std::to_string(logits.numel()) +
-                                 " logits, not the " + std::to_string(expected_logits) +
-                                 " its convolution strides imply");
+    // The decoder reads one row per frame, so the layout is checked, not only
+    // the element count: [vocab, frames] holds as many values and decodes to noise.
+    if (expected <= 0 || logits.shape != std::vector<std::int64_t>{expected, vocab_size}) {
+        throw std::runtime_error("hubert engine returned logits of shape " +
+                                 shape_text(logits.shape) + ", not the [" +
+                                 std::to_string(expected) + ", " + std::to_string(vocab_size) +
+                                 "] its convolution strides and vocabulary imply");
     }
 
     auto decoded = hubert::greedy_decode(static_cast<const float*>(logits.data), expected,

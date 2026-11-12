@@ -10,6 +10,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 using namespace trtmc;
@@ -18,10 +19,11 @@ using namespace trtmc;
 // (kernel 1, stride 1), so the pipeline's frame check holds for four samples.
 class CtcEngine final : public ITrtModule {
   public:
+    explicit CtcEngine(std::vector<int64_t> shape = {4, 4}) : shape_(std::move(shape)) {}
     TensorMap forward(const TensorMap& inputs) override {
         const auto found = inputs.find("audio");
         seen_samples = found == inputs.end() ? -1 : found->second.numel();
-        return {{"logits", {logits_, {4, 4}, DType::kFloat32}}};
+        return {{"logits", {logits_, shape_, DType::kFloat32}}};
     }
     DeviceTensorMap forward_device(const DeviceTensorMap&) override { return {}; }
     void forward_device_async(const DeviceTensorMap&) override {}
@@ -56,6 +58,7 @@ class CtcEngine final : public ITrtModule {
     std::int64_t seen_samples{0};
 
   private:
+    std::vector<int64_t> shape_;
     // Frames decode to: delimiter, A, delimiter, B -> "A B" with ids {1, 2, 1, 3}.
     float logits_[16]{0, 4, 0, 0, 0, 0, 4, 0, 0, 4, 0, 0, 0, 0, 0, 4};
 };
@@ -146,6 +149,27 @@ int test_pipeline_refusals() {
     internal::SpeechTranscriptionRequest empty;
     if (!refuses<std::invalid_argument>([&] { pipeline.run(empty, {}); })) {
         std::cerr << "FAIL: an empty clip is not refused\n";
+        ++failed;
+    }
+
+    // Seven interleaved values are not a whole number of stereo frames.
+    raw->seen_samples = 0;
+    internal::SpeechTranscriptionRequest partial;
+    partial.audio.samples = {samples, 7};
+    partial.audio.channels = 2;
+    if (!refuses<std::invalid_argument>([&] { pipeline.run(partial, {}); }) ||
+        raw->seen_samples != 0) {
+        std::cerr << "FAIL: a partial stereo frame is not refused before the engine\n";
+        ++failed;
+    }
+
+    // The same sixteen values as [1, 16] instead of [frames, vocab]: the
+    // element count alone would accept them and decode noise.
+    HubertPipeline transposed(std::make_unique<CtcEngine>(std::vector<int64_t>{1, 16}), config());
+    internal::SpeechTranscriptionRequest request;
+    request.audio.samples = {samples, 4};
+    if (!refuses<std::runtime_error>([&] { transposed.run(request, {}); })) {
+        std::cerr << "FAIL: logits of the wrong layout are not refused\n";
         ++failed;
     }
     return failed;

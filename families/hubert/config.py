@@ -170,6 +170,13 @@ def resolve(model_dir: Path, shapes: dict[str, tuple[int, ...]]) -> dict:
     vocab = _read_json(model_dir / "vocab.json", "vocab.json")
     tokenizer = _read_json(model_dir / "tokenizer_config.json", "tokenizer_config.json",
                            required=False)
+    if "added_tokens_decoder" not in tokenizer:
+        # Without added_tokens_decoder, Transformers merges special_tokens_map.json
+        # over tokenizer_config.json when it loads the tokenizer; decode with the
+        # same effective settings (the pad token is the CTC blank it drops).
+        special = _read_json(model_dir / "special_tokens_map.json", "special_tokens_map.json",
+                             required=False)
+        tokenizer = {**tokenizer, **special}
 
     _require(cfg.get("model_type") == "hubert",
              f"builds model_type 'hubert', not {cfg.get('model_type')!r}")
