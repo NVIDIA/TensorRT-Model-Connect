@@ -84,7 +84,10 @@ class Checkpoint:
                 for cached in revision.files
             }
         inventoried = self._cache_files.get(lexical)
-        if inventoried != blob or inventoried.resolve() != path:
+        # CachedFileInfo reports the first hop in newer Hub versions and the
+        # fully resolved payload in older supported versions. Both must agree
+        # with the independently validated snapshot link and store target.
+        if inventoried not in (blob, path) or inventoried.resolve() != path:
             raise ValueError("diffusion_gemma weight shard is not verified by the Hub cache inventory")
         return path
 

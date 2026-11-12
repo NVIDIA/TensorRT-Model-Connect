@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from dataclasses import replace
 import json
 from pathlib import Path
 import struct
@@ -68,7 +69,10 @@ def test_bf16_finite_check_keeps_subnormals_and_negative_values():
 
 @pytest.mark.parametrize("indexed", [False, True])
 @pytest.mark.parametrize("shared", [False, True])
-def test_hub_snapshot_accepts_inventory_verified_blob_links(tmp_path, indexed, shared):
+@pytest.mark.parametrize("resolved_inventory", [False, True])
+def test_hub_snapshot_accepts_inventory_verified_blob_links(tmp_path, monkeypatch, indexed, shared, resolved_inventory):
+    import huggingface_hub
+
     snapshot = tmp_path / "hub/models--google--diffusiongemma-26B-A4B-it/snapshots" / ("a" * 40)
     snapshot.mkdir(parents=True)
     blobs = snapshot.parent.parent / "blobs"
@@ -87,6 +91,22 @@ def test_hub_snapshot_accepts_inventory_verified_blob_links(tmp_path, indexed, s
     (snapshot / name).symlink_to("../../blobs/" + blob.name)
     if indexed:
         (snapshot / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"test.weight": name}}))
+    inventory = huggingface_hub.scan_cache_dir(tmp_path / "hub")
+    # Older scanners report the fully resolved blob; newer scanners retain
+    # the first hop. Exercise both public representations on either version.
+    repositories = []
+    for repository in inventory.repos:
+        revisions = []
+        for revision in repository.revisions:
+            files = frozenset(
+                replace(cached, blob_path=blob.resolve() if resolved_inventory else blob)
+                if cached.file_path == snapshot / name else cached
+                for cached in revision.files
+            )
+            revisions.append(replace(revision, files=files))
+        repositories.append(replace(repository, revisions=frozenset(revisions)))
+    inventory = replace(inventory, repos=frozenset(repositories))
+    monkeypatch.setattr(huggingface_hub, "scan_cache_dir", lambda path: inventory)
     array = Checkpoint(snapshot, config()).tensor("test.weight", (1, 2))
     np.testing.assert_array_equal(array.astype(np.float32), [[1, 2]])
 
