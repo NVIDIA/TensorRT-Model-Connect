@@ -206,6 +206,7 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     if base != profile:  # the base's configuration under the profile's own; the candidate stays the profile's
         inherited = profile_override(base, catalog_model.family, repository, root)
         inherited.pop("candidate", None)
+        inherited.pop("capacity_limits", None)  # the base's build size, not the quantized candidate's
         override = deep_merge(inherited, override)
     config = deep_merge(deep_merge(configuration(tasks["defaults"]),
                         configuration(tasks["tasks"][catalog_model.task])), override)
@@ -304,9 +305,19 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         **({"accuracy_note": str(config["accuracy_note"])} if accuracy_source == "none" else {}),
         "absolute": absolute, "supplementary": supplementary,
         **({"coverage": str(config["coverage"])} if config.get("coverage") else {}),
+        **({"capacity_limits": capacity_limits(profile, config["capacity_limits"])} if config.get("capacity_limits") else {}),
         "performance": policy,
         **({"service_metrics": dict(config["service_metrics"])} if config.get("service_metrics") else {}),
     }
+
+
+def capacity_limits(profile: str, limits: Any) -> dict[str, str]:
+    """``capacity_limits``: GPU architecture (the platform fingerprint's ``gpu_arch``, e.g. ``sm110``) -> why the
+    candidate cannot be built or run there. Such a platform reports the profile as blocked by device capacity."""
+    if not isinstance(limits, Mapping) or not all(isinstance(key, str) and key.startswith("sm") and str(value).strip()
+                                                   for key, value in limits.items()):
+        raise ConfigError(f"{profile}: capacity_limits maps GPU architectures (sm110) to a reason")
+    return {key: str(value).strip() for key, value in limits.items()}
 
 
 def checkpoints(model: Mapping[str, Any]) -> set[str]:

@@ -3,3 +3,8 @@
 
 reference:
   mode: eager  # torch.compile: the hybrid attention recompiles for minutes on every new prompt length
+
+# Jetson AGX Thor (128 GB shared by CPU and GPU) cannot build this 27B bundle: TensorRT's host memory during
+# tactic timing (about the MLP weights) plus its 50 GiB device weight buffer exceed it (issue #2189).
+capacity_limits:
+  sm110: "27B FP16 build needs more than the 128 GB of memory the CPU and GPU share (TensorRT build memory, #2189)"
