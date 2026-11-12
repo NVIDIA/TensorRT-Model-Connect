@@ -13,6 +13,11 @@ from families.ministral3.tests import test_e2e
 CASE = {"queries": ["q1", "q2"], "documents": ["d1", "d2"]}
 
 
+def case_of(rows):
+    """A case whose texts have ``rows`` bytes, one byte per synthetic token."""
+    return {"queries": ["q" * rows, "r" * rows], "documents": ["d" * rows, "e" * rows]}
+
+
 def test_every_manifest_case_is_well_formed():
     premerge = [name for name, (_, _, case) in test_e2e.CASES.items() if case.get("premerge")]
     assert premerge == ["nemotron-3-embed-1b-bf16"]
@@ -74,7 +79,7 @@ def parity_inputs(rng, noise, texts=("q1", "q2", "d1", "d2"), rows=2):
     truth_tokens = [
         {
             "token_ids": [1] * rows,
-            "byte_offsets": [[0, 1], [1, 2]] + [[2, 2]] * (rows - 2),
+            "byte_offsets": [[index, index + 1] for index in range(rows)],
             "hidden": rng.standard_normal((rows, 8)),
         }
         for _ in texts
@@ -97,7 +102,7 @@ def test_fp32_oracle_accepts_rounding_and_rejects_drift():
         test_e2e._assert_parity(native, truth, None, CASE, test_e2e.DEFAULT_THRESHOLDS)
 
 
-def test_bf16_oracle_is_relative_to_the_official_drift():
+def bf16_inputs():
     rng = np.random.default_rng(1)
     native, truth = parity_inputs(rng, 1e-3, rows=30)
     official, _ = parity_inputs(np.random.default_rng(1), 1e-3, rows=30)
@@ -106,13 +111,19 @@ def test_bf16_oracle_is_relative_to_the_official_drift():
         for item in truth["tokens"]
     ]
     official["embeddings"] = native["embeddings"].copy()
-    summary = test_e2e._assert_parity(native, truth, official, CASE, test_e2e.DEFAULT_THRESHOLDS)
-    assert set(summary["drift_statistics"]) == {"embedding", "score", "token"}
+    return native, truth, official
+
+
+def test_bf16_oracle_is_relative_to_the_official_drift():
+    native, truth, official = bf16_inputs()
+    case = case_of(30)
+    summary = test_e2e._assert_parity(native, truth, official, case, test_e2e.DEFAULT_THRESHOLDS)
+    assert set(summary["drift_statistics"]) == {"embedding", "score", "token", "token_relative"}
     assert summary["pooled_drift"]["native"] <= summary["pooled_drift"]["official_bf16"] * 3
     worse, _ = parity_inputs(np.random.default_rng(2), 1e-1, rows=30)
     worse["tokens"], worse["pooled"] = native["tokens"], native["pooled"]
     with pytest.raises(AssertionError):
-        test_e2e._assert_parity(worse, truth, official, CASE, test_e2e.DEFAULT_THRESHOLDS)
+        test_e2e._assert_parity(worse, truth, official, case, test_e2e.DEFAULT_THRESHOLDS)
     few, few_truth = parity_inputs(np.random.default_rng(1), 1e-3)
     with pytest.raises(AssertionError, match="100 tokens"):
         test_e2e._assert_parity(few, few_truth, few, CASE, test_e2e.DEFAULT_THRESHOLDS)
@@ -120,7 +131,7 @@ def test_bf16_oracle_is_relative_to_the_official_drift():
 
 def test_bf16_long_documents_are_checked_one_by_one():
     """Only the per-document check can reject a drifted long document here."""
-    case = dict(CASE, repeated_documents=[{"text": "long", "count": 2}])
+    case = dict(case_of(30), repeated_documents=[{"text": "long", "count": 2}])
     rng = np.random.default_rng(4)
     _, truth = parity_inputs(rng, 0.0, texts=("q1", "q2", "d1", "d2", "long"), rows=30)
     truth["tokens"] = truth["tokens"][:4]
@@ -167,3 +178,48 @@ def test_token_ids_and_offsets_must_match():
     changed_offsets["tokens"][1] = dict(native["tokens"][1], byte_offsets=[[0, 1]])
     with pytest.raises(AssertionError, match="byte offsets"):
         test_e2e._assert_parity(changed_offsets, truth, None, CASE, test_e2e.DEFAULT_THRESHOLDS)
+
+
+def test_offsets_must_be_contiguous_not_only_cover_the_bytes():
+    """For ``aa`` the spans [0, 1] and [0, 1] concatenate to the input but do not tile it."""
+    native, truth = parity_inputs(np.random.default_rng(3), 0.0)
+    case = dict(CASE, queries=["aa", "q2"])
+    test_e2e._assert_parity(native, truth, None, case, test_e2e.DEFAULT_THRESHOLDS)
+    for offsets in ([[0, 1], [0, 1]], [[0, 1], [1, 1], [1, 2]], [[0, 2], [2, 2]]):
+        repeated = dict(native, tokens=list(native["tokens"]))
+        repeated["tokens"][0] = dict(native["tokens"][0], byte_offsets=offsets)
+        with pytest.raises(AssertionError, match="byte offsets"):
+            test_e2e._assert_parity(repeated, truth, None, case, test_e2e.DEFAULT_THRESHOLDS)
+
+
+def scaled(values, factor):
+    result = dict(
+        values, tokens=[dict(item, hidden=item["hidden"] * factor) for item in values["tokens"]]
+    )
+    return result
+
+
+def test_fp32_raw_features_are_checked_for_length_not_only_direction():
+    """Features scaled by 1 % keep every cosine at 1 and must still fail."""
+    native, truth = parity_inputs(np.random.default_rng(5), 0.0)
+    test_e2e._assert_parity(native, truth, None, CASE, test_e2e.DEFAULT_THRESHOLDS)
+    with pytest.raises(AssertionError, match="token-feature relative error"):
+        test_e2e._assert_parity(
+            scaled(native, 1.01), truth, None, CASE, test_e2e.DEFAULT_THRESHOLDS
+        )
+    longer = dict(native, pooled=native["pooled"] * 1.01)
+    with pytest.raises(AssertionError, match="pooled-feature relative error exceeds its bound"):
+        test_e2e._assert_parity(longer, truth, None, CASE, test_e2e.DEFAULT_THRESHOLDS)
+
+
+def test_bf16_raw_features_are_checked_for_length_not_only_direction():
+    native, truth, official = bf16_inputs()
+    case = case_of(30)
+    test_e2e._assert_parity(native, truth, official, case, test_e2e.DEFAULT_THRESHOLDS)
+    with pytest.raises(AssertionError, match="token_relative mean drift"):
+        test_e2e._assert_parity(
+            scaled(native, 1.01), truth, official, case, test_e2e.DEFAULT_THRESHOLDS
+        )
+    longer = dict(native, pooled=native["pooled"] * 1.01)
+    with pytest.raises(AssertionError, match="pooled-feature relative error"):
+        test_e2e._assert_parity(longer, truth, official, case, test_e2e.DEFAULT_THRESHOLDS)

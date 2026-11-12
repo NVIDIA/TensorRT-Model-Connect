@@ -116,6 +116,19 @@ void check_contract(const nlohmann::json& base) {
         "duplicate merge");
     rejects(base, [](auto& j) { j["model"]["merges"].push_back({"x", "q"}); }, "merge result");
     rejects(base, [](auto& j) { j["truncation"] = {{"max_length", 8}}; }, "truncation");
+    rejects(
+        base, [](auto& j) { j["model"]["vocab"]["he"] = j["model"]["vocab"]["\xC4\xA0t"]; },
+        "duplicate vocab id");
+}
+
+void check_max_token_bytes(const nlohmann::json& data) {
+    const auto tokenizer = load(data.at("tokenizer"));
+    // The fixture's longest vocabulary entry and longest added token span 7 bytes.
+    check(tokenizer->max_token_bytes() == 7, "max_token_bytes of the fixture");
+    for (const auto& sample : data.at("cases"))
+        for (const auto& token : tokenizer->encode(sample.at("input").get<std::string>()))
+            check(token.byte_end - token.byte_begin <= tokenizer->max_token_bytes(),
+                  "every token spans at most max_token_bytes");
 }
 
 void check_invalid_utf8(const nlohmann::json& base) {
@@ -139,6 +152,7 @@ int main() {
         const auto data = fixture("tekken_tokenizer.json");
         check_token_ids(data);
         check_contract(data.at("tokenizer"));
+        check_max_token_bytes(data);
         check_invalid_utf8(data.at("tokenizer"));
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';

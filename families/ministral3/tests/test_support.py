@@ -38,3 +38,12 @@ def test_other_ministral_identities_are_not_claimed():
         {"model_type": "mistral", "architectures": ["MistralModel"]},
     ):
         assert describe(ModelMetadata(config=config, model_index={})) is None
+
+
+def test_causal_ministral3_backbones_are_not_claimed():
+    """``is_causal`` true, absent (causal by default) or not a boolean is not this family."""
+    for value in (True, None, "false", 0):
+        config = dict(EMBEDDING_CONFIG, is_causal=value)
+        if value is None:
+            del config["is_causal"]
+        assert describe(ModelMetadata(config=config, model_index={})) is None
