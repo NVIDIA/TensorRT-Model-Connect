@@ -153,6 +153,7 @@ def protected_roots(environment: Mapping[str, Any], out: Path) -> list[Any]:
 def preflight_code_sandbox(model: Mapping[str, Any], environment: Mapping[str, Any], out: Path) -> None:
     # Note (Jiaxin Deng): Reject an unavailable grading boundary before spending model preparation or GPU work.
     if any(item.get("metric") == "code_pass" for item in model.get("absolute", [])):
+        out.mkdir(parents=True, exist_ok=True)
         _sandbox_verified([str(path) for path in protected_roots(environment, out) if path])
 
 

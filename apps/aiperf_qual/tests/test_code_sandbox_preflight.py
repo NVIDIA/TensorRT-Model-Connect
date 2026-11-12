@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import os
+from pathlib import Path
 import subprocess
 
 import pytest
@@ -193,3 +195,69 @@ def test_qualification_preflight_failure_keeps_the_environment_category_and_bloc
     rows, _, _ = campaign.collect([tmp_path / "results"])
     assert campaign.signal(rows["codegen"]) == "white" and not campaign.is_pass(rows["codegen"])
     assert campaign.exit_code([record], []) == 1
+
+
+def test_grading_sandbox_failure_reaches_the_campaign_without_phase_retries(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual import absolute, runner
+
+    probes = []
+
+    def boundary(paths):
+        probes.append(paths)
+        if len(probes) > 2:
+            raise gold_metrics.SandboxUnavailable("code sandbox: permissions changed during grading")
+
+    def grading(model, environment, out):
+        side = {"observations": {"greedy": {0: {"text": "return 0"}}}}
+        return runner._Phases(out).run("candidate", lambda: absolute.judge(
+            {"suite": "code", "metric": "code_pass"}, [{"gold": {}}], side, side), retries=1)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("blocked grading deleted the bundle")
+
+    monkeypatch.setattr(gold_metrics, "_sandbox_verified", boundary)
+    monkeypatch.setattr(campaign, "run_key", lambda *args: "normal-key")
+    monkeypatch.setattr(campaign, "reference_python", lambda *args: "python")
+    monkeypatch.setattr(campaign, "warm_selections", lambda *args: None)
+    monkeypatch.setattr(campaign, "prefetch", lambda *args: None)
+    monkeypatch.setattr(campaign.bundles, "ensure_bundle", lambda *args: {"status": "built"})
+    monkeypatch.setattr(runner, "_qualify", grading)
+    monkeypatch.setattr(campaign.retention, "delete_bundle", forbidden)
+    model = {"model": "codegen", "task": "text_generation", "candidate": {}, "reference": {},
+             "absolute": [{"suite": "code", "metric": "code_pass"}]}
+    directory = tmp_path / "codegen"
+    record = campaign.run_one(Environment({}), model, directory)
+    assert record["category"] == "environment-blocked" and record["blocked_by"] == "code_sandbox"
+    assert len(probes) == 3 and not (directory / "phase-errors.log").exists()
+    assert (directory / "execution.jsonl").exists() and not (directory / "report.json").exists()
+    assert json.loads((directory / "build.json").read_text())["status"] == "built"
+    assert json.loads((directory / "error.json").read_text())["failure_type"] == "environment"
+    assert (directory / campaign.RUN_KEY).read_text().strip() != "normal-key"
+
+
+def test_speculative_prefetch_checks_the_created_code_result_directory(tmp_path, monkeypatch):
+    downloaded = []
+    monkeypatch.setattr(gold_metrics, "PROTECTED_READ", ())
+
+    def check(command, **kwargs):
+        writable = "test" in command and Path(command[-1]).is_dir() and Path(command[-1]).stat().st_mode & 0o002
+        return subprocess.CompletedProcess(command, 0 if command[-1] == "true" or writable else 1)
+
+    monkeypatch.setattr(subprocess, "run", check)
+    monkeypatch.setattr(campaign, "prefetch", lambda environment, model: downloaded.append(model["model"]))
+    original = campaign.run_one
+
+    def run(environment, model, out):
+        return original(environment, model, out) if model["model"] == "codegen" else {"category": "pass"}
+
+    monkeypatch.setattr(campaign, "run_one", run)
+    code = {"model": "codegen", "candidate": {"checkpoint": "org/code"}, "reference": {},
+            "absolute": [{"metric": "code_pass"}]}
+    root = tmp_path / "results"
+    previous = os.umask(0)
+    try:
+        records = campaign.run_all(Environment({}), [{"model": "first", "candidate": {}}, code], root, keep_order=True)
+    finally:
+        os.umask(previous)
+    assert records[1]["category"] == "environment-blocked" and not downloaded
+    assert "nobody can write" in json.loads((root / "codegen/error.json").read_text())["reason"]

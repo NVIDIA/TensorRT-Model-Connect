@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping, Sequence
 from . import absolute, aiperf_metrics, compat, edits, execution, geneval, intelligibility, judge, replay_parity, sweep, world_model
 from .aiperf_runner import AiperfRun, run_aiperf
 from .config import Environment
+from .gold_metrics import SandboxUnavailable
 from .report import write_report
 from .artifacts import recorded_path
 from .services import gpu_exclusive, gpu_identity, platform_fingerprint, platform_id, reference_python, serving
@@ -527,6 +528,9 @@ class _Phases:
             evidence_start = execution.checkpoint()
             try:
                 return call()
+            except SandboxUnavailable:
+                execution.supersede(evidence_start)
+                raise
             except Exception as error:  # noqa: BLE001 - reported per phase
                 execution.supersede(evidence_start)
                 self.errors[name] = f"{type(error).__name__}: {error}"[:1500]
