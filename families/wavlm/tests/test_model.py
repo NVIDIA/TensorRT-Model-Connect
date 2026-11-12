@@ -121,6 +121,31 @@ def test_resolve_refuses_a_vocabulary_that_does_not_match(tmp_path, vocab, added
         config_module.resolve(_write(tmp_path, vocab=vocab, added=added), {})
 
 
+def test_special_tokens_map_overrides_the_legacy_configuration(tmp_path):
+    # Without added_tokens_decoder the loader lets special_tokens_map.json
+    # override tokenizer_config.json, and fills what the configuration omits.
+    vocab = {**{key: value for key, value in _VOCAB.items() if key != "x"}, "#": 24}
+    tokenizer = {key: value for key, value in _TOKENIZER.items() if key != "word_delimiter_token"}
+    _write(tmp_path, vocab=vocab, tokenizer=tokenizer)
+    (tmp_path / "special_tokens_map.json").write_text(json.dumps({"word_delimiter_token": "#"}))
+    assert config_module.resolve(tmp_path, {})["word_delimiter_token"] == "#"
+    (tmp_path / "special_tokens_map.json").write_text(json.dumps({"pad_token": {"content": "|"}}))
+    with pytest.raises(NotImplementedError, match="config.pad_token_id is 28"):
+        config_module.resolve(tmp_path, {})
+
+
+def test_added_tokens_decoder_replaces_the_legacy_files(tmp_path):
+    # With added_tokens_decoder the loader reads neither added_tokens.json nor
+    # special_tokens_map.json.
+    tokenizer = {**_TOKENIZER, "added_tokens_decoder": {
+        "29": {"content": "<s>", "special": True}, "30": {"content": "</s>", "special": True}}}
+    _write(tmp_path, added={}, tokenizer=tokenizer)
+    (tmp_path / "special_tokens_map.json").write_text(json.dumps({"word_delimiter_token": "a"}))
+    cfg = config_module.resolve(tmp_path, {})
+    assert cfg["tokens"][29:] == ["<s>", "</s>"]
+    assert cfg["word_delimiter_token"] == "|"
+
+
 def test_resolve_reads_serialised_special_tokens(tmp_path):
     tokenizer = {**_TOKENIZER, "pad_token": {"content": "[PAD]", "lstrip": False}}
     cfg = config_module.resolve(_write(tmp_path, tokenizer=tokenizer), {})

@@ -43,7 +43,10 @@ clean-up would change the text (`clean_up_tokenization_spaces` with `.`, `?`,
 `config.pad_token_id`. It reads the configuration before any weight, so a
 checkpoint without a CTC head, such as the pretrained `microsoft/wavlm-large`,
 resolves to this family through its `model_type` and is refused because it has
-no transcription to build. Added tokens are read from `added_tokens.json`.
+no transcription to build. Special and added tokens are read as Transformers'
+tokenizer loader reads them: in the legacy layout `special_tokens_map.json`
+overrides `tokenizer_config.json` and added tokens come from `added_tokens.json`;
+a `tokenizer_config.json` with `added_tokens_decoder` replaces both files.
 
 ## Checkpoints
 
@@ -136,6 +139,14 @@ attention mask is implemented. The `WavLMForSequenceClassification`,
 `WavLMForXVector` and `WavLMForAudioFrameClassification` heads and the bare
 encoder's hidden states are not built.
 
+### Not supported
+
+- Checkpoints that store the positional convolution's weight norm under the
+  names current Transformers saves, `parametrizations.weight.original0` and
+  `original1`, are refused with a missing-tensor error: the builder reads
+  `weight_g` and `weight_v`, as the wav2vec2 family does, and the pinned
+  checkpoints use those names.
+
 ## Tests
 
 - `tests/test_support.py`: identity and default Task, without dependencies.
@@ -145,7 +156,9 @@ encoder's hidden states are not built.
 - `tests/test_reference.py`: the family's dataflow against randomly initialised
   Transformers models on CPU (feature encoder, bias table, encoder with gate and
   bias, with controls for a gate on the wrong rows, an ungated bias and a
-  transposed offset), the checkpoint conversion, and, on a GPU, real fp32 and
+  transposed offset), the blank and delimiter against Transformers' tokenizer
+  loader for both tokenizer layouts, the checkpoint conversion, and, on a GPU,
+  real fp32 and
   fp16 engines of both layouts against the same models.
 - `tests/cpp/`: the CTC decoder with a blank that is not id 0 and with
   delimiters at the edges, waveform normalisation and the pipeline's refusals,

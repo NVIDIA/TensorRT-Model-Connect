@@ -26,7 +26,7 @@ THRESHOLD_ROOT = TEST_ROOT / "thresholds"
 # converts it next to copies of the files the builder reads and leaves the
 # cache untouched.
 CHECKPOINT_FILES = ("config.json", "preprocessor_config.json", "vocab.json",
-                    "added_tokens.json", "tokenizer_config.json")
+                    "added_tokens.json", "tokenizer_config.json", "special_tokens_map.json")
 
 
 def _case_index() -> dict[str, tuple[Path, dict, dict]]:

@@ -139,6 +139,33 @@ def _tokens(vocab: dict, added: dict, vocab_size: int) -> tuple[list[str], dict[
     return tokens, ids
 
 
+def _tokenizer_settings(tokenizer: dict, special_map: dict) -> dict:
+    """The tokenizer settings as Transformers' loader resolves them.
+
+    A tokenizer_config.json without ``added_tokens_decoder`` is the legacy
+    layout: every entry of special_tokens_map.json overrides the configuration.
+    With ``added_tokens_decoder`` the map is not read at all.
+    """
+    if "added_tokens_decoder" in tokenizer:
+        return dict(tokenizer)
+    return {**tokenizer, **special_map}
+
+
+def _added_tokens(tokenizer: dict, added_file: dict) -> dict:
+    """Added tokens from ``added_tokens_decoder`` when the configuration has it,
+    otherwise from added_tokens.json, as Transformers' loader takes them."""
+    decoder = tokenizer.get("added_tokens_decoder")
+    if decoder is None:
+        return added_file
+    added = {}
+    for index, token in decoder.items():
+        content = token.get("content") if isinstance(token, dict) else token
+        _require(isinstance(content, str) and content != "",
+                 "needs string added tokens in tokenizer_config.json")
+        added[content] = int(index)
+    return added
+
+
 def require_head(cfg: dict, shapes: dict) -> None:
     """Refuse a CTC head whose shape is not the vocabulary over the encoder width."""
     head = shapes.get("lm_head.weight")
@@ -163,8 +190,10 @@ def resolve(model_dir: Path, shapes: dict) -> dict:
 
     pre = _read_json(model_dir / "preprocessor_config.json", "preprocessor_config.json")
     vocab = _read_json(model_dir / "vocab.json", "vocab.json")
-    added = _read_optional_json(model_dir / "added_tokens.json")
     tokenizer = _read_optional_json(model_dir / "tokenizer_config.json")
+    added = _added_tokens(tokenizer, _read_optional_json(model_dir / "added_tokens.json"))
+    settings = _tokenizer_settings(tokenizer,
+                                   _read_optional_json(model_dir / "special_tokens_map.json"))
 
     _require(int(pre.get("feature_size", 1)) == 1, "reads single-channel audio")
     _require(float(pre.get("padding_value", 0.0)) == 0.0, "needs a zero padding value")
@@ -174,15 +203,15 @@ def resolve(model_dir: Path, shapes: dict) -> dict:
     tokenizer_class = tokenizer.get("tokenizer_class") or cfg.get("tokenizer_class") or _TOKENIZER
     _require(tokenizer_class == _TOKENIZER,
              f"decodes {_TOKENIZER} vocabularies, not {tokenizer_class}")
-    _require(tokenizer.get("replace_word_delimiter_char", " ") == " ",
+    _require(settings.get("replace_word_delimiter_char", " ") == " ",
              "decodes the word delimiter to a space only")
 
     vocab_size = int(cfg["vocab_size"])
     tokens, ids = _tokens(vocab, added, vocab_size)
     # The runtime neither lowercases nor applies Transformers' space clean-up;
     # a tokenizer that would is refused unless the clean-up cannot apply.
-    _require(not tokenizer.get("do_lower_case", False), "decodes without do_lower_case")
-    if tokenizer.get("clean_up_tokenization_spaces", False):
+    _require(not settings.get("do_lower_case", False), "decodes without do_lower_case")
+    if settings.get("clean_up_tokenization_spaces", False):
         affected = sorted({char for token in tokens for char in token
                            if char in _CLEANUP_CHARACTERS})
         _require(not affected,
@@ -190,13 +219,13 @@ def resolve(model_dir: Path, shapes: dict) -> dict:
 
     # The tokenizer's pad token is the CTC blank its decoder drops; the head was
     # trained with config.pad_token_id as that blank, so the two must agree.
-    pad = _token_text(tokenizer.get("pad_token"), "<pad>")
+    pad = _token_text(settings.get("pad_token"), "<pad>")
     blank = ids.get(pad)
     _require(blank is not None, f"needs its pad token {pad!r} in the vocabulary as the CTC blank")
     pad_token_id = cfg.get("pad_token_id")
     _require(pad_token_id is None or int(pad_token_id) == blank,
              f"pad token {pad!r} is id {blank} but config.pad_token_id is {pad_token_id}")
-    delimiter = _token_text(tokenizer.get("word_delimiter_token"), "|")
+    delimiter = _token_text(settings.get("word_delimiter_token"), "|")
     _require(delimiter in ids, f"needs its word delimiter {delimiter!r} in the vocabulary")
 
     resolved = {
