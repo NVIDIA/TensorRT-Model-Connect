@@ -1,0 +1,9 @@
+numpy>=1.26
+ml_dtypes>=0.5
+safetensors>=0.4
+jinja2>=3.1
+torch>=2.6
+torchvision>=0.21
+transformers>=5.22.2,<6
+timm>=1.0.16
+Pillow>=12
