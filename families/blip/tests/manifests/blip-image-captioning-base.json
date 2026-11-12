@@ -1,0 +1,18 @@
+{
+  "name": "blip-image-captioning-base",
+  "hf_id": "Salesforce/blip-image-captioning-base",
+  "hf_revision": "82a37760796d32b1411fe092ab5d4e227313294b",
+  "bundle": "blip-image-captioning-base-fp32.bundle",
+  "family": "blip",
+  "task": "images_text_to_text",
+  "precision": "fp32",
+  "max_sequence_length": 64,
+  "tensor_parallel_size": 1,
+  "test_image_url": "https://storage.googleapis.com/sfr-vision-language-research/BLIP/demo.jpg?generation=1642901856234049",
+  "testcases": [
+    {"name": "blip-base-caption", "premerge": true, "prompt": "", "mirror": false},
+    {"name": "blip-base-prefix", "premerge": true, "prompt": "a photography of", "mirror": false},
+    {"name": "blip-base-mirror", "premerge": true, "prompt": "", "mirror": true},
+    {"name": "blip-base-prefix-mirror", "premerge": true, "prompt": "a photography of", "mirror": true}
+  ]
+}
