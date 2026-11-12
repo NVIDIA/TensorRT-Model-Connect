@@ -869,6 +869,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "ibm-granite/granite-4.0-1b-speech",
+      "revision": "bd87ab862416353633ea431fe49b1614003623c5",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "granite_speech",
+      "architectures": [
+        "GraniteSpeechForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "ibm-granite/granite-timeseries-patchtsmixer",
       "revision": "90dc5a88d45f032b7dceefb5d814ca2af54f2ff9",
       "revision_source": "resolved",

@@ -1,0 +1,35 @@
+{
+  "name": "granite-4.0-1b-speech",
+  "hf_id": "ibm-granite/granite-4.0-1b-speech",
+  "hf_revision": "bd87ab862416353633ea431fe49b1614003623c5",
+  "bundle": "granite-4.0-1b-speech.bundle",
+  "family": "granite_speech",
+  "task": "speech_transcription",
+  "precision": "bf16",
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "granite-4.0-1b-speech",
+      "premerge": true,
+      "checkpoint_audio": "multilingual_sample.wav",
+      "max_new_tokens": 200
+    },
+    {
+      "name": "granite-4.0-1b-speech-first-7s",
+      "checkpoint_audio": "multilingual_sample.wav",
+      "end_seconds": 7.3,
+      "max_new_tokens": 200
+    },
+    {
+      "name": "granite-4.0-1b-speech-twice",
+      "checkpoint_audio": "multilingual_sample.wav",
+      "repeat": 2,
+      "max_new_tokens": 400
+    },
+    {
+      "name": "granite-4.0-1b-speech-12-tokens",
+      "checkpoint_audio": "multilingual_sample.wav",
+      "max_new_tokens": 12
+    }
+  ]
+}

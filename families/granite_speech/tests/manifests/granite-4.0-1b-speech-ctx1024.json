@@ -1,0 +1,18 @@
+{
+  "name": "granite-4.0-1b-speech-ctx1024",
+  "hf_id": "ibm-granite/granite-4.0-1b-speech",
+  "hf_revision": "bd87ab862416353633ea431fe49b1614003623c5",
+  "bundle": "granite-4.0-1b-speech-ctx1024.bundle",
+  "family": "granite_speech",
+  "task": "speech_transcription",
+  "precision": "bf16",
+  "max_sequence_length": 1024,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "granite-4.0-1b-speech-ctx1024",
+      "checkpoint_audio": "multilingual_sample.wav",
+      "max_new_tokens": 200
+    }
+  ]
+}

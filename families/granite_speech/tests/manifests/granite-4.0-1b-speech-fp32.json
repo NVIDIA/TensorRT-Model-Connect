@@ -1,0 +1,23 @@
+{
+  "name": "granite-4.0-1b-speech-fp32",
+  "hf_id": "ibm-granite/granite-4.0-1b-speech",
+  "hf_revision": "bd87ab862416353633ea431fe49b1614003623c5",
+  "bundle": "granite-4.0-1b-speech-fp32.bundle",
+  "family": "granite_speech",
+  "task": "speech_transcription",
+  "precision": "fp32",
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "granite-4.0-1b-speech-fp32",
+      "checkpoint_audio": "multilingual_sample.wav",
+      "max_new_tokens": 200
+    },
+    {
+      "name": "granite-4.0-1b-speech-fp32-first-7s",
+      "checkpoint_audio": "multilingual_sample.wav",
+      "end_seconds": 7.3,
+      "max_new_tokens": 200
+    }
+  ]
+}
