@@ -1,0 +1,20 @@
+{
+  "name": "oneformer-cityscapes-swin-large",
+  "hf_id": "shi-labs/oneformer_cityscapes_swin_large",
+  "hf_revision": "8ed649db2cc1756b8bc36f0cad00b0812e333027",
+  "bundle": "oneformer-cityscapes-swin-large.bundle",
+  "family": "oneformer",
+  "task": "image_to_semantic_segmentation",
+  "precision": "fp32",
+  "image_height": 2048,
+  "image_width": 2048,
+  "testcases": [
+    {
+      "name": "oneformer-cityscapes-swin-large",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}
