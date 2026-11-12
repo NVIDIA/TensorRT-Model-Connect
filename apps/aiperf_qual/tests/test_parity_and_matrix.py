@@ -369,3 +369,22 @@ def test_dinov2_checker_applies_the_e2e_feature_tolerance_of_the_build_precision
     assert compare(side(hidden + 1e-2), side(hidden), {"precision": "fp16"})[0] is True
     assert compare(side(hidden + 1.5e-2), side(hidden), {"precision": "fp32", "threshold_scale": 2.0})[0] is False
     assert compare(None, side(hidden), {"precision": "fp32"})[0] is None
+
+
+def test_lossless_images_send_the_decoded_pixels_as_png():
+    import base64
+    import io
+
+    from PIL import Image
+
+    from trtmc_aiperf_qual.suites import _encoded_media
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 6), (200, 30, 90)).save(buffer, format="JPEG")
+    jpeg = {"bytes": buffer.getvalue()}
+    assert _encoded_media(jpeg, ".png")["$file"]["suffix"] == ".jpg"
+    media = _encoded_media(jpeg, ".png", lossless=True)["$file"]
+    assert media["suffix"] == ".png"
+    with Image.open(io.BytesIO(base64.b64decode(media["b64"]))) as decoded, \
+            Image.open(io.BytesIO(jpeg["bytes"])) as original:
+        assert decoded.format == "PNG" and decoded.tobytes() == original.convert("RGB").tobytes()

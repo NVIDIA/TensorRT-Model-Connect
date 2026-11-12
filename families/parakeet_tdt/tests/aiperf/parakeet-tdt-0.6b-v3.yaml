@@ -3,3 +3,7 @@
 
 reference:
   requirements: families/parakeet_tdt/requirements.txt  # the Transformers release with ParakeetForTDT
+
+# The Task detects the language itself and rejects a language control.
+benchmarks:
+  librispeech: {request: {language: null}}

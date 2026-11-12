@@ -55,7 +55,7 @@ class Adapter:
         for qid, item, raw in zip(ids, items, logits):
             count = len(item["markers"])
             scale = agent.temperature_by_options.get(temp_bucket(item["qtype"], count), agent.temperature[item["qtype"]])
-            values = np.asarray(raw[:count].float().cpu(), dtype=np.float64) / scale
+            values = np.asarray(raw[:count], dtype=np.float64) / scale  # the package returns NumPy logits
             probabilities = np.exp(values - values.max())
             probabilities /= probabilities.sum()
             scores.append({"question_id": qid, "logits": values.tolist(), "probabilities": probabilities.tolist()})

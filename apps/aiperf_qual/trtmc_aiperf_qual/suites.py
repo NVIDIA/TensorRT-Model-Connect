@@ -311,7 +311,7 @@ def _hf_rows(name: str, meta: Any, revision: str, source: Mapping[str, Any],
         if "prompt" in roles:
             record["prompt"] = row[roles["prompt"]]
         if "image" in roles:
-            record["image"] = _encoded_media(row[roles["image"]], ".png")
+            record["image"] = _encoded_media(row[roles["image"]], ".png", bool(source.get("lossless_images")))
         if "audio" in roles:
             record["audio"] = _wav_media(row[roles["audio"]]["bytes"], sample_rate)
         if label_column:
@@ -341,12 +341,19 @@ def _hf_rows(name: str, meta: Any, revision: str, source: Mapping[str, Any],
     return records
 
 
-def _encoded_media(value: Mapping[str, Any], default_suffix: str) -> dict[str, Any]:
+def _encoded_media(value: Mapping[str, Any], default_suffix: str, lossless: bool = False) -> dict[str, Any]:
+    """The image as stored, or with ``lossless`` its RGB pixels decoded once and stored as PNG: both sides
+    then read the same pixels instead of decoding a JPEG with different decoders (Pillow and stb_image
+    differ by a few levels per pixel, which a strict feature-parity gate reads as conversion error)."""
     from PIL import Image
 
     data = value["bytes"]
     with Image.open(io.BytesIO(data)) as image:
         suffix = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}.get(image.format or "", default_suffix)
+        if lossless and suffix != ".png":
+            buffer = io.BytesIO()
+            image.convert("RGB").save(buffer, format="PNG")
+            data, suffix = buffer.getvalue(), ".png"
     return {"$file": {"suffix": suffix, "b64": base64.b64encode(data).decode()}}
 
 

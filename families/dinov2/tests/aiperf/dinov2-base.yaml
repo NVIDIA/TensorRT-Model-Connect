@@ -16,7 +16,7 @@ benchmarks:
       outliers: {max_fraction: 0.02, gate: {threshold_scale: 2.0}}
     suite_definition:
       suite: coco-feature-parity
-      version: 1
+      version: 2
       # COCO val2017, pinned public export; conversion parity has no class labels.
       # Image rights follow each original image's license: https://cocodataset.org/#termsofuse
       source:
@@ -26,5 +26,7 @@ benchmarks:
         revision: cf0b22332314a937e9dc8a1957b21725430bb41d
         data_files: {val: data/val-*.parquet}
         image_column: image
+        # Pixels decoded once and sent as PNG: the two JPEG decoders differ by more than the gate.
+        lossless_images: true
       selection: {method: seeded, count: 50}
       fields: {image: image_path}

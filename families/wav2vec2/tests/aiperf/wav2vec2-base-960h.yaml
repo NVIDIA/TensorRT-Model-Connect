@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A CTC decoder: no language or token-budget control (the Task declares neither).
+benchmarks:
+  librispeech: {request: {language: null, max_new_tokens: null}}

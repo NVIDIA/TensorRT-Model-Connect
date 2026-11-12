@@ -15,7 +15,7 @@ from families.wav2vec2 import config as config_module, model
 
 torch = pytest.importorskip("torch")
 transformers = pytest.importorskip("transformers")
-from families.wav2vec2.convert_checkpoint import convert  # noqa: E402
+from families.wav2vec2.convert_checkpoint import convert, prepare  # noqa: E402
 
 
 def _reference(*, stable=True, norm="layer", bias=True):
@@ -192,6 +192,29 @@ def test_e2e_preparation_preserves_cached_checkpoint(tmp_path, monkeypatch):
     assert len(observed) == 1 and not observed[0].exists()
     assert not (tmp_path / "model.safetensors").exists()
     assert (tmp_path / "pytorch_model.bin").is_file()
+
+
+def test_prepare_converts_once_beside_the_bundle(tmp_path):
+    source, destination = tmp_path / "source", tmp_path / "checkpoint"
+    source.mkdir()
+    for name in ("config.json", "preprocessor_config.json", "vocab.json"):
+        (source / name).write_text("{}")
+    torch.save({"weight": torch.arange(3, dtype=torch.float16)}, source / "pytorch_model.bin")
+
+    assert prepare(source, destination) == destination
+    weights, _ = model._load(destination)
+    np.testing.assert_array_equal(weights["weight"], np.arange(3))
+    assert not (destination / "model.safetensors.partial").exists()
+    assert not (source / "model.safetensors").exists()
+    stamp = (destination / "model.safetensors").stat().st_mtime_ns
+    assert prepare(source, destination) == destination
+    assert (destination / "model.safetensors").stat().st_mtime_ns == stamp
+
+
+def test_prepare_keeps_a_safetensors_checkpoint(tmp_path):
+    (tmp_path / "model.safetensors").touch()
+    assert prepare(tmp_path, tmp_path / "checkpoint") == tmp_path
+    assert not (tmp_path / "checkpoint").exists()
 
 
 def test_missing_xlsr_bias_is_rejected_before_build(tmp_path):

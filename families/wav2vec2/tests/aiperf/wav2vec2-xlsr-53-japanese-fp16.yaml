@@ -3,3 +3,6 @@
 
 # A Japanese model: FLEURS ja by character error rate, not English LibriSpeech.
 absolute: [fleurs_ja]
+# A CTC decoder: no language or token-budget control (the Task declares neither).
+benchmarks:
+  fleurs_ja: {request: {language: null, max_new_tokens: null}}
