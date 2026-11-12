@@ -8,6 +8,7 @@
 #include "families/smolvlm/runtime/sampler.h"
 #include "families/smolvlm/runtime/tokenizer.h"
 
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <nlohmann/json.hpp>
@@ -42,6 +43,16 @@ void test_tokenizer(const nlohmann::json& fixture) {
               "lossy decode " + item.at("ids").dump());
     check(tokenizer.added_token_id("<image>") >= 0 && tokenizer.added_token_id("<absent>") == -1,
           "added-token lookup");
+    // A single pre-tokenized piece of 100,000 letters merges into 50,000 "ll" units. Merging
+    // with a full rescan per merge would need about 5e9 pair lookups for it.
+    const std::string letters(100000, 'l');
+    const auto start = std::chrono::steady_clock::now();
+    const auto pairs = tokenizer.encode(letters);
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    check(pairs.size() == letters.size() / 2 && tokenizer.decode(pairs) == letters,
+          "a long piece merges into pairs");
+    check(seconds < 10.0, "a 100,000-byte piece took " + std::to_string(seconds) + " s");
 }
 
 void test_sampler() {

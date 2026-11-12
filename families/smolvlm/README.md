@@ -56,11 +56,16 @@ checkpoint's generation default; `temperature` 0 is greedy as well.
   image or `Role: ` otherwise, `<end_of_utterance>\n` per message, then
   `Assistant:`), each image expanded to `<fake_token_around_image><row_r_col_c>`
   plus 64 `<image>` tokens per tile, a newline per tile row, and the global
-  view. Text may not contain the literal `<image>` token.
+  view. Text parts may not contain the literal `<image>`, `<end_of_utterance>`
+  or `<|im_start|>` tokens: the reference would read them as an image slot or
+  as a message boundary, so text could otherwise pose as another role's
+  message. A request whose image tokens alone exceed the context is rejected
+  before its remaining images are tiled.
 - **Tokenizer.** The checkpoint's byte-level BPE: literal special tokens,
-  digits split one by one, the GPT-2 split expression, rank-ordered merges.
-  Like the reference, bytes without a vocabulary unit (21 control and invalid
-  UTF-8 bytes) are dropped.
+  digits split one by one, the GPT-2 split expression, rank-ordered merges
+  (lowest rank first, leftmost on ties, kept in a priority queue so that long
+  pieces merge in O(n log n)). Like the reference, bytes without a vocabulary
+  unit (21 control and invalid UTF-8 bytes) are dropped.
 
 The shared `images_text_to_text` contract requires at least one image and one
 text part per request; text-only conversations are rejected before they reach
@@ -93,7 +98,10 @@ Transformers reference (FP32, eager attention, TF32 off) on the same GPU:
   five tokens by at most 0.089 (p99 0.048). Free-running texts are not
   compared: the reference has near-ties in several conversations (top-2 margins
   of 0.010 to 0.18 within the first 16 tokens, 0.001 at token 59 of the first),
-  after which greedy texts diverge without any error.
+  after which greedy texts diverge without any error;
+- in both precisions generation must stop at the first `<end_of_utterance>` or
+  at the token limit, and the returned text must equal the reference
+  tokenizer's decoding of the returned token ids.
 
 ```sh
 TRTMC_BINARY=<build>/trtmc TRTMC_RUNTIME_ROOT=<build> TRTMC_NATIVE_BUILD_DIR=<build> \

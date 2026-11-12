@@ -5,9 +5,11 @@
 #include "tokenizer.h"
 
 #include <array>
-#include <limits>
+#include <functional>
 #include <nlohmann/json.hpp>
+#include <queue>
 #include <stdexcept>
+#include <tuple>
 #include <unicode/regex.h>
 #include <unicode/uchar.h>
 #include <unicode/unistr.h>
@@ -32,8 +34,8 @@ std::string utf8(const icu::UnicodeString& text) {
     return result;
 }
 
-std::string pair_key(const std::string& left, const std::string& right) {
-    return left + '\0' + right;
+uint64_t id_pair(int32_t left, int32_t right) {
+    return (uint64_t(uint32_t(left)) << 32) | uint32_t(right);
 }
 
 // Rust char::is_numeric: general categories Nd, Nl and No.
@@ -45,13 +47,20 @@ bool is_numeric(UChar32 cp) {
 } // namespace
 
 struct Tokenizer::Impl {
+    struct Merge {
+        int32_t rank, id;
+    };
+
     std::unique_ptr<icu::RegexPattern> pattern;
-    std::unordered_map<std::string, int32_t> vocab, ranks;
+    std::unordered_map<std::string, int32_t> vocab;
+    // (left id, right id) -> rank in the merges list and the id of the merged unit.
+    std::unordered_map<uint64_t, Merge> merges;
     std::unordered_map<int32_t, std::string> inverse;
     std::unordered_set<int32_t> special_ids;
     std::vector<std::pair<std::string, int32_t>> added;
     std::array<std::string, 256> byte_encoder;
-    std::array<bool, 256> byte_known{};
+    // Vocabulary id of each byte's unit, -1 when the vocabulary lacks it.
+    std::array<int32_t, 256> byte_id{};
     std::unordered_map<UChar32, unsigned char> byte_decoder;
 
     explicit Impl(std::string_view serialized) {
@@ -93,7 +102,12 @@ struct Tokenizer::Impl {
                 left = text.substr(0, space);
                 right = text.substr(space + 1);
             }
-            ranks.emplace(pair_key(left, right), rank++);
+            const auto left_id = vocab.find(left), right_id = vocab.find(right),
+                       merged_id = vocab.find(left + right);
+            if (left_id == vocab.end() || right_id == vocab.end() || merged_id == vocab.end())
+                throw std::invalid_argument("SmolVLM BPE merge outside the vocabulary");
+            merges.emplace(id_pair(left_id->second, right_id->second),
+                           Merge{rank++, merged_id->second});
         }
         for (const auto& item : document.at("added_tokens")) {
             if (item.value("single_word", false) || item.value("lstrip", false) ||
@@ -116,40 +130,70 @@ struct Tokenizer::Impl {
             byte_encoder[value] = utf8(icu::UnicodeString(cp));
             byte_decoder.emplace(cp, static_cast<unsigned char>(value));
         }
-        for (int value = 0; value < 256; ++value)
-            byte_known[value] = vocab.count(byte_encoder[value]) != 0;
+        for (int value = 0; value < 256; ++value) {
+            const auto found = vocab.find(byte_encoder[value]);
+            byte_id[value] = found == vocab.end() ? -1 : found->second;
+        }
     }
 
+    // Merges the lowest-ranked adjacent pair first, the leftmost one on ties, until no
+    // pair has a merge. As in the reference (tokenizers' Word::merge_all), candidate
+    // merges wait in a min-heap keyed by (rank, position) over a linked list of units,
+    // so a piece of n bytes takes O(n log n) instead of a full rescan per merge.
     void merge_piece(const std::string& bytes, std::vector<int32_t>& result) const {
+        struct Unit {
+            int32_t id, prev, next; // prev / next: neighbouring unit, -1 at the ends
+            bool live;
+        };
         // Without an unknown token or byte fallback, a byte whose unit is not in
         // the vocabulary is dropped; its neighbours become adjacent.
-        std::vector<std::string> units;
+        std::vector<Unit> units;
         units.reserve(bytes.size());
-        for (unsigned char value : bytes)
-            if (byte_known[value])
-                units.push_back(byte_encoder[value]);
-        // Merge the lowest-ranked adjacent pair first; the leftmost one on ties.
-        while (units.size() > 1) {
-            size_t best = units.size();
-            int32_t best_rank = std::numeric_limits<int32_t>::max();
-            for (size_t i = 0; i + 1 < units.size(); ++i) {
-                const auto found = ranks.find(pair_key(units[i], units[i + 1]));
-                if (found != ranks.end() && found->second < best_rank) {
-                    best_rank = found->second;
-                    best = i;
-                }
-            }
-            if (best == units.size())
-                break;
-            units[best] += units[best + 1];
-            units.erase(units.begin() + static_cast<std::ptrdiff_t>(best) + 1);
+        for (unsigned char value : bytes) {
+            if (byte_id[value] < 0)
+                continue;
+            const auto index = static_cast<int32_t>(units.size());
+            units.push_back({byte_id[value], index - 1, index + 1, true});
         }
-        for (const auto& unit : units) {
-            const auto found = vocab.find(unit);
-            if (found == vocab.end())
-                throw std::runtime_error("SmolVLM BPE produced a unit outside the vocabulary");
-            result.push_back(found->second);
+        if (units.empty())
+            return;
+        units.back().next = -1;
+        using Candidate = std::tuple<int32_t, int32_t, int32_t>; // rank, left unit, merged id
+        std::priority_queue<Candidate, std::vector<Candidate>, std::greater<>> queue;
+        const auto offer = [&](int32_t left) {
+            const int32_t right = units[size_t(left)].next;
+            if (right < 0)
+                return;
+            const auto found =
+                merges.find(id_pair(units[size_t(left)].id, units[size_t(right)].id));
+            if (found != merges.end())
+                queue.emplace(found->second.rank, left, found->second.id);
+        };
+        for (int32_t index = 0; index + 1 < static_cast<int32_t>(units.size()); ++index)
+            offer(index);
+        while (!queue.empty()) {
+            const int32_t left = std::get<1>(queue.top()), merged = std::get<2>(queue.top());
+            queue.pop();
+            Unit& unit = units[size_t(left)];
+            // An entry is stale when an earlier merge removed its unit or changed its pair.
+            if (!unit.live || unit.next < 0)
+                continue;
+            Unit& right = units[size_t(unit.next)];
+            const auto found = merges.find(id_pair(unit.id, right.id));
+            if (found == merges.end() || found->second.id != merged)
+                continue;
+            unit.id = merged;
+            right.live = false;
+            unit.next = right.next;
+            if (right.next >= 0)
+                units[size_t(right.next)].prev = left;
+            if (unit.prev >= 0)
+                offer(unit.prev);
+            offer(left);
         }
+        // The first unit only ever absorbs its right neighbours, so it heads the list.
+        for (int32_t index = 0; index >= 0; index = units[size_t(index)].next)
+            result.push_back(units[size_t(index)].id);
     }
 
     void split_regex(const icu::UnicodeString& piece, icu::RegexMatcher& matcher,
