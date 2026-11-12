@@ -45,9 +45,10 @@ trtmc qwen3_next build Qwen/Qwen3-Coder-Next \
 ```
 
 Configure the source build with `TRTMC_BUILD_TESTS=ON` and build `trtmc`,
-`trtmc_backend_trt`, `trtmc_model_qwen3_next`, `qwen3_next_logits_trace`, and
-`qwen3_next_tokenizer_probe`, and `qwen3_next_routing_probe`. The tokenizer
-requires ICU uc and i18n.
+`trtmc_backend_trt`, `trtmc_model_qwen3_next`, `qwen3_next_logits_trace`,
+`qwen3_next_tokenizer_probe`, `qwen3_next_routing_probe`,
+`qwen3_next_pipeline_probe`, and `test_qwen3_next_sampler`. The tokenizer requires
+ICU uc and i18n.
 
 The family tests use the official Transformers 5.2.0 implementation as the
 independent BF16 oracle. The layer tests compare actual checkpoint DeltaNet and
