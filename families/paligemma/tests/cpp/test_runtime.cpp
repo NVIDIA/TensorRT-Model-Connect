@@ -49,6 +49,17 @@ void check_throws(Function&& function, const std::string& name) {
     check(false, name + " must be rejected");
 }
 
+// The message of the std::invalid_argument the function throws, or "" if none.
+template <typename Function>
+std::string rejection(Function&& function) {
+    try {
+        function();
+    } catch (const std::invalid_argument& error) {
+        return error.what();
+    }
+    return {};
+}
+
 // <pad> <eos> <bos> <unk>, 256 byte pieces, then a few merges and one user-defined symbol.
 PaligemmaBpeTokenizer toy_tokenizer(bool remove_extra_whitespaces = false) {
     PaligemmaBpeAsset asset;
@@ -129,10 +140,14 @@ void test_prompt() {
     check(reserved_text(tokenizer, {2, 500}, 500) == std::vector<std::string>{"<bos>", "<image>"},
           "reserved ids map to piece text and the image token");
 
-    // The longest toy piece is "<loc0001>" (9 bytes): 1,000,001 bytes need at least
-    // 111,112 tokens, so the prefix is refused without being tokenized.
-    PromptParts huge{{image}, std::string(1000000, 'a')};
-    check_throws([&] { prompt_ids(huge, tokenizer, tokens, 100); }, "an oversized prefix");
+    // The longest toy piece is "<loc0001>" (9 bytes): 1,000,006 bytes need at least
+    // 111,112 tokens, so the length alone refuses the prefix. prompt_ids scans for
+    // special tokens before it tokenizes, so a capacity refusal despite the
+    // trailing "<bos>" shows that the prefix was neither scanned nor tokenized.
+    PromptParts huge{{image}, std::string(1000000, 'a') + "<bos>"};
+    check(rejection([&] { prompt_ids(huge, tokenizer, tokens, 100); }).find("capacity") !=
+              std::string::npos,
+          "an oversized prefix is refused before it is scanned or tokenized");
     // The bound is tight but never refuses a prefix whose tokens fit: two
     // "<loc0001>" pieces and the newline are 3 tokens in 19 bytes, the least
     // the bound allows (ceil(19 / 9) = 3).
