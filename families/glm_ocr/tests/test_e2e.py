@@ -15,8 +15,8 @@ same lossless PNG to both sides):
 The host-parity tests compare the native host steps, run through the host probe of the
 native ``test_glm_ocr_runtime`` (the family's CTest executable), with the processor and the
 tokenizers library: image preprocessing to the bit, tokenization, the pre-tokenizer on every
-Unicode scalar and on random text, chat-template rendering and the multimodal rotary
-positions.
+Unicode scalar and on random text, chat-template rendering (also on the build check's generated
+conversations) and the multimodal rotary positions.
 """
 
 from __future__ import annotations
@@ -430,6 +430,33 @@ def test_native_tokenizer_matches_tokenizers(request, tmp_path) -> None:
         assert native["ids"] == ids, text
         assert native["decoded"] == tokenizer.decode(ids, skip_special_tokens=True), text
         assert native["decoded_with_special"] == tokenizer.decode(ids), text
+
+
+def test_native_prompt_matches_the_template_on_generated_conversations(request, tmp_path) -> None:
+    """The runtime's renderer, its Python statement used by the build's template check and the
+    checkpoint's template (through Transformers) agree on every generated conversation."""
+    _host_selected(request)
+    from transformers import AutoTokenizer
+
+    from families.glm_ocr.chat_template import probe_conversations, render_native
+
+    model_dir = _host_model_dir()
+    tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
+    conversations = probe_conversations()
+    probe_input = [{"messages": [
+        {"role": message["role"], "parts": [
+            {"image": [4, 4]} if part["type"] == "image" else {"text": part["text"]}
+            for part in message["content"]]}
+        for message in conversation]} for conversation in conversations]
+    path = tmp_path / "generated.json"
+    path.write_text(json.dumps(probe_input, ensure_ascii=False), encoding="utf-8")
+    out = tmp_path / "generated_prompts.json"
+    _run_probe("prompt", str(model_dir / "tokenizer.json"), str(path), str(out))
+    results = json.loads(out.read_text(encoding="utf-8"))
+    for messages, native in zip(conversations, results, strict=True):
+        expected = render_native(messages)
+        assert native["text"] == expected, messages
+        assert tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True) == expected
 
 
 def _split_pre_tokenizer(model_dir: Path):
