@@ -8,6 +8,7 @@
 
 #include <map>
 #include <stdexcept>
+#include <string_view>
 
 namespace test {
 
@@ -17,11 +18,14 @@ inline void require(bool condition, const char* message) {
 }
 
 template <class Function>
-void rejects(Function function) {
+void rejects(Function function, std::string_view expected = {}) {
     bool rejected = false;
     try {
         function();
-    } catch (const std::exception&) {
+    } catch (const std::exception& error) {
+        require(expected.empty() ||
+                    std::string_view(error.what()).find(expected) != std::string_view::npos,
+                "request failed for the wrong reason");
         rejected = true;
     }
     require(rejected, "invalid request was accepted");

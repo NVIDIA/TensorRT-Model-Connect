@@ -66,10 +66,13 @@ uses BF16.
 ## Validation
 
 The Task SDK exposes `text_continuation` for UTF-8 prefixes and
-`images_text_to_text` for one user turn with one RGB image and text. The image
+`images_text_to_text` for one user turn with one RGB image followed by text. The image
 Task accepts contiguous UInt8 RGB pixels or Float32 RGB values in [0,1]. Tools,
-additional turns, and additional images are rejected. LoRA management is
-advertised only when the loaded decoder has adapter inputs.
+additional turns, additional images, and text before the image are rejected.
+When `max_new_tokens` is omitted, the SDK bounds its default budget by the cache
+space remaining after the encoded prompt. Explicit budgets that exceed this
+space are rejected. LoRA management is advertised only when the loaded decoder
+has adapter inputs.
 
 The manifest contains original and mirrored vehicle-image cases. The official
 Transformers reference uses the same processor bounds, BF16 weights, prompt,

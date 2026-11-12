@@ -26,7 +26,7 @@ Span<const internal::ConfigField> task_fields() {
     return {fields.data(), fields.size()};
 }
 
-TextGenerationConfig request_config(internal::ConfigView supplied, int default_tokens) {
+TextGenerationConfig request_config(internal::ConfigView supplied) {
     const auto fields = task_fields();
     internal::validate_config(fields, supplied);
     const auto integer = [&](const char* key, int fallback) {
@@ -38,13 +38,16 @@ TextGenerationConfig request_config(internal::ConfigView supplied, int default_t
         return static_cast<std::int32_t>(value);
     };
     TextGenerationConfig config;
-    config.max_new_tokens = integer("max_new_tokens", default_tokens);
+    const auto requested_tokens =
+        internal::config_get<std::int64_t>(supplied, fields, "max_new_tokens");
+    // Zero is a family-internal signal to select the budget after tokenization.
+    config.max_new_tokens = integer("max_new_tokens", 0);
     config.top_k = integer("top_k", 1);
     config.seed = integer("seed", -1);
     const auto temperature = *internal::config_get<double>(supplied, fields, "temperature");
     const auto top_p = *internal::config_get<double>(supplied, fields, "top_p");
     const auto min_p = *internal::config_get<double>(supplied, fields, "min_p");
-    if (config.max_new_tokens <= 0 || config.top_k < 1 || config.seed < -1 ||
+    if ((requested_tokens && config.max_new_tokens <= 0) || config.top_k < 1 || config.seed < -1 ||
         !std::isfinite(temperature) || temperature <= 0 ||
         temperature > std::numeric_limits<float>::max() || !std::isfinite(top_p) || top_p <= 0 ||
         top_p > 1 || !std::isfinite(min_p) || min_p < 0 || min_p > 1)
@@ -70,12 +73,13 @@ TextResult Qwen3VlMoePipeline::run(const internal::TextContinuationRequest& requ
     const auto* prefix = std::get_if<std::string_view>(&request.prefix);
     if (prefix == nullptr)
         throw std::invalid_argument("Qwen3-VL-MoE continuation accepts UTF-8 text prefixes");
-    return generate(std::string(*prefix), request_config(supplied, default_max_new_tokens()));
+    const auto config = request_config(supplied);
+    return generate(std::string(*prefix), config, config.max_new_tokens == 0);
 }
 
 TextResult Qwen3VlMoePipeline::run(const internal::ImagesTextToTextRequest& request,
                                    internal::ConfigView supplied) {
-    const auto config = request_config(supplied, default_max_new_tokens());
+    const auto config = request_config(supplied);
     if (request.messages.size() != 1 || !request.tools.empty() ||
         request.messages[0].role != internal::MessageRole::User)
         throw std::invalid_argument("Qwen3-VL-MoE accepts one user turn without tools");
@@ -83,6 +87,8 @@ TextResult Qwen3VlMoePipeline::run(const internal::ImagesTextToTextRequest& requ
     std::string prompt;
     for (const auto& part : request.messages[0].parts) {
         if (const auto* text = std::get_if<internal::TextPartView>(&part)) {
+            if (image == nullptr)
+                throw std::invalid_argument("Qwen3-VL-MoE requires the image before text parts");
             prompt.append(text->text);
         } else if (const auto* media = std::get_if<internal::ImageView>(&part)) {
             if (image != nullptr)
@@ -122,7 +128,7 @@ TextResult Qwen3VlMoePipeline::run(const internal::ImagesTextToTextRequest& requ
         }
     }
     return generate(prompt, pixels.data(), static_cast<int32_t>(height),
-                    static_cast<int32_t>(width), config);
+                    static_cast<int32_t>(width), config, config.max_new_tokens == 0);
 }
 
 } // namespace trtmc
