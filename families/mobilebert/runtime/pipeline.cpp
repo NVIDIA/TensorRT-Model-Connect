@@ -72,7 +72,10 @@ std::vector<std::int32_t> MobileBertPipeline::single_ids(const internal::TextSou
         }
         return {ids->begin(), ids->end()};
     }
-    const auto body = tokenizer_->encode(std::get<std::string_view>(source));
+    // [CLS] and [SEP] take two places of the window, so the text is read only
+    // until it overflows the rest; forward() then refuses it.
+    const auto room = static_cast<std::size_t>(config_.max_sequence_length) - 2;
+    const auto body = tokenizer_->encode(std::get<std::string_view>(source), room);
     std::vector<std::int32_t> framed;
     framed.reserve(body.size() + 2);
     framed.push_back(config_.cls_token_id);
@@ -86,9 +89,8 @@ MobileBertPipeline::Scores MobileBertPipeline::forward(const std::vector<std::in
                                                        const std::vector<std::size_t>& rows) {
     const auto window = static_cast<std::size_t>(config_.max_sequence_length);
     if (ids.size() > window) {
-        throw std::invalid_argument("mobilebert input has " + std::to_string(ids.size()) +
-                                    " tokens, more than the engine window of " +
-                                    std::to_string(window));
+        throw std::invalid_argument("mobilebert input is longer than the engine window of " +
+                                    std::to_string(window) + " tokens");
     }
     // The engine is fixed-length and the runtime keeps its input buffers between
     // calls, so the whole window is sent every time: ids padded with [PAD],
@@ -167,8 +169,13 @@ MobileBertPipeline::run(const internal::TextPairToPretrainingRelationScoresReque
                         internal::ConfigView config) {
     if (!config.empty())
         throw internal::ConfigError("mobilebert has no runtime configuration");
-    const auto first = tokenizer_->encode(request.first);
-    const auto second = tokenizer_->encode(request.second);
+    // [CLS] A [SEP] B [SEP]: three places of the window are framing. Each text is
+    // read only until the pair overflows the rest; forward() then refuses it.
+    const auto room = static_cast<std::size_t>(config_.max_sequence_length) - 3;
+    const auto first = tokenizer_->encode(request.first, room);
+    const auto second = first.size() > room
+                            ? std::vector<std::int32_t>{}
+                            : tokenizer_->encode(request.second, room - first.size());
     std::vector<std::int32_t> ids;
     std::vector<std::int32_t> segments;
     ids.reserve(first.size() + second.size() + 3);

@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -39,56 +40,36 @@ bool contains(const CodeRange (&ranges)[N], char32_t cp) {
     return found != std::end(ranges) && found->lo <= cp;
 }
 
-// Refuses text that is not well-formed UTF-8 (truncated or stray bytes, overlong
-// forms, surrogates, values past U+10FFFF): the reference only ever sees valid text,
-// so there is no reference behaviour to reproduce for it.
-void require_utf8(const std::string& text) {
-    for (std::size_t pos = 0; pos < text.size();) {
-        const auto lead = static_cast<unsigned char>(text[pos]);
-        const std::size_t length = lead < 0x80             ? 1
-                                   : (lead & 0xE0) == 0xC0 ? 2
-                                   : (lead & 0xF0) == 0xE0 ? 3
-                                   : (lead & 0xF8) == 0xF0 ? 4
-                                                           : 0;
-        if (length == 0 || pos + length > text.size())
-            throw std::invalid_argument("mobilebert input is not valid UTF-8");
-        char32_t cp = length == 1 ? lead : lead & (0xFF >> (length + 1));
-        for (std::size_t i = 1; i < length; ++i) {
-            const auto next = static_cast<unsigned char>(text[pos + i]);
-            if ((next & 0xC0) != 0x80)
-                throw std::invalid_argument("mobilebert input is not valid UTF-8");
-            cp = (cp << 6) | (next & 0x3F);
-        }
-        constexpr char32_t kSmallest[] = {0, 0, 0x80, 0x800, 0x10000};
-        if (cp < kSmallest[length] || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
-            throw std::invalid_argument("mobilebert input is not valid UTF-8");
-        pos += length;
-    }
-}
-
-// Decodes one code point of text already known to be well-formed.
-char32_t next_code_point(const std::string& text, std::size_t& pos) {
-    const auto byte = [&](std::size_t at) { return static_cast<unsigned char>(text[at]); };
-    const unsigned char lead = byte(pos);
-    std::size_t length = lead < 0x80             ? 1
-                         : (lead & 0xE0) == 0xC0 ? 2
-                         : (lead & 0xF0) == 0xE0 ? 3
-                         : (lead & 0xF8) == 0xF0 ? 4
-                                                 : 0;
-    if (length == 0 || pos + length > text.size()) {
-        ++pos;
-        return 0xFFFD;
-    }
+// Decodes the code point at pos and moves past it. Text that is not well-formed
+// UTF-8 (truncated or stray bytes, overlong forms, surrogates, values past
+// U+10FFFF) is refused: the reference only ever sees valid text, so there is no
+// reference behaviour to reproduce for it.
+char32_t next_code_point(std::string_view text, std::size_t& pos) {
+    const auto lead = static_cast<unsigned char>(text[pos]);
+    const std::size_t length = lead < 0x80             ? 1
+                               : (lead & 0xE0) == 0xC0 ? 2
+                               : (lead & 0xF0) == 0xE0 ? 3
+                               : (lead & 0xF8) == 0xF0 ? 4
+                                                       : 0;
+    if (length == 0 || pos + length > text.size())
+        throw std::invalid_argument("mobilebert input is not valid UTF-8");
     char32_t cp = length == 1 ? lead : lead & (0xFF >> (length + 1));
     for (std::size_t i = 1; i < length; ++i) {
-        if ((byte(pos + i) & 0xC0) != 0x80) {
-            ++pos;
-            return 0xFFFD;
-        }
-        cp = (cp << 6) | (byte(pos + i) & 0x3F);
+        const auto next = static_cast<unsigned char>(text[pos + i]);
+        if ((next & 0xC0) != 0x80)
+            throw std::invalid_argument("mobilebert input is not valid UTF-8");
+        cp = (cp << 6) | (next & 0x3F);
     }
+    constexpr char32_t kSmallest[] = {0, 0, 0x80, 0x800, 0x10000};
+    if (cp < kSmallest[length] || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))
+        throw std::invalid_argument("mobilebert input is not valid UTF-8");
     pos += length;
     return cp;
+}
+
+void require_utf8(std::string_view text) {
+    for (std::size_t pos = 0; pos < text.size();)
+        next_code_point(text, pos);
 }
 
 void append_utf8(std::string& out, char32_t cp) {
@@ -155,37 +136,6 @@ void normalize_code_point(char32_t cp, std::string& out) {
     append_utf8(out, cp);
 }
 
-std::string normalize(const std::string& text) {
-    std::string out;
-    out.reserve(text.size());
-    for (std::size_t pos = 0; pos < text.size();)
-        normalize_code_point(next_code_point(text, pos), out);
-    return out;
-}
-
-// BertPreTokenizer: whitespace separates words; punctuation is a word of its own.
-std::vector<std::string> pre_tokenize(const std::string& text) {
-    std::vector<std::string> words;
-    std::string current;
-    for (std::size_t pos = 0; pos < text.size();) {
-        const std::size_t start = pos;
-        const char32_t cp = next_code_point(text, pos);
-        const bool punctuation = contains(kPunctuation, cp);
-        if (punctuation || contains(kWhitespace, cp)) {
-            if (!current.empty())
-                words.push_back(std::move(current));
-            current.clear();
-            if (punctuation)
-                words.push_back(text.substr(start, pos - start));
-            continue;
-        }
-        current.append(text, start, pos - start);
-    }
-    if (!current.empty())
-        words.push_back(std::move(current));
-    return words;
-}
-
 std::size_t code_point_count(const std::string& text) {
     std::size_t count = 0;
     for (std::size_t pos = 0; pos < text.size(); ++count)
@@ -221,33 +171,49 @@ class MobileBertTokenizer final : public IMobileBertTokenizer {
         unk_id_ = unknown->second;
     }
 
-    std::vector<std::int32_t> encode(std::string_view input) const override {
-        // Added tokens are found in the raw text first, leftmost and then longest,
-        // and the text between them is normalised and split on its own.
-        const std::string text(input);
-        require_utf8(text);
+    std::vector<std::int32_t> encode(std::string_view text, std::size_t limit) const override {
+        // One pass over the raw text. An added token is matched where it starts,
+        // leftmost and then longest; any other code point is normalised and split
+        // into words (BertPreTokenizer: whitespace ends a word, punctuation is a
+        // word of its own), and each word is encoded as soon as it ends.
         std::vector<std::int32_t> ids;
-        std::size_t start = 0;
-        while (start < text.size()) {
-            std::size_t next = std::string::npos;
-            std::int32_t token_id = -1;
-            std::size_t token_size = 0;
-            for (const auto& [token, id] : added_tokens_) {
-                const auto found = text.find(token, start);
-                if (found < next || (found == next && token.size() > token_size)) {
-                    next = found;
-                    token_id = id;
-                    token_size = token.size();
+        std::string word;
+        std::size_t word_chars = 0;
+        const auto end_word = [&] {
+            // A word longer than max_input_chars_per_word is a single unknown
+            // token, so its characters past that bound are not kept.
+            if (word_chars > max_chars_per_word_)
+                ids.push_back(unk_id_);
+            else if (word_chars > 0)
+                encode_word(word, ids);
+            word.clear();
+            word_chars = 0;
+        };
+        std::string normalized;
+        for (std::size_t pos = 0; pos < text.size() && ids.size() <= limit;) {
+            if (const auto* added = added_token_at(text, pos)) {
+                end_word();
+                ids.push_back(added->second);
+                pos += added->first.size();
+                continue;
+            }
+            normalized.clear();
+            normalize_code_point(next_code_point(text, pos), normalized);
+            for (std::size_t at = 0; at < normalized.size();) {
+                const std::size_t start = at;
+                const char32_t cp = next_code_point(normalized, at);
+                const bool punctuation = contains(kPunctuation, cp);
+                if (punctuation || contains(kWhitespace, cp)) {
+                    end_word();
+                    if (punctuation)
+                        encode_word(normalized.substr(start, at - start), ids);
+                } else if (++word_chars <= max_chars_per_word_) {
+                    word.append(normalized, start, at - start);
                 }
             }
-            const auto end = next == std::string::npos ? text.size() : next;
-            for (const auto& word : pre_tokenize(normalize(text.substr(start, end - start))))
-                encode_word(word, ids);
-            if (next == std::string::npos)
-                break;
-            ids.push_back(token_id);
-            start = next + token_size;
         }
+        if (ids.size() <= limit)
+            end_word();
         return ids;
     }
 
@@ -259,6 +225,18 @@ class MobileBertTokenizer final : public IMobileBertTokenizer {
     }
 
   private:
+    // The longest added token that starts at pos, or nullptr.
+    const std::pair<std::string, std::int32_t>* added_token_at(std::string_view text,
+                                                               std::size_t pos) const {
+        const std::pair<std::string, std::int32_t>* found = nullptr;
+        for (const auto& added : added_tokens_) {
+            if ((found == nullptr || added.first.size() > found->first.size()) &&
+                text.substr(pos, added.first.size()) == added.first)
+                found = &added;
+        }
+        return found;
+    }
+
     // Greedy longest-match-first WordPiece; a word with any piece missing from the
     // vocabulary becomes a single unknown token.
     void encode_word(const std::string& word, std::vector<std::int32_t>& ids) const {
@@ -347,25 +325,32 @@ class MobileBertTokenizer final : public IMobileBertTokenizer {
                 "separate CJK, strip accents, lowercase)");
     }
 
+    // As the builder requires, an added token has an id inside the vocabulary, the
+    // vocabulary token's own id when it is one, so no id read from the file sizes
+    // a table.
     void read_added_tokens(const nlohmann::json& json) {
         const auto added = json.find("added_tokens");
         if (added == json.end())
             return;
         for (const auto& entry : *added) {
             const auto content = entry.at("content").get<std::string>();
-            const auto id = entry.at("id").get<std::int32_t>();
-            if (content.empty() || id < 0)
-                throw std::runtime_error("mobilebert tokenizer has an invalid added token");
+            const auto& id_value = entry.at("id");
+            const auto id = id_value.is_number_integer() ? id_value.get<std::int64_t>() : -1;
+            const auto in_vocab = vocab_.find(content);
+            if (content.empty() || id < 0 ||
+                static_cast<std::uint64_t>(id) >= id_to_token_.size() ||
+                (in_vocab != vocab_.end() && in_vocab->second != id))
+                throw std::runtime_error("mobilebert tokenizer added token '" + content +
+                                         "' has an invalid id");
             if (entry.value("normalized", false) || entry.value("single_word", false) ||
                 entry.value("lstrip", false) || entry.value("rstrip", false))
                 throw std::runtime_error("mobilebert tokenizer added token '" + content +
                                          "' uses matching options this tokenizer does not "
                                          "implement");
-            if (static_cast<std::size_t>(id) >= id_to_token_.size())
-                id_to_token_.resize(static_cast<std::size_t>(id) + 1);
+            const auto token_id = static_cast<std::int32_t>(id);
             id_to_token_[static_cast<std::size_t>(id)] = content;
-            token_to_id_[content] = id;
-            added_tokens_.emplace_back(content, id);
+            token_to_id_[content] = token_id;
+            added_tokens_.emplace_back(content, token_id);
         }
     }
 
