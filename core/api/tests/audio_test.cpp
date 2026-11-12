@@ -41,8 +41,68 @@ void write_bundle(const std::filesystem::path& path, const std::string& mode) {
     output.write("PLAN", 4);
 }
 
+void test_timed_labels(const trtmc::Model& model, trtmc::AudioView audio) {
+    const auto task = model.task<trtmc::AudioToTimedLabels>();
+    check(task.config_fields().size() == 1 && task.config_fields()[0].name == "gain",
+          "timed labels expose only the family's declared config");
+    auto timed = task.run({audio}, {{"gain", 2.0}});
+    const std::vector<std::string_view> speakers{"speaker_0", "speaker_1"};
+    const auto intervals = timed.intervals();
+    check(timed.labels() == speakers && timed.vocabulary_id().empty() && intervals.size() == 3 &&
+              intervals[0].start_seconds == 0.0 && intervals[0].end_seconds == 0.01 &&
+              intervals[0].label == 0 && intervals[1].label == 1 &&
+              intervals[1].end_seconds == 0.03 && intervals[2].start_seconds == 0.02,
+          "timed labels keep result-local speakers and overlapping turns in start order");
+    const auto scores = timed.frame_scores();
+    check(scores.rows == 3 && scores.columns == 2 && scores.values.size() == 6 &&
+              scores.values[0] == 4.0F && scores.values[3] == 6.0F &&
+              timed.frame_seconds() == 0.01 && timed.score_kind() == TRTMC_SCORE_LOGIT,
+          "frame scores stay raw [frame, label] logits on a declared frame clock");
+    check(timed.setup_ms() == 2 && timed.inference_ms() == 4,
+          "timed labels keep the family's timings");
+    auto moved = std::move(timed);
+    check(moved.intervals().size() == 3 && timed.intervals().empty() &&
+              timed.frame_scores().values.empty(),
+          "timed labels owner move clears the source views");
+    check(rejects([&] { (void)task.run({audio}, {{"threshold", 0.5}}); }, TRTMC_INVALID_CONFIG),
+          "timed labels reject undeclared config");
+}
+
+void test_timed_label_modes(const std::filesystem::path& root, const trtmc::LoadOptions& options,
+                            trtmc::AudioView audio) {
+    // Every mode breaks one promise of the contract; the shared layer refuses
+    // the family result instead of handing it to the application.
+    for (const auto* mode : {"bad_labels", "timed_unknown_label", "timed_unordered",
+                             "timed_overlap", "timed_empty_interval", "timed_frame_shape",
+                             "timed_frame_seconds", "timed_frames_without_scores"}) {
+        const auto path = root / (std::string{"audio-timed-"} + mode + ".bundle");
+        write_bundle(path, mode);
+        check(rejects(
+                  [&] {
+                      (void)trtmc::Model::load(path.string(), options)
+                          .task<trtmc::AudioToTimedLabels>()
+                          .run({audio});
+                  },
+                  TRTMC_INTERNAL_ERROR),
+              mode);
+        std::filesystem::remove(path);
+    }
+    const auto path = root / "audio-timed-intervals-only.bundle";
+    write_bundle(path, "timed_intervals_only");
+    {
+        const auto result = trtmc::Model::load(path.string(), options)
+                                .task<trtmc::AudioToTimedLabels>()
+                                .run({audio});
+        const auto scores = result.frame_scores();
+        check(result.intervals().size() == 3 && scores.rows == 0 && scores.columns == 0 &&
+                  scores.values.empty() && result.frame_seconds() == 0 && result.score_kind() == 0,
+              "timed labels without frame scores report an empty frame matrix");
+    }
+    std::filesystem::remove(path);
+}
+
 void test_stateless(const trtmc::Model& model, trtmc::AudioView audio) {
-    check(model.tasks().size() == 14, "all stateless audio contracts are discoverable");
+    check(model.tasks().size() == 15, "all stateless audio contracts are discoverable");
     auto generated = model.task<trtmc::TextToAudio>().run({"wind"}, {{"preset", "calm"}});
     check(generated.channels() == 2 && generated.sample_rate() == 24000 &&
               generated.frame_count() == 2,
@@ -80,6 +140,7 @@ void test_stateless(const trtmc::Model& model, trtmc::AudioView audio) {
     check(events.labels() == event_labels && events.scores()[0] == 1.5F &&
               events.kind() == TRTMC_SCORE_LOGIT && events.vocabulary_id().empty(),
           "audio class scores stay raw multi-label logits over named sound events");
+    test_timed_labels(model, audio);
     auto language = model.task<trtmc::AudioLanguageIdentification>().run({audio});
     check(language.labels() == std::vector<std::string_view>{"en", "fr"} &&
               language.scores()[0] == 0.75F && language.kind() == TRTMC_SCORE_PROBABILITY &&
@@ -448,6 +509,7 @@ int main(int argc, char** argv) {
     test_mixed(full.string(), options, audio);
     test_generated_batches(full.string(), options);
     test_generated_modes(root, options);
+    test_timed_label_modes(root, options, audio);
     const auto limited = trtmc::Model::load(restricted.string(), options);
     check(limited.supports<trtmc::SpeechTranscription>() &&
               !limited.supports<trtmc::SpeechTranslation>() &&
