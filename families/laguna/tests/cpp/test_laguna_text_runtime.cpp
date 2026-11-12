@@ -162,6 +162,17 @@ void test_chat_template() {
     check(trtmc::laguna::render_chat("Q", " \n", false) ==
               "\xE3\x80\x88|EOS|\xE3\x80\x89<user>\nQ\n</user>\n<assistant>\n</think>",
           "a blank system message drops the system block");
+    // Python's strip() / rstrip() treat U+3000, U+00A0 and U+2028 as whitespace.
+    check(trtmc::laguna::render_chat("Q", "\xE3\x80\x80\xC2\xA0", false) ==
+              "\xE3\x80\x88|EOS|\xE3\x80\x89<user>\nQ\n</user>\n<assistant>\n</think>",
+          "a system message of Unicode whitespace drops the system block");
+    check(trtmc::laguna::render_chat("Q", "Be brief.\xE3\x80\x80\xE2\x80\xA8\n", false) ==
+              header + "Be brief.\n</system>\n<user>\nQ\n</user>\n<assistant>\n</think>",
+          "trailing Unicode whitespace is right-stripped");
+    check(trtmc::laguna::render_chat("Q", "Caf\xC3\xA9 \xE3\x80\x89", false) ==
+              header +
+                  "Caf\xC3\xA9 \xE3\x80\x89\n</system>\n<user>\nQ\n</user>\n<assistant>\n</think>",
+          "multi-byte characters that are not whitespace are kept");
 }
 
 void test_sampler() {
@@ -175,6 +186,17 @@ void test_sampler() {
     check(greedy->sample(eos_logits, 3, params).is_eos, "any listed EOS id stops");
     check(trtmc::laguna::is_eos_token(params, 24) && !trtmc::laguna::is_eos_token(params, 9),
           "EOS membership");
+
+    // Any top_p below 1 enables nucleus sampling: over uniform logits the draws are not all
+    // the first maximum that the greedy path returns.
+    trtmc::laguna::SamplingParams nucleus;
+    nucleus.top_p = 0.999999F;
+    auto sampler = trtmc::laguna::create_sampler(nucleus);
+    const float uniform[] = {0.0F, 0.0F, 0.0F, 0.0F};
+    bool other = false;
+    for (int i = 0; i < 32; ++i)
+        other = other || sampler->sample(uniform, 4, nucleus).token_id != 0;
+    check(other, "top_p just below 1 samples from the nucleus");
 }
 
 } // namespace

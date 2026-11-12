@@ -101,6 +101,12 @@ def test_config_reads_the_xs2_layout() -> None:
         },
         {"rope_parameters": {"rope_type": "default", "rope_theta": 10000.0}},
         {"rope_parameters": {"full_attention": XS2_ROPE["full_attention"]}},
+        {
+            "rope_parameters": {
+                **XS2_ROPE,
+                "full_attention": {**XS2_ROPE["full_attention"], "rope_theta": 1.0},
+            }
+        },
     ],
 )
 def test_config_rejects_what_the_family_cannot_represent(override: dict) -> None:

@@ -101,8 +101,16 @@ def _hub_layout(model) -> dict[str, np.ndarray]:
 
 @pytest.fixture(scope="module")
 def tiny(tmp_path_factory):
+    saved = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
+    try:
+        yield _tiny_model(tmp_path_factory)
+    finally:
+        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = saved
+
+
+def _tiny_model(tmp_path_factory):
     torch.manual_seed(0)
     config = laguna_hf.LagunaConfig(**TINY)
     model = laguna_hf.LagunaForCausalLM(config).eval()

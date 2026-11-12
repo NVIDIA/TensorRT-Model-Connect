@@ -20,7 +20,7 @@ float clamp_unit(float value, float fallback) {
 }
 
 bool top_p_enabled(float top_p) {
-    return top_p > 0.0F && top_p < 1.0F - kEpsilon;
+    return top_p > 0.0F && top_p < 1.0F;
 }
 
 SampleResult argmax(const float* logits, std::int32_t vocab_size, const SamplingParams& params) {

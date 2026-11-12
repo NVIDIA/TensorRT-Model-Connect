@@ -148,6 +148,9 @@ def _rope_spec(params: dict, head_dim: int, layer_type: str) -> RopeSpec:
         return RopeSpec("default", theta, rotary_dim)
     if rope_type != "yarn":
         raise ValueError(f"Laguna does not support rope_type={rope_type!r}")
+    if theta <= 1.0:
+        # The YaRN correction range divides by log(rope_theta).
+        raise ValueError(f"Laguna YaRN rope_parameters[{layer_type!r}] needs rope_theta > 1")
     if params.get("mscale") or params.get("mscale_all_dim"):
         raise ValueError("Laguna YaRN with mscale / mscale_all_dim is not supported")
     attention_factor = params.get("attention_factor")
