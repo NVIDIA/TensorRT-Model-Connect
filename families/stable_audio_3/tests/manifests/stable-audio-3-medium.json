@@ -6,6 +6,7 @@
   "family": "stable_audio_3",
   "task": "text_to_audio",
   "precision": "fp16",
+  "tensor_parallel_size": 1,
   "testcases": [
     {
       "name": "stable-audio-3-medium-rain-10s",

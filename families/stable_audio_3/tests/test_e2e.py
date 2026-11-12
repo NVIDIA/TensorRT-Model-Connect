@@ -129,7 +129,8 @@ def _runtime() -> tuple[Path, Path]:
 
 def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
     build(BuildRequest(model_dir=model_dir, output_path=bundle, family=FAMILY, task=manifest["task"],
-                       precision=manifest["precision"]))
+                       precision=manifest["precision"],
+                       tensor_parallel_size=int(manifest.get("tensor_parallel_size", 1))))
 
 
 def _environment(runtime_root: Path) -> dict:
