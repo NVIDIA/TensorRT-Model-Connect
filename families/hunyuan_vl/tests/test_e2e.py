@@ -92,14 +92,22 @@ def _checkpoint(manifest):
         return root
     from huggingface_hub import snapshot_download
 
-    # The repository root holds HunyuanOCR-1.5; v1.0/ and the dflash/ draft are other models.
-    return Path(
-        snapshot_download(
+    # The E2E reads only the exact cached snapshot, as CI provides it offline. The repository root
+    # holds HunyuanOCR-1.5; v1.0/ and the dflash/ draft are other models.
+    try:
+        snapshot = snapshot_download(
             manifest["hf_id"],
             revision=manifest["hf_revision"],
             allow_patterns=["*.json", "*.jinja", "model.safetensors", "assets/*"],
+            local_files_only=True,
         )
-    )
+    except Exception as error:
+        raise AssertionError(
+            f"selected {FAMILY} E2E requires the exact cached checkpoint {manifest['hf_id']} at "
+            f"revision {manifest['hf_revision']} (download it first or set "
+            "TRTMC_HUNYUAN_VL_MODEL_DIR)"
+        ) from error
+    return Path(snapshot)
 
 
 def _native_tool(runtime, name):
