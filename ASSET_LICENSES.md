@@ -102,6 +102,10 @@ content in all three model families:
 - `probe_06_leading_trailing_silence_48k_stereo.wav`
 - `probe_08_noisy_48k_stereo_snr20.wav`
 
+A byte-identical copy of `probe_02_clean_16k_mono_no_resample.wav` is stored at:
+
+- `families/voxtral/tests/data/probe_02_clean_16k_mono_no_resample.wav`
+
 The PersonaPlex fixture contains the same maintainer-owned spoken recording,
 converted to mono 24 kHz float32 for official-reference regression tests:
 
@@ -133,6 +137,7 @@ golden data.
 ## LibriSpeech accuracy fixture
 
 `families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+(byte-identical copy: `families/voxtral/tests/data/librispeech-test-clean-6930-75918-0003.wav`)
 is utterance `6930-75918-0003` from the LibriSpeech `test-clean` split,
 distributed by OpenSLR as SLR12 under the Creative Commons Attribution 4.0
 International license. LibriSpeech was prepared by Vassil Panayotov with the

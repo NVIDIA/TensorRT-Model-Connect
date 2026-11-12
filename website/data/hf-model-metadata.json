@@ -1504,6 +1504,17 @@
         "DeepseekV3ForCausalLM"
       ],
       "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "mzbac/voxtral-mini-3b-4bit-mixed",
+      "revision": "d5803d1a8b3e75df4722fc721e3a7df9b57dc73d",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "voxtral",
+      "architectures": [
+        "VoxtralForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
     }
   ]
 }

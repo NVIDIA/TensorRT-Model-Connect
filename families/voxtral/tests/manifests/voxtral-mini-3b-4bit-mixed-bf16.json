@@ -1,0 +1,19 @@
+{
+  "name": "voxtral-mini-3b-4bit-mixed-bf16",
+  "hf_id": "mzbac/voxtral-mini-3b-4bit-mixed",
+  "hf_revision": "d5803d1a8b3e75df4722fc721e3a7df9b57dc73d",
+  "bundle": "voxtral-mini-3b-4bit-mixed-bf16.bundle",
+  "family": "voxtral",
+  "task": "speech_transcription",
+  "precision": "bf16",
+  "max_sequence_length": 4096,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "voxtral-mini-3b-4bit-mixed-bf16-librispeech",
+      "premerge": false,
+      "test_input_audio": "data/librispeech-test-clean-6930-75918-0003.wav",
+      "max_new_tokens": 256
+    }
+  ]
+}
