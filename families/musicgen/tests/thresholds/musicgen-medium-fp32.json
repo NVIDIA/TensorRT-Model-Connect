@@ -1,0 +1,6 @@
+{
+  "waveform_cosine_min": 0.999,
+  "waveform_relative_rmse_max": 0.01,
+  "waveform_rms_min": 0.001,
+  "prompt_waveform_relative_difference_min": 0.1
+}

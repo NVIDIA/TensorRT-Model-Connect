@@ -1,0 +1,2 @@
+# Build-time checkpoint reader and official E2E reference.
+torch>=2.6
