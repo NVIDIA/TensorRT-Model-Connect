@@ -714,8 +714,12 @@ class _FluxModel:
                 )
             }
             with timed_weight_loading(build_timing, "mistral_encoder"):
+                # Only the layers up to the deepest extracted hidden state reach
+                # the output; the builder keeps the full count for validation.
                 mistral_weights = load_mistral_encoder_weights(
-                    te_dir, precision=precision, **te_arch
+                    te_dir,
+                    precision=precision,
+                    **{**te_arch, "num_layers": max(te_spec["extract_layers"])},
                 )
             with timed_trt_compile(build_timing, "mistral_encoder"):
                 mistral_plan = build_mistral_encoder_engine(
