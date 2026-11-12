@@ -77,6 +77,8 @@ def test_full_checkpoint_features_are_paired_in_default_display(recorded_checkpo
     run, payload, original, native, reference, calls, _ = recorded_checkpoint
     recorder = run(precision)
     data = json.loads((recorder.directory / "evidence.json").read_text())
+    assert data["evidence_status"] == "recorded"
+    assert data["issues"] == []
     assert payload == original
     assert calls == ["build", "reference", *(["gelu_pytorch_tanh"] if precision == "fp16" else []), "native"]
     for role, expected in (("native", native), ("reference", reference)):
@@ -95,6 +97,27 @@ def test_full_checkpoint_features_are_paired_in_default_display(recorded_checkpo
     assert comparison["scope"] == "independent_reference" and comparison["enforced"] is True
     assert [check["name"] for check in comparison["checks"]] == ["cosine", "max_abs_error"]
     assert all(check["passed"] for check in comparison["checks"])
+    assert len(_assess_reference_comparisons(data)) == 1
+    if precision == "fp16":
+        early = next(item["value"]["tanh_reference"] for item in data["observations"]
+                     if item["name"] == "diagnostics" and "tanh_reference" in item["value"])
+        control = data["diagnostics"]["counterfactual_control"]
+        diagnostics = [
+            (early, reference + 0.1),
+            (control["native"]["values"], native),
+            (control["reference"]["values"], reference),
+            (control["tanh_reference"], reference + 0.1),
+        ]
+        assert len({tensor["artifact"] for tensor, _ in diagnostics}) == 4
+        for tensor, expected in diagnostics:
+            assert tensor["shape"] == [257, 768]
+            saved = np.load(recorder.directory / tensor["artifact"], allow_pickle=False)
+            assert saved.size == 197376
+            np.testing.assert_array_equal(saved, expected)
+            assert any(item["path"] == tensor["artifact"] and item["role"] == "diagnostics"
+                       for item in data["artifacts"])
+        assert control["name"] == "Tanh approximation control"
+        assert "scope" not in control
     top = render_case(data, recorder.directory).split('<details class="case-details">', 1)[0]
     assert "257 × 768" in top and "197376 values" in top
     assert '<polyline aria-label="Native"' in top
@@ -143,7 +166,8 @@ def test_successful_tanh_control_does_not_add_an_independent_reference(tmp_path)
     assert (native, reference, counterfactual) == original
     assert len(_assess_reference_comparisons(recorder.data)) == 1
     control = recorder.data["diagnostics"]["counterfactual_control"]
-    assert control["tanh_reference"] == counterfactual
+    assert control["tanh_reference"]["shape"] == [1, 2]
+    assert control["tanh_reference"]["values"] == counterfactual
     assert control["actual"] == 0.0 and control["operator"] == "<"
     assert control["expected"] == e2e._TANH_SHARE_LIMIT and control["passed"] is True
 

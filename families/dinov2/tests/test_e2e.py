@@ -354,8 +354,9 @@ def _check_features(native: list[list[float]], reference: list[list[float]], pre
     if precision == "fp16":
         record_evidence("thresholds", {"max_tanh_defect_share": _TANH_SHARE_LIMIT})
         record_evidence("diagnostics", {"counterfactual_control": {
-            "name": "Tanh approximation control", "native": {"values": native},
-            "reference": {"values": reference}, "tanh_reference": tanh_reference,
+            "name": "Tanh approximation control", "native": {"values": np.asarray(native)},
+            "reference": {"values": np.asarray(reference)},
+            "tanh_reference": np.asarray(tanh_reference),
             "actual": share, "operator": "<", "expected": _TANH_SHARE_LIMIT,
             "passed": share < _TANH_SHARE_LIMIT,
         }})
@@ -398,7 +399,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     if gate == "fp16":
         with evidence_stage("reference"):
             tanh_reference = _reference(model_dir, case, hidden_act="gelu_pytorch_tanh")
-        record_evidence("diagnostics", {"tanh_reference": tanh_reference})
+        record_evidence("diagnostics", {"tanh_reference": np.asarray(tanh_reference)})
     with evidence_stage("native"):
         payload = _run_json(binary, runtime_root, bundle, case, "extract-features", "--task",
                             "image_to_token_and_pooled_features", "--image",
