@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <numeric>
 #include <stdexcept>
 
@@ -30,12 +31,20 @@ int32_t Sampler::sample(const std::vector<float>& logits) {
         return greedy();
     std::vector<int32_t> order(logits.size());
     std::iota(order.begin(), order.end(), 0);
-    std::stable_sort(order.begin(), order.end(), [&](int32_t a, int32_t b) {
-        return logits[static_cast<std::size_t>(a)] > logits[static_cast<std::size_t>(b)];
-    });
     std::size_t keep = order.size();
     if (config_.top_k > 0)
         keep = std::min<std::size_t>(keep, static_cast<std::size_t>(config_.top_k));
+    // Descending logit, equal logits by id; only the kept candidates need ordering.
+    const auto before = [&](int32_t a, int32_t b) {
+        const float left = logits[static_cast<std::size_t>(a)];
+        const float right = logits[static_cast<std::size_t>(b)];
+        return left > right || (left == right && a < b);
+    };
+    if (keep < order.size())
+        std::partial_sort(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(keep),
+                          order.end(), before);
+    else
+        std::sort(order.begin(), order.end(), before);
     const double top = logits[static_cast<std::size_t>(order.front())];
     std::vector<double> weights(keep);
     double total = 0.0;

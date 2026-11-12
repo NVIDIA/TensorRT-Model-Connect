@@ -70,6 +70,12 @@ def _environment() -> tuple[Path, Path, Path, Path]:
     return binary, runtime, native, reference
 
 
+def _eos_ids(checkpoint: Path) -> set[int]:
+    """End-of-sequence ids the builder writes to the bundle (``generation_config.json``)."""
+    value = json.loads((checkpoint / "generation_config.json").read_text(encoding="utf-8"))["eos_token_id"]
+    return {value} if isinstance(value, int) else set(value)
+
+
 def _thresholds(case_name: str) -> dict:
     path = TEST_DIR / "thresholds" / f"{case_name}.json"
     return json.loads(path.read_text(encoding="utf-8"))["threshold_overrides"] if path.is_file() else {}
@@ -161,6 +167,8 @@ def test_official_checkpoint_e2e(case: dict, tmp_path: Path, request) -> None:
     teacher = reference["teacher_forced"]
     tolerance = float(_thresholds(case["name"]).get("near_tie_logit", 0.0))
     assert teacher["candidate"] == tokens and len(tokens) <= case["max_new_tokens"]
+    # Generation stops at an end-of-sequence id (kept in the ids) or at the budget, never early without one.
+    assert tokens and (tokens[-1] in _eos_ids(checkpoint) or len(tokens) == case["max_new_tokens"]), tokens
     for index, (token, gap) in enumerate(zip(teacher["candidate"], teacher["candidate_gap"])):
         assert gap <= tolerance, (
             f"token {index} ({token}) is {gap:.4f} below the FP32 reference maximum; "

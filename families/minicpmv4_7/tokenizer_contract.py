@@ -20,6 +20,7 @@ _BASE_VOCAB_SIZE = 248044
 _MERGE_COUNT = 247587
 _ADDED_TOKEN_COUNT = 100
 _SPECIAL_TOKEN_COUNT = 88
+FULL_VOCAB_SIZE = _BASE_VOCAB_SIZE + _ADDED_TOKEN_COUNT
 # Chat and image protocol tokens: content -> (id, special).
 _PROTOCOL_TOKENS = {
     "<|endoftext|>": (248044, True),
@@ -75,8 +76,14 @@ def _byte_level_alphabet() -> list[str]:
     return alphabet
 
 
-def check_tokenizer_contract(model_dir: Path) -> None:
-    """Raise ``ValueError`` unless ``tokenizer.json`` is exactly what the runtime implements."""
+def check_tokenizer_contract(model_dir: Path, vocab_size: int) -> None:
+    """Raise ``ValueError`` unless ``tokenizer.json`` is exactly what the runtime implements.
+
+    ``vocab_size`` is the decoder's; it must cover exactly the tokenizer's ids, so that every prompt id has a
+    decoder row and every generated id can be decoded.
+    """
+    if vocab_size != FULL_VOCAB_SIZE:
+        raise ValueError(f"minicpmv4_7 decoder vocab_size {vocab_size} differs from the tokenizer's {FULL_VOCAB_SIZE} ids")
     path = model_dir / "tokenizer.json"
     if not path.is_file():
         raise ValueError("minicpmv4_7 requires tokenizer.json (the runtime tokenizer reads it)")

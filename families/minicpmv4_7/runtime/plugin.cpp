@@ -17,12 +17,14 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <cuda_runtime_api.h>
 #include <limits>
 #include <memory>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -124,9 +126,12 @@ RuntimeConfig parse_runtime(const BundleReader& bundle) {
     return config;
 }
 
+constexpr int64_t kDefaultMaxNewTokens = 128;
+
 const std::vector<internal::ConfigField>& config_fields() {
     static const std::vector<internal::ConfigField> fields{
-        {"max_new_tokens", internal::ConfigKind::I64, int64_t{128}, "Generated token budget"},
+        {"max_new_tokens", internal::ConfigKind::I64, std::nullopt,
+         "Generated token budget; by default up to 128 within the decoder capacity"},
         {"temperature", internal::ConfigKind::F64, 1.0, "Sampling temperature"},
         {"top_k", internal::ConfigKind::I64, int64_t{1},
          "Top-k sampling; 1 selects greedy decoding"},
@@ -217,8 +222,8 @@ class Model final : public internal::IModel, public internal::IImagesTextToText 
         const auto& fields = config_fields();
         const Span<const internal::ConfigField> schema{fields.data(), fields.size()};
         internal::validate_config(schema, supplied);
-        const auto max_new = *internal::config_get<int64_t>(supplied, schema, "max_new_tokens");
-        if (max_new <= 0 || max_new > config_.capacity)
+        const auto requested = internal::config_get<int64_t>(supplied, schema, "max_new_tokens");
+        if (requested && (*requested <= 0 || *requested > config_.capacity))
             throw std::invalid_argument("MiniCPM-V 4.7 max_new_tokens must be in [1, capacity]");
         const SamplingConfig sampling{
             *internal::config_get<double>(supplied, schema, "temperature"),
@@ -226,7 +231,6 @@ class Model final : public internal::IModel, public internal::IImagesTextToText 
             *internal::config_get<double>(supplied, schema, "top_p"),
             *internal::config_get<int64_t>(supplied, schema, "seed")};
         const bool thinking = *internal::config_get<bool>(supplied, schema, "enable_thinking");
-        std::lock_guard<std::mutex> lock(mutex_);
         const auto setup_begin = Clock::now();
 
         std::vector<ChatMessage> messages;
@@ -273,11 +277,16 @@ class Model final : public internal::IModel, public internal::IImagesTextToText 
             format_conversation(config_.prompts.at(thinking ? "true" : "false"), messages);
         const auto expanded = expand_images(formatted, images, config_.processor.merge_factor);
         const auto ids = tokenizer_->encode(expanded);
-        if (ids.empty() || ids.size() + static_cast<std::size_t>(max_new) >
-                               static_cast<std::size_t>(config_.capacity) + 1)
+        // The last generated token is never fed back, so it needs no cache row.
+        const auto room =
+            static_cast<int64_t>(config_.capacity) + 1 - static_cast<int64_t>(ids.size());
+        const int64_t max_new = requested ? *requested : std::min(kDefaultMaxNewTokens, room);
+        if (ids.empty() || max_new < 1 || max_new > room)
             throw std::invalid_argument(
                 "MiniCPM-V 4.7 prompt and output exceed the decoder capacity");
 
+        // Host preparation above reads only immutable members; engines and state need the lock.
+        std::lock_guard<std::mutex> lock(mutex_);
         std::vector<std::array<int32_t, 2>> grids;
         std::vector<uint8_t> features;
         for (auto& image : images)
