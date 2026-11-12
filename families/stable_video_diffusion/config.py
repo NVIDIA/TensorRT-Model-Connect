@@ -10,6 +10,7 @@ refused here, before weights are read.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 PIPELINE = "StableVideoDiffusionPipeline"
@@ -82,6 +83,8 @@ def _vae(raw: dict) -> dict:
              "the VAE encoder must use DownEncoderBlock2D blocks")
     _require(len(raw["down_block_types"]) == len(raw["block_out_channels"]),
              "VAE block types must match the level count")
+    _require(len(raw["block_out_channels"]) == 4,
+             "the VAE must have four levels: the bundle uses an eightfold latent scale")
     _require(int(raw["in_channels"]) == 3 and int(raw["out_channels"]) == 3, "the VAE must be RGB")
     return {
         "in_channels": 3,
@@ -134,6 +137,9 @@ def _feature_extractor(raw: dict) -> dict:
     mean = [float(value) for value in raw["image_mean"]]
     std = [float(value) for value in raw["image_std"]]
     _require(len(mean) == 3 and len(std) == 3, "the CLIP normalization must have three channels")
+    _require(all(math.isfinite(value) for value in mean)
+             and all(math.isfinite(value) and value > 0.0 for value in std),
+             "the CLIP normalization needs finite means and positive standard deviations")
     return {"image_mean": mean, "image_std": std}
 
 

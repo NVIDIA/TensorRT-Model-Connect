@@ -35,7 +35,12 @@ KarrasSchedule karras_schedule(std::int32_t steps, double sigma_min, double sigm
     for (std::int32_t index = 0; index < steps; ++index) {
         const double ramp = steps > 1 && index == steps - 1 ? 1.0 : index * ramp_step;
         const double sigma = std::pow(max_inv_rho + ramp * (min_inv_rho - max_inv_rho), kRho);
-        schedule.sigmas.push_back(static_cast<float>(sigma));
+        const auto value = static_cast<float>(sigma);
+        // Every active sigma is a divisor and a log argument in float32.
+        if (!std::isfinite(value) || !(value > 0.0F))
+            throw std::invalid_argument(
+                "Stable Video Diffusion sigma range is not representable in float32");
+        schedule.sigmas.push_back(value);
     }
     for (const float sigma : schedule.sigmas)
         schedule.timesteps.push_back(0.25F * std::log(sigma));

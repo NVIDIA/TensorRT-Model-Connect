@@ -74,6 +74,11 @@ def _compile(populate, *, work, verbose: bool) -> bytes:
     return bytes(plan)
 
 
+def _vae_encoder_work(vae_cfg: dict, work):
+    """The VAE encoder's dtype: the pipeline upcasts only the encode when force_upcast is set."""
+    return trt.float32 if vae_cfg["force_upcast"] else work
+
+
 def _image_encoder_plan(model_dir: Path, cfg: dict, work, verbose: bool) -> bytes:
     weights = _load_weights(model_dir, "image_encoder", "model.safetensors")
     return _compile(lambda network: clip_builder.build_image_encoder(
@@ -163,8 +168,7 @@ def build(request, writer) -> None:
             f"stable_video_diffusion needs height and width that are multiples of {multiple}")
     verbose = bool(request.verbose)
     work = _PRECISIONS[precision]
-    # The pipeline upcasts only the VAE encode when force_upcast is set.
-    encoder_work = trt.float32 if cfg["vae"]["force_upcast"] else work
+    encoder_work = _vae_encoder_work(cfg["vae"], work)
 
     writer.set_header(family="stable_video_diffusion", task=request.task, backend=request.backend)
     writer.add_bytes("image_encoder.plan", _image_encoder_plan(model_dir, cfg, work, verbose))

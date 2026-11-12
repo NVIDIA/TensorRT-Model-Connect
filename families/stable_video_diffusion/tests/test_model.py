@@ -135,6 +135,10 @@ def test_runtime_config_carries_the_pipeline_defaults(tmp_path):
     ("image_encoder/config.json", {"hidden_act": "quick_gelu"}, "exact GELU"),
     ("image_encoder/config.json", {"image_size": 336}, "224"),
     ("model_index.json", {"_class_name": "StableDiffusionPipeline"}, "model_index.json"),
+    ("vae/config.json", {"block_out_channels": [128, 256, 512],
+                         "down_block_types": ["DownEncoderBlock2D"] * 3}, "four levels"),
+    ("feature_extractor/preprocessor_config.json", {"image_std": [0.27, 0.0, 0.28]},
+     "positive standard deviations"),
 ])
 def test_unbuilt_variants_are_refused(tmp_path, name, change, message):
     with pytest.raises(NotImplementedError, match=message):

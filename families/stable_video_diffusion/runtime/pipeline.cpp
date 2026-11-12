@@ -107,11 +107,14 @@ GenerationSettings Pipeline::resolve(internal::ConfigView config) const {
                                         " is out of range");
         return value;
     };
+    // Real-valued settings are used as float, so they must stay finite after narrowing.
     const auto real = [&](std::string_view name, double minimum) {
         const auto value = *internal::config_get<double>(config, fields, name);
-        if (!std::isfinite(value) || value < minimum)
+        if (!std::isfinite(value) || value < minimum ||
+            value > static_cast<double>(std::numeric_limits<float>::max()))
             throw internal::ConfigError("Stable Video Diffusion config " + std::string(name) +
-                                        " must be finite and at least " + std::to_string(minimum));
+                                        " must be a finite float32 value of at least " +
+                                        std::to_string(minimum));
         return value;
     };
     GenerationSettings settings;

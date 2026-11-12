@@ -13,7 +13,9 @@
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -529,6 +531,18 @@ int main() {
     }
     check_near(svd::init_noise_sigma(svd::karras_schedule(25, kSigmaMin, kSigmaMax), false), 700.0,
                0.0, "linspace spacing starts at the largest sigma");
+
+    // A positive double range whose float32 sigmas reach zero or infinity is rejected.
+    for (const auto& [sigma_min, sigma_max] :
+         {std::pair{1e-50, kSigmaMax}, std::pair{kSigmaMin, 1e39}}) {
+        bool rejected = false;
+        try {
+            (void)svd::karras_schedule(25, sigma_min, sigma_max);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        check(rejected, "a sigma range outside float32 is rejected");
+    }
 
     for (const auto& expected : kRamps) {
         const auto values = svd::guidance_ramp(expected.minimum, expected.maximum, expected.frames);

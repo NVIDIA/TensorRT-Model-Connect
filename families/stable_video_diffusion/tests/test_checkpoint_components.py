@@ -27,7 +27,11 @@ transformers = pytest.importorskip("transformers")
 
 from families.stable_video_diffusion import clip_builder, unet_builder, vae_builder  # noqa: E402
 from families.stable_video_diffusion import config as config_module  # noqa: E402
-from families.stable_video_diffusion.model import _compile, _load_weights  # noqa: E402
+from families.stable_video_diffusion.model import (  # noqa: E402
+    _compile,
+    _load_weights,
+    _vae_encoder_work,
+)
 
 MODEL_DIR = os.environ.get("TRTMC_STABLE_VIDEO_DIFFUSION_MODEL_DIR")
 pytestmark = pytest.mark.skipif(
@@ -41,9 +45,10 @@ LATENT = (8, 16)
 # engine and the same engine with plain FP16 linear and convolution layers, whose
 # FP16-accumulating tactics it must reject (relative L2 ratios, healthy / plain FP16):
 # image encoder 1.5 / 2.9 (1.5 with every attention and activation precision tried),
-# VAE encoder 0.8 / 2.1, VAE decoder 0.8 / 2.9. The UNet measures 1.0 / 1.1 at these
-# shapes, so its bound only limits general precision loss; FP16 accumulation in the UNet
-# is caught by the end-to-end FP16 shortfall bound.
+# VAE encoder 0.8 / 2.1 (an FP16 encoder: bundles of a VAE with force_upcast build it in
+# FP32, and the test then judges it as FP32), VAE decoder 0.8 / 2.9. The UNet measures
+# 1.0 / 1.1 at these shapes, so its bound only limits general precision loss; FP16
+# accumulation in the UNet is caught by the end-to-end FP16 shortfall bound.
 FP32_RATIO = 2.0
 FP16_RATIOS = {"image encoder": 2.0, "VAE encoder": 1.5, "VAE decoder": 1.5, "UNet": 1.5}
 
@@ -136,25 +141,32 @@ def test_vae_matches_the_checkpoint(precision):
     weights = _load_weights(model_dir, "vae", "diffusion_pytorch_model.safetensors")
     height, width = LATENT[0] * 8, LATENT[1] * 8
     work = _work(precision)
+    # The encoder is judged at the precision the bundle builds it in (FP32 under force_upcast).
+    encoder_work = _vae_encoder_work(cfg["vae"], work)
+    encoder_precision = "fp32" if encoder_work == trt.float32 else precision
     encoder_plan = _compile(lambda network: vae_builder.build_encoder(
-        network, weights, cfg["vae"], height, width, work), work=work, verbose=False)
+        network, weights, cfg["vae"], height, width, encoder_work), work=encoder_work,
+        verbose=False)
     decoder_plan = _compile(lambda network: vae_builder.build_decoder(
         network, weights, cfg["vae"], FRAMES, *LATENT, work), work=work, verbose=False)
-    module = diffusers.AutoencoderKLTemporalDecoder.from_pretrained(
-        model_dir / "vae", torch_dtype=torch.float32).cuda().eval()
     generator = torch.Generator().manual_seed(2)
     image = torch.rand((1, 3, height, width), generator=generator).cuda() * 2 - 1
     latents = torch.randn((FRAMES, 4, *LATENT), generator=generator).cuda()
+
+    def module():
+        """The FP32 checkpoint module; each stage starts from it, as precision casts are in place."""
+        return diffusers.AutoencoderKLTemporalDecoder.from_pretrained(
+            model_dir / "vae", torch_dtype=torch.float32).cuda().eval()
 
     def dtype(m):
         return next(m.parameters()).dtype
 
     reference, baseline = _reference_run(
-        module, lambda m: m.encode(image.to(dtype(m))).latent_dist.mode(), precision)
+        module(), lambda m: m.encode(image.to(dtype(m))).latent_dist.mode(), encoder_precision)
     actual = _run(encoder_plan, {"image": image}, {"image_latent": tuple(baseline.shape)})
-    _check("VAE encoder", precision, actual["image_latent"], reference, baseline)
+    _check("VAE encoder", encoder_precision, actual["image_latent"], reference, baseline)
     reference, baseline = _reference_run(
-        module, lambda m: m.decode(latents.to(dtype(m)), num_frames=FRAMES).sample, precision)
+        module(), lambda m: m.decode(latents.to(dtype(m)), num_frames=FRAMES).sample, precision)
     actual = _run(decoder_plan, {"latents": latents}, {"frames": tuple(baseline.shape)})
     _check("VAE decoder", precision, actual["frames"], reference, baseline)
 

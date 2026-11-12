@@ -152,6 +152,8 @@ def _time_embedding(network, timestep, time_ids, weights, cfg: dict, work):
 
     count = cfg["added_time_ids"]
     width = cfg["addition_time_embed_dim"]
+    # The pipeline stores the added time ids in the UNet's dtype; the embedding itself is FP32.
+    time_ids = g.cast(network, g.cast(network, time_ids, work), trt.float32)
     id_features = g.sinusoid_embedding(network, g.reshape(network, time_ids, (count, 1)), width)
     id_features = g.reshape(network, id_features, (1, count * width))
     hidden = g.linear(network, g.cast(network, id_features, work),

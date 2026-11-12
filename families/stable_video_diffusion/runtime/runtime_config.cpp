@@ -5,6 +5,8 @@
 
 #include "families/stable_video_diffusion/runtime/runtime_config.h"
 
+#include <algorithm>
+#include <cmath>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 
@@ -50,6 +52,14 @@ RuntimeConfig parse_runtime_config(const std::vector<char>& data) {
     config.default_seed = defaults.at("seed").get<std::int64_t>();
     if (config.precision != "fp16" && config.precision != "fp32")
         throw std::runtime_error("stable_video_diffusion runtime.json names an unknown precision");
+    const auto finite = [](float value) { return std::isfinite(value); };
+    const auto positive = [](float value) { return std::isfinite(value) && value > 0.0F; };
+    if (!std::all_of(config.clip_image_mean.begin(), config.clip_image_mean.end(), finite) ||
+        !std::all_of(config.clip_image_std.begin(), config.clip_image_std.end(), positive)) {
+        throw std::runtime_error(
+            "stable_video_diffusion runtime.json needs finite CLIP means and positive standard "
+            "deviations");
+    }
     if (config.height <= 0 || config.width <= 0 || config.num_frames <= 0 ||
         config.latent_channels <= 0 || config.latent_height * 8 != config.height ||
         config.latent_width * 8 != config.width || config.cross_attention_dim <= 0 ||

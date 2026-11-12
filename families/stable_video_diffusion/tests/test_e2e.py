@@ -281,13 +281,20 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
     assert payload["conditioned_prefix_frames"] == 0, "every frame is generated"
     assert payload["timestamps_seconds"] == pytest.approx([index / fps for index in range(frames)])
 
-    # The public C and C++ SDKs run the same Task on the same pixels.
-    for language, values in _sdk_frames(native_build, runtime_root, bundle, pixels, case,
-                                        tmp_path).items():
-        assert values.shape == shape
-        sdk_psnr = min(_frame_psnrs(_quantize(values), native))
-        print(f"{FAMILY} {case_name} {language} SDK vs CLI: min frame PSNR {sdk_psnr:.2f} dB")
-        assert sdk_psnr >= float(thresholds["min_sdk_frame_psnr"])
+    # The public C and C++ SDKs run the same Task on the same pixels. The consumers pass
+    # only the seed and the step count, so the comparison needs a case that leaves every
+    # other Config field at its default.
+    sdk_unpassed = [name for name in CONFIG_OVERRIDES if name in case]
+    if sdk_unpassed:
+        print(f"{FAMILY} {case_name}: SDK parity not compared, the consumers do not pass "
+              + ", ".join(sdk_unpassed))
+    else:
+        for language, values in _sdk_frames(native_build, runtime_root, bundle, pixels, case,
+                                            tmp_path).items():
+            assert values.shape == shape
+            sdk_psnr = min(_frame_psnrs(_quantize(values), native))
+            print(f"{FAMILY} {case_name} {language} SDK vs CLI: min frame PSNR {sdk_psnr:.2f} dB")
+            assert sdk_psnr >= float(thresholds["min_sdk_frame_psnr"])
 
     # Task invariants: the clip starts at the conditioning image and moves.
     first_psnr = _psnr(native[0], pixels)

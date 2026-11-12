@@ -9,6 +9,7 @@
 // path and diffusers 0.39.0, from the checkpoint's scheduler and feature-extractor configs.
 
 #include "families/stable_video_diffusion/runtime/preprocess.h"
+#include "families/stable_video_diffusion/runtime/runtime_config.h"
 
 #include <array>
 #include <cmath>
@@ -34,6 +35,21 @@ void check_near(double actual, double expected, double tolerance, const std::str
         std::cerr << "FAIL: " << message << ": " << actual << " vs " << expected << '\n';
         ++failures;
     }
+}
+
+// A complete runtime.json with the given CLIP standard deviations.
+std::vector<char> runtime_json(const std::string& deviations) {
+    const std::string text =
+        R"({"precision": "fp16", "height": 64, "width": 64, "num_frames": 2,)"
+        R"( "latent_channels": 4, "latent_height": 8, "latent_width": 8,)"
+        R"( "cross_attention_dim": 8, "added_time_ids": 3, "clip_image_size": 224,)"
+        R"( "clip_image_mean": [0.48, 0.46, 0.41], "clip_image_std": )" +
+        deviations +
+        R"(, "scaling_factor": 0.18215, "sigma_min": 0.002, "sigma_max": 700.0,)"
+        R"( "init_noise_sigma_includes_unit": true, "defaults": {"num_steps": 25,)"
+        R"( "min_guidance_scale": 1.0, "max_guidance_scale": 3.0, "fps": 7,)"
+        R"( "motion_bucket_id": 127, "noise_aug_strength": 0.02, "seed": 0}})";
+    return {text.begin(), text.end()};
 }
 
 } // namespace
@@ -233,6 +249,18 @@ int main() {
         rejected = true;
     }
     check(rejected, "float pixels outside [0, 1] are rejected");
+
+    // The bundle's CLIP standard deviations divide the pixels: zero or negative is rejected.
+    (void)svd::parse_runtime_config(runtime_json("[0.27, 0.26, 0.28]"));
+    for (const char* deviations : {"[0.27, 0.0, 0.28]", "[0.27, -0.26, 0.28]"}) {
+        rejected = false;
+        try {
+            (void)svd::parse_runtime_config(runtime_json(deviations));
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        check(rejected, std::string("CLIP standard deviations ") + deviations + " are rejected");
+    }
 
     if (failures != 0)
         return 1;
