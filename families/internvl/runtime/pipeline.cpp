@@ -389,9 +389,16 @@ TextResult InternVlPipeline::generate(const std::string& prompt, const float* im
         // features in tile order, as the reference model does.
         const std::size_t tile_values =
             preprocessed.pixel_values.size() / static_cast<std::size_t>(preprocessed.num_tiles);
+        // Copy the metadata once and only the current tile's pixels per tile:
+        // copying the whole multi-tile buffer per tile costs O(tiles^2).
+        InternVlPreprocessedImage tile_image;
+        tile_image.image_grid_hws = preprocessed.image_grid_hws;
+        tile_image.channels = preprocessed.channels;
+        tile_image.height = preprocessed.height;
+        tile_image.width = preprocessed.width;
+        tile_image.num_tiles = 1;
+        tile_image.ok = preprocessed.ok;
         for (int32_t tile = 0; tile < preprocessed.num_tiles; ++tile) {
-            InternVlPreprocessedImage tile_image = preprocessed;
-            tile_image.num_tiles = 1;
             const auto first =
                 preprocessed.pixel_values.begin() + static_cast<std::ptrdiff_t>(tile * tile_values);
             tile_image.pixel_values.assign(first, first + static_cast<std::ptrdiff_t>(tile_values));

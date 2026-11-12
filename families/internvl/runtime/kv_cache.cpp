@@ -70,12 +70,13 @@ void InternvlKvCache::write_position_input(TensorMap& inputs, int32_t seq_len) {
 }
 
 void InternvlKvCache::write_batched_mask(TensorMap& inputs, int32_t seq_len) {
-    // Batched prefill mask: (seq_len, max_length + seq_len). Columns
-    // [0, valid) are visible cache, [valid, max_length) are stale slots,
-    // [max_length, max_length+seq_len) are the new tokens — causal so
-    // token i sees tokens 0..i.
+    // Batched prefill mask: (seq_len, cache_columns + seq_len). Columns
+    // [0, valid) are visible cache, [valid, cache_columns) are stale slots
+    // (none with valid-prefix attention), the last seq_len columns are the new
+    // tokens — causal so token i sees tokens 0..i.
     const int32_t valid = std::max(0, std::min(position_, max_length_));
-    const int32_t kv_len = max_length_ + seq_len;
+    const int32_t cache_columns = mask_cache_columns(valid);
+    const int32_t kv_len = cache_columns + seq_len;
     const std::size_t total = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(kv_len);
     mask_buf_.assign(total, kMaskedScore);
     for (int32_t i = 0; i < seq_len; ++i) {
@@ -83,7 +84,7 @@ void InternvlKvCache::write_batched_mask(TensorMap& inputs, int32_t seq_len) {
         for (int32_t j = 0; j < valid; ++j)
             mask_buf_[row + static_cast<std::size_t>(j)] = 0.0f;
         for (int32_t j = 0; j <= i; ++j)
-            mask_buf_[row + static_cast<std::size_t>(max_length_) + static_cast<std::size_t>(j)] =
+            mask_buf_[row + static_cast<std::size_t>(cache_columns) + static_cast<std::size_t>(j)] =
                 0.0f;
     }
     Tensor mask_t;
@@ -98,7 +99,8 @@ void InternvlKvCache::write_bidirectional_mask(TensorMap& inputs, int32_t seq_le
     // rows are hidden, and every token in the current block can see every other
     // token in the current block.
     const int32_t valid = std::max(0, std::min(position_, max_length_));
-    const int32_t kv_len = max_length_ + seq_len;
+    const int32_t cache_columns = mask_cache_columns(valid);
+    const int32_t kv_len = cache_columns + seq_len;
     const std::size_t total = static_cast<std::size_t>(seq_len) * static_cast<std::size_t>(kv_len);
     mask_buf_.assign(total, kMaskedScore);
     for (int32_t i = 0; i < seq_len; ++i) {
@@ -106,7 +108,7 @@ void InternvlKvCache::write_bidirectional_mask(TensorMap& inputs, int32_t seq_le
         for (int32_t j = 0; j < valid; ++j)
             mask_buf_[row + static_cast<std::size_t>(j)] = 0.0f;
         for (int32_t j = 0; j < seq_len; ++j)
-            mask_buf_[row + static_cast<std::size_t>(max_length_) + static_cast<std::size_t>(j)] =
+            mask_buf_[row + static_cast<std::size_t>(cache_columns) + static_cast<std::size_t>(j)] =
                 0.0f;
     }
     Tensor mask_t;
@@ -124,7 +126,7 @@ void InternvlKvCache::write_decode_mask(TensorMap& inputs) {
         throw std::runtime_error("internvl decoder has an invalid attention-mask rank");
 
     const int32_t valid = std::max(0, std::min(position_, max_length_));
-    const int32_t mask_width = max_length_ + 1;
+    const int32_t mask_width = mask_cache_columns(valid) + 1;
     if (mask_buf_.size() != static_cast<std::size_t>(mask_width))
         mask_buf_.resize(static_cast<std::size_t>(mask_width));
     std::fill(mask_buf_.begin(), mask_buf_.end(), kMaskedScore);
