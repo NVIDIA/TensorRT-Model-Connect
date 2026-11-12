@@ -141,19 +141,11 @@ class MagpiePipeline final : public IAudioGeneration, public IStreamingAudioGene
     std::vector<int32_t> run_gpu_greedy_loop(DecoderLoopState& state, int32_t max_frames);
     bool gpu_greedy_frame_step(DecoderLoopState& state, int32_t frame,
                                MagpieCudaBuffer& d_eos_flag);
-    void gpu_greedy_update_text_consumed(DecoderLoopState& state, int32_t frame);
 
     // GPU sampling loop (top-k temperature sampling on device)
     std::vector<int32_t> run_gpu_sampling_loop(DecoderLoopState& state, int32_t max_frames);
     bool gpu_sampling_frame_step(DecoderLoopState& state, int32_t frame,
                                  MagpieCudaBuffer& d_eos_flag, std::vector<int32_t>& h_codes);
-
-    // Unified GPU stop checking
-    bool gpu_check_stop_conditions(DecoderLoopState& state, int32_t frame,
-                                   MagpieCudaBuffer& d_eos_flag, int32_t& h_eos_flag,
-                                   int32_t& gen_frames_actual);
-    // GPU-side text completion update
-    void gpu_update_text_completion(DecoderLoopState& state, int32_t frame);
 
     // CFG passes
     bool run_cfg_uncond_pass_gpu(DecoderLoopState& state, int32_t frame);

@@ -808,8 +808,8 @@ bool MagpiePipeline::gpu_greedy_frame_step(DecoderLoopState& state, int32_t fram
     if (pos_ptr)
         cudaMemcpyAsync(pos_ptr, &pos, sizeof(int32_t), cudaMemcpyHostToDevice, stream_);
 
-    // Mask: [1, 1, W+1] — zeros for cached entries + current, -inf for rest
-    // For autoregressive (seq_len=1): allow positions 0..pos (inclusive)
+    // Mask: [1, 1, W+1], same layout as MagpieKvCache::write_decode_mask():
+    // cache rows [0, pos) and the current token (last column) are visible.
     void* mask_ptr = decoder_->device_ptr("attention_mask");
     if (mask_ptr) {
         const int32_t W = decoder_state_->max_length();
@@ -847,65 +847,49 @@ bool MagpiePipeline::gpu_greedy_frame_step(DecoderLoopState& state, int32_t fram
     return true;
 }
 
-void MagpiePipeline::gpu_greedy_update_text_consumed(DecoderLoopState& state, int32_t frame) {
-    if (state.text_consumed)
-        return;
-    if (state.use_cross_attn_tracking) {
-        std::vector<float> xattn(static_cast<std::size_t>(state.max_source_positions));
-        cudaMemcpyAsync(xattn.data(), cross_attn_weights_.data(),
-                        static_cast<std::size_t>(state.max_source_positions) * sizeof(float),
-                        cudaMemcpyDeviceToHost, stream_);
-        cudaStreamSynchronize(stream_);
-
-        if (update_magpie_text_consumed_from_cross_attn(xattn.data(), state.max_source_positions,
-                                                        state.text_consumed_threshold,
-                                                        state.max_peak_pos, state.text_consumed)) {
-            std::cerr << "[magpie-tts] Text consumed at frame " << frame
-                      << " (max_peak_pos=" << state.max_peak_pos
-                      << ", threshold=" << state.text_consumed_threshold
-                      << ", text_len=" << text_length_ << ")" << std::endl;
-        }
-        return;
-    }
-    update_magpie_text_consumed_from_heuristic(state.estimated_frames, frame, state.text_consumed);
-}
-
 std::vector<int32_t> MagpiePipeline::run_gpu_greedy_loop(DecoderLoopState& state,
                                                          int32_t max_frames) {
-    constexpr int32_t EOS_CHECK_INTERVAL = 16;
+    // Same per-frame stop rules as run_cpu_sampling_loop(): EOS gating from the
+    // attention prior, EOS checked every frame, the EOS frame is dropped, and the
+    // prior follows the alignment of every kept frame.
     constexpr int32_t MIN_FRAMES = 4;
 
     const int32_t num_cb = state.num_cb;
 
     MagpieCudaBuffer d_eos_flag(sizeof(int32_t));
-    int32_t h_eos_flag = 0;
-    cudaMemsetAsync(d_eos_flag.data(), 0, sizeof(int32_t), stream_);
-
     int32_t gen_frames_actual = 0;
 
     for (int32_t frame = 0; frame < max_frames; ++frame) {
+        const MagpieEosGate gate = magpie_eos_gate(has_attn_prior_, last_attended_pos_,
+                                                   text_length_, state.frames_past_text_consumed);
+        if (should_stop_magpie_on_eos(gate.force, frame, MIN_FRAMES)) {
+            std::cerr << "[magpie-tts] EOS forced at frame " << frame << std::endl;
+            break;
+        }
+
+        cudaMemsetAsync(d_eos_flag.data(), 0, sizeof(int32_t), stream_);
         if (!gpu_greedy_frame_step(state, frame, d_eos_flag))
             break;
+        int32_t h_eos_flag = 0;
+        cudaMemcpyAsync(&h_eos_flag, d_eos_flag.data(), sizeof(int32_t), cudaMemcpyDeviceToHost,
+                        stream_);
+        cudaStreamSynchronize(stream_);
 
+        if (should_stop_magpie_on_eos(!gate.forbid && h_eos_flag != 0, frame, MIN_FRAMES)) {
+            std::cerr << "[magpie-tts] EOS detected at frame " << frame
+                      << ", dropping terminal frame" << std::endl;
+            break;
+        }
         gen_frames_actual = frame + 1;
 
-        // Periodic checks (EOS, repetition, text-completion) every N frames
-        const bool periodic =
-            should_run_magpie_periodic_check(frame, MIN_FRAMES, EOS_CHECK_INTERVAL);
-        if (periodic &&
-            gpu_check_stop_conditions(state, frame, d_eos_flag, h_eos_flag, gen_frames_actual)) {
+        update_text_completion(state, frame);
+        update_attention_prior(frame);
+
+        if (check_finished_limit(state, frame))
             break;
-        }
-        if (periodic && !state.text_consumed) {
-            gpu_update_text_completion(state, frame);
-        }
-        if (check_finished_limit(state, frame)) {
-            gen_frames_actual = frame + 1;
-            break;
-        }
     }
 
-    // Final sync and bulk D2H of all accumulated codes
+    // Bulk D2H of the kept frames
     cudaStreamSynchronize(stream_);
     const std::size_t total_codes_bytes =
         static_cast<std::size_t>(gen_frames_actual) * num_cb * sizeof(int32_t);
@@ -1177,46 +1161,6 @@ std::vector<int32_t> MagpiePipeline::run_gpu_sampling_loop(DecoderLoopState& sta
 }
 
 // ---------------------------------------------------------------------------
-// GPU stop conditions / text completion helpers
-// ---------------------------------------------------------------------------
-
-bool MagpiePipeline::gpu_check_stop_conditions(DecoderLoopState& state, int32_t frame,
-                                               MagpieCudaBuffer& d_eos_flag, int32_t& h_eos_flag,
-                                               int32_t& gen_frames_actual) {
-    (void)state;
-    (void)frame;
-    (void)gen_frames_actual;
-
-    cudaMemcpyAsync(&h_eos_flag, d_eos_flag.data(), sizeof(int32_t), cudaMemcpyDeviceToHost,
-                    stream_);
-    cudaStreamSynchronize(stream_);
-    return h_eos_flag != 0;
-}
-
-void MagpiePipeline::gpu_update_text_completion(DecoderLoopState& state, int32_t frame) {
-    if (state.text_consumed)
-        return;
-    if (state.use_cross_attn_tracking) {
-        std::vector<float> xattn(static_cast<std::size_t>(state.max_source_positions));
-        cudaMemcpyAsync(xattn.data(), cross_attn_weights_.data(),
-                        static_cast<std::size_t>(state.max_source_positions) * sizeof(float),
-                        cudaMemcpyDeviceToHost, stream_);
-        cudaStreamSynchronize(stream_);
-
-        if (update_magpie_text_consumed_from_cross_attn(xattn.data(), state.max_source_positions,
-                                                        state.text_consumed_threshold,
-                                                        state.max_peak_pos, state.text_consumed)) {
-            std::cerr << "[magpie-tts] Text consumed at frame " << frame
-                      << " (max_peak_pos=" << state.max_peak_pos
-                      << ", threshold=" << state.text_consumed_threshold
-                      << ", text_len=" << text_length_ << ")" << std::endl;
-        }
-        return;
-    }
-    update_magpie_text_consumed_from_heuristic(state.estimated_frames, frame, state.text_consumed);
-}
-
-// ---------------------------------------------------------------------------
 // CPU step decomposition helpers
 // ---------------------------------------------------------------------------
 
@@ -1231,13 +1175,8 @@ bool MagpiePipeline::cpu_run_conditioned_step(DecoderLoopState& state, int32_t f
 
 bool MagpiePipeline::cpu_sample_frame_codes(DecoderLoopState& state,
                                             std::vector<int32_t>& frame_codes, bool& eos) {
-    // NeMo-aligned EOS gating based on attention prior's position tracking:
-    // - unfinished (forbid EOS): attended_pos < text_len - 3
-    // - finished (allow/force EOS): attended_pos >= text_len - 2 for >5 frames
-    const bool text_near_end = has_attn_prior_ && last_attended_pos_ >= text_length_ - 2;
-    const bool text_unfinished = has_attn_prior_ && last_attended_pos_ < text_length_ - 3;
-    const bool forbid_eos = text_unfinished;
-    const bool force_eos = text_near_end && state.frames_past_text_consumed > 5;
+    const MagpieEosGate gate = magpie_eos_gate(has_attn_prior_, last_attended_pos_, text_length_,
+                                               state.frames_past_text_consumed);
 
     const auto decoded = decode_magpie_frame_codes(
         state.logits, state.num_cb, state.cb_size, config_.greedy, config_.temperature,
@@ -1245,7 +1184,7 @@ bool MagpiePipeline::cpu_sample_frame_codes(DecoderLoopState& state,
         [this](const float* cb_logits, int32_t vocab_size, float temperature, int32_t top_k) {
             return sample_top_k(cb_logits, vocab_size, temperature, top_k);
         },
-        forbid_eos, force_eos);
+        gate.forbid, gate.force);
     frame_codes = decoded.frame_codes;
     eos = decoded.eos;
     return true;
