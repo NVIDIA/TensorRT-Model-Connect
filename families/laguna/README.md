@@ -31,6 +31,21 @@ format is the single-user-turn rendering of Laguna's `chat_template.jinja` (defa
 `<assistant>` framing, `</think>` or `<think>` after the generation prompt); the builder enables it only when the
 checkpoint's template contains every literal fragment of that framing (a fragment check, not a template evaluation).
 
+## Validation
+
+`tests/test_e2e.py` runs the checkpoint through the CLI and a logits trace, and compares the trace with transformers
+FP32 on the same fed tokens. The bounds on the trace's statistics (cosine p50 / p5, relative L2 p95, top-1 agreement)
+come from transformers at the bundle precision on the same tokens, run twice — eager and SDPA attention — taking for
+each statistic the less favourable run: on the E2E cases these two correct BF16 implementations differ by up to 1.42 ×
+in relative L2 p95, 0.020 in cosine p5 and 0.029 in top-1 agreement, and either one alone as the baseline rejects the
+other on one of the cases. The margins added to that envelope (0.005, 0.03, 1.25 × + 0.02, 0.03) are of the same
+order, the median cosine has an absolute floor of 0.99, and the relative bounds apply again to the positions past the
+sliding window. With them, engines built from configs with the YaRN `attention_factor` set to 1.0 or without the
+sliding window are rejected although they still give the expected answers, as is one with `moe_routed_scaling_factor`
+1.0. Single positions are not bounded: on Laguna-XS.2 isolated BF16 positions deviate in every implementation (the
+engine at one position of the beyond-window case, transformers BF16 at one of the code case), while an `fp32` build of
+the same graph matches transformers FP32 on every position.
+
 ## Provenance and licenses
 
 - Model weights, tokenizer files and the chat template are poolside's, published under Apache-2.0 (the model card
