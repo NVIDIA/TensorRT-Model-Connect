@@ -38,7 +38,7 @@ if(TRTMC_BUILD_TESTS)
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
   )
 
-  # Run by test_e2e.py against a built bundle, so it is a target rather than a CTest case.
+  # Run, and built, by test_e2e.py against a built bundle, so it is a target rather than a CTest case.
   add_executable(paligemma_tokenizer_check
     ${PROJECT_SOURCE_DIR}/families/paligemma/tests/cpp/tokenizer_check.cpp
     ${PROJECT_SOURCE_DIR}/families/paligemma/runtime/paligemma_bpe.cpp

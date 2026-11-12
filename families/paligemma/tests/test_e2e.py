@@ -9,6 +9,7 @@ reference. Both runs also check the native prompt ids and decoded text against
 the reference processor, using the tokenizer packaged in the bundle.
 """
 
+from functools import cache
 from pathlib import Path
 import gc
 import json
@@ -144,9 +145,18 @@ def _ned(a, b):
     return row[-1] / max(len(a), len(b), 1)
 
 
-def _binary(name):
+@cache
+def _native_build():
     root = Path(os.environ["TRTMC_NATIVE_BUILD_DIR"])
-    candidate = root / name
+    # CI builds only a family's CTest and SDK-consumer targets (tools/ci/e2e.py),
+    # so the E2E builds the bundle tokenizer check it runs.
+    subprocess.run(["cmake", "--build", str(root), "--parallel", "8", "--target",
+                    "paligemma_tokenizer_check"], check=True, timeout=900)
+    return root
+
+
+def _binary(name):
+    candidate = _native_build() / name
     assert candidate.is_file(), f"build the {name} CMake target in TRTMC_NATIVE_BUILD_DIR"
     return candidate
 
