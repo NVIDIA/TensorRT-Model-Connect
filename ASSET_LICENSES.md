@@ -183,6 +183,13 @@ audiobooks.
 - Source and attribution: https://www.openslr.org/12/
 - License: https://creativecommons.org/licenses/by/4.0/
 
+`families/moss_transcribe_diarize/tests/data/continuation_20s.wav` and
+`families/moss_transcribe_diarize/tests/data/two_speakers_22s.wav` join
+utterances of several speakers from the same `test-clean` split, with 0.8 s of
+silence between utterances, as 16 kHz mono 16-bit PCM, and are distributed under
+the same license. `families/moss_transcribe_diarize/tests/data/README.md` lists
+the utterance IDs and their positions.
+
 A byte-identical copy is stored at
 `families/qwen3_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`.
 
