@@ -224,9 +224,8 @@ class MiniCpmOcrModel final : public api::IModel, public trtmc::internal::IImage
         std::lock_guard<std::mutex> lock(mutex_);
         const auto setup_start = std::chrono::steady_clock::now();
         std::vector<PromptMessage> messages;
+        std::vector<ProcessedImage> images;
         std::vector<ImageTokenLayout> layouts;
-        DecoderPrompt prompt;
-        std::size_t rows = 0;
         for (const auto& message : request.messages) {
             PromptMessage item{role(message.role), {}};
             if (message.parts.empty())
@@ -241,9 +240,8 @@ class MiniCpmOcrModel final : public api::IModel, public trtmc::internal::IImage
                             if (item.role == PromptRole::System)
                                 throw std::invalid_argument(
                                     "System message cannot contain images.");
-                            const auto image = preprocess_image(config_.image, value);
-                            layouts.push_back(layout(image));
-                            rows += vision_.encode(image, prompt.features);
+                            images.push_back(preprocess_image(config_.image, value));
+                            layouts.push_back(layout(images.back()));
                             item.parts.push_back({true, {}});
                         } else {
                             throw std::invalid_argument(
@@ -258,7 +256,29 @@ class MiniCpmOcrModel final : public api::IModel, public trtmc::internal::IImage
             throw std::invalid_argument("MiniCPM-OCR requests need at least one image");
         const auto text = expand_images(render_chat(messages, thinking, config_.tokens), layouts,
                                         config_.use_image_id, config_.tokens);
+        DecoderPrompt prompt;
         prompt.token_ids = tokenizer_->encode(text);
+
+        // The prompt length is known before any image is encoded: a request that cannot fit
+        // the cache is refused here, without GPU work.
+        const auto capacity = static_cast<int64_t>(config_.decoder.max_cache_length) + 1 -
+                              static_cast<int64_t>(prompt.token_ids.size());
+        const int64_t budget = requested ? *requested
+                                         : std::min<int64_t>(config_.default_max_new_tokens,
+                                                             std::max<int64_t>(capacity, 1));
+        if (budget <= 0 || budget > INT32_MAX)
+            throw std::invalid_argument("MiniCPM-OCR max_new_tokens must be positive");
+        if (budget > capacity)
+            throw std::invalid_argument("MiniCPM-OCR prompt (" +
+                                        std::to_string(prompt.token_ids.size()) +
+                                        " tokens) plus max_new_tokens (" + std::to_string(budget) +
+                                        ") exceeds the bundle's sequence capacity (" +
+                                        std::to_string(config_.decoder.max_cache_length) +
+                                        "); rebuild with a larger max_sequence_length");
+
+        std::size_t rows = 0;
+        for (const auto& image : images)
+            rows += vision_.encode(image, prompt.features);
         prompt.feature_rows.assign(prompt.token_ids.size(), -1);
         std::size_t next = 0;
         for (std::size_t i = 0; i < prompt.token_ids.size(); ++i)
@@ -271,13 +291,6 @@ class MiniCpmOcrModel final : public api::IModel, public trtmc::internal::IImage
                                     std::chrono::steady_clock::now() - setup_start)
                                     .count();
 
-        const auto capacity = static_cast<int64_t>(config_.decoder.max_cache_length) + 1 -
-                              static_cast<int64_t>(prompt.token_ids.size());
-        const int64_t budget = requested ? *requested
-                                         : std::min<int64_t>(config_.default_max_new_tokens,
-                                                             std::max<int64_t>(capacity, 1));
-        if (budget <= 0 || budget > INT32_MAX)
-            throw std::invalid_argument("MiniCPM-OCR max_new_tokens must be positive");
         auto output = decoder_.generate(prompt, sampling, static_cast<int32_t>(budget));
         std::vector<int32_t> visible = output.token_ids;
         if (output.stopped)

@@ -317,4 +317,5 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
                                         "near_tie_positions": sum(gap > 0 for gap in gaps)})
         assert max(gaps) <= tolerance, f"a native token is {max(gaps):.4f} logits below the FP32 argmax"
         eos = set(json.loads((model_dir / "generation_config.json").read_text())["eos_token_id"])
+        assert not eos.intersection(native_ids[:-1]), "the native run continued after an EOS token"
         assert native_ids[-1] in eos or len(native_ids) == case["max_new_tokens"]

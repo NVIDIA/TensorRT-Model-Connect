@@ -58,7 +58,8 @@ def _tokenizer(**overrides) -> dict:
             {"type": "Split", "pattern": {"Regex": SPLIT_PATTERN}, "behavior": "Isolated", "invert": False},
             {"type": "ByteLevel", "add_prefix_space": False, "trim_offsets": False, "use_regex": False}]},
         "decoder": {"type": "ByteLevel", "add_prefix_space": True, "trim_offsets": True, "use_regex": True},
-        "model": {"type": "BPE", "byte_fallback": False, "ignore_merges": False, "vocab": {}, "merges": []},
+        "model": {"type": "BPE", "byte_fallback": False, "ignore_merges": False, "continuing_subword_prefix": "",
+                  "end_of_word_suffix": "", "vocab": {}, "merges": []},
     }
     tokenizer.update(overrides)
     return tokenizer
@@ -80,10 +81,12 @@ def test_the_checkpoint_tokenizer_pipeline_is_accepted(tmp_path: Path) -> None:
     {"decoder": {"type": "Metaspace"}},
     {"model": {"type": "BPE", "byte_fallback": True, "vocab": {}, "merges": []}},
     {"model": {"type": "BPE", "ignore_merges": True, "vocab": {}, "merges": []}},
+    {"model": {"type": "BPE", "continuing_subword_prefix": "##", "vocab": {}, "merges": []}},
+    {"model": {"type": "BPE", "end_of_word_suffix": "</w>", "vocab": {}, "merges": []}},
     {"model": {"type": "WordPiece", "vocab": {}}},
     {"pre_tokenizer": {"type": "ByteLevel", "add_prefix_space": False, "use_regex": True}},
-], ids=["no-normalizer", "nfkc", "metaspace-decoder", "byte-fallback", "ignore-merges", "wordpiece",
-        "bytelevel-regex"])
+], ids=["no-normalizer", "nfkc", "metaspace-decoder", "byte-fallback", "ignore-merges", "subword-prefix",
+        "word-suffix", "wordpiece", "bytelevel-regex"])
 def test_other_tokenizer_pipelines_are_refused(tmp_path: Path, override: dict) -> None:
     with pytest.raises(ValueError, match="native tokenizer"):
         tokenizer_bytes(_model_dir(tmp_path, _tokenizer(**override)))

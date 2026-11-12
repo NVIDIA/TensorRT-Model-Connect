@@ -29,6 +29,7 @@ def tokenizer_bytes(model_dir: Path) -> bytes:
     split, byte_level = steps if len(steps) == 2 else ({}, {})
     supported = (
         model.get("type") == "BPE" and not model.get("byte_fallback") and not model.get("ignore_merges")
+        and not model.get("continuing_subword_prefix") and not model.get("end_of_word_suffix")
         and tokenizer.get("normalizer") == {"type": "NFC"}
         and pre_tokenizer.get("type") == "Sequence"
         and split.get("type") == "Split" and split.get("pattern") == {"Regex": SPLIT_PATTERN}
