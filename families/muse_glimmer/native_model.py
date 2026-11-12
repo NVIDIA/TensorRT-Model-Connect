@@ -67,6 +67,8 @@ def build(request, writer):
         "weight_format": "nvfp4_mxfp8",
         "max_cache_length": capacity,
         "max_input_length": min(capacity, 512),
+        # One target engine: a multi-row prefill profile and a one-row decode profile.
+        "decoder_engine_layout": "dual_profile",
         "hidden_size": config.hidden_size,
         "num_hidden_layers": config.num_hidden_layers,
         "num_key_value_heads": config.num_key_value_heads,

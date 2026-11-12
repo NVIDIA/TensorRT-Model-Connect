@@ -2,13 +2,94 @@
 
 This family builds `facebook/sam-vit-base` (Segment Anything, ViT-B) as two
 TensorRT engines: the image encoder and the mask decoder. The prompt encoder
-runs on the CPU in the native runtime. The family default precision is fp32 and
-the manifest builds fp16. Batch size is 1 and the encoder input is 1024x1024.
+runs on the CPU in the native runtime. The family default precision is fp16
+(see Precision); `--precision fp32` builds both engines in fp32. Batch size is 1
+and the encoder input is 1024x1024.
+
+## Precision
+
+| Precision | How to select | Image encoder | Mask decoder |
+|---|---|---|---|
+| fp16 (default) | no `--precision`, or `--precision fp16` | fp16; layer-norm statistics in fp32 | two-way transformer in fp32; upscaling convolutions, hypernetwork MLPs and IoU head in fp16 |
+| fp32 | `--precision fp32` | fp32 | fp32 |
+
+The engine inputs and outputs are fp32 for both precisions, so the bundle and the
+native runtime do not change. The tensor-parallel encoder builder builds fp32 for
+every precision; the tensor-parallel manifest selects fp32.
+
+Why the two-way transformer stays fp32 in an fp16 build (mask decoder alone on
+PyTorch embeddings, mask IoU against PyTorch, 6 builds each, 60 images, B200 and
+B300, TensorRT 11.4):
+
+| Mask decoder | Mask IoU (range over builds) | Decoder time (ms) |
+|---|---|---|
+| all fp16 (fp16 build before this change) | 0.985 to 0.988 | 0.30 to 0.33 |
+| fp32 | 0.989 to 0.996 | 0.31 to 0.34 |
+| fp32 transformer, fp16 upscaling and heads (fp16 default) | 0.990 to 0.996 | 0.27 to 0.29 |
+
+The upscaling and the mask heads in fp16 give the same IoU as an all-fp32
+decoder, and this split is the fastest decoder.
+
+Note: TensorRT may run fp32 matrix multiplies with TF32 math (the builder default).
+The kernels it picks change from build to build, and with them the masks of the
+fp32 decoder and of the fp32 transformer of the fp16 decoder: mask IoU against
+PyTorch is about 0.990 for some builds and 0.996 for others (6 builds each, 60
+images, B200 and B300). Without TF32 the decoder matches PyTorch (IoU 0.999 to
+1.000) but takes 0.62 to 0.73 ms instead of 0.27 to 0.34 ms. TF32 is not changed.
+
+### Speed
+
+`facebook/sam-vit-base`, batch 1, one image and one point prompt: the encoder and
+the mask decoder in one CUDA graph. Median of 3 builds x 5 rounds (11.4) or 2 builds
+x 5 rounds (11.1), all variants built and timed in one job per GPU with the rounds
+interleaved. "fp16 before" is the fp16 build before this change (all-fp16 decoder).
+
+| GPU | TensorRT | fp32 (ms) | fp16 before (ms) | fp16 default (ms) | fp16 default vs fp32 |
+|---|---|---|---|---|---|
+| B200 | 11.4 | 6.620 | 4.576 | 4.538 | 1.46x |
+| B300 | 11.4 | 6.263 | 4.326 | 4.306 | 1.45x |
+| B200 | 11.1 | 6.824 | 5.074 | 5.024 | 1.36x |
+| B300 | 11.1 | 6.626 | 4.780 | 4.737 | 1.40x |
+
+| Part, TensorRT 11.4 | fp32 B200 / B300 | fp16 before B200 / B300 | fp16 default B200 / B300 |
+|---|---|---|---|
+| Image encoder (ms) | 6.411 / 5.931 | 4.236 / 4.000 | 4.232 / 3.999 |
+| Mask decoder (ms) | 0.326 / 0.319 | 0.314 / 0.307 | 0.279 / 0.279 |
+| Encoder plan (MiB) | 358.8 / 358.8 | 190.0 / 178.2 | 190.0 / 178.2 |
+| Decoder plan (MiB) | 24.3 / 24.3 | 12.6 / 12.6 | 22.8 / 22.9 |
+
+The encoder runs once per image and the decoder once per prompt.
+
+### Quality
+
+Reference: PyTorch fp32 `SamModel` (TF32 off). Data: 500 images of the COCO 2017
+validation split; the 419 images not used to choose the fp32 parts (every eighth
+image was) give 652 objects, each prompted with a foreground point at the box
+center and with the box. Metric: mask IoU against PyTorch, mean of the 3 multimask
+outputs per prompt (the E2E gate metric), upsampled to the image size, threshold 0.
+TensorRT 11.4. The two fp32 rows are two builds of the same fp32 network (see the
+TF32 note above).
+
+| Build | B200 point IoU mean (5th pct) | B200 box IoU mean (5th pct) | B300 point IoU mean (5th pct) | B300 box IoU mean (5th pct) |
+|---|---|---|---|---|
+| fp32, build 1 | 0.9892 (0.956) | 0.9906 (0.963) | 0.9895 (0.963) | 0.9903 (0.961) |
+| fp32, build 2 | 0.9893 (0.959) | 0.9906 (0.962) | 0.9951 (0.984) | 0.9965 (0.986) |
+| fp16 before | 0.9877 (0.954) | 0.9888 (0.953) | 0.9870 (0.950) | 0.9883 (0.954) |
+| fp16 default | 0.9944 (0.981) | 0.9956 (0.983) | 0.9888 (0.959) | 0.9908 (0.962) |
+
+No prompt of any build is below IoU 0.7 (the E2E bar). Image-embedding relative
+error against PyTorch: 0.0014 (fp32), 0.0039 (fp16, B200), 0.0027 (fp16, B300).
+No NaN or Inf in the embeddings, masks or scores on the real images, nor on noise
+images (std 1, 3, 10, 30), constant images and a checkerboard with random prompts
+(std 1 and 10). The fp16 default on the E2E case (native runtime): mask IoU
+0.9926 (B200) and 0.9909 (B300) against the 0.7 bar, fp32 0.9930 and 0.9915.
 
 ## FP8 quantization study (not shipped)
 
 FP8 quantization of the image encoder was built and measured on TensorRT 11.4
-and 11.1. It is not shipped: the encoder is only 1.04x to 1.05x faster than
+and 11.1, when the family default was fp32 and the fp16 build ran the whole mask
+decoder in fp16. In this section "fp32 default" is the fp32 build and "fp16" is
+that fp16 build. It is not shipped: the encoder is only 1.04x to 1.05x faster than
 fp16, and the masks get worse. This section records the recipe, the method and
 every number, so that the study does not have to be repeated. The FP8 code was
 not merged. All numbers come from a local study; this repository has no FP8
@@ -29,7 +110,7 @@ build for SAM.
 Decision: do not ship FP8 for the SAM image encoder.
 
 - Speed: 1.04x to 1.05x over fp16 on B200 and B300, TensorRT 11.1 and 11.4.
-  The 1.5x gain over the fp32 family default comes from fp16, not from FP8.
+  The 1.5x gain over fp32 comes from fp16, not from FP8.
 - Quality: the embedding error is 9x to 12x larger than fp16 (B200, B300), the mean mask IoU
   is 0.01 to 0.02 lower, and the 5th percentile IoU against the fp16 engine is
   0.87 (point) and 0.92 (box).
@@ -45,7 +126,7 @@ Decision: do not ship FP8 for the SAM image encoder.
 | Checkpoint | `facebook/sam-vit-base`, revision `70c1a07f894ebb5b307fd9eaaee97b9dfc16068f` |
 | Engines | image encoder, mask decoder |
 | Prompt encoder | CPU, native runtime (numpy port in the study) |
-| Family default precision | fp32 |
+| Family default precision at the time | fp32 |
 | Manifest precision | fp16 |
 | Batch size | 1 (the family supports batch 1 only) |
 | Encoder input | 1024x1024 |

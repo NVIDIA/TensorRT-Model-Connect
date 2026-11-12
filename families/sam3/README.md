@@ -4,9 +4,58 @@ This family builds `facebook/sam3` for `text_prompted_segmentation` as a bundle
 of TensorRT plans: the CLIP text encoder (24 layers, hidden 1024, 32 tokens),
 the vision plan (ViT-L, 32 blocks, 1008 x 1008 image, plus the FPN necks), the
 detector core (DETR encoder and decoder, mask head) and the video tracker plans.
-Batch size is 1. The family builds `fp32` only: the text plan is fp32, and the
-vision and core plans keep the residual stream, norms and activations in fp32
-and run most GEMMs and attention in fp16. The family has no quantized build.
+Batch size is 1. The family builds `fp16` by default; `--precision fp32`
+builds the previous default. The family has no quantized build.
+
+## Precision
+
+| Plan | `fp16` (default) | `fp32` |
+|---|---|---|
+| Text encoder (`engine.plan`) | fp16 (layer norms through the TensorRT normalization layer) | fp32 |
+| Vision (`vision.plan`) | ViT blocks (residual stream, layer norms, GELU, GEMMs, attention) and both necks in fp16; patch embedding, pre-norm and outputs fp32 | residual stream, norms, GELU and necks fp32; GEMMs and attention fp16 |
+| Detector core (`core.plan`) | fp32 with fp16 attention and encoder MLP (same plan for both) | same |
+| Video tracker plans | unchanged (own fixed schedule) | same |
+
+Plan inputs and outputs are the same for both precisions (fp32 features), so
+the runtime and the bundle format do not change. The core stays on its fp32
+schedule: an fp16 core is 1.18x faster on its own but lowers the box IoU
+against PyTorch from 0.997 to 0.988.
+
+Measured on TensorRT 11.4.0.106, batch 1, one request = text + vision + core
+plans in one CUDA graph; median of 9 interleaved rounds per build, median of 3
+builds per precision, all built and timed in one job per GPU through the
+family `build()`:
+
+| GPU | `fp32` request (ms) | `fp16` request (ms) | Speedup | Text fp32 / fp16 | Vision fp32 / fp16 | Core |
+|---|---|---|---|---|---|---|
+| B200 | 18.590 | 15.054 | 1.23x | 1.387 / 0.801 | 13.591 / 10.819 | 3.75 |
+| B300 | 17.142 | 13.979 | 1.23x | 1.326 / 0.768 | 12.442 / 9.978 | 3.38 |
+
+Plan size: text 1348.8 to 675.4 MiB, vision 1044.0 to 1014.3 MiB; bundle
+2769 to 2066 MiB.
+
+Quality against PyTorch fp32 `Sam3Model` on 361 held-out prompt and image
+pairs (the FP8 study set below; 712 reference instances):
+
+| GPU | Build | mask IoU mean (p5) | semantic IoU | box IoU | score abs err | same instance count | FPN cosine (min, 3 levels) |
+|---|---|---|---|---|---|---|---|
+| B200 | fp32 | 0.9992 (0.9964) | 0.9994 | 0.9985 | 0.0011 | 0.992 | 0.99993 / 0.99980 / 0.99966 |
+| B200 | fp16 | 0.9992 (0.9960) | 0.9993 | 0.9984 | 0.0013 | 0.989 | 0.99993 / 0.99977 / 0.99962 |
+| B300 | fp32 | 0.9975 (0.9955) | 0.9994 | 0.9970 | 0.0019 | 0.995 | 0.99991 / 0.99969 / 0.99953 |
+| B300 | fp16 | 0.9974 (0.9946) | 0.9992 | 0.9969 | 0.0026 | 0.992 | 0.99989 / 0.99972 / 0.99952 |
+| B300 | fp16 core (not shipped) | 0.9982 (0.9945) | 0.9992 | 0.9883 | 0.0027 | 0.992 | - |
+
+No non-finite output in either build on the 361 pairs, on five stress images
+(noise with std 1, 3 and 10, all black, all white) with three prompts each, and
+on 98 prompts through the fp16 text plan (held-out prompts, empty, one letter,
+a 40-word run, punctuation, digits). Largest activation in PyTorch fp32
+(forward hooks, 12 images and the stress images): vision blocks 331, text
+blocks 1221, detector core 139; all well inside the fp16 range.
+
+TensorRT 11.1.0.106 (one build per precision): request 18.336 to 15.618 ms
+(1.17x, B200) and 17.099 to 14.028 ms (1.22x, B300); mask IoU 0.9992 to
+0.9992 (B200) and 0.9988 to 0.9990 (B300), box IoU 0.9985 to 0.9985 and 0.9983
+to 0.9982; no non-finite output.
 
 ## FP8 quantization study (not shipped)
 
@@ -39,8 +88,8 @@ Decision: do not ship FP8 for SAM3.
   which was not shipped.
 - The text encoder runs 32 tokens per GEMM and is launch bound. A plain fp16
   text plan (no FP8) is faster than the FP8 one (0.806 ms against 1.005 ms on
-  B200) and keeps the default quality. The family cannot build it today:
-  `precision` is one value for the bundle and the vision plan refuses fp16.
+  B200) and keeps the default quality. It is now part of the `fp16` default
+  (see Precision); the study below compares with the `fp32` build.
 - Vision plan: FP8 of its projections gives at most 1.11x for that plan and
   lowers the mask IoU from 0.9975 to 0.96. No subset of the projections keeps
   the quality.
@@ -72,7 +121,7 @@ high precision unless it holds quality).
 - GPUs: B200 and B300, one GPU per job, all variants built and timed in that
   job through the family's `build()`; TensorRT 11.4.0.106 (target) and
   11.1.0.106 (B300 only). Builder optimization level 1, precision fp32 (the
-  family default).
+  family default at the time).
 - Reference: PyTorch fp32 `Sam3Model` (Transformers 5.17.0) on the same
   preprocessed pixels and tokens. The default bundle is the quality floor.
 - Data: `detection-datasets/coco` validation, 400 images at a fixed stride;
@@ -189,8 +238,8 @@ the measured recipe builds on both versions.
 
 ### When to revisit
 
-- The family gets an fp16 text plan or fp16 vision plan: FP8 would then have
-  to beat those, not the fp32 default.
+- The family now builds fp16 text and vision plans by default: FP8 has to beat
+  those, not the fp32 build.
 - A recipe that keeps the vision plan at the floor (mask IoU about 0.997) with
   a clear speedup; that plan is where the request time is.
 - A caller that encodes many prompts per image: the text encoder share grows,

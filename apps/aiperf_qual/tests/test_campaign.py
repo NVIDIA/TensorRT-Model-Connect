@@ -401,6 +401,46 @@ def test_run_cli_exit_codes_require_a_supported_success_outcome(tmp_path, monkey
     assert json.loads(capsys.readouterr().out) == {"report": str(tmp_path / "report.md"), **record}
 
 
+TIMED = {"reference": {"p50_ms": 9.0}}
+
+
+@pytest.mark.parametrize("accuracy, perf, expected", [
+    ([{"native": {"mode": "compile"}}], [{"reference_mode": "compile", "light": "green", **TIMED}], "compile"),
+    ([{"native": {"mode": "eager"}}], [], "eager"),  # configured or pinned
+    ([{"native": {"mode": "eager", "compile_fallback": "Dynamo recompile limit"}}], [], "eager (compile failed)"),
+    ([], [{"reference_mode": "eager", "configured_mode": "compile", "light": "green", **TIMED}],
+     "eager (compile failed)"),
+    ([{"native": {"mode": "compile"}}], [{"reference_mode": "compile+eager", "light": "green", **TIMED}],
+     "compile, eager"),
+    ([], [{"reference_mode": "eager", "light": "n/a", **TIMED}], "—"),
+    # Accuracy errored, but the natural-dataset Perf shows eager answering after a failed compile.
+    ([{"status": "error", "native": {"mode": "compile"}}],
+     [{"reference_mode": "eager", "light": "informational", "compile_fallback": "Dynamo recompile limit", **TIMED}],
+     "eager (compile failed)"),
+    # The native side never answered: an errored entry, or a Perf row without native timings.
+    ([{"status": "error", "native": {"mode": "eager"}}], [{"reference_mode": "eager", "light": "informational",
+                                                          "reference": {"p50_ms": None}}], "—"),
+])
+def test_native_mode_names_compile_eager_or_a_failed_compile(accuracy, perf, expected):
+    assert campaign.native_mode({"accuracy": accuracy, "perf": perf}) == expected
+
+
+def test_summary_counts_and_lists_the_native_mode_of_each_model(tmp_path):
+    from trtmc_aiperf_qual import report_html
+
+    for name, mode in (("a", "compile"), ("b", "compile"), ("c", "eager")):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "report.json").write_text(json.dumps({
+            "task": "t", "verdict": {"category": "pass"},
+            "accuracy": [{"suite": "s", "status": "pass", "native": {"mode": mode}}], "performance": []}))
+    text, _ = campaign.summary([tmp_path])
+    assert "Native mode (torch.compile by default; eager where pinned or where compile failed): compile 2, eager 1." in text
+    assert f"| Green | c | t | eager | {tmp_path.name} |" in text
+    rows, counts, rank = campaign.collect([tmp_path])
+    page = report_html.render(rows, counts, rank, tmp_path / "summary.html").read_text()
+    assert "<th>Native mode</th>" in page and "compile 2, eager 1" in page and "<td>eager</td>" in page
+
+
 def test_summary_merges_result_roots(tmp_path):
     first = tmp_path / "gb300-1/a"
     first.mkdir(parents=True)
@@ -415,8 +455,8 @@ def test_summary_merges_result_roots(tmp_path):
                                                    "reason": "error: checkpoint is gated"}))
     text, counts = campaign.summary([tmp_path / "gb300-1", tmp_path / "gb300-2"])
     assert counts == {"pass": 1, "build-failed": 1}
-    assert "| Green | a | text_generation | gb300-1 | mmlu: 10/10 within tolerance | eager: TRTMC 4.0 ms · native 10.0 ms |" in text
-    assert "| White | b | classification | gb300-2 |" in text and "checkpoint is gated" in text
+    assert "| Green | a | text_generation | eager | gb300-1 | mmlu: 10/10 within tolerance | eager: TRTMC 4.0 ms · native 10.0 ms |" in text
+    assert "| White | b | classification | — | gb300-2 |" in text and "checkpoint is gated" in text
     assert "1 pass (Green + conclusive Yellow)" in text and "| White | 1 |" in text
 
 
@@ -455,18 +495,29 @@ def test_machine_model_list_excludes_checkpoints_above_the_size_limit():
                          "reason": "checkpoint 54 GiB > models.max_checkpoint_gib 30"}]
 
 
-def test_a_profile_definition_excludes_the_profile_from_every_machines_list():
+def test_a_profile_definition_excludes_the_profile_from_every_machines_list(tmp_path):
     """``exclude: <reason>`` in a profile's own definition: a profile AIPerf cannot qualify as cataloged."""
-    reason = "its catalog testcase has no prompt or image, so no request can be built"
-    declared = selection.Profile("qwen35-moe-gptq-edge", "vision_language_generation", "Qwen/x", None, reason)
+    from trtmc_aiperf_qual.models import profile_override
+
+    reason = "its catalog testcase has no prompt, so no request can be built"
+    definition = tmp_path / "families/f/tests/aiperf/p.yaml"
+    definition.parent.mkdir(parents=True)
+    definition.write_text(f"exclude: {reason}\n")
+    assert profile_override("p", "f", tmp_path, root=tmp_path / "config")["exclude"] == reason
+    declared = selection.Profile("p", "vision_language_generation", "Org/p", None, reason)
     selected, excluded = selection.select({}, [*CATALOG, declared])
     assert _names(selected) == _names(CATALOG)
-    assert excluded == [{"profile": "qwen35-moe-gptq-edge", "task": "vision_language_generation", "reason": reason}]
+    assert excluded == [{"profile": "p", "task": "vision_language_generation", "reason": reason}]
     # A machine whose list does not include it still records the profile's own reason.
     _, excluded = selection.select({"include": ["qwen3-0.6b-fp16"]}, [*CATALOG, declared])
-    assert {item["profile"]: item["reason"] for item in excluded}["qwen35-moe-gptq-edge"] == reason
+    assert {item["profile"]: item["reason"] for item in excluded}["p"] == reason
+
+
+def test_the_vision_language_profiles_whose_catalog_cases_gained_a_request_are_qualified():
+    """Their catalog cases now carry a prompt and an image, so no definition excludes them any more."""
     declared_here = {profile.name: profile.excluded for profile in selection.catalog(REPOSITORY)}
-    assert declared_here["qwen35-moe-gptq-edge"] == reason and declared_here["qwen3-0.6b-fp16"] is None
+    for name in ("nemotron-omni-nvfp4-text-image", "qwen35-moe-gptq-edge", "qwen3-0.6b-fp16"):
+        assert declared_here[name] is None, name
 
 
 def test_an_unreadable_profile_definition_is_an_error_of_that_profile_alone(tmp_path):
@@ -654,7 +705,7 @@ def test_summary_fetches_remote_result_roots_over_ssh(tmp_path):
     assert roots == [tmp_path / "fetched/gb300-1"] and not (roots[0] / "a/big.bin").exists()
     assert campaign.collect(roots)[0]["a"]["precision"]["trtmc"] == "fp16"  # the model's precision came along
     text, counts = campaign.summary(roots)
-    assert counts == {"pass": 1} and "| Green | a | classification | gb300-1 |" in text
+    assert counts == {"pass": 1} and "| Green | a | classification | — | gb300-1 |" in text
     local = tmp_path / "local-root"
     local.mkdir()
     assert campaign.fetch_roots([str(local)], str(fake_ssh), tmp_path / "fetched") == [local]
@@ -693,7 +744,7 @@ def test_summary_keeps_the_latest_result_of_a_profile_run_on_several_roots(tmp_p
             {"task": "image_generation", "started": started, "verdict": {"category": category}}))
     for order in ([tmp_path / "gb300-1", tmp_path / "gb300-2"], [tmp_path / "gb300-2", tmp_path / "gb300-1"]):
         text, counts = campaign.summary(order)
-        assert counts == {"acc-issue": 1} and "| Red | m | image_generation | gb300-1 |" in text
+        assert counts == {"acc-issue": 1} and "| Red | m | image_generation | — | gb300-1 |" in text
 
 
 def test_summary_counts_every_planned_profile(tmp_path):
@@ -704,7 +755,7 @@ def test_summary_counts_every_planned_profile(tmp_path):
     (root / "a/report.json").write_text(json.dumps({"task": "t", "started": 1.0, "verdict": {"category": "pass"}}))
     text, counts = campaign.summary([root])
     assert counts == {"pass": 1, "not-run": 1, "config-error": 1}
-    assert "| White | b | - | gb300-1 |" in text and "unknown benchmark 'typo'" in text
+    assert "| White | b | - | — | gb300-1 |" in text and "unknown benchmark 'typo'" in text
     assert "| White | c |" not in text and "no Task defaults" not in text
     assert len(json.loads((root / campaign.PLAN).read_text())["config_errors"]) == 2
 
@@ -743,6 +794,35 @@ def test_summary_notes_trtmc_regressions_against_a_baseline(tmp_path):
             "performance": [{"reference_mode": "eager", "light": "green", "candidate": {"p50_ms": p50}}]}))
     text, _ = campaign.summary([tmp_path / "now"], [tmp_path / "before"])
     assert "regression: TRTMC eager p50 +10.0% vs baseline" in text
+
+
+def test_summary_names_the_native_mode_and_keeps_regressions_across_a_mode_change(tmp_path):
+    for root, p50, mode in (("now", 11.0, "compile"), ("before", 10.0, "eager")):
+        (tmp_path / root / "m").mkdir(parents=True)
+        (tmp_path / root / "m/report.json").write_text(json.dumps({
+            "task": "t", "started": 1.0, "verdict": {"category": "measured"}, "performance_source": "quality",
+            "performance": [{"reference_mode": mode, "request": "mmlu", "kind": "natural_dataset", "pairs": 2,
+                             "matched_pairs": 2, "complete": True, "light": "informational",
+                             "candidate": {"p50_ms": p50}, "reference": {"p50_ms": 30.0}}]}))
+    text, _ = campaign.summary([tmp_path / "now"], [tmp_path / "before"])
+    assert "mmlu: TRTMC 11.0 ms · native compile 30.0 ms" in text
+    assert "regression: TRTMC mmlu p50 +10.0% vs baseline" in text  # the native mode is not part of the key
+
+
+def test_regression_notes_skip_entries_without_a_trtmc_timing():
+    rows = {"m": {"perf": [{"reference_mode": "eager", "request": "catalog", "candidate": {"p50_ms": 11.0}}]}}
+    baseline = {"m": {"perf": [{"reference_mode": "eager", "request": "catalog", "candidate": {"p50_ms": 10.0}},
+                               {"reference_mode": "compile", "request": "catalog", "light": "n/a", "candidate": {}}]}}
+    campaign.annotate_regressions(rows, baseline)
+    assert rows["m"]["baseline"] == {"catalog": pytest.approx(10.0)}
+    assert rows["m"]["notes"].startswith("regression: TRTMC catalog p50 +10.0% vs baseline")
+
+
+def test_the_qualifying_fixed_light_is_the_one_reported():
+    row = {"perf": [{"reference_mode": "eager", "configured_mode": "compile", "qualifying": True, "request": "catalog"},
+                    {"reference_mode": "compile", "qualifying": False, "request": "catalog"},
+                    {"reference_mode": "eager", "request": "old"}]}  # a report without the flag: eager qualifies
+    assert [item["request"] for item in campaign.reported_perf(row)] == ["catalog", "old"]
 
 
 def test_html_report_lists_failures_first_with_evidence(tmp_path):
@@ -1285,6 +1365,10 @@ def test_perf_is_white_on_a_busy_gpu_or_a_fallback_reference_precision():
     assert unmeasured["light"] == "white" and "not measured" in unmeasured["reasons"][0]
     fallback = judge.judge_performance(fast, {**slow, "precision": "fp32", "precision_fallback": "fp16: error"}, **ok)
     assert fallback["light"] == "white" and "fp32" in fallback["reasons"][0] and fallback["speedup"] == 10.0
+    # eager in place of a failed torch.compile is a valid baseline, noted (a rejudge keeps the note)
+    replaced = judge.judge_performance(fast, {**slow, "mode": "eager", "compile_fallback": "compile fp16: X"}, **ok)
+    assert replaced["light"] == "green" and replaced["notes"] == ["native torch.compile failed; timed in eager mode: "
+                                                                  "compile fp16: X"]
 
 
 def test_perf_lights_come_from_the_speedup_interval():

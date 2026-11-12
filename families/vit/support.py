@@ -11,4 +11,7 @@ describe = family_support(
     architectures=("ViTForImageClassification",),
     tasks=("image_to_class_scores",),
     default_task="image_to_class_scores",
+    # fp16 is faster than fp32 on every GPU measured and passes its own E2E
+    # gate (tests/test_e2e.py); --precision fp32 still builds the fp32 graph.
+    default_precision="fp16",
 )

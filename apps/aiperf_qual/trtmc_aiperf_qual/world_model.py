@@ -43,7 +43,7 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
 
     suite = build_suite(model_suite(check["suite"], model), environment)
     reuse = bool(check.get("reuse_outputs"))
-    native, _, _ = generate_native(environment, model, suite, python, out, "world-model", reuse=reuse)
+    native, *_ = generate_native(environment, model, suite, python, out, "world-model", reuse=reuse)
     candidate = generate(environment, model, "trtmc", out / "world-model-candidate", suite, reuse=reuse)
     items = [(str(mine[0]), str(theirs[0])) for mine, theirs in zip(candidate, native)]
     completed = subprocess.run([str(environment["serve_python"]), "-c", SCRIPT, json.dumps(items), str(SAMPLED_FRAMES)],

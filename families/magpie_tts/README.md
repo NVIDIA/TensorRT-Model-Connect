@@ -9,6 +9,107 @@ runs two decoder passes per frame (conditioned and unconditioned, for
 classifier-free guidance). The manifests build fp32; fp16 is also supported.
 The family has no quantized build.
 
+## Decoding
+
+Keep the default `greedy: false` in `runtime.json` (top-k sampling,
+temperature 0.6, top-k 80, classifier-free guidance 2.5). Greedy decoding
+(`greedy: true`, argmax of every codebook) is less accurate for this model,
+also in the reference implementation. On 13 test sentences
+(whisper-large-v3-turbo WER against the text):
+
+| Decoding | NeMo reference | Native runtime (TensorRT 11.4, B200 and B300) |
+|---|---|---|
+| Sampling (default) | 1.2% | 2.35% |
+| Greedy | 9.4% (10.0% to 11.2% without guidance) | 9.4% |
+
+Many top-2 logit margins are below 0.05, so greedy picks follow small numeric
+differences: two NeMo greedy runs on the same GPU already give different
+codes. The native greedy loop is deterministic (two runs give bit-identical
+audio). It uses the same decode attention mask, attention-prior update and
+EOS rules as the sampling loop and checks EOS after every frame.
+
+fp16 bundles compute the NanoCodec length masks in fp32. Sample positions
+reach 512 x 1024, above the fp16 limit (65504), and an fp16 mask turned the
+audio into NaN from frame 63 on.
+
+## Context prefill
+
+The decoder plan has two optimization profiles: profile 0 for the one-frame
+decoder step and profile 1 for a block of up to 110 frames (the baked speaker
+context). The native runtime runs each phase in its own execution context: it
+writes the first 109 context frames into the conditioned and unconditioned KV
+caches with one profile-1 call each, then runs the last context frame and all
+generated frames through the profile-0 context. Before, it ran all 110 context
+frames one step at a time, twice, and ran every decoder step in the profile-1
+context. Tensor-parallel bundles keep the one-step path.
+
+Measured with the native runtime, fp32 manifest bundle, TensorRT 11.4, seed 42,
+median of 15 interleaved runs of each sentence (5 rounds of 3), one process per
+variant and round after one warm-up request. Time is to the full waveform
+(encoder, decoder and codec). Sentences: short (48 frames), medium (91 frames)
+and long (295 to 309 frames, the premerge prompt).
+
+| GPU | Sentence | Before | Batched prefill only | This change | Speedup |
+|---|---|---|---|---|---|
+| B200 | short | 895 ms | 335 ms | 302 ms | 2.97x |
+| B200 | medium | 1132 ms | 572 ms | 509 ms | 2.22x |
+| B200 | long | 2255 ms | 1770 ms | 1496 ms | 1.51x |
+| B300 | short | 861 ms | 328 ms | 309 ms | 2.79x |
+| B300 | medium | 1088 ms | 558 ms | 521 ms | 2.09x |
+| B300 | long | 2242 ms | 1730 ms | 1580 ms | 1.42x |
+
+"Batched prefill only" keeps the decoder step in the profile-1 context. The
+context prefill (both caches) goes from 572 ms to 11 ms (B200) and from 550 ms
+to 11 ms (B300). The two decoder passes of a frame go from 5.33 to 4.67 ms
+(B200) and from 5.12 to 4.83 ms (B300) when the step runs in its own profile.
+TensorRT 11.1 (B300): 2.84x, 2.10x and 1.42x.
+
+Output: with the default sampling, 11 of 13 test sentences give bit-identical
+audio, and all 13 whisper-large-v3-turbo transcripts are identical to the
+one-step path (WER 2.35% for both). The other sentences change because a few
+logits differ in the last bits and a sample flips. No non-finite samples.
+
+## Cross-attention K and V
+
+The cross-attention K and V of a decoder layer depend only on the encoder
+output (2048 padded rows). Single-GPU bundles carry a `cross_kv.plan` that
+applies each layer's memory LayerNorm and K and V projections to the encoder
+output, with the same ops and dtypes as the decoder used. The runtime runs it
+once per request for the text and once for the classifier-free-guidance null
+text, and binds the per-layer K and V rows to the decoder's `cross_k_<i>` and
+`cross_v_<i>` inputs, which now have shape [2048, 128] (xa_n_heads x
+xa_d_head) in the layer's compute dtype. Before, every decoder step normalized
+and projected all 2048 rows in every layer. Padded rows are zero in both
+cases. Bundles without `cross_kv.plan` (built before this change, and
+tensor-parallel bundles) keep the old inputs and path. The decoder with
+projected inputs is stored as `decoder.cross_kv.plan` instead of
+`decoder.plan`, so a runtime from before this change stops at load with
+`bundle section is missing or empty: decoder.plan` instead of binding the raw
+encoder output to it.
+
+Same measurement as "Context prefill" (TensorRT 11.4, fp32 manifest bundle):
+
+| GPU | Sentence | Before (prefill change only) | This change | Speedup | vs one-step prefill |
+|---|---|---|---|---|---|
+| B200 | short | 302 ms | 276 ms | 1.09x | 3.24x |
+| B200 | medium | 509 ms | 464 ms | 1.10x | 2.44x |
+| B200 | long | 1496 ms | 1341 ms | 1.12x | 1.68x |
+| B300 | short | 309 ms | 287 ms | 1.08x | 3.00x |
+| B300 | medium | 521 ms | 486 ms | 1.07x | 2.24x |
+
+The two decoder passes of a frame go from 4.67 to 4.17 ms (B200) and from
+4.83 to 4.44 ms (B300); fp16 bundles: 2.93 to 2.65 ms and 2.83 to 2.64 ms. On
+B300 the long sentence ends at 295 frames instead of 309 (one sample flips),
+so its time is not compared. TensorRT 11.1 (B300): 4.84 to 4.52 ms per frame.
+The fp32 decoder plan is 394 MiB instead of 403 MiB, plus 9 MiB for
+`cross_kv.plan`. The runtime's cross-attention buffers take 50 MiB instead of
+302 MiB.
+
+Output: all 13 whisper-large-v3-turbo transcripts are identical (WER 2.35%),
+no non-finite samples. On B300, 12 of 13 sentences give bit-identical audio.
+On B200, 12 of 13 have the same length and differ by at most 1.1e-3 (the
+codec plan of the separately built bundle picks other kernels).
+
 ## FP8 quantization study (not shipped)
 
 FP8 self-quantization of the encoder and decoder projections was built and
@@ -169,17 +270,17 @@ Two changes would make synthesis much faster, but they are not part of this
 study:
 
 - The decoder engine has a batched prefill profile (profile 1). The runtime
-  does not use it: `prefill_context_sequential` runs the 110 context frames
-  one step at a time, twice (conditioned and unconditioned). This is 55% to
-  75% of the time of a short or medium sentence. In the study, the batched
-  profile prefilled 110 rows in 1.46 ms (fp16, B300). The sequential path
-  took about 358 ms. The fp16 KV cache matched to a relative error of 6e-4.
-  A sentence model with the measured step times gives 548 to 192 ms for a
-  2.5 s sentence (fp16, eager).
-- The cross-attention K and V projections of the 2048 padded encoder rows are
+  did not use it: it ran the 110 context frames one step at a time, twice
+  (conditioned and unconditioned). This was 55% to 75% of the time of a short
+  or medium sentence. In the study, the batched profile prefilled 110 rows in
+  1.46 ms (fp16, B300). The sequential path took about 358 ms. The fp16 KV
+  cache matched to a relative error of 6e-4. The runtime now uses it (see
+  "Context prefill").
+- The cross-attention K and V projections of the 2048 padded encoder rows were
   recomputed in every decoder step. Computing them once per sentence in a
   separate engine (0.11 ms) makes the step 13% faster (1.091 to 0.953 ms, CUDA
-  graph, B300, TensorRT 11.1).
+  graph, B300, TensorRT 11.1). Single-GPU bundles now do this (see
+  "Cross-attention K and V").
 
 With FP8, the batched prefill and the sequential prefill disagree more: KV
 relative error 3.8% (fp16: 0.06%). The activation scales are static, so this is

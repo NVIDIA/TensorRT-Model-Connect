@@ -153,6 +153,7 @@ class K2HorizonTrtRunner:
         _check_cuda(err)
         self.stream = stream
         self.cache_length = 0
+        self._select_single_token_profile()
 
         self._host_scalars = {
             "token_id": np.zeros((1,), dtype=np.int32),
@@ -195,6 +196,19 @@ class K2HorizonTrtRunner:
             self._device_debug[name] = pointer
 
         self.reset()
+
+    def _select_single_token_profile(self) -> None:
+        """Run one token per step; dual-profile engines decode in their last profile."""
+
+        profiles = self.engine.num_optimization_profiles
+        if profiles > 1 and not self.context.set_optimization_profile_async(
+            profiles - 1, self.stream
+        ):
+            raise RuntimeError("Failed to select the K2-Horizon decode optimization profile")
+        for name in ("token_id", "position_id"):
+            if tuple(self.engine.get_tensor_shape(name)) != (1,):
+                if not self.context.set_input_shape(name, (1,)):
+                    raise RuntimeError(f"Failed to set the K2-Horizon {name} shape to [1]")
 
     def _copy_scalar(self, name: str, value: int) -> None:
         host = self._host_scalars[name]

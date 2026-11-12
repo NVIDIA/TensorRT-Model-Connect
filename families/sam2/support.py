@@ -11,4 +11,5 @@ describe = family_support(
     required_files=("sam2.1_hiera_s.yaml", "sam2.1_hiera_small.pt"),
     tasks=("video_segmentation",),
     default_task="video_segmentation",
+    default_precision="fp16",
 )

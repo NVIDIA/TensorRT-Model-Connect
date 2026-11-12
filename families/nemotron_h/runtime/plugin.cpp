@@ -50,6 +50,8 @@ struct RuntimeConfig {
     std::string tensor_parallel_mode;
     std::string precision;
     std::string kv_cache_quantization{"none"};
+    // Single-GPU split bundles carry a multi-row prefill engine.
+    bool split{false};
 };
 
 template <typename T>
@@ -82,7 +84,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
             throw std::runtime_error("nemotron_h runtime.json has invalid quantization");
     }
     const std::string layout = require_value<std::string>(json, "decoder_engine_layout");
-    if (layout != "single" && layout != "dual_profile")
+    if (layout != "single" && layout != "dual_profile" && layout != "split")
         throw std::runtime_error("nemotron_h runtime.json has invalid decoder_engine_layout");
 
     RuntimeConfig config{
@@ -109,6 +111,11 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_value<std::string>(json, "tensor_parallel_mode"),
         require_value<std::string>(json, "precision"),
     };
+    // Tensor-parallel bundles record dual_profile; their per-rank engines keep
+    // one-token inputs. Split bundles are single-GPU.
+    config.split = layout == "split";
+    if (config.split && config.tensor_parallel_size != 1)
+        throw std::runtime_error("nemotron_h split bundles are single-GPU");
     if (json.contains("kv_cache_quantization")) {
         config.kv_cache_quantization = require_value<std::string>(json, "kv_cache_quantization");
         if (config.kv_cache_quantization != "none" && config.kv_cache_quantization != "fp8")
@@ -195,6 +202,18 @@ ITask* create(const FamilyContext& context) {
     if (decoder == nullptr || !decoder->ok())
         throw std::runtime_error("nemotron_h failed to load decoder");
     decoder->set_timing_label("nemotron_h decoder");
+    std::unique_ptr<ITrtModule> prefill;
+    if (config.split) {
+        // The prefill engine shares the decoder's stream so state copies stay ordered.
+        ModuleCreateOptions prefill_options = options;
+        prefill_options.stream = decoder->stream();
+        const auto& prefill_plan = require_section(context.reader, "prefill.plan");
+        prefill = context.backend.create_module(prefill_plan.data(), prefill_plan.size(),
+                                                prefill_options);
+        if (prefill == nullptr || !prefill->ok())
+            throw std::runtime_error("nemotron_h failed to load the prefill engine");
+        prefill->set_timing_label("nemotron_h prefill");
+    }
     const cudaStream_t stream = decoder->stream();
     const std::int32_t kv_dim =
         (config.num_key_value_heads / config.tensor_parallel_size) * config.head_dim;
@@ -227,7 +246,7 @@ ITask* create(const FamilyContext& context) {
                                            config.precision, config.tensor_parallel_size);
     return new RecurrentPipeline(std::move(decoder), std::move(state), std::move(generation),
                                  stream, "Nemotron-H", std::move(tokenizer), std::string{},
-                                 std::move(paired));
+                                 std::move(paired), std::move(prefill));
 }
 
 } // namespace trtmc::nemotron_h

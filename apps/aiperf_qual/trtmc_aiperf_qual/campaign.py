@@ -26,10 +26,10 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import bundles, retention
+from . import bundles, gold_metrics, retention
 from .bundles import prefetch
 from .config import Environment
-from .judge import QUALIFYING_MODE
+from .judge import qualifying
 from .models import checkpoints
 from .compat import report as normalized_report
 from .report import acc_value, plain
@@ -166,13 +166,36 @@ def warm_selections(environment: Environment, model: Mapping[str, Any]) -> None:
                 pass
 
 
+def _sandbox_run_key(environment: Environment, model: Mapping[str, Any], out: Path, reason: str) -> str:
+    # Note (Jiaxin Deng): A blocked run must not prepare reference dependencies just to identify its result.
+    value = {"model": model, "harness": harness_digest(), "smoke": bool(environment.values.get("smoke")),
+             "blocked_by": "code_sandbox", "reason": reason,
+             "protected_roots": gold_metrics.protected_roots(environment.values, out)}
+    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _sandbox_blocked_result(environment: Environment, model: Mapping[str, Any], out: Path,
+                            started: float, error: gold_metrics.SandboxUnavailable) -> dict[str, Any]:
+    record = {"profile": model["model"], "task": model.get("task"), "category": "environment-blocked",
+              "failure_type": "environment", "blocked_by": "code_sandbox", "reason": _error(error),
+              "seconds": round(time.time() - started)}
+    (out / RUN_KEY).write_text(_sandbox_run_key(environment, model, out, str(error)) + "\n")
+    (out / "error.json").write_text(json.dumps(record, indent=2))
+    return record
+
+
 def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[str, Any]:
     """Build the bundle when missing, qualify, and apply the bundle retention policy. A previous run
     in ``out`` is set aside first."""
     started = time.time()
+    configured_model = model
     model = copy.deepcopy(model)  # resolved build capacity must not mutate the caller's resume configuration
     set_aside(out)
     out.mkdir(parents=True, exist_ok=True)
+    try:
+        gold_metrics.preflight_code_sandbox(model, environment.values, out)
+    except gold_metrics.SandboxUnavailable as error:
+        return _sandbox_blocked_result(environment, configured_model, out, started, error)
     (out / RUN_KEY).write_text(run_key(environment, model) + "\n")
     bundle_policy, hf_policy = retention.policies(environment)
     record: dict[str, Any] = {"profile": model["model"], "task": model.get("task")}
@@ -191,6 +214,8 @@ def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[
         try:
             verdict = qualify(model, environment, out)["verdict"]
             record.update(verdict)
+        except gold_metrics.SandboxUnavailable as error:
+            return _sandbox_blocked_result(environment, configured_model, out, started, error)
         except Exception as error:  # noqa: BLE001
             record.update(category="error", reason=_error(error))
             (out / "error.json").write_text(json.dumps({**record, "traceback": traceback.format_exc()}, indent=2))
@@ -239,6 +264,9 @@ def _finished(out: Path, key: str | None = None) -> str | None:
         return json.loads(report.read_text()).get("verdict", {}).get("category")
     if build.is_file() and json.loads(build.read_text()).get("status") == "failed":
         return "build-failed"
+    error = out / "error.json"
+    if error.is_file() and json.loads(error.read_text()).get("category") == "environment-blocked":
+        return "environment-blocked"
     return None
 
 
@@ -256,15 +284,30 @@ def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root
         for index, model in enumerate(ordered):
             profile, out = model["model"], out_root / model["model"]
             if prefetch_next and index + 1 < len(ordered):
-                downloads.submit(prefetch, environment, ordered[index + 1])
+                following = ordered[index + 1]
+                try:
+                    gold_metrics.preflight_code_sandbox(following, environment.values, out_root / following["model"])
+                except gold_metrics.SandboxUnavailable:
+                    # Note (Jiaxin Deng): run_one records the blocked profile without speculative weight downloads.
+                    pass
+                else:
+                    downloads.submit(prefetch, environment, following)
             started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            finished = _finished(out, run_key(environment, model))
+            finished = None
+            if out.is_dir():
+                try:
+                    gold_metrics.preflight_code_sandbox(model, environment.values, out)
+                except gold_metrics.SandboxUnavailable as error:
+                    key = _sandbox_run_key(environment, model, out, str(error))
+                else:
+                    key = run_key(environment, model)
+                finished = _finished(out, key)
             if finished and not rerun:
                 record = {"profile": profile, "status": "skipped", "category": finished}
             else:
                 set_aside(out)
                 record = run_one(environment, model, out)
-            if record["category"] in ("error", "build-failed", "smoke-fail"):
+            if record["category"] in (*HARNESS_FAILURES, "smoke-fail"):
                 failed_checkpoints.update(checkpoints(model))
             for repo in sorted(checkpoints(model)):
                 remaining[repo] -= 1
@@ -279,11 +322,11 @@ def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root
     return records
 
 
-CATEGORIES = ("error", "config-error", "build-failed", "not-run", "acc-issue", "not-covered", "acc-inconclusive",
+CATEGORIES = ("error", "environment-blocked", "config-error", "build-failed", "not-run", "acc-issue", "not-covered", "acc-inconclusive",
               "not-comparable", "perf-issue", "perf-inconclusive", "measured", "pass", "excluded", "smoke-fail", "smoke-pass")
 EXCLUSIONS = "excluded.json"
 PLAN = "plan.json"
-HARNESS_FAILURES = ("error", "build-failed")
+HARNESS_FAILURES = ("error", "environment-blocked", "build-failed")
 
 
 def write_plan(out_root: Path, selected: Sequence[str], config_errors: Sequence[Mapping[str, Any]],
@@ -346,11 +389,42 @@ def _row(directory: Path) -> dict[str, Any] | None:
                                         *(f"{key}: {text[:100]}" for key, text in value.get("errors", {}).items())])}
         if name == "build.json" and value.get("status") != "failed":
             continue
-        return {"task": value.get("task"), "category": "build-failed" if name == "build.json" else "error",
+        category = ("build-failed" if name == "build.json" else
+                    "environment-blocked" if value.get("category") == "environment-blocked" else "error")
+        return {"task": value.get("task"), "category": category,
                 "directory": str(directory), "repro": value.get("repro"),
                 "time": path.stat().st_mtime,
                 "accuracy": [], "perf": [], "backend": "", "notes": value.get("reason", "")}
     return None
+
+
+NO_NATIVE_MODE = "—"
+FELL_BACK = "eager (compile failed)"
+
+
+def native_mode(row: Mapping[str, Any]) -> str:
+    """The native mode that answered a profile: ``compile``, ``eager`` (configured, or pinned), ``eager (compile
+    failed)`` where eager replaced a failed torch.compile, ``compile, eager`` when the evidence mixes them, or
+    ``—``."""
+    # An entry that errored records the mode it would have run; only evidence names the mode that answered.
+    accuracy = [item.get("native") or {} for item in row.get("accuracy", []) if item.get("status") != "error"]
+    perf = [item for item in row.get("perf", []) if item.get("light") != "n/a"
+            and (item.get("reference") or {}).get("p50_ms") is not None]  # a native side that timed requests
+    modes = {str(item["mode"]) for item in accuracy if item.get("mode")}
+    modes |= {mode for item in perf for mode in str(item.get("reference_mode") or "").split("+") if mode}
+    fell_back = (any(item.get("compile_fallback") for item in accuracy)
+                 or any(item.get("compile_fallback") or item.get("configured_mode") for item in perf))
+    if not modes:
+        return NO_NATIVE_MODE
+    if fell_back and modes == {"eager"}:
+        return FELL_BACK
+    return ", ".join(sorted(modes)) + (" (a compile failed)" if fell_back else "")
+
+
+def native_mode_counts(rows: Mapping[str, Mapping[str, Any]]) -> str:
+    """``compile 160, eager 48, ...``: how many profiles each native mode answered."""
+    counts = collections.Counter(native_mode(row) for row in rows.values())
+    return ", ".join(f"{mode} {count}" for mode, count in counts.most_common())
 
 
 def _accuracy_text(items: Sequence[Mapping[str, Any]]) -> str:
@@ -379,9 +453,15 @@ def measurement_note(item: Mapping[str, Any]) -> str:
     return "; ".join(notes)
 
 
+def _native(item: Mapping[str, Any]) -> str:
+    """``native``, with the mode that answered (compile or eager) unless the request label already names it."""
+    mode = item.get("reference_mode")
+    return f"native {mode}" if mode and item.get("request") else "native"
+
+
 def _perf_text(profile: str, items: Sequence[Mapping[str, Any]]) -> str:
     return "; ".join(f"{request_label(profile, item)}: TRTMC {ms((item.get('candidate') or {}).get('p50_ms'))} · "
-                     f"native {ms((item.get('reference') or {}).get('p50_ms'))}"
+                     f"{_native(item)} {ms((item.get('reference') or {}).get('p50_ms'))}"
                      + (" per audio second" if (item.get("candidate") or {}).get("unit") else "")
                      + (f" ({note})" if (note := measurement_note(item)) else "") for item in items)
 
@@ -392,7 +472,7 @@ def _perf_text(profile: str, items: Sequence[Mapping[str, Any]]) -> str:
 # (counts as a pass) or an Acc difference not shown either way; Green, a pass.
 SIGNALS = ("white", "red", "yellow", "green")
 SIGNAL_NAMES = {"white": "White", "red": "Red", "yellow": "Yellow", "green": "Green"}
-NO_VERDICT = {"error", "config-error", "build-failed", "not-run", "excluded", "smoke-fail"}
+NO_VERDICT = {"error", "environment-blocked", "config-error", "build-failed", "not-run", "excluded", "smoke-fail"}
 NOT_COMPARED = {"not-comparable", "not-covered"}
 
 
@@ -402,7 +482,7 @@ def reported_perf(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     if row.get("performance_source") == "quality":
         return datasets
     return [item for item in row.get("perf", []) if "near-capacity" not in str(item.get("request") or "")
-            and item.get("reference_mode", QUALIFYING_MODE) == QUALIFYING_MODE and item.get("gate", True)]
+            and qualifying(item)]
 
 
 def request_label(profile: str, item: Mapping[str, Any]) -> str:
@@ -524,19 +604,27 @@ REGRESSION_MARGIN_PERCENT = 5.0
 
 def annotate_regressions(rows: Mapping[str, dict[str, Any]], baseline: Mapping[str, Mapping[str, Any]],
                          margin_percent: float = REGRESSION_MARGIN_PERCENT) -> None:
-    """Compare TRTMC p50 per profile and native mode with a baseline run (for example the previous
-    release); slower by more than the margin is noted as a regression (the category is unchanged)."""
+    """Compare TRTMC p50 per profile and timed request with a baseline run (for example the previous
+    release); slower by more than the margin is noted as a regression (the category is unchanged). The native
+    mode is not part of the key: it does not change the TRTMC time, and a baseline may have run another one."""
+    def timed(perf: Sequence[Mapping[str, Any]]) -> dict[str, float]:
+        """TRTMC p50 per timed request (a mode the native side could not run has no TRTMC timing)."""
+        found: dict[str, float] = {}
+        for item in perf:
+            p50 = (item.get("candidate") or {}).get("p50_ms")
+            if p50:
+                found.setdefault(str(item.get("request") or item.get("reference_mode")), p50)
+        return found
+
     for profile, row in rows.items():
-        key = lambda item: f"{item.get('reference_mode')}/{item.get('request') or ''}".rstrip("/")  # noqa: E731
-        previous = {key(item): item for item in (baseline.get(profile) or {}).get("perf", [])}
-        for item in row.get("perf", []):
-            before = (previous.get(key(item)) or {}).get("candidate", {}).get("p50_ms")
-            now = item.get("candidate", {}).get("p50_ms")
-            if before and now:
+        previous = timed((baseline.get(profile) or {}).get("perf", []))
+        for name, now in timed(row.get("perf", [])).items():
+            before = previous.get(name)
+            if before:
                 change = (now / before - 1) * 100
-                row.setdefault("baseline", {})[key(item)] = change
+                row.setdefault("baseline", {})[name] = change
                 if change > margin_percent:
-                    row["notes"] = (f"regression: TRTMC {key(item)} p50 +{change:.1f}% vs baseline; "
+                    row["notes"] = (f"regression: TRTMC {name} p50 +{change:.1f}% vs baseline; "
                                     + row.get("notes", "")).strip("; ")
 
 
@@ -552,19 +640,22 @@ def summary(roots: Sequence[Path], baseline: Sequence[Path] = ()) -> tuple[str, 
     names = [SIGNAL_NAMES[result] for result in SIGNALS]
     lines = ["# TRTMC vs native qualification", "", f"{len(rows)} models from {', '.join(r.name for r in roots)}: "
              f"{sum(is_pass(row) for row in rows.values())} pass (Green + conclusive Yellow).", "",
-             "Green: pass. Yellow: Perf about equal to native (counts as a pass) or an Acc difference not shown either "
-             "way; inconclusive Acc does not count as a pass. Red: Acc or Perf worse than native beyond its margin. White: no valid comparison (an error or a "
+             "Green: pass. Yellow: Perf about equal to native (counts as a pass); an inconclusive Acc of an older "
+             "report does not count as a pass. Red: Acc or Perf worse than native beyond its margin. White: no valid comparison (an error or a "
              "failed build, or the comparison does not apply).", "",
+             f"Native mode (torch.compile by default; eager where pinned or where compile failed): "
+             f"{native_mode_counts(rows)}.", "",
              "| result | models |", "|---|---|", *(f"| {SIGNAL_NAMES[r]} | {results[r]} |" for r in SIGNALS),
              "", "## By Task", "", "| Task | " + " | ".join(names) + " |", "|---|" + "---|" * len(names),
              *(f"| {task} | " + " | ".join(str(by_task[task].get(r) or "") for r in SIGNALS) + " |"
                for task in sorted(by_task)),
-             "", "## Per model", "", "| result | model | Task | host | Acc (TRTMC · native) | Perf p50 (TRTMC · native) | "
-             "reason |", "|---|---|---|---|---|---|---|"]
+             "", "## Per model", "", "| result | model | Task | native mode | host | Acc (TRTMC · native) | "
+             "Perf p50 (TRTMC · native) | reason |", "|---|---|---|---|---|---|---|---|"]
     for profile in sorted(rows, key=lambda p: (SIGNALS.index(signal(rows[p])), rows[p]["task"] or "", p)):
         row = rows[profile]
         reason = signal_reason(profile, row).replace("|", "/").replace("\n", " ")
-        lines.append(f"| {SIGNAL_NAMES[signal(row)]} | {profile} | {row['task'] or '-'} | {row['root']} | "
+        lines.append(f"| {SIGNAL_NAMES[signal(row)]} | {profile} | {row['task'] or '-'} | {native_mode(row)} | "
+                     f"{row['root']} | "
                      f"{_accuracy_text(row['accuracy'])} | {_perf_text(profile, reported_perf(row))} | {reason} |")
     native = {profile: row["aiperf_metrics"] for profile, row in rows.items() if row.get("aiperf_metrics")}
     if native:

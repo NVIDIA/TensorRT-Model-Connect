@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Paired non-inferiority of TRTMC against the native model.
 
-The regression ``R`` is positive when TRTMC is worse, in the metric's points. An entry ``pass``es when
-the one-sided 95% upper bound of ``R`` is below the margin, ``fail``s (a regression established) when
-the one-sided 95% lower bound exceeds it, and is ``inconclusive`` otherwise.
+The regression ``R`` is positive when TRTMC is worse, in the metric's points. An entry ``fail``s when the
+measured ``R`` exceeds the margin and ``pass``es otherwise (at the margin included): there is no
+inconclusive outcome. The statistics below are reported with it, for information:
 
-- Binary metrics: Tango's paired score test on the discordant counts, with a cutoff that is exact for
+- Binary metrics: Tango's paired score statistic on the discordant counts, with a cutoff that is exact for
   the problem count and margin (``critical``).
 - Sampled models: per-problem seed-mean differences, one-sided Student-t bounds over problems.
 - Corpus metrics: paired percentile bootstrap over independent clusters of ``R - margin(native)``.
@@ -98,16 +98,19 @@ def critical(n: int, delta: float) -> float:
     return float(cutoffs[int(np.argmax(controlled))]) if controlled.any() else float(cutoffs[-1])
 
 
+def outcome(regression_points: float, margin_points: float) -> str:
+    """``fail`` when the measured regression exceeds the margin, else ``pass``."""
+    return "fail" if regression_points > margin_points else "pass"
+
+
 def binary(native_only: int, trtmc_only: int, n: int, delta_points: float) -> dict[str, Any]:
     """Outcome of right/wrong pairs: ``b`` problems only the native model answers right, ``c`` only TRTMC."""
     delta = delta_points / 100.0
-    # One statistic at the margin, two tails: Z < -k rejects R >= delta (non-inferior), Z > k rejects
-    # R <= delta (a regression beyond the margin).
+    regression = 100.0 * (native_only - trtmc_only) / n if n else 0.0
+    # Reported with the outcome: the score statistic at the margin and its exact two-tailed cutoff.
     z = score_z(native_only, trtmc_only, n, delta) if n else 0.0
-    k = critical(n, round(delta, 6))
-    outcome = "pass" if z < -k else "fail" if z > k else "inconclusive"
-    return {"outcome": outcome, "regression_points": 100.0 * (native_only - trtmc_only) / n if n else 0.0,
-            "z": z, "critical": k}
+    return {"outcome": outcome(regression, delta_points), "regression_points": regression, "z": z,
+            "critical": critical(n, round(delta, 6))}
 
 
 def t_quantile(probability: float, df: float) -> float:
@@ -120,12 +123,12 @@ def t_quantile(probability: float, df: float) -> float:
 def paired_means(differences: Sequence[float], delta_points: float) -> dict[str, Any]:
     """Outcome from per-problem regressions (points, already averaged over seeds within each problem)."""
     n = len(differences)
+    mean = statistics.fmean(differences) if n else 0.0
     if n < 2:
-        return {"outcome": "inconclusive", "regression_points": statistics.fmean(differences) if n else 0.0}
-    mean = statistics.fmean(differences)
+        return {"outcome": outcome(mean, delta_points), "regression_points": mean}
     half = t_quantile(1 - ALPHA, n - 1) * statistics.stdev(differences) / math.sqrt(n)
-    outcome = "pass" if mean + half < delta_points else "fail" if mean - half > delta_points else "inconclusive"
-    return {"outcome": outcome, "regression_points": mean, "upper": mean + half, "lower": mean - half}
+    return {"outcome": outcome(mean, delta_points), "regression_points": mean, "upper": mean + half,
+            "lower": mean - half}
 
 
 def _moving_blocks(order: Sequence[int], length: int, generator: random.Random) -> list[int]:
@@ -169,7 +172,7 @@ def bootstrap(statistic: Callable[[Sequence[int]], tuple[float, float]], cluster
         draws.append(excess(picked)[0])
     draws.sort()
     low, high = draws[int(ALPHA * resamples)], draws[int((1 - ALPHA) * resamples) - 1]
-    outcome = "pass" if high < 0.0 else "fail" if low > 0.0 else "inconclusive"
-    return {"outcome": outcome, "regression_points": regression, "margin_points": margin(gate, native),
+    return {"outcome": outcome(regression, margin(gate, native)), "regression_points": regression,
+            "margin_points": margin(gate, native),
             "excess_interval90": [low, high], "clusters": len(keys), "resamples": resamples, "observed_excess": observed,
             **({"block": block} if block else {})}

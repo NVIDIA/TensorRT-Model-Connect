@@ -211,15 +211,16 @@ def _floor(environment: Environment, model: dict[str, Any], suite: Any, python: 
 
 
 def _parity(environment: Environment, model: dict[str, Any], check: Mapping[str, Any], python: str,
-                   out: Path, suite: Any, outputs: Mapping[str, Any], native: tuple[str, str],
+                   out: Path, suite: Any, outputs: Mapping[str, Any], native: tuple[str, str, str],
                    max_frames: int) -> dict[str, Any]:
+    """``native``: the backend, precision, and mode of the native outputs; the noise floor renders eager."""
     label = " ".join(native)
     missing = not_replayed(outputs)
     if missing:
         return item(suite, {}, label, None, outputs,
                                   [f"the initial noise was not replayed on {', '.join(missing)}"])
     floor_suite = limit_suite(suite, int(check.get("parity_floor_samples", 10)))
-    floor, floor_label = _floor(environment, model, floor_suite, python, out, *native,
+    floor, floor_label = _floor(environment, model, floor_suite, python, out, native[0], native[1],
                                 reuse=bool(check.get("reuse_outputs")))
     if floor is not None and not_replayed({"floor": floor}):
         floor, floor_label = None, None
@@ -247,9 +248,9 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
                 else check.get("parity_floor_samples", 10))
     suite = with_latent_seeds(limit_suite(suite, count))
     reuse = bool(check.get("reuse_outputs"))
-    native, native_backend, native_precision = generate_native(environment, model, suite, python, out, "replay",
-                                                               reuse=reuse)
+    native, native_backend, native_precision, native_mode = generate_native(environment, model, suite, python, out,
+                                                                            "replay", reuse=reuse)
     outputs = {"candidate": generate(environment, model, "trtmc", out / "replay-candidate", suite, reuse=reuse),
                "native": native}
     return [_parity(environment, model, check, python, out, suite, outputs,
-                    (native_backend, native_precision), int(check.get("max_frames", 8)))]
+                    (native_backend, native_precision, native_mode), int(check.get("max_frames", 8)))]

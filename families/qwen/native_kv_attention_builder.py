@@ -47,8 +47,14 @@ def add_active_prefix_causal_masks(
     cache_write_indices: trt.ITensor,
     key_value_lengths: trt.ITensor,
     cache_capacity: int,
+    key_positions: trt.ITensor | None = None,
 ) -> NativeKvMasks:
-    """Build BOOL attention and active-prefix masks for a cache append."""
+    """Build BOOL attention and active-prefix masks for a cache append.
+
+    Without ``key_positions`` the masks span the whole cache capacity. With an
+    int32 ``[R]`` ``key_positions`` input holding ``0..R-1``, they span only
+    the first ``R`` cache rows, so attention can run over that slice.
+    """
 
     if cache_capacity <= 0:
         raise ValueError("native KV cache capacity must be positive")
@@ -92,21 +98,26 @@ def add_active_prefix_causal_masks(
     query_limits_2d = network.add_shuffle(query_limits)
     query_limits_2d.set_input(1, query_limit_shape.get_output(0))
 
-    key_positions = _constant(
-        network,
-        (1, cache_capacity),
-        np.arange(cache_capacity, dtype=np.int32).reshape(1, cache_capacity),
-        dtype=np.dtype(np.int32),
-    )
+    if key_positions is None:
+        key_positions_2d = _constant(
+            network,
+            (1, cache_capacity),
+            np.arange(cache_capacity, dtype=np.int32).reshape(1, cache_capacity),
+            dtype=np.dtype(np.int32),
+        )
+    else:
+        key_positions_shuffle = network.add_shuffle(key_positions)
+        key_positions_shuffle.reshape_dims = (1, -1)
+        key_positions_2d = key_positions_shuffle.get_output(0)
     active_length_2d = network.add_shuffle(key_value_lengths)
     active_length_2d.reshape_dims = (1, 1)
     causal = network.add_elementwise(
-        key_positions,
+        key_positions_2d,
         query_limits_2d.get_output(0),
         trt.ElementWiseOperation.LESS,
     ).get_output(0)
     active = network.add_elementwise(
-        key_positions,
+        key_positions_2d,
         active_length_2d.get_output(0),
         trt.ElementWiseOperation.LESS,
     ).get_output(0)
@@ -129,7 +140,7 @@ def add_active_prefix_causal_masks(
     mask_4d.set_input(1, target_shape.get_output(0))
 
     active_4d = network.add_shuffle(active)
-    active_4d.reshape_dims = (1, 1, 1, cache_capacity)
+    active_4d.reshape_dims = (1, 1, 1, -1)
     return NativeKvMasks(
         attention=mask_4d.get_output(0),
         active_prefix=active_4d.get_output(0),
@@ -197,10 +208,21 @@ def add_explicit_masked_grouped_query_attention(
     key_grouped.reshape_dims = (1, num_kv_heads, 1, -1, head_dim)
     value_grouped = network.add_shuffle(value)
     value_grouped.reshape_dims = (1, num_kv_heads, 1, -1, head_dim)
+    # The key-row count may be dynamic (an active-prefix slice of the cache),
+    # so derive the 5-D mask shape from the 4-D mask instead of the key shape.
+    mask_shape = network.add_shape(masks.attention).get_output(0)
+    leading_one = _constant(
+        network,
+        (1,),
+        np.array([1], dtype=np.int64),
+        dtype=np.dtype(np.int64),
+    )
+    mask_grouped_shape = network.add_concatenation([leading_one, mask_shape])
+    mask_grouped_shape.axis = 0
     mask_grouped = network.add_shuffle(masks.attention)
-    mask_grouped.reshape_dims = (1, 1, 1, -1, int(key.shape[-2]))
+    mask_grouped.set_input(1, mask_grouped_shape.get_output(0))
     active_grouped = network.add_shuffle(masks.active_prefix)
-    active_grouped.reshape_dims = (1, 1, 1, int(key.shape[-2]), 1)
+    active_grouped.reshape_dims = (1, 1, 1, -1, 1)
 
     zero = _constant(
         network,

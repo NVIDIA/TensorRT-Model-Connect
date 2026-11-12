@@ -248,12 +248,6 @@ def build_ltx_dit_engine(
     )
     rotary_cos_t = graph_ops.add_constant(network, (seq_len, dim), rotary_cos, dtype=np.float32)
     rotary_sin_t = graph_ops.add_constant(network, (seq_len, dim), rotary_sin, dtype=np.float32)
-    rot_half = graph_ops.add_constant(
-        network,
-        (dim, dim),
-        _make_ltx_rotate_half_matrix(dim, num_heads, interleaved=True),
-        dtype=np.float32,
-    )
 
     cross_mask = _make_cross_attention_mask(network, encoder_mask, text_seq_len=text_seq_len)
 
@@ -289,7 +283,6 @@ def build_ltx_dit_engine(
             dtype=np_dtype,
             rotary_cos=rotary_cos_t,
             rotary_sin=rotary_sin_t,
-            rot_half=rot_half,
         )
         hidden = _residual_gated(network, hidden, attn_hidden, gate_msa)
 
@@ -578,18 +571,38 @@ def _from_attention_4d(
     return flat.get_output(0)
 
 
+def _rotate_half_interleaved(network: trt.INetworkDefinition, x: trt.ITensor) -> trt.ITensor:
+    """RoPE rotate-half on adjacent pairs, ``(x0, x1) -> (-x1, x0)``, as slice and concat.
+
+    Same result as multiplying by ``_make_ltx_rotate_half_matrix(..., interleaved=True)``,
+    without a float32 ``[tokens, dim] x [dim, dim]`` GEMM per call (the GEMM runs in TF32 on
+    Blackwell and rounds the rotated values).
+    """
+    seq, width = x.shape
+    pairs = network.add_shuffle(x)
+    pairs.reshape_dims = (seq, width // 2, 2)
+    even = network.add_slice(pairs.get_output(0), (0, 0, 0), (seq, width // 2, 1), (1, 1, 1))
+    odd = network.add_slice(pairs.get_output(0), (0, 0, 1), (seq, width // 2, 1), (1, 1, 1))
+    minus_one = graph_ops.add_constant(network, (1, 1, 1), np.array([-1.0], dtype=np.float32))
+    negated_odd = network.add_elementwise(
+        odd.get_output(0), minus_one, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    joined = network.add_concatenation([negated_odd, even.get_output(0)])
+    joined.axis = 2
+    flat = network.add_shuffle(joined.get_output(0))
+    flat.reshape_dims = (seq, width)
+    return flat.get_output(0)
+
+
 def _apply_ltx_rope(
     network: trt.INetworkDefinition,
     x: trt.ITensor,
     cos: trt.ITensor,
     sin: trt.ITensor,
-    rot_half: trt.ITensor,
 ) -> trt.ITensor:
     out_dtype = x.dtype
     x_fp32 = x if x.dtype == trt.float32 else network.add_cast(x, trt.float32).get_output(0)
-    rotated = network.add_matrix_multiply(
-        x_fp32, trt.MatrixOperation.NONE, rot_half, trt.MatrixOperation.NONE
-    ).get_output(0)
+    rotated = _rotate_half_interleaved(network, x_fp32)
     x_cos = network.add_elementwise(x_fp32, cos, trt.ElementWiseOperation.PROD).get_output(0)
     rot_sin = network.add_elementwise(rotated, sin, trt.ElementWiseOperation.PROD).get_output(0)
     out = network.add_elementwise(x_cos, rot_sin, trt.ElementWiseOperation.SUM).get_output(0)
@@ -613,7 +626,6 @@ def _ltx_attention(
     dtype: np.dtype,
     rotary_cos: trt.ITensor | None = None,
     rotary_sin: trt.ITensor | None = None,
-    rot_half: trt.ITensor | None = None,
 ) -> trt.ITensor:
     kv_source = hidden if context is None else context
     q = _linear(network, hidden, dim, dim, weights, f"{prefix}.to_q", dtype)
@@ -627,9 +639,9 @@ def _ltx_attention(
         network, k, dim, weights[f"{prefix}.norm_k.weight"], eps_t, dtype=dtype
     )
 
-    if rotary_cos is not None and rotary_sin is not None and rot_half is not None:
-        q = _apply_ltx_rope(network, q, rotary_cos, rotary_sin, rot_half)
-        k = _apply_ltx_rope(network, k, rotary_cos, rotary_sin, rot_half)
+    if rotary_cos is not None and rotary_sin is not None:
+        q = _apply_ltx_rope(network, q, rotary_cos, rotary_sin)
+        k = _apply_ltx_rope(network, k, rotary_cos, rotary_sin)
 
     q4 = _to_attention_4d(network, q, seq_len=q_seq_len, num_heads=num_heads, head_dim=head_dim)
     k4 = _to_attention_4d(network, k, seq_len=kv_seq_len, num_heads=num_heads, head_dim=head_dim)

@@ -9,10 +9,6 @@ The [Contributor Quickstart](website/docs/extend/contributing.md) and
 [architecture guide](website/docs/architecture/ai-native-horizontal-scaling.md)
 provide project-specific design, testing, and ownership guidance.
 
-Maintainers can optionally request an
-[advisory documentation review](.github/documentation-check.md). It is manually
-triggered, keeps reports private, and does not replace the existing merge gates.
-
 ## Development workflow
 
 ### 1. Fork and clone the repository
@@ -142,7 +138,9 @@ branch that other people are using.
 
 Open the pull request from your fork branch to
 `NVIDIA/TensorRT-Model-Connect:main` and keep it in draft while completing the
-self-review below. Complete every section of the pull-request template; use
+self-review below. Maintainers treat a draft as work in progress: it is not
+queued for review or protected CI until you mark it ready (step 10). Complete
+every section of the pull-request template; use
 `Not applicable: <reason>` instead of deleting a section. Include:
 
 - **Background**: the problem, motivation, current behavior, and linked issue;
@@ -238,12 +236,14 @@ qualification. Follow the existing maintainer-triggered process below until
 the separate gate migration is complete.
 
 Opening a pull request or pushing to your fork does **not** start the protected
-premerge suite. After public CPU validation passes and the pull request is
-ready for protected CI, mention the repository maintainer in a pull-request
+premerge suite. Maintainers review pull requests and trigger protected CI only
+after they are marked **Ready for review**; a draft is not queued for either.
+After public CPU validation passes and the self-review is complete, mark the
+pull request ready, then mention the repository maintainer in a pull-request
 comment:
 
 ```text
-@yifeif-nv This PR is ready for CI. Please trigger CI for the current head.
+@yifeif-nv This PR is ready for review and CI. Please trigger CI for the current head.
 ```
 
 The maintainer verifies the pull-request head and a successful `Community CPU /

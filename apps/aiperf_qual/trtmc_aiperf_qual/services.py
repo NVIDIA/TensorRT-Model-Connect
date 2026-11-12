@@ -12,6 +12,7 @@ import signal
 import socket
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, wait
 from contextlib import ExitStack, contextmanager
@@ -116,11 +117,14 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
             mode: str = "eager", precision: str | None = None, deterministic: bool = False,
             isolate_requests: bool = False, python: str | None = None, keep_artifacts: bool = False, memory_probe: bool = False,
             port: int | None = None, extra_env: Mapping[str, str] | None = None,
-            service: str = "perf-serving", model_name: str = "trtmc") -> Iterator[dict[str, Any]]:
+            service: str = "perf-serving", model_name: str = "trtmc",
+            compile_fallback: str | None = None) -> Iterator[dict[str, Any]]:
     """Run one server for the model; yields its URL and /v1/serving/info.
 
     backend: ``trtmc`` (candidate) or ``reference`` (generic HF adapters, run in ``python``: the model's
-    reference environment).
+    reference environment). A ``compile`` mode reference that stopped serving (torch.compile failed on some
+    request) fails the work it served when that work ends. ``compile_fallback``: why this eager server replaces a
+    compile one (recorded with its evidence).
     """
     if service == "trtmc-server":
         if backend != "trtmc" or isolate_requests or memory_probe or keep_artifacts:
@@ -193,9 +197,12 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
 
         identity = {**info, "side": "candidate" if backend == "trtmc" else "reference", "mode": mode,
                     "precision": model["candidate"]["precision"] if backend == "trtmc" else
-                    info.get("precision", precision or reference.get("precision", "fp32"))}
+                    info.get("precision", precision or reference.get("precision", "fp32")),
+                    **({"compile_fallback": compile_fallback} if compile_fallback else {})}
         with execution_service(identity):
             yield {"url": url, "info": info, "records": out / "records.jsonl"}
+        if backend != "trtmc" and mode == "compile" and (reason := _stopped_serving(url)):
+            raise ServiceError(f"the torch.compile reference stopped serving: {reason}")
     finally:
         try:  # the record never keeps a server from stopping
             (out / MEMORY_NODES).write_text(json.dumps(memory_nodes(process.pid), indent=2) + "\n")
@@ -508,6 +515,22 @@ def serving_replicas(environment: Environment, model: dict[str, Any], backend: s
                 raise failure
         yield {**first, "urls": urls, "replicas": len(urls), "mps": bool(shared),
                "footprint_mib": max(after[0] - before[0], 0) if before and after else None}
+
+
+def _stopped_serving(url: str) -> str | None:
+    """Why a running server answers ``/health/ready`` unavailable (its backend stopped serving), or None."""
+    try:
+        urllib.request.urlopen(f"{url}/health/ready", timeout=30)
+        return None
+    except urllib.error.HTTPError as error:
+        if error.code != 503:
+            return None
+        try:
+            return str(json.loads(error.read() or b"{}").get("reason") or "unavailable")
+        except ValueError:
+            return "unavailable"
+    except OSError as error:  # no longer answering at all
+        return f"{type(error).__name__}: {error}"
 
 
 def _wait_ready(process: subprocess.Popen, url: str, out: Path, timeout_s: float = 1800) -> dict[str, Any]:

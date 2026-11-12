@@ -11,6 +11,8 @@ Python and no PyTorch.
 
 ```bash
 trtmc build nvidia/gr00t17-lerobot-libero_spatial-640 -o groot.bundle --precision bf16
+# FP8 DiT projections (bf16 only, calibrated checkpoints only; see FP8 below)
+trtmc build nvidia/gr00t17-lerobot-libero_spatial-640 -o groot-fp8.bundle --precision bf16 --quantization fp8
 ```
 
 The family is recognised from `type: "groot"` in `config.json`, never from a
@@ -34,9 +36,9 @@ Anything outside this list fails at build time with the offending field named.
 | Batch | one |
 | Real-time chunking, relative actions, PEFT adapters | not supported (`use_relative_actions`, `use_peft` must be off; grouped `raw_stats`/`modality_config` are rejected) |
 | Processor steps | exactly the steps LeRobot 0.6.1 saves for an N1.7 policy; any other step is rejected |
-| Precision | `bf16` (default) and `fp32` |
+| Precision | `bf16` (default) and `fp32`; `bf16` with `--quantization fp8` (DiT projections in FP8, see below) |
 | Instruction | ASCII, up to 256 tokens and 4096 bytes; formalised as LeRobot does (lower case, keep letters, digits, whitespace and `_`), or used verbatim when `formalize_language` is off |
-| Not claimed | GR00T N1.5, other backbones, Jetson targets, quantization, multi-GPU |
+| Not claimed | GR00T N1.5, other backbones, Jetson targets, quantization other than FP8 of the DiT, multi-GPU |
 
 ### Tokenizer
 
@@ -55,7 +57,7 @@ of any other size, or with other chat-template token ids, is refused.
 
 | Section | Content |
 | --- | --- |
-| `condition.plan` | vision tower (in the build precision; its query/key/value projections in float32), DeepStack, the 16 kept text layers, the action head's vision-language layers, the state token, and the keys/values of every DiT cross-attention block; the prompt length is dynamic |
+| `condition.plan` | vision tower (in the build precision), DeepStack, the 16 kept text layers, the action head's vision-language layers, the state token, and the keys/values of every DiT cross-attention block; the prompt length is dynamic |
 | `denoise.plan` | one flow-matching step: action encoder, DiT, action decoder and the Euler update |
 | `tokenizer.json` | the Qwen3-VL byte-level BPE |
 | `runtime.json` | camera names and order, crop, dimensions, step count, instruction rules, normalization |
@@ -117,7 +119,12 @@ at the manifest's revision, or `TRTMC_LEROBOT_GROOT_CHECKPOINT_DIR` if set.
 checkpoint, runs each observation through the SDK and compares all 16x7 actions,
 checks the preprocessing against LeRobot's, and checks that the native runtime links
 no Python or PyTorch library. Thresholds are in `thresholds/` and are anchored to
-LeRobot's own bfloat16-versus-float32 noise.
+LeRobot's own bfloat16-versus-float32 noise: about twice LeRobot's bfloat16 error on
+each observation, except the bf16 maximum and mean of `ep1267_f080`, where LeRobot's
+bfloat16 error is the smallest of the three; those are set from the measured bundle
+error with headroom (see below). The FP8 manifest builds the same checkpoint with
+`quantization="fp8"`; its thresholds are about twice the FP8 bundle's measured error on
+B200 and B300 (see [FP8](#fp8)).
 
 ```bash
 python -m pytest families/lerobot_groot/tests --e2e-model lerobot_groot -q
@@ -147,25 +154,31 @@ GPU with its default bfloat16 autocast (163 ms in float32). Three bf16 builds ga
 identical actions on this GPU. The bf16 column above was measured with the vision tower
 in float32.
 
-The bf16 bundle now runs the vision tower in bfloat16, as LeRobot's autocast does (the
-fine-tune keeps the base model's bfloat16 vision weights), with only the query/key/value
-projection of each block in float32. Measured with a Python harness that runs the two
-plans as the runtime does (GPU time of the condition plan and four denoising steps),
-TensorRT 11.4.0.106, on the three observations above and on 200 held-out LIBERO-spatial
-observations (mean absolute error of the six arm dimensions against LeRobot float32;
-LeRobot bfloat16 has 9.3e-4):
+The bf16 bundle runs the whole vision tower in bfloat16, as LeRobot's autocast does
+(the fine-tune keeps the base model's bfloat16 vision weights): every matrix product
+in bfloat16, with norms, softmax, gelu, the rotary embedding and the residual stream
+in float32 like the rest of the graph. Measured with a Python harness that runs the
+two plans as the runtime does (GPU time of the condition plan and four denoising
+steps), TensorRT 11.4.0.106, on the three observations above and on 200 held-out
+LIBERO-spatial observations (mean absolute error of the six arm dimensions against
+LeRobot float32; LeRobot bfloat16 has 9.3e-4):
 
 | | B200, vision float32 | B200 | B300, vision float32 | B300 |
 | --- | --- | --- | --- | --- |
-| Policy step | 19.1 ms | 12.1 ms | 17.8 ms | 11.6 ms |
-| Vision tower alone | 10.4 ms | 3.5 ms | 9.3 ms | 3.3 ms |
-| Max abs error vs LeRobot fp32 | 3.6e-3 / 2.9e-3 / 8.7e-3 | 3.6e-3 / 3.3e-3 / 7.4e-3 | 2.7e-3 / 2.3e-3 / 7.8e-3 | 3.6e-3 / 3.3e-3 / 7.4e-3 |
-| Held-out mean arm error | 6.8e-4 | 8.5e-4 | 6.7e-4 | 8.5e-4 |
-| Bundle size | 6.5 GB | 5.8 GB | 6.5 GB | 5.8 GB |
+| Policy step | 19.1 ms | 10.3 ms | 17.8 ms | 9.9 ms |
+| Vision tower alone | 10.4 ms | 1.7 ms | 9.3 ms | 1.5 ms |
+| Max abs error vs LeRobot fp32 | 3.6e-3 / 2.9e-3 / 8.7e-3 | 4.8e-3 / 6.2e-3 / 1.8e-2 | 2.7e-3 / 2.3e-3 / 7.8e-3 | 4.8e-3 / 6.2e-3 / 1.8e-2 |
+| Held-out mean arm error | 6.8e-4 | 9.1e-4 | 6.7e-4 | 9.1e-4 |
+| Bundle size | 6.5 GB | 5.7 GB | 6.5 GB | 5.7 GB |
 
-A tower fully in bfloat16 is 1.8 ms faster again on B200 at the same held-out error
-(9.1e-4), but its maximum error on the second observation, 6.2e-3, is past that case's
-5.1e-3 threshold; the float32 query/key/value projection keeps all three inside.
+The held-out error stays below LeRobot's own bfloat16 policy (9.3e-4), and the median
+per-observation maximum error (4.3e-3) matches LeRobot bfloat16's (4.1e-3). On
+`ep1267_f080`, LeRobot bfloat16 is unusually close to float32 (2.6e-3, against a
+held-out median of 4.1e-3), so twice that error was the tightest limit of the three;
+the bundle's 6.2e-3 to 6.5e-3 (B200 and B300, TensorRT 11.4 and 11.1) is past it, and
+that case's bf16 limits are now 9.5e-3 maximum and 1.4e-3 mean, about 1.5 times the
+largest measured value. A build with one block's query/key/value bias dropped, or
+with every attention output projection scaled by 1.02, still fails that case.
 
 ### Other `lerobot-train` outputs
 
@@ -179,58 +192,57 @@ against the eager LeRobot policy (TensorRT 11.4):
 | `nvidia/gr00t17-lerobot-libero_10-640` @ `5ee08ab09fac5c5ef2388a14c882ea825ac861db` | 3.2e-6 / 1.2e-6 / 6.0e-6 |
 | `nvidia/gr00t17-lerobot-libero_goal-640` @ `436c57c0eb7a90be54270abf3977668b2084ad75` | 3.3e-6 / 1.7e-6 / 2.3e-6 |
 
-## FP8 quantization study (not shipped)
+## FP8
 
-FP8 self-quantization of the flow-matching DiT was built and measured on TensorRT 11.4
-(B200, B300) and 11.1 (B200) on top of the bf16 vision tower. It is not shipped: one
-policy step is only 1.06x faster than the bf16 bundle, the mean action error grows to
-1.8x that of the bf16 bundle, and one of the three committed bf16 test observations fails
-its thresholds. This section records the recipe, the method and the numbers, so that the
-study does not have to be repeated. The FP8 code was not merged; this family has no
-quantized build.
+`--quantization fp8` (with `--precision bf16`) runs the projections of the flow-matching DiT
+as FP8 GEMMs; everything else stays as in the bf16 bundle. It trades action accuracy for a
+small speed-up: on TensorRT 11.4 one policy step is 1.07x faster (GPU time, B200 and B300),
+the native runtime's wall time per chunk 1.05x to 1.06x, the bundle 16% smaller, and the mean
+arm action error is 1.7x that of the bf16 bundle and 1.65x LeRobot's own
+bfloat16-versus-float32 difference. Only `nvidia/gr00t17-lerobot-libero_spatial-640` is
+calibrated; another checkpoint fails at build time and names the calibration tool.
 
-### Summary and decision
+### Summary
 
 Policy step = the condition engine once and the denoise engine four times (GPU time,
-TensorRT 11.4; 200 held-out LIBERO-spatial observations):
+TensorRT 11.4, median over three builds of each precision; 200 held-out LIBERO-spatial
+observations):
 
 | Item | bf16 bundle | FP8 bundle | FP8 vs bf16 |
 | --- | --- | --- | --- |
-| Policy step, B200 / B300 | 12.15 / 11.00 ms | 11.49 / 10.29 ms | 1.06x / 1.06x to 1.07x |
-| Four denoising steps, B200 / B300 | 6.25 / 5.70 ms | 5.62 / 5.05 ms | 1.11x to 1.12x / 1.11x to 1.13x |
-| Condition engine, B200 / B300 | 5.90 / 5.29 ms | 5.87 / 5.24 ms | unchanged |
-| Bundle | 5.82 GB | 4.89 GB | -16% |
-| Held-out mean arm error vs LeRobot fp32 | 8.5e-4 | 1.5e-3 | 1.78x |
-| Committed bf16 E2E thresholds | 3 of 3 pass | 2 of 3 pass | `ep1267_f080` fails |
+| Policy step, B200 / B300 | 9.99 / 9.86 ms | 9.33 / 9.21 ms | 1.07x / 1.07x |
+| Four denoising steps, B200 / B300 | 6.04 / 6.08 ms | 5.41 / 5.43 ms | 1.12x / 1.12x |
+| Condition engine, B200 / B300 | 3.95 / 3.78 ms | 3.93 / 3.77 ms | unchanged |
+| Native runtime wall time per chunk (p50), B200 / B300 | 12.32 / 13.29 ms | 11.65 / 12.62 ms | 1.06x / 1.05x |
+| Bundle | 5.67 GB | 4.74 GB | -16% |
+| Held-out mean arm error vs LeRobot fp32 | 9.1e-4 | 1.5e-3 | 1.68x (LeRobot bf16: 9.3e-4) |
+| E2E thresholds | bf16 cases | FP8 cases (own thresholds) | |
 | Non-finite outputs | 0 | 0 | none |
 
-Decision: do not ship FP8 for GR00T.
-
-- Speed: FP8 saves 0.6 to 0.7 ms of a 11 to 12 ms step. Only the DiT is quantized, and
-  the DiT is half of the step; the other half, the condition engine (vision tower,
-  backbone, VL blocks), stays bf16.
+- Only the DiT is quantized, and the DiT is more than half of the step; the condition
+  engine (vision tower, backbone, VL blocks) stays bf16. FP8 there was measured to add 1%
+  to 2% for twice the action error.
 - The DiT runs on 41 tokens, so its GEMMs are small and FP8 makes one denoising step only
-  1.11x to 1.13x faster.
-- Quality: the mean arm error is 1.78x that of the bf16 bundle and 1.6x LeRobot's own
-  bfloat16-versus-float32 difference. An FP8 build would need its own, looser E2E
-  thresholds.
-- Plan size: the denoise plan is 41% smaller, but the bundle only 16%.
+  1.12x faster.
+- The FP8 E2E cases (`tests/manifests/groot-n17-libero-spatial-fp8.json`, the first one
+  premerge) have their own thresholds, about twice the FP8 bundle's error on B200 and B300.
 
-### Recipe that was measured
+### Recipe
 
 No FP8 or NVFP4 GR00T checkpoint exists on the Hub (`nvidia/GR00T-N1.7-3B` and the
 LeRobot fine-tunes are bf16 or fp32 only), and no official GR00T quantization config
-exists.
+exists, so the build quantizes the original checkpoint (`quantization.py`).
 
 | Choice | Decision |
 | --- | --- |
 | Quantized (192 projections) | `attn1.to_q/k/v`, `attn1.to_out.0`, `ff.net.0.proj`, `ff.net.2` of all 32 DiT blocks; in the plans: 128 FP8 GEMMs in the denoise engine and 1 in the condition engine (the 32 cross-attention key/value projections, merged by TensorRT) |
 | bf16 | vision tower, the 16 backbone layers, the 4 VL self-attention blocks, attention matmuls, AdaLN modulation, timestep embedders, DiT output projections, embodiment-specific encoders and decoder |
-| Weight scale | per tensor, amax / 448, from the checkpoint at build time |
-| Activation scale | static, per tensor; ModelOpt 0.46.1 `FP8_DEFAULT_CFG` (max calibration) through LeRobot's float32 policy, all four denoising steps, 128 LIBERO-spatial observations (32 episodes x 4 frames) |
+| Weight scale | per tensor, amax / 448, from the checkpoint at build time; FP8 weights are never stored |
+| Activation scale | static, per tensor, from `fp8_activation_scales.json`; calibrated once with `calibrate_fp8_scales.py`: ModelOpt 0.46.1 `FP8_DEFAULT_CFG` (max calibration) through LeRobot's float32 policy, all four denoising steps, 128 LIBERO-spatial observations (32 episodes x 4 frames) |
+| Scale table key | model config (kept backbone layers, embodiment) plus a weight fingerprint (sums of the first backbone and DiT query weights); an unknown checkpoint, a missing entry or a non-positive scale is an error |
 | Outlier rule | a scale above 20x the median of its kind stays bf16; measured: none in the DiT (largest ratio 3.99, `ff.net.2`) |
-| Dequantize type | bf16 (the build precision) |
-| Build | `precision=bf16` only; fp32 with FP8 and already quantized checkpoints refused |
+| Dequantize type | bf16 (the build precision): no fp16 overflow, the bias stays in the GEMM epilogue |
+| Build | `precision=bf16` only; fp32 with FP8, other quantization formats and already quantized checkpoints are refused before the weights load |
 
 ### Method
 
@@ -239,8 +251,11 @@ exists.
 - A Python harness runs the two plans as the runtime does (prompt, image patches, state
   normalization, masks, four Euler steps, unnormalization, LIBERO gripper).
 - Speed: GPU time of one policy step (CUDA events, inputs on the device), median of 20
-  interleaved rounds of 10 steps (15 on 11.1). On 11.4 each variant was built twice and
-  all four plans were timed in the same job, one job per GPU type.
+  interleaved rounds of 10 steps. On 11.4 each precision was built three times and all six
+  plans were timed in the same job, one job per GPU type; one build each on 11.1.
+- Native runtime: the C++ qualification binary, two builds of each precision through
+  `BuildRequest`, the 3 test observations and 20 held-out ones, 20 repeats each, three
+  interleaved rounds; wall time per chunk includes host preprocessing.
 - Quality: 200 held-out LIBERO-spatial observations (50 episodes x 4 frames, none used
   for calibration or by the tests) and the 3 committed test observations, fixed noise per
   observation, 16 x 7 actions in robot units. Arm = the 6 continuous dimensions, gripper =
@@ -251,37 +266,53 @@ exists.
 
 ### Results
 
-Speed and size (x is bf16 time over FP8 time; two builds of each variant on 11.4):
+Speed and size (x is bf16 time over FP8 time; per build on 11.4):
 
-| GPU | TensorRT | bf16 step | FP8 step | x step | bf16 / FP8 denoise x4 | x denoise | denoise plan bf16 to FP8 |
+| GPU | TensorRT | bf16 step | FP8 step | x step (median) | bf16 / FP8 denoise x4 | x denoise | denoise plan bf16 to FP8 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| B200 | 11.4 | 12.15 / 12.17 ms | 11.49 / 11.47 ms | 1.06 | 6.25-6.28 / 5.61-5.62 ms | 1.11 to 1.12 | 2004 to 1178 MB |
-| B300 | 11.4 | 11.00 / 10.94 ms | 10.29 / 10.35 ms | 1.06 to 1.07 | 5.67-5.70 / 5.05-5.09 ms | 1.11 to 1.13 | 2004 to 1178 MB |
-| B200 | 11.1 | 11.81 ms | 11.12 ms | 1.06 | 5.97 / 5.29 ms | 1.13 | 2004 to 1179 MB |
+| B200 | 11.4 | 10.00 / 9.99 / 9.95 ms | 9.32 / 9.33 / 9.36 ms | 1.07 | 6.04 / 5.41-5.42 ms | 1.12 | 2004 to 1178 MB |
+| B300 | 11.4 | 9.90 / 9.86 / 9.84 ms | 9.21 / 9.21 / 9.19 ms | 1.07 | 6.07-6.11 / 5.43-5.44 ms | 1.12 | 2004 to 1178 MB |
+| B200 | 11.1 | 10.38 ms | 9.69 ms | 1.07 | 6.23 / 5.54 ms | 1.12 | 2004 to 1178 MB |
+| B300 | 11.1 | 9.74 ms | 9.02 ms | 1.08 | 5.86 / 5.14 ms | 1.14 | 2004 to 1178 MB |
 
-The condition plan goes from 3809 to 3708 MB, the bundle from 5.82 to 4.89 GB. Build time
-is 148 to 248 s for bf16 and 252 to 337 s for FP8.
+The condition plan goes from 3658 to 3557 MB, the bundle from 5.67 to 4.74 GB. Build time
+is 145 to 350 s for bf16 and 250 to 460 s for FP8; bundle load time 4.4 to 3.8 s (B200).
 
-Quality on the 200 held-out observations (B200 and B300 give the same numbers on 11.4):
+Native runtime (TensorRT 11.4, wall time per chunk, p50 per build):
+
+| GPU | bf16 | FP8 | x |
+| --- | --- | --- | --- |
+| B200 | 12.36 / 12.28 ms | 11.65 / 11.65 ms | 1.06 |
+| B300 | 13.30 / 13.27 ms | 12.62 / 12.61 ms | 1.05 |
+
+Quality on the 200 held-out observations (all builds of one precision, and B200 and B300,
+give the same numbers on each TensorRT version):
 
 | Engine | Arm mean abs vs LeRobot fp32 | Ratio to bf16 bundle | p99 | Median per-observation max | Gripper flips | Arm mean abs vs bf16 bundle |
 | --- | --- | --- | --- | --- | --- | --- |
-| bf16 bundle, 11.4 | 8.46e-4 | 1.00 | 5.77e-3 | 4.03e-3 | 0.031% | |
-| FP8 bundle, 11.4 | 1.50e-3 | 1.78 | 8.53e-3 | 7.82e-3 | 0.031% | 1.27e-3 |
-| bf16 bundle, 11.1 | 8.39e-4 | 1.00 | 5.59e-3 | 4.04e-3 | 0.094% | |
-| FP8 bundle, 11.1 | 1.46e-3 | 1.74 | 8.33e-3 | 7.27e-3 | 0.031% | 1.41e-3 |
-| LeRobot bf16 policy | 9.27e-4 | 1.10 | 6.79e-3 | 4.06e-3 | 0.031% | |
+| bf16 bundle, 11.4 | 9.11e-4 | 1.00 | 6.77e-3 | 4.25e-3 | 0.031% | |
+| FP8 bundle, 11.4 | 1.53e-3 | 1.68 | 8.97e-3 | 7.41e-3 | 0.062% | 1.27e-3 |
+| bf16 bundle, 11.1 | 9.02e-4 | 1.00 | 6.42e-3 | 4.06e-3 | 0.031% | |
+| FP8 bundle, 11.1 | 1.53e-3 | 1.70 | 9.25e-3 | 7.51e-3 | 0.062% | 1.27e-3 |
+| LeRobot bf16 policy | 9.27e-4 | 1.02 | 6.79e-3 | 4.06e-3 | 0.031% | |
 
-The committed test observations against the bf16 E2E thresholds (TensorRT 11.4; max abs /
-mean abs vs LeRobot fp32, max abs vs LeRobot bf16; cosine is at least 0.99998 everywhere):
+The native runtime gives the same agreement on its 23 observations (arm mean abs vs LeRobot
+fp32: bf16 8.8e-4, FP8 1.53e-3, LeRobot bf16 8.5e-4).
 
-| Observation | Threshold | bf16 bundle | FP8 bundle |
+E2E through the native runtime (TensorRT 11.4; max abs / mean abs / cosine vs LeRobot fp32,
+max abs vs LeRobot bf16; B200 and B300 identical, two builds each; `ep1272_f000` also runs
+the alternate instruction, shown second):
+
+| Observation | bf16 bundle | FP8 bundle | FP8 threshold |
 | --- | --- | --- | --- |
-| `ep1262_f040` | 1.26e-2 / 1.8e-3 / 1.9e-2 | 3.64e-3 / 7.08e-4 / 6.41e-3 | 9.94e-3 / 1.49e-3 / 9.16e-3 |
-| `ep1267_f080` | 5.1e-3 / 9.4e-4 / 7.7e-3 | 3.27e-3 / 5.83e-4 / 5.49e-3 | 8.16e-3 / 1.22e-3 / 9.16e-3 (fails all three) |
-| `ep1272_f000` | 3.0e-2 / 2.6e-3 / 4.5e-2 | 7.38e-3 / 8.07e-4 / 8.07e-3 | 7.12e-3 / 1.10e-3 / 1.44e-2 |
+| `ep1262_f040` | 4.76e-3 / 8.65e-4 / 0.999996 / 9.16e-3 | 7.79e-3 / 1.59e-3 / 0.999986 / 1.10e-2 | 1.6e-2 / 3.2e-3 / 0.9999 / 2.2e-2 |
+| `ep1267_f080` | 6.21e-3 / 9.34e-4 / 0.999995 / 4.58e-3 | 9.80e-3 / 1.51e-3 / 0.999989 / 8.70e-3 | 2.0e-2 / 3.0e-3 / 0.9999 / 1.8e-2 |
+| `ep1272_f000` | 1.77e-2 / 1.95e-3 / 0.999973 / 7.32e-3; 1.07e-2 / 1.58e-3 / 0.999983 / 9.16e-3 | 1.13e-2 / 1.38e-3 / 0.999989 / 1.05e-2; 8.51e-3 / 1.46e-3 / 0.999988 / 7.32e-3 | 2.3e-2 / 3.0e-3 / 0.9999 / 2.1e-2 |
 
-TensorRT 11.1 gives the same picture (`ep1267_f080` FP8: 7.24e-3 / 1.03e-3 / 8.24e-3).
+The FP8 bundle would fail the bf16 thresholds of `ep1267_f080` (9.5e-3 / 1.4e-3 / 7.7e-3),
+which is why it has its own. A broken FP8 build (every activation scale divided by 16) fails
+the premerge FP8 case with max abs 0.53 and cosine 0.959. TensorRT 11.1 stays inside the
+FP8 thresholds (largest: `ep1267_f080`, 1.16e-2 / 1.43e-3 / 9.6e-3).
 
 Other recipes, measured earlier with the vision tower in float32 (TensorRT 11.4; B200 /
 B300; the bf16 step was then 19.2 / 17.8 ms):
@@ -302,27 +333,24 @@ A harness prototype with the DiT feed-forward projections in NVFP4 (per-16 block
 dynamic activation quantize; q/k/v in FP8), measured with the float32 vision tower on
 TensorRT 11.4, is slower than bf16: 0.97x (B200) and 0.98x (B300) per step, 0.92x and
 0.95x per denoise call, with a mean arm error of 2.75e-3. At 41 tokens the dynamic block
-quantize costs more than the 4-bit weight reads save.
+quantize costs more than the 4-bit weight reads save. Not shipped.
 
-### What was not tried
+### Not covered
 
 | Item | Note |
 | --- | --- |
-| FP8 of the bf16 vision tower | not measured |
-| FP8 attention matmuls, percentile or entropy calibration | not measured |
-| Closed-loop LIBERO success rate, the native runtime with an FP8 bundle, H100 | not measured |
+| Other checkpoints | `libero_10`, `libero_goal` and other `lerobot-train` outputs need a table entry from `calibrate_fp8_scales.py` |
+| FP8 of the vision tower, FP8 attention matmuls, percentile or entropy calibration | not measured |
+| Closed-loop LIBERO success rate, RTX PRO 6000, H100, GB300 | not measured |
 
-### When to revisit
-
-- A deployment with more denoising steps per call: the DiT share of the step, and so the
-  FP8 gain, grows with the step count.
-- A quality target that accepts a mean arm error of about 1.5e-3 (1.6x LeRobot's own
-  bfloat16 noise), with FP8-specific E2E thresholds.
+A deployment with more denoising steps per call gains more: the DiT share of the step, and
+so the FP8 gain, grows with the step count.
 
 ## Known limits
 
 - Qualified on one NVIDIA RTX PRO 6000 Blackwell with TensorRT 11.4 (CUDA 13.4). Other
-  GPUs, TensorRT versions and Jetson are not.
+  GPUs, TensorRT versions and Jetson are not. The FP8 build was measured on B200 and B300
+  (TensorRT 11.4 and 11.1) and is calibrated for one checkpoint.
 - Validated for the LIBERO configuration only. Other embodiments, camera layouts, state
   and action sizes and chunk lengths build, but are not qualified.
 - Batch one, one observation step, square cameras at the target size; GR00T N1.5,

@@ -31,6 +31,7 @@ target_include_directories(trtmc_model_internvl SYSTEM PRIVATE
 target_link_libraries(trtmc_model_internvl PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
+  Threads::Threads
   ${TRTMC_CUDART_LIBRARY}
   ${CMAKE_DL_LIBS}
 )
@@ -81,7 +82,7 @@ if(TRTMC_BUILD_TESTS)
   target_include_directories(test_internvl_tiling SYSTEM PRIVATE
     ${PROJECT_SOURCE_DIR}/third_party/stb
   )
-  target_link_libraries(test_internvl_tiling PRIVATE nlohmann_json::nlohmann_json)
+  target_link_libraries(test_internvl_tiling PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
   add_test(NAME internvl_tiling COMMAND test_internvl_tiling)
   set_tests_properties(internvl_tiling PROPERTIES LABELS "cpu")
 endif()

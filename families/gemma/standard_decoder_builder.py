@@ -67,7 +67,7 @@ def build_standard_decoder_engine(
     verbose: bool = False,
     debug_layer_outputs: bool = False,
     hidden_state_output: bool = False,
-) -> bytes:
+) -> memoryview:
     """Build a TRT engine plan (serialized bytes) for a standard decoder.
 
     Args:
@@ -485,7 +485,7 @@ def build_standard_decoder_engine(
     if plan is None:
         raise RuntimeError("TensorRT engine build failed")
 
-    return bytes(plan)
+    return memoryview(plan)
 
 
 def _apply_norm(

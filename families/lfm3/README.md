@@ -23,10 +23,25 @@ greedy token-ID comparison to the pinned official reference. CPU tests exercise
 configuration, safetensors mapping and graph helpers; they do not prove device
 execution or checkpoint parity. E2E requires `TRTMC_NATIVE_BUILD_DIR` and runs
 the native tokenizer checkpoint executable against the downloaded revision's
-`tokenizer.json` before building an engine. All 27 fixtures must pass; missing
+`tokenizer.json` before building an engine. All 36 fixtures must pass; missing
 assets or a skipped executable fail E2E. For standalone execution, set
 `TRTMC_LFM3_TOKENIZER_JSON` to that tokenizer asset.
 
 Repository source retains its Apache-2.0 notices. Model weights are distributed
 by LiquidAI under the LFM Open License v1.0; users must obtain them separately
 under that license. No model weights or external implementation files are included.
+
+The native regex categories use Unicode 16.0 L* and N* data from
+[UnicodeData.txt](https://www.unicode.org/Public/16.0.0/ucd/UnicodeData.txt),
+redistributed under Unicode License v3 in `UNICODE_LICENSE.txt`. Its SHA-256 is
+`ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f`.
+Regenerate with the command below, then apply clang-format:
+
+```bash
+python families/lfm3/tools/generate_unicode_data.py \
+  UnicodeData.txt families/lfm3/runtime/unicode_categories.h
+```
+
+The categories
+match the pinned tokenizer regex for every Unicode scalar. The notice is installed
+with this family.

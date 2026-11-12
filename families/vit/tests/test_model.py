@@ -195,9 +195,16 @@ def test_fp16_is_accepted(tmp_path: Path) -> None:
         model_module.build(_request(tmp_path, "fp16"), writer=None)
 
 
-def test_the_default_precision_is_fp32() -> None:
+def test_fp32_is_still_accepted(tmp_path: Path) -> None:
+    """fp32 is no longer the default but still passes the precision check."""
+    with pytest.raises(FileNotFoundError, match="safetensors"):
+        model_module.build(_request(tmp_path, "fp32"), writer=None)
+
+
+def test_the_default_precision_is_fp16() -> None:
+    """A build without --precision is fp16."""
     from families.vit.support import describe
     from tensorrt_model_connect.model_support import ModelMetadata
 
     support = describe(ModelMetadata(config={"model_type": "vit"}, model_index={}))
-    assert support.default_precision == "fp32"
+    assert support.default_precision == "fp16"

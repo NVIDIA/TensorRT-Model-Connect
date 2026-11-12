@@ -15,6 +15,7 @@ import numpy as np
 import tensorrt as trt
 
 from .native_kv_attention_builder import (
+    EXPLICIT_ATTENTION_PREFILL_CHUNK_TOKENS,
     NativeKvMasks,
     add_active_prefix_causal_masks,
     add_explicit_masked_grouped_query_attention,
@@ -144,7 +145,7 @@ def _grouped_rms_norm(
     group_width = hidden_size // num_groups
     fp32 = _cast(network, tensor, trt.float32)
     shaped = network.add_shuffle(fp32)
-    shaped.reshape_dims = (1, num_groups, group_width)
+    shaped.reshape_dims = (-1, num_groups, group_width)
     grouped = shaped.get_output(0)
     squared = network.add_elementwise(
         grouped,
@@ -176,7 +177,7 @@ def _grouped_rms_norm(
         trt.ElementWiseOperation.PROD,
     ).get_output(0)
     flattened = network.add_shuffle(normalized)
-    flattened.reshape_dims = (1, hidden_size)
+    flattened.reshape_dims = (-1, hidden_size)
     gamma_tensor = _constant(
         network,
         (1, hidden_size),
@@ -218,7 +219,7 @@ def _active_rope_cache(
     )
     position = _cast(network, position_id, trt.float32)
     position_column = network.add_shuffle(position)
-    position_column.reshape_dims = (1, 1)
+    position_column.reshape_dims = (-1, 1)
     inverse = _constant(
         network,
         (1, head_dim // 2),
@@ -233,9 +234,9 @@ def _active_rope_cache(
     cos = network.add_unary(angles, trt.UnaryOperation.COS).get_output(0)
     sin = network.add_unary(angles, trt.UnaryOperation.SIN).get_output(0)
     cos_3d = network.add_shuffle(cos)
-    cos_3d.reshape_dims = (1, 1, head_dim // 2)
+    cos_3d.reshape_dims = (1, -1, head_dim // 2)
     sin_3d = network.add_shuffle(sin)
-    sin_3d.reshape_dims = (1, 1, head_dim // 2)
+    sin_3d.reshape_dims = (1, -1, head_dim // 2)
     return (
         _cast(network, cos_3d.get_output(0), work_dtype),
         _cast(network, sin_3d.get_output(0), work_dtype),
@@ -249,8 +250,12 @@ def _reshape_rows_to_heads(
     num_heads: int,
     head_dim: int,
 ) -> trt.ITensor:
-    shaped = network.add_shuffle(tensor)
-    shaped.reshape_dims = (1, num_heads, 1, head_dim)
+    # [S, H*D] -> [H, S, D] -> [1, H, S, D]; each row holds every head of one token.
+    split = network.add_shuffle(tensor)
+    split.reshape_dims = (-1, num_heads, head_dim)
+    split.second_transpose = trt.Permutation([1, 0, 2])
+    shaped = network.add_shuffle(split.get_output(0))
+    shaped.reshape_dims = (1, num_heads, -1, head_dim)
     return shaped.get_output(0)
 
 
@@ -260,8 +265,10 @@ def _reshape_heads_to_rows(
     *,
     width: int,
 ) -> trt.ITensor:
+    # [1, H, S, D] -> [S, H*D]
     shaped = network.add_shuffle(tensor)
-    shaped.reshape_dims = (1, width)
+    shaped.first_transpose = trt.Permutation([0, 2, 1, 3])
+    shaped.reshape_dims = (-1, width)
     return shaped.get_output(0)
 
 
@@ -395,7 +402,12 @@ def build_engine(
     verbose: bool = False,
     quant_ctx=None,
 ) -> bytes:
-    """Build the qualified single-token BF16 engine with native KV updates.
+    """Build the qualified BF16 engine with native KV updates.
+
+    One engine carries two optimization profiles over a dynamic token count:
+    profile 0 prefills up to ``EXPLICIT_ATTENTION_PREFILL_CHUNK_TOKENS`` prompt
+    tokens per launch and profile 1 decodes one token. Logits are always the
+    last row, ``[1, vocab]``.
 
     With ``quant_ctx`` (``quantization.calibrate_k2_horizon_fp8``) the projections it holds run as
     FP8 GEMMs; without it every projection is the BF16 matmul.
@@ -427,8 +439,8 @@ def build_engine(
 
         configure_fp8_build(builder_config, quant_ctx)
 
-    token_id = network.add_input("token_id", trt.int32, (1,))
-    position_id = network.add_input("position_id", trt.int32, (1,))
+    token_id = network.add_input("token_id", trt.int32, (-1,))
+    position_id = network.add_input("position_id", trt.int32, (-1,))
     cache_write_indices = network.add_input("cache_write_indices", trt.int32, (1,))
     key_value_lengths = network.add_input("key_value_lengths", trt.int32, (1,))
     attention_masks = add_active_prefix_causal_masks(
@@ -462,6 +474,13 @@ def build_engine(
                 cache_shape,
             )
         )
+
+    prefill_chunk = min(EXPLICIT_ATTENTION_PREFILL_CHUNK_TOKENS, max_cache_length)
+    for minimum, optimum, maximum in ((1, prefill_chunk, prefill_chunk), (1, 1, 1)):
+        profile = builder.create_optimization_profile()
+        for name in ("token_id", "position_id"):
+            profile.set_shape(name, (minimum,), (optimum,), (maximum,))
+        builder_config.add_optimization_profile(profile)
 
     embedding = _work_constant(
         network,
@@ -637,6 +656,33 @@ def build_engine(
         present_k_outputs.append(attention["present_k"])
         present_v_outputs.append(attention["present_v"])
 
+    # Only the last token's logits feed sampling: slice [S, hidden] to its last
+    # row before the final norm and LM head, under both profiles.
+    row_shape = network.add_shape(hidden_state).get_output(0)
+    last_row_offset = _constant(
+        network,
+        (2,),
+        np.array([1, cfg.hidden_size], dtype=np.int64),
+        constant_keepalive,
+        dtype=np.dtype(np.int64),
+    )
+    last_row_start = network.add_elementwise(
+        row_shape,
+        last_row_offset,
+        trt.ElementWiseOperation.SUB,
+    ).get_output(0)
+    last_row_size = _constant(
+        network,
+        (2,),
+        np.array([1, cfg.hidden_size], dtype=np.int64),
+        constant_keepalive,
+        dtype=np.dtype(np.int64),
+    )
+    last_row = network.add_slice(hidden_state, start=(0, 0), shape=(0, 0), stride=(1, 1))
+    last_row.set_input(1, last_row_start)
+    last_row.set_input(2, last_row_size)
+    hidden_state = last_row.get_output(0)
+
     hidden_state = _grouped_rms_norm(
         network,
         hidden_state,
@@ -672,7 +718,7 @@ def build_engine(
         print(
             "[trtmc build] Building K2-Horizon native BF16 engine "
             f"(layers={cfg.num_hidden_layers}, hidden={cfg.hidden_size}, "
-            f"cache={max_cache_length}, "
+            f"cache={max_cache_length}, prefill_chunk={prefill_chunk}, "
             f"fp8_projections={0 if quant_ctx is None else len(quant_ctx.scales)}) ...",
             file=sys.stderr,
         )
@@ -765,7 +811,7 @@ def _runtime_config(
         ),
         "precision": "bf16",
         "max_cache_length": max_cache_length,
-        "decoder_engine_layout": "single",
+        "decoder_engine_layout": "dual_profile",
         "tensor_parallel_size": 1,
         "tensor_parallel_mode": "single",
         "native_kv_cache": True,

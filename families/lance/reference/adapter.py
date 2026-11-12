@@ -72,6 +72,7 @@ class Adapter:
         sys.path.insert(0, str(checkout))
         reference._configure_upstream_vae(checkout, vae)
         upstream = reference._load_upstream(checkout)
+        reference._use_sdpa_without_flash_kernels()
         vit = reference._sdpa_vit_path(self.root, vit)
         dataset_file = self.root / "input.json"
         dataset_file.write_text(json.dumps(reference._dataset_payload(
