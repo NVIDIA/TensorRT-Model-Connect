@@ -6,11 +6,59 @@
 from copy import deepcopy
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from families.yolo11.tests import reporting
 from tools import e2e_evidence
 from tools.e2e_report import render_case
+
+
+@pytest.mark.parametrize("empty_reference", [False, True])
+def test_count_failure_retains_full_reference_and_letterbox_parameters(tmp_path, monkeypatch, empty_reference):
+    import json
+    import sys
+    from types import SimpleNamespace
+    from families.yolo11.tests import test_e2e as e2e
+
+    native, kept, options = _inputs()
+    if empty_reference:
+        kept = np.empty((0, 6), dtype=np.float64)
+    else:
+        native = {"boxes": native["boxes"] * 2, "scores": native["scores"] * 2, "classes": native["classes"] * 2}
+    image = tmp_path / "source.png"
+    Image.new("RGB", (120, 100), "white").save(image)
+    manifest = {"name": "report", "family": "yolo11", "hf_id": "example/model", "task": "object_detection",
+                "bundle": "model.bundle", "precision": "fp32", "max_sequence_length": 1, "tensor_parallel_size": 1}
+    monkeypatch.setattr(e2e, "CASES", {"report": (manifest, {"name": "report"})})
+    monkeypatch.setattr(e2e, "_required_path", lambda value, label: tmp_path / "binary" if label == "TRTMC_BINARY" else tmp_path)
+    monkeypatch.setattr(e2e, "_model_dir", lambda *args: tmp_path)
+    monkeypatch.setattr(e2e, "_asset", lambda *args: image)
+    monkeypatch.setattr(e2e, "build", lambda *args: None)
+    for name in ("libtrtmc_backend_trt.so", "libtrtmc_model_yolo11.so"):
+        (tmp_path / name).touch()
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if command[0] == sys.executable:
+            np.savez(command[-1], kept=kept, **options)
+        return SimpleNamespace(stdout=json.dumps(native))
+
+    monkeypatch.setattr(e2e.subprocess, "run", run)
+    recorder = e2e_evidence.Evidence(tmp_path / "evidence", family="yolo11", case="report",
+                                    source_revision="a" * 40, roots=(tmp_path,))
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        with pytest.raises(AssertionError):
+            e2e.test_official_checkpoint_e2e("report", tmp_path)
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+    assert len(calls) == 2
+    observed = recorder.data["reference"]
+    assert observed["detections_letterbox"]["shape"] == list(kept.shape)
+    assert {key: observed[key] for key in options} == options
+    assert "reference_comparison" not in recorder.data
 
 
 def _inputs():
@@ -82,14 +130,35 @@ def test_native_and_reference_boxes_are_visible_before_details(tmp_path):
     np.testing.assert_equal(reference, before_reference)
 
 
-def test_repeated_samples_keep_distinct_native_reference_pairs(tmp_path):
+@pytest.mark.parametrize("different_output", [False, True])
+def test_repeated_samples_keep_distinct_native_reference_pairs(tmp_path, different_output):
+    import base64
+
     native, reference, options = _inputs()
     recorder = _record(tmp_path, native, reference, options)
-    _record(tmp_path, native, reference, options, sample_index=1, recorder=recorder)
+    first = next(view for view in recorder.data["views"] if view["title"] == "Sample 0 / Native")
+    first_path = recorder.directory / first["image"]["artifact"]
+    first_bytes = first_path.read_bytes()
+    second_native = deepcopy(native)
+    if different_output:
+        if isinstance(second_native, dict):
+            second_native["boxes"][0] += 5.0
+        else:
+            second_native[0]["box"][0] += 5.0
+    _record(tmp_path, second_native, reference, options, sample_index=1, recorder=recorder)
+    second = next(view for view in recorder.data["views"] if view["title"] == "Sample 1 / Native")
+    second_bytes = (recorder.directory / second["image"]["artifact"]).read_bytes()
+    assert first_path.read_bytes() == first_bytes
+    assert (first_bytes != second_bytes) is different_output
     recorder.finish("passed")
     document = render_case(recorder.data, recorder.directory)
+    top = document.split('<details class="case-details">', 1)[0]
     assert 'data-media-index="0" data-media-paired="true"' in document
-    assert 'data-media-index="1" data-media-paired="true"' in document
+    assert 'data-media-index="1" data-media-paired="true"' in top
+    assert 'data-media-index="0"' not in top
+    if different_output:
+        assert base64.b64encode(second_bytes).decode() in top
+        assert base64.b64encode(first_bytes).decode() not in top
 
 
 def test_previews_are_opt_in_and_do_not_require_valid_outputs(tmp_path):

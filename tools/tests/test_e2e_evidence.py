@@ -2315,6 +2315,56 @@ ROOT = Path(__file__).resolve().parents[2]
 ENTRIES = sorted((ROOT / "families").glob("*/tests/test_e2e.py"))
 
 
+def _entrypoint_evidence_fields(tree, entrypoint):
+    """Follow directly named local helpers without counting sibling/orphan code.
+
+    This is a syntactic call-path guard, not proof of branch execution. Indirect
+    callbacks and imported producers cannot establish recording here; those need
+    executable recorder controls rather than a family-specific exemption.
+    """
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+
+    class Calls(ast.NodeVisitor):
+        def __init__(self):
+            self.calls = []
+
+        def visit_Call(self, node):
+            self.calls.append(node)
+            self.generic_visit(node)
+
+        def visit_FunctionDef(self, node):
+            pass
+
+        def visit_AsyncFunctionDef(self, node):
+            pass
+
+        def visit_ClassDef(self, node):
+            pass
+
+        def visit_Lambda(self, node):
+            pass
+
+    pending, visited, fields = [entrypoint], set(), set()
+    while pending:
+        name = pending.pop()
+        if name in visited:
+            continue
+        visited.add(name)
+        calls = Calls()
+        for statement in functions[name].body:
+            calls.visit(statement)
+            if isinstance(statement, (ast.Return, ast.Raise)):
+                break
+        for call in calls.calls:
+            if not isinstance(call.func, ast.Name):
+                continue
+            if call.func.id == "record_evidence" and call.args and isinstance(call.args[0], ast.Constant):
+                fields.add(call.args[0].value)
+            elif call.func.id in functions:
+                pending.append(call.func.id)
+    return fields
+
+
 @pytest.mark.parametrize("entry", ENTRIES, ids=lambda path: path.parent.parent.name)
 def test_official_family_e2e_has_an_evidence_entrypoint(entry):
     tree = ast.parse(entry.read_text())
@@ -2325,17 +2375,57 @@ def test_official_family_e2e_has_an_evidence_entrypoint(entry):
         assert "case_name" in {arg.arg for arg in function.args.args}, (
             f"{entry}:{function.lineno}: pytest IDs do not replace the case_name parameter"
         )
-    fields = {
-        node.args[0].value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        and node.func.id == "record_evidence" and node.args
-        and isinstance(node.args[0], ast.Constant)
-    }
-    assert {"inputs", "native", "reference"} <= fields, (
-        f"{entry}: declare inputs, native and reference observations; a contract-only test "
-        "must explicitly record that no independent reference ran"
-    )
+        fields = _entrypoint_evidence_fields(tree, function.name)
+        assert {"inputs", "native", "reference"} <= fields, (
+            f"{entry}:{function.lineno} {function.name}: recording inputs, native and reference "
+            "could not be established through directly called local helpers. Module-wide "
+            "declarations do not qualify another entrypoint; dynamic/imported recording paths "
+            "need executable recorder controls. Contract-only tests must record that scope."
+        )
+
+
+def test_entrypoint_guard_does_not_borrow_a_sibling_or_uninvoked_helper():
+    tree = ast.parse('''
+def capture():
+    record_evidence("inputs", {})
+    record_evidence("native", {})
+    record_evidence("reference", {})
+def test_first_e2e(case_name):
+    capture()
+def test_second_e2e(case_name):
+    def unused():
+        capture()
+    callback = capture
+''')
+    assert _entrypoint_evidence_fields(tree, "test_first_e2e") == {"inputs", "native", "reference"}
+    assert _entrypoint_evidence_fields(tree, "test_second_e2e") == set()
+
+
+def test_entrypoint_guard_follows_local_helper_chains_without_recursion():
+    tree = ast.parse('''
+def capture_inputs():
+    record_evidence("inputs", {})
+    capture_outputs()
+def capture_outputs():
+    record_evidence("native", {})
+    record_evidence("reference", {})
+    capture_inputs()
+def test_model_e2e(case_name):
+    capture_inputs()
+''')
+    assert _entrypoint_evidence_fields(tree, "test_model_e2e") == {"inputs", "native", "reference"}
+
+
+def test_entrypoint_guard_does_not_count_unreachable_or_indirect_calls():
+    tree = ast.parse('''
+def test_return_e2e(case_name):
+    return
+    record_evidence("native", {})
+def test_dynamic_e2e(case_name, callback):
+    callback()
+''')
+    assert _entrypoint_evidence_fields(tree, "test_return_e2e") == set()
+    assert _entrypoint_evidence_fields(tree, "test_dynamic_e2e") == set()
 
 
 def test_library_comparison_snapshots_keep_arrays_and_strict_limits(tmp_path):
@@ -2366,6 +2456,8 @@ def test_library_comparison_snapshots_keep_arrays_and_strict_limits(tmp_path):
 
 @pytest.mark.parametrize("operator,actual,expected", [("<", 1, 1), (">", 1, 1)])
 def test_strict_comparison_boundary_does_not_become_a_pass(tmp_path, operator, actual, expected):
+    from tools.e2e_report import _assess_comparison_check
+
     recorder = _recorder(tmp_path)
     token = e2e_evidence._ACTIVE.set(recorder)
     try:
@@ -2378,7 +2470,10 @@ def test_strict_comparison_boundary_does_not_become_a_pass(tmp_path, operator, a
     finally:
         e2e_evidence._ACTIVE.reset(token)
     assert assessment(recorder.data)["kind"] == "failed"
-    assert recorder.data["reference_comparison"]["checks"][0]["passed"] is False
+    check = recorder.data["reference_comparison"]["checks"][0]
+    assert check["passed"] is False
+    assert _assess_comparison_check(check) is False
+    assert _assess_comparison_check({**check, "passed": True}) is None
 
 
 def test_comparison_recording_errors_are_diagnostics_not_model_failures(tmp_path, monkeypatch):
@@ -2476,6 +2571,30 @@ def test_current_input_scope_precedes_recipe_text_key_priority(key):
     rendered = _demo_input(data)
     assert "CURRENT_OPERATION_INPUT" in rendered
     assert "RECIPE_PROMPT" not in rendered and "RECIPE_QUERY" not in rendered
+
+
+@pytest.mark.parametrize("key", ["prompt", "test_prompt", "text", "query", "source_text"])
+@pytest.mark.parametrize("cleared", ["", None])
+def test_explicit_current_text_clear_does_not_restore_recipe_inputs(key, cleared):
+    from tools.e2e_report import _demo_input
+
+    data = {"inputs": {key: cleared, "case": {
+        "prompt": "OLD_RECIPE_PROMPT", "query": "OLD_RECIPE_QUERY",
+        "inputs": {"text": "OLD_NESTED_TEXT"},
+    }}}
+    before = copy.deepcopy(data)
+    rendered = _demo_input(data)
+    assert "OLD_RECIPE" not in rendered and "OLD_NESTED_TEXT" not in rendered
+    assert data == before
+
+
+def test_cleared_prompt_can_coexist_with_another_current_text_field():
+    from tools.e2e_report import _demo_input
+
+    data = {"inputs": {"prompt": None, "query": "CURRENT_QUERY",
+                       "case": {"prompt": "OLD_PROMPT"}}}
+    rendered = _demo_input(data)
+    assert "CURRENT_QUERY" in rendered and "OLD_PROMPT" not in rendered
 
 
 def test_recipe_input_fallback_preserves_its_own_scope_priority():
@@ -2583,6 +2702,68 @@ def test_current_media_pair_precedes_history_from_another_operation(tmp_path, sa
         assert urls["earlier", role] not in top and urls["earlier", role] in report
     assert 'data-media-paired="true"' in top
     assert data == before and assessment(data) == verdict
+
+
+def test_identical_media_retains_three_operation_scopes_without_duplicate_mirrors(tmp_path):
+    data, urls = _two_recorded_media_operations(tmp_path, same_index=True)
+    data["observations"].append({"name": "views", "value": []})
+    latest_views = []
+    for role in ("native", "reference"):
+        original = (tmp_path / f"earlier-{role}.png").read_bytes()
+        (tmp_path / f"current-{role}.png").write_bytes(original)
+        name = f"latest-{role}.png"
+        (tmp_path / name).write_bytes(original)
+        data["artifacts"].append({"path": name, "role": role})
+        value = {"image": {"artifact": name}}
+        data[role] = copy.deepcopy(value)
+        data["observations"].append({"name": role, "value": value})
+        latest_views.append({"title": f"Sample 0 / {role}", "image": {"artifact": name},
+                             "caption": "latest operation"})
+    data["inputs"]["prompt"] = "latest request"
+    data["views"] = copy.deepcopy(latest_views)
+    data["observations"].append({"name": "views", "value": latest_views})
+    original_data = copy.deepcopy(data)
+    report = render_case(data, tmp_path)
+    top = report.split('<details class="case-details">', 1)[0]
+    assert "latest operation" in top
+    assert "earlier operation" not in top and "current operation" not in top
+    assert "earlier operation" in report and "current operation" in report
+    for role in ("native", "reference"):
+        assert report.count(f'<figure data-media-role="{role}">') == 3
+        assert report.count(urls["earlier", role]) == 3
+    assert data == original_data
+    data["observations"].append({"name": "views", "value": copy.deepcopy(latest_views)})
+    mirrored = render_case(data, tmp_path)
+    for role in ("native", "reference"):
+        assert mirrored.count(f'<figure data-media-role="{role}">') == 3
+
+
+def test_identical_path_title_and_caption_keep_three_operation_histories(tmp_path):
+    from tools.e2e_report import _media_items
+
+    data = _case()
+    data.update(artifacts=[], observations=[])
+    views = []
+    for role in ("native", "reference"):
+        name = f"shared-{role}.png"
+        _rgb_png(tmp_path / name, (30, 60 if role == "native" else 120, 90))
+        data["artifacts"].append({"path": name, "role": role})
+        data[role] = {"image": {"artifact": name}}
+        views.append({"title": f"Sample 0 / {role}", "image": {"artifact": name},
+                      "caption": "Identical path, title and caption"})
+    for _ in range(3):
+        data["observations"].append({"name": "views", "value": []})
+        data["observations"].append({"name": "views", "value": copy.deepcopy(views)})
+    data["views"] = copy.deepcopy(views)
+    items = _media_items(data, data["artifacts"])
+    assert len(items) == 6 and {item["operation_scope"] for item in items} == {1, 2, 3}
+    report = render_case(data, tmp_path)
+    top = report.split('<details class="case-details">', 1)[0]
+    for role in ("native", "reference"):
+        assert top.count(f'<figure data-media-role="{role}">') == 1
+        assert report.count(f'<figure data-media-role="{role}">') == 3
+    data["observations"].append({"name": "views", "value": copy.deepcopy(views)})
+    assert len(_media_items(data, data["artifacts"])) == 6
 
 
 def test_current_native_view_never_borrows_a_historical_reference(tmp_path):

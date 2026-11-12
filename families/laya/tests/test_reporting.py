@@ -81,8 +81,22 @@ def test_empty_questions_keep_explicit_contract_scope(tmp_path):
 
 
 def test_disabled_reporting_does_not_inspect_outputs():
-    class Unreadable:
-        def __getitem__(self, key):
-            raise AssertionError("disabled reporting inspected model output")
+    from collections.abc import Mapping
 
-    record_decisions(Unreadable(), Unreadable(), Unreadable())
+    accesses = []
+
+    class ObservedMapping(Mapping):
+        def __getitem__(self, key):
+            accesses.append(("getitem", key))
+            return {"answers": {}}
+
+        def __iter__(self):
+            accesses.append(("iter", None))
+            return iter(("response",))
+
+        def __len__(self):
+            accesses.append(("len", None))
+            return 1
+
+    record_decisions(ObservedMapping(), ObservedMapping(), ObservedMapping())
+    assert accesses == []

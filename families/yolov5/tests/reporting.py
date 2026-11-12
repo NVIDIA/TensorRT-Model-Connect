@@ -66,7 +66,7 @@ def _reference_rows(kept, scale, pad_x, pad_y):
     return rows, len(kept)
 
 
-def _view(role, rows, total, source: Path, directory: Path, sample_index: int):
+def _view(role, rows, total, source: Path, directory: Path, sample_index: int, operation: str):
     from PIL import Image, ImageDraw
 
     with Image.open(source) as original:
@@ -87,7 +87,7 @@ def _view(role, rows, total, source: Path, directory: Path, sample_index: int):
     picture.save(path)
     labels = "; ".join(f"{row['label'][:80]} ({row['score']:.3f})" for row in rows)
     caption = (
-        f"{source.name}: showing first {len(rows)} of {total} detections. "
+        f"{operation} / {source.name}: showing first {len(rows)} of {total} detections. "
         "Boxes use original-image xyxy pixels; the display is resized only. "
         + (labels or "No detections.")
     )
@@ -96,6 +96,7 @@ def _view(role, rows, total, source: Path, directory: Path, sample_index: int):
         "image": path,
         "caption": caption,
     }, {
+        "operation": operation,
         "source_size": list(source_size),
         "displayed": len(rows),
         "total": total,
@@ -104,7 +105,7 @@ def _view(role, rows, total, source: Path, directory: Path, sample_index: int):
 
 
 def record_detection_views(
-    actual, expected, source: Path, directory: Path, *, scale, pad_x, pad_y, sample_index=0
+    actual, expected, source: Path, directory: Path, *, scale, pad_x, pad_y, sample_index=0, operation="CLI"
 ):
     """Record independent overlays without changing model data or test outcomes."""
     if not evidence_enabled():
@@ -117,7 +118,7 @@ def record_detection_views(
                 if role == "Native"
                 else _reference_rows(expected, scale, pad_x, pad_y)
             )
-            view, details = _view(role, rows, total, source, directory, sample_index)
+            view, details = _view(role, rows, total, source, directory, sample_index, operation)
             views.append(view)
             summary[role.lower()] = details
         except Exception as error:

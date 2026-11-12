@@ -74,3 +74,23 @@ def test_each_embedding_request_has_its_own_current_evidence(tmp_path, monkeypat
         assert recorder.data["inputs"]["text"] == "NEGATIVE"
         assert recorder.data["native"]["values"] == recorder.data["reference"]["values"] == values["NEGATIVE"]
     assert [(kind, text) for kind, text in events if kind == "reference"][0] == ("reference", "QUERY")
+
+
+@pytest.mark.parametrize("precision", ["fp32", "fp16"])
+@pytest.mark.parametrize("values,reference", [([1.0, 0.0], [0.0, 1.0]), ([1.0, 2.0], [1.1, 2.1])])
+def test_failed_embedding_gate_retains_structured_values_and_original_limits(tmp_path, precision, values, reference):
+    recorder = e2e_evidence.Evidence(tmp_path / "evidence", family="nomic_bert", case="failed-metric",
+                                    source_revision="a" * 40, roots=(tmp_path,))
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        with pytest.raises(AssertionError):
+            e2e._check_embedding(values, reference, precision, "current request")
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+    measured = recorder.data["diagnostics"]["embedding_comparison"]
+    assert measured["input_text"] == "current request" and measured["precision"] == precision
+    assert measured["max_abs_error"] == max(abs(a - b) for a, b in zip(values, reference))
+    assert measured["cosine"] == e2e._cosine(values, reference)
+    assert measured["max_abs_limit"] == (e2e._FP16_EMBEDDING_TOLERANCE if precision == "fp16" else e2e._EMBEDDING_TOLERANCE)
+    assert measured["cosine_min"] == e2e._COSINE_FLOOR
+    assert "passed" not in measured

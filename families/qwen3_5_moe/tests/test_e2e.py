@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from tools.e2e_evidence import record_evidence, record_reference_comparison
+from contextlib import suppress
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 from tensorrt_model_connect import BuildRequest, build
 from families.qwen3_5_moe.tests import edge_validation
+from families.qwen3_5_moe.tests.reporting import record_failed_reference_proof
 
 TEST_DIR = Path(__file__).resolve().parent
 MANIFEST = json.loads((TEST_DIR / "manifests/qwen35-moe-gptq-edge.json").read_text())
@@ -99,24 +101,29 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, request) -> Non
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
     }
-    edge_validation.run_driver(
-        [
-            str(reference_python),
-            "-m",
-            "families.qwen3_5_moe.tests.hf_reference",
-            "--device",
-            "cuda",
-            "--checkpoint",
-            str(checkpoint),
-            "--output",
-            str(output),
-            "--image",
-            str(image),
-        ],
-        output / "hf.log",
-        env=environment,
-        timeout=3600,
-    )
+    try:
+        edge_validation.run_driver(
+            [
+                str(reference_python),
+                "-m",
+                "families.qwen3_5_moe.tests.hf_reference",
+                "--device",
+                "cuda",
+                "--checkpoint",
+                str(checkpoint),
+                "--output",
+                str(output),
+                "--image",
+                str(image),
+            ],
+            output / "hf.log",
+            env=environment,
+            timeout=3600,
+        )
+    except Exception:
+        with suppress(Exception):
+            record_failed_reference_proof(output)
+        raise
     evidence = json.loads((output / "evidence.json").read_text())
     record_evidence("native", json.loads((output / "public.json").read_text()))
     record_evidence("reference", evidence["hf"])

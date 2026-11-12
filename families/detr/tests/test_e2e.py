@@ -322,6 +322,7 @@ def _sdk_detections(runtime_root: Path, bundle: Path, image: Path, tmp_path: Pat
     record_evidence("native", None)
     record_evidence("reference", None)
     record_evidence("views", [])
+    record_evidence("detection_view_summary", None)
     import numpy as np
     from PIL import Image
 
@@ -341,6 +342,7 @@ def _sdk_detections(runtime_root: Path, bundle: Path, image: Path, tmp_path: Pat
         record_evidence("native", None)
         record_evidence("reference", None)
         record_evidence("views", [])
+        record_evidence("detection_view_summary", None)
         consumer = native_build / f"test_detr_sdk_{language}"
         assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
         completed = subprocess.run(
@@ -399,13 +401,16 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     with evidence_stage("compare"):
         _assert_parity(actual, expected)
     for sample_index, sdk in enumerate(_sdk_detections(runtime_root, bundle, _asset(case["test_image"]), tmp_path), start=1):
-        record_evidence("inputs", {"operation": "sdk", "sdk_language": ("c", "cpp")[sample_index - 1]})
+        language = ("c", "cpp")[sample_index - 1]
+        record_evidence("inputs", {"operation": "sdk", "sdk_language": language})
         record_evidence("native", sdk)
         record_evidence("views", [])
+        record_evidence("detection_view_summary", None)
         record_evidence("reference", {"detections": expected})
         record_evidence("native", sdk)
         record_detection_views(sdk, expected, _asset(case["test_image"]),
-                               tmp_path / "sdk-detection-views", sample_index=sample_index)
+                               tmp_path / "sdk-detection-views", sample_index=sample_index,
+                               operation="SDK C" if language == "c" else "SDK C++")
         with evidence_stage("compare"):
             _assert_parity(sdk, expected)
 
@@ -426,9 +431,12 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             record_evidence("native", None)
             record_evidence("reference", None)
             record_evidence("views", [])
-            with evidence_stage("compare"):
+            record_evidence("detection_view_summary", None)
+            with evidence_stage("native"):
                 variant_actual = record_evidence("native", _native(binary, runtime_root, bundle, variant_case))
+            with evidence_stage("reference"):
                 variant_reference = record_evidence("reference", _official_reference(model_dir, variant_case))
-                record_detection_views(variant_actual, variant_reference, path,
-                                       tmp_path / f"{name}-detection-views", sample_index=sample_index)
+            record_detection_views(variant_actual, variant_reference, path,
+                                   tmp_path / f"{name}-detection-views", sample_index=sample_index)
+            with evidence_stage("compare"):
                 _assert_parity(variant_actual, variant_reference)

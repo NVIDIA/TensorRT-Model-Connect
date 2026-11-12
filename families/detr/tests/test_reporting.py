@@ -6,6 +6,7 @@
 from copy import deepcopy
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from families.detr.tests import reporting
@@ -82,14 +83,35 @@ def test_native_and_reference_boxes_are_visible_before_details(tmp_path):
     np.testing.assert_equal(reference, before_reference)
 
 
-def test_repeated_samples_keep_distinct_native_reference_pairs(tmp_path):
+@pytest.mark.parametrize("different_output", [False, True])
+def test_repeated_samples_keep_distinct_native_reference_pairs(tmp_path, different_output):
+    import base64
+
     native, reference, options = _inputs()
     recorder = _record(tmp_path, native, reference, options)
-    _record(tmp_path, native, reference, options, sample_index=1, recorder=recorder)
+    first = next(view for view in recorder.data["views"] if view["title"] == "Sample 0 / Native")
+    first_path = recorder.directory / first["image"]["artifact"]
+    first_bytes = first_path.read_bytes()
+    second_native = deepcopy(native)
+    if different_output:
+        if isinstance(second_native, dict):
+            second_native["boxes"][0] += 5.0
+        else:
+            second_native[0]["box"][0] += 5.0
+    _record(tmp_path, second_native, reference, options, sample_index=1, recorder=recorder)
+    second = next(view for view in recorder.data["views"] if view["title"] == "Sample 1 / Native")
+    second_bytes = (recorder.directory / second["image"]["artifact"]).read_bytes()
+    assert first_path.read_bytes() == first_bytes
+    assert (first_bytes != second_bytes) is different_output
     recorder.finish("passed")
     document = render_case(recorder.data, recorder.directory)
+    top = document.split('<details class="case-details">', 1)[0]
     assert 'data-media-index="0" data-media-paired="true"' in document
-    assert 'data-media-index="1" data-media-paired="true"' in document
+    assert 'data-media-index="1" data-media-paired="true"' in top
+    assert 'data-media-index="0"' not in top
+    if different_output:
+        assert base64.b64encode(second_bytes).decode() in top
+        assert base64.b64encode(first_bytes).decode() not in top
 
 
 def test_previews_are_opt_in_and_do_not_require_valid_outputs(tmp_path):
@@ -176,8 +198,89 @@ def test_failed_second_sdk_clears_previous_overlays_and_results(tmp_path, monkey
     assert recorder.data["inputs"]["sdk_language"] == "cpp"
     assert recorder.data["native"] is recorder.data["reference"] is None
     assert recorder.data["views"] == []
+    assert recorder.data["detection_view_summary"] is None
+    assert any(row["name"] == "detection_view_summary" and row["value"] for row in recorder.data["observations"])
     recorder.data["status"] = "failed"
     document = render_case(recorder.data, recorder.directory)
     top = document.split('<details class="case-details">', 1)[0]
     for url in old_urls:
         assert url not in top and url in document
+
+
+@pytest.mark.parametrize("operation", ["CLI", "SDK C", "SDK C++"])
+def test_detection_captions_name_the_operation_and_source_image(tmp_path, operation):
+    native, reference, options = _inputs()
+    recorder = _record(tmp_path, native, reference, {**options, "operation": operation})
+    for view in recorder.data["views"]:
+        assert view["caption"].startswith(operation + " / source.png:")
+    for role in ("native", "reference"):
+        assert recorder.data["detection_view_summary"][role]["operation"] == operation
+
+
+@pytest.mark.parametrize("failed_stage", ["native", "reference", "compare"])
+def test_variant_failures_keep_their_actual_stage_and_consumer_identity(tmp_path, monkeypatch, failed_stage):
+    from pathlib import Path
+    from families.detr.tests import test_e2e as e2e
+    from tools.e2e_report import _assessment
+
+    Image.new("RGB", (120, 100), "white").save(tmp_path / "source.png")
+    case = {"name": "report", "test_image": "source.png"}
+    manifest = {"name": "report", "family": "detr", "task": "image_to_boxes", "precision": "fp32",
+                "bundle": "model.bundle", "hf_id": "example/model"}
+    monkeypatch.setattr(e2e, "CASES", {"report": (tmp_path / "manifest.json", manifest, case)})
+    monkeypatch.setattr(e2e, "TEST_ROOT", tmp_path)
+    monkeypatch.setattr(e2e, "_model_dir", lambda *args: tmp_path)
+    monkeypatch.setattr(e2e, "_runtime", lambda *args: (tmp_path / "binary", tmp_path))
+    monkeypatch.setattr(e2e, "_build", lambda *args: None)
+    monkeypatch.setattr(e2e, "_asset", lambda value: tmp_path / value)
+    native, reference, _ = _inputs()
+    native = {**native, "image_height": 100, "image_width": 120}
+    calls, captions = [], []
+
+    def run_native(binary, runtime, bundle, current):
+        name = Path(current["test_image"]).name
+        calls.append(("native", name))
+        if name == "portrait.png" and failed_stage == "native":
+            raise RuntimeError("portrait native failed")
+        return {**native, "boxes": [100.0, 100.0, 120.0, 120.0]} if name == "portrait.png" and failed_stage == "compare" else deepcopy(native)
+
+    def run_reference(model, current):
+        name = Path(current["test_image"]).name
+        calls.append(("reference", name))
+        if name == "portrait.png" and failed_stage == "reference":
+            raise RuntimeError("portrait reference failed")
+        return deepcopy(reference)
+
+    def sdk(*args):
+        calls.append(("sdk", "source.png"))
+        return [deepcopy(native), deepcopy(native)]
+
+    recorder = e2e_evidence.Evidence(tmp_path / "evidence", family="detr", case="report",
+                                    source_revision="a" * 40, roots=(tmp_path,))
+    original_views = e2e.record_detection_views
+
+    def views(*args, **kwargs):
+        captions.append((kwargs.get("operation", "CLI"), recorder.data["inputs"].get("sdk_language")))
+        original_views(*args, **kwargs)
+
+    monkeypatch.setattr(e2e, "_native", run_native)
+    monkeypatch.setattr(e2e, "_official_reference", run_reference)
+    monkeypatch.setattr(e2e, "_sdk_detections", sdk)
+    monkeypatch.setattr(e2e, "record_detection_views", views)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        with pytest.raises(AssertionError if failed_stage == "compare" else RuntimeError):
+            e2e.test_official_checkpoint_e2e("report", tmp_path)
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+    assert captions[:3] == [("CLI", None), ("SDK C", "c"), ("SDK C++", "cpp")]
+    assert calls[:3] == [("native", "source.png"), ("reference", "source.png"), ("sdk", "source.png")]
+    assert calls.count(("native", "portrait.png")) == 1
+    assert calls.count(("reference", "portrait.png")) == (0 if failed_stage == "native" else 1)
+    assert recorder.data["failure_stage"] == failed_stage
+    assert recorder.data["inputs"]["variant"] == "portrait"
+    if failed_stage != "compare":
+        assert recorder.data["detection_view_summary"] is None
+    recorder.data["status"] = "failed"
+    if failed_stage == "reference":
+        assert _assessment(recorder.data)["label"] == "Reference run failed"

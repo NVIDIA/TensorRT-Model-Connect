@@ -258,6 +258,11 @@ def _check_embedding(values, reference, precision: str, text: str) -> tuple[floa
     """Assert the gate of ``precision`` on one pooled vector; return max abs and cosine."""
     delta = max(abs(a - b) for a, b in zip(values, reference))
     cosine = _cosine(values, reference)
+    record_evidence("diagnostics", {"embedding_comparison": {
+        "input_text": text, "precision": precision, "max_abs_error": delta, "cosine": cosine,
+        "max_abs_limit": _FP16_EMBEDDING_TOLERANCE if precision == "fp16" else _EMBEDDING_TOLERANCE,
+        "cosine_min": _COSINE_FLOOR,
+    }})
     record_evidence("thresholds", {"cosine_min": _COSINE_FLOOR})
     assert cosine >= _COSINE_FLOOR, f"{FAMILY} embedding cosine {cosine} for {text!r}"
     tolerance = _FP16_EMBEDDING_TOLERANCE if precision == "fp16" else _EMBEDDING_TOLERANCE

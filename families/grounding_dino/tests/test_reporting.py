@@ -6,6 +6,7 @@
 from copy import deepcopy
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from families.grounding_dino.tests import reporting
@@ -82,14 +83,35 @@ def test_native_and_reference_boxes_are_visible_before_details(tmp_path):
     np.testing.assert_equal(reference, before_reference)
 
 
-def test_repeated_samples_keep_distinct_native_reference_pairs(tmp_path):
+@pytest.mark.parametrize("different_output", [False, True])
+def test_repeated_samples_keep_distinct_native_reference_pairs(tmp_path, different_output):
+    import base64
+
     native, reference, options = _inputs()
     recorder = _record(tmp_path, native, reference, options)
-    _record(tmp_path, native, reference, options, sample_index=1, recorder=recorder)
+    first = next(view for view in recorder.data["views"] if view["title"] == "Sample 0 / Native")
+    first_path = recorder.directory / first["image"]["artifact"]
+    first_bytes = first_path.read_bytes()
+    second_native = deepcopy(native)
+    if different_output:
+        if isinstance(second_native, dict):
+            second_native["boxes"][0] += 5.0
+        else:
+            second_native[0]["box"][0] += 5.0
+    _record(tmp_path, second_native, reference, options, sample_index=1, recorder=recorder)
+    second = next(view for view in recorder.data["views"] if view["title"] == "Sample 1 / Native")
+    second_bytes = (recorder.directory / second["image"]["artifact"]).read_bytes()
+    assert first_path.read_bytes() == first_bytes
+    assert (first_bytes != second_bytes) is different_output
     recorder.finish("passed")
     document = render_case(recorder.data, recorder.directory)
+    top = document.split('<details class="case-details">', 1)[0]
     assert 'data-media-index="0" data-media-paired="true"' in document
-    assert 'data-media-index="1" data-media-paired="true"' in document
+    assert 'data-media-index="1" data-media-paired="true"' in top
+    assert 'data-media-index="0"' not in top
+    if different_output:
+        assert base64.b64encode(second_bytes).decode() in top
+        assert base64.b64encode(first_bytes).decode() not in top
 
 
 def test_previews_are_opt_in_and_do_not_require_valid_outputs(tmp_path):

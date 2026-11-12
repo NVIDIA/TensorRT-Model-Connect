@@ -243,9 +243,9 @@ def test_e2e(case_name, request, tmp_path):
                         "normalized_text_edit_distance": distance})
     record_evidence("metrics", {"cases": results, "normalized_text_edit_distance_max": threshold})
     assert all(row["normalized_text_edit_distance"] <= threshold for row in results), results
-    for row in results:
+    for request_index, row in enumerate(results):
         record_reference_comparison(
-            "Text against the recorded independent reference", row["actual"], row["reference"],
+            f"Request index {request_index}: text against the recorded independent reference", row["actual"], row["reference"],
             [{"name": "normalized_text_edit_distance", "scope": "independent_reference",
               "actual": row["normalized_text_edit_distance"], "operator": "<=",
               "expected": threshold, "passed": True}],

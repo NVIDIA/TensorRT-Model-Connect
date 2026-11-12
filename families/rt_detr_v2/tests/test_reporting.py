@@ -6,11 +6,45 @@
 from copy import deepcopy
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from families.rt_detr_v2.tests import reporting
 from tools import e2e_evidence
 from tools.e2e_report import render_case
+
+
+@pytest.mark.parametrize("failure", ["iou", "score", "label"])
+def test_failed_match_keeps_attempted_metrics_without_a_success_claim(tmp_path, failure):
+    from families.rt_detr_v2.tests import test_e2e as e2e
+
+    native, reference, _ = _inputs()
+    native = {**native, "image_height": 100, "image_width": 120}
+    reference = deepcopy(reference)
+    if failure == "iou":
+        reference[0]["box"] = [60.0, 25.0, 120.0, 70.0]
+    elif failure == "score":
+        reference[0]["score"] = 0.1
+    else:
+        reference[0]["label"] = 9
+    recorder = e2e_evidence.Evidence(tmp_path / "evidence", family="rt_detr_v2", case="failed-match",
+                                    source_revision="a" * 40, roots=(tmp_path,))
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        with pytest.raises(AssertionError):
+            e2e._assert_parity(native, reference)
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+    measured = recorder.data["diagnostics"]["attempted_match"]
+    assert "passed" not in measured and "reference_comparison" not in recorder.data
+    assert measured["min_box_iou"] == 0.5 and measured["max_score_error"] == 0.05
+    if failure == "label":
+        assert measured["reference"] is None and measured["score_error"] is None
+    elif failure == "iou":
+        assert measured["box_iou"] == 0.2
+    else:
+        assert measured["box_iou"] == 1.0
+        assert measured["score_error"] == abs(0.9 - 0.1)
 
 
 def _inputs():
@@ -82,14 +116,35 @@ def test_native_and_reference_boxes_are_visible_before_details(tmp_path):
     np.testing.assert_equal(reference, before_reference)
 
 
-def test_repeated_samples_keep_distinct_native_reference_pairs(tmp_path):
+@pytest.mark.parametrize("different_output", [False, True])
+def test_repeated_samples_keep_distinct_native_reference_pairs(tmp_path, different_output):
+    import base64
+
     native, reference, options = _inputs()
     recorder = _record(tmp_path, native, reference, options)
-    _record(tmp_path, native, reference, options, sample_index=1, recorder=recorder)
+    first = next(view for view in recorder.data["views"] if view["title"] == "Sample 0 / Native")
+    first_path = recorder.directory / first["image"]["artifact"]
+    first_bytes = first_path.read_bytes()
+    second_native = deepcopy(native)
+    if different_output:
+        if isinstance(second_native, dict):
+            second_native["boxes"][0] += 5.0
+        else:
+            second_native[0]["box"][0] += 5.0
+    _record(tmp_path, second_native, reference, options, sample_index=1, recorder=recorder)
+    second = next(view for view in recorder.data["views"] if view["title"] == "Sample 1 / Native")
+    second_bytes = (recorder.directory / second["image"]["artifact"]).read_bytes()
+    assert first_path.read_bytes() == first_bytes
+    assert (first_bytes != second_bytes) is different_output
     recorder.finish("passed")
     document = render_case(recorder.data, recorder.directory)
+    top = document.split('<details class="case-details">', 1)[0]
     assert 'data-media-index="0" data-media-paired="true"' in document
-    assert 'data-media-index="1" data-media-paired="true"' in document
+    assert 'data-media-index="1" data-media-paired="true"' in top
+    assert 'data-media-index="0"' not in top
+    if different_output:
+        assert base64.b64encode(second_bytes).decode() in top
+        assert base64.b64encode(first_bytes).decode() not in top
 
 
 def test_previews_are_opt_in_and_do_not_require_valid_outputs(tmp_path):

@@ -9,6 +9,22 @@ from pathlib import Path
 from tools.e2e_evidence import evidence_enabled, record_evidence
 
 
+def record_attempted_match(native, reference, iou):
+    """Keep the current match measurement without claiming its gate passed."""
+    if not evidence_enabled():
+        return
+    try:
+        record_evidence("diagnostics", {"attempted_match": {
+            "native": native, "reference": reference, "box_iou": iou,
+            "min_box_iou": 0.5,
+            "score_error": abs(float(native["score"]) - float(reference["score"]))
+            if reference is not None else None,
+            "max_score_error": 0.05,
+        }})
+    except Exception as error:
+        record_evidence("diagnostics", {"attempted_match_unavailable": f"{type(error).__name__}: {error}"})
+
+
 _MAX_BOXES = 32
 _COLORS = {"Native": (14, 145, 150), "Reference": (224, 113, 25)}
 

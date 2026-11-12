@@ -904,9 +904,18 @@ def _media_items(data: dict[str, Any], artifacts: list) -> list[dict[str, Any]]:
         row for row in data.get("observations", []) if isinstance(row, dict)
     ]
     views, seen_views = {}, set()
-    sources = [data.get("views", [])] + [
+    history = [
         row.get("value") for row in observations if row.get("name") == "views"
     ]
+    # Several previews may belong to one operation. Only an explicit clear
+    # starts another operation; snapshot priority alone is not its identity.
+    operation, operations = 0, []
+    for source in history:
+        if isinstance(source, list) and not source:
+            operation += 1
+        operations.append(operation)
+    sources = [data.get("views", []), *history]
+    operations = [operation, *operations]
     for priority, source in enumerate(sources):
         for view in source if isinstance(source, list) else []:
             if not isinstance(view, dict):
@@ -922,10 +931,10 @@ def _media_items(data: dict[str, Any], artifacts: list) -> list[dict[str, Any]]:
                     str(view.get("title", "Recorded view")),
                     str(view.get("caption", "")),
                 )
-                key = (path, title, caption)
+                key = (path, title, caption, operations[priority])
                 if key not in seen_views:
                     seen_views.add(key)
-                    views.setdefault(path, []).append((title, caption, priority))
+                    views.setdefault(path, []).append((title, caption, priority, operations[priority]))
     references = {
         role: _artifact_references(data.get(role))
         for role in ("inputs", "native", "reference")
@@ -942,8 +951,8 @@ def _media_items(data: dict[str, Any], artifacts: list) -> list[dict[str, Any]]:
         fallback = str(artifact.get("role", "Recorded media"))
         if artifact.get("label"):
             fallback += " / " + str(artifact["label"])
-        for title, caption, priority in views.get(
-            path, [(fallback, str(artifact.get("caption", "")), len(sources))]
+        for title, caption, priority, operation_scope in views.get(
+            path, [(fallback, str(artifact.get("caption", "")), len(sources), operation)]
         ):
             pair = (
                 _media_pair_key(title)
@@ -979,6 +988,7 @@ def _media_items(data: dict[str, Any], artifacts: list) -> list[dict[str, Any]]:
                         "priority": priority,
                         "view": path in views and not logical_input,
                         "media_scope": priority if scoped_views else 0,
+                        "operation_scope": operation_scope,
                         "current_output": (
                             not scoped_views
                             or priority == 0
@@ -1024,7 +1034,7 @@ def _media_items(data: dict[str, Any], artifacts: list) -> list[dict[str, Any]]:
 
 def _media_duplicate(item: dict[str, Any], fingerprint: str, seen: set) -> bool:
     scope = item["pair"] or (item["title"] if item["view"] else None)
-    key = (item["role"], scope, fingerprint)
+    key = (item["role"], scope, item.get("operation_scope", item.get("media_scope", 0)), fingerprint)
     if key in seen:
         return True
     seen.add(key)
@@ -1582,11 +1592,15 @@ def _demo_input(data: dict[str, Any], media: str = "") -> str:
     if "input_values" in native:
         request["input_values"] = native["input_values"]
         request.pop("past_values", None)
+    text_keys = ("prompt", "test_prompt", "text", "query", "source_text")
+    # A present current field can deliberately clear the recipe's text.
+    text_scopes = ((inputs,) if any(key in inputs for key in text_keys)
+                   else (case, _mapping(case.get("inputs"))))
     text = next(
         (
             scope[key]
-            for scope in (inputs, case, _mapping(case.get("inputs")))
-            for key in ("prompt", "test_prompt", "text", "query", "source_text")
+            for scope in text_scopes
+            for key in text_keys
             if isinstance(scope.get(key), str) and scope[key]
         ),
         "",

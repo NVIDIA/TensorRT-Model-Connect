@@ -44,7 +44,7 @@ def _native_rows(actual):
     return rows, len(scores)
 
 
-def _view(role, rows, total, source: Path, directory: Path, sample_index: int):
+def _view(role, rows, total, source: Path, directory: Path, sample_index: int, operation: str):
     from PIL import Image, ImageDraw
 
     with Image.open(source) as original:
@@ -65,7 +65,7 @@ def _view(role, rows, total, source: Path, directory: Path, sample_index: int):
     picture.save(path)
     labels = "; ".join(f"{row['label'][:80]} ({row['score']:.3f})" for row in rows)
     caption = (
-        f"{source.name}: showing first {len(rows)} of {total} detections. "
+        f"{operation} / {source.name}: showing first {len(rows)} of {total} detections. "
         "Boxes use original-image xyxy pixels; the display is resized only. "
         + (labels or "No detections.")
     )
@@ -74,6 +74,7 @@ def _view(role, rows, total, source: Path, directory: Path, sample_index: int):
         "image": path,
         "caption": caption,
     }, {
+        "operation": operation,
         "source_size": list(source_size),
         "displayed": len(rows),
         "total": total,
@@ -81,7 +82,7 @@ def _view(role, rows, total, source: Path, directory: Path, sample_index: int):
     }
 
 
-def record_detection_views(actual, expected, source: Path, directory: Path, *, sample_index=0):
+def record_detection_views(actual, expected, source: Path, directory: Path, *, sample_index=0, operation="CLI"):
     """Record independent overlays without changing model data or test outcomes."""
     if not evidence_enabled():
         return
@@ -89,7 +90,7 @@ def record_detection_views(actual, expected, source: Path, directory: Path, *, s
     for role in ("Native", "Reference"):
         try:
             rows, total = _native_rows(actual) if role == "Native" else _rows(expected)
-            view, details = _view(role, rows, total, source, directory, sample_index)
+            view, details = _view(role, rows, total, source, directory, sample_index, operation)
             views.append(view)
             summary[role.lower()] = details
         except Exception as error:

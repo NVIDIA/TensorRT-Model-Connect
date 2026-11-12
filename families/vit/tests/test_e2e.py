@@ -362,21 +362,12 @@ def _check_logits(scores: list[float], reference: list[float], precision: str,
     )
     if precision == "fp16":
         record_evidence("thresholds", {"max_tanh_defect_share": _TANH_SHARE_LIMIT})
-        record_reference_comparison(
-            "Tanh approximation control",
-            {"scores": scores},
-            {"scores": reference, "tanh_reference": tanh_reference},
-            [
-                {
-                    "name": "tanh_defect_share",
-                    "scope": "independent_reference",
-                    "actual": share,
-                    "operator": "<",
-                    "expected": _TANH_SHARE_LIMIT,
-                    "passed": share < _TANH_SHARE_LIMIT,
-                },
-            ],
-        )
+        record_evidence("diagnostics", {"counterfactual_control": {
+            "name": "Tanh approximation control", "native": {"scores": scores},
+            "reference": {"scores": reference}, "tanh_reference": tanh_reference,
+            "actual": share, "operator": "<", "expected": _TANH_SHARE_LIMIT,
+            "passed": share < _TANH_SHARE_LIMIT,
+        }})
     return worst, cosine
 
 

@@ -6,6 +6,7 @@
 from copy import deepcopy
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from families.yolov8.tests import reporting
@@ -82,14 +83,35 @@ def test_native_and_reference_boxes_are_visible_before_details(tmp_path):
     np.testing.assert_equal(reference, before_reference)
 
 
-def test_repeated_samples_keep_distinct_native_reference_pairs(tmp_path):
+@pytest.mark.parametrize("different_output", [False, True])
+def test_repeated_samples_keep_distinct_native_reference_pairs(tmp_path, different_output):
+    import base64
+
     native, reference, options = _inputs()
     recorder = _record(tmp_path, native, reference, options)
-    _record(tmp_path, native, reference, options, sample_index=1, recorder=recorder)
+    first = next(view for view in recorder.data["views"] if view["title"] == "Sample 0 / Native")
+    first_path = recorder.directory / first["image"]["artifact"]
+    first_bytes = first_path.read_bytes()
+    second_native = deepcopy(native)
+    if different_output:
+        if isinstance(second_native, dict):
+            second_native["boxes"][0] += 5.0
+        else:
+            second_native[0]["box"][0] += 5.0
+    _record(tmp_path, second_native, reference, options, sample_index=1, recorder=recorder)
+    second = next(view for view in recorder.data["views"] if view["title"] == "Sample 1 / Native")
+    second_bytes = (recorder.directory / second["image"]["artifact"]).read_bytes()
+    assert first_path.read_bytes() == first_bytes
+    assert (first_bytes != second_bytes) is different_output
     recorder.finish("passed")
     document = render_case(recorder.data, recorder.directory)
+    top = document.split('<details class="case-details">', 1)[0]
     assert 'data-media-index="0" data-media-paired="true"' in document
-    assert 'data-media-index="1" data-media-paired="true"' in document
+    assert 'data-media-index="1" data-media-paired="true"' in top
+    assert 'data-media-index="0"' not in top
+    if different_output:
+        assert base64.b64encode(second_bytes).decode() in top
+        assert base64.b64encode(first_bytes).decode() not in top
 
 
 def test_previews_are_opt_in_and_do_not_require_valid_outputs(tmp_path):
@@ -185,8 +207,69 @@ def test_failed_second_sdk_clears_previous_overlays_and_results(tmp_path, monkey
     assert recorder.data["inputs"]["sdk_language"] == "cpp"
     assert recorder.data["native"] is recorder.data["reference"] is None
     assert recorder.data["views"] == []
+    assert recorder.data["detection_view_summary"] is None
+    assert any(row["name"] == "detection_view_summary" and row["value"] for row in recorder.data["observations"])
     recorder.data["status"] = "failed"
     document = render_case(recorder.data, recorder.directory)
     top = document.split('<details class="case-details">', 1)[0]
     for url in old_urls:
         assert url not in top and url in document
+
+
+@pytest.mark.parametrize("operation", ["CLI", "SDK C", "SDK C++"])
+def test_detection_captions_name_the_operation_and_source_image(tmp_path, operation):
+    native, reference, options = _inputs()
+    recorder = _record(tmp_path, native, reference, {**options, "operation": operation})
+    for view in recorder.data["views"]:
+        assert view["caption"].startswith(operation + " / source.png:")
+    for role in ("native", "reference"):
+        assert recorder.data["detection_view_summary"][role]["operation"] == operation
+
+
+def test_outer_sdk_results_keep_the_actual_consumer_language(tmp_path, monkeypatch):
+    import json
+    import sys
+    from types import SimpleNamespace
+    from families.yolov8.tests import test_e2e as e2e
+
+    native, kept, options = _inputs()
+    native = {**native, "task": "image_to_boxes", "image_height": 100, "image_width": 120}
+    image = tmp_path / "source.png"
+    Image.new("RGB", (120, 100), "white").save(image)
+    manifest = {"name": "report", "family": "yolov8", "hf_id": "example/model", "task": "image_to_boxes",
+                "bundle": "model.bundle", "precision": "fp32", "max_sequence_length": 1, "tensor_parallel_size": 1}
+    monkeypatch.setattr(e2e, "CASES", {"report": (manifest, {"name": "report"})})
+    monkeypatch.setattr(e2e, "_required_path", lambda value, label: tmp_path / "binary" if label == "TRTMC_BINARY" else tmp_path)
+    monkeypatch.setattr(e2e, "_model_dir", lambda *args: tmp_path)
+    monkeypatch.setattr(e2e, "_asset", lambda *args: image)
+    monkeypatch.setattr(e2e, "build", lambda *args: None)
+    for name in ("libtrtmc_backend_trt.so", "libtrtmc_model_yolov8.so", "test_yolov8_sdk_c", "test_yolov8_sdk_cpp"):
+        (tmp_path / name).touch()
+    calls, captions = [], []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if command[0] == sys.executable:
+            np.savez(command[-1], kept=kept, **options)
+        return SimpleNamespace(stdout=json.dumps(native))
+
+    monkeypatch.setattr(e2e.subprocess, "run", run)
+    recorder = e2e_evidence.Evidence(tmp_path / "evidence", family="yolov8", case="report",
+                                    source_revision="a" * 40, roots=(tmp_path,))
+    original_views = e2e.record_detection_views
+
+    def views(*args, **kwargs):
+        captions.append((kwargs.get("operation", "CLI"), recorder.data["inputs"].get("sdk_language")))
+        original_views(*args, **kwargs)
+
+    monkeypatch.setattr(e2e, "record_detection_views", views)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        e2e.test_official_checkpoint_e2e("report", tmp_path)
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+    assert len(calls) == 4
+    assert calls[2][0].endswith("_sdk_c") and calls[3][0].endswith("_sdk_cpp")
+    assert captions == [("CLI", None), ("SDK C", "c"), ("SDK C++", "cpp")]
+    assert recorder.data["inputs"]["sdk_language"] == "cpp"
+    assert all(view["caption"].startswith("SDK C++ / source.png:") for view in recorder.data["views"])

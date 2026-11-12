@@ -156,6 +156,7 @@ def _sdk_detections(
     record_evidence("native", None)
     record_evidence("reference", None)
     record_evidence("views", [])
+    record_evidence("detection_view_summary", None)
     from PIL import Image
 
     native_build = _required_path(
@@ -174,6 +175,7 @@ def _sdk_detections(
         record_evidence("native", None)
         record_evidence("reference", None)
         record_evidence("views", [])
+        record_evidence("detection_view_summary", None)
         consumer = native_build / f"test_yolov5_sdk_{language}"
         assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
         completed = subprocess.run(
@@ -251,10 +253,13 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     # The public SDK reads the same pixels the reference decoded, so it is held to
     # the same oracle; the CLI's own JPEG decoder is not claimed bitwise equal.
     for sample_index, sdk in enumerate(_sdk_detections(runtime_root, bundle, image, tmp_path), start=1):
-        record_evidence("inputs", {"operation": "sdk", "sdk_language": ("c", "cpp")[sample_index - 1]})
+        language = ("c", "cpp")[sample_index - 1]
+        record_evidence("inputs", {"operation": "sdk", "sdk_language": language})
         record_evidence("native", sdk)
         record_evidence("views", [])
+        record_evidence("detection_view_summary", None)
         record_evidence("reference", {"detections_letterbox": kept, "scale": scale, "pad_x": pad_x, "pad_y": pad_y})
         record_detection_views(sdk, kept, image, tmp_path / "sdk-detection-views",
-                               scale=scale, pad_x=pad_x, pad_y=pad_y, sample_index=sample_index)
+                               scale=scale, pad_x=pad_x, pad_y=pad_y, sample_index=sample_index,
+                               operation="SDK C" if language == "c" else "SDK C++")
         _assert_matches_reference(sdk, kept, scale, pad_x, pad_y)

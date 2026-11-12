@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from tools.e2e_evidence import evidence_stage, record_evidence, record_reference_comparison
-from families.rt_detr_v2.tests.reporting import record_detection_views
+from families.rt_detr_v2.tests.reporting import record_attempted_match, record_detection_views
 
 import json
 import os
@@ -280,6 +280,7 @@ def _assert_parity(actual: dict, expected: list[dict]) -> None:
             if iou > best_iou:
                 best_iou = iou
                 best_match = index
+        record_attempted_match(detection, reference[best_match] if best_match is not None else None, best_iou)
         assert best_match is not None, (
             f"native detection label={detection['label']} has no reference match"
         )

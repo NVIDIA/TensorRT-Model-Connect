@@ -352,21 +352,12 @@ def _check_features(native: list[list[float]], reference: list[list[float]], pre
     )
     if precision == "fp16":
         record_evidence("thresholds", {"max_tanh_defect_share": _TANH_SHARE_LIMIT})
-        record_reference_comparison(
-            "Tanh approximation control",
-            {"values": native},
-            {"values": reference, "tanh_reference": tanh_reference},
-            [
-                {
-                    "name": "tanh_defect_share",
-                    "scope": "independent_reference",
-                    "actual": share,
-                    "operator": "<",
-                    "expected": _TANH_SHARE_LIMIT,
-                    "passed": share < _TANH_SHARE_LIMIT,
-                },
-            ],
-        )
+        record_evidence("diagnostics", {"counterfactual_control": {
+            "name": "Tanh approximation control", "native": {"values": native},
+            "reference": {"values": reference}, "tanh_reference": tanh_reference,
+            "actual": share, "operator": "<", "expected": _TANH_SHARE_LIMIT,
+            "passed": share < _TANH_SHARE_LIMIT,
+        }})
     return worst, cosine
 
 

@@ -13,7 +13,7 @@ from families.depth_anything.tests.reporting import record_depth_views
 
 def test_paired_views_preserve_values_and_render_before_details(tmp_path):
     left = np.array([[0, 1], [1, 0]], dtype=np.float32)
-    right = np.array([[0, 1], [0, 0]], dtype=np.float32)
+    right = np.array([[0, 1], [0, 2]], dtype=np.float32)
     saved_left, saved_right = left.copy(), right.copy()
     recorder = e2e_evidence.Evidence(tmp_path / "evidence", family="depth_anything", case="views",
                                     source_revision="a" * 40, roots=(tmp_path,))
@@ -31,6 +31,7 @@ def test_paired_views_preserve_values_and_render_before_details(tmp_path):
     images = [np.asarray(Image.open(recorder.directory / view["image"]["artifact"])) for view in views[:2]]
     np.testing.assert_array_equal(images[0][0, 0], images[1][0, 0])
     np.testing.assert_array_equal(images[0][0, 1], images[1][0, 1])
+    assert not np.array_equal(images[0][0, 1], images[1][1, 1])
     assert views[0]["caption"] == views[1]["caption"]
     report = render_case(recorder.data, recorder.directory)
     top = report.split('<details class="case-details">', 1)[0]

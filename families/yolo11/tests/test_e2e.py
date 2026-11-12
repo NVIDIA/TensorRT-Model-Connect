@@ -159,13 +159,13 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         kept = result["kept"]
         scale, pad_x, pad_y = (float(result[name]) for name in ("scale", "pad_x", "pad_y"))
 
+    record_evidence("reference", {"detections_letterbox": kept, "scale": scale, "pad_x": pad_x, "pad_y": pad_y})
     record_detection_views(actual, kept, image, tmp_path / "detection-views",
                            scale=scale, pad_x=pad_x, pad_y=pad_y)
     assert len(kept), "the reference found nothing above the threshold to compare against"
     assert len(actual["scores"]) == len(kept), (
         f"engine returned {len(actual['scores'])} detections, reference {len(kept)}"
     )
-    record_evidence("reference", {"detections_letterbox": kept, "scale": scale, "pad_x": pad_x, "pad_y": pad_y})
     comparison_checks = []
     for index, row in enumerate(kept):
         x0, y0, x1, y1, score, label = row
