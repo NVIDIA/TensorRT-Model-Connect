@@ -395,8 +395,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
 
     text_deltas = []
     for text, expected in zip((case["query"], case["negative_query"]), reference_texts):
-        record_evidence("inputs", {"text": str(text), "query": str(text)})
+        record_evidence("inputs", {"text": str(text), "query": str(text), "image": None, "media": []})
         record_evidence("native", None)
+        record_evidence("views", [])
         record_evidence("reference", {"operation": "text_to_embedding", "values": expected})
         with evidence_stage("native"):
             native = _native_embedding(binary, runtime_root, bundle, case, "--task",
@@ -440,8 +441,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     scores = []
     logit_deltas = []
     for text, expected_text in zip((case["query"], case["negative_query"]), reference_texts):
-        record_evidence("inputs", {"text": str(text), "query": str(text)})
+        record_evidence("inputs", {"text": str(text), "query": str(text), "image": None, "media": [{"image": TEST_ROOT / case["test_image"]}]})
         record_evidence("native", None)
+        record_evidence("views", [])
         record_evidence("reference", None)
         with evidence_stage("native"):
             payload = _run_json(binary, runtime_root, bundle, case, "rerank", "--task",

@@ -287,8 +287,11 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     worst_cosine = 1.0
     for role, text in (("query", case["query"]), ("document", case["document"]),
                        ("document", case["negative_document"])):
-        payload = _native(binary, runtime_root, bundle, case, str(text), role)
         record_evidence("inputs", {"text": str(text), "role": role})
+        record_evidence("native", None)
+        record_evidence("reference", None)
+        record_evidence("views", [])
+        payload = _native(binary, runtime_root, bundle, case, str(text), role)
         record_evidence("native", payload)
 
         # The runtime owns the prefix, so the reference is given the prefixed

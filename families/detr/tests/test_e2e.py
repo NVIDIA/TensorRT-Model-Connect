@@ -318,6 +318,10 @@ def _assert_parity(actual: dict, expected: list[dict]) -> None:
 
 def _sdk_detections(runtime_root: Path, bundle: Path, image: Path, tmp_path: Path) -> list[dict]:
     """Run the public C and C++ consumers on the reference's own decoded pixels."""
+    record_evidence("inputs", {"operation": "sdk", "sdk_language": None, "image": image})
+    record_evidence("native", None)
+    record_evidence("reference", None)
+    record_evidence("views", [])
     import numpy as np
     from PIL import Image
 
@@ -333,6 +337,10 @@ def _sdk_detections(runtime_root: Path, bundle: Path, image: Path, tmp_path: Pat
     )
     outputs = []
     for language in ("c", "cpp"):
+        record_evidence("inputs", {"sdk_language": language})
+        record_evidence("native", None)
+        record_evidence("reference", None)
+        record_evidence("views", [])
         consumer = native_build / f"test_detr_sdk_{language}"
         assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
         completed = subprocess.run(
@@ -353,6 +361,7 @@ def _sdk_detections(runtime_root: Path, bundle: Path, image: Path, tmp_path: Pat
         payloads = [line for line in completed.stdout.splitlines() if line.startswith("{")]
         assert len(payloads) == 1, f"the {language} consumer must print one result"
         result = json.loads(payloads[0])
+        record_evidence("native", result)
         assert result["task"] == "image_to_boxes"
         assert (result["image_height"], result["image_width"]) == pixels.shape[:2]
         outputs.append(result)
@@ -390,6 +399,10 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     with evidence_stage("compare"):
         _assert_parity(actual, expected)
     for sample_index, sdk in enumerate(_sdk_detections(runtime_root, bundle, _asset(case["test_image"]), tmp_path), start=1):
+        record_evidence("inputs", {"operation": "sdk", "sdk_language": ("c", "cpp")[sample_index - 1]})
+        record_evidence("native", sdk)
+        record_evidence("views", [])
+        record_evidence("reference", {"detections": expected})
         record_evidence("native", sdk)
         record_detection_views(sdk, expected, _asset(case["test_image"]),
                                tmp_path / "sdk-detection-views", sample_index=sample_index)
@@ -409,7 +422,10 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             path = tmp_path / f"{name}.png"
             variant.save(path)
             variant_case = {**case, "test_image": str(path)}
-            record_evidence("inputs", {"variant": name, "case": variant_case, "image": path})
+            record_evidence("inputs", {"variant": name, "case": variant_case, "image": path, "operation": "native_cli", "sdk_language": None})
+            record_evidence("native", None)
+            record_evidence("reference", None)
+            record_evidence("views", [])
             with evidence_stage("compare"):
                 variant_actual = record_evidence("native", _native(binary, runtime_root, bundle, variant_case))
                 variant_reference = record_evidence("reference", _official_reference(model_dir, variant_case))

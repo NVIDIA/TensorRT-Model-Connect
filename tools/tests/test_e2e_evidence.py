@@ -2536,3 +2536,111 @@ def test_primary_tensor_keeps_priority_over_auxiliary_scalar_score():
     label, values = _demo_numeric_value({"values": [1, 2], "score": 0.5, "score_kind": "logit"})
     assert label == original_label
     assert _numeric_data(values) == _numeric_data(original_values)
+
+
+def _two_recorded_media_operations(tmp_path, *, failed=False, partial=False, same_index=False, views=True):
+    data = _case()
+    data.update(status="failed" if failed else "passed", artifacts=[], observations=[])
+    urls = {}
+
+    def record(name, value):
+        snapshot = copy.deepcopy(value)
+        data["observations"].append({"name": name, "value": snapshot})
+        data[name] = {**data.get(name, {}), **snapshot} if name == "inputs" else snapshot
+
+    for operation, index in (("earlier", 0), ("current", 0 if same_index else 4)):
+        record("inputs", {"prompt": operation + " request"})
+        record("native", None)
+        record("reference", None)
+        record("views", [])
+        if operation == "current" and failed:
+            continue
+        current_views = []
+        for role in ("native", "reference"):
+            if operation == "current" and partial and role == "reference":
+                continue
+            name = f"{operation}-{role}.png"
+            color = (20 if operation == "earlier" else 180, 40 if role == "native" else 200, 80)
+            urls[operation, role] = _rgb_png(tmp_path / name, color)
+            data["artifacts"].append({"path": name, "role": role})
+            record(role, {"image": {"artifact": name}})
+            current_views.append({"title": f"Sample {index} / {role}", "image": {"artifact": name},
+                                  "caption": operation + " operation"})
+        if operation == "earlier" or views:
+            record("views", current_views)
+    return data, urls
+
+
+@pytest.mark.parametrize("same_index", [False, True])
+def test_current_media_pair_precedes_history_from_another_operation(tmp_path, same_index):
+    data, urls = _two_recorded_media_operations(tmp_path, same_index=same_index)
+    before = copy.deepcopy(data)
+    verdict = assessment(data)
+    report = render_case(data, tmp_path)
+    top = report.split('<details class="case-details">', 1)[0]
+    for role in ("native", "reference"):
+        assert urls["current", role] in top
+        assert urls["earlier", role] not in top and urls["earlier", role] in report
+    assert 'data-media-paired="true"' in top
+    assert data == before and assessment(data) == verdict
+
+
+def test_current_native_view_never_borrows_a_historical_reference(tmp_path):
+    data, urls = _two_recorded_media_operations(tmp_path, partial=True, same_index=True)
+    report = render_case(data, tmp_path)
+    top = report.split('<details class="case-details">', 1)[0]
+    assert urls["current", "native"] in top and 'data-media-paired="false"' in top
+    for role in ("native", "reference"):
+        assert urls["earlier", role] not in top and urls["earlier", role] in report
+
+
+def test_explicit_output_reset_keeps_old_media_only_in_details(tmp_path):
+    data, urls = _two_recorded_media_operations(tmp_path, failed=True)
+    report = render_case(data, tmp_path)
+    top = report.split('<details class="case-details">', 1)[0]
+    assert "current request" in top
+    for url in urls.values():
+        assert url not in top and url in report
+    assert assessment(data)["kind"] == "failed"
+
+
+def test_cleared_views_can_still_show_current_direct_media(tmp_path):
+    from tools.e2e_report import _artifacts
+
+    data, urls = _two_recorded_media_operations(tmp_path, views=False)
+    previews, more = _artifacts(data, tmp_path, [256 * 1024 * 1024])
+    for role in ("native", "reference"):
+        assert urls["current", role] in previews[role]
+        assert urls["earlier", role] not in "".join(previews.values())
+        assert urls["earlier", role] in more
+
+
+def test_unscoped_media_keeps_the_legacy_first_pair_fallback(tmp_path):
+    data, urls = _two_recorded_media_operations(tmp_path)
+    del data["views"]
+    top = render_case(data, tmp_path).split('<details class="case-details">', 1)[0]
+    for role in ("native", "reference"):
+        assert urls["earlier", role] in top and urls["current", role] not in top
+
+
+def test_explicit_empty_input_media_does_not_resurrect_recipe_or_history(tmp_path):
+    data = _case()
+    url = _rgb_png(tmp_path / "old-input.png", (20, 30, 40))
+    old = {"artifact": "old-input.png"}
+    data["inputs"] = {"prompt": "Current text-only request", "media": [], "case": {"image": old}}
+    data["observations"] = [{"name": "inputs", "value": {"media": [old]}}]
+    data["artifacts"] = [{"path": "old-input.png", "role": "inputs"}]
+    top = render_case(data, tmp_path).split('<details class="case-details">', 1)[0]
+    assert "Current text-only request" in top and url not in top
+    assert url in render_case(data, tmp_path)
+
+
+@pytest.mark.parametrize("values", [[1.0, 2.0], list(range(16))])
+def test_reference_only_numeric_preview_names_its_actual_role(values):
+    from tools.e2e_report import _demo_output
+
+    page = _demo_output({"values": values}, role="reference", task="text_to_embedding")
+    assert "Reference" in page and "Native" not in page
+    if len(values) > 8:
+        assert 'aria-label="Reference"' in page and 'stroke-dasharray="6 4"' in page
+        assert "Reference · dashed" in page

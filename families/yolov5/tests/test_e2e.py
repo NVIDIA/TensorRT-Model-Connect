@@ -152,6 +152,10 @@ def _sdk_detections(
     runtime_root: Path, bundle: Path, image: Path, tmp_path: Path
 ) -> list[dict]:
     """Run the public C and C++ consumers on the reference's own decoded pixels."""
+    record_evidence("inputs", {"operation": "sdk", "sdk_language": None, "image": image})
+    record_evidence("native", None)
+    record_evidence("reference", None)
+    record_evidence("views", [])
     from PIL import Image
 
     native_build = _required_path(
@@ -166,6 +170,10 @@ def _sdk_detections(
     )
     outputs = []
     for language in ("c", "cpp"):
+        record_evidence("inputs", {"sdk_language": language})
+        record_evidence("native", None)
+        record_evidence("reference", None)
+        record_evidence("views", [])
         consumer = native_build / f"test_yolov5_sdk_{language}"
         assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
         completed = subprocess.run(
@@ -176,6 +184,7 @@ def _sdk_detections(
         payloads = [line for line in completed.stdout.splitlines() if line.startswith("{")]
         assert len(payloads) == 1, f"the {language} consumer must print one result"
         result = json.loads(payloads[0])
+        record_evidence("native", result)
         assert result["task"] == "image_to_boxes"
         assert (result["image_height"], result["image_width"]) == pixels.shape[:2]
         outputs.append(result)
@@ -242,6 +251,10 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     # The public SDK reads the same pixels the reference decoded, so it is held to
     # the same oracle; the CLI's own JPEG decoder is not claimed bitwise equal.
     for sample_index, sdk in enumerate(_sdk_detections(runtime_root, bundle, image, tmp_path), start=1):
+        record_evidence("inputs", {"operation": "sdk", "sdk_language": ("c", "cpp")[sample_index - 1]})
+        record_evidence("native", sdk)
+        record_evidence("views", [])
+        record_evidence("reference", {"detections_letterbox": kept, "scale": scale, "pad_x": pad_x, "pad_y": pad_y})
         record_detection_views(sdk, kept, image, tmp_path / "sdk-detection-views",
                                scale=scale, pad_x=pad_x, pad_y=pad_y, sample_index=sample_index)
         _assert_matches_reference(sdk, kept, scale, pad_x, pad_y)

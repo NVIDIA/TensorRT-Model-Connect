@@ -356,8 +356,11 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     worst = 0.0
     worst_cosine = 1.0
     for text in (case["query"], case["document"], case["negative_document"]):
-        payload = _native(binary, runtime_root, bundle, case, str(text))
         record_evidence("inputs", {"text": str(text)})
+        record_evidence("native", None)
+        record_evidence("reference", None)
+        record_evidence("views", [])
+        payload = _native(binary, runtime_root, bundle, case, str(text))
         record_evidence("native", payload)
         reference = _reference(model_dir, str(text))
         record_evidence("reference", {"values": reference})

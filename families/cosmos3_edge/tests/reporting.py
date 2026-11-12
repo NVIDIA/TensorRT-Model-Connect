@@ -46,3 +46,27 @@ def record_input_media(requests):
         record_evidence("inputs", {"media": media})
     except Exception as error:
         record_evidence("inputs", {"media": media, "preview_unavailable": f"{type(error).__name__}: {error}"})
+
+
+def record_request_inputs(request):
+    """Start one displayed request without carrying another request's media."""
+    if not evidence_enabled():
+        return
+    record_evidence("native", None)
+    record_evidence("reference", None)
+    record_evidence("views", [])
+    record_evidence("inputs", {
+        "prompt": None, "text": None, "query": None, "source_text": None,
+        "image": None, "audio": None, "video": None, "media": [],
+        "raw_file": None, "asset": None, "requests": None, "request_file": None,
+        "request_id": None, "request": None, "preview_unavailable": None,
+    })
+    try:
+        record_evidence("inputs", {"request_id": request.get("id"), "request": request})
+        record_evidence("inputs", {"prompt": request["prompt"]})
+        record_input_media([request])
+    except Exception as error:
+        record_evidence("inputs", {
+            "text": "Current request input preview unavailable; the original batch remains in Details.",
+            "preview_unavailable": f"{type(error).__name__}: {error}",
+        })

@@ -148,3 +148,45 @@ def test_preview_bound_is_explicit_and_preserves_full_inputs(tmp_path):
     assert all("first 32 of 40" in view["caption"] for view in recorder.data["views"])
     assert native == before_native
     np.testing.assert_equal(reference, before_reference)
+
+
+def test_failed_second_sdk_clears_previous_overlays_and_results(tmp_path, monkeypatch):
+    import base64
+    import json
+    from types import SimpleNamespace
+    import pytest
+    from families.yolov8.tests import test_e2e as e2e
+
+    native, reference, options = _inputs()
+    recorder = _record(tmp_path, native, reference, options)
+    old_urls = ["data:image/png;base64," + base64.b64encode(
+        (recorder.directory / view["image"]["artifact"]).read_bytes()).decode()
+        for view in recorder.data["views"]]
+    for language in ("c", "cpp"):
+        (tmp_path / f"test_yolov8_sdk_{language}").touch()
+    monkeypatch.setattr(e2e, "_required_path", lambda *args: tmp_path)
+    result = {**native, "task": "image_to_boxes", "image_height": 100, "image_width": 120}
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append(command)
+        if command[0].endswith("_cpp"):
+            raise RuntimeError("second SDK failed")
+        return SimpleNamespace(stdout=json.dumps(result))
+
+    monkeypatch.setattr(e2e.subprocess, "run", run)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        with pytest.raises(RuntimeError, match="second SDK failed"):
+            e2e._sdk_detections(tmp_path, tmp_path / "model.bundle", tmp_path / "source.png", tmp_path)
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+    assert len(calls) == 2
+    assert recorder.data["inputs"]["sdk_language"] == "cpp"
+    assert recorder.data["native"] is recorder.data["reference"] is None
+    assert recorder.data["views"] == []
+    recorder.data["status"] = "failed"
+    document = render_case(recorder.data, recorder.directory)
+    top = document.split('<details class="case-details">', 1)[0]
+    for url in old_urls:
+        assert url not in top and url in document

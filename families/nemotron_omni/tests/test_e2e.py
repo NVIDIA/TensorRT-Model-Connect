@@ -19,7 +19,7 @@ import pytest
 
 from tensorrt_model_connect import BuildRequest, build
 from tools.e2e_evidence import evidence_stage, record_evidence, record_reference_comparison
-from families.nemotron_omni.tests.reporting import record_input_media
+from families.nemotron_omni.tests.reporting import record_input_media, record_request_by_id
 
 ROOT = Path(__file__).resolve().parent
 FAMILY = "nemotron_omni"
@@ -328,7 +328,8 @@ def test_e2e(case_name, request, tmp_path, capfd):
     _progress(capfd, case_name, "build completed")
     source, destination = tmp_path / "input.json", tmp_path / "output.json"
     source.write_text(json.dumps(requests))
-    record_evidence("inputs", {"requests": requests, "request_file": source})
+    record_evidence("request_batch", {"requests": requests, "request_file": source})
+    record_evidence("inputs", {"text": "Request batch before per-request results", "prompt": None})
     record_input_media(requests)
     command = [str(runner), str(bundle), str(runtime), str(source), str(destination)]
     env = dict(os.environ)
@@ -352,6 +353,7 @@ def test_e2e(case_name, request, tmp_path, capfd):
     record_evidence("thresholds", {"normalized_text_edit_distance": threshold})
     results = []
     for a, b in zip(actual, expected, strict=True):
+        record_request_by_id(requests, b["id"])
         record_evidence("native", a)
         record_evidence("reference", b)
         assert a["id"] == b["id"] and a["status"] == "passed"
@@ -365,13 +367,11 @@ def test_e2e(case_name, request, tmp_path, capfd):
             }
         )
     record_evidence(
-        "reference", {"backend": REFERENCE["reference_backend"], "revision": REFERENCE["revision"]}
+        "reference_provenance", {"backend": REFERENCE["reference_backend"], "revision": REFERENCE["revision"]}
     )
     record_evidence("metrics", {"cases": results, "normalized_text_edit_distance_max": threshold})
     assert all(row["normalized_text_edit_distance"] <= threshold for row in results), results
     for row in results:
-        record_evidence("native", row["actual"])
-        record_evidence("reference", row["reference"])
         record_reference_comparison(
             "Text against the recorded independent reference", row["actual"], row["reference"],
             [{"name": "normalized_text_edit_distance", "scope": "independent_reference",
