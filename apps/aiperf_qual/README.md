@@ -43,6 +43,16 @@ ADE20K mIoU, mask IoU, ETTh1 MSE, WMT / FLORES chrF++). Selections are seeded an
 filtered to the shipped bundle's length (rendered through the chat template on the chat route). A model
 whose catalog request samples answers once per seed on each side and is judged on per-problem seed means.
 Each benchmark's `margin`, `relative_margin`, and size are set in `config/tasks.yaml`.
+
+HumanEval and MBPP grading requires a host that can apply the configured `setpriv` UID/GID and
+capability boundary. Before model preparation, code profiles verify that `nobody` cannot write the
+result, bundle, cache, data, reference-environment and runtime roots or read the protected home.
+An unavailable boundary produces an `environment-blocked` result in `error.json`, a White
+"environment blocked" summary label, and a nonzero exit status, with no model qualification claim.
+Blocked profiles are retained on resume while the boundary remains unavailable; a repaired host
+retries with the normal execution key.
+The same verification still runs before every generated program. There is no unsandboxed fallback;
+ordinary non-root hosts that cannot apply the boundary cannot execute these code benchmarks.
 Native absolute scores do not decide conversion acceptance: the paired difference does.
 A low score limits what this benchmark establishes about model capability, but does not
 prevent comparing conversion results. Historical `min_native` fields are ignored.

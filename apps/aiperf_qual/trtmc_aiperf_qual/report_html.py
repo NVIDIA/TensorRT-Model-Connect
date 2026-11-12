@@ -88,7 +88,8 @@ let n=0;for(const r of document.querySelectorAll('tr.m, section.client-metrics')
 const v=r.dataset.k.includes(q)&&(!s||r.dataset.result===s);
 r.style.display=v?'':'none';if(r.classList.contains('m'))n+=v}document.getElementById('n').textContent=n}
 """
-NO_VERDICT_LABELS = {"error": "run error", "build-failed": "build failed", "config-error": "configuration error",
+NO_VERDICT_LABELS = {"error": "run error", "environment-blocked": "environment blocked",
+                     "build-failed": "build failed", "config-error": "configuration error",
                      "not-run": "not run", "excluded": "excluded", "smoke-fail": "smoke failed"}
 TIMING_SPREAD = re.compile(r"^(TRTMC|native) CI (±[\d.]+%)")
 NO_WORK = re.compile(r"^(TRTMC|native): (\d+ responses report no work|no work evidence)")

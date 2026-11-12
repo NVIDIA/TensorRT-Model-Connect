@@ -26,7 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import bundles, retention
+from . import bundles, gold_metrics, retention
 from .bundles import prefetch
 from .config import Environment
 from .judge import qualifying
@@ -166,13 +166,36 @@ def warm_selections(environment: Environment, model: Mapping[str, Any]) -> None:
                 pass
 
 
+def _sandbox_run_key(environment: Environment, model: Mapping[str, Any], out: Path, reason: str) -> str:
+    # Note (Jiaxin Deng): A blocked run must not prepare reference dependencies just to identify its result.
+    value = {"model": model, "harness": harness_digest(), "smoke": bool(environment.values.get("smoke")),
+             "blocked_by": "code_sandbox", "reason": reason,
+             "protected_roots": gold_metrics.protected_roots(environment.values, out)}
+    return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _sandbox_blocked_result(environment: Environment, model: Mapping[str, Any], out: Path,
+                            started: float, error: gold_metrics.SandboxUnavailable) -> dict[str, Any]:
+    record = {"profile": model["model"], "task": model.get("task"), "category": "environment-blocked",
+              "failure_type": "environment", "blocked_by": "code_sandbox", "reason": _error(error),
+              "seconds": round(time.time() - started)}
+    (out / RUN_KEY).write_text(_sandbox_run_key(environment, model, out, str(error)) + "\n")
+    (out / "error.json").write_text(json.dumps(record, indent=2))
+    return record
+
+
 def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[str, Any]:
     """Build the bundle when missing, qualify, and apply the bundle retention policy. A previous run
     in ``out`` is set aside first."""
     started = time.time()
+    configured_model = model
     model = copy.deepcopy(model)  # resolved build capacity must not mutate the caller's resume configuration
     set_aside(out)
     out.mkdir(parents=True, exist_ok=True)
+    try:
+        gold_metrics.preflight_code_sandbox(model, environment.values, out)
+    except gold_metrics.SandboxUnavailable as error:
+        return _sandbox_blocked_result(environment, configured_model, out, started, error)
     (out / RUN_KEY).write_text(run_key(environment, model) + "\n")
     bundle_policy, hf_policy = retention.policies(environment)
     record: dict[str, Any] = {"profile": model["model"], "task": model.get("task")}
@@ -191,6 +214,8 @@ def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[
         try:
             verdict = qualify(model, environment, out)["verdict"]
             record.update(verdict)
+        except gold_metrics.SandboxUnavailable as error:
+            return _sandbox_blocked_result(environment, configured_model, out, started, error)
         except Exception as error:  # noqa: BLE001
             record.update(category="error", reason=_error(error))
             (out / "error.json").write_text(json.dumps({**record, "traceback": traceback.format_exc()}, indent=2))
@@ -239,6 +264,9 @@ def _finished(out: Path, key: str | None = None) -> str | None:
         return json.loads(report.read_text()).get("verdict", {}).get("category")
     if build.is_file() and json.loads(build.read_text()).get("status") == "failed":
         return "build-failed"
+    error = out / "error.json"
+    if error.is_file() and json.loads(error.read_text()).get("category") == "environment-blocked":
+        return "environment-blocked"
     return None
 
 
@@ -256,15 +284,30 @@ def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root
         for index, model in enumerate(ordered):
             profile, out = model["model"], out_root / model["model"]
             if prefetch_next and index + 1 < len(ordered):
-                downloads.submit(prefetch, environment, ordered[index + 1])
+                following = ordered[index + 1]
+                try:
+                    gold_metrics.preflight_code_sandbox(following, environment.values, out_root / following["model"])
+                except gold_metrics.SandboxUnavailable:
+                    # Note (Jiaxin Deng): run_one records the blocked profile without speculative weight downloads.
+                    pass
+                else:
+                    downloads.submit(prefetch, environment, following)
             started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            finished = _finished(out, run_key(environment, model))
+            finished = None
+            if out.is_dir():
+                try:
+                    gold_metrics.preflight_code_sandbox(model, environment.values, out)
+                except gold_metrics.SandboxUnavailable as error:
+                    key = _sandbox_run_key(environment, model, out, str(error))
+                else:
+                    key = run_key(environment, model)
+                finished = _finished(out, key)
             if finished and not rerun:
                 record = {"profile": profile, "status": "skipped", "category": finished}
             else:
                 set_aside(out)
                 record = run_one(environment, model, out)
-            if record["category"] in ("error", "build-failed", "smoke-fail"):
+            if record["category"] in (*HARNESS_FAILURES, "smoke-fail"):
                 failed_checkpoints.update(checkpoints(model))
             for repo in sorted(checkpoints(model)):
                 remaining[repo] -= 1
@@ -279,11 +322,11 @@ def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root
     return records
 
 
-CATEGORIES = ("error", "config-error", "build-failed", "not-run", "acc-issue", "not-covered", "acc-inconclusive",
+CATEGORIES = ("error", "environment-blocked", "config-error", "build-failed", "not-run", "acc-issue", "not-covered", "acc-inconclusive",
               "not-comparable", "perf-issue", "perf-inconclusive", "measured", "pass", "excluded", "smoke-fail", "smoke-pass")
 EXCLUSIONS = "excluded.json"
 PLAN = "plan.json"
-HARNESS_FAILURES = ("error", "build-failed")
+HARNESS_FAILURES = ("error", "environment-blocked", "build-failed")
 
 
 def write_plan(out_root: Path, selected: Sequence[str], config_errors: Sequence[Mapping[str, Any]],
@@ -346,7 +389,9 @@ def _row(directory: Path) -> dict[str, Any] | None:
                                         *(f"{key}: {text[:100]}" for key, text in value.get("errors", {}).items())])}
         if name == "build.json" and value.get("status") != "failed":
             continue
-        return {"task": value.get("task"), "category": "build-failed" if name == "build.json" else "error",
+        category = ("build-failed" if name == "build.json" else
+                    "environment-blocked" if value.get("category") == "environment-blocked" else "error")
+        return {"task": value.get("task"), "category": category,
                 "directory": str(directory), "repro": value.get("repro"),
                 "time": path.stat().st_mtime,
                 "accuracy": [], "perf": [], "backend": "", "notes": value.get("reason", "")}
@@ -427,7 +472,7 @@ def _perf_text(profile: str, items: Sequence[Mapping[str, Any]]) -> str:
 # (counts as a pass) or an Acc difference not shown either way; Green, a pass.
 SIGNALS = ("white", "red", "yellow", "green")
 SIGNAL_NAMES = {"white": "White", "red": "Red", "yellow": "Yellow", "green": "Green"}
-NO_VERDICT = {"error", "config-error", "build-failed", "not-run", "excluded", "smoke-fail"}
+NO_VERDICT = {"error", "environment-blocked", "config-error", "build-failed", "not-run", "excluded", "smoke-fail"}
 NOT_COMPARED = {"not-comparable", "not-covered"}
 
 
