@@ -1,0 +1,22 @@
+{
+  "name": "molmo2-8b-bf16",
+  "hf_id": "allenai/Molmo2-8B",
+  "hf_revision": "e28fa28597e5ec5e0cca2201dd8ab33d48bc4a1b",
+  "family": "molmo2",
+  "task": "vision_language_generation",
+  "precision": "bf16",
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 2048,
+  "bundle": "molmo2-8b-bf16.bundle",
+  "source_sha256": {
+    "modeling_molmo2.py": "4a469aba3698dd1ef9b579439f363bda90ba3be2a5709e73bc10d8840f84e07a",
+    "configuration_molmo2.py": "e75a5ab18c298f91d81b2b1e68369812b655a573b4a6a52d59ab8535d791bf39",
+    "processing_molmo2.py": "61ef1329d8a02caebaa5e5acd07a329fdbf9772e18ff32cd7256c09a3231360b",
+    "image_processing_molmo2.py": "613bc2436936cebb1ebf0bfddda666b5c979573ba503fb904eed6eb56a706181"
+  },
+  "testcases": [
+    {"name": "molmo2-red", "premerge": true, "color": [255, 0, 0], "size": [64, 64], "prompt": "What color is this image? Answer with one word.", "max_new_tokens": 16},
+    {"name": "molmo2-blue", "premerge": true, "color": [0, 0, 255], "size": [512, 256], "prompt": "What color is this image? Answer with one word.", "max_new_tokens": 16},
+    {"name": "molmo2-car", "premerge": true, "test_image": "data/test_img.jpeg", "prompt": "What is the main object in this image? Answer with one word.", "max_new_tokens": 16}
+  ]
+}

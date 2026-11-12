@@ -1,0 +1,8 @@
+# Run in a separate reference environment: the checkout builder uses Transformers 5.2.
+transformers==4.57.1
+huggingface_hub==0.36.0
+einops==0.8.1
+requests>=2.32,<3
+torch>=2.6
+torchvision
+Pillow>=10,<14
