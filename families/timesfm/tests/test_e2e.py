@@ -358,15 +358,22 @@ def _assert_sdk_consumers(runtime_root, bundle, manifest, case, tmp_path, expect
 
 
 def test_forecast_contract_requires_matching_shape() -> None:
-    expected = {"values": np.asarray([0.1, 0.2], dtype=np.float32)}
+    expected = {"values": np.asarray([[0.1, 0.2]], dtype=np.float32)}
+    actual = {
+        "values": np.asarray([0.1, 0.2], dtype=np.float32),
+        "shape": [2, 1],
+        "task": "series_to_point_forecast",
+        "kind": "point",
+        "axes": ["horizon", "channel"],
+        "horizon_steps": [1, 2],
+        "channel_names": [],
+        "channel_units": [],
+    }
+    manifest = {"task": "series_to_point_forecast"}
+    thresholds = {"relative_l2": 1.0, "max_pointwise_error": 1.0}
+    _assert_parity(actual, expected, manifest, {}, thresholds)
     with pytest.raises(AssertionError):
-        _assert_parity(
-            {"values": np.asarray([0.1, 0.2], dtype=np.float32), "shape": [2]},
-            expected,
-            {"task": "series_to_point_forecast"},
-            {},
-            {"relative_l2": 1.0, "max_pointwise_error": 1.0},
-        )
+        _assert_parity({**actual, "shape": [2]}, expected, manifest, {}, thresholds)
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:

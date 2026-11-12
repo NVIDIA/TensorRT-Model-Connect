@@ -12,7 +12,7 @@ from tensorrt_model_connect.model_support import ModelMetadata, resolve_family
 @pytest.mark.parametrize("model_type", ["timesfm", "times_fm"])
 def test_checkpoint_resolves_to_point_forecast(model_type):
     metadata = ModelMetadata({"model_type": model_type}, {})
-    family, support = resolve_family(metadata)
+    family, support = resolve_family(metadata, requested_family="timesfm")
     assert family == "timesfm"
     assert support.tasks == ("series_to_point_forecast",)
     assert support.default_task == "series_to_point_forecast"
