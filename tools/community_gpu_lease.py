@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import argparse
+from contextvars import ContextVar
 from datetime import datetime
 import hashlib
 from html.parser import HTMLParser
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -20,7 +22,13 @@ import time
 import tempfile
 import zipfile
 
-from tools.brev_exec import POLL_INTERVAL, ProvisionError, _load_lease, _save_lease, cleanup
+from tools.brev_exec import (
+    POLL_INTERVAL,
+    ProvisionError,
+    _load_lease,
+    _save_lease,
+    cleanup,
+)
 
 
 OWNER_JOB = "Community GPU / Provision and test"
@@ -28,6 +36,7 @@ LEASE_FILE = "trtmc-gpu-ci-lease.json"
 MAX_ARCHIVE_BYTES = 1024 * 1024
 MAX_REPORT_BYTES = 64 * 1024 * 1024
 REPORT_FILE = "report.html"
+EVIDENCE_DEADLINE: ContextVar[float | None] = ContextVar("gpu_evidence_deadline", default=None)
 
 
 class RecoveryError(RuntimeError):
@@ -35,8 +44,16 @@ class RecoveryError(RuntimeError):
 
 
 def _api(path: str, *, binary: bool = False):
+    remaining = 30.0
+    deadline = EVIDENCE_DEADLINE.get()
+    if deadline is not None:
+        remaining = min(remaining, deadline - time.monotonic())
+        if remaining <= 0:
+            raise RecoveryError("GPU recovery evidence budget expired")
     try:
-        result = subprocess.run(["gh", "api", path], capture_output=True, timeout=30, check=False)
+        result = subprocess.run(
+            ["gh", "api", path], capture_output=True, timeout=remaining, check=False
+        )
     except (OSError, subprocess.TimeoutExpired):
         raise RecoveryError("GitHub lease evidence is temporarily unavailable") from None
     limit = MAX_REPORT_BYTES + MAX_ARCHIVE_BYTES if binary else MAX_ARCHIVE_BYTES
@@ -224,7 +241,11 @@ def decode_report_receipt(archive: bytes, artifact: dict, producer: dict, reposi
     except (ValueError, OSError, zipfile.BadZipFile, RuntimeError, RecursionError):
         raise RecoveryError("GPU report recovery receipt is invalid") from None
     return validate_report_receipt(
-        receipt, repository, producer["run_id"], producer["run_attempt"], producer["head_sha"]
+        receipt,
+        repository,
+        producer["run_id"],
+        producer["run_attempt"],
+        producer["head_sha"],
     )
 
 
@@ -312,6 +333,23 @@ def _recover_producer(
     try:
         _save_lease(temporary, lease)
         _load_lease(temporary, lease["name"])
+        _save_lease(
+            destination.with_suffix(".authority.json"),
+            {
+                "repository": repository,
+                "repository_id": run["repository"]["id"],
+                "run_id": producer["run_id"],
+                "run_attempt": producer["run_attempt"],
+                "workflow_sha": producer["head_sha"],
+                "producer_id": producer["id"],
+                "producer_completed_at": producer["completed_at"],
+                "origin_digest": artifact["digest"],
+                "base_lease_digest": hashlib.sha256(
+                    json.dumps(lease, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest(),
+                "base_checked_at": "1970-01-01T00:00:00Z",
+            },
+        )
         temporary.replace(destination)
     finally:
         temporary.unlink(missing_ok=True)
@@ -347,7 +385,14 @@ def check_report(repository: str, run_id: int, attempt: int, sha: str) -> dict:
         archive = _api(f"repos/{repository}/actions/artifacts/{report['id']}/zip", binary=True)
         decode_report_receipt(archive, report, producer, repository)
         return {"report_available": "true", "report_check_unconfirmed": "false"}
-    except (RecoveryError, ProvisionError, OSError, ValueError, TypeError, RecursionError):
+    except (
+        RecoveryError,
+        ProvisionError,
+        OSError,
+        ValueError,
+        TypeError,
+        RecursionError,
+    ):
         return {"report_available": "false", "report_check_unconfirmed": "true"}
 
 
@@ -359,6 +404,46 @@ def cleanup_attempts(
     directory: Path,
     *,
     prior_only: bool,
+    timeout: float = 600,
+    unknown_timeout: float | None = None,
+    journal: dict | None = None,
+) -> dict:
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise RecoveryError("GPU recovery requires a finite positive budget")
+    if unknown_timeout is not None and (not math.isfinite(unknown_timeout) or unknown_timeout <= 0):
+        raise RecoveryError("Unknown GPU recovery requires a finite positive budget")
+    deadline = time.monotonic() + timeout
+    unknown_deadline = (
+        time.monotonic() + unknown_timeout if unknown_timeout is not None else deadline
+    )
+    token = EVIDENCE_DEADLINE.set(deadline)
+    try:
+        return _cleanup_attempts(
+            repository,
+            run_id,
+            attempt,
+            sha,
+            directory,
+            prior_only=prior_only,
+            deadline=deadline,
+            unknown_deadline=unknown_deadline,
+            journal=journal,
+        )
+    finally:
+        EVIDENCE_DEADLINE.reset(token)
+
+
+def _cleanup_attempts(
+    repository: str,
+    run_id: int,
+    attempt: int,
+    sha: str,
+    directory: Path,
+    *,
+    prior_only: bool,
+    deadline: float,
+    unknown_deadline: float,
+    journal: dict | None,
 ) -> dict:
     """Release every original owner before a rerun may allocate again.
 
@@ -376,6 +461,11 @@ def cleanup_attempts(
     context = None
     metadata_unconfirmed = True
     while True:
+        known = any(_load_lease(path, name).get("instance_id") for name, path in recovered.values())
+        effective_deadline = deadline if known else min(deadline, unknown_deadline)
+        if time.monotonic() >= effective_deadline:
+            raise RecoveryError("GPU recovery budget expired; original leases remain unresolved")
+        EVIDENCE_DEADLINE.set(effective_deadline)
         try:
             prefix, run, jobs = _context(repository, run_id, attempt, sha)
             owners = [job for job in jobs if job.get("name") == OWNER_JOB]
@@ -424,15 +514,39 @@ def cleanup_attempts(
                 try:
                     if owner_attempt not in recovered:
                         destination = directory / str(owner_attempt) / LEASE_FILE
-                        result = _recover_producer(repository, prefix, run, producer, destination)
+                        restored = False
+                        if journal is not None:
+                            if (
+                                journal.get("repository") != repository
+                                or journal.get("repository_id") != run["repository"]["id"]
+                            ):
+                                raise RecoveryError(
+                                    "The recovery journal belongs to another repository"
+                                )
+                            from tools.community_gpu_recovery import restore_record
+
+                            restored = restore_record(journal, producer, destination)
+                        result = (
+                            {"instance_name": f"trtmc-gpu-ci-{run_id}-{owner_attempt}"}
+                            if restored
+                            else _recover_producer(repository, prefix, run, producer, destination)
+                        )
                         if result.get("cleanup_confirmed") == "true":
                             confirmed.add(owner_attempt)
                             continue
-                        recovered[owner_attempt] = (result["instance_name"], destination)
+                        recovered[owner_attempt] = (
+                            result["instance_name"],
+                            destination,
+                        )
                     name, destination = recovered[owner_attempt]
                     lease = _load_lease(destination, name)
                     pending.append(
-                        (not bool(lease.get("instance_id")), owner_attempt, name, destination)
+                        (
+                            not bool(lease.get("instance_id")),
+                            owner_attempt,
+                            name,
+                            destination,
+                        )
                     )
                 except (RecoveryError, ProvisionError, OSError):
                     evidence_unconfirmed = True
@@ -440,14 +554,22 @@ def cleanup_attempts(
         # One blocked identity cannot prevent another owned VM being released.
         for _unknown, owner_attempt, name, destination in sorted(pending):
             try:
-                cleanup(name, lease_file=destination, timeout=90)
+                remaining = effective_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RecoveryError(
+                        "GPU recovery budget expired; original leases remain unresolved"
+                    )
+                cleanup(name, lease_file=destination, timeout=min(90, remaining))
                 confirmed.add(owner_attempt)
             except (ProvisionError, OSError):
                 pass
         if not evidence_unconfirmed and set(producers) <= confirmed:
             return {"cleanup_confirmed": "true"}
-        print("GPU allocations remain unconfirmed; continuing reconciliation.", file=sys.stderr)
-        time.sleep(POLL_INTERVAL)
+        print(
+            "GPU allocations remain unconfirmed; continuing reconciliation.",
+            file=sys.stderr,
+        )
+        time.sleep(min(POLL_INTERVAL, max(0, effective_deadline - time.monotonic())))
 
 
 def prune_reported_artifacts(repository: str, run_id: int, attempt: int, sha: str) -> dict:
@@ -506,7 +628,10 @@ def prune_reported_artifacts(repository: str, run_id: int, attempt: int, sha: st
                 continue
             final = select_artifact(finals, producer, run["repository"]["id"])
             original = decode_lease(
-                _api(f"repos/{repository}/actions/artifacts/{final['id']}/zip", binary=True),
+                _api(
+                    f"repos/{repository}/actions/artifacts/{final['id']}/zip",
+                    binary=True,
+                ),
                 final,
                 producer,
                 repository,
@@ -516,7 +641,12 @@ def prune_reported_artifacts(repository: str, run_id: int, attempt: int, sha: st
                 raise RecoveryError("HTML did not preserve the exact final recovery journal")
         names = {
             f"{stem}-{run_id}-{owner_attempt}"
-            for stem in ("gpu-ci-intent", "gpu-ci-lease", "gpu-ci-lease-final", "gpu-ci-output")
+            for stem in (
+                "gpu-ci-intent",
+                "gpu-ci-lease",
+                "gpu-ci-lease-final",
+                "gpu-ci-output",
+            )
         }
         # Delete the final journal last so interrupted compaction can resume
         # the same exact comparison before deleting any remaining artifacts.
@@ -556,7 +686,14 @@ def main() -> int:
     mode.add_argument("--prune-reported-artifacts", action="store_true")
     mode.add_argument("--check-report", action="store_true")
     parser.add_argument("--lease-directory", type=Path)
+    parser.add_argument("--timeout", type=float, default=600)
+    parser.add_argument("--unknown-timeout", type=float)
+    parser.add_argument("--use-journal", action="store_true")
     args = parser.parse_args()
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        parser.error("--timeout must be finite and positive")
+    deadline = time.monotonic() + args.timeout
+    token = EVIDENCE_DEADLINE.set(deadline)
     try:
         identity = (
             os.environ["GITHUB_REPOSITORY"],
@@ -573,8 +710,24 @@ def main() -> int:
         else:
             if args.lease_directory is None:
                 raise RecoveryError("A directory is required for original allocation leases")
+            journal = None
+            if args.use_journal and not (args.cleanup_prior and identity[2] == 1):
+                from tools.community_gpu_recovery import load_journal
+
+                try:
+                    journal = load_journal(identity[0])
+                except RecoveryError:
+                    print(
+                        "Recovery checkpoint unavailable; reconciling original owner evidence.",
+                        file=sys.stderr,
+                    )
             result = cleanup_attempts(
-                *identity, args.lease_directory, prior_only=args.cleanup_prior
+                *identity,
+                args.lease_directory,
+                prior_only=args.cleanup_prior,
+                timeout=max(0, deadline - time.monotonic()),
+                unknown_timeout=args.unknown_timeout,
+                journal=journal,
             )
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
             for key, value in result.items():
@@ -583,6 +736,8 @@ def main() -> int:
     except (KeyError, ValueError, RuntimeError, OSError):
         print("ERROR: Original GPU lease recovery remains unconfirmed.", file=sys.stderr)
         return 75
+    finally:
+        EVIDENCE_DEADLINE.reset(token)
 
 
 if __name__ == "__main__":

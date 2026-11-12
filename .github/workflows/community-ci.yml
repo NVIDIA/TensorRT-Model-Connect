@@ -1095,8 +1095,8 @@ jobs:
     environment:
       name: gpu-ci-dispatch
       deployment: false
-    # Leave the hosted runner's full budget available for blocking final cleanup.
-    # External runner termination remains outside the helper's control.
+    # Model execution retains its budget; resource recovery has shorter,
+    # explicit budgets and hands unresolved leases to the recovery workflow.
     timeout-minutes: 360
     concurrency:
       group: trtmc-community-gpu-${{ inputs.ci_lane }}-${{ needs.gpu-authorize.outputs.pr_number }}
@@ -1104,6 +1104,7 @@ jobs:
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     outputs:
       conclusion: ${{ steps.result.outputs.conclusion }}
       failure_class: ${{ steps.classification.outputs.failure_class }}
@@ -1125,6 +1126,16 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+
+      - name: Recheck the PR after the GPU queue
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.gpu-authorize.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.gpu-authorize.outputs.head_sha }}
+        run: |
+          python3 -m tools.community_gpu_recovery --check-pr \
+            --pr-number "$PR_NUMBER" --head-sha "$HEAD_SHA" --timeout 60
 
       - name: Select the qualified host RAM profile
         id: host_profile
@@ -1227,12 +1238,27 @@ jobs:
           exit 1
 
       - name: Release every earlier allocation attempt
+        timeout-minutes: 22
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           python3 -m tools.community_gpu_lease --cleanup-prior \
-            --lease-directory "$RUNNER_TEMP/gpu-ci-prior-leases"
+            --lease-directory "$RUNNER_TEMP/gpu-ci-prior-leases" \
+            --use-journal --timeout 1200 --unknown-timeout 180
+
+      - name: Admit the current GPU request
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.gpu-authorize.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.gpu-authorize.outputs.head_sha }}
+          TRTMC_GPU_MAX_UNRESOLVED: ${{ vars.TRTMC_GPU_MAX_UNRESOLVED || '5' }}
+          TRTMC_GPU_ALLOCATION_COOLDOWN: ${{ vars.TRTMC_GPU_ALLOCATION_COOLDOWN || '900' }}
+        run: |
+          python3 -m tools.community_gpu_recovery --admit \
+            --pr-number "$PR_NUMBER" --head-sha "$HEAD_SHA" --timeout 120 \
+            --prior-directory "$RUNNER_TEMP/gpu-ci-prior-leases"
 
       - name: Prepare the GPU allocation intent
         id: prepare
@@ -1304,8 +1330,22 @@ jobs:
           # Preserve ownership through GitHub's 30-day rerun window.
           retention-days: 35
 
+      - name: Confirm GPU admission before reservation
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.gpu-authorize.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.gpu-authorize.outputs.head_sha }}
+          TRTMC_GPU_MAX_UNRESOLVED: ${{ vars.TRTMC_GPU_MAX_UNRESOLVED || '5' }}
+          TRTMC_GPU_ALLOCATION_COOLDOWN: ${{ vars.TRTMC_GPU_ALLOCATION_COOLDOWN || '900' }}
+        run: |
+          python3 -m tools.community_gpu_recovery --admit \
+            --pr-number "$PR_NUMBER" --head-sha "$HEAD_SHA" --timeout 120 \
+            --prior-directory "$RUNNER_TEMP/gpu-ci-prior-leases"
+
       - name: Reserve a GPU instance
         id: reserve
+        timeout-minutes: 47
         if: ${{ success() && steps.intent.outcome == 'success' && steps.intent.outputs.artifact-id != '' }}
         env:
           INSTANCE_NAME: ${{ steps.prepare.outputs.instance_name }}
@@ -1609,6 +1649,7 @@ jobs:
 
       - name: Always tear down the GPU instance
         id: release
+        timeout-minutes: 17
         if: ${{ always() && steps.prepare.outcome == 'success' && steps.reserve.outcome != 'skipped' }}
         env:
           INSTANCE_NAME: ${{ steps.prepare.outputs.instance_name }}
@@ -1617,7 +1658,7 @@ jobs:
           python3 -m tools.brev_exec cleanup \
             --instance "$INSTANCE_NAME" \
             --lease-file "$RUNNER_TEMP/trtmc-gpu-ci-lease.json" \
-            --until-deleted
+            --timeout 900 --unknown-timeout 90
           echo "cleanup_confirmed=true" >> "$GITHUB_OUTPUT"
 
       - name: Record the step conclusion
@@ -1773,7 +1814,7 @@ jobs:
     environment:
       name: gpu-ci-dispatch
       deployment: false
-    timeout-minutes: 360
+    timeout-minutes: 35
     permissions:
       contents: read
       actions: write
@@ -1839,6 +1880,7 @@ jobs:
 
       - name: Delete every original GPU allocation
         id: release
+        timeout-minutes: 22
         if: ${{ always() && steps.no_allocation.outputs.cleanup_confirmed != 'true' && steps.cleanup-checkout.outcome == 'success' && steps.cleanup-login.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1847,7 +1889,26 @@ jobs:
           # Original producer metadata and immutable artifacts remain available
           # when outputs disappear. Reconcile every attempt, never only the last.
           python3 -m tools.community_gpu_lease --cleanup-all \
-            --lease-directory "$RUNNER_TEMP/gpu-ci-all-leases"
+            --lease-directory "$RUNNER_TEMP/gpu-ci-all-leases" \
+            --use-journal --timeout 1200 --unknown-timeout 180
+
+      - name: Checkpoint recovery progress
+        if: ${{ always() && steps.cleanup-checkout.outcome == 'success' }}
+        timeout-minutes: 1
+        run: |
+          python3 -m tools.community_gpu_recovery \
+            --export-progress "$RUNNER_TEMP/gpu-ci-all-leases" \
+            --journal-file "$RUNNER_TEMP/recovery-progress/journal.json"
+
+      - name: Publish recovery progress
+        if: ${{ always() && steps.cleanup-checkout.outcome == 'success' }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: community-gpu-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/recovery-progress/journal.json
+          if-no-files-found: ignore
+          retention-days: 90
 
       - name: Keep the verified HTML as the final artifact
         if: ${{ always() && steps.cleanup-checkout.outcome == 'success' && (steps.release.outputs.cleanup_confirmed == 'true' || steps.no_allocation.outputs.cleanup_confirmed == 'true') }}
@@ -2080,8 +2141,8 @@ jobs:
           # the backstop reconciles every original producer in this workflow.
           if { [ "$RUN_GPU" = true ] || [ "$ORIGINAL_RUN_ATTEMPT" -gt 1 ]; } \
             && [ "$BACKSTOP_RELEASE_CONFIRMED" != true ]; then
-            state=pending
-            description="Community CI release remains unconfirmed"
+            state=error
+            description="Infrastructure error: GPU recovery remains unresolved"
           elif [ "$CPU_RESULT" = success ] && [ "$RUN_GPU" = true ] \
             && [ "${GPU_PLAN_REJECTED:-}" = true ] \
             && [ "${NO_ALLOCATION_CONFIRMED:-}" = true ]; then
