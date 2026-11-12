@@ -130,8 +130,8 @@ void test_channels_and_formats() {
     image.width = 256;
     image.format = trtmc::internal::ImageFormat::Float32;
     const auto levels = trtmc::trocr::to_rgb8(image);
-    bool recovered = true;
-    for (std::size_t index = 0; index < levels.size(); ++index)
+    bool recovered = levels.size() == floats.size();
+    for (std::size_t index = 0; recovered && index < levels.size(); ++index)
         recovered = recovered && levels[index] == index / 3;
     check(recovered, "float32 [0, 1] pixels round back to their 8-bit levels");
 

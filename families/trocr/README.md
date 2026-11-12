@@ -31,8 +31,11 @@ The builder refuses, by name, the TrOCR checkpoints with the other decoder graph
 (`trocr-large-printed`, `trocr-*-stage1`: sinusoidal positions, ReLU, scaled
 embeddings, untied output projection). The `trocr-small-*` checkpoints use a
 DeiT encoder and are not claimed. `microsoft/trocr-base-printed` is validated
-end to end; `microsoft/trocr-base-handwritten` (the same configuration) passed
-the graph-parity check only.
+end to end. `microsoft/trocr-base-handwritten` (the same configuration) was only
+measured with the graph-parity helpers on the printed case's images: the same
+teacher-forced tokens and logits within the gate, and cross-attention states as
+far from its GPU reference as that reference's own CPU run (up to 1.5e-3, above
+the 1e-3 gate calibrated on the printed checkpoint).
 
 ## Validation
 

@@ -14,8 +14,8 @@
         "data/printed_total.png",
         "data/printed_thanks.png",
         "data/printed_receipt.png",
-        "data/screenshot_rope.png",
-        "data/screenshot_swiglu.png",
+        "data/printed_small.png",
+        "data/printed_tight.png",
         "data/printed_tall.png"
       ],
       "expected_text": {
