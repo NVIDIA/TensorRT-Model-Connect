@@ -390,3 +390,24 @@ def test_lossless_images_send_the_decoded_pixels_as_png():
     with Image.open(io.BytesIO(base64.b64decode(media["b64"]))) as decoded, \
             Image.open(io.BytesIO(jpeg["bytes"])) as original:
         assert decoded.format == "PNG" and decoded.tobytes() == original.convert("RGB").tobytes()
+
+
+def test_max_audio_seconds_drops_longer_clips_for_both_sides(tmp_path):
+    import base64
+    import io
+
+    import numpy as np
+    import soundfile
+
+    from trtmc_aiperf_qual.absolute import _audio_fitted
+    from trtmc_aiperf_qual.config import Environment
+
+    def clip(seconds):
+        buffer = io.BytesIO()
+        soundfile.write(buffer, np.zeros(int(16000 * seconds), dtype=np.float32), 16000, format="WAV")
+        return {"$file": {"suffix": ".wav", "b64": base64.b64encode(buffer.getvalue()).decode()}}
+
+    samples = [{"sample_id": name, "request": {"audio_path": clip(seconds)}}
+               for name, seconds in (("short", 12.0), ("limit", 30.0), ("long", 33.9))]
+    kept = _audio_fitted(Environment({}), samples, 30.0)
+    assert [sample["sample_id"] for sample in kept] == ["short", "limit"]

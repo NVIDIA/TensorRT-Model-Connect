@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# A CTC decoder: no language or token-budget control (the Task declares neither).
+# A CTC decoder: no language or token-budget control (the Task declares neither); its bundle takes clips of at
+# most 30 seconds (480,000 samples at 16 kHz).
 benchmarks:
-  librispeech: {request: {language: null, max_new_tokens: null}}
+  librispeech: {max_audio_seconds: 30, request: {language: null, max_new_tokens: null}}

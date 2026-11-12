@@ -4,6 +4,6 @@
 reference:
   requirements: families/parakeet_tdt/requirements.txt  # the Transformers release with ParakeetForTDT
 
-# The Task detects the language itself and rejects a language control.
+# The Task detects the language itself and rejects a language control; it takes clips of at most 30 seconds.
 benchmarks:
-  librispeech: {request: {language: null}}
+  librispeech: {max_audio_seconds: 30, request: {language: null}}
