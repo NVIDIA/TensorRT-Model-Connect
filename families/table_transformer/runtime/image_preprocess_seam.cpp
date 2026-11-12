@@ -107,6 +107,45 @@ std::vector<FilterRow> bilinear_weights(int source, int destination) {
     return rows;
 }
 
+std::vector<uint8_t> resample_horizontal(const std::vector<uint8_t>& source, int height, int width,
+                                         int out_width, const std::vector<FilterRow>& horizontal) {
+    std::vector<uint8_t> result(static_cast<std::size_t>(height) * out_width * 3);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < out_width; ++x) {
+            const auto& row = horizontal[x];
+            for (int channel = 0; channel < 3; ++channel) {
+                int64_t sum = 1 << (kFilterBits - 1);
+                for (std::size_t k = 0; k < row.coefficients.size(); ++k)
+                    sum += source[(static_cast<std::size_t>(y) * width + row.start + k) * 3 +
+                                  channel] *
+                           static_cast<int64_t>(row.coefficients[k]);
+                result[(static_cast<std::size_t>(y) * out_width + x) * 3 + channel] =
+                    static_cast<uint8_t>(std::clamp<int64_t>(sum >> kFilterBits, 0, 255));
+            }
+        }
+    }
+    return result;
+}
+
+std::vector<uint8_t> resample_vertical(const std::vector<uint8_t>& source, int width,
+                                       int out_height, const std::vector<FilterRow>& vertical) {
+    std::vector<uint8_t> result(static_cast<std::size_t>(out_height) * width * 3);
+    for (int y = 0; y < out_height; ++y) {
+        const auto& row = vertical[y];
+        for (int x = 0; x < width; ++x) {
+            for (int channel = 0; channel < 3; ++channel) {
+                int64_t sum = 1 << (kFilterBits - 1);
+                for (std::size_t k = 0; k < row.coefficients.size(); ++k)
+                    sum += source[((row.start + k) * width + x) * 3 + channel] *
+                           static_cast<int64_t>(row.coefficients[k]);
+                result[(static_cast<std::size_t>(y) * width + x) * 3 + channel] =
+                    static_cast<uint8_t>(std::clamp<int64_t>(sum >> kFilterBits, 0, 255));
+            }
+        }
+    }
+    return result;
+}
+
 std::vector<uint8_t> resize_rgb_bytes(const float* pixels, int height, int width, int out_height,
                                       int out_width) {
     std::vector<uint8_t> source(static_cast<std::size_t>(height) * width * 3);
@@ -117,36 +156,16 @@ std::vector<uint8_t> resize_rgb_bytes(const float* pixels, int height, int width
     }
     const auto horizontal = bilinear_weights(width, out_width);
     const auto vertical = bilinear_weights(height, out_height);
-    std::vector<uint8_t> intermediate(static_cast<std::size_t>(height) * out_width * 3);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < out_width; ++x) {
-            const auto& row = horizontal[x];
-            for (int channel = 0; channel < 3; ++channel) {
-                int64_t sum = 1 << (kFilterBits - 1);
-                for (std::size_t k = 0; k < row.coefficients.size(); ++k)
-                    sum += source[(static_cast<std::size_t>(y) * width + row.start + k) * 3 +
-                                  channel] *
-                           static_cast<int64_t>(row.coefficients[k]);
-                intermediate[(static_cast<std::size_t>(y) * out_width + x) * 3 + channel] =
-                    static_cast<uint8_t>(std::clamp<int64_t>(sum >> kFilterBits, 0, 255));
-            }
-        }
+    // Pillow 13 compares the number of removed pixels, not the scale factors.
+    // Keep byte rounding at both pass boundaries regardless of traversal order.
+    const int64_t removed_height = static_cast<int64_t>(height) - out_height;
+    const int64_t removed_width = static_cast<int64_t>(width) - out_width;
+    if (removed_height > 0 && removed_height > 2 * removed_width) {
+        auto intermediate = resample_vertical(source, width, out_height, vertical);
+        return resample_horizontal(intermediate, out_height, width, out_width, horizontal);
     }
-    std::vector<uint8_t> result(static_cast<std::size_t>(out_height) * out_width * 3);
-    for (int y = 0; y < out_height; ++y) {
-        const auto& row = vertical[y];
-        for (int x = 0; x < out_width; ++x) {
-            for (int channel = 0; channel < 3; ++channel) {
-                int64_t sum = 1 << (kFilterBits - 1);
-                for (std::size_t k = 0; k < row.coefficients.size(); ++k)
-                    sum += intermediate[((row.start + k) * out_width + x) * 3 + channel] *
-                           static_cast<int64_t>(row.coefficients[k]);
-                result[(static_cast<std::size_t>(y) * out_width + x) * 3 + channel] =
-                    static_cast<uint8_t>(std::clamp<int64_t>(sum >> kFilterBits, 0, 255));
-            }
-        }
-    }
-    return result;
+    auto intermediate = resample_horizontal(source, height, width, out_width, horizontal);
+    return resample_vertical(intermediate, out_width, out_height, vertical);
 }
 
 } // namespace

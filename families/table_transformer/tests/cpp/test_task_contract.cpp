@@ -34,9 +34,11 @@ class FakeEngine final : public trtmc::ITrtModule {
         input_shape = image.shape;
         trtmc::TensorMap outputs;
         if (has_boxes)
-            outputs.emplace("pred_boxes", trtmc::Tensor{boxes.data(), boxes_shape, boxes_dtype});
+            outputs.emplace("pred_boxes", trtmc::Tensor{null_boxes ? nullptr : boxes.data(),
+                                                        boxes_shape, boxes_dtype});
         if (has_logits)
-            outputs.emplace("logits", trtmc::Tensor{logits.data(), logits_shape, logits_dtype});
+            outputs.emplace("logits", trtmc::Tensor{null_logits ? nullptr : logits.data(),
+                                                    logits_shape, logits_dtype});
         return outputs;
     }
     trtmc::DeviceTensorMap forward_device(const trtmc::DeviceTensorMap&) override { return {}; }
@@ -73,6 +75,7 @@ class FakeEngine final : public trtmc::ITrtModule {
 
     int calls{0};
     bool has_boxes{true}, has_logits{true};
+    bool null_boxes{false}, null_logits{false};
     // 2 queries, normalized [cx, cy, w, h]
     std::vector<float> boxes{0.5F, 0.5F, 0.2F, 0.4F, 0.1F, 0.2F, 0.1F, 0.1F};
     std::vector<int64_t> boxes_shape{1, 2, 4};
@@ -257,6 +260,36 @@ void test_unusable_engine_outputs_are_errors() {
     rejects_engine_output([](FakeEngine& e) { e.logits_shape = {1, 2}; }, "rank 2 logits");
     rejects_engine_output([](FakeEngine& e) { e.boxes_shape = {1, 1, 4}; }, "truncated boxes");
     rejects_engine_output([](FakeEngine& e) { e.boxes_shape = {1, 0, 4}; }, "empty boxes");
+    rejects_engine_output([](FakeEngine& e) { e.null_boxes = true; }, "null boxes");
+    rejects_engine_output([](FakeEngine& e) { e.null_logits = true; }, "null logits");
+    rejects_engine_output([](FakeEngine& e) { e.boxes_dtype = trtmc::DType::kFloat16; },
+                          "FP16 boxes");
+    rejects_engine_output([](FakeEngine& e) { e.logits_dtype = trtmc::DType::kFloat16; },
+                          "FP16 logits");
+    rejects_engine_output([](FakeEngine& e) { e.boxes_shape = {1, 2, 5}; }, "five-value boxes");
+    rejects_engine_output([](FakeEngine& e) { e.boxes_shape = {1, 3, 4}; }, "extra box query");
+    rejects_engine_output([](FakeEngine& e) { e.boxes_shape = {2, 2, 4}; }, "batched boxes");
+    rejects_engine_output([](FakeEngine& e) { e.logits_shape = {2, 2, 3}; }, "batched logits");
+    rejects_engine_output([](FakeEngine& e) { e.boxes_shape = {1, 2, 4, 1}; }, "rank 4 boxes");
+    rejects_engine_output([](FakeEngine& e) { e.logits_shape = {1, 2, 3, 1}; }, "rank 4 logits");
+    rejects_engine_output([](FakeEngine& e) { e.logits_shape = {1, 2, 1}; }, "no label class");
+    rejects_engine_output([](FakeEngine& e) { e.logits_shape = {1, -1, 3}; }, "negative queries");
+    const int64_t beyond_int32 = static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
+    rejects_engine_output([=](FakeEngine& e) { e.logits_shape = {1, beyond_int32, 3}; },
+                          "queries beyond int32");
+    rejects_engine_output([=](FakeEngine& e) { e.logits_shape = {1, 2, beyond_int32}; },
+                          "classes beyond int32");
+}
+
+void test_nonfinite_logits_are_errors() {
+    for (const float value :
+         {std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity(),
+          -std::numeric_limits<float>::infinity()}) {
+        for (std::size_t index = 0; index < 6; ++index) {
+            rejects_engine_output([=](FakeEngine& e) { e.logits[index] = value; },
+                                  "non-finite label or background logit");
+        }
+    }
 }
 
 } // namespace
@@ -269,10 +302,11 @@ int main() {
         test_an_empty_detection_is_valid();
         test_invalid_requests_fail_before_the_engine();
         test_unusable_engine_outputs_are_errors();
+        test_nonfinite_logits_are_errors();
     } catch (const std::exception& error) {
         std::cerr << "table_transformer task contract failed: " << error.what() << '\n';
         return 1;
     }
-    std::cout << "table_transformer task contract: 6 cases passed\n";
+    std::cout << "table_transformer task contract: 7 cases passed\n";
     return 0;
 }

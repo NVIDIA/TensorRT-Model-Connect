@@ -9,6 +9,8 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .support import validate_structure_config
+
 
 @dataclass
 class ModelConfig:
@@ -19,17 +21,10 @@ class ModelConfig:
     @staticmethod
     def from_json(text: str) -> "ModelConfig":
         raw = json.loads(text)
-        model_type = raw.get("model_type")
-        architectures = raw.get("architectures")
-        if not isinstance(model_type, str) or not model_type:
-            raise ValueError("Table Transformer config requires model_type")
-        if isinstance(architectures, list) and architectures:
-            architecture = str(architectures[0])
-        else:
-            architecture = raw.get("architecture", model_type)
-        if not isinstance(architecture, str) or not architecture:
-            architecture = model_type
-        return ModelConfig(model_type=model_type, architecture=architecture, raw=raw)
+        validate_structure_config(raw)
+        return ModelConfig(
+            model_type=raw["model_type"], architecture=raw["architectures"][0], raw=raw
+        )
 
     @classmethod
     def from_dir(cls, model_dir: str | Path) -> "ModelConfig":

@@ -542,9 +542,6 @@ def build(request, writer) -> None:
 
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
-    if config.model_type.lower() != "table-transformer":
-        raise ValueError(f"table_transformer does not support model_type={config.model_type!r}")
-    raw = config.raw
     processor = json.loads((model_dir / "preprocessor_config.json").read_text())
     if (
         processor.get("size") != 800
@@ -555,15 +552,6 @@ def build(request, writer) -> None:
         or processor.get("image_std") != [0.229, 0.224, 0.225]
     ):
         raise ValueError("table_transformer requires the checkpoint's 800/1000 ImageNet processor")
-    if (
-        raw.get("backbone") != "resnet18"
-        or raw.get("dilation", False)
-        or raw.get("position_embedding_type", "sine") != "sine"
-        or raw.get("activation_function", "relu") != "relu"
-    ):
-        raise ValueError(
-            "table_transformer requires a non-dilated ResNet-18, sine positions, and ReLU"
-        )
     precision = str(request.precision).lower()
     if precision not in {"fp16", "fp32"}:
         raise ValueError(f"Unsupported table_transformer precision: {precision}")

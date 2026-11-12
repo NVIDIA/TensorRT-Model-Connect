@@ -89,7 +89,7 @@ def _required_path(value: str | None, label: str) -> Path:
     assert value, f"selected {FAMILY} E2E requires {label}"
     path = Path(value)
     assert path.exists(), f"selected {FAMILY} E2E {label} does not exist: {path}"
-    return path
+    return path.resolve()
 
 
 def _model_dir(manifest: dict) -> Path:
@@ -106,7 +106,7 @@ def _model_dir(manifest: dict) -> Path:
         raise AssertionError(
             f"selected {FAMILY} E2E requires the exact cached checkpoint {manifest['hf_id']}"
         ) from error
-    return Path(snapshot)
+    return Path(snapshot).resolve()
 
 
 def _runtime() -> tuple[Path, Path]:
@@ -239,7 +239,7 @@ def _box_iou(left: list[float], right: list[float]) -> float:
     return inter_area / union_area if union_area > 0.0 else 0.0
 
 
-def _assert_parity(actual: dict, expected: list[dict]) -> dict:
+def _assert_parity(actual: dict, expected: list[dict], image_shape: tuple[int, int]) -> dict:
     boxes = actual.get("boxes", [])
     scores = actual.get("scores", [])
     classes = actual.get("classes", [])
@@ -247,7 +247,9 @@ def _assert_parity(actual: dict, expected: list[dict]) -> dict:
     assert len(boxes) == len(scores) * 4 == len(classes) * 4, (
         "native Table Transformer returned inconsistent detection arrays"
     )
-    assert int(actual["image_height"]) > 0 and int(actual["image_width"]) > 0
+    assert (actual["image_height"], actual["image_width"]) == image_shape, (
+        "native Table Transformer returned incorrect image dimensions"
+    )
     native = [
         {
             "score": float(scores[index]),
@@ -382,16 +384,21 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     preprocess_error = _assert_preprocessing(model_dir, _asset(case["test_image"]), tmp_path)
     actual = _native(binary, runtime_root, bundle, case)
     expected = _official_reference(model_dir, case)
-    evidence = {"cli": _assert_parity(actual, expected), "preprocess_max_error": preprocess_error}
+    from PIL import Image, ImageOps
+
+    with Image.open(_asset(case["test_image"])) as image:
+        image_shape = (image.height, image.width)
+    evidence = {
+        "cli": _assert_parity(actual, expected, image_shape),
+        "preprocess_max_error": preprocess_error,
+    }
     for index, sdk in enumerate(
         _sdk_detections(runtime_root, bundle, _asset(case["test_image"]), tmp_path)
     ):
-        evidence[("c_sdk", "cpp_sdk")[index]] = _assert_parity(sdk, expected)
+        evidence[("c_sdk", "cpp_sdk")[index]] = _assert_parity(sdk, expected, image_shape)
 
     # The same bundle must accept images outside the original single fixture's
     # aspect ratio, with the official resize and unchanged parity criteria.
-    from PIL import Image, ImageOps
-
     with Image.open(_asset(case["test_image"])) as image:
         variants = {
             "portrait": ImageOps.expand(image, border=(40, 300, 40, 300), fill="white"),
@@ -405,11 +412,13 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             evidence[name] = _assert_parity(
                 _native(binary, runtime_root, bundle, variant_case),
                 _official_reference(model_dir, variant_case),
+                (variant.height, variant.width),
             )
 
     evidence.update(
         {
             "checkpoint": manifest["hf_id"],
+            "checkpoint_path": str(model_dir),
             "revision": manifest["hf_revision"],
             "precision": manifest["precision"],
         }

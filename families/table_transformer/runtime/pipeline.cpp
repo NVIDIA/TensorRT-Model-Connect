@@ -24,15 +24,18 @@ const Tensor& require_output(const TensorMap& outputs, const char* name) {
     const auto found = outputs.find(name);
     if (found == outputs.end())
         throw std::runtime_error(std::string("Table Transformer engine did not return ") + name);
-    if (found->second.numel() <= 0)
-        throw std::runtime_error(std::string("Table Transformer engine returned empty ") + name);
+    if (found->second.data == nullptr || found->second.dtype != DType::kFloat32)
+        throw std::runtime_error(
+            std::string("Table Transformer engine requires FP32 storage for ") + name);
     return found->second;
 }
 
 int32_t argmax_softmax(const float* logits, int32_t class_count, int32_t label_count,
                        float* score_out) {
     float max_logit = logits[0];
-    for (int32_t c = 1; c < class_count; ++c) {
+    for (int32_t c = 0; c < class_count; ++c) {
+        if (!std::isfinite(logits[c]))
+            throw std::runtime_error("Table Transformer engine returned non-finite logits");
         if (logits[c] > max_logit)
             max_logit = logits[c];
     }
@@ -49,6 +52,8 @@ int32_t argmax_softmax(const float* logits, int32_t class_count, int32_t label_c
         }
     }
     *score_out = std::exp(best_logit - max_logit) / sum_exp;
+    if (!std::isfinite(*score_out))
+        throw std::runtime_error("Table Transformer engine returned a non-finite score");
     return best_class;
 }
 
@@ -100,14 +105,20 @@ internal::DetectedBoxesResult TableTransformerObjectDetectionPipeline::detect(co
 
     const Tensor& logits_tensor = require_output(outputs, "logits");
     const Tensor& boxes_tensor = require_output(outputs, "pred_boxes");
-    if (logits_tensor.shape.size() < 3 || boxes_tensor.shape.size() < 3)
+    if (logits_tensor.shape.size() != 3 || boxes_tensor.shape.size() != 3)
         throw std::runtime_error("Table Transformer engine outputs have unexpected rank");
-
-    const int32_t num_queries = static_cast<int32_t>(logits_tensor.shape[1]);
-    const int32_t num_classes = static_cast<int32_t>(logits_tensor.shape[2]);
-    const int32_t num_labels = num_classes - 1;
-    if (num_queries <= 0 || num_labels <= 0 || boxes_tensor.numel() < num_queries * 4U)
+    const auto queries = logits_tensor.shape[1];
+    const auto classes = logits_tensor.shape[2];
+    if (logits_tensor.shape[0] != 1 || boxes_tensor.shape[0] != 1 || queries <= 0 ||
+        queries > std::numeric_limits<int32_t>::max() || classes <= 1 ||
+        classes > std::numeric_limits<int32_t>::max() || boxes_tensor.shape[1] != queries ||
+        boxes_tensor.shape[2] != 4 ||
+        static_cast<std::uint64_t>(queries) >
+            std::numeric_limits<std::size_t>::max() / sizeof(float) / classes)
         throw std::runtime_error("Table Transformer engine outputs have unexpected shapes");
+    const int32_t num_queries = static_cast<int32_t>(queries);
+    const int32_t num_classes = static_cast<int32_t>(classes);
+    const int32_t num_labels = num_classes - 1;
 
     const float* logits = static_cast<const float*>(logits_tensor.data);
     const float* boxes = static_cast<const float*>(boxes_tensor.data);

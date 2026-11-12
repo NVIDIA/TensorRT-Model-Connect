@@ -33,9 +33,11 @@ A local directory containing that revision's `config.json`,
 `preprocessor_config.json`, and `model.safetensors` can replace the model ID.
 The builder resolves ownership from checkpoint metadata.
 
-Build the native consumers in a configured native build directory:
+Configure the same native build directory with tests enabled, then build the
+native consumers (include any toolchain paths needed by the source-build guide):
 
 ```bash
+cmake -S . -B build -DTRTMC_BUILD_TESTS=ON
 cmake --build build --parallel 8 --target \
   trtmc trtmc_backend_trt trtmc_model_table_transformer \
   test_table_transformer_task_contract test_table_transformer_image_preprocess \
@@ -51,7 +53,9 @@ and output heads retain FP32 arithmetic because narrow structure boxes amplify
 half-precision perturbations. TF32 is disabled for the reference-sensitive path. The processor preserves
 aspect ratio, targets an 800-pixel shortest edge, caps the longest edge at
 1000 pixels, and applies the checkpoint's ImageNet normalization. RGB floats in [0, 1]
-are restored to bytes before the official PIL-compatible bilinear resize. Engine input
+are restored to bytes before the Pillow 13.0.0 bilinear resize, including its
+vertical-first pass order for tall downsamples. The family pins that reference
+dependency because older Pillow versions use a different pass order. Engine input
 dimensions are dynamic; the default capacity is 1000 by 1000. The runtime
 rejects images whose resized dimensions exceed a caller's smaller build bound.
 Batching, distributed execution, quantization, BF16, and other backends are
