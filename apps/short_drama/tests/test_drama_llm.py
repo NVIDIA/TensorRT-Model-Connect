@@ -7,7 +7,7 @@ import pytest
 from trtmc_short_drama import llm
 from trtmc_short_drama.llm import FREE_APIS, ChatClient
 
-OK = {"choices": [{"message": {"content": "好"}}]}
+OK = {"choices": [{"message": {"content": "Fine"}}]}
 
 
 def replies(monkeypatch, *responses):
@@ -39,7 +39,7 @@ def test_a_rate_limited_api_is_asked_again_after_the_wait_it_names(monkeypatch):
     requests, waits = replies(monkeypatch, httpx.Response(429, headers={"Retry-After": "2"}),
                               httpx.Response(503, text="busy"), httpx.ConnectError("reset"),
                               httpx.Response(200, json=OK))
-    assert ask(api_client()) == "好"
+    assert ask(api_client()) == "Fine"
     assert waits == [2.0, 20.0, 60.0]
     url, kwargs = requests[0]
     assert url == "https://api.example/v1/chat/completions"

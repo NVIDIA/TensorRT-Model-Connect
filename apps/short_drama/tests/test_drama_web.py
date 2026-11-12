@@ -11,10 +11,10 @@ from fastapi.testclient import TestClient
 from trtmc_short_drama.engine import Served
 from trtmc_short_drama.web import Services, create_app
 
-PLAN_STEPS = [{"location": "dock", "characters": ["zhou"], "speaker": "zhou", "line": "快上船！", "seconds": 6}]
-BIBLE = {"title": "渡口", "characters": [{"id": "zhou", "name": "老周", "look": "thin"}],
-         "locations": [{"id": "dock", "name": "渡口", "look": "a wooden dock"}],
-         "episodes": [{"number": 1, "title": "一", "summary": "s", "chapters": [1]}]}
+PLAN_STEPS = [{"location": "dock", "characters": ["zhou"], "speaker": "zhou", "line": "All aboard!", "seconds": 6}]
+BIBLE = {"title": "The Ferry", "characters": [{"id": "zhou", "name": "Zhou", "look": "thin"}],
+         "locations": [{"id": "dock", "name": "Dock", "look": "a wooden dock"}],
+         "episodes": [{"number": 1, "title": "One", "summary": "s", "chapters": [1]}]}
 
 
 class FakeEngine:
@@ -37,7 +37,7 @@ class FakeEngine:
         pass
 
 
-STORY = "第一章 手机\n" + "他捡起一部手机，屏幕亮了。" * 20
+STORY = "Chapter 1: The Phone\n" + " ".join(["He picks up a phone and the screen lights up."] * 20)
 
 
 class FakeChat:
@@ -48,9 +48,9 @@ class FakeChat:
         if user.startswith("Summarize"):
             return {"summary": "x"}
         if user.startswith("Rewrite one shot"):
-            return {**PLAN_STEPS[0], "line": "船要开了！"}
+            return {**PLAN_STEPS[0], "line": "The ferry is leaving!"}
         if user.startswith("Review"):
-            return [{"shot": "e1s1", "problem": "台词太长", "fix": "说短一点"}]
+            return [{"shot": "e1s1", "problem": "The line is too long", "fix": "Make it shorter"}]
         return BIBLE if user.startswith("Plan") else PLAN_STEPS
 
 
@@ -88,12 +88,12 @@ def test_create_plan_edit_and_select_flow(tmp_path, monkeypatch):
         jobs = wait(client)
         assert jobs[0]["status"] == "done", jobs
         plan = client.get(f"/api/projects/{created['id']}").json()["plan"]
-        assert plan["episodes"][0]["shots"][0]["line"] == "快上船！"
+        assert plan["episodes"][0]["shots"][0]["line"] == "All aboard!"
 
-        assert "<d>[Chinese] 快上船！</d>" in client.get(f"/api/projects/{created['id']}").json()["previews"]["e1s1"]
-        plan["episodes"][0]["shots"][0]["line"] = "再等等！"
+        assert "<d>[English] All aboard!</d>" in client.get(f"/api/projects/{created['id']}").json()["previews"]["e1s1"]
+        plan["episodes"][0]["shots"][0]["line"] = "Wait for me!"
         assert client.put(f"/api/projects/{created['id']}/plan", json=plan).status_code == 200
-        assert client.get(f"/api/projects/{created['id']}").json()["plan"]["episodes"][0]["shots"][0]["line"] == "再等等！"
+        assert client.get(f"/api/projects/{created['id']}").json()["plan"]["episodes"][0]["shots"][0]["line"] == "Wait for me!"
 
         flow = client.get("/api/flows/default").json()["flow"]
         saved = client.post("/api/flows/default", json={"flow": flow, "note": "same"}).json()
@@ -104,7 +104,7 @@ def test_create_plan_edit_and_select_flow(tmp_path, monkeypatch):
 def test_episode_steps_need_an_episode_and_shots_need_approved_stills(tmp_path, monkeypatch):
     client, services = make_client(tmp_path, monkeypatch)
     with client:
-        created = client.post("/api/projects", json={"title": "x", "novel": "第一章\n文本", "episodes": 1}).json()
+        created = client.post("/api/projects", json={"title": "x", "novel": "Chapter 1\nText", "episodes": 1}).json()
         assert client.post(f"/api/projects/{created['id']}/run", json={"step": "shots"}).status_code == 400
         client.post(f"/api/projects/{created['id']}/run", json={"step": "plan"})
         wait(client)
@@ -117,7 +117,7 @@ def test_episode_steps_need_an_episode_and_shots_need_approved_stills(tmp_path, 
 def test_files_stay_inside_the_project_and_keys_stay_private(tmp_path, monkeypatch):
     client, _ = make_client(tmp_path, monkeypatch)
     with client:
-        created = client.post("/api/projects", json={"title": "x", "novel": "文本"}).json()
+        created = client.post("/api/projects", json={"title": "x", "novel": "Text"}).json()
         assert client.get(f"/api/projects/{created['id']}/files/novel.txt").status_code == 200
         assert client.get(f"/api/projects/{created['id']}/files/../../settings.json").status_code == 404
         assert client.get("/api/projects/..%2f..%2fetc/files/passwd").status_code == 404
@@ -156,7 +156,7 @@ def test_a_vision_model_named_in_settings_comes_before_the_one_served_here(tmp_p
 def test_choosing_a_take_switches_the_clip_and_drops_its_timing(tmp_path, monkeypatch):
     client, _ = make_client(tmp_path, monkeypatch)
     with client:
-        created = client.post("/api/projects", json={"title": "x", "novel": "文本"}).json()
+        created = client.post("/api/projects", json={"title": "x", "novel": "Text"}).json()
         state_file = tmp_path / "projects" / created["id"] / "episodes" / "01" / "shots.json"
         state_file.parent.mkdir(parents=True)
         takes = [{"take": 1, "file": "c1.mp4", "sheet": "s1.jpg"},
@@ -191,16 +191,16 @@ def test_previous_frame_is_used_only_when_the_place_continues():
 def test_writes_need_the_app_header_and_a_local_host(tmp_path, monkeypatch):
     client, _ = make_client(tmp_path, monkeypatch, allowed_hosts=["testserver", "127.0.0.1"])
     with client:
-        assert client.post("/api/projects", json={"title": "x", "novel": "文"},
+        assert client.post("/api/projects", json={"title": "x", "novel": "Text"},
                            headers={"X-Short-Drama": ""}).status_code == 403
         assert client.get("/api/state", headers={"Host": "evil.example"}).status_code == 400
-        assert client.post("/api/projects", json={"title": "x", "novel": "文"}).status_code == 200
+        assert client.post("/api/projects", json={"title": "x", "novel": "Text"}).status_code == 200
 
 
 def test_edited_plans_cannot_use_ids_that_escape_the_project(tmp_path, monkeypatch):
     client, _ = make_client(tmp_path, monkeypatch)
     with client:
-        created = client.post("/api/projects", json={"title": "x", "novel": "文"}).json()
+        created = client.post("/api/projects", json={"title": "x", "novel": "Text"}).json()
         bad = {"characters": [{"id": "../../evil"}], "episodes": []}
         assert client.put(f"/api/projects/{created['id']}/plan", json=bad).status_code == 400
         shot = {"characters": [{"id": "zhou"}], "episodes": [{"number": 1, "shots": [{"id": "../x"}]}]}
@@ -226,7 +226,7 @@ def test_without_a_language_model_the_plan_points_to_settings(tmp_path):
         state = client.get("/api/state").json()
         assert state["chat_ready"] is False
         assert state["free_apis"]["openrouter"]["base_url"] == "https://openrouter.ai/api/v1"
-        created = client.post("/api/projects", json={"title": "t", "novel": "第一章\n文"}).json()
+        created = client.post("/api/projects", json={"title": "t", "novel": "Chapter 1\nText"}).json()
         url = f"/api/projects/{created['id']}"
         assert client.get(url).json()["stages"][0]["next"] == "Choose a language model in Settings"
         client.post(f"{url}/run", json={"step": "plan"})
@@ -280,10 +280,10 @@ def test_an_idea_project_writes_its_story_then_plans_and_revises(tmp_path, monke
     client, _ = make_client(tmp_path, monkeypatch)
     with client:
         assert client.post("/api/projects", json={"title": "x"}).status_code == 400
-        created = client.post("/api/projects", json={"title": "手机", "idea": "外卖骑手捡到一部手机", "episodes": 1}).json()
+        created = client.post("/api/projects", json={"title": "The Phone", "idea": "A delivery rider finds a phone", "episodes": 1}).json()
         url = f"/api/projects/{created['id']}"
         project = client.get(url).json()
-        assert project["novel_chars"] == 0 and project["meta"]["idea"] == "外卖骑手捡到一部手机"
+        assert project["novel_chars"] == 0 and project["meta"]["idea"] == "A delivery rider finds a phone"
         assert project["stages"][0]["next"] == "Write the story from the idea"
         assert project["model_review"] is None  # the page tests it for truth
         client.post(f"{url}/run", json={"step": "plan"})
@@ -299,28 +299,28 @@ def test_an_idea_project_writes_its_story_then_plans_and_revises(tmp_path, monke
         assert project["stages"][1]["next"] == "Draw 2 stills" and project["estimates"] == {"still": None, "shot": None}
         assert client.post(f"{url}/run", json={"step": "revise", "params": {"target": "shot:../x", "instruction": "a"}}
                            ).status_code == 400
-        client.post(f"{url}/run", json={"step": "revise", "params": {"target": "shot:e1s1", "instruction": "换句台词",
+        client.post(f"{url}/run", json={"step": "revise", "params": {"target": "shot:e1s1", "instruction": "Change the line",
                                                                         "only": ["x"], "max_tokens": 1}})
         assert wait(client)[0]["status"] == "done"
         client.post(f"{url}/run", json={"step": "review"})
         wait(client)
         project = client.get(url).json()
-        assert project["plan"]["episodes"][0]["shots"][0]["line"] == "船要开了！"
-        assert project["model_review"]["current"] and project["model_review"]["items"][0]["fix"] == "说短一点"
+        assert project["plan"]["episodes"][0]["shots"][0]["line"] == "The ferry is leaving!"
+        assert project["model_review"]["current"] and project["model_review"]["items"][0]["fix"] == "Make it shorter"
         assert project["history"][0]["note"].startswith("before revising shot e1s1")
         name = project["history"][0]["name"]
         assert client.post(f"{url}/history/{name}/restore").status_code == 200
         assert client.post(f"{url}/history/..%2fplan.json/restore").status_code == 404
         project = client.get(url).json()
-        assert project["plan"]["episodes"][0]["shots"][0]["line"] == "快上船！" and not project["model_review"]["current"]
+        assert project["plan"]["episodes"][0]["shots"][0]["line"] == "All aboard!" and not project["model_review"]["current"]
         assert client.put(f"{url}/novel", json={"novel": " "}).status_code == 400
 
 
 def test_projects_are_listed_newest_first_renamed_and_deleted(tmp_path, monkeypatch):
     client, _ = make_client(tmp_path, monkeypatch)
     with client:
-        first = client.post("/api/projects", json={"title": "一", "novel": "第一章\n文本", "episodes": 1}).json()["id"]
-        second = client.post("/api/projects", json={"title": "二", "idea": "小熊猫种星星", "episodes": 1,
+        first = client.post("/api/projects", json={"title": "One", "novel": "Chapter 1\nText", "episodes": 1}).json()["id"]
+        second = client.post("/api/projects", json={"title": "Two", "idea": "A red panda plants stars", "episodes": 1,
                                                     "style": "bright 3D cartoon animation"}).json()["id"]
         client.post(f"/api/projects/{first}/run", json={"step": "plan"})
         wait(client)
@@ -332,7 +332,7 @@ def test_projects_are_listed_newest_first_renamed_and_deleted(tmp_path, monkeypa
         assert listed["projects"][1]["progress"]["story"] is False and listed["estimates"] == {"still": None, "shot": None}
         assert client.get(f"/api/projects/{second}").json()["meta"]["style"] == "bright 3D cartoon animation"
 
-        assert client.put(f"/api/projects/{first}/meta", json={"title": " 新名字 "}).json()["title"] == "新名字"
+        assert client.put(f"/api/projects/{first}/meta", json={"title": " New name "}).json()["title"] == "New name"
         assert client.put(f"/api/projects/{first}/meta", json={"title": ""}).status_code == 400
         monkeypatch.setattr(client.app.state.jobs, "busy", lambda project=None: True)
         assert client.delete(f"/api/projects/{first}").status_code == 409
@@ -349,7 +349,7 @@ def test_the_page_sees_the_gpu_its_server_log_and_each_phase(tmp_path, monkeypat
         state = client.get("/api/state").json()
         assert state["engine"] == {"loaded": [], "loading": [], "since": None, "failure": ""}
         assert client.get("/api/logs/server?lines=1").json() == {"lines": ["ready"]}
-        created = client.post("/api/projects", json={"title": "x", "novel": "第一章\n文本", "episodes": 1}).json()
+        created = client.post("/api/projects", json={"title": "x", "novel": "Chapter 1\nText", "episodes": 1}).json()
         client.post(f"/api/projects/{created['id']}/run", json={"step": "plan"})
         job = wait(client)[0]
         assert job["message"] == "writing the shots of episode 1" and job["phase_seconds"] is not None

@@ -12,6 +12,7 @@ import pytest
 from trtmc_short_drama import editing, video
 
 RATE = 16000
+# The speech model is built for Chinese, and line timing counts Chinese characters.
 LINE = "王总这是新的报告"
 
 
@@ -40,8 +41,8 @@ def fake_recognizer(spoken_from: float, spoken_to: float, total: float):
 
 
 def test_coverage_counts_characters_heard_in_order():
-    assert editing.coverage(" 王总 这是新的报告", "王总，这是新的报告。") == 1.0
-    assert editing.coverage("王总", "王总这是新的报告") == 0.25
+    assert editing.coverage(" boss here's  the plan", "Boss, here's the plan.") == 1.0
+    assert editing.coverage("Boss", "Boss, here's the plan") == 0.25
     assert editing.coverage("", "") == 0.0
 
 
@@ -60,19 +61,19 @@ def test_line_end_is_found_by_binary_search():
 
 
 def test_unheard_line_gets_an_estimated_slot():
-    timing = editing.time_line(lambda _: "完全不同", silent_wav(4.0), LINE)
+    timing = editing.time_line(lambda _: "something else", silent_wav(4.0), LINE)
     assert timing["timing"] == "estimated" and timing["start"] < timing["end"] <= 4.0
 
 
 def test_subtitles_follow_the_shots_on_the_timeline():
-    shots = [{"id": "a", "seconds": 5, "line": "第一句"}, {"id": "b", "seconds": 6, "line": ""},
-             {"id": "c", "seconds": 4, "line": "“第三句”"}]
+    shots = [{"id": "a", "seconds": 5, "line": "First line."}, {"id": "b", "seconds": 6, "line": ""},
+             {"id": "c", "seconds": 4, "line": "“Third line.”"}]
     state = {"a": {"speech": {"start": 0.4, "end": 1.9}}, "c": {"speech": {"start": 0.2, "end": 9.0}}}
     srt = editing.subtitles(shots, state)
-    assert srt.splitlines()[:3] == ["1", "00:00:00,400 --> 00:00:01,900", "第一句"]
-    assert "00:00:11,200 --> 00:00:15,000\n第三句" in srt
+    assert srt.splitlines()[:3] == ["1", "00:00:00,400 --> 00:00:01,900", "First line."]
+    assert "00:00:11,200 --> 00:00:15,000\nThird line." in srt
     shorter = editing.subtitles(shots, state, {"a": 5.0, "b": 4.9, "c": 3.5})  # b skipped a held picture
-    assert "00:00:10,100 --> 00:00:13,400\n第三句" in shorter
+    assert "00:00:10,100 --> 00:00:13,400\nThird line." in shorter
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="FFmpeg is not installed")
@@ -86,7 +87,7 @@ def test_clips_become_vertical_1080p_and_join_with_subtitles(tmp_path: Path):
     info = video.probe(clip)
     assert (info["width"], info["height"], info["audio"]) == (1080, 1920, True)
     assert abs(info["duration"] - 2.0) < 0.1
-    (tmp_path / "episode.srt").write_text("1\n00:00:00,200 --> 00:00:01,500\n测试\n", encoding="utf-8")
+    (tmp_path / "episode.srt").write_text("1\n00:00:00,200 --> 00:00:01,500\nTest\n", encoding="utf-8")
     output = tmp_path / "episode.mp4"
     video.export_episode([clip, clip], tmp_path / "episode.srt", output, max_seconds=3.0,
                          font="Noto Sans CJK SC", font_size=12, crf=23)
@@ -105,25 +106,26 @@ def test_subtitle_fonts_cannot_inject_filters(tmp_path: Path):
 
 
 def test_a_line_nobody_speaks_is_read_and_names_its_speaker():
+    # reading time counts Chinese characters
     assert editing.read_line(5.04, "先排队。蛋糕三十八。") == {"start": 0.3, "end": 2.54, "timing": "read"}
-    assert editing.read_line(5.04, "滚！")["end"] == 1.8  # long enough to read
+    assert editing.read_line(5.04, "走！")["end"] == 1.8  # long enough to read
     assert editing.read_line(1.0, "先排队。蛋糕三十八。")["end"] == 1.0  # within the clip
-    shots = [{"id": "e1s1", "seconds": 5, "speaker": "linwan", "line": "先排队。"}]
+    shots = [{"id": "e1s1", "seconds": 5, "speaker": "linwan", "line": "Get in line."}]
     timing = {"start": 0.3, "end": 1.8}
-    silent = editing.subtitles(shots, {"e1s1": {"silent": True, "speech": timing}}, names={"linwan": "林晚"})
-    assert "林晚：先排队。" in silent
-    assert "林晚" not in editing.subtitles(shots, {"e1s1": {"speech": timing}}, names={"linwan": "林晚"})
+    silent = editing.subtitles(shots, {"e1s1": {"silent": True, "speech": timing}}, names={"linwan": "Lin Wan"})
+    assert "Lin Wan: Get in line." in silent
+    assert "Lin Wan" not in editing.subtitles(shots, {"e1s1": {"speech": timing}}, names={"linwan": "Lin Wan"})
 
 
 def test_lines_of_takes_without_sound_are_timed_without_speech_recognition(tmp_path, monkeypatch):
     from trtmc_short_drama.flow import Context
     from trtmc_short_drama.store import Store
 
-    project = Store(tmp_path).create("t", "第一章\n文", flow="default@1", episodes=1, max_seconds=60)
+    project = Store(tmp_path).create("t", "Chapter 1\nText", flow="default@1", episodes=1, max_seconds=60)
     shot = {"id": "e1s1", "seconds": 5, "location": "shop", "characters": ["linwan"], "props": [],
-            "speaker": "linwan", "line": "先排队。"}
-    project.save_plan({"title": "t", "characters": [{"id": "linwan", "name": "林晚"}], "locations": [], "props": [],
-                       "episodes": [{"number": 1, "title": "一", "summary": "", "shots": [shot]}]})
+            "speaker": "linwan", "line": "Wait."}
+    project.save_plan({"title": "t", "characters": [{"id": "linwan", "name": "Lin Wan"}], "locations": [], "props": [],
+                       "episodes": [{"number": 1, "title": "One", "summary": "", "shots": [shot]}]})
     project.save_shot_state(1, {"e1s1": {"take": 1, "file": "episodes/01/clips/e1s1-take1.mp4", "silent": True}})
     monkeypatch.setattr(video, "probe", lambda path: {"duration": 5.04, "audio": True})
 

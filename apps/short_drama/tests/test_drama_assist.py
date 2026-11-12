@@ -11,12 +11,12 @@ from trtmc_short_drama.store import Store
 
 SHOT = {"camera": "c", "action": "a", "after": "b", "then": "t", "sound": "s", "summary": "x", "props": []}
 PLAN = {"title": "t", "setting": "a town", "style": "drama",
-        "characters": [{"id": "zhou", "name": "老周", "role": "船夫", "look": "a thin man", "voice": "hoarse"}],
-        "locations": [{"id": "dock", "name": "渡口", "look": "a wooden dock"}], "props": [],
+        "characters": [{"id": "zhou", "name": "Zhou", "role": "ferryman", "look": "a thin man", "voice": "hoarse"}],
+        "locations": [{"id": "dock", "name": "Dock", "look": "a wooden dock"}], "props": [],
         "chapters": [{"number": 1, "summary": "s", "quotes": []}],
         "episodes": [{"number": 1, "chapters": [1], "shots": [
             {**SHOT, "id": "e1s1", "seconds": 6, "location": "dock", "characters": ["zhou"], "speaker": "zhou",
-             "line": "嘿！"},
+             "line": "Hey!"},
             {**SHOT, "id": "e1s2", "seconds": 8, "location": "dock", "characters": ["zhou"], "speaker": "",
              "line": ""}]}]}
 
@@ -52,58 +52,60 @@ def act(project, run, chat, **params):
 
 
 def test_an_idea_becomes_a_story_with_chapters(store):
-    project = store.create("idea", "", flow="default@1", episodes=2, max_seconds=60, idea="外卖骑手捡到一部手机")
-    reply = "<think>plan</think>\n```\n好的。\n第一章 手机\n" + "他捡起手机。" * 40 + "\n第二章 追踪\n" + "他跑。" * 40 + "\n```"
+    project = store.create("idea", "", flow="default@1", episodes=2, max_seconds=60,
+                           idea="A delivery rider finds a phone", language="en")
+    reply = ("<think>plan</think>\n```\nSure.\nChapter 1: The Phone\n" + "He picks up the phone. " * 40
+             + "\nChapter 2: The Chase\n" + "He runs. " * 40 + "\n```")
     chat = FakeChat(reply)
     act(project, assist.run_story, chat)
-    assert project.novel.startswith("第一章 手机") and "第二章 追踪" in project.novel and "```" not in project.novel
-    assert "外卖骑手捡到一部手机" in chat.prompts[0] and "Exactly 2 chapters" in chat.prompts[0]
+    assert project.novel.startswith("Chapter 1: The Phone") and "Chapter 2: The Chase" in project.novel and "```" not in project.novel
+    assert "A delivery rider finds a phone" in chat.prompts[0] and "Exactly 2 chapters" in chat.prompts[0]
     with pytest.raises(ValueError, match="already has its story"):
         act(project, assist.run_story, chat)
 
 
 def test_a_story_without_chapters_is_refused(store):
-    project = store.create("idea", "", flow="default@1", episodes=2, max_seconds=60, idea="一个想法")
+    project = store.create("idea", "", flow="default@1", episodes=2, max_seconds=60, idea="An idea")
     with pytest.raises(ValueError, match="chapter headings"):
-        act(project, assist.run_story, FakeChat("我不能写这个故事。"))
+        act(project, assist.run_story, FakeChat("I cannot write this story."))
     assert project.novel == ""
 
 
 def test_revising_a_shot_changes_only_that_shot_and_keeps_the_old_plan(store):
-    project = store.create("t", "第一章\n文", flow="default@1", episodes=1, max_seconds=20)
+    project = store.create("t", "Chapter 1\nText", flow="default@1", episodes=1, max_seconds=20)
     project.save_plan(copy.deepcopy(PLAN))
-    revised = {**SHOT, "location": "dock", "characters": ["zhou"], "speaker": "zhou", "line": "今天风大，坐稳了！",
+    revised = {**SHOT, "location": "dock", "characters": ["zhou"], "speaker": "zhou", "line": "It is windy today, hold on tight!",
                "seconds": 9, "action": "zhou wipes his brow, then speaks"}
     chat = FakeChat(revised)
-    act(project, assist.run_revise, chat, target="shot:e1s1", instruction="让他先擦汗再开口")
+    act(project, assist.run_revise, chat, target="shot:e1s1", instruction="Have him wipe his brow before he speaks")
     shots = project.plan["episodes"][0]["shots"]
-    assert shots[0]["id"] == "e1s1" and shots[0]["line"] == "今天风大，坐稳了！"
+    assert shots[0]["id"] == "e1s1" and shots[0]["line"] == "It is windy today, hold on tight!"
     assert shots[0]["seconds"] == 9 and shots[1] == PLAN["episodes"][0]["shots"][1]
-    assert "让他先擦汗再开口" in chat.prompts[0] and '"e1s2"' not in chat.prompts[0]  # neighbours without ids
+    assert "Have him wipe his brow before he speaks" in chat.prompts[0] and '"e1s2"' not in chat.prompts[0]  # neighbours without ids
     history = project.snapshots()
     assert len(history) == 1 and history[0]["note"].startswith("before revising shot e1s1")
     project.restore(history[0]["name"])
-    assert project.plan["episodes"][0]["shots"][0]["line"] == "嘿！" and len(project.snapshots()) == 2
+    assert project.plan["episodes"][0]["shots"][0]["line"] == "Hey!" and len(project.snapshots()) == 2
 
 
 def test_a_revised_shot_must_fit_the_time_left_in_its_episode(store):
-    project = store.create("t", "第一章\n文", flow="default@1", episodes=1, max_seconds=10)
+    project = store.create("t", "Chapter 1\nText", flow="default@1", episodes=1, max_seconds=10)
     project.save_plan(copy.deepcopy(PLAN))
     with pytest.raises(ValueError, match="only 2 s left"):
-        act(project, assist.run_revise, FakeChat({}), target="shot:e1s1", instruction="更长")
+        act(project, assist.run_revise, FakeChat({}), target="shot:e1s1", instruction="Make it longer")
 
 
 def test_revising_a_character_keeps_its_id(store):
-    project = store.create("t", "第一章\n文", flow="default@1", episodes=1, max_seconds=60)
+    project = store.create("t", "Chapter 1\nText", flow="default@1", episodes=1, max_seconds=60)
     project.save_plan(copy.deepcopy(PLAN))
-    act(project, assist.run_revise, FakeChat({"id": "evil", "name": "老周", "look": "a thin man with a scar",
-                                               "voice": ""}), target="character:zhou", instruction="脸上加一道疤")
+    act(project, assist.run_revise, FakeChat({"id": "evil", "name": "Zhou", "look": "a thin man with a scar",
+                                               "voice": ""}), target="character:zhou", instruction="Add a scar to his face")
     character = project.plan["characters"][0]
-    assert character == {**PLAN["characters"][0], "name": "老周", "look": "a thin man with a scar"}
+    assert character == {**PLAN["characters"][0], "name": "Zhou", "look": "a thin man with a scar"}
 
 
 def test_revision_requests_name_a_target_and_a_short_note():
-    assert assist.revision({"target": "prop:pipe", "instruction": " 换成铜的 "}) == ("prop", "pipe", "换成铜的")
+    assert assist.revision({"target": "prop:pipe", "instruction": " Make it brass "}) == ("prop", "pipe", "Make it brass")
     for bad in ({"target": "shot:../x", "instruction": "a"}, {"target": "shot:e1s1", "instruction": " "},
                 {"target": "plan:all", "instruction": "a"}, {"target": "shot:e1s1", "instruction": "a" * 601}):
         with pytest.raises(ValueError):
@@ -111,14 +113,14 @@ def test_revision_requests_name_a_target_and_a_short_note():
 
 
 def test_the_model_review_keeps_problems_about_real_shots(store):
-    project = store.create("t", "第一章\n文", flow="default@1", episodes=1, max_seconds=60)
+    project = store.create("t", "Chapter 1\nText", flow="default@1", episodes=1, max_seconds=60)
     project.save_plan(copy.deepcopy(PLAN))
-    chat = FakeChat([{"shot": "e1s2", "problem": "老周的灯笼在第 2 秒突然消失", "fix": "让他一直提着灯笼"},
+    chat = FakeChat([{"shot": "e1s2", "problem": "Zhou's lantern vanishes at 2 s", "fix": "Keep the lantern in his hand"},
                      {"shot": "e9s9", "problem": "no such shot"}, {"shot": "e1s1", "problem": ""}])
     act(project, assist.run_review, chat)
     saved = project.review
-    assert saved["items"] == [{"shot": "e1s2", "episode": 1, "problem": "老周的灯笼在第2秒突然消失", "fix": "让他一直提着灯笼"}]
+    assert saved["items"] == [{"shot": "e1s2", "episode": 1, "problem": "Zhou's lantern vanishes at 2 s", "fix": "Keep the lantern in his hand"}]
     assert saved["plan"] == assist.fingerprint(project.plan)
     plan = project.plan
-    plan["episodes"][0]["shots"][1]["line"] = "嗯"
+    plan["episodes"][0]["shots"][1]["line"] = "Mm."
     assert assist.fingerprint(plan) != saved["plan"]  # an edited shot list makes the review stale

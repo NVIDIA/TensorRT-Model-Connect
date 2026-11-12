@@ -56,16 +56,16 @@ def test_picture_change_at_a_cut():
 
 def test_measured_findings_name_the_shot_and_what_to_do():
     measures = {"sound": {"level_db": -20.0, "burst": 1.0, "clipping": 0.0}, "picture": {"black": 0.0, "motion": 9.0},
-                "speech": {"heard": "嗯", "match": 0.0}}
-    shot = {"id": "e1s2", "line": "先排队。"}
-    [missing] = analysis.measured_findings("zh", shot, measures)
+                "speech": {"heard": "um", "match": 0.0}}
+    shot = {"id": "e1s2", "line": "Get in line."}
+    [missing] = analysis.measured_findings("en", shot, measures)
     assert missing["category"] == "speech" and missing["action"] == "revise" and missing["target"] == "shot:e1s2"
-    assert "先排队" in missing["finding"]
+    assert "Get in line." in missing["finding"]
     unplanned = analysis.measured_findings("en", {"id": "e1s3", "line": ""},
                                            {**measures, "speech": {"heard": "who is there", "match": 0.0}})
     assert [f["id"] for f in unplanned] == ["e1s3-unplanned"] and unplanned[0]["finding"].startswith("someone speaks")
-    credits = {**measures, "speech": {"heard": "字幕志愿者 杨茜茜", "match": 0.0}}
-    assert analysis.measured_findings("zh", {"id": "e1s2", "line": ""}, credits) == []  # Whisper on quiet audio
+    credits = {**measures, "speech": {"heard": "Thanks for watching!", "match": 0.0}}
+    assert analysis.measured_findings("en", {"id": "e1s2", "line": ""}, credits) == []  # Whisper on quiet audio
     cuts = [{"from": "e1s1", "to": "e1s2", "same_place": True, "jump": 0.6, "level_jump_db": 12.0},
             {"from": "e1s2", "to": "e1s3", "same_place": False, "jump": 0.9, "level_jump_db": 1.0}]
     found = analysis.cut_findings("en", cuts)
@@ -79,7 +79,7 @@ class FakeEngine:
 
     def transcribe(self, model, wav):
         self.heard.append(model)
-        return "先排队蛋糕三十八"
+        return "get in line the cake is thirty eight"
 
 
 class FakeVision:
@@ -90,10 +90,10 @@ class FakeVision:
 
     def complete_json(self, system, user, *, max_tokens, temperature, images=()):
         self.calls.append({"user": user, "images": list(images)})
-        return [{"category": "consistency", "severity": "high", "finding": "她的发型和参考图不同",
-                 "target": "character:linwan", "action": "redraw", "suggestion": "参考图里把头发扎起来"},
-                {"category": "text", "finding": "门上有乱码文字", "target": "character:nobody", "action": "redraw",
-                 "suggestion": "画面里不要出现文字"},
+        return [{"category": "consistency", "severity": "high", "finding": "Her hair differs from her reference picture",
+                 "target": "character:linwan", "action": "redraw", "suggestion": "Tie her hair up in the reference picture"},
+                {"category": "text", "finding": "Garbled text on the door", "target": "character:nobody", "action": "redraw",
+                 "suggestion": "Keep text out of the picture"},
                 {"category": "made-up", "finding": "x"}]
 
 
@@ -119,14 +119,14 @@ def make_clip(path, colour, tone):
 
 @needs_ffmpeg
 def test_analysis_measures_every_shot_and_keeps_vision_findings_in_bounds(tmp_path):
-    project = Store(tmp_path).create("t", "第一章\n文", flow="default@1", episodes=1, max_seconds=60)
+    project = Store(tmp_path).create("t", "Chapter 1\nText", flow="default@1", episodes=1, max_seconds=60)
     shots = [{"id": "e1s1", "seconds": 2, "location": "shop", "characters": ["linwan"], "props": [], "line": "",
               "summary": "s"},
              {"id": "e1s2", "seconds": 2, "location": "shop", "characters": ["linwan"], "props": [],
-              "speaker": "linwan", "line": "先排队。蛋糕三十八。", "summary": "s"}]
-    project.save_plan({"title": "t", "language": "zh", "characters": [{"id": "linwan", "name": "林晚", "look": "l"}],
-                       "locations": [{"id": "shop", "name": "店", "look": "l"}], "props": [],
-                       "episodes": [{"number": 1, "title": "一", "summary": "", "shots": shots}]})
+              "speaker": "linwan", "line": "Get in line. The cake is thirty-eight.", "summary": "s"}]
+    project.save_plan({"title": "t", "language": "en", "characters": [{"id": "linwan", "name": "Lin Wan", "look": "l"}],
+                       "locations": [{"id": "shop", "name": "Shop", "look": "l"}], "props": [],
+                       "episodes": [{"number": 1, "title": "One", "summary": "", "shots": shots}]})
     (project.root / "stills").mkdir()
     for key, colour in (("character-linwan", "red"), ("location-shop", "blue")):
         make_clip(tmp_path / "src.mp4", colour, 300)
@@ -162,14 +162,11 @@ def test_analysis_measures_every_shot_and_keeps_vision_findings_in_bounds(tmp_pa
                            str(tmp_path / "board.jpg")], capture_output=True, text=True, check=True).stdout.strip()
     assert size == "1024,596"  # the 1468x320 sheet scaled to 1024x224, a 12 px gap, three pictures 360 high
     # a speech model built for Chinese does not judge the lines of an English project
-    plan = project.plan
-    project.save_plan({**plan, "language": "en"})
     english = FakeServices()
     english.languages = {"whisper": "zh"}
     analysis.run_analyze(Context(project, {"only": ["e1s1"]}, "whisper", 1, english, progress=lambda _: None))
     checked = analysis.load(project, 1)
     assert checked["shots"]["e1s1"]["speech"]["unchecked"] and "e1s1-unplanned" not in {f["id"] for f in checked["findings"]}
-    project.save_plan(plan)
     analysis.run_analyze(Context(project, {"only": ["e1s1"]}, "whisper", 1, FakeServices(FakeVision()),
                                  progress=lambda _: None))
     # analysing one shot again keeps the other shot's numbers
@@ -186,7 +183,7 @@ def test_analysis_measures_every_shot_and_keeps_vision_findings_in_bounds(tmp_pa
     recut = FakeServices()
     analysis.run_analyze(Context(project, {"only": ["e1s2"]}, "whisper", 1, recut, progress=lambda _: None))
     assert recut.engine.heard == ["whisper"] and analysis.load(project, 1)["shots"]["e1s2"]["speech"]["match"] >= 0.6
-    state["e1s2"]["speech"] = {"start": 0.1, "end": 1.0, "heard": "先排队", "match": 0.5}
+    state["e1s2"]["speech"] = {"start": 0.1, "end": 1.0, "heard": "get in line", "match": 0.5}
     project.save_shot_state(1, state)
     timed = FakeServices()
     analysis.run_analyze(Context(project, {"only": ["e1s2"]}, "whisper", 1, timed, progress=lambda _: None))

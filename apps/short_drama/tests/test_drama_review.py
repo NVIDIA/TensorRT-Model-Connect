@@ -8,29 +8,30 @@ from trtmc_short_drama import review
 SHOT = {"camera": "c", "action": "a", "after": "b", "then": "t", "sound": "s", "props": []}
 PLAN = {
     "title": "t", "setting": "a town", "style": "drama",
-    "characters": [{"id": "zhou", "name": "老周"}, {"id": "mei", "name": "小梅"}],
-    "locations": [{"id": "dock", "name": "渡口"}], "props": [],
-    "chapters": [{"number": 1, "characters": ["老周", "小学徒", "学徒", "陈伯"]}],
+    "characters": [{"id": "zhou", "name": "Zhou"}, {"id": "mei", "name": "Mei"}],
+    "locations": [{"id": "dock", "name": "Dock"}], "props": [],
+    "chapters": [{"number": 1, "characters": ["Zhou", "Little Apprentice", "Apprentice", "Old Chen"]}],
     "episodes": [{"number": 1, "chapters": [1], "shots": [
         {**SHOT, "id": "e1s1", "seconds": 6, "location": "dock", "characters": ["zhou"], "speaker": "zhou",
-         "line": "我送你过河！", "summary": "zhou waves to mei"},
+         "line": "I'll take you across!", "summary": "zhou waves to mei"},
         {**SHOT, "id": "e1s2", "seconds": 4, "location": "yard", "characters": ["zhou"], "speaker": "mei",
          "line": "天都黑了你们两个怎么还不回家吃饭呀", "summary": "zhou is called home"}]}],
 }
-NOVEL = "第一章\n小学徒跑来。老周摸摸小学徒的头。小学徒笑了。陈伯在晒太阳。小梅，我送你过河！"
+NOVEL = ("Chapter 1\nThe little apprentice runs in. Zhou pats the little apprentice on the head. "
+         "The little apprentice laughs. Old Chen sits in the sun. Mei, I'll take you across!")
 
 
 def test_checks_find_uncast_people_unknown_ids_and_lines_that_do_not_fit():
     problems = review.check(PLAN, NOVEL, max_seconds=60)
     found = {(p["level"], p["where"]) for p in problems}
     text = " | ".join(p["message"] for p in problems)
-    assert ("warning", "episode 1") in found and "小学徒 is named 3 times" in text
-    assert "学徒 is named" not in text.replace("小学徒 is named", "")  # part of a fuller name
-    assert "陈伯" not in text  # named once: probably not on screen
-    assert ("warning", "e1s1") in found and "mentions 小梅" in text  # mei acts in e1s1 without a still
+    assert ("warning", "episode 1") in found and "Little Apprentice is named 3 times" in text
+    assert "Apprentice is named" not in text.replace("Little Apprentice is named", "")  # part of a fuller name
+    assert "Old Chen" not in text  # named once: probably not on screen
+    assert ("warning", "e1s1") in found and "mentions Mei" in text  # mei acts in e1s1 without a still
     assert ("error", "e1s2") in found and "location:yard" in text
-    assert "spoken by 小梅, who is not in the shot" in text
-    assert "the line needs about 6 s" in text
+    assert "spoken by Mei, who is not in the shot" in text
+    assert "the line needs about 6 s" in text  # speech time counts Chinese characters
     assert not [p for p in review.check(PLAN, NOVEL, max_seconds=10) if "over the" in p["message"]]
     assert [p for p in review.check(PLAN, NOVEL, max_seconds=8) if "over the 8 s limit" in p["message"]]
 
@@ -48,7 +49,7 @@ def test_a_clean_plan_has_no_problems_and_shots_cannot_outlast_a_clip():
 def test_lines_quoted_from_the_novel_are_marked():
     assert review.origins(PLAN, NOVEL) == {"e1s1": "novel", "e1s2": "adapted"}
     plan = copy.deepcopy(PLAN)
-    plan["episodes"][0]["shots"][0]["line"] = "嘿！"
+    plan["episodes"][0]["shots"][0]["line"] = "嗯"  # one Chinese character tells nothing
     assert review.origins(plan, NOVEL) == {"e1s2": "adapted"}
 
 
