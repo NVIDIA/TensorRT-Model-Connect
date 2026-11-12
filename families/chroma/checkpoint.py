@@ -188,7 +188,11 @@ def load_checkpoint(root: Path) -> ChromaCheckpoint:
             raise ValueError(f"scheduler: {flag} is not supported")
     if s.get("shift_terminal"):
         raise ValueError("scheduler: shift_terminal is not supported")
-    scheduler = SchedulerConfig(shift=float(s.get("shift", 1.0)), num_train_timesteps=int(s["num_train_timesteps"]))
+    num_train_timesteps = int(s["num_train_timesteps"])
+    if num_train_timesteps != 1000:
+        # The runtime's timestep conditioning (t / 1000 * 1000 in the bundle's precision) assumes this value.
+        raise ValueError(f"scheduler: num_train_timesteps must be 1000, got {num_train_timesteps}")
+    scheduler = SchedulerConfig(shift=float(s.get("shift", 1.0)), num_train_timesteps=num_train_timesteps)
 
     return ChromaCheckpoint(root, transformer, text_encoder, vae, scheduler)
 

@@ -147,6 +147,7 @@ def test_the_released_layout_is_accepted(tmp_path: Path) -> None:
     {"vae__config.json": {"latents_mean": [0.0] * 16}},
     {"scheduler__scheduler_config.json": {"use_dynamic_shifting": True}},
     {"scheduler__scheduler_config.json": {"stochastic_sampling": True}},
+    {"scheduler__scheduler_config.json": {"num_train_timesteps": 999}},
 ])
 def test_other_layouts_are_rejected(tmp_path: Path, changes: dict) -> None:
     with pytest.raises(ValueError):

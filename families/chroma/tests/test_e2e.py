@@ -125,6 +125,13 @@ def _required_path(value: str | None, label: str) -> Path:
     return path
 
 
+def _text_length(manifest: dict) -> int:
+    """The bundle's text budget; the build, the official pipeline and the tokenizer check all use it."""
+    from families.chroma.model import MAX_TEXT_LENGTH
+
+    return int(manifest.get("max_sequence_length") or MAX_TEXT_LENGTH)
+
+
 def _model_dir(manifest: dict) -> Path:
     explicit = os.environ.get("TRTMC_CHROMA_MODEL_DIR")
     if explicit:
@@ -190,6 +197,7 @@ def _official(model_dir: Path, manifest: dict, case: dict, latents: np.ndarray, 
                 width=manifest["image_width"],
                 num_inference_steps=case["num_inference_steps"],
                 guidance_scale=case["guidance_scale"],
+                max_sequence_length=_text_length(manifest),
                 latents=torch.from_numpy(latents)[None].to("cuda"),
                 output_type="np",
             ).images[0]
@@ -255,7 +263,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     build(BuildRequest(
         model_dir=model_dir, output_path=bundle, family=FAMILY, task=TASK,
         precision=manifest["precision"], image_height=manifest["image_height"],
-        image_width=manifest["image_width"], max_sequence_length=manifest.get("max_sequence_length"),
+        image_width=manifest["image_width"], max_sequence_length=_text_length(manifest),
         tensor_parallel_size=int(manifest["tensor_parallel_size"]),
     ))
     env = _environment(runtime_root)
@@ -314,7 +322,7 @@ def test_native_tokenizer_matches_reference(case_name: str, tmp_path: Path) -> N
     _, manifest, _ = CASES[case_name]
     model_dir = _model_dir(manifest)
     _, _, native = _runtime()
-    length = int(manifest.get("max_sequence_length") or 512)
+    length = _text_length(manifest)
     tokenizer = AutoTokenizer.from_pretrained(model_dir / "tokenizer")
     prompts = _tokenizer_prompts(500)
     cases = tmp_path / "tokenizer_cases.jsonl"
