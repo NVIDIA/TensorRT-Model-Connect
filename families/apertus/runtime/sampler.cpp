@@ -24,7 +24,7 @@ std::int32_t argmax(const std::vector<float>& logits) {
 
 Sampler::Sampler(const SamplingParams& params)
     : params_(params),
-      greedy_(params.temperature < kEpsilon || params.top_p <= 0.0F ||
+      greedy_(params.temperature <= 0.0F || params.top_p <= 0.0F ||
               (params.top_k == 1 && params.top_p >= 1.0F - kEpsilon && params.min_p <= 0.0F)),
       state_(params.seed >= 0 ? static_cast<std::uint64_t>(params.seed) : kDefaultSeed) {
     if (state_ == 0)

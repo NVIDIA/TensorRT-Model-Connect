@@ -50,6 +50,15 @@ int main() {
     expect(first == second, "a seeded sampler is deterministic");
     expect(seen.size() > 1, "unrestricted sampling visits more than one token");
 
+    SamplingParams warm = random;
+    warm.temperature = 5e-7F;
+    Sampler small_temperature(warm);
+    std::set<std::int32_t> tied_seen;
+    for (int step = 0; step < 64; ++step)
+        tied_seen.insert(small_temperature.sample(tied));
+    expect(tied_seen == std::set<std::int32_t>{1, 2},
+           "a small positive temperature samples among the tied maxima");
+
     SamplingParams top_two = random;
     top_two.top_k = 2;
     Sampler limited(top_two);
