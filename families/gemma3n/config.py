@@ -228,6 +228,11 @@ class ModelConfig:
         for name in ("text_config", "vision_config", "audio_config"):
             if not isinstance(raw.get(name), dict):
                 raise ValueError(f"Gemma 3n checkpoint config has no {name}")
+        # The conditional-generation model ties its language-model head to the
+        # token embeddings by this top-level setting; the decoder computes the
+        # logits with the token embeddings.
+        if not raw.get("tie_word_embeddings", True):
+            raise NotImplementedError("Gemma 3n requires the tied language-model head")
         vision_raw = raw["vision_config"]
         if vision_raw.get("model_type") != "gemma3n_vision":
             raise ValueError("Gemma 3n vision_config must have model_type gemma3n_vision")

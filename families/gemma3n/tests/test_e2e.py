@@ -204,6 +204,8 @@ def _reference(checkpoint, conversations, images, max_new_tokens, natives):
                 margins = (steps.max(dim=1).values - chosen).tolist()
             results.append({"token_ids": tokens, "prompt_ids": inputs["input_ids"][0].tolist(),
                             "text": processor.decode(tokens, skip_special_tokens=True),
+                            "native_decoded": processor.decode(native["token_ids"],
+                                                               skip_special_tokens=True),
                             "native_margins": margins})
         return results
     finally:
@@ -262,9 +264,9 @@ def test_e2e(case_name, request, tmp_path):
         cli_output = json.loads(cli_result.stdout)
         record_evidence("native", {"sdk_cpp": natives, "sdk_c": c_output, "cli": cli_output})
     # The three public entry points and both pixel formats agree on one request.
-    assert c_output["token_ids"] == natives[0]["token_ids"]
-    assert cli_output["token_ids"] == natives[0]["token_ids"]
-    assert natives[4]["token_ids"] == natives[0]["token_ids"]
+    for output in (c_output, cli_output, natives[4]):
+        assert output["token_ids"] == natives[0]["token_ids"]
+        assert output["text"] == natives[0]["text"]
     with evidence_stage("reference"):
         expected = _reference(checkpoint, conversations, images, max_new_tokens, natives)
         record_evidence("reference", {"backend": "hf_transformers", "precision": "fp32",
@@ -277,9 +279,12 @@ def test_e2e(case_name, request, tmp_path):
         assert actual["text"] and 0 < len(actual["token_ids"]) <= max_new_tokens
         rows.append({"conversation": name, "native": actual["token_ids"],
                      "reference": reference["token_ids"], "text": actual["text"],
+                     "native_decoded": reference["native_decoded"],
                      "reference_text": reference["text"],
                      "max_margin": max(reference["native_margins"])})
     record_evidence("metrics", {"rows": rows})
+    # The native text is the checkpoint tokenizer's decoding of the native tokens.
+    assert all(row["text"] == row["native_decoded"] for row in rows), rows
     if manifest["precision"] == "fp32":
         assert all(row["native"] == row["reference"] for row in rows), rows
     else:
