@@ -4,7 +4,7 @@
 # COCO val2017 (pinned public export): the 50 seeded images of the geometry parity, for relative depth parity.
 # Image rights follow each original image's license: https://cocodataset.org/#termsofuse
 suite: coco-val2017-depth-50
-version: 1
+version: 2
 source:
   kind: hf_dataset
   dataset: detection-datasets/coco
@@ -12,5 +12,7 @@ source:
   revision: cf0b22332314a937e9dc8a1957b21725430bb41d
   data_files: {val: data/val-*.parquet}
   image_column: image
+  # Pixels decoded once and sent as PNG: the two JPEG decoders differ by more than the gate.
+  lossless_images: true
 selection: {method: seeded, count: 50}
 fields: {image: image_path}
