@@ -22,8 +22,10 @@ namespace trtmc {
 class IMobileBertTokenizer {
   public:
     virtual ~IMobileBertTokenizer() = default;
-    virtual std::vector<std::int32_t> encode(std::string_view text) const = 0;
-    // Number of ids, base vocabulary and added tokens together.
+    // Reads the text only until more than `limit` ids are known: a result longer
+    // than `limit` means the text does not fit, and the rest of it was not read.
+    virtual std::vector<std::int32_t> encode(std::string_view text, std::size_t limit) const = 0;
+    // Number of ids: the vocabulary, which holds every added token.
     virtual std::size_t size() const = 0;
     // Id of an exact token string, or -1.
     virtual std::int32_t id_for_token(std::string_view token) const = 0;

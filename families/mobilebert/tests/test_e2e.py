@@ -264,6 +264,10 @@ def _top(row: list[float], k: int = 5) -> list[int]:
 def _check_masked(native: list[list[float]], reference: list[list[float]]) -> float:
     """Assert the masked-LM gate; return the largest absolute difference."""
     assert len(native) == len(reference) and native
+    assert all(len(row) == len(want) for row, want in zip(native, reference))
+    # max() keeps a finite difference over a NaN one, so non-finite values are refused first.
+    assert all(math.isfinite(value) for rows in (native, reference) for row in rows
+               for value in row), f"{FAMILY} logits are not all finite"
     worst = max(max(abs(a - b) for a, b in zip(row, want))
                 for row, want in zip(native, reference))
     # Every logit within the tolerance also bounds the ranking: two tokens can
@@ -276,6 +280,8 @@ def _check_masked(native: list[list[float]], reference: list[list[float]]) -> fl
 def _check_relation(native: list[float], reference: list[float]) -> tuple[float, float]:
     """Assert the next-sentence gate; return (relative logit error, margin error)."""
     assert len(native) == len(reference) == 2
+    assert all(math.isfinite(value) for value in (*native, *reference)), (
+        f"{FAMILY} relation logits are not all finite")
     relative = max(abs(a - b) / abs(b) for a, b in zip(native, reference))
     margin = reference[0] - reference[1]
     margin_error = abs((native[0] - native[1]) - margin) / abs(margin)
@@ -310,6 +316,8 @@ def test_official_checkpoint_e2e(case_name: str, bundles) -> None:
         _, want = reference.run(encoding.ids, encoding.type_ids)
         native = [float(value) for value in payload["scores"]]
         relative, margin = _check_relation(native, want)
+        assert payload["top_class"] == (0 if want[0] >= want[1] else 1), (
+            f"{FAMILY} relation top_class differs from the reference")
         print(f"{case_name}: native {native}, reference {want}; relative {relative:.2e}, "
               f"margin error {margin:.2e}, label {payload['labels'][payload['top_class']]}")
         return

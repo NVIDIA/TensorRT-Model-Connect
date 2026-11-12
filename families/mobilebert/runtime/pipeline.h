@@ -47,7 +47,8 @@ struct MobileBertRuntimeConfig {
 //
 // An input longer than the engine window is refused rather than truncated: cutting
 // it would drop masked positions or the end of the second text without telling
-// the caller.
+// the caller. Text is tokenized only until it overflows the window, so refusing
+// it does not cost a full pass over it.
 class MobileBertPipeline final : public internal::IModel,
                                  public internal::IMaskedTextToTokenScores,
                                  public internal::ITextPairToPretrainingRelationScores {

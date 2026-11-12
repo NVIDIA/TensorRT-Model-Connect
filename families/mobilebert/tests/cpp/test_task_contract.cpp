@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -46,6 +47,7 @@ const char* kTokenizerJson = R"json({
 
 constexpr std::int32_t kVocab = 23;
 constexpr std::int32_t kWindow = 8;
+constexpr std::size_t kNoLimit = std::numeric_limits<std::size_t>::max();
 
 void require(bool value, const std::string& message) {
     if (!value)
@@ -58,6 +60,17 @@ void rejects(Function function, const std::string& message) {
         function();
     } catch (const Error&) {
         return;
+    }
+    throw std::runtime_error(message);
+}
+
+// The message of the invalid_argument the function throws.
+template <class Function>
+std::string refusal(Function function, const std::string& message) {
+    try {
+        function();
+    } catch (const std::invalid_argument& error) {
+        return error.what();
     }
     throw std::runtime_error(message);
 }
@@ -194,7 +207,7 @@ void test_tokenizer() {
         {"", {}},
     };
     for (const auto& [text, expected] : cases)
-        require(words->encode(text) == expected, "tokenizer mismatch on '" + text + "'");
+        require(words->encode(text, kNoLimit) == expected, "tokenizer mismatch on '" + text + "'");
     require(words->size() == static_cast<std::size_t>(kVocab), "tokenizer size");
     require(words->id_for_token("[MASK]") == 4 && words->id_for_token("missing") == -1,
             "tokenizer token lookup");
@@ -204,8 +217,8 @@ void test_tokenizer() {
     const std::string typed = "\"type\": \"WordPiece\", ";
     std::string untyped = kTokenizerJson;
     untyped.erase(untyped.find(typed), typed.size());
-    require(trtmc::CreateMobileBertTokenizer(untyped.data(), untyped.size())->encode("Café") ==
-                std::vector<std::int32_t>{6},
+    require(trtmc::CreateMobileBertTokenizer(untyped.data(), untyped.size())
+                    ->encode("Café", kNoLimit) == std::vector<std::int32_t>{6},
             "an untyped WordPiece model is read like a typed one");
     std::string other = kTokenizerJson;
     other.replace(other.find(typed), typed.size(), "\"type\": \"BPE\", ");
@@ -217,7 +230,7 @@ void test_tokenizer() {
     for (const auto& bad :
          {std::string("a\xff"), std::string("\xc0\xaf"), std::string("\xed\xa0\x80"),
           std::string("\xe4\xb8"), std::string("\xf4\x90\x80\x80")})
-        rejects<std::invalid_argument>([&] { words->encode(bad); },
+        rejects<std::invalid_argument>([&] { words->encode(bad, kNoLimit); },
                                        "malformed UTF-8 must be refused");
 
     std::string normalized_special = kTokenizerJson;
@@ -228,6 +241,37 @@ void test_tokenizer() {
             trtmc::CreateMobileBertTokenizer(normalized_special.data(), normalized_special.size());
         },
         "an added token matched after normalisation is not implemented and must be refused");
+
+    // An added token keeps its vocabulary id, inside the vocabulary; any other id
+    // is refused before it can size a table (2^32 + 4 must not wrap to 4).
+    const std::string mask_entry = "\"id\": 4, \"content\": \"[MASK]\"";
+    for (const char* id : {"2147483647", "4294967300", "23", "5", "-1", "4.5"}) {
+        std::string json = kTokenizerJson;
+        json.replace(json.find(mask_entry), mask_entry.size(),
+                     std::string("\"id\": ") + id + ", \"content\": \"[MASK]\"");
+        rejects<std::runtime_error>(
+            [&] { trtmc::CreateMobileBertTokenizer(json.data(), json.size()); },
+            std::string("an added token with id ") + id + " must be refused");
+    }
+}
+
+void test_tokenizer_reads_only_what_fits() {
+    const auto words = tokenizer();
+    require(words->encode("the [MASK] world", 3) == std::vector<std::int32_t>({5, 4, 13}),
+            "a text that fits the limit is encoded whole");
+    // Past the limit the text is read only to the first id beyond it, so the rest,
+    // here malformed, is never read.
+    const std::string tail = "the [MASK] world hello \xff";
+    rejects<std::invalid_argument>([&] { words->encode(tail, kNoLimit); }, "the tail is malformed");
+    require(words->encode(tail, 3) == std::vector<std::int32_t>({5, 4, 13, 12}),
+            "encoding stops at the first id past the limit");
+    // A long run of added tokens costs one pass, and stops at the limit.
+    std::string masks;
+    for (int i = 0; i < 100000; ++i)
+        masks += "[MASK]";
+    require(words->encode(masks, kNoLimit) == std::vector<std::int32_t>(100000, 4),
+            "every added token of a long run");
+    require(words->encode(masks + "\xff", 6).size() == 7, "a long run stops at the limit");
 }
 
 void test_bindings() {
@@ -305,6 +349,23 @@ void test_window_is_not_truncated() {
                        {});
         },
         "a pair longer than the window is refused");
+    // Text is read only until it overflows the window: these are refused for their
+    // length, and their malformed tails are never read.
+    const auto too_long = [](const std::string& message) {
+        return message.find("longer than the engine window") != std::string::npos;
+    };
+    const auto pair = [&](std::string_view first, std::string_view second) {
+        model->run(trtmc::internal::TextPairToPretrainingRelationScoresRequest{first, second}, {});
+    };
+    require(too_long(refusal([&] { masked(*model, "the the the the the the the [MASK] \xff"); },
+                             "an over-long text is refused")),
+            "an over-long text is refused before its tail is read");
+    require(too_long(refusal([&] { pair("the the the the the the", "\xff"); },
+                             "an over-long first text is refused")),
+            "the second text is not read once the first overflows");
+    require(too_long(refusal([&] { pair("the", "the the the the the \xff"); },
+                             "an over-long second text is refused")),
+            "an over-long second text is refused before its tail is read");
     require(engine->calls == 1, "refused inputs never reach the engine");
 }
 
@@ -361,6 +422,7 @@ void test_runtime_config_and_outputs_are_checked() {
 int main() {
     try {
         test_tokenizer();
+        test_tokenizer_reads_only_what_fits();
         test_bindings();
         test_masked_positions();
         test_unmasked_text_returns_every_position();
