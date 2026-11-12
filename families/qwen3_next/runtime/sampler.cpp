@@ -21,6 +21,7 @@
 #include <vector>
 
 namespace trtmc {
+namespace {
 
 // Host argmax uses the first maximum, matching deterministic greedy decoding.
 static Qwen3NextSampleResult argmax_over_logits(const float* logits, int32_t vocab_size,
@@ -236,6 +237,8 @@ class TopKSampler final : public Qwen3NextISampler {
     uint64_t initial_seed_;
 };
 
+} // namespace
+
 // ─────────────────────────────────────────────────────────────
 // Factory
 // ─────────────────────────────────────────────────────────────
@@ -257,7 +260,7 @@ create_qwen3_next_sampler(const Qwen3NextSamplingParams& params) {
     // Greedy when sampling is fully disabled and no explicit random seed is set.
     const float top_p = sanitized_top_p(params.top_p);
     const float min_p = sanitized_min_p(params.min_p);
-    if (params.top_k <= 1 && top_p >= 1.0F - kSamplingEpsilon && min_p <= 0.0F && params.seed < 0) {
+    if (params.top_k == 1 && top_p >= 1.0F - kSamplingEpsilon && min_p <= 0.0F && params.seed < 0) {
         return std::make_unique<GreedySampler>();
     }
 

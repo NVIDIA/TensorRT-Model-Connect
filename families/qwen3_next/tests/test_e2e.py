@@ -9,6 +9,8 @@ import subprocess
 import numpy as np
 import pytest
 
+from families.qwen3_next.tests.checkpoint import assert_bundle_checkpoint, assert_pinned_checkpoint
+
 
 def test_qwen3_next_bf16_logits(request, tmp_path):
     directory = Path(__file__).parent
@@ -49,18 +51,7 @@ def test_qwen3_next_bf16_logits(request, tmp_path):
         checkpoint = Path(
             snapshot_download(repo_id=manifest["hf_id"], revision=manifest["hf_revision"])
         )
-    # These local-dir download receipts identify every fetched shard's commit;
-    # a manually supplied checkpoint must provide the same pinned receipts.
-    if checkpoint.parent.name == "snapshots":
-        assert checkpoint.name == manifest["hf_revision"]
-    else:
-        for filename in [
-            "config.json",
-            "model.safetensors.index.json",
-            *sorted(path.name for path in checkpoint.glob("*.safetensors")),
-        ]:
-            receipt = checkpoint / ".cache/huggingface/download" / (filename + ".metadata")
-            assert receipt.read_text().splitlines()[0] == manifest["hf_revision"]
+    assert_pinned_checkpoint(checkpoint, manifest)
     runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
     binary = Path(os.environ["TRTMC_BINARY"])
     assert binary.is_file()
@@ -91,6 +82,8 @@ def test_qwen3_next_bf16_logits(request, tmp_path):
     assert info["provenance"]["build"]["precision"] == manifest["precision"]
     assert info["provenance"]["build"]["max_sequence_length"] == manifest["max_sequence_length"]
     assert info["provenance"]["build"]["tensor_parallel_size"] == manifest["tensor_parallel_size"]
+    if supplied:
+        assert_bundle_checkpoint(info, manifest)
     trace_binary = runtime / "qwen3_next_logits_trace"
     assert trace_binary.is_file()
     prefix = tmp_path / "native"

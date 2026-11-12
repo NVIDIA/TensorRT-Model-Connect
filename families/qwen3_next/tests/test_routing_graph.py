@@ -2,17 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """Verify that reference routing overrides tied GPU TopK results and weights."""
 
-import os
 from types import SimpleNamespace
 import numpy as np
 import pytest
 
 
+@pytest.mark.gpu
+@pytest.mark.trt
 def test_reference_routing_override():
-    if not os.environ.get("TRTMC_QWEN3_NEXT_CHECKPOINT"):
-        pytest.skip("requires the family CUDA validation environment")
-    import torch
-    import tensorrt as trt
+    trt = pytest.importorskip("tensorrt")
+    cuda = pytest.importorskip("cuda.bindings.runtime")
+    status, count = cuda.cudaGetDeviceCount()
+    if int(status) or count == 0:
+        pytest.skip("requires a CUDA GPU for the routing graph")
+    torch = pytest.importorskip("torch")
     from families.qwen3_next.graph import Graph
     from families.qwen3_next.tests.gpu_runner import run
 

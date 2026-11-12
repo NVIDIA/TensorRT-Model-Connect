@@ -72,6 +72,11 @@ PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \
   families/qwen3_next/tests --e2e-model qwen3_next -q
 ```
 
+A supplied bundle must record the manifest's checkpoint repository and revision
+in its core provenance; a missing identity fails validation. Build from an
+immutable Hugging Face cache snapshot to record that identity. Layer checks and
+the E2E oracle both validate the selected checkpoint's revision provenance.
+
 Large checkpoints require enough CPU memory for the official full-model oracle
 and enough GPU memory for all BF16 native engines. Run reports and large
 artifacts belong outside the source tree.

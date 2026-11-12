@@ -8,12 +8,16 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from families.qwen3_next.tests.checkpoint import assert_pinned_checkpoint
+
 
 @pytest.mark.parametrize("index", [0, 3])
 def test_checkpoint_layer(index):
     location = os.environ.get("TRTMC_QWEN3_NEXT_CHECKPOINT")
     if not location:
         pytest.skip("requires the pinned Qwen3-Coder-Next checkpoint and CUDA")
+    root = Path(location)
+    assert_pinned_checkpoint(root)
     import ml_dtypes
     import torch
     from families.qwen3_next.config import Config
@@ -23,7 +27,6 @@ def test_checkpoint_layer(index):
     from families.qwen3_next.tests.reference import OfficialReference
 
     torch.set_num_threads(8)
-    root = Path(location)
     config = Config.load(root)
     plan = engine(Weights(root), config, index, 1024)
     random = np.random.default_rng(20261111)

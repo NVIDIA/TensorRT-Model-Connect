@@ -19,7 +19,7 @@ struct Qwen3NextSamplingParams {
     int32_t top_k{1};  // 1 = greedy unless top_p is active; <=0 = no top-k limit
     float top_p{1.0f}; // 1.0 = disabled; 0.0 = greedy; (0,1) = nucleus
     float min_p{0.0f}; // 0.0 = disabled; filters tokens below min_p * max_prob
-    int32_t seed{-1};  // -1 = deterministic (argmax)
+    int32_t seed{-1};  // -1 = use the deterministic default seed; top_k=1 remains greedy
     int32_t eos_token_id{-1};
 };
 

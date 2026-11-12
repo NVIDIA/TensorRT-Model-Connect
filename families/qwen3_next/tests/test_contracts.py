@@ -69,6 +69,13 @@ def test_truncated_checkpoint_rejected(tmp_path):
         weights.describe("x")
 
 
+@pytest.mark.parametrize("offsets", [(-4, 0), (4, 0), (False, 4), (0.0, 4)])
+def test_invalid_checkpoint_offsets_rejected(tmp_path, offsets):
+    weights = make_checkpoint(tmp_path, offsets=offsets)
+    with pytest.raises(ValueError, match="safetensors offsets"):
+        weights.describe("x")
+
+
 @pytest.mark.parametrize(
     "values", [{"precision": "fp16"}, {"tensor_parallel_size": 2}, {"max_sequence_length": 0}]
 )
