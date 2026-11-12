@@ -39,3 +39,32 @@ combining sequence.
 
 Rebuild the family runtime to obtain corrected token IDs. No bundle schema or
 public Task API change is required.
+
+## Quantization
+
+`--precision fp16 --quantization fp8` quantizes `Alibaba-NLP/gte-base-en-v1.5`
+at build time (#2079). `qkv_proj`, `o_proj`, `up_gate_proj` and `down_proj` of
+every layer (48 projections) get per-tensor FP8 weights (amax / 448) and static
+activation scales from `fp8_activation_scales.json` (ModelOpt
+`FP8_DEFAULT_CFG`, English retrieval texts up to 8192 tokens). The word
+embedding, norms and attention matmuls stay fp16. TensorRT 11.4, batch 1: FP8
+is 1.09x to 1.13x faster than fp16 at 512 and 2048 tokens and 1.02x to 1.05x at
+8192, the plan is 40% smaller, and nDCG@10 stays at the Hugging Face level.
+
+### NVFP4
+
+NVFP4 was not tried; no NVFP4 engine was built. The 137M parameter encoder is
+not bound by weight reads (numbers from #2055 and #2079, B200 and B300,
+TensorRT 11.4, batch 1):
+
+| Item | Value |
+|---|---|
+| FP8 weights | about 110 MB |
+| Time to read them | about 15 us |
+| FP8 engine call, 512 tokens | 0.54 to 0.57 ms |
+| FP8 vs fp16, 512 and 2048 tokens | 1.09x to 1.13x |
+| FP8 vs fp16, 8192 tokens | 1.02x to 1.05x |
+| Plan, 512 tokens, fp16 / FP8 | 263.6 / 158.0 MiB |
+
+Most of the call is GEMM compute and attention, so 4-bit weights cannot pay
+here.
