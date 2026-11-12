@@ -73,6 +73,27 @@ select the same option as the BF16 reference (806 for the BF16 engine). FP8
 probabilities differ from the reference by up to 0.077, more than the BF16 E2E
 gate allows, so the E2E cases cover only BF16 bundles.
 
+### NVFP4
+
+NVFP4 was not tried (#2010). Clef has no decode step: a request is one
+full-sequence forward at batch 1, so the run is not bound by weight reads.
+
+| Item (Clef-Flash, B200, TensorRT 11.4, 256 tokens) | Value |
+|---|---|
+| BF16 backbone | 15.61 ms |
+| FP8 backbone | 13.85 ms (1.13x), 1.8 ms saved |
+| Weight bytes removed by FP8 | about 7 GB, about 1 ms to read at 7 TB/s |
+| Upper bound for NVFP4 over FP8 | about 0.5 ms (3%) |
+| FP8 vs BF16, all inputs (256 to 8,192 tokens, B200 and B300) | 1.09x to 1.17x (Clef-Flash), 1.18x to 1.25x (Clef) |
+
+The DeltaNet recurrence, attention and element-wise kernels keep the rest of
+the time. At 8,192 tokens the GEMMs are compute bound and FP4 GEMMs could help
+more, but in the dense and hybrid families where NVFP4 was measured its KL
+divergence was 3x to 9x that of FP8, and the joint schema head turns small
+hidden-state errors into option-probability changes, which are already up to
+0.077 with FP8. Worth a measurement only if long inputs (several thousand
+tokens) are the main use.
+
 ## Images and video
 
 The CLI accepts image filenames in `images` and ordered arrays of frame
