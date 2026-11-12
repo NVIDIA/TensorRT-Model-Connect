@@ -847,6 +847,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "google/mobilebert-uncased",
+      "revision": "1f90a6c24c7879273a291d34a849033eba2dbc0f",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "mobilebert",
+      "architectures": [
+        "MobileBertForPreTraining"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "google/timesfm-2.0-500m-pytorch",
       "revision": "dc2443792ce5516872b89b37cf1bc058c3bf0c10",
       "revision_source": "resolved",
