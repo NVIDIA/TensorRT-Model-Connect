@@ -277,17 +277,22 @@ Tokenizer::Tokenizer(std::string_view tokenizer_json) {
         throw std::runtime_error("glm_ocr tokenizer.json must decode byte-level");
     ignore_merges_ = model.value("ignore_merges", false);
 
+    // Every id is checked before it sizes or indexes id_to_token_.
+    const auto token_id = [](const nlohmann::json& value) {
+        const auto id = value.get<std::int64_t>();
+        if (id < 0 || id >= std::numeric_limits<std::int32_t>::max())
+            throw std::runtime_error("glm_ocr tokenizer.json has a token id out of range");
+        return static_cast<std::int32_t>(id);
+    };
     const auto& vocab = model.at("vocab");
     std::size_t size = 0;
     for (auto it = vocab.begin(); it != vocab.end(); ++it)
-        size = std::max<std::size_t>(size, it.value().get<std::int64_t>() + 1);
+        size = std::max<std::size_t>(size, static_cast<std::size_t>(token_id(it.value())) + 1);
     for (const auto& added : json.at("added_tokens"))
-        size = std::max<std::size_t>(size, added.at("id").get<std::int64_t>() + 1);
-    if (size > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()))
-        throw std::runtime_error("glm_ocr tokenizer vocabulary is too large");
+        size = std::max<std::size_t>(size, static_cast<std::size_t>(token_id(added.at("id"))) + 1);
     id_to_token_.resize(size);
     for (auto it = vocab.begin(); it != vocab.end(); ++it) {
-        const auto id = it.value().get<std::int32_t>();
+        const auto id = token_id(it.value());
         vocab_.emplace(it.key(), id);
         id_to_token_[static_cast<std::size_t>(id)] = it.key();
     }
@@ -305,7 +310,7 @@ Tokenizer::Tokenizer(std::string_view tokenizer_json) {
         if (added.value("lstrip", false) || added.value("rstrip", false) ||
             added.value("single_word", false) || added.value("normalized", false))
             throw std::runtime_error("glm_ocr tokenizer.json has an added token it cannot match");
-        Added token{added.at("content").get<std::string>(), added.at("id").get<std::int32_t>(),
+        Added token{added.at("content").get<std::string>(), token_id(added.at("id")),
                     added.value("special", false)};
         if (token.content.empty())
             throw std::runtime_error("glm_ocr tokenizer.json has an empty added token");

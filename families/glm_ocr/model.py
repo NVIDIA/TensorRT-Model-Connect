@@ -12,12 +12,12 @@ multimodal rotary positions and stop generation.
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .checkpoint import Checkpoint, GlmOcrConfig, load_config
 from .decoder_engine import build_decoder_engines
+from .image_budget import patch_budget
 from .vision_engine import build_vision_engine
 
 if TYPE_CHECKING:
@@ -31,14 +31,6 @@ _PRECISIONS = ("bf16", "fp32")
 _DEFAULT_MAX_SEQUENCE_LENGTH = 16384
 _RUNTIME_FORMAT = 1
 _EMBEDDING = "model.language_model.embed_tokens.weight"
-
-
-def _patch_budget(height: int, width: int, config: GlmOcrConfig) -> int:
-    """Vision patches of an image of at most ``height x width`` pixels after the processor's rounding."""
-    p = config.processor
-    factor = p.patch_size * p.merge_size
-    budget = math.ceil(height / factor) * math.ceil(width / factor) * p.merge_size * p.merge_size
-    return min(budget, config.max_image_patches)
 
 
 def _runtime_contract(config: GlmOcrConfig, precision: str, max_rows: int, max_patches: int) -> dict:
@@ -110,7 +102,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config = load_config(model_dir)
     max_patches = config.max_image_patches
     if request.image_height is not None:
-        max_patches = _patch_budget(int(request.image_height), int(request.image_width), config)
+        max_patches = patch_budget(int(request.image_height), int(request.image_width), config)
     checkpoint = Checkpoint(model_dir, config)
 
     writer.set_header(family="glm_ocr", task=request.task, backend=request.backend)

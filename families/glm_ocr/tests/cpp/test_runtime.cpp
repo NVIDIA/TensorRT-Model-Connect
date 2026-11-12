@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -38,6 +39,17 @@ bool throws(const std::function<void()>& body) {
         body();
     } catch (const std::exception&) {
         return true;
+    }
+    return false;
+}
+
+bool throws_invalid_argument(const std::function<void()>& body) {
+    try {
+        body();
+    } catch (const std::invalid_argument&) {
+        return true;
+    } catch (const std::exception&) {
+        return false;
     }
     return false;
 }
@@ -172,6 +184,12 @@ void test_preprocess() {
     trtmc::internal::ImageView gray = view;
     gray.channels = 1;
     check(throws([&] { trtmc::glm_ocr::to_rgb8(gray); }), "non-RGB images are refused");
+    // Dimensions far beyond the buffer: refused before the pixel buffer is allocated (an
+    // allocation of this size would throw std::length_error instead).
+    trtmc::internal::ImageView huge = view;
+    huge.height = huge.width = static_cast<std::uint32_t>(std::numeric_limits<int>::max());
+    check(throws_invalid_argument([&] { trtmc::glm_ocr::to_rgb8(huge); }),
+          "an image view larger than its buffer is refused before allocation");
 }
 
 void test_pre_tokenize() {
@@ -230,10 +248,35 @@ const char* kTinyTokenizer = R"json({
     "merges": [["a", "b"], ["ab", "c"]]}
 })json";
 
+// kTinyTokenizer with ignore_merges off and two competing merges: (b, c) ranks before (a, b),
+// so "abc" must become [a, bc] although it is a vocabulary entry and (a, b) comes first in the
+// text. Negative ids are refused.
+std::string merge_rank_tokenizer() {
+    std::string json = kTinyTokenizer;
+    const auto replace = [&json](const std::string& from, const std::string& to) {
+        const auto at = json.find(from);
+        if (at == std::string::npos)
+            throw std::logic_error("fixture text not found: " + from);
+        json.replace(at, from.size(), to);
+    };
+    replace("\"ignore_merges\": true", "\"ignore_merges\": false");
+    replace("\"Ã\": 9, \"©\": 10}", "\"Ã\": 9, \"©\": 10, \"bc\": 13}");
+    replace("[[\"a\", \"b\"], [\"ab\", \"c\"]]",
+            "[[\"b\", \"c\"], [\"a\", \"b\"], [\"ab\", \"c\"]]");
+    return json;
+}
+
 void test_tokenizer() {
     const trtmc::glm_ocr::Tokenizer tokenizer(kTinyTokenizer);
     using Ids = std::vector<std::int32_t>;
-    check(tokenizer.encode("abc") == Ids{5}, "BPE merges in rank order");
+    check(tokenizer.encode("abc") == Ids{5}, "ignore_merges takes a whole vocabulary word");
+    const trtmc::glm_ocr::Tokenizer ranked(merge_rank_tokenizer());
+    check(ranked.encode("abc") == Ids{0, 13}, "BPE applies the lowest-ranked merge first");
+    check(ranked.encode("ab") == Ids{4}, "BPE merges a pair that has a rank");
+    std::string negative = kTinyTokenizer;
+    negative.replace(negative.find("\"b\": 1"), 6, "\"b\": -1");
+    check(throws([&] { trtmc::glm_ocr::Tokenizer bad(negative); }),
+          "a negative token id is refused");
     check(tokenizer.encode("ab ab") == Ids{4, 3, 4}, "BPE stops when no merge applies");
     check(tokenizer.encode(" a") == Ids{6}, "ignore_merges takes a whole vocabulary piece");
     check(tokenizer.encode("a<|x|>b<y>") == Ids{0, 11, 1, 12}, "added tokens split the text");

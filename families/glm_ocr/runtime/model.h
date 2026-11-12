@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <unordered_set>
 #include <vector>
 
@@ -47,6 +48,12 @@ RuntimeConfig parse_runtime_config(const std::vector<char>& json);
 // (top_k 1, or temperature 0); anything else throws internal::ConfigError.
 void check_greedy_controls(double temperature, std::int64_t top_k, double top_p);
 
+// Owns a CUDA stream; destroying it releases the stream.
+struct StreamDeleter {
+    void operator()(cudaStream_t stream) const noexcept { cudaStreamDestroy(stream); }
+};
+using StreamHandle = std::unique_ptr<std::remove_pointer_t<cudaStream_t>, StreamDeleter>;
+
 class GlmOcrModel final : public internal::IModel, public internal::IImagesTextToText {
   public:
     GlmOcrModel(const BundleReader& reader, IBackend& backend);
@@ -70,7 +77,7 @@ class GlmOcrModel final : public internal::IModel, public internal::IImagesTextT
     RuntimeConfig config_;
     std::unique_ptr<Tokenizer> tokenizer_;
     std::vector<char> embedding_; // BF16 [vocab, hidden]
-    cudaStream_t stream_{nullptr};
+    StreamHandle stream_;         // declared before the engines and caches, so it outlives them
     std::unique_ptr<ITrtModule> vision_;
     std::unique_ptr<ITrtModule> prefill_;
     std::unique_ptr<ITrtModule> decode_;

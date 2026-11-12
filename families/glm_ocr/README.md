@@ -28,10 +28,11 @@ decoder), the BF16 token-embedding table, the checkpoint's `tokenizer.json` and
 
 * `--max-sequence-length` sets the key/value cache: prompt (including image tokens) plus
   generated tokens. Default 16384.
-* `--image-height` / `--image-width` (together) bound the largest image the vision engine
-  accepts, in pixels after the processor's resize. Default: the processor's own limit
-  (9,633,792 pixels over two frames, i.e. 24,576 vision patches). Larger inputs are refused
-  with a message, never shrunk.
+* `--image-height` / `--image-width` (together) declare the largest input image, in pixels.
+  The vision engine is sized for every image up to that size after the processor's resize,
+  including the enlargement of small images. Default: the processor's own limit (9,633,792
+  pixels over two frames, i.e. 24,576 vision patches). An image that needs more patches is
+  refused with a message, never shrunk.
 
 ## Run
 

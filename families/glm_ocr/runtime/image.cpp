@@ -189,15 +189,19 @@ std::vector<std::uint8_t> to_rgb8(const internal::ImageView& image) {
         image.width > static_cast<std::uint32_t>(std::numeric_limits<int>::max()))
         throw std::invalid_argument("glm_ocr image dimensions are too large");
     const std::uint64_t count = std::uint64_t{image.height} * image.width * 3;
+    const bool uint8 = image.format == internal::ImageFormat::UInt8;
+    if (!uint8 && image.format != internal::ImageFormat::Float32)
+        throw std::invalid_argument("glm_ocr accepts UInt8 or Float32 RGB images");
+    // Checked before allocating: a view whose dimensions exceed its buffer is refused, never
+    // allocated for.
+    const std::uint64_t element = uint8 ? 1 : sizeof(float);
+    if (image.byte_size % element != 0 || image.byte_size / element != count)
+        throw std::invalid_argument("glm_ocr image byte size does not match its dimensions");
     std::vector<std::uint8_t> pixels(static_cast<std::size_t>(count));
-    if (image.format == internal::ImageFormat::UInt8) {
-        if (image.byte_size != count)
-            throw std::invalid_argument("glm_ocr RGB8 image size does not match its dimensions");
+    if (uint8) {
         std::memcpy(pixels.data(), image.data, pixels.size());
         return pixels;
     }
-    if (image.format != internal::ImageFormat::Float32 || image.byte_size != count * sizeof(float))
-        throw std::invalid_argument("glm_ocr accepts UInt8 or Float32 RGB images");
     const auto* bytes = static_cast<const unsigned char*>(image.data);
     for (std::size_t i = 0; i < pixels.size(); ++i) {
         float value;

@@ -159,11 +159,13 @@ GlmOcrModel::GlmOcrModel(const BundleReader& reader, IBackend& backend) {
     if (embedding_.size() != static_cast<std::size_t>(config_.vocab_size) * config_.hidden_size * 2)
         throw std::runtime_error("glm_ocr token embedding has the wrong size");
 
-    if (cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking) != cudaSuccess)
+    cudaStream_t stream = nullptr;
+    if (cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking) != cudaSuccess)
         throw std::runtime_error("glm_ocr failed to create its CUDA stream");
-    vision_ = load_engine(reader, backend, "vision.plan", stream_);
-    prefill_ = load_engine(reader, backend, "prefill.plan", stream_);
-    decode_ = load_engine(reader, backend, "decode.plan", stream_);
+    stream_.reset(stream); // released by its owner if the rest of the constructor throws
+    vision_ = load_engine(reader, backend, "vision.plan", stream_.get());
+    prefill_ = load_engine(reader, backend, "prefill.plan", stream_.get());
+    decode_ = load_engine(reader, backend, "decode.plan", stream_.get());
     if (prefill_->tensor_dtype("present_key_0") != config_.cache_dtype ||
         decode_->tensor_dtype("past_key_0") != config_.cache_dtype ||
         vision_->tensor_dtype("image_embeds") != DType::kFloat32)
@@ -174,8 +176,8 @@ GlmOcrModel::GlmOcrModel(const BundleReader& reader, IBackend& backend) {
     cache_row_bytes_ = static_cast<std::size_t>(config_.num_key_value_heads) * config_.head_dim *
                        dtype_size(config_.cache_dtype);
     for (int layer = 0; layer < config_.num_layers; ++layer) {
-        key_cache_.emplace_back(shape, config_.cache_dtype, stream_);
-        value_cache_.emplace_back(shape, config_.cache_dtype, stream_);
+        key_cache_.emplace_back(shape, config_.cache_dtype, stream_.get());
+        value_cache_.emplace_back(shape, config_.cache_dtype, stream_.get());
         if (!key_cache_.back().ok() || !value_cache_.back().ok())
             throw std::runtime_error("glm_ocr could not allocate its key/value cache");
         // The prefill writes the prompt's rows at the start of each cache.
@@ -190,8 +192,7 @@ GlmOcrModel::~GlmOcrModel() {
     vision_.reset();
     key_cache_.clear();
     value_cache_.clear();
-    if (stream_ != nullptr)
-        cudaStreamDestroy(stream_);
+    // stream_ is released after the engines and caches, by its owner.
 }
 
 std::vector<internal::TaskInstance> GlmOcrModel::task_bindings() {
