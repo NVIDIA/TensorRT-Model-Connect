@@ -21,7 +21,11 @@ def test_rope_matches_official_bfloat16_products_exactly(layer_index):
     torch = _reference_dependencies()
     import ml_dtypes
     import tensorrt as trt
-    from transformers.models.diffusion_gemma.modeling_diffusion_gemma import apply_rotary_pos_emb
+    from transformers.models.diffusion_gemma.configuration_diffusion_gemma import DiffusionGemmaTextConfig
+    from transformers.models.diffusion_gemma.modeling_diffusion_gemma import (
+        DiffusionGemmaTextRotaryEmbedding, apply_rotary_pos_emb,
+    )
+    from families.diffusion_gemma.tests.original_reference import _assert_official_source
     from families.diffusion_gemma.graph import Graph, _create, _mark, _rope, _serialize, rope_tables
 
     config = json.loads((Path(__file__).parent / "data/diffusiongemma-26b-a4b-config.json").read_text())["text_config"]
@@ -32,11 +36,18 @@ def test_rope_matches_official_bfloat16_products_exactly(layer_index):
     values = np.random.default_rng(112).normal(size=(length, heads, width)).astype(ml_dtypes.bfloat16)
     positions = np.arange(length, dtype=np.int32)
     tables = rope_tables(config, layer_index, 32)
-    cosine = tables[0][:length].astype(ml_dtypes.bfloat16).astype(np.float32)
-    sine = tables[1][:length].astype(ml_dtypes.bfloat16).astype(np.float32)
+    _assert_official_source()
+    rotary = DiffusionGemmaTextRotaryEmbedding(DiffusionGemmaTextConfig(**config), device="cuda")
     value = torch.tensor(values.astype(np.float32), dtype=torch.bfloat16, device="cuda").unsqueeze(0)
-    cos = torch.tensor(cosine, dtype=torch.bfloat16, device="cuda").unsqueeze(0)
-    sin = torch.tensor(sine, dtype=torch.bfloat16, device="cuda").unsqueeze(0)
+    position_tensor = torch.tensor(positions, device="cuda").unsqueeze(0)
+    kind = config["layer_types"][layer_index]
+    cos, sin = rotary(value, position_tensor, kind)
+    cosine = cos.squeeze(0).float().cpu().numpy()
+    sine = sin.squeeze(0).float().cpu().numpy()
+    # These are the BF16 constants actually consumed by this network. Derive
+    # their expected values independently, including the reference frequencies.
+    np.testing.assert_array_equal(tables[0][:length].astype(ml_dtypes.bfloat16).astype(np.float32), cosine)
+    np.testing.assert_array_equal(tables[1][:length].astype(ml_dtypes.bfloat16).astype(np.float32), sine)
     expected = apply_rotary_pos_emb(value, cos, sin, unsqueeze_dim=2).squeeze(0).float().cpu().numpy()
     # This fixture contains cancellation that distinguishes the observed
     # multiply/add contraction from the official two rounded BF16 products.
