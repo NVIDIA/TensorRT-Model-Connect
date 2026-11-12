@@ -91,12 +91,27 @@ class InternvlKvCache : public InternvlInferenceState {
     // position + seq_len and read only the valid cache rows; others take
     // max_length + seq_len and hide the stale rows in the mask.
     void set_valid_prefix_attention(bool enabled) { valid_prefix_attention_ = enabled; }
+    bool valid_prefix_attention() const { return valid_prefix_attention_; }
+
+    // Valid-prefix decoders read only cache rows [0, position), so `module`
+    // can write its present K/V for `seq_len` new tokens straight into rows
+    // [position, position + seq_len). Returns false (nothing bound) when the
+    // decoder reads the whole cache; the caller then copies the outputs
+    // itself. Throws when the rows do not fit.
+    bool bind_present_to_cache_rows(ITrtModule& module, int32_t seq_len);
+
+    // Count `seq_len` rows written in place by bind_present_to_cache_rows.
+    void commit_cache_rows(int32_t seq_len);
 
   private:
     // Mask columns that precede the new tokens.
     int32_t mask_cache_columns(int32_t valid) const {
         return valid_prefix_attention_ ? valid : max_length_;
     }
+    std::size_t row_bytes() const {
+        return static_cast<std::size_t>(kv_dim_) * cache_element_size_;
+    }
+    void bind_decode_present();
     void write_position_input(TensorMap& inputs, int32_t seq_len);
     void write_batched_mask(TensorMap& inputs, int32_t seq_len);
     void write_bidirectional_mask(TensorMap& inputs, int32_t seq_len);
@@ -120,6 +135,9 @@ class InternvlKvCache : public InternvlInferenceState {
     InternvlKvCacheNames names_;
     ITrtModule* bound_module_{nullptr};
     bool valid_prefix_attention_{false};
+    // The decode module's present outputs point at cache row position_
+    // (set by prepare_step), so advance() has nothing to copy.
+    bool decode_present_in_cache_{false};
 };
 
 } // namespace trtmc
