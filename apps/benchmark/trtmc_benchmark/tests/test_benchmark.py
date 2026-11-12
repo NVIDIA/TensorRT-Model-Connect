@@ -1245,7 +1245,7 @@ def test_prepare_only_checks_explicit_bundle_identity_without_loading_a_model(
         "run", "--model", "distilgpt2", "--manifest-root", str(REPO / "families"),
         "--bundle", str(bundle), "--prepare-only", "--no-build",
     ]
-    if task == "text_generation":
+    if task == "text_continuation":
         assert main(arguments) == 0
         assert json.loads(capsys.readouterr().out)["bundles"][0]["status"] == "reused"
     else:
@@ -1269,7 +1269,7 @@ def test_prepare_only_binds_an_explicit_bundle_to_the_manifest_checkpoint(
     monkeypatch.setattr(
         benchmark_builder.subprocess, "run",
         lambda command, **_: subprocess.CompletedProcess(command, 0, json.dumps(
-            {"family": "gpt2", "task": "text_generation", "provenance": provenance}
+            {"family": "gpt2", "task": model.task, "provenance": provenance}
         ), ""),
     )
     arguments = [

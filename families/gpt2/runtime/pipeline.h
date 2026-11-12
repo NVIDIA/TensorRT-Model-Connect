@@ -14,6 +14,9 @@
 #include "families/gpt2/runtime/inference_state.h"
 #include "families/gpt2/runtime/sampler.h"
 #include "families/gpt2/runtime/tokenizer.h"
+#include "trtmc/internal/config.h"
+#include "trtmc/internal/model.h"
+#include "trtmc/internal/text.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
 
@@ -40,13 +43,20 @@ struct Gpt2TextGenConfig {
     int32_t num_layers{0};
 };
 
-class Gpt2TextGenerationPipeline final : public ITextGeneration {
+class Gpt2TextGenerationPipeline final : public ITextGeneration,
+                                         public internal::IModel,
+                                         public internal::ITextContinuation {
   public:
     Gpt2TextGenerationPipeline(std::unique_ptr<ITrtModule> decoder,
                                std::unique_ptr<Gpt2InferenceState> state, Gpt2TextGenConfig config,
                                std::shared_ptr<ITokenizer> tokenizer,
                                std::unique_ptr<ITrtModule> prefill,
                                std::shared_ptr<void> distributed_owner = nullptr);
+
+    const char* task() const noexcept override { return internal::ITextContinuation::kTask.data(); }
+    std::vector<internal::TaskInstance> task_bindings() override;
+    TextResult run(const internal::TextContinuationRequest& request,
+                   internal::ConfigView config) override;
 
     // Public API: takes raw text, returns typed result.
     TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg = {}) override;
@@ -68,6 +78,7 @@ class Gpt2TextGenerationPipeline final : public ITextGeneration {
     Gpt2TextGenConfig config_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string logits_output_name_;
+    TextGenerationConfig request_config(internal::ConfigView supplied) const;
     bool state_bound_{false};
     double last_setup_ms_{0.0};
 

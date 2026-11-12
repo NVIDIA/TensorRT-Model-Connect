@@ -9,6 +9,7 @@
 #include "families/gpt2/runtime/pipeline.h"
 #include "families/gpt2/runtime/plugin_helpers.h"
 #include "families/gpt2/runtime/tensor_names.h"
+#include "trtmc/internal/text.h"
 #include "trtmc/runtime/family_factory.h"
 
 #include <cstdint>
@@ -198,10 +199,17 @@ ITask* create(const FamilyContext& context) {
         std::move(modules.prefill), std::move(modules.distributed_owner));
 }
 
+std::string require_task(const BundleInfo& info) {
+    if (info.task == std::string(internal::ITextContinuation::kTask))
+        return info.task;
+    throw std::runtime_error("gpt2 does not implement task: " + info.task);
+}
+
 } // namespace trtmc::gpt2
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("gpt2 does not support --kv-cache-size");
+    trtmc::gpt2::require_task(context.reader.info());
     return trtmc::gpt2::create(context);
 }

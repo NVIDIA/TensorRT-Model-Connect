@@ -317,7 +317,7 @@ def _build_request(**updates):
         video_num_frames=None,
         max_batch_size=1,
         context_parallel_size=1,
-        task="text_generation",
+        task="text_continuation",
         model_dir=Path("."),
         precision="fp16",
         max_sequence_length=64,
