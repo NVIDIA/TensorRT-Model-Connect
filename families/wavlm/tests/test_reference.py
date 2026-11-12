@@ -116,6 +116,44 @@ def cpu_graph(monkeypatch):
     monkeypatch.setattr(model.g, "add_attention", attention)
 
 
+@pytest.mark.parametrize("layout", ["legacy_map_overrides", "legacy_map_fills", "decoder"])
+def test_special_tokens_follow_the_tokenizer_loader(tmp_path, layout):
+    # The blank and the word delimiter must be the ones the tokenizer itself
+    # ends up with when Transformers loads the same files.
+    vocab = {"|": 0, "#": 1, "a": 2, "b": 3, "<pad>": 4, "[PAD]": 5, "<unk>": 6, "<s>": 7, "</s>": 8}
+    tokenizer = {"tokenizer_class": "Wav2Vec2CTCTokenizer", "unk_token": "<unk>", "bos_token": "<s>",
+                 "eos_token": "</s>", "pad_token": "<pad>", "word_delimiter_token": "|"}
+    special_map = {"pad_token": "[PAD]", "word_delimiter_token": "#"}
+    if layout == "legacy_map_fills":
+        del tokenizer["word_delimiter_token"]
+        special_map = {"word_delimiter_token": "#"}
+    elif layout == "decoder":
+        tokenizer["added_tokens_decoder"] = {
+            str(vocab[token]): {"content": token, "lstrip": False, "normalized": False,
+                                "rstrip": False, "single_word": False, "special": True}
+            for token in ("<pad>", "<unk>", "<s>", "</s>")}
+    (tmp_path / "vocab.json").write_text(json.dumps(vocab))
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps(tokenizer))
+    (tmp_path / "special_tokens_map.json").write_text(json.dumps(special_map))
+    (tmp_path / "preprocessor_config.json").write_text(json.dumps({"sampling_rate": 16000}))
+    loaded = transformers.Wav2Vec2CTCTokenizer.from_pretrained(str(tmp_path))
+
+    cfg = transformers.WavLMConfig(
+        hidden_size=8, num_hidden_layers=1, num_attention_heads=2, intermediate_size=12,
+        conv_dim=(4, 8), conv_kernel=(3, 3), conv_stride=(2, 2), num_conv_pos_embeddings=4,
+        num_conv_pos_embedding_groups=2, num_buckets=8, max_bucket_distance=6,
+        vocab_size=len(vocab), pad_token_id=loaded.pad_token_id)
+    cfg.architectures = ["WavLMForCTC"]
+    cfg.to_json_file(tmp_path / "config.json")
+    resolved = config_module.resolve(tmp_path, {})
+    assert resolved["blank_token_id"] == loaded.pad_token_id
+    assert resolved["word_delimiter_token"] == loaded.word_delimiter_token
+    # Control: the layouts disagree, so matching all three is not a coincidence.
+    expected = {"legacy_map_overrides": ("[PAD]", "#"), "legacy_map_fills": ("<pad>", "#"),
+                "decoder": ("<pad>", "|")}[layout]
+    assert (resolved["tokens"][resolved["blank_token_id"]], resolved["word_delimiter_token"]) == expected
+
+
 def test_buckets_match_the_reference_for_the_released_geometry():
     attention = transformers.models.wavlm.modeling_wavlm.WavLMAttention(
         embed_dim=16, num_heads=2, num_buckets=320, max_distance=800)
@@ -249,7 +287,7 @@ def test_e2e_preparation_preserves_cached_checkpoint(tmp_path, monkeypatch):
     from families.wavlm.tests import test_e2e
 
     names = ("config.json", "preprocessor_config.json", "vocab.json", "added_tokens.json",
-             "tokenizer_config.json")
+             "tokenizer_config.json", "special_tokens_map.json")
     for name in names:
         (tmp_path / name).write_text("{}")
     torch.save({"weight": torch.arange(3, dtype=torch.float16)}, tmp_path / "pytorch_model.bin")
