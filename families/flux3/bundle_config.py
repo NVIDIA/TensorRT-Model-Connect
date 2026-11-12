@@ -81,17 +81,6 @@ class Flux3Checkpoint:
     vae: dict[str, Any]
     text_layers: tuple[int, ...]
 
-    @property
-    def hidden_size(self) -> int:
-        return int(self.transformer["num_attention_heads"]) * int(
-            self.transformer["attention_head_dim"]
-        )
-
-    @property
-    def vae_block_out_channels(self) -> tuple[int, ...]:
-        channels = self.vae.get("decoder_block_out_channels") or self.vae["block_out_channels"]
-        return tuple(int(value) for value in channels)
-
 
 def _read_json(path: Path) -> dict[str, Any]:
     try:

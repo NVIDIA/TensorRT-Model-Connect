@@ -2,11 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
-from tensorrt_model_connect.model_support import (
-    FamilyResolutionError,
-    ModelMetadata,
-    resolve_family,
-)
+from families.flux3.support import describe
+from tensorrt_model_connect.model_support import ModelMetadata, resolve_family
 
 # Root config.json of black-forest-labs/flux-3-image-klein (revision 09561231), abridged to the identity fields.
 _PACKAGE = {
@@ -47,11 +44,7 @@ def test_flux3_klein_resolves_to_text_to_image_in_bf16() -> None:
     ids=["not-flow-map", "other-model", "other-format", "missing-sentinel"],
 )
 def test_other_packages_are_not_flux3(package, files) -> None:
-    try:
-        family, _ = resolve_family(ModelMetadata(package, {}, files))
-    except FamilyResolutionError:
-        return
-    assert family != "flux3"
+    assert describe(ModelMetadata(package, {}, files)) is None
 
 
 def test_text_encoder_config_is_not_claimed_by_flux3() -> None:
