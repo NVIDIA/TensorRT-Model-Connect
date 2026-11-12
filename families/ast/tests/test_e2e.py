@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from tools.e2e_evidence import evidence_stage, record_evidence, record_reference_comparison
+
 import json
 import os
 import subprocess
@@ -265,6 +267,34 @@ def _assert_parity(native: dict, reference: list[float], labels: list[str], case
         f"top-{case['top_k']} order mismatch: native={[labels[i] for i in mine_top]} "
         f"reference={[labels[i] for i in top]}"
     )
+    record_evidence("native", {**native, "class_label": labels[native["top_class"]]})
+    record_evidence("reference", {
+        "scores": reference, "labels": labels, "top_class": top[0], "class_label": labels[top[0]],
+    })
+    record_evidence("thresholds", {"max_logit_gap": tolerance, "top_k": int(case["top_k"])})
+    record_reference_comparison(
+        "Audio classification logits",
+        native,
+        {"scores": reference, "labels": labels},
+        [
+            {
+                "name": "max_logit_gap",
+                "scope": "independent_reference",
+                "actual": worst,
+                "operator": "<=",
+                "expected": tolerance,
+                "passed": worst <= tolerance,
+            },
+            {
+                "name": "top_class",
+                "scope": "independent_reference",
+                "actual": native["top_class"],
+                "operator": "==",
+                "expected": top[0],
+                "passed": native["top_class"] == top[0],
+            },
+        ],
+    )
     print(
         f"ast parity: worst logit gap {worst:.6f} on {labels[worst_index]!r}, "
         f"top-{case['top_k']} {[labels[index] for index in top]}"
@@ -273,13 +303,33 @@ def _assert_parity(native: dict, reference: list[float], labels: list[str], case
 
 def test_e2e(tmp_path: Path, case_name: str) -> None:
     manifest_path, manifest, case = CASES[case_name]
+    record_evidence(
+        "inputs", {"manifest": manifest, "case": case, "audio": TEST_ROOT / case["test_input_audio"]}
+    )
+    record_evidence(
+        "thresholds", {"max_logit_gap": case.get("logit_tolerance"), "top_k": case.get("top_k")}
+    )
     assert manifest_path.is_file()
     binary, runtime_root = _runtime()
     model_dir = _model_dir(manifest)
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     bundle = tmp_path / str(manifest["bundle"])
-    _build(model_dir, bundle, manifest)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
     assert bundle.is_file(), f"{FAMILY} bundle was not produced: {bundle}"
 
-    native = _native(binary, runtime_root, bundle, case)
-    reference, labels = _official_reference(model_dir, case)
-    _assert_parity(native, reference, labels, case)
+    with evidence_stage("native"):
+        native = _native(binary, runtime_root, bundle, case)
+    record_evidence("native", native)
+    with evidence_stage("reference"):
+        reference, labels = _official_reference(model_dir, case)
+    record_evidence("reference", {"scores": reference, "labels": labels})
+    with evidence_stage("compare"):
+        _assert_parity(native, reference, labels, case)

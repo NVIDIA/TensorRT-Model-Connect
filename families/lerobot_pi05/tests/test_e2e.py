@@ -11,7 +11,7 @@ a bfloat16 bundle, with LeRobot's own bfloat16 policy).
 
 from __future__ import annotations
 
-from tools.e2e_evidence import evidence_stage, record_evidence
+from tools.e2e_evidence import evidence_stage, record_evidence, record_reference_comparison
 
 import json
 import os
@@ -228,12 +228,14 @@ def _qualification_binary() -> tuple[Path, Path]:
 def _asset(case: dict, name: str) -> Path:
     path = TEST_ROOT / case["inputs"][name]
     assert path.exists(), path
-    record_evidence("inputs", {name: path})
+    record_evidence("reference" if name.startswith("reference_") else "inputs", {name: path})
     return path
 
 
 def _reference(case: dict, name: str) -> np.ndarray:
-    return np.fromfile(_asset(case, name), dtype="<f4").reshape(CHUNK, ACTION_DIM)
+    values = np.fromfile(_asset(case, name), dtype="<f4").reshape(CHUNK, ACTION_DIM)
+    record_evidence("reference", {"name": name, "values": values})
+    return values
 
 
 def _metrics(got: np.ndarray, want: np.ndarray) -> dict[str, float]:
@@ -245,6 +247,10 @@ def _metrics(got: np.ndarray, want: np.ndarray) -> dict[str, float]:
 def _run_native(binary: Path, root: Path, bundle: Path, case: dict, tmp_path: Path) -> tuple[np.ndarray, dict]:
     frame = _asset(case, "frame")
     observation = json.loads((frame / "observation.json").read_text(encoding="utf-8"))
+    record_evidence("inputs", {
+        "observation": observation, "camera": frame / "image.png",
+        "wrist_camera": frame / "wrist_image.png",
+    })
     state = tmp_path / "state.f32"
     np.asarray(observation["state"], dtype="<f4").tofile(state)
     output = tmp_path / "actions.f32"
@@ -284,19 +290,25 @@ EXPECTED_REJECTIONS = {
 
 def test_pi05_bundle_matches_the_lerobot_reference_e2e(case_name: str, bundles, tmp_path) -> None:
     manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence("checkpoint", {"hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     limits = json.loads((THRESHOLD_ROOT / f"{case_name}.json").read_text(encoding="utf-8"))[
         "threshold_overrides"
     ]
+    record_evidence("thresholds", limits)
     bundle = bundles(manifest)
     with evidence_stage("native_build"):
         binary, root = _qualification_binary()
     with evidence_stage("native"):
         actions, summary = _run_native(binary, root, bundle, case, tmp_path)
+    record_evidence("native", {"values": actions, "summary": summary})
 
     assert summary["rows"] == CHUNK and summary["columns"] == ACTION_DIM
     assert np.isfinite(actions).all()
-    vs_fp32 = _metrics(actions, _reference(case, "reference_fp32"))
-    vs_bf16 = _metrics(actions, _reference(case, "reference_bf16"))
+    reference_fp32 = _reference(case, "reference_fp32")
+    vs_fp32 = _metrics(actions, reference_fp32)
+    reference_bf16 = _reference(case, "reference_bf16")
+    vs_bf16 = _metrics(actions, reference_bf16)
     p95 = float(np.percentile(summary["wall_ms"], 95))
     record_evidence(
         "metrics",
@@ -310,6 +322,15 @@ def test_pi05_bundle_matches_the_lerobot_reference_e2e(case_name: str, bundles, 
     assert vs_fp32["cosine"] >= limits["cosine_vs_fp32_min"], vs_fp32
     if "max_abs_vs_bf16" in limits:
         assert vs_bf16["max_abs"] <= limits["max_abs_vs_bf16"], vs_bf16
+    record_reference_comparison(
+        "Action chunk against the recorded fp32 reference", {"values": actions}, {"values": reference_fp32},
+        [{"name": "max_abs", "scope": "independent_reference", "actual": vs_fp32["max_abs"],
+          "operator": "<=", "expected": limits["max_abs_vs_fp32"], "passed": True},
+         {"name": "mean_abs", "scope": "independent_reference", "actual": vs_fp32["mean_abs"],
+          "operator": "<=", "expected": limits["mean_abs_vs_fp32"], "passed": True},
+         {"name": "cosine", "scope": "independent_reference", "actual": vs_fp32["cosine"],
+          "operator": ">=", "expected": limits["cosine_vs_fp32_min"], "passed": True}],
+    )
     assert p95 <= limits["chunk_inference_p95_ms"], p95
 
     rejections = {item["case"]: item for item in summary["rejections"]}

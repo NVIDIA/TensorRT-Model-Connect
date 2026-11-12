@@ -425,6 +425,51 @@ def record_evidence(name: str, value: Any) -> Any:
     return value
 
 
+def record_reference_comparison(
+    label: str, native: Any, reference: Any, checks: list[dict[str, Any]]
+) -> None:
+    """Persist family-supplied comparisons and distinct bounded output snapshots.
+
+    The caller supplies values, operators, limits and verdicts from its existing
+    enforced checks. This function performs only evidence I/O; it neither runs
+    a comparator nor chooses a passing criterion. Library checks must finish
+    successfully before their successful verdict is recorded.
+    """
+    recorder = _ACTIVE.get()
+    if recorder is None:
+        return
+    try:
+        recorder._prepare()
+        outputs = {}
+        for role, value in (("native", native), ("reference", reference)):
+            data = json.dumps(
+                recorder.serialize(value, role), ensure_ascii=False, allow_nan=False
+            ).encode("utf-8")
+            if len(data) > _FILE_LIMIT or recorder.bytes_written + len(data) > _TOTAL_LIMIT:
+                raise ValueError("Comparison snapshot exceeds the evidence size bound")
+            name = f"comparison-{len(recorder.data['artifacts']):04d}-{role}.json"
+            path = recorder.directory / "artifacts" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+            recorder.bytes_written += len(data)
+            outputs[role] = {
+                "artifact": f"artifacts/{name}", "size_bytes": len(data),
+                "media_type": "application/json",
+            }
+            recorder.data["artifacts"].append({
+                "path": outputs[role]["artifact"], "role": role, "label": name,
+                "media_type": "application/json", "size_bytes": len(data),
+            })
+        recorder.record("reference_comparison", {
+            "label": label, "scope": "independent_reference", "enforced": True,
+            **outputs, "checks": checks,
+        })
+    except Exception as error:
+        recorder.data["issues"].append(
+            f"Could not record reference comparison: {type(error).__name__}: {error}"
+        )
+
+
 @contextmanager
 def evidence_stage(name: str):
     """Record stage duration and failure location, preserving every exception."""

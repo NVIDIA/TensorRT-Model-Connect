@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+from tools.e2e_evidence import record_evidence
+from families.stable_diffusion.tests.reporting import record_image_views
+
 import json
 import os
 import subprocess
@@ -264,6 +267,8 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
     import torch
 
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence("checkpoint", {"hf_id": manifest["hf_id"], "hf_revision": manifest.get("hf_revision")})
     assert manifest["trust_remote_code"] is False
     binary, runtime_root = _runtime()
     model_dir = _model_dir(manifest)
@@ -281,5 +286,8 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
 
     _build(model_dir, bundle, manifest)
     native = _native(binary, runtime_root, bundle, case, raw, tmp_path / "native.png")
+    record_evidence("native", {"image": tmp_path / "native.png"})
     reference = _official_reference(model_dir, manifest, case, latents)
-    _assert_parity(native, reference, _thresholds(case_name))
+    record_evidence("reference", {"pixels": reference})
+    record_image_views(reference, tmp_path)
+    _assert_parity(native, reference, record_evidence("thresholds", _thresholds(case_name)))

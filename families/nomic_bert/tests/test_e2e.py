@@ -31,6 +31,8 @@ this case; see ``_FP16_EMBEDDING_TOLERANCE``.
 
 from __future__ import annotations
 
+from tools.e2e_evidence import record_evidence
+
 import json
 import math
 import os
@@ -256,8 +258,10 @@ def _check_embedding(values, reference, precision: str, text: str) -> tuple[floa
     """Assert the gate of ``precision`` on one pooled vector; return max abs and cosine."""
     delta = max(abs(a - b) for a, b in zip(values, reference))
     cosine = _cosine(values, reference)
+    record_evidence("thresholds", {"cosine_min": _COSINE_FLOOR})
     assert cosine >= _COSINE_FLOOR, f"{FAMILY} embedding cosine {cosine} for {text!r}"
     tolerance = _FP16_EMBEDDING_TOLERANCE if precision == "fp16" else _EMBEDDING_TOLERANCE
+    record_evidence("thresholds", {"embedding_max_abs": tolerance, "cosine_min": _COSINE_FLOOR})
     assert delta <= tolerance, (
         f"{FAMILY} {precision} embedding for {text!r} differs from the reference by {delta}"
     )
@@ -271,6 +275,8 @@ def _native(binary, runtime_root, bundle, case, text: str, role: str) -> dict:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence("checkpoint", {"hf_id": manifest["hf_id"], "hf_revision": manifest.get("hf_revision")})
     model_dir = _model_dir(manifest)
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
@@ -282,10 +288,13 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     for role, text in (("query", case["query"]), ("document", case["document"]),
                        ("document", case["negative_document"])):
         payload = _native(binary, runtime_root, bundle, case, str(text), role)
+        record_evidence("inputs", {"text": str(text), "role": role})
+        record_evidence("native", payload)
 
         # The runtime owns the prefix, so the reference is given the prefixed
         # text. If the runtime stopped applying it, this is what would notice.
         reference = _reference(model_dir, _ROLE_PREFIXES[role] + str(text))
+        record_evidence("reference", {"values": reference})
         values = [float(value) for value in payload["values"]]
         assert len(values) == len(reference), (
             f"{FAMILY} returned {len(values)} values, reference {len(reference)}"

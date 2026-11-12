@@ -336,6 +336,7 @@ _OUTPUT_NAMES = {
     "segmentation": "Segmentation masks",
     "video_segmentation": "Segmentation masks",
     "image_to_class_scores": "Class scores",
+    "audio_to_class_scores": "Class scores",
     "text_to_embedding": "Embedding vector",
     "text_to_pooled_features": "Encoded features",
     "image_to_embedding": "Embedding vector",
@@ -349,7 +350,7 @@ _OUTPUT_NAMES = {
 
 def _is_classification_task(task: str) -> bool:
     # The semantic SDK names the result type instead of the old execution mode.
-    return "classification" in task or task == "image_to_class_scores"
+    return "classification" in task or task in {"image_to_class_scores", "audio_to_class_scores"}
 
 
 def _label(key: str) -> str:
@@ -747,7 +748,7 @@ def _output_summary(value: Any, *, role: str, task: str, peer: Any = None) -> st
         return "<p class='note'>No output recorded. Check the result and failure stage below.</p>"
     if isinstance(value, dict) and value.get("mode") == "contract_only":
         return (
-            "<p><strong>Contract checks only</strong></p><p class='note'>No reference output was generated.</p>"
+            "<p><strong>Contract checks only</strong></p><p class='note'>Only the declared contract was checked; reference agreement was not asserted.</p>"
             + (_facts([("Checked contract", value["oracle"])]) if value.get("oracle") else "")
         )
     if isinstance(value, str):
@@ -1648,7 +1649,9 @@ def _demo_output(value: Any, *, role: str, task: str, media: str = "", peer: Any
     if _is_classification_task(task):
         chosen = value.get("top_class") if isinstance(value, dict) else value
         if isinstance(chosen, (int, float)):
-            return f'<p class="class-result">Class ID <strong>{_escape(chosen)}</strong></p>'
+            label = _mapping(value).get("class_label")
+            named = f'<p class="readable">{_escape(label)}</p>' if isinstance(label, str) else ""
+            return f'<p class="class-result">Class ID <strong>{_escape(chosen)}</strong></p>' + named
         saved = classification_index(_mapping(value).get("logits", value))
         if saved is not None:
             return f'<p class="class-result">Class ID <strong>{saved[0]}</strong></p><p class="note">From complete saved logits</p>'
@@ -1818,13 +1821,16 @@ def _assess_comparison_check(check: Any) -> bool | None:
         not isinstance(scope, str)
         or not isinstance(op, str)
         or scope not in {"contract", "independent_reference"}
-        or op not in {"==", ">=", "<="}
+        or op not in {"==", ">=", "<=", ">", "<"}
     ):
         return None
     if type(check.get("passed")) is not bool:
         return None
     actual, expected = check.get("actual"), check.get("expected")
-    if type(actual) is bool or type(expected) is bool:
+    if isinstance(actual, str) or isinstance(expected, str):
+        if op != "==" or not isinstance(actual, str) or not isinstance(expected, str):
+            return None
+    elif type(actual) is bool or type(expected) is bool:
         if scope != "contract" or op != "==" or type(actual) is not type(expected):
             return None
     else:
@@ -1840,6 +1846,10 @@ def _assess_comparison_check(check: Any) -> bool | None:
         if op == "=="
         else actual >= expected
         if op == ">="
+        else actual > expected
+        if op == ">"
+        else actual < expected
+        if op == "<"
         else actual <= expected
     )
     return check["passed"] if evaluated is check["passed"] else None

@@ -12,7 +12,7 @@ import sys
 import numpy as np
 import pytest
 from tensorrt_model_connect import BuildRequest, build
-from tools.e2e_evidence import evidence_stage, record_evidence
+from tools.e2e_evidence import evidence_stage, record_evidence, record_reference_comparison
 
 FAMILY = "embeddinggemma2"
 ROOT = Path(__file__).resolve().parent
@@ -62,6 +62,8 @@ def required(name):
 
 def test_embedding_e2e(case_name, tmp_path):
     manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case, "prompt": case["prompt"], "role": case["role"]})
+    record_evidence("checkpoint", {"hf_id": manifest["hf_id"], "hf_revision": manifest["hf_revision"]})
     import torch
 
     assert torch.cuda.is_available(), "selected EmbeddingGemma2 E2E requires CUDA"
@@ -146,3 +148,11 @@ def test_embedding_e2e(case_name, tmp_path):
             >= 0.99
         )
         assert float(np.linalg.norm(actual - expected)) <= 0.1
+    record_reference_comparison(
+        "Embedding against the official reference", {"embedding": actual}, reference,
+        [{"name": "cosine", "scope": "independent_reference",
+          "actual": float(np.dot(actual, expected) / (np.linalg.norm(actual) * np.linalg.norm(expected))),
+          "operator": ">=", "expected": 0.99, "passed": True},
+         {"name": "l2_distance", "scope": "independent_reference",
+          "actual": float(np.linalg.norm(actual - expected)), "operator": "<=", "expected": 0.1, "passed": True}],
+    )

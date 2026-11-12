@@ -679,7 +679,7 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     if case.get("reference") == "none":
         # ModelOpt NVFP4 checkpoints cannot be run by transformers, so there is no
         # reference model; the engine output is checked against the expected answer.
-        record_evidence("reference", {"mode": "none", "oracle": "expected_answers"})
+        record_evidence("reference", {"mode": "contract_only", "oracle": "expected_answers; no independent reference model was run"})
         with evidence_stage("compare"):
             _assert_reference_free(payload, case)
         return

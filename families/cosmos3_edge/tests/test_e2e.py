@@ -17,7 +17,8 @@ import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
-from tools.e2e_evidence import evidence_stage, record_evidence
+from tools.e2e_evidence import evidence_stage, record_evidence, record_reference_comparison
+from families.cosmos3_edge.tests.reporting import record_input_media
 
 ROOT = Path(__file__).resolve().parent
 FAMILY = "cosmos3_edge"
@@ -188,6 +189,8 @@ def _runner(runtime):
 @pytest.mark.parametrize("case_name", sorted(CASES))
 def test_e2e(case_name, request, tmp_path):
     manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence("checkpoint", {"hf_id": manifest["hf_id"], "hf_revision": manifest.get("hf_revision")})
     _selected(request.config, manifest, case)
     assert case["reference_backend"] == "hf_transformers"
     assert case["reference_precision"] == "fp32"
@@ -208,6 +211,8 @@ def test_e2e(case_name, request, tmp_path):
             tensor_parallel_size=manifest["tensor_parallel_size"]))
     source, destination = tmp_path / "input.json", tmp_path / "output.json"
     source.write_text(json.dumps(requests))
+    record_evidence("inputs", {"requests": requests, "request_file": source})
+    record_input_media(requests)
     command = [str(runner), str(bundle), str(runtime), str(source), str(destination)]
     env = dict(os.environ)
     library_path = "PATH" if os.name == "nt" else "LD_LIBRARY_PATH"
@@ -219,16 +224,30 @@ def test_e2e(case_name, request, tmp_path):
         record_evidence("native", {"stdout": completed.stdout, "stderr": completed.stderr})
         assert completed.returncode == 0, completed.stdout + completed.stderr
     actual = json.loads(destination.read_text())
+    record_evidence("native", {"results": actual})
     with evidence_stage("reference"):
         expected = _reference(checkpoint, requests, image, frames, metadata, manifest["trust_remote_code"])
         record_evidence("reference", {"backend": "hf_transformers", "precision": "fp32", "results": expected})
     assert len(actual) == len(expected) == len(requests)
     threshold = json.loads((ROOT / "thresholds" / f"{case_name}.json").read_text())["threshold_overrides"]["normalized_text_edit_distance"]
+    record_evidence("thresholds", {"normalized_text_edit_distance": threshold})
     results = []
     for a, b, item in zip(actual, expected, requests):
+        record_evidence("inputs", {"prompt": item["prompt"]})
+        record_evidence("native", a)
+        record_evidence("reference", b)
         assert a["text"] and 0 < len(a["token_ids"]) <= item.get("max_new_tokens", 64)
         distance = _ned(a["text"], b["text"])
         results.append({"prompt": item["prompt"], "actual": a, "reference": b,
                         "normalized_text_edit_distance": distance})
     record_evidence("metrics", {"cases": results, "normalized_text_edit_distance_max": threshold})
     assert all(row["normalized_text_edit_distance"] <= threshold for row in results), results
+    for row in results:
+        record_evidence("native", row["actual"])
+        record_evidence("reference", row["reference"])
+        record_reference_comparison(
+            "Text against the recorded independent reference", row["actual"], row["reference"],
+            [{"name": "normalized_text_edit_distance", "scope": "independent_reference",
+              "actual": row["normalized_text_edit_distance"], "operator": "<=",
+              "expected": threshold, "passed": True}],
+        )

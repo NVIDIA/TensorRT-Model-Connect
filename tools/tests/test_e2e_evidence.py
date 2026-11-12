@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import ast
 import base64
+import re
 import copy
 import unittest
 import json
@@ -548,7 +550,7 @@ def test_numeric_output_shows_dimensions_without_vectors(tmp_path: Path) -> None
     assert "float32" not in visible and "float32" in report
 
 
-@pytest.mark.parametrize("task", ["image_classification", "image_to_class_scores"])
+@pytest.mark.parametrize("task", ["image_classification", "image_to_class_scores", "audio_to_class_scores"])
 def test_classification_preserves_ids_and_raw_score_meaning(tmp_path: Path, task: str) -> None:
     data = _case()
     data["inputs"]["manifest"]["task"] = task
@@ -571,7 +573,7 @@ def test_classification_preserves_ids_and_raw_score_meaning(tmp_path: Path, task
         (7, 80, "passed", False),
     ],
 )
-@pytest.mark.parametrize("task", ["classification", "image_to_class_scores"])
+@pytest.mark.parametrize("task", ["classification", "image_to_class_scores", "audio_to_class_scores"])
 def test_classification_reference_is_visible_beside_native(
     tmp_path: Path, native_class: int, reference_class: int, status: str, checked: bool, task: str
 ) -> None:
@@ -2236,7 +2238,7 @@ def test_library_comparison_requires_complete_enforced_distinct_evidence(field, 
         ("expected", None),
         ("passed", False),
         ("passed", "true"),
-        ("operator", ">"),
+        ("operator", "!="),
         ("operator", {}),
         ("scope", {}),
         ("name", ""),
@@ -2307,3 +2309,156 @@ def test_library_comparison_uses_human_labels_without_changing_check_identity():
     assert "raw similarity key" in _assess_reference_details(data)
     data["observations"][0]["value"]["checks"].append({**check, "label": "Another label"})
     assert assessment(data)["kind"] == "unverified"
+
+
+ROOT = Path(__file__).resolve().parents[2]
+ENTRIES = sorted((ROOT / "families").glob("*/tests/test_e2e.py"))
+
+
+@pytest.mark.parametrize("entry", ENTRIES, ids=lambda path: path.parent.parent.name)
+def test_official_family_e2e_has_an_evidence_entrypoint(entry):
+    tree = ast.parse(entry.read_text())
+    official = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                and re.fullmatch(r"test_.*e2e", node.name)]
+    assert official, f"{entry}: no official recorder-compatible E2E function"
+    for function in official:
+        assert "case_name" in {arg.arg for arg in function.args.args}, (
+            f"{entry}:{function.lineno}: pytest IDs do not replace the case_name parameter"
+        )
+    fields = {
+        node.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        and node.func.id == "record_evidence" and node.args
+        and isinstance(node.args[0], ast.Constant)
+    }
+    assert {"inputs", "native", "reference"} <= fields, (
+        f"{entry}: declare inputs, native and reference observations; a contract-only test "
+        "must explicitly record that no independent reference ran"
+    )
+
+
+def test_library_comparison_snapshots_keep_arrays_and_strict_limits(tmp_path):
+    recorder = _recorder(tmp_path)
+    native, reference = np.arange(128, dtype=np.float32), np.arange(128, dtype=np.float32)
+    # The original library comparison determines success before recording it.
+    np.testing.assert_allclose(native, reference, atol=0, rtol=0)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        e2e_evidence.record_reference_comparison(
+            "Exact independent values", {"values": native}, {"values": reference},
+            [{"name": "max_abs", "scope": "independent_reference",
+              "actual": 0.0, "operator": "<", "expected": 0.01, "passed": True}],
+        )
+        recorder.finish("passed")
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+    comparison = recorder.data["reference_comparison"]
+    assert comparison["native"]["artifact"] != comparison["reference"]["artifact"]
+    for role in ("native", "reference"):
+        path = recorder.directory / comparison[role]["artifact"]
+        recorded = json.loads(path.read_text())
+        array = np.load(recorder.directory / recorded["values"]["artifact"], allow_pickle=False)
+        np.testing.assert_array_equal(array, native)
+    assert assessment(recorder.data)["kind"] == "reference"
+    assert "Exact independent values" in render_case(recorder.data, recorder.directory)
+
+
+@pytest.mark.parametrize("operator,actual,expected", [("<", 1, 1), (">", 1, 1)])
+def test_strict_comparison_boundary_does_not_become_a_pass(tmp_path, operator, actual, expected):
+    recorder = _recorder(tmp_path)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        e2e_evidence.record_reference_comparison(
+            "Strict boundary", {"value": actual}, {"value": expected},
+            [{"name": "strict", "scope": "independent_reference", "actual": actual,
+              "operator": operator, "expected": expected, "passed": False}],
+        )
+        recorder.finish("failed", failure="original comparison rejected the boundary")
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+    assert assessment(recorder.data)["kind"] == "failed"
+    assert recorder.data["reference_comparison"]["checks"][0]["passed"] is False
+
+
+def test_comparison_recording_errors_are_diagnostics_not_model_failures(tmp_path, monkeypatch):
+    recorder = _recorder(tmp_path)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        monkeypatch.setattr(Path, "write_bytes", lambda *args: (_ for _ in ()).throw(OSError("full disk")))
+        e2e_evidence.record_reference_comparison("Saved output", [1], [1], [])
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+    assert "reference_comparison" not in recorder.data
+    assert any("full disk" in issue for issue in recorder.data["issues"])
+
+
+def test_comparison_snapshots_obey_the_existing_size_budget(tmp_path, monkeypatch):
+    recorder = _recorder(tmp_path)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        monkeypatch.setattr(e2e_evidence, "_FILE_LIMIT", 8)
+        e2e_evidence.record_reference_comparison("Bounded", {"text": "long result"}, [1], [])
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+    assert "reference_comparison" not in recorder.data
+    assert any("size bound" in issue for issue in recorder.data["issues"])
+
+
+def test_audio_class_scores_show_supplied_labels_without_interpreting_scores(tmp_path):
+    data = _case()
+    data["inputs"]["manifest"]["task"] = "audio_to_class_scores"
+    data["native"] = {"top_class": 0, "class_label": "Speech <spoken>", "scores": [7.5, -2.0]}
+    data["reference"] = {"top_class": 0, "class_label": "Speech <spoken>", "scores": [7.4, -2.1]}
+    top = render_case(data, tmp_path).split('<details class="case-details">', 1)[0]
+    assert top.count("Speech &lt;spoken&gt;") == 2
+    assert top.count("Class ID <strong>0</strong>") == 2
+    assert "7.5" not in top and "probability" not in top.lower()
+
+
+@pytest.mark.parametrize("actual,expected,operator,passed,valid", [
+    ("Transcription", "Transcription", "==", True, True),
+    ("你好", "你好", "==", True, True),
+    ("a", "b", "==", False, True),
+    ("a", "b", "==", True, False),
+    ("1", 1, "==", True, False),
+    ("a", "b", ">=", False, False),
+])
+def test_recorded_text_comparison_is_exact_and_never_coerces_types(
+    tmp_path, actual, expected, operator, passed, valid
+):
+    from tools.e2e_report import _assess_reference_record
+
+    recorder = _recorder(tmp_path)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        e2e_evidence.record_reference_comparison(
+            "Original exact transcript check", {"text": actual}, {"text": expected},
+            [{"name": "transcript", "scope": "independent_reference", "actual": actual,
+              "operator": operator, "expected": expected, "passed": passed}],
+        )
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+    result = _assess_reference_record(recorder.data["reference_comparison"])
+    assert (result is not None) is valid
+    if valid:
+        assert result["passed"] is passed
+
+
+def test_contract_only_preserves_an_observed_reference_without_claiming_agreement(tmp_path):
+    data = _case()
+    data["status"] = "passed"
+    data["inputs"]["manifest"]["task"] = "text_generation"
+    data["native"] = {"text": "Native observed answer"}
+    data["reference"] = {
+        "mode": "contract_only", "reference_text": "Different reference sample",
+        "oracle": "Sampling option forwarding; output agreement was not asserted",
+    }
+    data["checks"] = [{"status": "passed", "expression": "len(token_ids) <= max_new_tokens"}]
+    assert assessment(data)["kind"] == "limited"
+    report = render_case(data, tmp_path)
+    visible = _visible(report)
+    assert "Native observed answer" in visible and "Different reference sample" in visible
+    assert "No reference output was generated" not in report
+    summary = _output_summary(data["reference"], role="reference", task="text_generation")
+    assert "reference agreement was not asserted" in summary

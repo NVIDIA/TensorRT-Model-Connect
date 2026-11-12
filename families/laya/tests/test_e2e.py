@@ -5,6 +5,9 @@
 from copy import deepcopy
 from functools import cache
 import json
+
+from tools.e2e_evidence import record_evidence, record_reference_comparison
+from families.laya.tests.reporting import record_decision_input, record_decisions
 import os
 from pathlib import Path
 import subprocess
@@ -131,19 +134,22 @@ def compare_native_response(result, reference, internal):
 
 
 @pytest.mark.parametrize(
-    ("manifest", "case"),
+    ("case_name", "manifest", "case"),
     [
-        pytest.param(manifest, case, id=case["name"])
+        pytest.param(case["name"], manifest, case, id=case["name"])
         for manifest in MANIFESTS.values()
         for case in manifest["testcases"]
     ],
 )
-def test_e2e(manifest, case, request, tmp_path):
+def test_e2e(case_name, manifest, case, request, tmp_path):
     selected = _selection(request.config)
     if not selected and os.environ.get("TRTMC_E2E") != "1":
         pytest.skip("real Laya E2E requires explicit selection")
     if selected and not selected.intersection({"laya", manifest["name"], case["name"]}):
         pytest.skip("Laya case was not selected")
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence("checkpoint", {"hf_id": manifest["hf_id"], "hf_revision": manifest.get("hf_revision")})
+    record_evidence("thresholds", {"logits_atol": 0.125, "logits_rtol": 0.015, "probabilities_atol": 0.015, "probabilities_rtol": 0.01, "argmax": "exact equality"})
     import torch
     from laya.common import collate_items, temp_bucket
 
@@ -151,6 +157,8 @@ def test_e2e(manifest, case, request, tmp_path):
     bundle, reference_agent = request.getfixturevalue("laya_models")(manifest["name"])
     fixture = ROOT / case["inputs"]["document_path"]
     record = json.loads(fixture.read_text())
+    record_evidence("inputs", {"document": fixture, "record": record})
+    record_decision_input(record)
     routing = None
     variant = manifest["variant"]
     if variant == "router":
@@ -168,17 +176,24 @@ def test_e2e(manifest, case, request, tmp_path):
     assert agent.device.type == "cuda", "the reference must not silently fall back to CPU"
     if routing is not None:
         reference["routing"] = routing
+    record_evidence("reference", {"response": reference, "logits": logits})
     native = json.loads(
         subprocess.check_output(
             [str(probe), str(bundle), os.environ["TRTMC_RUNTIME_ROOT"], str(fixture), "2"],
             text=True,
         )
     )
+    record_evidence("native", native)
     assert not any(
         any(token in name.lower() for token in ("python", "torch", "c10"))
         for name in native["loaded_libraries"]
     )
     result = native["results"][0]
+    record_evidence("native", result)
+    record_evidence("reference", {"response": reference, "logits": logits})
+    if not ids:
+        record_evidence("reference", {"mode": "contract_only", "oracle": "empty-question response contract", "response": reference})
+    record_decisions(result, reference, logits, empty_questions=not ids)
     if routing is not None:
         assert result["response"]["routing"] == routing
     assert result["scores"] == native["results"][1]["scores"]
@@ -200,5 +215,12 @@ def test_e2e(manifest, case, request, tmp_path):
         # temperature still moves these probabilities by about 0.14.
         np.testing.assert_allclose(actual["probabilities"], probabilities, atol=0.015, rtol=0.01)
         assert np.argmax(actual["probabilities"]) == np.argmax(probabilities)
+        record_reference_comparison(
+            f"Option argmax: {qid}", actual,
+            {"logits": expected, "probabilities": probabilities},
+            [{"name": "option_argmax", "scope": "independent_reference",
+              "actual": int(np.argmax(actual["probabilities"])), "operator": "==",
+              "expected": int(np.argmax(probabilities)), "passed": True}],
+        )
     compare_native_response(result, reference, internal)
     (tmp_path / "native.json").write_text(json.dumps(native, indent=2))

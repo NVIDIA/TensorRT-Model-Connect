@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+from tools.e2e_evidence import evidence_stage, record_evidence, record_reference_comparison
+from families.grounding_dino.tests.reporting import record_detection_views
+
 import json
 import os
 import subprocess
@@ -326,6 +329,30 @@ def _assert_parity(actual: dict, expected: list[dict]) -> None:
         worst_iou = min(worst_iou, best_iou)
         worst_score = max(worst_score, abs(detection["score"] - reference[best_match]["score"]))
         matched.add(best_match)
+    record_evidence("thresholds", {"min_box_iou": 0.5, "max_score_error": 0.05})
+    record_reference_comparison(
+        "Matched detections",
+        actual,
+        {"detections": expected},
+        [
+            {
+                "name": "box_iou",
+                "scope": "independent_reference",
+                "actual": worst_iou,
+                "operator": ">=",
+                "expected": 0.5,
+                "passed": worst_iou >= 0.5,
+            },
+            {
+                "name": "score_error",
+                "scope": "independent_reference",
+                "actual": worst_score,
+                "operator": "<=",
+                "expected": 0.05,
+                "passed": worst_score <= 0.05,
+            },
+        ],
+    )
     print(
         f"{FAMILY} parity: {len(native)} detections, worst IoU {worst_iou:.4f}, "
         f"worst score delta {worst_score:.4f}"
@@ -334,10 +361,29 @@ def _assert_parity(actual: dict, expected: list[dict]) -> None:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence(
+        "inputs", {"manifest": manifest, "case": case, "image": TEST_ROOT / case["test_image"]}
+    )
+    record_evidence("thresholds", {"min_box_iou": 0.5, "max_score_error": 0.05})
     model_dir = _model_dir(manifest)
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
-    actual = _native(binary, runtime_root, bundle, case)
-    expected = _official_reference(model_dir, manifest, case)
-    _assert_parity(actual, expected)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
+    with evidence_stage("native"):
+        actual = _native(binary, runtime_root, bundle, case)
+    record_evidence("native", actual)
+    with evidence_stage("reference"):
+        expected = _official_reference(model_dir, manifest, case)
+    record_evidence("reference", {"detections": expected})
+    record_detection_views(actual, expected, _asset(case["test_image"]), tmp_path / "detection-views")
+    with evidence_stage("compare"):
+        _assert_parity(actual, expected)

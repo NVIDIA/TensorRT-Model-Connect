@@ -4,6 +4,8 @@
 """Provisioned family-owned build/public/direct/independent-quality E2E; never a CPU placeholder."""
 
 from __future__ import annotations
+
+from tools.e2e_evidence import record_evidence, record_reference_comparison
 import json
 import os
 from pathlib import Path
@@ -44,6 +46,8 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, request) -> Non
         pytest.skip("real family E2E requires explicit selection or TRTMC_E2E=1")
     if selected and not ({case_name, MANIFEST["name"], MANIFEST["family"]} & selected):
         pytest.skip("case not selected")
+    record_evidence("inputs", {"manifest": MANIFEST, "case_name": case_name})
+    record_evidence("checkpoint", {"hf_id": MANIFEST["hf_id"], "hf_revision": MANIFEST["hf_revision"]})
     runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
     reference_python = Path(os.environ.get("TRTMC_QWEN35_MOE_REFERENCE_PYTHON", sys.executable))
     assert runtime.is_dir() and reference_python.is_file()
@@ -76,7 +80,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, request) -> Non
     )
     output = tmp_path / "proof"
     case = next(item for item in MANIFEST["testcases"] if item["name"] == case_name)
+    record_evidence("inputs", {"case": case})
     image = TEST_DIR / case["test_image"]
+    record_evidence("inputs", {"image": image})
     edge_validation.gpu(
         SimpleNamespace(
             bundle=bundle,
@@ -112,7 +118,20 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, request) -> Non
         timeout=3600,
     )
     evidence = json.loads((output / "evidence.json").read_text())
+    record_evidence("native", json.loads((output / "public.json").read_text()))
+    record_evidence("reference", evidence["hf"])
+    record_evidence("thresholds", {"normalized_text_edit_distance": evidence["hf"]["threshold"]})
     assert evidence["passed"] and evidence["hf_quality"] == "passed"
+    for row in evidence["hf"]["results"]:
+        record_evidence("native", {"text": row["actual_text"]})
+        record_evidence("reference", {"text": row["text"], "token_ids": row["token_ids"]})
+        record_reference_comparison(
+            "Official reference text", {"text": row["actual_text"]},
+            {"text": row["text"], "token_ids": row["token_ids"]},
+            [{"name": "normalized_edit_distance", "scope": "independent_reference",
+              "actual": row["normalized_edit_distance"], "operator": "<=",
+              "expected": evidence["hf"]["threshold"], "passed": row["passed"]}],
+        )
 
 
 def test_catalog_case_is_the_validated_image_request() -> None:

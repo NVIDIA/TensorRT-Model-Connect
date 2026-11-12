@@ -47,6 +47,8 @@ rather than behaviour. This file does not pretend to gate them.
 
 from __future__ import annotations
 
+from tools.e2e_evidence import evidence_stage, record_evidence, record_reference_comparison
+
 import json
 import math
 import os
@@ -272,24 +274,72 @@ def _check_logits(native, reference, precision: str) -> tuple[float, float]:
     assert worst <= tolerance, (
         f"{FAMILY} {precision} logits differ from the reference by {worst}"
     )
+    record_evidence("thresholds", {"cosine_floor": _COSINE_FLOOR, "max_abs_error": tolerance})
+    record_reference_comparison(
+        "Reference logits",
+        {"logits": native},
+        {"logits": reference},
+        [
+            {
+                "name": "cosine",
+                "scope": "independent_reference",
+                "actual": cosine,
+                "operator": ">=",
+                "expected": _COSINE_FLOOR,
+                "passed": cosine >= _COSINE_FLOOR,
+            },
+            {
+                "name": "max_abs_error",
+                "scope": "independent_reference",
+                "actual": worst,
+                "operator": "<=",
+                "expected": tolerance,
+                "passed": worst <= tolerance,
+            },
+        ],
+    )
     return worst, cosine
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence(
+        "thresholds",
+        {
+            "cosine_floor": _COSINE_FLOOR,
+            "max_abs_error": _FP16_LOGIT_TOLERANCE
+            if manifest["precision"] == "fp16"
+            else _LOGIT_TOLERANCE,
+        },
+    )
     model_dir = _model_dir(manifest)
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
 
     prompt = str(case["prompt"])
-    payload = _run_json(binary, runtime_root, bundle, case, "encode", "--task",
-                        "masked_text_to_token_scores", "--text", prompt)
+    record_evidence("inputs", {"prompt": prompt})
+    with evidence_stage("native"):
+        payload = _run_json(binary, runtime_root, bundle, case, "encode", "--task",
+                            "masked_text_to_token_scores", "--text", prompt)
+    record_evidence("native", payload)
 
     # The tokenizer is gated before the logits are. ESM's tokenizer is not a
     # fast one, so the family reads vocab.txt itself and matches longest-token
     # first; an error there would otherwise surface only as a value mismatch.
-    expected_ids = _reference_ids(model_dir, prompt)
+    with evidence_stage("reference"):
+        expected_ids = _reference_ids(model_dir, prompt)
+    record_evidence("reference", {"token_ids": expected_ids})
     positions = payload["positions"]
     assert payload["score_kind"] == "logit"
     assert payload["axes"] == ["selected_position", "vocabulary_id"]
@@ -312,12 +362,16 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     columns = shape[1]
     native = [values[row * columns:(row + 1) * columns] for row in range(shape[0])]
 
-    reference_rows = _reference_logits(model_dir, expected_ids,
-                                       int(manifest["max_sequence_length"]))
+    with evidence_stage("reference"):
+        reference_rows = _reference_logits(model_dir, expected_ids,
+                                           int(manifest["max_sequence_length"]))
     reference = [reference_rows[index] for index in masked]
+    record_evidence("reference", {"logits": reference, "positions": masked})
     assert columns == len(reference[0])
 
-    worst, cosine = _check_logits(native, reference, manifest["precision"])
+    with evidence_stage("compare"):
+        worst, cosine = _check_logits(native, reference, manifest["precision"])
+    record_evidence("metrics", {"max_abs_error": worst, "cosine": cosine})
     print(
         f"{FAMILY} {manifest['precision']} parity: {shape[0]} masked positions x "
         f"{shape[1]} vocabulary, "
@@ -373,6 +427,7 @@ def test_fp16_gate_rejects_unzeroed_masked_rows(fp16_case_name: str) -> None:
     masked = [index for index, value in enumerate(ids) if value == 32]
     reference_rows = _reference_logits(model_dir, ids, window)
     reference = [reference_rows[index] for index in masked]
+    record_evidence("reference", {"logits": reference, "positions": masked})
     weights = model._open_checkpoint(model_dir)
     cfg = config_module.resolve(model_dir, weights, model._prefix(weights))
 

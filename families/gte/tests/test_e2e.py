@@ -48,6 +48,8 @@ this case; see ``_FP16_EMBEDDING_TOLERANCE``. The FP8 case (fp16 work type,
 
 from __future__ import annotations
 
+from tools.e2e_evidence import record_evidence
+
 import json
 import math
 import os
@@ -325,9 +327,11 @@ def _check_embedding(values, reference, precision: str, text: str) -> tuple[floa
     delta = max(abs(a - b) for a, b in zip(values, reference))
     cosine = _cosine(values, reference)
     floor = _FP8_COSINE_FLOOR if precision == "fp8" else _COSINE_FLOOR
+    record_evidence("thresholds", {"cosine_min": floor})
     assert cosine >= floor, f"{FAMILY} {precision} embedding cosine {cosine} for {text!r}"
     tolerance = {"fp16": _FP16_EMBEDDING_TOLERANCE, "fp8": _FP8_EMBEDDING_TOLERANCE}.get(
         precision, _EMBEDDING_TOLERANCE)
+    record_evidence("thresholds", {"embedding_max_abs": tolerance, "cosine_min": floor})
     assert delta <= tolerance, (
         f"{FAMILY} {precision} embedding for {text!r} differs from the reference by {delta}"
     )
@@ -341,6 +345,8 @@ def _native(binary, runtime_root, bundle, case, text: str, *arguments: str) -> d
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence("checkpoint", {"hf_id": manifest["hf_id"], "hf_revision": manifest.get("hf_revision")})
     model_dir = _model_dir(manifest)
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
@@ -351,7 +357,10 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     worst_cosine = 1.0
     for text in (case["query"], case["document"], case["negative_document"]):
         payload = _native(binary, runtime_root, bundle, case, str(text))
+        record_evidence("inputs", {"text": str(text)})
+        record_evidence("native", payload)
         reference = _reference(model_dir, str(text))
+        record_evidence("reference", {"values": reference})
         values = [float(value) for value in payload["values"]]
         assert len(values) == len(reference), (
             f"{FAMILY} returned {len(values)} values, reference {len(reference)}"
