@@ -67,6 +67,17 @@ def tokenizer_contract(tokenizer: dict) -> dict:
 def _runtime_config(
     config: ApertusConfig, precision: str, max_cache_length: int, tokenizer: dict
 ) -> dict:
+    contract = tokenizer_contract(tokenizer)
+    # The runtime plugin rejects token IDs outside the vocabulary when it loads the bundle
+    # (config.py already checks the EOS IDs); reject them before the engine is built.
+    for name in ("tokenizer_prefix_ids", "tokenizer_suffix_ids"):
+        if any(
+            isinstance(value, bool) or not 0 <= value < config.vocab_size
+            for value in contract[name]
+        ):
+            raise ValueError(
+                f"Apertus {name} must be inside the vocabulary [0, {config.vocab_size})"
+            )
     return {
         "vocab_size": config.vocab_size,
         "num_hidden_layers": config.num_hidden_layers,
@@ -76,7 +87,7 @@ def _runtime_config(
         "prefill_chunk_tokens": min(PREFILL_CHUNK_TOKENS, max_cache_length),
         "precision": precision,
         "eos_token_ids": list(config.eos_token_ids),
-        **tokenizer_contract(tokenizer),
+        **contract,
     }
 
 

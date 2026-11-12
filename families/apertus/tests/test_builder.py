@@ -343,3 +343,26 @@ def test_build_rejects_requests_it_cannot_honor(update):
 
     with pytest.raises((ValueError, NotImplementedError)):
         build(_request(**update), Writer())
+
+
+@pytest.mark.parametrize(
+    ("token", "ids"),
+    [("<s>", [-1]), ("<s>", [131072]), ("<s>", [True]), ("</s>", [131072])],
+)
+def test_build_rejects_tokenizer_ids_outside_the_vocabulary(tmp_path, token, ids):
+    pytest.importorskip("tensorrt")
+    from families.apertus.model import build
+
+    post_processor = copy.deepcopy(CHECKPOINT_POST_PROCESSOR)
+    post_processor["single"].append({"SpecialToken": {"id": "</s>", "type_id": 0}})
+    post_processor["special_tokens"][token]["ids"] = ids
+    (tmp_path / "config.json").write_text(json.dumps(CHECKPOINT_CONFIG))
+    (tmp_path / "generation_config.json").write_text(json.dumps(CHECKPOINT_GENERATION))
+    (tmp_path / "tokenizer.json").write_text(json.dumps({"post_processor": post_processor}))
+
+    class Writer:
+        def __getattr__(self, name):
+            raise AssertionError(f"writer.{name} must not be reached")
+
+    with pytest.raises(ValueError, match=r"tokenizer_(prefix|suffix)_ids must be inside"):
+        build(_request(model_dir=tmp_path), Writer())
