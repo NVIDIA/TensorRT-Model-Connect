@@ -995,6 +995,17 @@
       "architecture_source": null
     },
     {
+      "hf_id": "microsoft/trocr-base-printed",
+      "revision": "93450be3f1ed40a930690d951ef3932687cc1892",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "vision-encoder-decoder",
+      "architectures": [
+        "VisionEncoderDecoderModel"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "mistralai/Mistral-7B-Instruct-v0.1",
       "revision": "ec5deb64f2c6e6fa90c1abf74a91d5c93a9669ca",
       "revision_source": "resolved",
