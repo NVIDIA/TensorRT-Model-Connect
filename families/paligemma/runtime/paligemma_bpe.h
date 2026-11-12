@@ -81,6 +81,12 @@ class PaligemmaBpeTokenizer {
     std::string decode(const std::vector<int32_t>& ids,
                        const std::unordered_set<int32_t>& skipped) const;
     const PaligemmaBpeAsset& asset() const noexcept { return asset_; }
+    // Most normalized-text bytes one token covers: the longest piece, and at
+    // least one UTF-8 character (an unknown piece without byte fallback).
+    std::size_t longest_piece_bytes() const noexcept { return longest_piece_bytes_; }
+    // True when normalization can only lengthen text (no whitespace removal, no
+    // shortening rule), so the raw byte length bounds the normalized one.
+    bool normalization_never_shortens() const noexcept { return never_shortens_; }
 
   private:
     struct PieceIndex {
@@ -100,6 +106,8 @@ class PaligemmaBpeTokenizer {
     std::array<std::vector<std::string>, 256> user_defined_pieces_by_first_byte_;
     std::vector<NormalizationRule> normalization_rules_;
     std::array<int32_t, 256> byte_ids_{};
+    std::size_t longest_piece_bytes_{4};
+    bool never_shortens_{false};
 };
 
 } // namespace trtmc::paligemma

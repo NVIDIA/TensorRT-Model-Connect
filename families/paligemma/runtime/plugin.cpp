@@ -165,22 +165,23 @@ class Pipeline final : public IModel, public IImagesTextToText {
         if (requested < 1 || requested > capacity_)
             throw std::invalid_argument("PaliGemma max_new_tokens must be between 1 and the "
                                         "built sequence capacity");
+        // Prompt assembly reads only immutable state, so an oversized request is
+        // rejected before it waits for the model. The last generated token is
+        // never fed back, so it needs no cache row.
+        const auto tokenize = Clock::now();
+        const auto prompt = collect_prompt(input.messages, input.tools);
+        const auto ids =
+            prompt_ids(prompt, tokenizer_, tokens_, size_t(capacity_) - size_t(requested - 1));
+        const double tokenize_ms = elapsed(tokenize);
         std::lock_guard<std::mutex> lock(mutex_);
         const auto setup = Clock::now();
-        const auto prompt = collect_prompt(input.messages, input.tools);
-        const auto ids = prompt_ids(prompt, tokenizer_, tokens_);
-        // The last generated token is never fed back, so it needs no cache row.
-        if (ids.size() > size_t(capacity_) ||
-            size_t(requested - 1) > size_t(capacity_) - ids.size())
-            throw std::invalid_argument(
-                "PaliGemma prompt and output budget exceed the built sequence capacity");
         auto embeddings = embed(ids);
         for (size_t i = 0; i < prompt.images.size(); ++i)
             insert_image(prompt.images[i], i * size_t(tokens_.image_tokens_per_image), embeddings);
         for (auto& tensor : cache_)
             cuda_check(cudaMemsetAsync(tensor.data(), 0, tensor.nbytes(), decoder_->stream()));
         TextResult result;
-        result.setup_ms = elapsed(setup);
+        result.setup_ms = tokenize_ms + elapsed(setup);
         const auto prefill = Clock::now();
         auto logits = step(embeddings, int(ids.size()), 0);
         result.prefill_ms = elapsed(prefill);

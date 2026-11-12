@@ -85,7 +85,7 @@ tokens exactly; the BF16 bundle is held to a normalized text edit distance.
 Both also check the native prompt ids and decoded text against the reference
 processor with the tokenizer packaged in the bundle.
 
-`tests/test_graph.py` compares both FP32 engines with transformers on a seeded
-tiny random checkpoint (no download), and `tests/test_model.py` plus the CTest
+`tests/test_graph.py` compares the FP32 and BF16 engines with transformers on a
+seeded tiny random checkpoint (no download), and `tests/test_model.py` plus the CTest
 `paligemma_runtime` cover configuration, checkpoint layouts, tokenizer
 flattening and decoding, prompt assembly and the Pillow resize on CPU.

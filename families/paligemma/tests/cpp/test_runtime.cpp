@@ -12,6 +12,7 @@
 #include "families/paligemma/runtime/paligemma_bpe.h"
 #include "families/paligemma/runtime/prompt.h"
 
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
@@ -49,10 +50,10 @@ void check_throws(Function&& function, const std::string& name) {
 }
 
 // <pad> <eos> <bos> <unk>, 256 byte pieces, then a few merges and one user-defined symbol.
-PaligemmaBpeTokenizer toy_tokenizer() {
+PaligemmaBpeTokenizer toy_tokenizer(bool remove_extra_whitespaces = false) {
     PaligemmaBpeAsset asset;
     asset.add_dummy_prefix = false;
-    asset.remove_extra_whitespaces = false;
+    asset.remove_extra_whitespaces = remove_extra_whitespaces;
     asset.pad_id = 0;
     asset.eos_id = 1;
     asset.bos_id = 2;
@@ -117,13 +118,34 @@ void test_prompt() {
 
     PromptTokens tokens{500, 3, 2, {"<bos>", "<image>"}};
     const std::vector<int32_t> expected{500, 500, 500, 500, 500, 500, 2, kAb, kSpaceAb, kNewline};
-    check(prompt_ids(prompt, tokenizer, tokens) == expected,
-          "image tokens, BOS, prefix and the newline separator");
+    check(prompt_ids(prompt, tokenizer, tokens, expected.size()) == expected,
+          "image tokens, BOS, prefix and the newline separator, filling the budget exactly");
+    check_throws([&] { prompt_ids(prompt, tokenizer, tokens, expected.size() - 1); },
+                 "a prompt one token over the budget");
 
     PromptParts reserved{prompt.images, "say <bos>"};
-    check_throws([&] { prompt_ids(reserved, tokenizer, tokens); }, "a special token in the prefix");
+    check_throws([&] { prompt_ids(reserved, tokenizer, tokens, 1000); },
+                 "a special token in the prefix");
     check(reserved_text(tokenizer, {2, 500}, 500) == std::vector<std::string>{"<bos>", "<image>"},
           "reserved ids map to piece text and the image token");
+
+    // The longest toy piece is "<loc0001>" (9 bytes): 1,000,001 bytes need at least
+    // 111,112 tokens, so the prefix is refused without being tokenized.
+    PromptParts huge{{image}, std::string(1000000, 'a')};
+    check_throws([&] { prompt_ids(huge, tokenizer, tokens, 100); }, "an oversized prefix");
+    // The bound is tight but never refuses a prefix whose tokens fit: two
+    // "<loc0001>" pieces and the newline are 3 tokens in 19 bytes, the least
+    // the bound allows (ceil(19 / 9) = 3).
+    PromptParts dense{{image}, "<loc0001><loc0001>"};
+    check(prompt_ids(dense, tokenizer, tokens, 3 + 1 + 3).size() == 7,
+          "a prefix of longest pieces that fits exactly is accepted");
+    check_throws([&] { prompt_ids(dense, tokenizer, tokens, 3 + 1 + 2); },
+                 "a prefix of longest pieces one token over the budget");
+    // Whitespace removal shortens text, so the bound uses the normalized length.
+    const auto squeezing = toy_tokenizer(true);
+    PromptParts spaced{{image}, "a" + std::string(60, ' ') + "b"};
+    check(prompt_ids(spaced, squeezing, tokens, 3 + 1 + 4).size() == 8,
+          "collapsed whitespace is measured after normalization");
     check_throws([&] { reserved_text(tokenizer, {9999}, 500); },
                  "a reserved id outside the vocabulary");
 
@@ -157,13 +179,25 @@ void test_resize(const std::string& path) {
               "Pillow bicubic " + std::to_string(height) + "x" + std::to_string(width) + " -> " +
                   item.at("out_h").dump() + "x" + item.at("out_w").dump());
     }
-    // Normalization: (v / 255 - 0.5) / 0.5 per channel, planar output.
-    const std::vector<std::uint8_t> flat(2 * 2 * 3, 255);
+    // Normalization: rescale, then (v - mean) / std per channel, planar CHW output.
+    // Distinct channels and statistics catch interleaved output and channel swaps.
+    std::vector<std::uint8_t> rgb(2 * 2 * 3);
+    for (size_t pixel = 0; pixel < 4; ++pixel) {
+        rgb[pixel * 3 + 0] = 255;
+        rgb[pixel * 3 + 1] = 0;
+        rgb[pixel * 3 + 2] = 51;
+    }
     ImageNormalization config;
     config.size = 2;
-    const auto pixels = preprocess_image(flat.data(), 2, 2, config);
-    check(pixels.size() == 12 && pixels[0] == 1.0F && pixels[11] == 1.0F,
-          "rescale and normalize to [-1, 1]");
+    config.mean = {0.5F, 0.5F, 0.0F};
+    config.std = {0.5F, 0.5F, 1.0F};
+    const auto pixels = preprocess_image(rgb.data(), 2, 2, config);
+    bool planar = pixels.size() == 12;
+    for (size_t index = 0; planar && index < 12; ++index) {
+        const float expected = index < 4 ? 1.0F : index < 8 ? -1.0F : 0.2F;
+        planar = std::fabs(pixels[index] - expected) < 1e-6F;
+    }
+    check(planar, "per-channel rescale and normalize into planar CHW");
 }
 } // namespace
 
