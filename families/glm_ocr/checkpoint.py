@@ -21,6 +21,8 @@ import ml_dtypes  # noqa: F401  (registers bfloat16 with NumPy for safetensors)
 import numpy as np
 from safetensors import safe_open
 
+from .chat_template import check_chat_template
+
 _MODEL_TYPE = "glm_ocr"
 _ARCHITECTURE = "GlmOcrForConditionalGeneration"
 _IMAGE_PROCESSOR = "Glm46VImageProcessor"
@@ -259,16 +261,6 @@ def _eos_token_ids(model_dir: Path, raw: dict) -> tuple[int, ...]:
     return tuple(int(v) for v in values)
 
 
-def _check_chat_template(model_dir: Path) -> None:
-    """The native renderer reproduces this checkpoint's template; refuse a template without its markers."""
-    path = model_dir / "chat_template.jinja"
-    _require(path.is_file(), "checkpoint has no chat_template.jinja")
-    template = path.read_text(encoding="utf-8")
-    for marker in ("[gMASK]<sop>", "<|user|>", "<|assistant|>", "<|system|>",
-                   "<|begin_of_image|><|image|><|end_of_image|>", "<think></think>"):
-        _require(marker in template, f"chat template lacks {marker!r}")
-
-
 def load_config(model_dir: Path) -> GlmOcrConfig:
     raw = _read_json(model_dir / "config.json")
     _require(raw.get("model_type") == _MODEL_TYPE, f"model_type must be {_MODEL_TYPE}")
@@ -279,7 +271,7 @@ def load_config(model_dir: Path) -> GlmOcrConfig:
              "vision out_hidden_size must equal the decoder hidden size")
     processor = _processor_config(model_dir, vision)
     prompt_ids, special = _tokenizer_facts(model_dir)
-    _check_chat_template(model_dir)
+    check_chat_template(model_dir / "chat_template.jinja")
     config = GlmOcrConfig(
         text=text,
         vision=vision,

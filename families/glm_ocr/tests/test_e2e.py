@@ -294,6 +294,10 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path_factory) -> None:
     assert worst <= _BF16_LOGIT_TOLERANCE, (
         f"{FAMILY} bf16 token at step {deficits.index(worst)} is {worst:.3f} logits below the "
         f"official FP32 maximum")
+    # The bf16 tokens may differ from FP32's; the native text must be the reference decoding of
+    # the native tokens.
+    processor, _ = _official(str(model_dir), "float32")
+    assert payload["text"] == processor.decode(tokens, skip_special_tokens=True)
     reference, text = _official_generation(model_dir, image, case, "float32")
     print(f"{FAMILY} bf16 {case_name}: {len(tokens)} tokens, largest FP32 deficit {worst:.4f}, "
           f"identical to the FP32 tokens: {tokens == reference}")
@@ -330,8 +334,9 @@ _CONVERSATIONS = [
 
 
 def _host_selected(request) -> None:
-    if not _selected_cases(request.config)[1]:
-        pytest.skip("host parity requires one of the three explicit E2E selectors")
+    names, enabled = _selected_cases(request.config)
+    if not enabled or not names:
+        pytest.skip("host parity requires an explicit E2E selector that selects a glm_ocr case")
 
 
 def _host_model_dir() -> Path:
