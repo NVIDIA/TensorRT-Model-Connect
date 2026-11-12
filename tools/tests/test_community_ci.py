@@ -684,7 +684,7 @@ def test_gpu_status_and_cleanup_fail_closed(
     assert cleanup_result.returncode == 73, cleanup_result.stderr
     assert cleanup_result.stdout.splitlines() == [
         "-m tools.community_gpu_lease --cleanup-all "
-        f"--lease-directory {tmp_path}/gpu-ci-all-leases --use-journal --timeout 1200 --unknown-timeout 180",
+        f"--lease-directory {tmp_path}/gpu-ci-all-leases --timeout 1200 --unknown-timeout 180",
     ]
     _workflow_plan(tmp_path)
     # Execute the real workflow script with remote operations stubbed. A copy
@@ -3617,7 +3617,7 @@ def test_independent_cleanup_verifies_every_original_attempt_and_propagates_fail
     assert result.returncode == cleanup_exit, result.stdout + result.stderr
     assert harness.events("reconcile") == [
         "-m tools.community_gpu_lease --cleanup-all "
-        f"--lease-directory {tmp_path}/gpu-ci-all-leases --use-journal --timeout 1200 --unknown-timeout 180",
+        f"--lease-directory {tmp_path}/gpu-ci-all-leases --timeout 1200 --unknown-timeout 180",
     ]
     assert not harness.events("brev")
     assert not harness.events("provision")
@@ -3801,13 +3801,6 @@ def _cleanup_evidence(
     repository = "example/repository"
     prefix = f"repos/{repository}/actions/runs/123"
     responses = {
-        f"repos/{repository}": {"id": 5, "full_name": repository, "default_branch": "main"},
-        f"repos/{repository}/actions/artifacts?name=community-gpu-recovery-journal&per_page=100&page=1": {
-            "artifacts": []
-        },
-        f"repos/{repository}/actions/workflows/community-gpu-recovery.yml/runs?per_page=30&page=1": {
-            "workflow_runs": []
-        },
         prefix: {
             "id": 123,
             "head_sha": "a" * 40,
@@ -4080,12 +4073,17 @@ def test_gpu_lease_survives_reservation_and_cleanup_with_a_trusted_backstop(gpu_
         "persist-credentials": False,
     }
     delete = cleanup_steps["Delete every original GPU allocation"]
-    assert delete["env"] == {"GH_TOKEN": "${{ github.token }}"}
+    assert delete["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
+        "TASK": "${{ inputs.task }}",
+        "SOURCE_RUN_ID": "${{ inputs.cleanup_run_id }}",
+    }
     assert "needs.provision-and-test.outputs" not in str(delete)
     assert "always()" in delete["if"]
     assert "steps.cleanup-checkout.outcome == 'success'" in delete["if"]
     assert "steps.cleanup-login.outcome == 'success'" in delete["if"]
-    assert "python3 -m tools.community_gpu_lease --cleanup-all" in delete["run"]
+    assert "mode=(--cleanup-all)" in delete["run"]
+    assert 'python3 -m tools.community_gpu_lease "${mode[@]}"' in delete["run"]
     assert "|| true" not in delete["run"]
     assert "-r2" not in delete["run"] and "-r3" not in delete["run"]
 
@@ -4193,6 +4191,7 @@ def test_cleanup_job_admits_trusted_reruns_after_current_cpu_failure(tmp_path, u
     workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
     condition = workflow["jobs"]["cleanup"]["if"].strip().removeprefix("${{").removesuffix("}}")
     context = {
+        "github.repository": "NVIDIA/TensorRT-Model-Connect",
         "github.event_name": "workflow_dispatch",
         "github.run_attempt": 2,
         "github.ref": "refs/heads/ci/developer",
@@ -5855,3 +5854,94 @@ def test_actual_workflow_diagnostic_keeps_unknown_allocation_and_no_case_passes(
     assert ("Resource recovery remains unconfirmed" in text) is (recovery != "true")
     assert "original operational journals" in text
     assert not list(tmp_path.glob("*lease*"))
+
+
+@pytest.mark.parametrize(
+    "role,allowed",
+    [("admin", True), ("maintain", True), ("write", False), ("read", False), ("", False)],
+)
+def test_cleanup_only_request_requires_maintainer_permission(tmp_path, role, allowed):
+    script = _workflow_step_script(
+        "community-ci.yml", "cleanup", "Authorize a cleanup-only request"
+    )
+    result = subprocess.run(
+        ["bash", "-c", 'gh() { printf "%s\\n" "$TEST_ROLE"; }\n' + script],
+        env={
+            **os.environ,
+            "GITHUB_REF": "refs/heads/ci/developer",
+            "GITHUB_REPOSITORY": "example/project",
+            "ACTOR": "maintainer",
+            "SOURCE_RUN_ID": "123",
+            "TEST_ROLE": role,
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert (result.returncode == 0) is allowed
+
+
+@pytest.mark.parametrize(
+    "ref,repository,event,expected",
+    [
+        ("refs/heads/ci/developer", "NVIDIA/TensorRT-Model-Connect", "workflow_dispatch", True),
+        ("refs/heads/main", "NVIDIA/TensorRT-Model-Connect", "workflow_dispatch", True),
+        ("refs/heads/topic", "NVIDIA/TensorRT-Model-Connect", "workflow_dispatch", False),
+        ("refs/heads/main", "example/fork", "workflow_dispatch", False),
+        ("refs/heads/main", "NVIDIA/TensorRT-Model-Connect", "pull_request", False),
+    ],
+)
+def test_manual_cleanup_can_run_without_cpu_or_pr_authorization(ref, repository, event, expected):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    condition = workflow["jobs"]["cleanup"]["if"].strip().removeprefix("${{").removesuffix("}}")
+    context = {
+        "github.repository": repository,
+        "github.ref": ref,
+        "github.event_name": event,
+        "github.run_attempt": 1,
+        "inputs.task": "cleanup",
+        "inputs.source_snapshot": "",
+        "needs.gpu-authorize.result": "skipped",
+        "needs.gpu-authorize.outputs.run_gpu": "",
+    }
+    for key, value in context.items():
+        condition = condition.replace(key, repr(value))
+    admitted = eval(
+        condition.replace("&&", " and ").replace("||", " or ").strip(),
+        {"__builtins__": {}},
+        {"always": lambda: True},
+    )
+    assert admitted is expected
+    for job in ("snapshot", "authorize", "required"):
+        assert "inputs.task == 'test'" in workflow["jobs"][job]["if"]
+
+
+@pytest.mark.parametrize("cleanup_exit", [0, 75])
+def test_manual_cleanup_routes_to_source_without_allocation(tmp_path, cleanup_exit):
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/community-ci.yml").read_text())
+    harness = JobHarness(tmp_path, workflow["jobs"]["cleanup"])
+    result = harness.run(
+        "release", TASK="cleanup", SOURCE_RUN_ID="456", VM_CLEANUP_EXIT=str(cleanup_exit)
+    )
+    assert result.returncode == cleanup_exit
+    assert harness.events("reconcile") == [
+        "-m tools.community_gpu_lease --cleanup-run 456 "
+        f"--lease-directory {tmp_path}/gpu-ci-all-leases --timeout 1200 --unknown-timeout 180"
+    ]
+    assert not harness.events("provision") and not harness.events("brev")
+
+
+@pytest.mark.parametrize("paused,allowed", [("false", True), ("true", False), ("invalid", False)])
+def test_pause_policy_blocks_new_requests_but_allows_cleanup(tmp_path, gpu_job, paused, allowed):
+    harness = JobHarness(tmp_path, gpu_job)
+    result = harness.run("Check new GPU request policy", GPU_REQUESTS_PAUSED=paused)
+    assert (result.returncode == 0) is allowed
+    assert not harness.events("prepare") and not harness.events("provision")
+    release = harness.run("release", GPU_REQUESTS_PAUSED=paused)
+    assert release.returncode == 0 and len(harness.events("cleanup")) == 1
+    names = [step["name"] for step in gpu_job["steps"]]
+    assert (
+        names.index("Release every earlier allocation attempt")
+        < names.index("Check new GPU request policy")
+        < names.index("Prepare the GPU allocation intent")
+    )

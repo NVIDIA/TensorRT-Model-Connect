@@ -7,6 +7,7 @@ import copy
 import hashlib
 import io
 import json
+import sys
 import zipfile
 
 import pytest
@@ -16,6 +17,13 @@ from tools import community_gpu_lease as recovery
 
 SHA = "a" * 40
 REPOSITORY = "example/project"
+
+
+def _clock(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(recovery.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(recovery.time, "sleep", lambda delay: now.__setitem__(0, now[0] + delay))
+    return now
 
 
 def _producer(attempt=1):
@@ -1182,3 +1190,198 @@ def test_check_report_cli_writes_only_read_only_report_outputs(
         "report_available": str(present and not invalid).lower(),
         "report_check_unconfirmed": str(invalid).lower(),
     }
+
+
+def test_unavailable_evidence_exits_without_claiming_release(monkeypatch, tmp_path):
+    now = _clock(monkeypatch)
+
+    def unavailable(*args):
+        raise recovery.RecoveryError("unavailable")
+
+    monkeypatch.setattr(recovery, "_context", unavailable)
+    with pytest.raises(recovery.RecoveryError, match="budget"):
+        recovery.cleanup_attempts(
+            REPOSITORY,
+            123,
+            2,
+            SHA,
+            tmp_path,
+            prior_only=True,
+            timeout=20,
+            unknown_timeout=3,
+        )
+    assert now[0] == 3
+    assert recovery.EVIDENCE_DEADLINE.get() is None
+
+
+def test_unknown_lease_hands_off_without_losing_identity(monkeypatch, tmp_path):
+    now = _clock(monkeypatch)
+    lease, artifact, _ = _fixture()
+    lease.update(instance_id=None, create_accepted=False, allocation_pending=True)
+    archive = _archive(lease)
+    artifact["digest"] = "sha256:" + hashlib.sha256(archive).hexdigest()
+    _api_fixture(
+        monkeypatch,
+        artifacts=[artifact],
+        archives={
+            f"repos/{REPOSITORY}/actions/artifacts/201/zip": archive,
+        },
+    )
+    calls = []
+
+    def unresolved(name, *, lease_file, timeout):
+        calls.append(timeout)
+        now[0] += timeout
+        raise recovery.ProvisionError("provider unavailable")
+
+    monkeypatch.setattr(recovery, "cleanup", unresolved)
+    with pytest.raises(recovery.RecoveryError, match="budget"):
+        recovery.cleanup_attempts(
+            REPOSITORY,
+            123,
+            2,
+            SHA,
+            tmp_path,
+            prior_only=True,
+            timeout=20,
+            unknown_timeout=3,
+        )
+    assert calls == [3] and now[0] == 3
+    saved = json.loads((tmp_path / "1" / recovery.LEASE_FILE).read_text())
+    assert saved["name"] == lease["name"] and saved["instance_id"] is None
+    assert not saved.get("cleanup_confirmed", False)
+
+
+def test_learned_instance_receives_known_cleanup_budget(monkeypatch, tmp_path):
+    now = _clock(monkeypatch)
+    _api_fixture(monkeypatch)
+    calls = []
+
+    def unavailable(name, *, lease_file, timeout):
+        calls.append(timeout)
+        now[0] += timeout
+        raise recovery.ProvisionError("provider unavailable")
+
+    monkeypatch.setattr(recovery, "cleanup", unavailable)
+    with pytest.raises(recovery.RecoveryError, match="budget"):
+        recovery.cleanup_attempts(
+            REPOSITORY,
+            123,
+            2,
+            SHA,
+            tmp_path,
+            prior_only=True,
+            timeout=20,
+            unknown_timeout=3,
+        )
+    assert calls == [3, 17] and now[0] == 20
+
+
+def _manual_source(monkeypatch):
+    calls, responses = _api_fixture(monkeypatch)
+    responses[f"repos/{REPOSITORY}"] = {"id": 5, "full_name": REPOSITORY}
+    source = responses[f"repos/{REPOSITORY}/actions/runs/123"]
+    source.update(
+        event="workflow_dispatch",
+        head_branch="ci/developer",
+        status="completed",
+        run_attempt=2,
+        head_repository={"id": 5},
+    )
+    return calls, responses, source
+
+
+def _manual_cli(monkeypatch, tmp_path):
+    monkeypatch.setenv("GITHUB_REPOSITORY", REPOSITORY)
+    monkeypatch.setenv("GITHUB_RUN_ID", "999")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "7")
+    monkeypatch.setenv("GITHUB_SHA", "b" * 40)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "output"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "lease",
+            "--cleanup-run",
+            "123",
+            "--lease-directory",
+            str(tmp_path / "leases"),
+            "--timeout",
+            "20",
+            "--unknown-timeout",
+            "3",
+        ],
+    )
+
+
+def test_manual_cleanup_uses_original_run_not_dispatch_identity(monkeypatch, tmp_path):
+    calls, _, _ = _manual_source(monkeypatch)
+    _manual_cli(monkeypatch, tmp_path)
+    deleted = []
+    monkeypatch.setattr(recovery, "cleanup", lambda name, **kwargs: deleted.append(name))
+    assert recovery.main() == 0
+    assert deleted == ["trtmc-gpu-ci-123-1"]
+    assert not any("runs/999" in path for path in calls)
+    assert (tmp_path / "output").read_text() == "cleanup_confirmed=true\n"
+    assert recovery.EVIDENCE_DEADLINE.get() is None
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("id", 999),
+        ("event", "pull_request"),
+        ("head_branch", "contributor/topic"),
+        ("status", "in_progress"),
+        ("path", ".github/workflows/other.yml"),
+        ("head_sha", "invalid"),
+        ("run_attempt", True),
+        ("run_attempt", 0),
+        ("head_repository", {"id": 6}),
+        ("repository", {"id": 6, "full_name": REPOSITORY}),
+    ],
+)
+def test_manual_cleanup_rejects_untrusted_or_active_source(
+    monkeypatch,
+    tmp_path,
+    field,
+    value,
+):
+    _, _, source = _manual_source(monkeypatch)
+    source[field] = value
+    _manual_cli(monkeypatch, tmp_path)
+    deleted = []
+    monkeypatch.setattr(recovery, "cleanup", lambda *args, **kwargs: deleted.append(args))
+    assert recovery.main() == 75
+    assert not deleted and not (tmp_path / "output").exists()
+
+
+def test_manual_cleanup_rejects_a_live_original_owner(monkeypatch, tmp_path):
+    now = _clock(monkeypatch)
+    _, responses, _ = _manual_source(monkeypatch)
+    owner = responses[f"repos/{REPOSITORY}/actions/runs/123/jobs?filter=all&per_page=100&page=1"][
+        "jobs"
+    ][0]
+    owner["status"] = "in_progress"
+    _manual_cli(monkeypatch, tmp_path)
+    deleted = []
+    monkeypatch.setattr(recovery, "cleanup", lambda *args, **kwargs: deleted.append(args))
+    assert recovery.main() == 75
+    assert now[0] == 3 and not deleted
+
+
+@pytest.mark.parametrize(
+    "state,head,allowed",
+    [
+        ("open", SHA, True),
+        ("closed", SHA, False),
+        ("open", "b" * 40, False),
+    ],
+)
+def test_queued_pr_must_still_be_open_on_the_same_head(monkeypatch, state, head, allowed):
+    monkeypatch.setattr(recovery, "_api", lambda path: {"state": state, "head": {"sha": head}})
+    if allowed:
+        assert recovery.check_pr(REPOSITORY, 17, SHA) == {}
+    else:
+        with pytest.raises(recovery.RecoveryError, match="closed or its head changed"):
+            recovery.check_pr(REPOSITORY, 17, SHA)

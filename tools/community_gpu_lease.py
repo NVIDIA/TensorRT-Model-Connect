@@ -333,23 +333,6 @@ def _recover_producer(
     try:
         _save_lease(temporary, lease)
         _load_lease(temporary, lease["name"])
-        _save_lease(
-            destination.with_suffix(".authority.json"),
-            {
-                "repository": repository,
-                "repository_id": run["repository"]["id"],
-                "run_id": producer["run_id"],
-                "run_attempt": producer["run_attempt"],
-                "workflow_sha": producer["head_sha"],
-                "producer_id": producer["id"],
-                "producer_completed_at": producer["completed_at"],
-                "origin_digest": artifact["digest"],
-                "base_lease_digest": hashlib.sha256(
-                    json.dumps(lease, sort_keys=True, separators=(",", ":")).encode()
-                ).hexdigest(),
-                "base_checked_at": "1970-01-01T00:00:00Z",
-            },
-        )
         temporary.replace(destination)
     finally:
         temporary.unlink(missing_ok=True)
@@ -406,7 +389,6 @@ def cleanup_attempts(
     prior_only: bool,
     timeout: float = 600,
     unknown_timeout: float | None = None,
-    journal: dict | None = None,
 ) -> dict:
     if not math.isfinite(timeout) or timeout <= 0:
         raise RecoveryError("GPU recovery requires a finite positive budget")
@@ -427,7 +409,6 @@ def cleanup_attempts(
             prior_only=prior_only,
             deadline=deadline,
             unknown_deadline=unknown_deadline,
-            journal=journal,
         )
     finally:
         EVIDENCE_DEADLINE.reset(token)
@@ -443,7 +424,6 @@ def _cleanup_attempts(
     prior_only: bool,
     deadline: float,
     unknown_deadline: float,
-    journal: dict | None,
 ) -> dict:
     """Release every original owner before a rerun may allocate again.
 
@@ -514,23 +494,7 @@ def _cleanup_attempts(
                 try:
                     if owner_attempt not in recovered:
                         destination = directory / str(owner_attempt) / LEASE_FILE
-                        restored = False
-                        if journal is not None:
-                            if (
-                                journal.get("repository") != repository
-                                or journal.get("repository_id") != run["repository"]["id"]
-                            ):
-                                raise RecoveryError(
-                                    "The recovery journal belongs to another repository"
-                                )
-                            from tools.community_gpu_recovery import restore_record
-
-                            restored = restore_record(journal, producer, destination)
-                        result = (
-                            {"instance_name": f"trtmc-gpu-ci-{run_id}-{owner_attempt}"}
-                            if restored
-                            else _recover_producer(repository, prefix, run, producer, destination)
-                        )
+                        result = _recover_producer(repository, prefix, run, producer, destination)
                         if result.get("cleanup_confirmed") == "true":
                             confirmed.add(owner_attempt)
                             continue
@@ -677,64 +641,110 @@ def prune_reported_artifacts(repository: str, run_id: int, attempt: int, sha: st
     return {"removed_artifacts": str(removed)}
 
 
+def check_pr(repository: str, number: int, head: str) -> dict:
+    if type(number) is not int or number < 1 or not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise RecoveryError("The requested PR identity is invalid")
+    pull = _api(f"repos/{repository}/pulls/{number}")
+    if (
+        not isinstance(pull, dict)
+        or pull.get("state") != "open"
+        or not isinstance(pull.get("head"), dict)
+        or pull["head"].get("sha") != head
+    ):
+        raise RecoveryError("The PR closed or its head changed; no new allocation requested")
+    return {}
+
+
+def cleanup_run_identity(repository: str, run_id: int) -> tuple[str, int, int, str]:
+    """Resolve only a completed trusted source run, never the cleanup dispatch."""
+    if type(run_id) is not int or run_id < 1:
+        raise RecoveryError("An original Community CI run ID is required")
+    info = _api(f"repos/{repository}")
+    run = _api(f"repos/{repository}/actions/runs/{run_id}")
+    if (
+        not isinstance(info, dict)
+        or info.get("full_name") != repository
+        or type(info.get("id")) is not int
+        or not isinstance(run, dict)
+        or run.get("id") != run_id
+        or run.get("event") != "workflow_dispatch"
+        or run.get("head_branch") not in {"main", "ci/developer"}
+        or run.get("path") != ".github/workflows/community-ci.yml"
+        or run.get("status") != "completed"
+        or type(run.get("run_attempt")) is not int
+        or run["run_attempt"] < 1
+        or not re.fullmatch(r"[0-9a-f]{40}", str(run.get("head_sha")))
+        or not isinstance(run.get("repository"), dict)
+        or run["repository"].get("full_name") != repository
+        or run["repository"].get("id") != info["id"]
+        or not isinstance(run.get("head_repository"), dict)
+        or run["head_repository"].get("id") != info["id"]
+    ):
+        raise RecoveryError("Manual cleanup requires a completed trusted Community CI run")
+    return repository, run_id, run["run_attempt"], run["head_sha"]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--lease-file", type=Path)
     mode.add_argument("--cleanup-prior", action="store_true")
     mode.add_argument("--cleanup-all", action="store_true")
+    mode.add_argument("--cleanup-run", type=int)
+    mode.add_argument("--check-pr", action="store_true")
     mode.add_argument("--prune-reported-artifacts", action="store_true")
     mode.add_argument("--check-report", action="store_true")
     parser.add_argument("--lease-directory", type=Path)
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--unknown-timeout", type=float)
-    parser.add_argument("--use-journal", action="store_true")
+    parser.add_argument("--pr-number", type=int)
+    parser.add_argument("--head-sha", default="")
     args = parser.parse_args()
     if not math.isfinite(args.timeout) or args.timeout <= 0:
         parser.error("--timeout must be finite and positive")
     deadline = time.monotonic() + args.timeout
     token = EVIDENCE_DEADLINE.set(deadline)
     try:
-        identity = (
-            os.environ["GITHUB_REPOSITORY"],
-            int(os.environ["GITHUB_RUN_ID"]),
-            int(os.environ["GITHUB_RUN_ATTEMPT"]),
-            os.environ["GITHUB_SHA"],
-        )
-        if args.check_report:
-            result = check_report(*identity)
-        elif args.prune_reported_artifacts:
-            result = prune_reported_artifacts(*identity)
-        elif args.lease_file:
-            result = recover(*identity, args.lease_file)
+        repository = os.environ["GITHUB_REPOSITORY"]
+        if args.check_pr:
+            result = check_pr(repository, args.pr_number, args.head_sha)
         else:
-            if args.lease_directory is None:
-                raise RecoveryError("A directory is required for original allocation leases")
-            journal = None
-            if args.use_journal and not (args.cleanup_prior and identity[2] == 1):
-                from tools.community_gpu_recovery import load_journal
-
-                try:
-                    journal = load_journal(identity[0])
-                except RecoveryError:
-                    print(
-                        "Recovery checkpoint unavailable; reconciling original owner evidence.",
-                        file=sys.stderr,
-                    )
-            result = cleanup_attempts(
-                *identity,
-                args.lease_directory,
-                prior_only=args.cleanup_prior,
-                timeout=max(0, deadline - time.monotonic()),
-                unknown_timeout=args.unknown_timeout,
-                journal=journal,
+            identity = (
+                cleanup_run_identity(repository, args.cleanup_run)
+                if args.cleanup_run is not None
+                else (
+                    repository,
+                    int(os.environ["GITHUB_RUN_ID"]),
+                    int(os.environ["GITHUB_RUN_ATTEMPT"]),
+                    os.environ["GITHUB_SHA"],
+                )
             )
+            if args.check_report:
+                result = check_report(*identity)
+            elif args.prune_reported_artifacts:
+                result = prune_reported_artifacts(*identity)
+            elif args.lease_file:
+                result = recover(*identity, args.lease_file)
+            else:
+                if args.lease_directory is None:
+                    raise RecoveryError("A directory is required for original allocation leases")
+                result = cleanup_attempts(
+                    *identity,
+                    args.lease_directory,
+                    prior_only=args.cleanup_prior,
+                    timeout=max(0, deadline - time.monotonic()),
+                    unknown_timeout=args.unknown_timeout,
+                )
         with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
             for key, value in result.items():
                 output.write(f"{key}={value}\n")
         return 0
     except (KeyError, ValueError, RuntimeError, OSError):
-        print("ERROR: Original GPU lease recovery remains unconfirmed.", file=sys.stderr)
+        print(
+            "ERROR: GPU request or release remains unconfirmed. Preserve the original lease; "
+            "use the trusted Community CI cleanup task to investigate before retrying allocation.",
+            file=sys.stderr,
+        )
         return 75
     finally:
         EVIDENCE_DEADLINE.reset(token)

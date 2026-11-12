@@ -6,7 +6,7 @@ name: Community CI
 # Community CI GPU promotion v1
 
 run-name: >-
-  ${{ (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.source_snapshot == '')) && format('Community CI · PR #{0}', github.event.pull_request.number || inputs.pr_number) || github.event_name == 'pull_request' && format('PR #{0} · community CI · head {1} · merge {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.sha) || format('{0} Community CI · PR #{1} · head {2} · merge {3}', inputs.ci_lane == 'dev' && 'Dev' || 'Stable', inputs.pr_number, fromJSON(inputs.source_snapshot || '{}').head_sha, fromJSON(inputs.source_snapshot || '{}').merge_sha) }}
+  ${{ github.event_name == 'workflow_dispatch' && inputs.task == 'cleanup' && format('Community GPU cleanup · run #{0}', inputs.cleanup_run_id) || (github.event_name == 'pull_request_target' || (github.event_name == 'workflow_dispatch' && inputs.source_snapshot == '')) && format('Community CI · PR #{0}', github.event.pull_request.number || inputs.pr_number) || github.event_name == 'pull_request' && format('PR #{0} · community CI · head {1} · merge {2}', github.event.pull_request.number, github.event.pull_request.head.sha, github.sha) || format('{0} Community CI · PR #{1} · head {2} · merge {3}', inputs.ci_lane == 'dev' && 'Dev' || 'Stable', inputs.pr_number, fromJSON(inputs.source_snapshot || '{}').head_sha, fromJSON(inputs.source_snapshot || '{}').merge_sha) }}
 
 # Keep the legacy pull_request CPU check compatible with existing consumers.
 # Trusted metadata pins one source snapshot for protected execution lanes.
@@ -21,11 +21,15 @@ on:
   workflow_dispatch:
     inputs:
       task:
-        description: Compatibility input for PR test dispatches
+        description: Run PR tests or clean an earlier GPU allocation
         required: false
         type: choice
         default: test
-        options: [test]
+        options: [test, cleanup]
+      cleanup_run_id:
+        description: Original Community CI run ID (required for cleanup only)
+        required: false
+        type: string
       pr_number:
         description: Open pull request number to test
         required: false
@@ -1096,7 +1100,7 @@ jobs:
       name: gpu-ci-dispatch
       deployment: false
     # Model execution retains its budget; resource recovery has shorter,
-    # explicit budgets and hands unresolved leases to the recovery workflow.
+    # explicit budgets and preserves unresolved leases for manual cleanup.
     timeout-minutes: 360
     concurrency:
       group: trtmc-community-gpu-${{ inputs.ci_lane }}-${{ needs.gpu-authorize.outputs.pr_number }}
@@ -1134,7 +1138,7 @@ jobs:
           PR_NUMBER: ${{ needs.gpu-authorize.outputs.pr_number }}
           HEAD_SHA: ${{ needs.gpu-authorize.outputs.head_sha }}
         run: |
-          python3 -m tools.community_gpu_recovery --check-pr \
+          python3 -m tools.community_gpu_lease --check-pr \
             --pr-number "$PR_NUMBER" --head-sha "$HEAD_SHA" --timeout 60
 
       - name: Select the qualified host RAM profile
@@ -1245,20 +1249,18 @@ jobs:
           set -euo pipefail
           python3 -m tools.community_gpu_lease --cleanup-prior \
             --lease-directory "$RUNNER_TEMP/gpu-ci-prior-leases" \
-            --use-journal --timeout 1200 --unknown-timeout 180
+            --timeout 1200 --unknown-timeout 180
 
-      - name: Admit the current GPU request
-        timeout-minutes: 3
+      - name: Check new GPU request policy
+        timeout-minutes: 1
         env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ needs.gpu-authorize.outputs.pr_number }}
-          HEAD_SHA: ${{ needs.gpu-authorize.outputs.head_sha }}
-          TRTMC_GPU_MAX_UNRESOLVED: ${{ vars.TRTMC_GPU_MAX_UNRESOLVED || '5' }}
-          TRTMC_GPU_ALLOCATION_COOLDOWN: ${{ vars.TRTMC_GPU_ALLOCATION_COOLDOWN || '900' }}
+          GPU_REQUESTS_PAUSED: ${{ vars.TRTMC_COMMUNITY_GPU_PAUSED || 'false' }}
         run: |
-          python3 -m tools.community_gpu_recovery --admit \
-            --pr-number "$PR_NUMBER" --head-sha "$HEAD_SHA" --timeout 120 \
-            --prior-directory "$RUNNER_TEMP/gpu-ci-prior-leases"
+          case "$GPU_REQUESTS_PAUSED" in
+            false) ;;
+            true) echo "::error::New GPU requests are paused; existing jobs and cleanup may continue."; exit 1 ;;
+            *) echo "::error::Invalid GPU pause policy; no new instance requested."; exit 1 ;;
+          esac
 
       - name: Prepare the GPU allocation intent
         id: prepare
@@ -1329,19 +1331,6 @@ jobs:
           if-no-files-found: error
           # Preserve ownership through GitHub's 30-day rerun window.
           retention-days: 35
-
-      - name: Confirm GPU admission before reservation
-        timeout-minutes: 3
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ needs.gpu-authorize.outputs.pr_number }}
-          HEAD_SHA: ${{ needs.gpu-authorize.outputs.head_sha }}
-          TRTMC_GPU_MAX_UNRESOLVED: ${{ vars.TRTMC_GPU_MAX_UNRESOLVED || '5' }}
-          TRTMC_GPU_ALLOCATION_COOLDOWN: ${{ vars.TRTMC_GPU_ALLOCATION_COOLDOWN || '900' }}
-        run: |
-          python3 -m tools.community_gpu_recovery --admit \
-            --pr-number "$PR_NUMBER" --head-sha "$HEAD_SHA" --timeout 120 \
-            --prior-directory "$RUNNER_TEMP/gpu-ci-prior-leases"
 
       - name: Reserve a GPU instance
         id: reserve
@@ -1809,6 +1798,9 @@ jobs:
       needs.gpu-authorize.outputs.run_gpu == 'true') ||
       (github.event_name == 'workflow_dispatch' && github.run_attempt > 1 &&
       inputs.source_snapshot != '' && inputs.task == 'test' &&
+      (github.ref == 'refs/heads/ci/developer' || github.ref == 'refs/heads/main')) ||
+      (github.repository == 'NVIDIA/TensorRT-Model-Connect' &&
+      github.event_name == 'workflow_dispatch' && inputs.task == 'cleanup' &&
       (github.ref == 'refs/heads/ci/developer' || github.ref == 'refs/heads/main'))) }}
     runs-on: ubuntu-24.04
     environment:
@@ -1822,7 +1814,22 @@ jobs:
       cleanup_confirmed: ${{ steps.release.outputs.cleanup_confirmed || steps.no_allocation.outputs.cleanup_confirmed }}
 
     steps:
+      - name: Authorize a cleanup-only request
+        if: ${{ inputs.task == 'cleanup' }}
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTOR: ${{ github.actor }}
+          SOURCE_RUN_ID: ${{ inputs.cleanup_run_id }}
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REF" in refs/heads/main|refs/heads/ci/developer) ;; *) exit 1 ;; esac
+          [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          role="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" --jq '.role_name')"
+          case "$role" in maintain|admin) ;; *) echo "::error::Cleanup requires maintain or admin permission."; exit 1 ;; esac
+
       - name: Confirm an initial skipped allocation
+        if: ${{ inputs.task != 'cleanup' }}
         id: no_allocation
         env:
           RESERVE_OUTCOME: ${{ needs.provision-and-test.outputs.reserve_outcome }}
@@ -1884,34 +1891,38 @@ jobs:
         if: ${{ always() && steps.no_allocation.outputs.cleanup_confirmed != 'true' && steps.cleanup-checkout.outcome == 'success' && steps.cleanup-login.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
+          TASK: ${{ inputs.task }}
+          SOURCE_RUN_ID: ${{ inputs.cleanup_run_id }}
         run: |
           set -euo pipefail
           # Original producer metadata and immutable artifacts remain available
           # when outputs disappear. Reconcile every attempt, never only the last.
-          python3 -m tools.community_gpu_lease --cleanup-all \
+          mode=(--cleanup-all)
+          if [ "${TASK:-test}" = cleanup ]; then mode=(--cleanup-run "$SOURCE_RUN_ID"); fi
+          python3 -m tools.community_gpu_lease "${mode[@]}" \
             --lease-directory "$RUNNER_TEMP/gpu-ci-all-leases" \
-            --use-journal --timeout 1200 --unknown-timeout 180
+            --timeout 1200 --unknown-timeout 180
 
-      - name: Checkpoint recovery progress
-        if: ${{ always() && steps.cleanup-checkout.outcome == 'success' }}
-        timeout-minutes: 1
+      - name: Summarize a cleanup-only request
+        if: ${{ always() && inputs.task == 'cleanup' }}
+        env:
+          SOURCE_RUN_ID: ${{ inputs.cleanup_run_id }}
+          RELEASE_CONFIRMED: ${{ steps.release.outputs.cleanup_confirmed }}
         run: |
-          python3 -m tools.community_gpu_recovery \
-            --export-progress "$RUNNER_TEMP/gpu-ci-all-leases" \
-            --journal-file "$RUNNER_TEMP/recovery-progress/journal.json"
-
-      - name: Publish recovery progress
-        if: ${{ always() && steps.cleanup-checkout.outcome == 'success' }}
-        timeout-minutes: 2
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: community-gpu-recovery-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/recovery-progress/journal.json
-          if-no-files-found: ignore
-          retention-days: 90
+          {
+            echo '### Manual GPU cleanup'
+            if [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+              printf '\nSource: [run %s](%s/%s/actions/runs/%s)\n' "$SOURCE_RUN_ID" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$SOURCE_RUN_ID"
+            fi
+            if [ "$RELEASE_CONFIRMED" = true ]; then
+              echo 'Resource release confirmed. The original test result remains unchanged.'
+            else
+              echo 'Release remains unconfirmed. Preserve the original lease and investigate before another allocation. Retry cleanup when the provider is healthy.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Keep the verified HTML as the final artifact
-        if: ${{ always() && steps.cleanup-checkout.outcome == 'success' && (steps.release.outputs.cleanup_confirmed == 'true' || steps.no_allocation.outputs.cleanup_confirmed == 'true') }}
+        if: ${{ always() && inputs.task != 'cleanup' && steps.cleanup-checkout.outcome == 'success' && (steps.release.outputs.cleanup_confirmed == 'true' || steps.no_allocation.outputs.cleanup_confirmed == 'true') }}
         timeout-minutes: 5
         # Artifact housekeeping must not invalidate confirmed VM recovery.
         continue-on-error: true

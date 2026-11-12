@@ -5567,3 +5567,53 @@ def test_missing_gpu_summary_reports_infra_without_blame_or_unproven_execution(t
     assert "CI preparation failure (infra_failure)" in rendered
     assert "family entrypoint execution is not confirmed" in rendered
     assert "GPU CI passed" not in rendered
+
+def test_unknown_cleanup_returns_on_short_budget_and_late_vm_can_be_cleaned(
+    fake, clock, monkeypatch
+):
+    fake.provision(prepare_only=True)
+    api = _OwnedInstances(clock)
+    monkeypatch.setattr(brev_provision, "_cleanup_request", api)
+    start = clock.now
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=900, unknown_timeout=3)
+    saved = _rate_limit_lease(fake)
+    assert clock.now - start == 3
+    assert saved["phase"] == "unresolved" and not saved["cleanup_confirmed"]
+    assert not saved.get("ownership_blocked", False)
+    assert saved["allocation_pending"] and not fake.creates
+    # A later manual cleanup reuses the same original lease; no second create.
+    late = _OwnedInstances(clock, ["late-created"])
+    monkeypatch.setattr(brev_provision, "_cleanup_request", late)
+    assert brev_provision.cleanup("gpu", lease_file=fake.lease, timeout=900) == "gpu"
+    assert not late.instances and _rate_limit_lease(fake)["cleanup_confirmed"]
+    assert not fake.creates
+
+
+def test_cleanup_deadline_is_not_an_ownership_conflict(monkeypatch, tmp_path):
+    lease = {
+        "schema_version": 1,
+        "name": "gpu",
+        "sku": "gpu-fixture.1",
+        "organization_id": "org-fixture",
+        "instance_id": None,
+        "create_started": True,
+        "create_accepted": False,
+        "allocation_pending": True,
+    }
+    path = tmp_path / "lease.json"
+    brev_provision._save_lease(path, lease)
+    monkeypatch.setattr(brev_provision.time, "monotonic", lambda: 0.0)
+    monkeypatch.setattr(
+        brev_provision, "_cleanup_request", lambda *args: (200, {"id": "org-fixture"})
+    )
+
+    def expire(*args, **kwargs):
+        brev_provision._remaining(-1)
+
+    monkeypatch.setattr(brev_provision, "_instance", expire)
+    with pytest.raises(brev_provision.ProvisionError, match="unconfirmed"):
+        brev_provision.cleanup("gpu", lease_file=path, timeout=1)
+    saved = json.loads(path.read_text())
+    assert saved["phase"] == "unresolved" and not saved["cleanup_confirmed"]
+    assert not saved.get("ownership_blocked", False)
