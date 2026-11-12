@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# torch reads the official pytorch_model.bin with weights_only=True; 2.10.0 or
+# newer carries the restricted-loading security fix. The reference path in the
+# tests is transformers' own HubertForCTC plus its processor, pinned to the
+# repository's release: unpinned, this file alone resolves a newer transformers
+# with a tokenizers and huggingface-hub that the repository's pin excludes. No
+# torchaudio: the family reads the waveform directly and its only frontend is a
+# mean/variance normalisation.
+transformers==5.2.0
+torch>=2.10.0

@@ -1,0 +1,22 @@
+{
+  "name": "hubert-large-ls960-ft",
+  "hf_id": "facebook/hubert-large-ls960-ft",
+  "hf_revision": "ece5fabbf034c1073acae96d5401b25be96709d8",
+  "bundle": "hubert-large-ls960-ft.bundle",
+  "family": "hubert",
+  "task": "speech_transcription",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "hubert-large-ls960-ft",
+      "premerge": true,
+      "test_input_audio": "data/speech_16k_mono.wav"
+    },
+    {
+      "name": "hubert-large-ls960-ft-librispeech",
+      "premerge": true,
+      "test_input_audio": "data/librispeech-test-clean-6930-75918-0003.wav"
+    }
+  ],
+  "tensor_parallel_size": 1
+}
