@@ -8,6 +8,20 @@ Transformer layers with self-attention KV cache and cross-attention to the
 encoder output). The manifests build fp16, and fp32 with the tensor-parallel
 decoder (4 GPUs).
 
+## Stage times
+
+Each transcription result reports three wall-clock times, measured on the
+request thread:
+
+| Field | Stage |
+|---|---|
+| `setup_ms` | audio frontend on the CPU: resampling and mel features |
+| `prefill_ms` | encoder and cross-attention setup |
+| `decode_ms` | decoder loop: prompt and generated steps |
+
+A batched call shares each stage's time equally among the segments that ran
+it. With the tensor-parallel decoder every rank reports its own times.
+
 ## Quantization
 
 `--precision fp16 --quantization fp8` quantizes the original `.nemo` checkpoint
