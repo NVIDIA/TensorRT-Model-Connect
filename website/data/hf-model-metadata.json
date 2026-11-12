@@ -986,6 +986,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "microsoft/VibeVoice-1.5B",
+      "revision": "c00898d257e6b46004e3e2866a47534085fb685a",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "vibevoice",
+      "architectures": [
+        "VibeVoiceForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "microsoft/deberta-base",
       "revision": "0d1b43ccf21b5acd9f4e5f7b077fa698f05cf195",
       "revision_source": "resolved",

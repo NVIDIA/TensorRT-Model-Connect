@@ -1,0 +1,36 @@
+{
+  "name": "vibevoice-1.5b-fp32",
+  "hf_id": "microsoft/VibeVoice-1.5B",
+  "hf_revision": "c00898d257e6b46004e3e2866a47534085fb685a",
+  "hf_dependencies": [
+    {
+      "repo_id": "Qwen/Qwen2.5-1.5B",
+      "revision": "8faed761d45a263340a0528343f099c05c9a4323"
+    },
+    {
+      "repo_id": "openai/whisper-large-v3-turbo",
+      "revision": "41f01f3fe87f28c78e2fbf8b568835947dd65ed9"
+    }
+  ],
+  "bundle": "vibevoice-1.5b-fp32.bundle",
+  "family": "vibevoice",
+  "task": "text_to_speech",
+  "precision": "fp32",
+  "max_sequence_length": 4096,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "vibevoice-1.5b-fp32-single",
+      "text": "Hello! This is a short test of a new speech model. The weather today is sunny and warm.",
+      "seed": 42,
+      "max_new_tokens": 400
+    },
+    {
+      "name": "vibevoice-1.5b-fp32-long-prompt",
+      "text": "Speaker 1: Welcome back to the program. Today we have a long conversation planned about the history of weather forecasting, from the first barometers to the satellites that circle the planet today. It is a story about curiosity, patience, and a great deal of mathematics.\nSpeaker 2: Thank you for having me. I have always loved this topic, because every forecast you hear on the radio is the result of centuries of work by people who wanted to know what the sky would do tomorrow.\nSpeaker 1: Let us start at the beginning. When did people first try to measure the atmosphere instead of simply looking at the clouds?\nSpeaker 2: The barometer was invented in the seventeenth century, and soon after that people noticed that falling pressure often came before storms. Sailors, farmers, and scientists began to keep careful notes every single day.\nSpeaker 1: And those notes became the first weather records, which is remarkable when you think about how much we rely on them now.\nSpeaker 2: Exactly. In the nineteenth century the telegraph changed everything, because observations from distant towns could finally be collected in one place on the same afternoon. For the first time, people could draw a map of the weather as it was happening.\nSpeaker 1: That must have felt like magic. What came after the maps?\nSpeaker 2: Mathematics. Early in the twentieth century, scientists wrote down the equations that describe how air moves and how heat flows. Solving them by hand was so slow that the forecast took longer to compute than the weather took to arrive.\nSpeaker 1: So computers were the missing piece.\nSpeaker 2: They were. The first computer forecasts in the nineteen fifties were rough, but they proved the idea worked. Since then, faster machines, better equations, and satellites have made forecasts more accurate every decade.\nSpeaker 1: That is a wonderful place to pause. When we come back, we will talk about how forecasters measure their own mistakes and learn from them.\nSpeaker 2: I am looking forward to it. Forecast verification is one of the quiet success stories of modern science, and most listeners have never heard of it.\nSpeaker 1: Then we will make sure they hear about it today. Thank you all for listening, and stay with us for the second half of the show.\nSpeaker 2: Before we go, one small piece of advice for anyone who checks the forecast every morning: look at the chance of rain as a number you can use, not a promise. A forecast that says thirty percent means that on days like this one, it rained about three times out of ten, and that is still very useful information for planning a picnic or a long walk in the hills.",
+      "seed": 9,
+      "max_new_tokens": 120,
+      "truncated": true
+    }
+  ]
+}
