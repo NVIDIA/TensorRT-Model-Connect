@@ -14,7 +14,7 @@ torch = pytest.importorskip("torch")
 from families.internvl.config import ModelConfig  # noqa: E402
 from families.internvl.default_dual_profile_decoder import build_dual_profile_decoder_engine  # noqa: E402
 
-HIDDEN, HEADS, KV_HEADS, HEAD_DIM, MLP, VOCAB, LAYERS, CACHE = 256, 2, 1, 128, 256, 64, 2, 32
+HIDDEN, HEADS, KV_HEADS, HEAD_DIM, MLP, VOCAB, LAYERS, CACHE = 512, 4, 2, 128, 256, 64, 2, 32
 MASKED = -1.0e4
 
 

@@ -148,6 +148,31 @@ def _cache_rows(
     return rows.get_output(0)
 
 
+def _native_gqa_attention(
+    network: trt.INetworkDefinition,
+    q: trt.ITensor,
+    k: trt.ITensor,
+    v: trt.ITensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    mask: trt.ITensor,
+    scale: float,
+    tag: str,
+) -> trt.ITensor:
+    """Masked IAttention over row-major Q [Sq, H*D] and K/V [L, Hkv*D], with the
+    K/V heads passed as they are (IAttention is grouped-query aware) instead of
+    repeated to every query head."""
+    q_4d = graph_ops.reshape_rows_to_heads_4d(network, q, num_heads, head_dim, tag=tag + ".q")
+    k_4d = graph_ops.reshape_rows_to_heads_4d(network, k, num_kv_heads, head_dim, tag=tag + ".k")
+    v_4d = graph_ops.reshape_rows_to_heads_4d(network, v, num_kv_heads, head_dim, tag=tag + ".v")
+    context = graph_ops.add_attention_core(network, q_4d, k_4d, v_4d, mask=mask, scale=scale)
+    return graph_ops.reshape_heads_4d_to_rows(
+        network, context, num_heads * head_dim, tag=tag + ".ctx"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main builder.
 # ---------------------------------------------------------------------------
@@ -195,8 +220,9 @@ def build_dual_profile_decoder_engine(
     ``valid_prefix_attention`` makes the attention read only the valid cache
     rows: the caller passes an ``attention_mask`` of shape (Sq, past + Sq), the
     engine slices ``cache_k/v[0:past]`` and attends over those rows plus the
-    new ones. Without it every step attends over all ``max_cache_length`` rows
-    behind the additive mask.
+    new ones with grouped-query IAttention and the boolean form of the mask
+    (K/V heads are not repeated per query head). Without it every step
+    attends over all ``max_cache_length`` rows behind the additive mask.
 
     """
     _supports_config(config, weights)
@@ -470,6 +496,19 @@ def build_dual_profile_decoder_engine(
         )
     else:
         mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask_work)
+    visible_4d = None
+    if valid_prefix_attention:
+        # Every additive-mask entry is 0 (visible) or -1e4 (hidden). IAttention
+        # takes the boolean form, with which Myelin keeps prefill fused (with the
+        # additive form it does not). The mask stays: IAttention's causal flag is
+        # aligned to the first key, wrong for a step on a non-empty cache. A
+        # decode step's mask is all visible, so TensorRT 11.4 ignoring masks in
+        # its single-query kernel cannot change the result.
+        zero = graph_ops.add_constant(
+            network, (1, 1), np.zeros((1, 1), np.float32), dtype=np.float32
+        )
+        visible = network.add_elementwise(attention_mask, zero, trt.ElementWiseOperation.EQUAL)
+        visible_4d = graph_ops.add_2d_mask_to_4d(network, visible.get_output(0))
 
     present_k_outs: list[trt.ITensor] = []
     present_v_outs: list[trt.ITensor] = []
@@ -571,23 +610,35 @@ def build_dual_profile_decoder_engine(
         all_v_cat = network.add_concatenation([cache_v_rows, v])
         all_v_cat.axis = 0
 
-        context = graph_ops.add_attention_from_rows(
-            network,
-            q,
-            all_k_cat.get_output(0),
-            all_v_cat.get_output(0),
-            num_heads=num_heads,
-            head_dim=head_dim,
-            num_kv_heads=num_kv_heads,
-            q_seq=None,
-            kv_seq=None,
-            # IAttention's causal mask is aligned to the first key, so a decode
-            # step over a valid prefix still needs the additive mask.
-            causal=False,
-            mask=mask_4d,
-            scale=attn_scale,
-            tag=f"{prefix}.attn",
-        )
+        if visible_4d is not None:
+            context = _native_gqa_attention(
+                network,
+                q,
+                all_k_cat.get_output(0),
+                all_v_cat.get_output(0),
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                mask=visible_4d,
+                scale=attn_scale,
+                tag=f"{prefix}.attn",
+            )
+        else:
+            context = graph_ops.add_attention_from_rows(
+                network,
+                q,
+                all_k_cat.get_output(0),
+                all_v_cat.get_output(0),
+                num_heads=num_heads,
+                head_dim=head_dim,
+                num_kv_heads=num_kv_heads,
+                q_seq=None,
+                kv_seq=None,
+                causal=False,
+                mask=mask_4d,
+                scale=attn_scale,
+                tag=f"{prefix}.attn",
+            )
 
         attn_out = matmul(
             context, attention_size, hidden, weights[f"{prefix}.w_o"], f"{prefix}.w_o"

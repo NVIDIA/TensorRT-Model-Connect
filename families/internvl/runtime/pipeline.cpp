@@ -534,6 +534,9 @@ bool InternVlPipeline::run_vl_prefill_batched(
         return false;
 
     kv_cache->bind_cache_inputs(*prefill_);
+    // Valid-prefix decoders write the prompt's K/V straight into the cache
+    // (no device copies, and no host download of the present outputs).
+    const bool kv_in_place = kv_cache->bind_present_to_cache_rows(*prefill_, sq);
     auto embedding_inputs =
         build_vl_sequence_embedding_inputs(input_ids, config_.image_token_id, image_features,
                                            deepstack_features, num_features, feature_dim);
@@ -546,6 +549,10 @@ bool InternVlPipeline::run_vl_prefill_batched(
     auto outputs = prefill_->forward(inputs);
     if (!copy_last_prefill_logits(outputs, config_.vocab_size, logits))
         return false;
+    if (kv_in_place) {
+        kv_cache->commit_cache_rows(sq);
+        return true;
+    }
 
     std::vector<const void*> present_k;
     std::vector<const void*> present_v;
