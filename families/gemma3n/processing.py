@@ -147,6 +147,23 @@ def validate_tokenizer(tokenizer: dict, config) -> dict:
     return {token: ids[token] for token in SPECIAL_TOKENS}
 
 
+def validate_bos_token(root: Path) -> None:
+    """Check that the reference adds no special tokens to a rendered prompt.
+
+    Transformers encodes a rendered chat without the tokenizer's post-processor
+    (which adds ``<bos>`` in Gemma 3n checkpoints) only when the text starts
+    with the tokenizer's BOS token; every rendered prompt starts with ``<bos>``
+    and the runtime adds no tokens of its own.
+    """
+    tokens = []
+    for name in ("tokenizer_config.json", "special_tokens_map.json"):
+        path = root / name
+        if path.is_file() and (token := _load(path).get("bos_token")) is not None:
+            tokens.append(token.get("content") if isinstance(token, dict) else token)
+    if not tokens or any(token != "<bos>" for token in tokens):
+        raise NotImplementedError("gemma3n requires the tokenizer BOS token <bos>")
+
+
 def validate_image_processor(processor: dict) -> float:
     """Check the image processing the runtime implements; return the rescale factor."""
     if processor.get("image_processor_type") not in ("SiglipImageProcessorFast", "SiglipImageProcessor"):
@@ -173,6 +190,7 @@ def validate_processing(root: Path, config) -> dict:
     root = Path(root)
     validate_chat_template(chat_template(root))
     special = validate_tokenizer(_load(root / "tokenizer.json"), config)
+    validate_bos_token(root)
     rescale = validate_image_processor(_load(root / "preprocessor_config.json"))
     processor = root / "processor_config.json"
     if processor.is_file() and _load(processor).get("image_seq_length", 256) != config.soft_tokens_per_image:

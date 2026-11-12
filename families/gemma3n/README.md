@@ -21,9 +21,11 @@ at revision `45e9fb1dd0e34db5ff9db1f43a49ac5d8e8b8778` (7.85 B parameters stored
 
 The runtime renders the chat template, tokenizes, resizes images (antialiased bilinear on 8-bit
 pixels, as the reference image processor's torchvision path does) and runs the decode loop. The
-build refuses tokenizer pipelines and image-processor settings the runtime does not implement, and
-chat templates that render a set of probe conversations differently from the runtime (rendered with
-Jinja2 as Transformers does).
+build refuses tokenizer pipelines and image-processor settings the runtime does not implement; chat
+templates that render a set of probe conversations differently from the runtime (rendered with
+Jinja2 as Transformers does); a tokenizer BOS token other than `<bos>`, with which Transformers adds
+special tokens to the rendered prompt; and a language-model head that is not tied to the token
+embeddings.
 
 ## Precision and limits
 
@@ -49,9 +51,10 @@ TRTMC_BINARY=<build>/trtmc TRTMC_RUNTIME_ROOT=<build> TRTMC_NATIVE_BUILD_DIR=<bu
 
 The E2E builds each manifest's bundle and runs five conversations (one image, a system prompt, two
 images, a multi-turn follow-up and float32 pixels) through the C++ SDK consumer, one of them through
-the C SDK consumer and the CLI. Against the Transformers model in FP32, the native prompt token ids of
-every conversation (on the checkpoint's tokenizer) must be the reference processor's; FP32 bundles
-must reproduce the reference's greedy tokens exactly; BF16 bundles are checked teacher-forced against
+the C SDK consumer and the CLI, which must return the same tokens and text. Against the Transformers
+model in FP32, the native prompt token ids of every conversation (on the checkpoint's tokenizer) must
+be the reference processor's, and the native text the reference tokenizer's decoding of the native
+tokens; FP32 bundles must reproduce the reference's greedy tokens exactly; BF16 bundles are checked teacher-forced against
 the FP32 reference within the logit margin in `tests/thresholds/`, which is the reference model's own
 BF16 error on the gap between its two best tokens along these conversations. `test_gemma3n_processing`
 (CTest) checks the tokenizer, the image resize and the chat rendering against goldens recorded from

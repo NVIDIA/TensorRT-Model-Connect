@@ -13,6 +13,7 @@ import pytest
 
 from families.gemma3n import processing
 from families.gemma3n.config import ModelConfig
+from families.gemma3n.support import describe
 from tensorrt_model_connect.model_support import ModelMetadata, resolve_family
 
 DATA = Path(__file__).resolve().parent / "data"
@@ -58,10 +59,12 @@ def test_gemma3n_has_one_owner_with_one_task():
     assert support.default_precision == "bf16"
 
 
-def test_earlier_gemma_generations_stay_with_their_owner():
-    for model_type in ("gemma3", "gemma3_text", "gemma4"):
-        name, _ = resolve_family(ModelMetadata(config={"model_type": model_type}, model_index={}))
-        assert name == "gemma"
+def test_earlier_gemma_generations_are_declined():
+    for model_type, architecture in (("gemma3", "Gemma3ForConditionalGeneration"),
+                                     ("gemma3_text", "Gemma3ForCausalLM"),
+                                     ("gemma4", "Gemma4ForConditionalGeneration")):
+        config = {"model_type": model_type, "architectures": [architecture]}
+        assert describe(ModelMetadata(config=config, model_index={})) is None
 
 
 def test_kv_sharing_follows_the_last_owner_of_each_attention_type():
@@ -97,6 +100,14 @@ def test_rope_bases_resolve_from_either_config_format():
 def test_unsupported_text_configurations_are_refused(change, error):
     with pytest.raises(error):
         ModelConfig.from_raw(_config(**change))
+
+
+def test_untied_language_model_head_is_refused():
+    top_level = copy.deepcopy(CONFIG)
+    top_level["tie_word_embeddings"] = False
+    for raw in (top_level, _config(tie_word_embeddings=False)):
+        with pytest.raises(NotImplementedError, match="tied language-model head"):
+            ModelConfig.from_raw(raw)
 
 
 def test_vision_tower_and_vocabularies_are_checked():
@@ -150,17 +161,86 @@ def test_image_processing_is_the_implemented_one():
             processing.validate_image_processor(_image_processor(**change))
 
 
-def test_tokenizer_pipeline_is_checked_on_the_fixture():
-    tokenizer = json.loads((DATA / "tokenizer_fixture.json").read_text(encoding="utf-8"))
-    config = ModelConfig.from_raw(CONFIG)
-    altered = copy.deepcopy(tokenizer)
-    altered["normalizer"] = {"type": "NFC"}
-    with pytest.raises(NotImplementedError, match="normalizer"):
-        processing.validate_tokenizer(altered, config)
-    altered = copy.deepcopy(tokenizer)
-    altered["added_tokens"][0]["lstrip"] = True
-    with pytest.raises(NotImplementedError, match="verbatim"):
-        processing.validate_tokenizer(altered, config)
-    # The fixture's vocabulary is smaller than the model's, which is refused.
-    with pytest.raises(ValueError, match="vocabulary"):
-        processing.validate_tokenizer(tokenizer, config)
+def _fixture_tokenizer() -> dict:
+    return json.loads((DATA / "tokenizer_fixture.json").read_text(encoding="utf-8"))
+
+
+def _fixture_config(**ids) -> ModelConfig:
+    """A model configuration whose vocabularies match the 291-token fixture."""
+    raw = copy.deepcopy(CONFIG)
+    raw.update({"image_token_id": 278, "boi_token_id": 279, "eoi_token_id": 280, **ids})
+    raw["text_config"].update(vocab_size=291, vocab_size_per_layer_input=278)
+    raw["vision_config"].update(vocab_offset=278, vocab_size=6)
+    raw["audio_config"].update(vocab_offset=284, vocab_size=7)
+    return ModelConfig.from_raw(raw)
+
+
+def _rename_token(tokenizer: dict, old: str, new: str) -> None:
+    vocab = tokenizer["model"]["vocab"]
+    vocab[new] = vocab.pop(old)
+
+
+def _drop_added_token(tokenizer: dict, content: str) -> None:
+    tokenizer["added_tokens"] = [token for token in tokenizer["added_tokens"]
+                                 if token["content"] != content]
+
+
+# One change each to a fixture that passes every check: (change, error, message).
+TOKENIZER_CHANGES = {
+    "normalizer": (lambda t: t.update(normalizer={"type": "NFC"}), NotImplementedError,
+                   "normalizer"),
+    "decoder": (lambda t: t["decoder"]["decoders"].pop(), NotImplementedError, "decoder"),
+    "dropout": (lambda t: t["model"].update(dropout=0.1), NotImplementedError, "without dropout"),
+    "added token flags": (lambda t: t["added_tokens"][0].update(lstrip=True), NotImplementedError,
+                          "verbatim"),
+    "vocabulary size": (lambda t: t["model"]["vocab"].update({"<extra>": 291}), ValueError,
+                        "vocabulary"),
+    "merges as strings": (lambda t: t["model"].update(
+        merges=[" ".join(pair) for pair in t["model"]["merges"]]), NotImplementedError, "merges"),
+    "byte-fallback token": (lambda t: _rename_token(t, "<0x41>", "<0x41>?"), ValueError,
+                            "byte-fallback token"),
+    "added token id": (lambda t: t["added_tokens"][2].update(id=3), ValueError,
+                       "disagree with the vocabulary"),
+    "special token": (lambda t: _drop_added_token(t, "<start_of_image>"), ValueError,
+                      "special token"),
+}
+
+
+def test_tokenizer_fixture_passes_the_pipeline_checks():
+    assert processing.validate_tokenizer(_fixture_tokenizer(), _fixture_config()) == {
+        "<bos>": 2, "<start_of_turn>": 276, "<end_of_turn>": 277, "<start_of_image>": 279,
+        "<image_soft_token>": 278, "<end_of_image>": 280}
+
+
+@pytest.mark.parametrize("name", sorted(TOKENIZER_CHANGES))
+def test_tokenizer_changes_are_refused_one_at_a_time(name):
+    change, error, message = TOKENIZER_CHANGES[name]
+    tokenizer = _fixture_tokenizer()
+    change(tokenizer)
+    with pytest.raises(error, match=message):
+        processing.validate_tokenizer(tokenizer, _fixture_config())
+
+
+def test_special_token_ids_must_match_the_model_config():
+    # Token 281 lies in the vision vocabulary but is not the image placeholder.
+    with pytest.raises(ValueError, match="<image_soft_token> id"):
+        processing.validate_tokenizer(_fixture_tokenizer(), _fixture_config(image_token_id=281))
+
+
+@pytest.mark.parametrize("files, accepted", [
+    ({"tokenizer_config.json": {"bos_token": "<bos>"}}, True),
+    ({"tokenizer_config.json": {"bos_token": {"content": "<bos>", "special": True}},
+      "special_tokens_map.json": {"bos_token": {"content": "<bos>"}}}, True),
+    ({"tokenizer_config.json": {"bos_token": "<s>"}}, False),
+    ({"tokenizer_config.json": {}}, False),
+    ({"tokenizer_config.json": {"bos_token": "<bos>"},
+      "special_tokens_map.json": {"bos_token": "<eos>"}}, False),
+])
+def test_reference_must_skip_special_tokens_on_rendered_prompts(tmp_path, files, accepted):
+    for name, content in files.items():
+        (tmp_path / name).write_text(json.dumps(content), encoding="utf-8")
+    if accepted:
+        processing.validate_bos_token(tmp_path)
+    else:
+        with pytest.raises(NotImplementedError, match="BOS token"):
+            processing.validate_bos_token(tmp_path)
