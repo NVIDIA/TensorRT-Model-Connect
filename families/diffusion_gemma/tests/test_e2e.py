@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import json
 import os
-import re
+import string
 import subprocess
 import sys
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,12 @@ def pytest_generate_tests(metafunc) -> None:
         if (not models or {FAMILY, MANIFEST["name"], name} & models)
         and (not cases or name in cases)
     ]
+    direct_paths = {ROOT.resolve(), ROOT.parent.resolve(), Path(__file__).resolve()}
+    direct = any(Path(str(value).split("::", 1)[0]).resolve() in direct_paths for value in config.args)
+    requested_family = bool(models & {FAMILY, MANIFEST["name"]})
+    requested_case = any(value.startswith((FAMILY, "diffusiongemma-")) for value in cases)
+    if explicit and not selected and (direct or requested_family or requested_case):
+        raise pytest.UsageError(f"No diffusion_gemma E2E testcase matches the explicit selectors: {sorted(models | cases)}")
     if not explicit:
         selected = [pytest.param(name, marks=pytest.mark.skip(
             reason="Exact checkpoint E2E requires an explicit E2E selector"
@@ -55,19 +62,31 @@ def pytest_generate_tests(metafunc) -> None:
 def _path(variable: str) -> Path:
     value = os.environ.get(variable)
     assert value, f"Selected {FAMILY} E2E requires {variable}"
-    path = Path(value).resolve()
+    # Preserve virtual-environment Python symlinks and their isolated dependencies.
+    path = Path(value).absolute()
     assert path.exists(), f"{variable} does not exist: {path}"
     return path
 
 
 def _checkpoint(manifest: dict) -> Path:
     if os.environ.get("TRTMC_DIFFUSION_GEMMA_MODEL_DIR"):
-        return _path("TRTMC_DIFFUSION_GEMMA_MODEL_DIR")
-    from huggingface_hub import snapshot_download
+        path = _path("TRTMC_DIFFUSION_GEMMA_MODEL_DIR").resolve()
+    else:
+        from huggingface_hub import snapshot_download
 
-    return Path(snapshot_download(
-        manifest["hf_id"], revision=manifest["hf_revision"], local_files_only=True,
-    ))
+        path = Path(snapshot_download(
+            manifest["hf_id"], revision=manifest["hf_revision"], local_files_only=True,
+        )).resolve()
+    assert path.name == manifest["hf_revision"], (
+        f"Selected {FAMILY} E2E requires the snapshot directory for revision "
+        f"{manifest['hf_revision']}, got {path}"
+    )
+    return path
+
+
+def normalized_answer(value: str) -> str:
+    value = unicodedata.normalize("NFKC", value).casefold()
+    return " ".join(value.strip().strip(string.punctuation + "\u2018\u2019\u201c\u201d").split())
 
 
 def _run(arguments: list[str], *, output: Path, environment: dict[str, str]) -> None:
@@ -239,5 +258,5 @@ def test_checkpoint_native_and_reference(case_name: str, tmp_path: Path) -> None
          output=artifacts / "native-generation.log", environment=environment)
     result = json.loads(generation_output.read_text())
     assert 0 < len(result["token_ids"]) <= case["max_new_tokens"]
-    assert re.search(r"\b" + re.escape(case["expected_answer"]) + r"\b", result["text"], re.I)
+    assert normalized_answer(result["text"]) == normalized_answer(case["expected_answer"])
     assert result["prefill_ms"] >= 0 and result["decode_ms"] > 0

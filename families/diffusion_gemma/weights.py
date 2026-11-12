@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import struct
 
 import ml_dtypes
@@ -33,21 +34,51 @@ class Checkpoint:
         self.config = config
         index = self.directory / "model.safetensors.index.json"
         self._headers: dict[str, tuple[Path, int, dict]] = {}
+        self._cache_files: dict[Path, Path] | None = None
         if index.is_file():
             document = json.loads(index.read_text())
             self._locations = document.get("weight_map")
             if not isinstance(self._locations, dict) or not self._locations:
                 raise ValueError("diffusion_gemma checkpoint has no safetensors weight map")
         else:
-            path, _, header = self._read_header("model.safetensors")
-            self._locations = {name: path.name for name in header if name != "__metadata__"}
+            _, _, header = self._read_header("model.safetensors")
+            self._locations = {name: "model.safetensors" for name in header if name != "__metadata__"}
+
+    def _shard_path(self, filename: str) -> Path:
+        if not isinstance(filename, str) or not filename or Path(filename).name != filename or filename in {".", ".."}:
+            raise ValueError("diffusion_gemma weight shard must be inside the checkpoint directory")
+        lexical = self.directory / filename
+        path = lexical.resolve()
+        if path.parent == self.directory:
+            return path
+        repository = self.directory.parent.parent
+        blobs = repository / "blobs"
+        if (not lexical.is_symlink() or self.directory.parent.name != "snapshots"
+                or not re.fullmatch(r"[0-9a-f]{40}", self.directory.name)
+                or blobs.is_symlink() or path.parent != blobs
+                or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", path.name)):
+            raise ValueError("diffusion_gemma weight shard must be inside the checkpoint directory or its verified Hub cache")
+        if self._cache_files is None:
+            from huggingface_hub import scan_cache_dir
+
+            # The Hub inventory establishes repository/revision/file provenance;
+            # no family-owned content fingerprint is introduced.
+            self._cache_files = {
+                cached.file_path: cached.blob_path
+                for repo in scan_cache_dir(repository.parent).repos
+                if repo.repo_type == "model" and repo.repo_path == repository
+                for revision in repo.revisions
+                if revision.snapshot_path == self.directory and revision.commit_hash == self.directory.name
+                for cached in revision.files
+            }
+        if self._cache_files.get(lexical) != path:
+            raise ValueError("diffusion_gemma weight shard is not verified by the Hub cache inventory")
+        return path
 
     def _read_header(self, filename: str) -> tuple[Path, int, dict]:
         if filename in self._headers:
             return self._headers[filename]
-        path = (self.directory / filename).resolve()
-        if path.parent != self.directory:
-            raise ValueError("diffusion_gemma weight shard must be inside the checkpoint directory")
+        path = self._shard_path(filename)
         with path.open("rb") as stream:
             length_bytes = stream.read(8)
             if len(length_bytes) != 8:

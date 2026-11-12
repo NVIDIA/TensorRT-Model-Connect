@@ -32,6 +32,7 @@ def test_checkpoint_global_and_sliding_attention_have_distinct_shapes():
     ("attention_bias", True), ("hidden_activation", "silu"),
     ("rms_norm_eps", float("nan")), ("final_logit_softcapping", 0),
     ("use_bidirectional_attention", "all"),
+    ("sliding_window", 1),
 ])
 def test_unsupported_mathematical_contracts_are_rejected(key, value):
     raw = checkpoint_config()
@@ -52,3 +53,26 @@ def test_causal_gemma_checkpoint_is_not_a_diffusion_model():
     raw["model_type"] = "gemma4"
     with pytest.raises(ValueError, match="diffusion_gemma checkpoint"):
         Config.from_dict(raw)
+
+
+@pytest.mark.parametrize("factor", [0, 2, -1, True, float("nan"), float("inf")])
+def test_nondefault_rope_factor_is_rejected(factor):
+    raw = checkpoint_config()
+    raw["text_config"]["rope_parameters"]["full_attention"]["factor"] = factor
+    with pytest.raises(ValueError, match="factor=1"):
+        Config.from_dict(raw)
+
+
+def test_smallest_runtime_window_and_default_rope_factor_are_valid():
+    raw = checkpoint_config()
+    raw["text_config"]["sliding_window"] = 2
+    raw["text_config"]["rope_parameters"]["full_attention"]["factor"] = 1
+    assert Config.from_dict(raw).text_config["sliding_window"] == 2
+
+
+def test_direct_rope_graph_does_not_ignore_a_nondefault_factor():
+    from families.diffusion_gemma.graph import rope_tables
+    raw = checkpoint_config()["text_config"]
+    raw["rope_parameters"]["full_attention"]["factor"] = 2
+    with pytest.raises(ValueError, match="factor=1"):
+        rope_tables(raw, 5, 16)

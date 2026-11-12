@@ -62,7 +62,7 @@ PYTHONPATH=core/builder:apps/benchmark:. \
 TRTMC_BINARY=/absolute/native-build/trtmc \
 TRTMC_RUNTIME_ROOT=/absolute/native-build \
 TRTMC_NATIVE_BUILD_DIR=/absolute/native-build \
-TRTMC_DIFFUSION_GEMMA_MODEL_DIR=/absolute/checkpoint \
+TRTMC_DIFFUSION_GEMMA_MODEL_DIR=/absolute/snapshots/f7f5b7f5fa82ffc52addd066915886d497f5517b \
 TRTMC_DIFFUSION_GEMMA_REFERENCE_PYTHON=/absolute/reference-env/bin/python \
 TRTMC_E2E_ARTIFACT_DIR=/tmp/diffusiongemma-evidence \
 python3 -m pytest families/diffusion_gemma/tests/test_e2e.py \
@@ -72,6 +72,11 @@ python3 -m pytest families/diffusion_gemma/tests/test_e2e.py \
 The default E2E builds through the public Python API. Set
 `TRTMC_DIFFUSION_GEMMA_BUNDLE` to an existing bundle to reuse a completed build
 while retaining the same native/reference comparisons and generation checks.
+
+The checkpoint override must resolve to a snapshot directory named by the
+manifest's pinned revision. This checks revision provenance, not the authenticity
+of file contents; differently named local directories do not establish pinned
+checkpoint qualification.
 
 The oracle compares all encoder K/V tensors, two complete fixed-canvas decoder
 logit tensors, and both self-conditioning outputs against the official model.

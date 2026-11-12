@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import ctypes
 import gc
 import json
+import math
 from pathlib import Path
 
 from .config import Config
@@ -17,8 +19,31 @@ def _generation_config(directory: Path, config: Config) -> dict:
     document = json.loads((directory / "generation_config.json").read_text())
     if not isinstance(document, dict):
         raise ValueError("diffusion_gemma generation_config.json must be an object")
-    if document.get("sampler_config", {}).get("_cls_name") != "EntropyBoundSamplerConfig":
+    sampler = document.get("sampler_config")
+    if not isinstance(sampler, dict) or sampler.get("_cls_name") != "EntropyBoundSamplerConfig":
         raise ValueError("diffusion_gemma requires its entropy-bound sampler")
+    for name, minimum in (("max_new_tokens", 1), ("max_denoising_steps", 1), ("stability_threshold", 0)):
+        value = document.get(name)
+        if type(value) is not int or not minimum <= value <= 2**31 - 1:
+            raise ValueError(f"diffusion_gemma generation {name} is outside its int32 bounds")
+
+    def number(value, name):
+        if type(value) not in (int, float):
+            raise ValueError(f"diffusion_gemma generation {name} must be finite and nonnegative")
+        try:
+            rounded = ctypes.c_float(value).value
+        except (OverflowError, TypeError):
+            rounded = float("inf")
+        if not math.isfinite(rounded) or rounded < 0:
+            raise ValueError(f"diffusion_gemma generation {name} must be finite and nonnegative")
+        return rounded
+
+    number(document.get("confidence_threshold"), "confidence_threshold")
+    minimum = number(document.get("t_min"), "t_min")
+    maximum = number(document.get("t_max"), "t_max")
+    if minimum <= 0 or maximum < minimum:
+        raise ValueError("diffusion_gemma generation requires 0 < t_min <= t_max")
+    number(sampler.get("entropy_bound"), "entropy_bound")
     eos = document.get("eos_token_id")
     if not isinstance(eos, list) or not eos or any(
         type(value) is not int or not 0 <= value < config.text_config["vocab_size"] for value in eos

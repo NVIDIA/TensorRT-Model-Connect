@@ -60,6 +60,13 @@ int main() {
         check(std::abs(result.mean_entropy - 0.5623351446) < 1e-7,
               "entropy matches categorical reference, not max-probability confidence");
         check(result.next_canvas == repeat.next_canvas, "native seed reproducibility");
+        std::mt19937_64 restrictive_seed(0), loose_seed(0);
+        const auto restrictive = sample_canvas(logits, 2, 2, 1.0F, 0.1, restrictive_seed);
+        const auto loose = sample_canvas(logits, 2, 2, 1.0F, 10.0, loose_seed);
+        check(restrictive.next_canvas == std::vector<std::int32_t>({0, 0}),
+              "restrictive entropy bound replaces the second sampled token");
+        check(loose.next_canvas == std::vector<std::int32_t>({0, 1}),
+              "loose entropy bound retains both categorical samples");
         const auto cooler = sample_canvas(logits, 2, 2, 0.5F, 0.1, first);
         check(std::abs(cooler.mean_entropy - 0.3250829734) < 1e-7,
               "checkpoint temperature schedule shapes the entropy distribution");

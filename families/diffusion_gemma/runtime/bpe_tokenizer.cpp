@@ -866,13 +866,36 @@ class BpeTokenizer final : public ITokenizer {
 
     std::string join_vocab_tokens(const std::vector<int32_t>& ids) const {
         std::string joined;
+        std::string bytes;
+        auto flush_bytes = [&]() {
+            if (valid_utf8(bytes))
+                joined += bytes;
+            else
+                for (std::size_t i = 0; i < bytes.size(); ++i)
+                    joined += "\xef\xbf\xbd";
+            bytes.clear();
+        };
         for (int32_t id : ids) {
             if (mSpecialIds.count(id))
                 continue;
             if (id >= 0 && static_cast<size_t>(id) < mVocab.size()) {
-                joined += mVocab[id];
+                std::string token = mVocab[id];
+                if (mDecoderType == DecoderType::kSequence) {
+                    for (const auto& rep : mSeqDecoderReplaces)
+                        token = string_replace_all(token, rep.pattern, rep.content);
+                    const int byte = token.size() == 6 && mSeqDecoderByteFallback
+                                         ? try_parse_byte_token(token, 0)
+                                         : -1;
+                    if (byte >= 0) {
+                        bytes.push_back(static_cast<char>(byte));
+                        continue;
+                    }
+                }
+                flush_bytes();
+                joined += token;
             }
         }
+        flush_bytes();
         return joined;
     }
 
@@ -905,16 +928,8 @@ class BpeTokenizer final : public ITokenizer {
 
     std::string decode_sequence(const std::string& joined) const {
         std::string text = joined;
-        // Step 1: Apply Replace operations (e.g. ▁ → space)
-        for (const auto& rep : mSeqDecoderReplaces) {
-            text = string_replace_all(text, rep.pattern, rep.content);
-        }
-        // Step 2: ByteFallback — convert <0xXX> tokens to raw bytes
-        if (mSeqDecoderByteFallback) {
-            text = apply_byte_fallback(text);
-        }
-        // Step 3: Fuse is implicit (tokens already joined)
-        // Step 4: Strip leading space
+        // Replace and ByteFallback operate per token before Fuse in
+        // join_vocab_tokens. Strip applies after the tokens have been fused.
         if (mSeqDecoderStripLeft && !text.empty() && text[0] == ' ') {
             text.erase(0, 1);
         }
@@ -964,21 +979,41 @@ class BpeTokenizer final : public ITokenizer {
         return (h << 4) | l;
     }
 
-    static std::string apply_byte_fallback(const std::string& text) {
-        std::string result;
-        result.reserve(text.size());
-        size_t pos = 0;
-        while (pos < text.size()) {
-            int byte_val = try_parse_byte_token(text, pos);
-            if (byte_val >= 0) {
-                result.push_back(static_cast<char>(byte_val));
-                pos += 6;
+    static bool valid_utf8(const std::string& text) {
+        for (std::size_t pos = 0; pos < text.size();) {
+            const auto lead = static_cast<unsigned char>(text[pos++]);
+            if (lead < 0x80)
+                continue;
+            int continuation;
+            std::uint32_t codepoint, minimum;
+            if (lead >= 0xc2 && lead <= 0xdf) {
+                continuation = 1;
+                codepoint = lead & 0x1f;
+                minimum = 0x80;
+            } else if (lead >= 0xe0 && lead <= 0xef) {
+                continuation = 2;
+                codepoint = lead & 0x0f;
+                minimum = 0x800;
+            } else if (lead >= 0xf0 && lead <= 0xf4) {
+                continuation = 3;
+                codepoint = lead & 0x07;
+                minimum = 0x10000;
             } else {
-                result.push_back(text[pos]);
-                ++pos;
+                return false;
             }
+            if (text.size() - pos < static_cast<std::size_t>(continuation))
+                return false;
+            for (int i = 0; i < continuation; ++i) {
+                const auto next = static_cast<unsigned char>(text[pos++]);
+                if ((next & 0xc0) != 0x80)
+                    return false;
+                codepoint = (codepoint << 6) | (next & 0x3f);
+            }
+            if (codepoint < minimum || codepoint > 0x10ffff ||
+                (codepoint >= 0xd800 && codepoint <= 0xdfff))
+                return false;
         }
-        return result;
+        return true;
     }
 
     // ─── Byte-level encoding ───

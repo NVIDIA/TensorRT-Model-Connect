@@ -131,6 +131,9 @@ def rope_tables(config: Mapping, layer_index: int, capacity: int):
     kind = config["layer_types"][layer_index]
     width = config["global_head_dim"] if kind == "full_attention" else config["head_dim"]
     parameters = config["rope_parameters"][kind]
+    factor = parameters.get("factor", 1.0)
+    if type(factor) not in (int, float) or factor != 1.0:
+        raise ValueError("diffusion_gemma supports only RoPE factor=1")
     fraction = float(parameters.get("partial_rotary_factor", 1.0))
     count = int(width * fraction) // 2
     inv = np.zeros(width // 2, np.float32)

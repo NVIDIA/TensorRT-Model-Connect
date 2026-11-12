@@ -48,9 +48,10 @@ def test_truncated_tensor_data_is_an_error(tmp_path):
         Checkpoint(tmp_path, config()).tensor("test.weight", (2,))
 
 
-def test_index_cannot_escape_checkpoint_directory(tmp_path):
+@pytest.mark.parametrize("filename", ["../outside.safetensors", "/outside.safetensors", "nested/part.safetensors", "", ".", ".."])
+def test_index_cannot_escape_checkpoint_directory(tmp_path, filename):
     (tmp_path / "model.safetensors.index.json").write_text(json.dumps({
-        "weight_map": {"test.weight": "../outside.safetensors"},
+        "weight_map": {"test.weight": filename},
     }))
     with pytest.raises(ValueError, match="inside the checkpoint"):
         Checkpoint(tmp_path, config()).tensor("test.weight", (2,))
@@ -63,3 +64,53 @@ def test_bf16_special_exponents_are_not_accepted_as_finite(value):
 
 def test_bf16_finite_check_keeps_subnormals_and_negative_values():
     assert _is_finite(np.array([0, -1, 1e-40, 3.3e38], dtype=ml_dtypes.bfloat16))
+
+
+@pytest.mark.parametrize("indexed", [False, True])
+def test_hub_snapshot_accepts_inventory_verified_blob_links(tmp_path, indexed):
+    snapshot = tmp_path / "hub/models--google--diffusiongemma-26B-A4B-it/snapshots" / ("a" * 40)
+    snapshot.mkdir(parents=True)
+    blobs = snapshot.parent.parent / "blobs"
+    blobs.mkdir()
+    blob = blobs / ("b" * 64)
+    write_shard(blob, [[1, 2]])
+    name = "part.safetensors" if indexed else "model.safetensors"
+    (snapshot / name).symlink_to("../../blobs/" + blob.name)
+    if indexed:
+        (snapshot / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"test.weight": name}}))
+    array = Checkpoint(snapshot, config()).tensor("test.weight", (1, 2))
+    np.testing.assert_array_equal(array.astype(np.float32), [[1, 2]])
+
+
+def test_external_shard_symlink_is_rejected(tmp_path):
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    outside = tmp_path / "outside.safetensors"
+    write_shard(outside, [1, 2])
+    (checkpoint / "model.safetensors").symlink_to(outside)
+    with pytest.raises(ValueError, match="inside the checkpoint directory"):
+        Checkpoint(checkpoint, config())
+
+
+def test_snapshot_link_cannot_escape_its_own_blob_directory(tmp_path):
+    snapshot = tmp_path / "hub/models--google--diffusiongemma/snapshots" / ("a" * 40)
+    snapshot.mkdir(parents=True)
+    outside = tmp_path / ("b" * 64)
+    write_shard(outside, [1, 2])
+    (snapshot / "model.safetensors").symlink_to(outside)
+    with pytest.raises(ValueError, match="inside the checkpoint directory"):
+        Checkpoint(snapshot, config())
+
+
+def test_hub_layout_alone_does_not_bypass_inventory_verification(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    import huggingface_hub
+    snapshot = tmp_path / "hub/models--google--diffusiongemma/snapshots" / ("a" * 40)
+    snapshot.mkdir(parents=True)
+    blob = snapshot.parent.parent / "blobs" / ("b" * 64)
+    blob.parent.mkdir()
+    write_shard(blob, [1, 2])
+    (snapshot / "model.safetensors").symlink_to(blob)
+    monkeypatch.setattr(huggingface_hub, "scan_cache_dir", lambda path: SimpleNamespace(repos=[]))
+    with pytest.raises(ValueError, match="Hub cache inventory"):
+        Checkpoint(snapshot, config())

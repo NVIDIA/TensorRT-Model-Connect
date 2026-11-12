@@ -26,7 +26,7 @@ void check(bool condition, const char* message) {
 struct Probe {
     // Module destruction and subsequent creation overwrite these borrowed
     // outputs. The pipeline must retain values independently of module lifetime.
-    std::vector<std::uint16_t> staging = std::vector<std::uint16_t>(512);
+    std::vector<float> staging = std::vector<float>(512);
     OwnedTensor raw_hidden;
     std::vector<std::int32_t> positions;
     bool qkv_live{false};
@@ -65,7 +65,7 @@ class Module final : public ITrtModule {
             for (std::int64_t row = 0; row < length; ++row)
                 local_[static_cast<std::size_t>(row * 4)] +=
                     static_cast<const std::int32_t*>(ids.data)[row];
-            const Tensor result{local_.data(), {length, 4}, DType::kBFloat16};
+            const Tensor result{local_.data(), {length, 4}, DType::kFloat32};
             return {{"encoder_embeddings", result}, {"decoder_embeddings", result}};
         }
         if (name_ == "output.plan") {
@@ -73,11 +73,11 @@ class Module final : public ITrtModule {
             logits_.assign(static_cast<std::size_t>(length * 8), 0.0F);
             local_.assign(static_cast<std::size_t>(length * 4), 0x3f80);
             return {{"raw_logits", {logits_.data(), {length, 8}, DType::kFloat32}},
-                    {"self_conditioning", {local_.data(), {length, 4}, DType::kBFloat16}}};
+                    {"self_conditioning", {local_.data(), {length, 4}, DType::kFloat32}}};
         }
         const auto& hidden = inputs.at("hidden_states");
         const auto length = hidden.shape.at(0);
-        const auto first = static_cast<const std::uint16_t*>(hidden.data)[0];
+        const auto first = static_cast<const float*>(hidden.data)[0];
         if (name_.rfind("qkv_", 0) == 0) {
             ++probe_.qkv_calls;
             check(inputs.size() == 2, "projection consumes only raw hidden states and positions");
@@ -91,9 +91,9 @@ class Module final : public ITrtModule {
             return {{"query",
                      {probe_.staging.data(),
                       {probe_.invalid_query_shape ? 1 : 2, length, 2},
-                      DType::kBFloat16}},
-                    {"key", {probe_.staging.data() + 128, {1, length, 2}, DType::kBFloat16}},
-                    {"value", {probe_.staging.data() + 256, {1, length, 2}, DType::kBFloat16}}};
+                      DType::kFloat32}},
+                    {"key", {probe_.staging.data() + 128, {1, length, 2}, DType::kFloat32}},
+                    {"value", {probe_.staging.data() + 256, {1, length, 2}, DType::kFloat32}}};
         }
         ++probe_.layer_calls;
         check(inputs.size() == 7 && inputs.find("position_ids") == inputs.end(),
@@ -102,11 +102,11 @@ class Module final : public ITrtModule {
         check(hidden.shape == probe_.raw_hidden.shape &&
                   std::memcmp(hidden.data, probe_.raw_hidden.bytes.data(), hidden.nbytes()) == 0,
               "main layer must receive the original residual input");
-        for (const auto& [name, offset] : std::vector<std::pair<std::string, std::uint16_t>>{
+        for (const auto& [name, offset] : std::vector<std::pair<std::string, float>>{
                  {"query", 0x100}, {"key", 0x200}, {"value", 0x300}}) {
             const auto& tensor = inputs.at(name);
-            check(tensor.dtype == DType::kBFloat16, "QKV handoff must retain BF16 bits");
-            const auto* data = static_cast<const std::uint16_t*>(tensor.data);
+            check(tensor.dtype == DType::kFloat32, "QKV handoff must retain FP32 values");
+            const auto* data = static_cast<const float*>(tensor.data);
             check(std::all_of(data, data + tensor.numel(),
                               [&](auto bits) { return bits == first + offset; }),
                   "QKV values must survive projection destruction and staging reuse");
@@ -131,8 +131,7 @@ class Module final : public ITrtModule {
             check(probe_.positions == std::vector<std::int32_t>{4},
                   "encoder append advances absolute positions");
         }
-        std::copy_n(static_cast<const std::uint16_t*>(hidden.data), hidden.numel(),
-                    probe_.staging.data());
+        std::copy_n(static_cast<const float*>(hidden.data), hidden.numel(), probe_.staging.data());
         for (std::size_t i = 0; i < hidden.numel(); ++i)
             ++probe_.staging[i];
         const auto total = past_key.shape[1] + length;
@@ -144,9 +143,9 @@ class Module final : public ITrtModule {
                 std::memcpy(target, past.data, past.nbytes());
             std::memcpy(target + past.numel(), inputs.at(name).data, inputs.at(name).nbytes());
         }
-        return {{"hidden_states_out", {probe_.staging.data(), hidden.shape, DType::kBFloat16}},
-                {"present_key", {probe_.staging.data() + 128, {1, total, 2}, DType::kBFloat16}},
-                {"present_value", {probe_.staging.data() + 256, {1, total, 2}, DType::kBFloat16}}};
+        return {{"hidden_states_out", {probe_.staging.data(), hidden.shape, DType::kFloat32}},
+                {"present_key", {probe_.staging.data() + 128, {1, total, 2}, DType::kFloat32}},
+                {"present_value", {probe_.staging.data() + 256, {1, total, 2}, DType::kFloat32}}};
     }
     DeviceTensorMap forward_device(const DeviceTensorMap&) override { return {}; }
     void forward_device_async(const DeviceTensorMap&) override {}
@@ -161,7 +160,7 @@ class Module final : public ITrtModule {
     std::vector<TensorInfo> output_info() const override { return {}; }
     bool has_input(const std::string&) const override { return false; }
     bool has_output(const std::string&) const override { return false; }
-    DType tensor_dtype(const std::string&) const override { return DType::kBFloat16; }
+    DType tensor_dtype(const std::string&) const override { return DType::kFloat32; }
     std::vector<int64_t> tensor_shape(const std::string&) const override { return {}; }
     std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
                                              ProfileShapeSelector) const override {
@@ -181,7 +180,7 @@ class Module final : public ITrtModule {
   private:
     std::string name_;
     Probe& probe_;
-    std::vector<std::uint16_t> local_;
+    std::vector<float> local_;
     std::vector<float> logits_;
 };
 
@@ -247,6 +246,7 @@ int main() {
         TestBundle bundle;
         Backend backend;
         RuntimeConfig config;
+        config.dtype = DType::kFloat32;
         config.hidden_size = 4;
         config.vocab_size = 8;
         config.num_layers = 2;

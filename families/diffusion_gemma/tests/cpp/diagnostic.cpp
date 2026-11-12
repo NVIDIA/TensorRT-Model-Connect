@@ -128,7 +128,11 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("denoising mutated the encoder prefix KV cache");
         }
         metadata["decoder_steps"] = canvases.size();
-        std::ofstream(directory / "metadata.json") << metadata.dump(2) << '\n';
+        std::ofstream output(directory / "metadata.json");
+        output << metadata.dump(2) << '\n';
+        output.close();
+        if (!output)
+            throw std::runtime_error("cannot write diffusion_gemma diagnostic metadata");
         std::cout << (directory / "metadata.json").string() << '\n';
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

@@ -14,6 +14,12 @@ set_target_properties(trtmc_model_diffusion_gemma PROPERTIES
 install(TARGETS trtmc_model_diffusion_gemma LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_diffusion_gemma_tokenizer
+    ${PROJECT_SOURCE_DIR}/families/diffusion_gemma/tests/cpp/test_tokenizer.cpp)
+  target_include_directories(test_diffusion_gemma_tokenizer PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(test_diffusion_gemma_tokenizer PRIVATE trtmc_model_diffusion_gemma nlohmann_json::nlohmann_json)
+  add_test(NAME test_diffusion_gemma_tokenizer COMMAND test_diffusion_gemma_tokenizer)
+  set_target_properties(test_diffusion_gemma_tokenizer PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
   add_executable(test_diffusion_gemma_sampling
     ${PROJECT_SOURCE_DIR}/families/diffusion_gemma/tests/cpp/test_sampling.cpp)
   target_include_directories(test_diffusion_gemma_sampling PRIVATE

@@ -41,6 +41,8 @@ class Config:
             "max_position_embeddings", "sliding_window",
         ):
             _positive_int(text.get(name), name)
+        if text["sliding_window"] < 2:
+            raise ValueError("diffusion_gemma sliding_window must be at least 2")
         if text["top_k_experts"] > text["num_experts"]:
             raise ValueError("diffusion_gemma top_k_experts exceeds num_experts")
         for name in ("num_key_value_heads", "num_global_key_value_heads"):
@@ -75,6 +77,9 @@ class Config:
             expected = "proportional" if kind == "full_attention" else "default"
             if parameters.get("rope_type") != expected:
                 raise ValueError(f"diffusion_gemma unsupported {kind} RoPE type")
+            factor = parameters.get("factor", 1.0)
+            if type(factor) not in (int, float) or factor != 1.0:
+                raise ValueError("diffusion_gemma supports only RoPE factor=1")
             head_dim = text["global_head_dim"] if kind == "full_attention" else text["head_dim"]
             fraction = parameters.get("partial_rotary_factor", 1.0)
             if isinstance(fraction, bool) or not isinstance(fraction, (int, float)):

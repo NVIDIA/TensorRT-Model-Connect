@@ -35,7 +35,11 @@ int main(int argc, char** argv) {
                               {"token_ids", std::vector<std::int32_t>(ids.begin(), ids.end())},
                               {"prefill_ms", result.prefill_ms()},
                               {"decode_ms", result.decode_ms()}};
-        std::ofstream(argv[4]) << output.dump(2) << '\n';
+        std::ofstream stream(argv[4]);
+        stream << output.dump(2) << '\n';
+        stream.close();
+        if (!stream)
+            throw std::runtime_error("cannot write diffusion_gemma generation result");
         std::cout << output.dump() << '\n';
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
