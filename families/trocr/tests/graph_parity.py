@@ -19,28 +19,27 @@ import math
 
 from .common import Reference
 
-# Measured on the five line images the case started with (B300, TensorRT 11.4,
-# Transformers 5.2.0 on the same GPU with TF32 off); the sixth, a tall canvas
-# added later, lands inside the correct band (6.2e-05 and 4.7e-05):
+# Measured on the case's six line images (B300, TensorRT 11.4, Transformers
+# 5.2.0 on the same GPU with TF32 off):
 #
 # ==========================  ======================  ==================
 # engines                     cross K/V (relative)    logits (absolute)
 # ==========================  ======================  ==================
-# correct                     2.9e-05 to 2.0e-04      3.2e-05 to 1.5e-04
-# reference on the CPU        4.4e-05 to 4.0e-04      2.8e-05 to 9.9e-05
-# decoder: tanh GELU          (unchanged)             2.5e-03 to 3.3e-03
-# decoder: layer norm 1e-12   (unchanged)             1.1e-03 to 3.0e-03
-# encoder: layer norm 1e-5    1.8e-04 to 6.8e-04      1.7e-04 to 7.6e-04
-# encoder: tanh GELU          5.9e-02 to 2.0e-01      5.0e-02 to 1.6e-01
+# correct                     3.4e-05 to 3.4e-04      3.0e-05 to 8.5e-05
+# reference on the CPU        4.3e-05 to 2.8e-04      3.1e-05 to 1.2e-04
+# decoder: tanh GELU          (unchanged)             2.4e-03 to 3.0e-03
+# decoder: layer norm 1e-12   (unchanged)             1.1e-03 to 2.1e-03
+# encoder: layer norm 1e-5    2.0e-04 to 6.7e-04      1.7e-04 to 7.4e-04
+# encoder: tanh GELU          6.8e-02 to 2.3e-01      5.0e-02 to 1.6e-01
 # ==========================  ======================  ==================
 #
 # Every one of these defects still produces the reference's greedy tokens on
 # every image, so the token-exact E2E cannot see them; these gates can. The
 # engines are as close to the GPU reference as the reference's own CPU run is.
 # The cross-attention gate is relative to the largest reference value and is a
-# structural check (5x the correct worst case); the logit gate sits 3.4x above
-# the correct worst case and below every decoder defect and the worst encoder
-# layer-norm case.
+# structural check (about 3x the correct worst case); the logit gate sits about
+# 6x above the correct worst case and below every decoder defect and the worst
+# encoder layer-norm case.
 CROSS_TOLERANCE = {"fp32": 1e-3}
 LOGIT_TOLERANCE = {"fp32": 5e-4}
 
