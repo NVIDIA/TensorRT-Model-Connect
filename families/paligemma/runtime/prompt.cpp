@@ -53,19 +53,32 @@ std::vector<std::string> reserved_text(const PaligemmaBpeTokenizer& tokenizer,
 }
 
 std::vector<int32_t> prompt_ids(const PromptParts& prompt, const PaligemmaBpeTokenizer& tokenizer,
-                                const PromptTokens& tokens) {
+                                const PromptTokens& tokens, std::size_t max_tokens) {
     if (tokens.image_token_id < 0 || tokens.image_tokens_per_image <= 0 || tokens.bos_token_id < 0)
         throw std::invalid_argument("PaliGemma prompt tokens are not configured");
+    constexpr const char* kTooLong =
+        "PaliGemma prompt and max_new_tokens exceed the built sequence capacity";
+    const std::size_t fixed =
+        prompt.images.size() * static_cast<std::size_t>(tokens.image_tokens_per_image) + 1;
+    // A token covers at most longest_piece_bytes() of normalized text, so this
+    // lower bound on the token count rejects an oversized prefix before it is
+    // tokenized; a prefix whose tokens fit always passes it.
+    const std::size_t longest = tokenizer.longest_piece_bytes();
+    const std::size_t length = tokenizer.normalization_never_shortens()
+                                   ? prompt.prefix.size() + 1
+                                   : tokenizer.normalize(prompt.prefix + "\n").size();
+    if (fixed > max_tokens || (length + longest - 1) / longest > max_tokens - fixed)
+        throw std::invalid_argument(kTooLong);
     for (const auto& reserved : tokens.reserved_text)
         if (!reserved.empty() && prompt.prefix.find(reserved) != std::string::npos)
             throw std::invalid_argument("PaliGemma prefix text contains the special token " +
                                         reserved);
-    std::vector<int32_t> ids(prompt.images.size() *
-                                 static_cast<std::size_t>(tokens.image_tokens_per_image),
-                             tokens.image_token_id);
+    const auto encoded = tokenizer.encode(prompt.prefix + "\n", false);
+    if (encoded.size() > max_tokens - fixed)
+        throw std::invalid_argument(kTooLong);
+    std::vector<int32_t> ids(fixed - 1, tokens.image_token_id);
     ids.push_back(tokens.bos_token_id);
-    const auto text = tokenizer.encode(prompt.prefix + "\n", false);
-    ids.insert(ids.end(), text.begin(), text.end());
+    ids.insert(ids.end(), encoded.begin(), encoded.end());
     return ids;
 }
 

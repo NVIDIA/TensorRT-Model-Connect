@@ -21,6 +21,7 @@
 #include <exception>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <string_view>
@@ -60,7 +61,8 @@ int main(int argc, char** argv) {
             prompt.images.resize(item.at("images").get<std::size_t>());
             prompt.prefix = item.at("prefix").get<std::string>();
             const auto expected = item.at("input_ids").get<std::vector<int32_t>>();
-            const auto actual = prompt_ids(prompt, tokenizer, tokens);
+            const auto actual =
+                prompt_ids(prompt, tokenizer, tokens, std::numeric_limits<std::size_t>::max());
             if (actual != expected)
                 mismatches.push_back(
                     {{"prefix", prompt.prefix}, {"expected", expected}, {"actual", actual}});

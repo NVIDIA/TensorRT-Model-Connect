@@ -109,7 +109,13 @@ def load_tokenizer(model_dir: Path, image_token_id: int, vocab_size: int) -> tup
     if missing:
         raise ValueError(f"PaliGemma vocabulary lacks processor tokens: {missing[:4]}")
     config = _read(root / "tokenizer_config.json")
-    named = _named_special(_special_source(root, config, "added_tokens_decoder" not in config))
+    source = _special_source(root, config, "added_tokens_decoder" not in config)
+    # The processor writes the configured BOS text into every prompt and the
+    # runtime prepends tokenizer.model's BOS id, so both must name one piece.
+    bos = _content(source.get("bos_token", _GEMMA_SPECIAL_DEFAULTS["bos_token"]))
+    if bos is None or ids.get(bos) != metadata.bos_id:
+        raise ValueError("PaliGemma bos_token is not the tokenizer.model BOS piece")
+    named = _named_special(source)
     added = _added_tokens(root, config, set(named))
     # Without a listed image token the processor appends it after the vocabulary.
     if added.get(image_token_id, (IMAGE_TOKEN,))[0] != IMAGE_TOKEN or (

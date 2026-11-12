@@ -635,6 +635,7 @@ PaligemmaBpeTokenizer::PaligemmaBpeTokenizer(PaligemmaBpeAsset asset) : asset_(s
     byte_ids_.fill(-1);
     for (std::size_t i = 0; i < asset_.pieces.size(); ++i) {
         const auto& piece = asset_.pieces[i];
+        longest_piece_bytes_ = std::max(longest_piece_bytes_, piece.text.size());
         if (piece.type == SentencePieceType::kNormal ||
             piece.type == SentencePieceType::kUserDefined ||
             piece.type == SentencePieceType::kUnused) {
@@ -655,6 +656,12 @@ PaligemmaBpeTokenizer::PaligemmaBpeTokenizer(PaligemmaBpeAsset asset) : asset_(s
             return lhs.size() > rhs.size();
         });
     }
+    never_shortens_ =
+        !asset_.remove_extra_whitespaces &&
+        std::all_of(asset_.normalization_rules.begin(), asset_.normalization_rules.end(),
+                    [](const NormalizationRule& rule) {
+                        return rule.replacement.size() >= rule.source.size();
+                    });
     normalization_rules_ = asset_.normalization_rules;
     std::stable_sort(normalization_rules_.begin(), normalization_rules_.end(),
                      [](const NormalizationRule& lhs, const NormalizationRule& rhs) {

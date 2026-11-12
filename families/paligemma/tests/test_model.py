@@ -247,6 +247,18 @@ def test_tokenizer_special_and_reserved_ids_follow_the_reference_loader(tmp_path
         load_tokenizer(tmp_path, count, count + 64)
 
 
+def test_tokenizer_bos_must_be_the_sentencepiece_bos(tmp_path):
+    from families.paligemma.tokenizer import load_tokenizer
+
+    count = _sentencepiece_model(tmp_path / "tokenizer.model")
+    (tmp_path / "tokenizer.json").write_text(json.dumps({"added_tokens": []}))
+    for bos in ("<eos>", {"content": "<eos>"}, None):
+        (tmp_path / "tokenizer_config.json").write_text(json.dumps({"bos_token": bos}))
+        with pytest.raises(ValueError, match="bos_token"):
+            load_tokenizer(tmp_path, count, count + 64)
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps({"bos_token": {"content": "<bos>"}}))
+    assert load_tokenizer(tmp_path, count, count + 64)[1]["bos_token_id"] == 2
+
 def test_tokenizer_config_added_tokens_take_precedence(tmp_path):
     from families.paligemma.tokenizer import load_tokenizer
 

@@ -8,6 +8,7 @@
 #include "families/paligemma/runtime/paligemma_bpe.h"
 #include "trtmc/internal/language.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -41,8 +42,9 @@ std::vector<std::string> reserved_text(const PaligemmaBpeTokenizer& tokenizer,
                                        int32_t image_token_id);
 
 // <image> x (images * tokens), <bos>, prefix and the newline separator,
-// exactly as the reference processor builds the prompt.
+// exactly as the reference processor builds the prompt. A prompt longer than
+// max_tokens is rejected, before tokenization when its length alone proves it.
 std::vector<int32_t> prompt_ids(const PromptParts& prompt, const PaligemmaBpeTokenizer& tokenizer,
-                                const PromptTokens& tokens);
+                                const PromptTokens& tokens, std::size_t max_tokens);
 
 } // namespace trtmc::paligemma
