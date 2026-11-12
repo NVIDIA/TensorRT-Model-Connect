@@ -38,6 +38,9 @@ class TekkenTokenizer {
 
     std::vector<Token> encode(std::string_view text) const;
     std::int64_t vocab_size() const noexcept { return vocab_size_; }
+    // The most bytes one token can cover. Tokens tile the text, so a text of
+    // more than n * max_token_bytes() bytes has more than n tokens.
+    std::size_t max_token_bytes() const noexcept { return max_token_bytes_; }
 
   private:
     struct Merge {
@@ -60,6 +63,7 @@ class TekkenTokenizer {
     std::int32_t byte_ids_[256]{};
     std::vector<TrieNode> added_trie_;
     std::int64_t vocab_size_{0};
+    std::size_t max_token_bytes_{1};
 };
 
 } // namespace trtmc::ministral3

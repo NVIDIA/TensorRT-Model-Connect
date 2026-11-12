@@ -159,7 +159,8 @@ def build_engine(
     builder_config.add_optimization_profile(profile)
     sequence = network.add_shape(input_ids).get_output(0)
 
-    all_positions = constants.add(np.arange(max_sequence_length, dtype=np.int32), dtype=trt.int32)
+    # The RotaryEmbedding operator takes its positionIds as INT64.
+    all_positions = constants.add(np.arange(max_sequence_length, dtype=np.int64), dtype=trt.int64)
     position_slice = network.add_slice(all_positions, start=(0,), shape=(1,), stride=(1,))
     position_slice.set_input(2, sequence)
     positions = network.add_shuffle(position_slice.get_output(0))

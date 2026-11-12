@@ -369,6 +369,11 @@ std::shared_ptr<const TekkenTokenizer> TekkenTokenizer::load(const char* data, s
                 "vocab ids must be a permutation of 0..size-1");
         seen[static_cast<std::size_t>(id)] = true;
         tokenizer->vocab_.emplace(token, static_cast<std::int32_t>(id));
+        // A token produced by BPE spells one byte per byte-level character.
+        std::size_t characters = 0;
+        for (const auto byte : token)
+            characters += (static_cast<unsigned char>(byte) & 0xC0) != 0x80 ? 1 : 0;
+        tokenizer->max_token_bytes_ = std::max(tokenizer->max_token_bytes_, characters);
     }
     tokenizer->vocab_size_ = static_cast<std::int64_t>(vocab.size());
 
@@ -410,6 +415,8 @@ std::shared_ptr<const TekkenTokenizer> TekkenTokenizer::load(const char* data, s
         const auto in_vocab = tokenizer->vocab_.find(content);
         require(in_vocab != tokenizer->vocab_.end() && in_vocab->second == id,
                 "added token content must map to its id in the vocab");
+        // An added token matches its content's UTF-8 bytes.
+        tokenizer->max_token_bytes_ = std::max(tokenizer->max_token_bytes_, content.size());
         std::int32_t node = 0;
         for (const auto byte : content) {
             auto& next = tokenizer->added_trie_[static_cast<std::size_t>(node)].next;

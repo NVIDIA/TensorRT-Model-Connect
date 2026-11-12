@@ -178,6 +178,27 @@ def test_unsupported_build_options_are_rejected(checkpoint, engines, field, valu
     assert engines == []
 
 
+def test_the_expected_tensors_are_the_bare_ministral3_model_layout(checkpoint):
+    """An explicit layout, independent of ``expected_shapes``, for the tiny checkpoint."""
+    model_dir, _ = checkpoint
+    vocab = json.loads((model_dir / "config.json").read_text())["vocab_size"]
+    per_layer = {
+        "input_layernorm.weight": (8,),
+        "self_attn.q_proj.weight": (16, 8),
+        "self_attn.k_proj.weight": (8, 8),
+        "self_attn.v_proj.weight": (8, 8),
+        "self_attn.o_proj.weight": (8, 16),
+        "post_attention_layernorm.weight": (8,),
+        "mlp.gate_proj.weight": (12, 8),
+        "mlp.up_proj.weight": (12, 8),
+        "mlp.down_proj.weight": (8, 12),
+    }
+    expected = {"embed_tokens.weight": (vocab, 8), "norm.weight": (8,)}
+    for layer in range(2):
+        expected.update({f"layers.{layer}.{name}": shape for name, shape in per_layer.items()})
+    assert expected_shapes(ModelConfig.from_dir(model_dir)) == expected
+
+
 def test_checkpoint_tensors_must_match_exactly(checkpoint):
     model_dir, tensors = checkpoint
     config = ModelConfig.from_dir(model_dir)
@@ -226,5 +247,52 @@ def test_tokenizer_contract_is_checked_at_build_time(checkpoint, engines, path, 
     target[path[-1]] = value
     (model_dir / "tokenizer.json").write_text(json.dumps(tokenizer))
     with pytest.raises(ValueError, match="Tekken contract"):
+        builder.build(request(model_dir), Writer())
+    assert engines == []
+
+
+def _duplicate_vocab_id(tokenizer):
+    vocab = tokenizer["model"]["vocab"]
+    vocab["he"] = vocab["Ġt"]
+
+
+def _rename_byte_symbol(tokenizer):
+    vocab = tokenizer["model"]["vocab"]
+    vocab["<not a byte symbol>"] = vocab.pop("!")
+
+
+def _merge_without_result(tokenizer):
+    assert "!!" not in tokenizer["model"]["vocab"]
+    tokenizer["model"]["merges"].append(["!", "!"])
+
+
+def _repeated_merge(tokenizer):
+    merges = tokenizer["model"]["merges"]
+    merges.append(list(merges[0]))
+
+
+def _added_token_with_another_id(tokenizer):
+    token = tokenizer["added_tokens"][1]
+    assert tokenizer["model"]["vocab"][token["content"]] == token["id"]
+    token["id"] += 1
+
+
+@pytest.mark.parametrize(
+    ("mutate", "problem"),
+    [
+        (_duplicate_vocab_id, "vocab ids"),
+        (_rename_byte_symbol, "byte alphabet"),
+        (_merge_without_result, "merges"),
+        (_repeated_merge, "merges"),
+        (_added_token_with_another_id, "added token ids"),
+    ],
+)
+def test_vocabularies_the_runtime_refuses_fail_the_build(checkpoint, engines, mutate, problem):
+    """The build rejects every vocabulary the native tokenizer refuses at load."""
+    model_dir, _ = checkpoint
+    tokenizer = json.loads((model_dir / "tokenizer.json").read_text())
+    mutate(tokenizer)
+    (model_dir / "tokenizer.json").write_text(json.dumps(tokenizer))
+    with pytest.raises(ValueError, match=f"Tekken contract.*'{problem}'"):
         builder.build(request(model_dir), Writer())
     assert engines == []
