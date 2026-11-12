@@ -33,9 +33,14 @@ if(TRTMC_BUILD_TESTS)
   target_link_libraries(test_hunyuan_vl_tokenizer PRIVATE
     nlohmann_json::nlohmann_json ICU::uc ICU::i18n)
   add_test(NAME test_hunyuan_vl_tokenizer COMMAND test_hunyuan_vl_tokenizer)
+  add_executable(test_hunyuan_vl_request ../tests/cpp/test_request.cpp)
+  target_include_directories(test_hunyuan_vl_request PRIVATE
+    ${PROJECT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/core/runtime/include)
+  add_test(NAME test_hunyuan_vl_request COMMAND test_hunyuan_vl_request)
   add_dependencies(trtmc_model_hunyuan_vl hunyuan_vl_preprocess_probe test_hunyuan_vl_tokenizer)
   # Wheel-backed E2E builds only the owning CTest targets, not the family DSO.
-  foreach(_hunyuan_vl_test IN ITEMS test_hunyuan_vl_media test_hunyuan_vl_tokenizer)
+  foreach(_hunyuan_vl_test IN ITEMS test_hunyuan_vl_media test_hunyuan_vl_tokenizer
+                                    test_hunyuan_vl_request)
     add_dependencies(${_hunyuan_vl_test} hunyuan_vl_inference_test hunyuan_vl_preprocess_probe)
   endforeach()
 endif()

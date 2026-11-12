@@ -373,11 +373,7 @@ class Pipeline final : public IModel, public IImagesTextToText {
         Sampler sampler(generation);
         const auto penalty = float(generation.repetition_penalty);
         for (int i = 0; i < generation.max_new_tokens; ++i) {
-            if (penalty != 1.0F)
-                for (int id = 0; id < vocab_; ++id)
-                    if (seen[size_t(id)])
-                        logits[size_t(id)] = logits[size_t(id)] < 0 ? logits[size_t(id)] * penalty
-                                                                    : logits[size_t(id)] / penalty;
+            apply_repetition_penalty(logits, seen, penalty);
             const int32_t token = sampler(logits);
             result.token_ids.push_back(token);
             seen[size_t(token)] = true;

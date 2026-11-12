@@ -100,6 +100,21 @@ def build(request, writer):
     root = Path(request.model_dir)
     config = ModelConfig.from_dir(root)
     processor = ImageProcessor.from_dir(root, config)
+    merge = config.merge_size**2
+    if request.image_height is None:
+        max_patches = config.position_edge**2
+    else:
+        max_patches = (
+            request.image_height * request.image_width // config.patch_size**2 // merge * merge
+        )
+    if max_patches < merge:
+        raise ValueError("hunyuan_vl image area bound must hold at least one merged token")
+    # Preprocessing scales small images up to min_pixels, so a smaller bound would reject them all.
+    if max_patches * config.patch_size**2 < processor.min_pixels:
+        raise ValueError(
+            f"hunyuan_vl image area bound of {max_patches} patches is below the image "
+            f"processor's min_pixels={processor.min_pixels}"
+        )
     if config.raw.get("quantization_config") is not None or any(
         (root / name).exists() for name in ("hf_quant_config.json", "quantize_config.json")
     ):
@@ -112,15 +127,6 @@ def build(request, writer):
     )
     if type(capacity) is not int or not 1 <= capacity <= config.max_position_embeddings:
         raise ValueError("hunyuan_vl max_sequence_length must be between 1 and the context length")
-    merge = config.merge_size**2
-    if request.image_height is None:
-        max_patches = config.position_edge**2
-    else:
-        max_patches = (
-            request.image_height * request.image_width // config.patch_size**2 // merge * merge
-        )
-    if max_patches < merge:
-        raise ValueError("hunyuan_vl image area bound must hold at least one merged token")
     weights = CheckpointWeights(root)
     max_input = min(capacity, PREFILL_CHUNK)
     writer.set_header(family="hunyuan_vl", task=request.task, backend=request.backend)

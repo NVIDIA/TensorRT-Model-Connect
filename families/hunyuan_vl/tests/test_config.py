@@ -4,6 +4,7 @@
 """CPU contracts: checkpoint metadata validation, build-option ownership and weight layout."""
 
 import copy
+import json
 
 import numpy as np
 import pytest
@@ -62,6 +63,18 @@ RELEASED = {
         "rms_norm_eps": 1e-5,
         "text_hidden_size": 1024,
     },
+}
+
+# The released preprocessor_config.json (same revision), reduced to the fields read here.
+PROCESSOR = {
+    "image_processor_type": "HunYuanVLImageProcessor",
+    "image_mean": [0.48145466, 0.4578275, 0.40821073],
+    "image_std": [0.26862954, 0.26130258, 0.27577711],
+    "min_pixels": 262144,
+    "max_pixels": 16777216,
+    "patch_size": 16,
+    "merge_size": 2,
+    "temporal_patch_size": 1,
 }
 
 
@@ -138,6 +151,34 @@ def test_unowned_build_options_are_rejected(field, value, tmp_path):
     arguments[field] = value
     with pytest.raises(NotImplementedError if field == "dynamic_kv_cache" else ValueError):
         build(BuildRequest(**arguments), writer=None)
+
+
+def _square_bound_request(tmp_path, edge):
+    from tensorrt_model_connect import BuildRequest
+
+    (tmp_path / "config.json").write_text(json.dumps(RELEASED), encoding="utf-8")
+    (tmp_path / "preprocessor_config.json").write_text(json.dumps(PROCESSOR), encoding="utf-8")
+    return BuildRequest(
+        model_dir=tmp_path,
+        output_path=tmp_path / "out.bundle",
+        family="hunyuan_vl",
+        task="images_text_to_text",
+        precision="bf16",
+        image_height=edge,
+        image_width=edge,
+    )
+
+
+@pytest.mark.parametrize("edge", [224, 511])
+def test_image_area_bound_below_min_pixels_is_rejected(edge, tmp_path):
+    with pytest.raises(ValueError, match="min_pixels"):
+        build(_square_bound_request(tmp_path, edge), writer=None)
+
+
+def test_image_area_bound_at_min_pixels_is_accepted(tmp_path):
+    # The fixture holds no chat template, which build() reads only after the area bound passes.
+    with pytest.raises(FileNotFoundError, match="chat_template"):
+        build(_square_bound_request(tmp_path, 512), writer=None)
 
 
 def test_merge_projection_matches_the_strided_convolution():

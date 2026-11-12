@@ -55,11 +55,31 @@ inline Generation read_generation(ConfigView supplied) {
     g.temperature = *config_get<double>(supplied, fields, "temperature");
     g.top_p = *config_get<double>(supplied, fields, "top_p");
     g.repetition_penalty = *config_get<double>(supplied, fields, "repetition_penalty");
+    // The penalty is applied in float, so it must convert to a positive normal float.
+    const bool penalty_in_range =
+        g.repetition_penalty >= double(std::numeric_limits<float>::min()) &&
+        g.repetition_penalty <= double(std::numeric_limits<float>::max());
     if (!std::isfinite(g.temperature) || g.temperature < 0 || !std::isfinite(g.top_p) ||
-        g.top_p <= 0 || g.top_p > 1 || !std::isfinite(g.repetition_penalty) ||
-        g.repetition_penalty <= 0)
+        g.top_p <= 0 || g.top_p > 1 || !penalty_in_range)
         throw ConfigError("HunYuanVL temperature, top_p or repetition_penalty is out of range");
     return g;
+}
+
+// Penalizes tokens already in the prompt or output in float, as the reference logits processor
+// does: negative logits are multiplied and the others divided. A penalized logit that leaves the
+// float range fails the request instead of reaching the sampler as an infinity.
+inline void apply_repetition_penalty(std::vector<float>& logits, const std::vector<bool>& seen,
+                                     float penalty) {
+    if (penalty == 1.0F)
+        return;
+    for (size_t id = 0; id < logits.size(); ++id) {
+        if (!seen[id])
+            continue;
+        float& logit = logits[id];
+        logit = logit < 0 ? logit * penalty : logit / penalty;
+        if (!std::isfinite(logit))
+            throw ConfigError("HunYuanVL repetition_penalty moves a logit out of the float range");
+    }
 }
 
 // Greedy (first maximum) at temperature zero; otherwise temperature, top-k and top-p sampling
