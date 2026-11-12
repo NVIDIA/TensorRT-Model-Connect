@@ -653,6 +653,70 @@ def test_classification_partial_reference_logits_do_not_invent_a_class(tmp_path:
     assert 'data-status="unverified"' in report
 
 
+@pytest.mark.parametrize("status", ["passed", "failed"])
+def test_complete_saved_class_scores_show_the_vit_reference_contract(
+    tmp_path: Path, status: str
+) -> None:
+    # ViT records all 1,000 scores and labels, without logits or top_class.
+    scores = [-0.25] * 1000
+    scores[777] = 9.5
+    data = _case()
+    data["inputs"]["manifest"]["task"] = "image_to_class_scores"
+    data["native"] = {"top_class": 777}
+    data["reference"] = {"scores": scores, "labels": [f"class_{i}" for i in range(1000)]}
+    data["status"] = status
+    data["checks"] = [{"status": status, "expression": "_cosine(actual, expected) >= .99",
+                       "explanation": "1.0 >= .99"}]
+    before = copy.deepcopy(data)
+    original_assessment = assessment(data)
+
+    report = render_case(data, tmp_path)
+    reference = report.split('<details class="case-details">', 1)[0].split(
+        "<h4>Reference output</h4>", 1
+    )[1]
+    assert "Class index <strong>777</strong>" in reference
+    assert "From complete saved scores" in reference
+    assert "Class preview unavailable" not in reference
+    assert "class_777" not in _visible(report)
+    assert f'data-status="{original_assessment["kind"]}"' in report
+    assert assessment(data) == original_assessment and data == before
+
+
+@pytest.mark.parametrize(
+    "logits,expected_index",
+    [([0.0, 8.0, 1.0], 1), (None, None), ([], None),
+     ({"shape": [1000], "preview": [0.0, 8.0]}, None),
+     ([0.0, float("nan")], None)],
+)
+def test_saved_class_scores_never_replace_explicit_logits(logits, expected_index) -> None:
+    from tools.e2e_report import _demo_output
+
+    value = {"logits": logits, "scores": [8.0, 0.0, 1.0]}
+    report = _demo_output(value, role="reference", task="image_to_class_scores")
+    assert "saved scores" not in report
+    if expected_index is None:
+        assert "Class preview unavailable" in report
+        assert "<strong>" not in report
+    else:
+        assert f"Class ID <strong>{expected_index}</strong>" in report
+        assert "From complete saved logits" in report
+
+
+@pytest.mark.parametrize(
+    "scores",
+    [None, [], {"shape": [1000], "preview": [0.0, 10.0]},
+     {"shape": [1000], "values": [0.0, 10.0]},
+     {"shape": [2, 2], "values": [0.0, 10.0, 1.0, 2.0]},
+     [0.0, float("nan")], [0.0, float("inf")], [False, True]],
+)
+def test_incomplete_or_nonfinite_class_scores_do_not_invent_a_class(scores) -> None:
+    from tools.e2e_report import _demo_output
+
+    report = _demo_output({"scores": scores}, role="reference", task="image_to_class_scores")
+    assert "Class preview unavailable; complete saved scores are unavailable." in report
+    assert "<strong>" not in report
+
+
 @pytest.mark.parametrize("reference", [None, {"mode": "contract_only"}])
 def test_classification_without_reference_does_not_invent_a_pair(
     tmp_path: Path, reference: dict | None

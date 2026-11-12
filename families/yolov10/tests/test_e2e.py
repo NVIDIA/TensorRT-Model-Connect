@@ -16,6 +16,7 @@ import pytest
 
 from tensorrt_model_connect import BuildRequest, build
 from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
+from families.yolov10.tests.reporting import begin_detection_operation, record_detection_views
 
 
 FAMILY = "yolov10"
@@ -105,22 +106,21 @@ def _asset(case: dict) -> Path:
     return path
 
 
-def _record_reference_boxes(rows, scale: float, pad_x: float, pad_y: float) -> None:
+def _record_reference_boxes(rows, scale: float, pad_x: float, pad_y: float) -> dict | None:
     if not evidence_enabled():
         return
     try:
-        record_evidence(
-            "reference",
-            {
-                "boxes": [
-                    (float(row[axis]) - (pad_x if axis % 2 == 0 else pad_y)) / scale
-                    for row in rows
-                    for axis in range(4)
-                ],
-                "scores": [float(row[4]) for row in rows],
-                "classes": [int(row[5]) for row in rows],
-            },
-        )
+        reference = {
+            "boxes": [
+                (float(row[axis]) - (pad_x if axis % 2 == 0 else pad_y)) / scale
+                for row in rows
+                for axis in range(4)
+            ],
+            "scores": [float(row[4]) for row in rows],
+            "classes": [int(row[5]) for row in rows],
+        }
+        record_evidence("reference", reference)
+        return reference
     except Exception as error:
         record_evidence("reference_preview", {"error": f"{type(error).__name__}: {error}"})
 
@@ -143,6 +143,7 @@ def _assert_matches_reference(actual: dict, kept: list, scale: float, pad_x: flo
 
 def _sdk_detections(runtime_root: Path, bundle: Path, image: Path, tmp_path: Path) -> list[dict]:
     """Run the public C and C++ consumers on the reference's own decoded pixels."""
+    begin_detection_operation(image, "SDK setup")
     from PIL import Image
 
     native_build = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
@@ -155,6 +156,8 @@ def _sdk_detections(runtime_root: Path, bundle: Path, image: Path, tmp_path: Pat
     )
     outputs = []
     for language in ("c", "cpp"):
+        operation = "SDK C" if language == "c" else "SDK C++"
+        begin_detection_operation(image, operation)
         consumer = native_build / f"test_yolov10_sdk_{language}"
         assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
         completed = subprocess.run(
@@ -176,6 +179,9 @@ def _sdk_detections(runtime_root: Path, bundle: Path, image: Path, tmp_path: Pat
         payloads = [line for line in completed.stdout.splitlines() if line.startswith("{")]
         assert len(payloads) == 1, f"the {language} consumer must print one result"
         result = json.loads(payloads[0])
+        record_evidence("native", result)
+        record_detection_views(result, None, image, tmp_path / "sdk-detection-views",
+                               sample_index=1 if language == "c" else 2, operation=operation)
         assert result["task"] == "image_to_boxes"
         assert (result["image_height"], result["image_width"]) == pixels.shape[:2]
         outputs.append(result)
@@ -211,6 +217,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             )
         )
     image = _asset(case)
+    begin_detection_operation(image, "CLI")
     with evidence_stage("native"):
         completed = subprocess.run(
             [
@@ -231,6 +238,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         actual = json.loads(completed.stdout)
 
     record_evidence("native", actual)
+    record_detection_views(actual, None, image, tmp_path / "detection-views")
 
     with evidence_stage("reference"):
         record_evidence("checkpoint", {"configuration": json.loads((model_dir / "config.json").read_text())})
@@ -249,11 +257,18 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     threshold = 0.25
     record_evidence("thresholds", {"reference_score_min": threshold, "detection_count_equal": True, "class_ids_equal": True, "score_absolute_error_lt": 5e-3, "box_coordinate_error_pixels_lt": 1.0})
     kept = [row for row in expected if float(row[4]) >= threshold]
-    _record_reference_boxes(kept, scale, pad_x, pad_y)
+    reference = _record_reference_boxes(kept, scale, pad_x, pad_y)
+    record_detection_views(actual, reference, image, tmp_path / "detection-views")
     with evidence_stage("compare"):
         _assert_matches_reference(actual, kept, scale, pad_x, pad_y)
     # The public SDK reads the same pixels the reference decoded, so it is held to
     # the same oracle; the CLI's own JPEG decoder is not claimed bitwise equal.
     with evidence_stage("sdk"):
-        for sdk in _sdk_detections(runtime_root, bundle, image, tmp_path):
+        for sample_index, sdk in enumerate(_sdk_detections(runtime_root, bundle, image, tmp_path), start=1):
+            operation = "SDK C" if sample_index == 1 else "SDK C++"
+            begin_detection_operation(image, operation)
+            record_evidence("native", sdk)
+            record_evidence("reference", reference)
+            record_detection_views(sdk, reference, image, tmp_path / "sdk-detection-views",
+                                   sample_index=sample_index, operation=operation)
             _assert_matches_reference(sdk, kept, scale, pad_x, pad_y)

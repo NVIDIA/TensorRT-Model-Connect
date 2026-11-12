@@ -41,6 +41,7 @@ import os
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
@@ -391,7 +392,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
 
     with evidence_stage("reference"):
         reference = _reference(model_dir, case)
-    record_evidence("reference", {"values": reference})
+    record_evidence("reference", {"values": np.asarray(reference)})
     gate = _gate(manifest)
     tanh_reference = None
     if gate == "fp16":
@@ -414,6 +415,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     values = [float(value) for value in payload["last_hidden_state"]]
     assert len(values) == rows * columns
     native = [values[index * columns:(index + 1) * columns] for index in range(rows)]
+    # Persist the complete matrix in the same row-major shape as the reference;
+    # the native JSON fields remain available alongside this display tensor.
+    record_evidence("native", {**payload, "values": np.asarray(native)})
 
     with evidence_stage("compare"):
         worst, cosine = _check_features(native, reference, gate, tanh_reference)

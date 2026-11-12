@@ -1739,10 +1739,13 @@ def _demo_output(
             label = _mapping(value).get("class_label")
             named = f'<p class="readable">{_escape(label)}</p>' if isinstance(label, str) else ""
             return f'<p class="class-result">Class ID <strong>{_escape(chosen)}</strong></p>' + named
-        saved = classification_index(_mapping(value).get("logits", value))
+        recorded = _mapping(value)
+        field = "scores" if "logits" not in recorded and "scores" in recorded else "logits"
+        saved = classification_index(recorded.get(field, value))
         if saved is not None:
-            return f'<p class="class-result">Class ID <strong>{saved[0]}</strong></p><p class="note">From complete saved logits</p>'
-        return '<p class="note">Class preview unavailable; complete saved logits are unavailable.</p>'
+            label = "Class index" if field == "scores" else "Class ID"
+            return f'<p class="class-result">{label} <strong>{saved[0]}</strong></p><p class="note">From complete saved {field}</p>'
+        return f'<p class="note">Class preview unavailable; complete saved {field} are unavailable.</p>'
     notices = _demo_nonfinite(value)
     text = _demo_text_value(value, role)
     if media:
