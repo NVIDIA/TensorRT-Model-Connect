@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gc
 import json
+import math
 import sys
 from functools import partial
 from pathlib import Path
@@ -40,7 +41,12 @@ def _processor_config(model_dir: Path) -> dict:
         if (not isinstance(values, list) or len(values) != 3
                 or any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in values)):
             raise ValueError(f"minicpmv4_7 {name} must hold three numbers")
-        settings[name] = [float(v) for v in values]
+        values = [float(v) for v in values]
+        if not all(math.isfinite(v) for v in values):
+            raise ValueError(f"minicpmv4_7 {name} must hold finite values")
+        if name == "image_std" and min(values) <= 0.0:
+            raise ValueError("minicpmv4_7 image_std must be positive")
+        settings[name] = values
     for name, default in _PROCESSOR_DEFAULTS.items():
         if name in ("max_slice_nums", "image_mean", "image_std"):
             continue
@@ -148,7 +154,7 @@ def build(request, writer) -> None:
     processor = _processor_config(model_dir)
     if processor["patch_size"] != config.vision.patch_size:
         raise ValueError("minicpmv4_7 processor patch size disagrees with the vision tower")
-    check_tokenizer_contract(model_dir)
+    check_tokenizer_contract(model_dir, text.vocab_size)
     token_ids, prompts = _token_metadata(model_dir, config)
     eos = _eos_ids(model_dir)
     writer.set_header(family="minicpmv4_7", task=request.task, backend=request.backend)

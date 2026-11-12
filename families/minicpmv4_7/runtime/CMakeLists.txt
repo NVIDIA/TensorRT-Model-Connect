@@ -31,6 +31,9 @@ set_target_properties(trtmc_model_minicpmv4_7 PROPERTIES
   INSTALL_RPATH "\$ORIGIN"
 )
 install(TARGETS trtmc_model_minicpmv4_7 LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+# The library carries code adapted from BSD-3-Clause and Apache-2.0 sources; ship their notices with it.
+install(FILES ${PROJECT_SOURCE_DIR}/families/minicpmv4_7/NOTICE
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/trtmc/families/minicpmv4_7)
 
 if(TRTMC_BUILD_TESTS)
   # Host-only preprocessing, prompt and canvas-position contract (no GPU, no bundle).
