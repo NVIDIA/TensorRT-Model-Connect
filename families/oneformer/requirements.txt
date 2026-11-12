@@ -9,3 +9,6 @@ transformers==5.2.0
 torchvision==0.27.0
 numpy>=1.24,<2.5
 Pillow
+# The reference OneFormerForUniversalSegmentation constructor builds the training
+# loss, which requires scipy.
+scipy==1.15.3
