@@ -72,14 +72,60 @@ void test_pipeline() {
             "SDK image generation or final-token stopping failed");
     tokenizer->tokens = 5;
     module->calls = 0;
-    rejects([&] { pipeline.run(request, settings); });
+    rejects([&] { pipeline.run(request, settings); }, "exceed KV capacity");
     require(module->calls == 0, "oversized image prompt began prefill");
+    tokenizer->tokens = 2;
     const internal::ConfigEntry invalid{"top_k", std::int64_t{0}};
-    rejects([&] { pipeline.run(request, {&invalid, 1}); });
+    rejects([&] { pipeline.run(request, {&invalid, 1}); }, "invalid generation options");
     const internal::ImagesTextPart repeated[]{image, image};
     const internal::ImagesTextMessage repeated_turn{internal::MessageRole::User, {repeated, 2}};
-    rejects(
-        [&] { pipeline.run(internal::ImagesTextToTextRequest{{&repeated_turn, 1}}, settings); });
+    rejects([&] { pipeline.run(internal::ImagesTextToTextRequest{{&repeated_turn, 1}}, settings); },
+            "exactly one image");
+
+    for (std::size_t prompt_tokens : {2, 4}) {
+        tokenizer->tokens = prompt_tokens;
+        module->calls = 0;
+        require(pipeline.run(prefix, {}).token_ids.size() == 5 - prompt_tokens &&
+                    module->calls == 4,
+                "default continuation budget exceeds remaining capacity");
+        module->calls = 0;
+        require(pipeline.run(request, {}).token_ids.size() == 5 - prompt_tokens &&
+                    module->calls == 4,
+                "default image budget exceeds remaining capacity");
+    }
+    tokenizer->tokens = 5;
+    module->calls = 0;
+    const auto before_full_prompt = cache->resets;
+    rejects([&] { pipeline.run(prefix, {}); }, "leaves no KV capacity");
+    rejects([&] { pipeline.run(request, {}); }, "leaves no KV capacity");
+    require(module->calls == 0 && cache->resets == before_full_prompt,
+            "full prompt began decoder prefill");
+    tokenizer->tokens = 2;
+    const internal::ConfigEntry oversized{"max_new_tokens", std::int64_t{4}};
+    rejects([&] { pipeline.run(prefix, {&oversized, 1}); }, "exceed KV capacity");
+    rejects([&] { pipeline.run(request, {&oversized, 1}); }, "exceed KV capacity");
+    for (std::int64_t budget : {0, -1}) {
+        const internal::ConfigEntry bad_budget{"max_new_tokens", budget};
+        rejects([&] { pipeline.run(prefix, {&bad_budget, 1}); }, "invalid generation options");
+        rejects([&] { pipeline.run(request, {&bad_budget, 1}); }, "invalid generation options");
+    }
+    const internal::ImagesTextPart reordered[]{internal::TextPartView{"before"}, image,
+                                               internal::TextPartView{"after"}};
+    for (std::size_t count : {2, 3}) {
+        const internal::ImagesTextMessage reordered_turn{internal::MessageRole::User,
+                                                         {reordered, count}};
+        rejects(
+            [&] {
+                pipeline.run(internal::ImagesTextToTextRequest{{&reordered_turn, 1}}, settings);
+            },
+            "image before text");
+    }
+    const internal::ImagesTextPart ordered[]{image, internal::TextPartView{"color"},
+                                             internal::TextPartView{"?"}};
+    const internal::ImagesTextMessage ordered_turn{internal::MessageRole::User, {ordered, 3}};
+    require(pipeline.run(internal::ImagesTextToTextRequest{{&ordered_turn, 1}}, settings).text ==
+                "x",
+            "ordered image and text parts were rejected");
 }
 
 void test_unmapped_adapter() {

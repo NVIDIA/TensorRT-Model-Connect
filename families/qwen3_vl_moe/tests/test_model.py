@@ -89,7 +89,9 @@ def test_unsupported_build_options_fail_before_loading(tmp_path, override, error
         build(BuildRequest(**args), None)
 
 
-@pytest.mark.parametrize("layout", ["rope_scaling", "rope_parameters", "missing"])
+@pytest.mark.parametrize(
+    "layout", ["rope_scaling", "rope_parameters", "null_legacy", "empty_legacy", "missing"]
+)
 def test_multimodal_rope_is_required_before_weight_loading(tmp_path, monkeypatch, layout):
     rope = {"mrope_section": [2, 1, 1], "mrope_interleaved": True}
     text = {
@@ -102,7 +104,10 @@ def test_multimodal_rope_is_required_before_weight_loading(tmp_path, monkeypatch
         "decoder_sparse_step": 1,
         "mlp_only_layers": [],
     }
-    if layout != "missing":
+    if layout in ("null_legacy", "empty_legacy"):
+        text["rope_scaling"] = None if layout == "null_legacy" else {}
+        text["rope_parameters"] = rope
+    elif layout != "missing":
         text[layout] = rope
     config = {
         "model_type": "qwen3_vl_moe",
@@ -135,6 +140,20 @@ def test_multimodal_rope_is_required_before_weight_loading(tmp_path, monkeypatch
         with pytest.raises(RuntimeError, match="weight loading reached"):
             build(request, None)
         assert calls == [True]
+
+
+@pytest.mark.parametrize("legacy", [None, {}])
+@pytest.mark.parametrize(
+    "parent", [None, "text_config", "language_config", "llm_config", "thinker"]
+)
+def test_empty_legacy_rope_uses_modern_settings(legacy, parent):
+    rope = {"mrope_section": [2, 1, 1]}
+    raw = {"rope_scaling": legacy, "rope_parameters": rope}
+    if parent == "thinker":
+        raw = {"rope_scaling": {}, "thinker_config": {"text_config": raw}}
+    elif parent is not None:
+        raw = {"rope_scaling": None, parent: raw}
+    assert get_rope_scaling(raw) == rope
 
 
 def test_tokenizer_contract_disables_checkpoint_code(tmp_path, monkeypatch):

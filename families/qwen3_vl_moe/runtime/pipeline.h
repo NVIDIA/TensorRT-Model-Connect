@@ -120,7 +120,12 @@ class Qwen3VlMoePipeline final : public ITextGeneration,
         int32_t feature_dim, int32_t merged_grid_height, int32_t merged_grid_width,
         int32_t max_new_tokens, const Qwen3VlMoeSamplingParams& params);
 
-    int32_t resolve_max_new_tokens(const TextGenerationConfig& cfg) const;
+    TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg,
+                        bool default_budget);
+    TextResult generate(const std::string& prompt, const float* image_pixels, int32_t image_height,
+                        int32_t image_width, const TextGenerationConfig& cfg, bool default_budget);
+    int32_t resolve_max_new_tokens(const TextGenerationConfig& cfg, std::size_t prompt_length,
+                                   bool default_budget) const;
 
     void reset_generation_context(int32_t prompt_length);
 

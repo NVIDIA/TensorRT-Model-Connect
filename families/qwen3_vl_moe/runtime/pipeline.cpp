@@ -187,12 +187,17 @@ void Qwen3VlMoePipeline::select_lora_adapter(const std::string& adapter_id) {
 
 TextResult Qwen3VlMoePipeline::generate(const std::string& prompt,
                                         const TextGenerationConfig& cfg) {
+    return generate(prompt, cfg, false);
+}
+
+TextResult Qwen3VlMoePipeline::generate(const std::string& prompt, const TextGenerationConfig& cfg,
+                                        bool default_budget) {
     if (!tokenizer_)
         throw std::runtime_error("Qwen3VlMoePipeline: no tokenizer configured");
 
     select_lora_adapter(cfg.lora_adapter_id);
     auto input_ids = tokenizer_->encode(prompt);
-    const int32_t max_new = resolve_max_new_tokens(cfg);
+    const int32_t max_new = resolve_max_new_tokens(cfg, input_ids.size(), default_budget);
     auto sp = qwen3_vl_moe_sampling_params_from_config(cfg, config_.id_eos_ids);
     auto output_ids = generate_from_ids(input_ids, max_new, sp);
 
@@ -584,20 +589,35 @@ bool add_mrope_prefill_input(ITrtModule& prefill, const std::vector<int32_t>& in
 
 } // namespace
 
-int32_t Qwen3VlMoePipeline::resolve_max_new_tokens(const TextGenerationConfig& cfg) const {
-    return (cfg.max_new_tokens > 0) ? cfg.max_new_tokens : 128;
+int32_t Qwen3VlMoePipeline::resolve_max_new_tokens(const TextGenerationConfig& cfg,
+                                                   std::size_t prompt_length,
+                                                   bool default_budget) const {
+    if (!default_budget)
+        return (cfg.max_new_tokens > 0) ? cfg.max_new_tokens : 128;
+    const auto capacity = state_->max_length();
+    if (capacity <= 0 || prompt_length >= static_cast<std::size_t>(capacity))
+        throw std::invalid_argument("Qwen3-VL-MoE prompt leaves no KV capacity for generation");
+    const auto remaining = capacity - static_cast<int32_t>(prompt_length);
+    const auto preferred = default_max_new_tokens();
+    return std::min(preferred > 0 ? preferred : 128, remaining);
 }
 
 TextResult Qwen3VlMoePipeline::generate(const std::string& prompt, const float* image_pixels,
                                         int32_t image_height, int32_t image_width,
                                         const TextGenerationConfig& cfg) {
+    return generate(prompt, image_pixels, image_height, image_width, cfg, false);
+}
+
+TextResult Qwen3VlMoePipeline::generate(const std::string& prompt, const float* image_pixels,
+                                        int32_t image_height, int32_t image_width,
+                                        const TextGenerationConfig& cfg, bool default_budget) {
     if (!tokenizer_)
         throw std::runtime_error("Qwen3VlMoePipeline: no tokenizer configured");
 
     select_lora_adapter(cfg.lora_adapter_id);
     bool valid = image_pixels && image_height > 0 && image_width > 0;
     if (!valid || !vision_encoder_)
-        return generate(prompt, cfg);
+        return generate(prompt, cfg, default_budget);
 
     // Preprocess and encode the image
     auto decoded = convert_float_to_decoded(image_pixels, image_height, image_width);
@@ -617,7 +637,7 @@ TextResult Qwen3VlMoePipeline::generate(const std::string& prompt, const float* 
 
     // Format prompt, tokenize, generate with vision features
     auto input_ids = tokenizer_->encode(qwen3_vl_moe_format_prompt(prompt, vl_preprocess_, nf));
-    const int32_t max_new = resolve_max_new_tokens(cfg);
+    const int32_t max_new = resolve_max_new_tokens(cfg, input_ids.size(), default_budget);
     auto sp_vl = qwen3_vl_moe_sampling_params_from_config(cfg, config_.id_eos_ids);
     const auto [merged_grid_height, merged_grid_width] =
         resolve_merged_grid(preprocessed, vl_preprocess_);
