@@ -61,6 +61,15 @@ std::vector<internal::TaskInstance> EncoderPipeline::task_bindings() {
 EncoderPipeline::Encoded EncoderPipeline::resolve(const internal::TextSource& source) const {
     Encoded encoded;
     if (const auto* text = std::get_if<std::string_view>(&source)) {
+        // A text with more bytes than the profile's tokens can cover is
+        // rejected before it is tokenized.
+        const auto limit = static_cast<std::uint64_t>(settings_.max_sequence_length);
+        const auto per_token = static_cast<std::uint64_t>(tokenizer_->max_token_bytes());
+        const auto at_least = text->size() / per_token + (text->size() % per_token != 0 ? 1 : 0);
+        if (at_least > limit)
+            throw std::invalid_argument(
+                "ministral3 input has at least " + std::to_string(at_least) +
+                " tokens; the bundle accepts at most " + std::to_string(limit));
         encoded.tokens = tokenizer_->encode(*text);
         encoded.ids.reserve(encoded.tokens.size());
         for (const auto& token : encoded.tokens)

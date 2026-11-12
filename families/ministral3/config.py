@@ -112,8 +112,13 @@ class ModelConfig:
         if head_dim % 2 != 0:
             raise ValueError("head_dim must be even for rotary embeddings")
         eps = raw.get("rms_norm_eps")
-        if not isinstance(eps, (int, float)) or isinstance(eps, bool) or not eps > 0:
-            raise ValueError("rms_norm_eps must be a positive number")
+        if (
+            not isinstance(eps, (int, float))
+            or isinstance(eps, bool)
+            or not math.isfinite(eps)
+            or not eps > 0
+        ):
+            raise ValueError("rms_norm_eps must be a positive finite number")
         max_positions = _positive_int(raw, "max_position_embeddings")
         rope = _rope(raw)
         head = _sentence_head(modules, pooling, sentence, sentence_bert, hidden)

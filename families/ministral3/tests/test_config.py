@@ -116,6 +116,25 @@ def test_checkpoint_files_are_read_from_the_model_directory(tmp_path):
         ModelConfig.from_dir(tmp_path)
 
 
+def test_an_rms_norm_eps_that_overflows_to_infinity_is_rejected(tmp_path):
+    (tmp_path / "1_Pooling").mkdir()
+    for name, value in (
+        ("modules.json", MODULES),
+        ("1_Pooling/config.json", POOLING),
+        ("config_sentence_transformers.json", SENTENCE),
+        ("sentence_bert_config.json", SENTENCE_BERT),
+    ):
+        (tmp_path / name).write_text(json.dumps(value), encoding="utf-8")
+    text = json.dumps(CONFIG)
+    assert '"rms_norm_eps": 1e-05' in text
+    # JSON parsing turns the literal 1e400 into float("inf").
+    (tmp_path / "config.json").write_text(
+        text.replace('"rms_norm_eps": 1e-05', '"rms_norm_eps": 1e400'), encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="rms_norm_eps"):
+        ModelConfig.from_dir(tmp_path)
+
+
 def edited(source, path, value):
     result = copy.deepcopy(source)
     target = result
@@ -143,6 +162,9 @@ def edited(source, path, value):
         (("rope_parameters", "partial_rotary_factor"), 0.5, "keys"),
         (("llama_4_scaling", "beta"), 0.2, "disagrees"),
         (("rms_norm_eps",), 0, "rms_norm_eps"),
+        (("rms_norm_eps",), float("inf"), "rms_norm_eps"),
+        (("rms_norm_eps",), float("nan"), "rms_norm_eps"),
+        (("rms_norm_eps",), True, "rms_norm_eps"),
         (("partial_rotary_factor",), 0.5, "full rotary"),
         (("original_max_position_embeddings",), 8192, "disagrees"),
     ],

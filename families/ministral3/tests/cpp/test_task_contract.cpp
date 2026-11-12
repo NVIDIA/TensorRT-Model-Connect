@@ -43,6 +43,21 @@ void rejects(Function&& function, const char* name) {
     throw std::runtime_error(std::string("expected failure was not raised: ") + name);
 }
 
+template <class Function>
+void rejects_with(Function&& function, const std::string& part, const std::string& absent,
+                  const char* name) {
+    try {
+        function();
+    } catch (const std::invalid_argument& error) {
+        const std::string message = error.what();
+        if (message.find(part) != std::string::npos &&
+            (absent.empty() || message.find(absent) == std::string::npos))
+            return;
+        throw std::runtime_error(std::string("unexpected message for ") + name + ": " + message);
+    }
+    throw std::runtime_error(std::string("expected failure was not raised: ") + name);
+}
+
 std::shared_ptr<const TekkenTokenizer> tokenizer() {
     const auto path = std::filesystem::path(__FILE__).parent_path().parent_path() / "fixtures" /
                       "tekken_tokenizer.json";
@@ -231,8 +246,15 @@ void task_contract(const char* primary) {
 
     const auto before = observed->calls.size();
     rejects<std::invalid_argument>([&] { pooled->run({std::string_view("")}, {}); }, "empty");
-    rejects<std::invalid_argument>([&] { pooled->run({std::string_view("abcdefgh")}, {}); },
-                                   "too long");
+    // Tokens of the fixture span at most 7 bytes, so 43 bytes are at least 7
+    // tokens: over the 6-token profile before tokenization.
+    check(tok->max_token_bytes() == 7, "fixture max_token_bytes");
+    const std::string oversized(static_cast<std::size_t>(kMaxLength * 7 + 1), 'a');
+    rejects_with([&] { pooled->run({std::string_view(oversized)}, {}); }, "has at least 7 tokens",
+                 "", "length bound before tokenization");
+    // A text within that bound is tokenized and rejected by its exact count.
+    rejects_with([&] { pooled->run({std::string_view("abcdefgh")}, {}); },
+                 " tokens; the bundle accepts at most 6", "at least", "too long");
     rejects<std::invalid_argument>([&] { token->run({std::string_view("a\xC3")}, {}); },
                                    "invalid UTF-8");
     for (const auto id : {std::int32_t{-1}, static_cast<std::int32_t>(tok->vocab_size())}) {

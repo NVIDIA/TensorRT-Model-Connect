@@ -39,8 +39,14 @@ DEFAULT_THRESHOLDS = {
     "score_abs_diff": 1e-5,
     "token_feature_cosine": 0.99999,
     "pooled_feature_cosine": 0.999999,
-    # BF16 bundle: its drift from the FP32 truth (1 - cosine, |score difference|)
-    # as a multiple of the official BF16 run's drift on the same inputs.
+    # Raw features also bound their length: |native - reference| / |reference|
+    # may not exceed sqrt(2 (1 - cosine bound)), the deviation the cosine bound
+    # allows at equal length (rounded down).
+    "token_feature_relative_error": 4.4e-3,
+    "pooled_feature_relative_error": 1.4e-3,
+    # BF16 bundle: its drift from the FP32 truth (1 - cosine, |score difference|,
+    # relative error of raw features) as a multiple of the official BF16 run's
+    # drift on the same inputs.
     "bf16_mean_drift_ratio": 1.5,
     "bf16_max_drift_ratio": 3.0,
 }
@@ -115,10 +121,11 @@ def _required_path(value: str | None, label: str) -> Path:
     return path
 
 
-def _model_dir(manifest: dict) -> Path:
+def _model_dir(manifest: dict) -> tuple[Path, bool]:
+    """The checkpoint directory, and whether it is the pinned snapshot itself."""
     explicit = os.environ.get("TRTMC_MINISTRAL3_MODEL_DIR")
     if explicit:
-        return _required_path(explicit, "TRTMC_MINISTRAL3_MODEL_DIR")
+        return _required_path(explicit, "TRTMC_MINISTRAL3_MODEL_DIR"), False
     from huggingface_hub import snapshot_download
 
     try:
@@ -129,7 +136,7 @@ def _model_dir(manifest: dict) -> Path:
         raise AssertionError(
             f"selected {FAMILY} E2E requires the exact cached checkpoint {manifest['hf_id']}"
         ) from error
-    return Path(snapshot)
+    return Path(snapshot), True
 
 
 def _runtime() -> tuple[Path, Path, Path]:
@@ -301,6 +308,12 @@ def _row_cosines(left: np.ndarray, right: np.ndarray) -> np.ndarray:
     return np.sum(a * b, axis=-1) / (np.linalg.norm(a, axis=-1) * np.linalg.norm(b, axis=-1))
 
 
+def _row_relative_errors(values: np.ndarray, reference: np.ndarray) -> np.ndarray:
+    a = values.astype(np.float64)
+    b = reference.astype(np.float64)
+    return np.linalg.norm(a - b, axis=-1) / np.linalg.norm(b, axis=-1)
+
+
 def _scores(embeddings: np.ndarray, queries: int) -> np.ndarray:
     values = embeddings.astype(np.float64)
     return values[:queries] @ values[queries:].T
@@ -309,14 +322,15 @@ def _scores(embeddings: np.ndarray, queries: int) -> np.ndarray:
 def _drifts(native: dict, reference: dict, queries: int) -> dict:
     """Per-text embedding, per-pair score and per-token feature drift from ``reference``."""
     scores = _scores(native["embeddings"], queries) - _scores(reference["embeddings"], queries)
+    pairs = list(zip(native["tokens"], reference["tokens"]))
     return {
         "embedding": 1 - _row_cosines(native["embeddings"], reference["embeddings"]),
         "score": np.abs(scores).reshape(-1),
         "token": np.concatenate(
-            [
-                1 - _row_cosines(mine["hidden"], theirs["hidden"])
-                for mine, theirs in zip(native["tokens"], reference["tokens"])
-            ]
+            [1 - _row_cosines(mine["hidden"], theirs["hidden"]) for mine, theirs in pairs]
+        ),
+        "token_relative": np.concatenate(
+            [_row_relative_errors(mine["hidden"], theirs["hidden"]) for mine, theirs in pairs]
         ),
     }
 
@@ -324,6 +338,11 @@ def _drifts(native: dict, reference: dict, queries: int) -> dict:
 def _pooled_cosine(pooled: np.ndarray, reference: dict, queries: int) -> float:
     document_mean = reference["tokens"][queries]["hidden"].astype(np.float64).mean(axis=0)
     return float(_row_cosines(np.asarray(pooled)[None, :], document_mean[None, :])[0])
+
+
+def _pooled_relative_error(pooled: np.ndarray, reference: dict, queries: int) -> float:
+    document_mean = reference["tokens"][queries]["hidden"].astype(np.float64).mean(axis=0)
+    return float(_row_relative_errors(np.asarray(pooled)[None, :], document_mean[None, :])[0])
 
 
 def _assert_parity(
@@ -337,7 +356,16 @@ def _assert_parity(
             f"native token IDs differ from AutoTokenizer: {text!r}"
         )
         data = text.encode("utf-8")
-        assert b"".join(data[begin:end] for begin, end in mine["byte_offsets"]) == data, (
+        offsets = mine["byte_offsets"]
+        ends = [0] + [end for _, end in offsets]
+        assert (
+            offsets
+            and all(
+                begin == ends[index] and begin < end for index, (begin, end) in enumerate(offsets)
+            )
+            and ends[-1] == len(data)
+        ), f"native byte offsets do not tile the input: {text!r} {offsets}"
+        assert b"".join(data[begin:end] for begin, end in offsets) == data, (
             f"native byte offsets do not tile the input: {text!r}"
         )
     drift = _drifts(native, truth, queries)
@@ -345,7 +373,9 @@ def _assert_parity(
         "embedding_cosine_min": float(1 - drift["embedding"].max()),
         "score_abs_diff_max": float(drift["score"].max()) if drift["score"].size else 0.0,
         "token_feature_cosine_min": float(1 - drift["token"].max()),
+        "token_feature_relative_error_max": float(drift["token_relative"].max()),
         "pooled_feature_cosine": _pooled_cosine(native["pooled"], truth, queries),
+        "pooled_feature_relative_error": _pooled_relative_error(native["pooled"], truth, queries),
         "tokens": int(drift["token"].size),
     }
     if drift["score"].size:
@@ -358,7 +388,14 @@ def _assert_parity(
         assert summary["embedding_cosine_min"] >= thresholds["embedding_cosine"], summary
         assert summary["score_abs_diff_max"] <= thresholds["score_abs_diff"], summary
         assert summary["token_feature_cosine_min"] >= thresholds["token_feature_cosine"], summary
+        assert (
+            summary["token_feature_relative_error_max"]
+            <= thresholds["token_feature_relative_error"]
+        ), f"token-feature relative error exceeds its bound: {summary}"
         assert summary["pooled_feature_cosine"] >= thresholds["pooled_feature_cosine"], summary
+        assert (
+            summary["pooled_feature_relative_error"] <= thresholds["pooled_feature_relative_error"]
+        ), f"pooled-feature relative error exceeds its bound: {summary}"
         return summary
     # A BF16 bundle is judged only relative to the official BF16 run's drift from
     # the FP32 truth. A mean over few tokens is dominated by single texts.
@@ -366,10 +403,12 @@ def _assert_parity(
         "BF16 drift statistics need at least 100 tokens of token features"
     )
     reference_drift = _drifts(official, truth, queries)
+    official_pooled = official["tokens"][queries]["hidden"].astype(np.float64).mean(axis=0)
     pooled = {
         "native": 1 - summary["pooled_feature_cosine"],
-        "official_bf16": 1
-        - _pooled_cosine(official["tokens"][queries]["hidden"].mean(axis=0), truth, queries),
+        "official_bf16": 1 - _pooled_cosine(official_pooled, truth, queries),
+        "native_relative": summary["pooled_feature_relative_error"],
+        "official_bf16_relative": _pooled_relative_error(official_pooled, truth, queries),
     }
     # Each repeated long document is one embedding averaged over thousands of
     # tokens, a stable statistic on its own; it covers the positions beyond
@@ -383,7 +422,7 @@ def _assert_parity(
         for index in range(first_long, drift["embedding"].size)
     ]
     statistics = {}
-    for kind in ("embedding", "score", "token"):
+    for kind in ("embedding", "score", "token", "token_relative"):
         values, baseline = drift[kind], reference_drift[kind]
         if values.size:
             statistics[kind] = {
@@ -404,6 +443,9 @@ def _assert_parity(
     assert pooled["native"] <= max_ratio * pooled["official_bf16"], (
         f"BF16 pooled-feature drift exceeds the official BF16 drift: {summary}"
     )
+    assert pooled["native_relative"] <= max_ratio * pooled["official_bf16_relative"], (
+        f"BF16 pooled-feature relative error exceeds the official BF16 one: {summary}"
+    )
     for item in long_documents:
         assert item["native"] <= max_ratio * item["official_bf16"], (
             f"BF16 long document drift exceeds the official BF16 drift: {summary}"
@@ -414,13 +456,18 @@ def _assert_parity(
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
-    model_dir = _model_dir(manifest)
+    model_dir, pinned = _model_dir(manifest)
     record_evidence(
         "checkpoint",
         {
             "model_dir": str(model_dir),
             "hf_id": manifest["hf_id"],
             "hf_revision": manifest["hf_revision"],
+            "identity": (
+                "pinned Hugging Face snapshot"
+                if pinned
+                else "TRTMC_MINISTRAL3_MODEL_DIR override, not verified against hf_revision"
+            ),
         },
     )
     binary, runtime_root, native_build = _runtime()

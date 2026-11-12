@@ -59,9 +59,67 @@ _BPE_FLAGS = {
 }
 
 
+def _byte_alphabet() -> list[str]:
+    """The GPT-2 byte-to-character alphabet of the ByteLevel pre-tokenizer."""
+    alphabet, shifted = [], 0
+    for byte in range(256):
+        if 33 <= byte <= 126 or 161 <= byte <= 172 or byte >= 174:
+            alphabet.append(chr(byte))
+        else:
+            alphabet.append(chr(256 + shifted))
+            shifted += 1
+    return alphabet
+
+
+def _merge_parts(merge: object) -> tuple[str, str] | None:
+    if isinstance(merge, str):
+        parts = merge.split(" ")
+        return (parts[0], parts[1]) if len(parts) == 2 and all(parts) else None
+    if isinstance(merge, list) and len(merge) == 2 and all(isinstance(part, str) for part in merge):
+        return merge[0], merge[1]
+    return None
+
+
+def _vocabulary_problems(model: dict, added_tokens: object, vocab_size: int) -> list[str]:
+    """The vocabulary invariants the native tokenizer requires at load."""
+    vocab = model.get("vocab")
+    if not isinstance(vocab, dict) or len(vocab) != vocab_size:
+        return ["vocab size"]
+    problems = []
+    ids = list(vocab.values())
+    if not all(type(value) is int for value in ids) or sorted(ids) != list(range(len(ids))):
+        problems.append("vocab ids")
+    if not all(symbol in vocab for symbol in _byte_alphabet()):
+        problems.append("byte alphabet")
+    merges = model.get("merges")
+    pairs: set[tuple[str, str]] = set()
+    for merge in merges if isinstance(merges, list) else (None,):
+        parts = _merge_parts(merge)
+        if (
+            parts is None
+            or parts in pairs
+            or not all(part in vocab for part in (*parts, parts[0] + parts[1]))
+        ):
+            problems.append("merges")
+            break
+        pairs.add(parts)
+    if not isinstance(added_tokens, list) or not all(
+        isinstance(token, dict)
+        and isinstance(token.get("content"), str)
+        and token["content"]
+        and type(token.get("id")) is int
+        and 0 <= token["id"] < vocab_size
+        and vocab.get(token["content"]) == token["id"]
+        for token in added_tokens
+    ):
+        problems.append("added token ids")
+    return problems
+
+
 def _check_tokenizer(tokenizer: dict, vocab_size: int) -> None:
     model = tokenizer.get("model") or {}
     post = tokenizer.get("post_processor") or {}
+    added = tokenizer.get("added_tokens", [])
     problems = [
         name
         for name, ok in (
@@ -77,20 +135,18 @@ def _check_tokenizer(tokenizer: dict, vocab_size: int) -> None:
             ),
             ("model", all(model.get(key, "?") == value for key, value in _BPE_FLAGS.items())),
             (
-                "vocab size",
-                isinstance(model.get("vocab"), dict) and len(model["vocab"]) == vocab_size,
-            ),
-            (
                 "added_tokens",
-                all(
-                    not token.get(key, True)
-                    for token in tokenizer.get("added_tokens", [])
+                isinstance(added, list)
+                and all(
+                    isinstance(token, dict) and not token.get(key, True)
+                    for token in added
                     for key in ("single_word", "lstrip", "rstrip", "normalized")
                 ),
             ),
         )
         if not ok
     ]
+    problems += _vocabulary_problems(model, added, vocab_size)
     if problems:
         raise ValueError(
             f"ministral3 tokenizer.json differs from the implemented Tekken contract: {problems}"
