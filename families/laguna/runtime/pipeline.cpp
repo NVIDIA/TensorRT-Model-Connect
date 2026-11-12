@@ -243,6 +243,12 @@ TextResult Pipeline::generate_tokens(const std::vector<std::int32_t>& input_ids,
                                      const TextGenerationConfig& cfg) {
     if (input_ids.empty())
         throw std::invalid_argument("Laguna needs a non-empty prompt");
+    for (const std::int32_t id : input_ids) {
+        if (id < 0 || id >= config_.vocab_size)
+            throw std::invalid_argument("Laguna token id " + std::to_string(id) +
+                                        " is outside the vocabulary [0, " +
+                                        std::to_string(config_.vocab_size) + ")");
+    }
     const std::int32_t max_new = cfg.max_new_tokens > 0 ? cfg.max_new_tokens : kDefaultMaxNewTokens;
     if (input_ids.size() + static_cast<std::size_t>(max_new) >
         static_cast<std::size_t>(cache_->max_length()))

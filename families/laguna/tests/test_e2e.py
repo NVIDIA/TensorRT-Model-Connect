@@ -243,37 +243,45 @@ def _reference(model_dir: Path, manifest: dict, case: dict, fed_ids: list[int], 
     else:
         prompt_ids = tokenizer(case["prompt"])["input_ids"]
     dtypes = {"fp32": torch.float32, "bf16": torch.bfloat16}
+    saved = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    result = {"prompt_ids": prompt_ids, "tokenizer": tokenizer, "window": config["sliding_window"]}
-    # The reference first (greedy text and the target logits), then the same
-    # framework at the bundle precision on the same tokens, once per attention
-    # implementation.
-    runs = [("reference", manifest["reference_precision"], "eager")]
-    runs += [(f"baseline_{name}", manifest["precision"], name) for name in _BASELINE_ATTENTION]
-    for role, precision, attention in runs:
-        model = AutoModelForCausalLM.from_pretrained(
-            model_dir,
-            local_files_only=True,
-            dtype=dtypes[precision],
-            device_map="cuda",
-            attn_implementation=attention,
-            experts_implementation="eager",
-        ).eval()
-        with torch.inference_mode():
-            if role == "reference":
-                inputs = torch.tensor([prompt_ids], device="cuda")
-                result["ids"] = model.generate(
-                    input_ids=inputs,
-                    attention_mask=torch.ones_like(inputs),
-                    max_new_tokens=int(case["max_new_tokens"]),
-                    do_sample=False,
-                )[0, len(prompt_ids) :].tolist()
-            fed = torch.tensor([fed_ids], device="cuda")
-            result[f"{role}_logits"] = model(input_ids=fed).logits[0].float().cpu().numpy()
-        del model
-        gc.collect()
-        torch.cuda.empty_cache()
+    try:
+        result = {
+            "prompt_ids": prompt_ids,
+            "tokenizer": tokenizer,
+            "window": config["sliding_window"],
+        }
+        # The reference first (greedy text and the target logits), then the same
+        # framework at the bundle precision on the same tokens, once per attention
+        # implementation.
+        runs = [("reference", manifest["reference_precision"], "eager")]
+        runs += [(f"baseline_{name}", manifest["precision"], name) for name in _BASELINE_ATTENTION]
+        for role, precision, attention in runs:
+            model = AutoModelForCausalLM.from_pretrained(
+                model_dir,
+                local_files_only=True,
+                dtype=dtypes[precision],
+                device_map="cuda",
+                attn_implementation=attention,
+                experts_implementation="eager",
+            ).eval()
+            with torch.inference_mode():
+                if role == "reference":
+                    inputs = torch.tensor([prompt_ids], device="cuda")
+                    result["ids"] = model.generate(
+                        input_ids=inputs,
+                        attention_mask=torch.ones_like(inputs),
+                        max_new_tokens=int(case["max_new_tokens"]),
+                        do_sample=False,
+                    )[0, len(prompt_ids) :].tolist()
+                fed = torch.tensor([fed_ids], device="cuda")
+                result[f"{role}_logits"] = model(input_ids=fed).logits[0].float().cpu().numpy()
+            del model
+            gc.collect()
+            torch.cuda.empty_cache()
+    finally:
+        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = saved
     result["text"] = tokenizer.decode(result["ids"], skip_special_tokens=True)
     return result
 

@@ -62,9 +62,9 @@ class _Graph:
     def const(self, array: np.ndarray, shape: tuple[int, ...] | None = None) -> trt.ITensor:
         array = np.ascontiguousarray(array)
         shape = tuple(array.shape) if shape is None else shape
+        # TensorRT keeps only a pointer to the host data; every array must outlive the build.
+        self._keep.append(array)
         if array.dtype == BF16:
-            # TensorRT keeps only the pointer; the array must outlive the build.
-            self._keep.append(array)
             weights = trt.Weights(trt.bfloat16, array.ctypes.data, array.size)
         else:
             weights = trt.Weights(array)
