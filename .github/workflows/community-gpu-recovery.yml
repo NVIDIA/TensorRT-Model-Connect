@@ -1,0 +1,143 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Community GPU recovery
+
+# Install this entry workflow on main before admitting new Dev allocations.
+# Until the GPU pipeline is promoted, run only the trusted ci/developer worker.
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Observe leases or apply ownership-verified deletion
+        type: choice
+        default: observe
+        options: [observe, apply]
+
+permissions: {}
+
+concurrency:
+  group: trtmc-community-gpu-recovery
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    name: Community GPU / Recover leases
+    if: ${{ github.repository == 'NVIDIA/TensorRT-Model-Connect' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    environment:
+      name: gpu-ci-dispatch
+      deployment: false
+    timeout-minutes: 18
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Require a fresh recovery run
+        run: |
+          if [ "$GITHUB_RUN_ATTEMPT" != 1 ]; then
+            echo "::error::Start a new manual recovery run; existing checkpoint artifacts stay immutable."
+            exit 1
+          fi
+
+      - name: Resolve the trusted recovery worker
+        id: worker
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKER_REF: ${{ vars.TRTMC_GPU_RECOVERY_WORKER_REF || 'ci/developer' }}
+          EVENT_NAME: ${{ github.event_name }}
+          ACTOR: ${{ github.actor }}
+          REQUESTED_MODE: ${{ inputs.mode || 'observe' }}
+          APPLY_ENABLED: ${{ vars.TRTMC_GPU_RECOVERY_APPLY || 'false' }}
+        run: |
+          set -euo pipefail
+          case "$WORKER_REF" in main|ci/developer) ;; *) exit 1 ;; esac
+          mode=observe
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            case "$REQUESTED_MODE" in observe|apply) mode="$REQUESTED_MODE" ;; *) exit 1 ;; esac
+            if [ "$mode" = apply ]; then
+              role="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$ACTOR/permission" --jq '.role_name')"
+              case "$role" in maintain|admin) ;; *) exit 1 ;; esac
+            fi
+          elif [ "$APPLY_ENABLED" = true ]; then
+            mode=apply
+          fi
+          sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$WORKER_REF" --jq '.object.sha')"
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]]
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the trusted recovery worker
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ steps.worker.outputs.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+
+      - name: Prepare recovery journal
+        id: prepare
+        timeout-minutes: 2
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 -m tools.community_gpu_recovery --initialize \
+            --journal-file "$RUNNER_TEMP/recovery-checkpoint/journal.json" --timeout 90
+
+      - name: Install the pinned Brev CLI
+        if: ${{ steps.worker.outputs.mode == 'apply' }}
+        timeout-minutes: 2
+        env:
+          BREV_VERSION: 0.6.335
+          BREV_ARCHIVE_SHA256: 89d778e6f1e5e52495f3e0f10393f1666a1b16d180001b13faec6f906955e6f8
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/brev-cli.tar.gz"
+          curl --connect-timeout 10 --max-time 90 --retry 2 -fsSL \
+            "https://github.com/brevdev/brev-cli/releases/download/v${BREV_VERSION}/brev-cli_${BREV_VERSION}_linux_amd64.tar.gz" \
+            -o "$archive"
+          echo "$BREV_ARCHIVE_SHA256  $archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$RUNNER_TEMP" brev
+          install -m 0755 "$RUNNER_TEMP/brev" "$HOME/.local/bin/brev"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Log in to Brev
+        if: ${{ steps.worker.outputs.mode == 'apply' }}
+        timeout-minutes: 3
+        env:
+          BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if timeout 40s brev login --api-key "$BREV_API_KEY"; then exit 0; fi
+            sleep 10
+          done
+          exit 1
+
+      - name: Reconcile GPU leases
+        timeout-minutes: 9
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BREV_API_KEY: ${{ secrets.BREV_API_KEY }}
+          MODE: ${{ steps.worker.outputs.mode }}
+        run: |
+          set -euo pipefail
+          flags=()
+          if [ "$MODE" = apply ]; then flags+=(--apply); fi
+          python3 -m tools.community_gpu_recovery "${flags[@]}" --timeout 480 \
+            --journal-file "$RUNNER_TEMP/recovery-checkpoint/journal.json"
+
+      - name: Publish recovery journal
+        if: ${{ always() && steps.prepare.outcome == 'success' }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: community-gpu-recovery-journal
+          path: ${{ runner.temp }}/recovery-checkpoint/journal.json
+          if-no-files-found: error
+          retention-days: 90
