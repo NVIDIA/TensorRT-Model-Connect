@@ -1,0 +1,5 @@
+{
+  "threshold_overrides": {
+    "near_tie_logit": 0.85
+  }
+}
