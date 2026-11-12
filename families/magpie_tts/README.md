@@ -9,6 +9,29 @@ runs two decoder passes per frame (conditioned and unconditioned, for
 classifier-free guidance). The manifests build fp32; fp16 is also supported.
 The family has no quantized build.
 
+## Decoding
+
+Keep the default `greedy: false` in `runtime.json` (top-k sampling,
+temperature 0.6, top-k 80, classifier-free guidance 2.5). Greedy decoding
+(`greedy: true`, argmax of every codebook) is less accurate for this model,
+also in the reference implementation. On 13 test sentences
+(whisper-large-v3-turbo WER against the text):
+
+| Decoding | NeMo reference | Native runtime (TensorRT 11.4, B200 and B300) |
+|---|---|---|
+| Sampling (default) | 1.2% | 2.35% |
+| Greedy | 9.4% (10.0% to 11.2% without guidance) | 9.4% |
+
+Many top-2 logit margins are below 0.05, so greedy picks follow small numeric
+differences: two NeMo greedy runs on the same GPU already give different
+codes. The native greedy loop is deterministic (two runs give bit-identical
+audio). It uses the same decode attention mask, attention-prior update and
+EOS rules as the sampling loop and checks EOS after every frame.
+
+fp16 bundles compute the NanoCodec length masks in fp32. Sample positions
+reach 512 x 1024, above the fp16 limit (65504), and an fp16 mask turned the
+audio into NaN from frame 63 on.
+
 ## Context prefill
 
 The decoder plan has two optimization profiles: profile 0 for the one-frame
