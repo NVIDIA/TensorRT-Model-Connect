@@ -549,6 +549,43 @@ void write_binary_artifact(const std::string& path, const T* values, std::uint64
     output.close();
 }
 
+Json depth_values(const std::vector<float>& values) {
+    auto result = Json::array();
+    for (const float value : values) {
+        if (!std::isfinite(value))
+            throw std::runtime_error("benchmark output contains a non-finite value");
+        result.push_back(value);
+    }
+    return result;
+}
+
+Json run_depth(trtmc::ITask& task, const Json& request, const Timing& timing) {
+    auto& interface = require_interface<trtmc::IMonocularDepth>(task, "IMonocularDepth");
+    const auto path = request.at("image_path").get<std::string>();
+    std::optional<Image> cached;
+    if (!timing.asset_loading_included)
+        cached = read_image(path);
+    return measure(
+        timing,
+        [&]() {
+            std::optional<Image> loaded;
+            if (!cached)
+                loaded = read_image(path);
+            const auto& image = cached ? *cached : *loaded;
+            return interface.estimate_depth(image.pixels.data(), image.height, image.width);
+        },
+        [](const trtmc::MonocularDepthResult& result) {
+            if (result.height <= 0 || result.width <= 0 ||
+                result.depth.size() != static_cast<std::size_t>(result.height) * result.width)
+                throw std::runtime_error("monocular depth returned inconsistent dimensions");
+            return Json{{"depth_images", 1},
+                        {"depth_pixels", result.depth.size()},
+                        {"height", result.height},
+                        {"width", result.width},
+                        {"depth", depth_values(result.depth)}};
+        });
+}
+
 Json run_geometry(trtmc::ITask& task, const Json& request, const Timing& timing) {
     auto& interface = require_interface<trtmc::IMonocularGeometry>(task, "IMonocularGeometry");
     const auto path = request.at("image_path").get<std::string>();
@@ -1768,6 +1805,99 @@ Json run_classify(const trtmc::Model& model, const Json& request, const Timing& 
                 output["top_score"] = *best;
             }
             return output;
+        });
+}
+
+Json run_classify_audio(const trtmc::Model& model, const Json& request, const Timing& timing,
+                        const std::string& task_id) {
+    if (task_id != trtmc::AudioToClassScores::kTask)
+        throw std::invalid_argument("classify_audio requires AudioToClassScores");
+    const auto task = task_for_operation<trtmc::AudioToClassScores>(model, task_id);
+    const auto config = sdk_config(request, task.config_fields(), {"audio_path"});
+    const auto path = request.at("audio_path").get<std::string>();
+    std::optional<trtmc::cli::io::LoadedAudio> cached;
+    if (!timing.asset_loading_included)
+        cached = trtmc::cli::io::read_wav_interleaved(path);
+    return measure(
+        timing,
+        [&]() {
+            std::optional<trtmc::cli::io::LoadedAudio> loaded;
+            if (!cached)
+                loaded = trtmc::cli::io::read_wav_interleaved(path);
+            return task.run({audio_view(cached ? *cached : *loaded)}, config);
+        },
+        [](const trtmc::LabelScoresResult& result) {
+            const auto scores = result.scores();
+            auto labels = Json::array();
+            for (auto label : result.labels())
+                labels.push_back(std::string(label));
+            Json output{{"classified_clips", 1},
+                        {"scores", json_values(scores)},
+                        {"score_kind", score_kind(result.kind())},
+                        {"labels", std::move(labels)},
+                        {"top_class", -1}};
+            if (!scores.empty())
+                output["top_class"] = std::max_element(scores.begin(), scores.end()) - scores.begin();
+            return output;
+        });
+}
+
+// Every query against the one image (a zero-shot choice scores the image against each class prompt): one
+// TextImageToRelevance call per query inside the timed call.
+Json run_relevance(const trtmc::Model& model, const Json& request, const Timing& timing,
+                   const std::string& task_id) {
+    if (task_id != trtmc::TextImageToRelevance::kTask)
+        throw std::invalid_argument("relevance requires TextImageToRelevance");
+    const auto task = task_for_operation<trtmc::TextImageToRelevance>(model, task_id);
+    const auto config = sdk_config(request, task.config_fields(), {"image_path", "queries"});
+    const auto path = request.at("image_path").get<std::string>();
+    const auto queries = request.at("queries").get<std::vector<std::string>>();
+    if (queries.empty())
+        throw std::invalid_argument("relevance requires at least one query");
+    std::optional<Image> cached;
+    if (!timing.asset_loading_included)
+        cached = read_image(path);
+    return measure(
+        timing,
+        [&]() {
+            std::optional<Image> loaded;
+            if (!cached)
+                loaded = read_image(path);
+            const Image& image = cached ? *cached : *loaded;
+            std::vector<float> scores;
+            scores.reserve(queries.size());
+            for (const auto& query : queries)
+                scores.push_back(task.run({query, sdk_image_view(image)}, config).score());
+            return scores;
+        },
+        [&queries](const std::vector<float>& scores) {
+            for (const float score : scores)
+                if (!std::isfinite(score))
+                    throw std::runtime_error("benchmark output contains a non-finite value");
+            return Json{{"scored_pairs", scores.size()},
+                        {"scores", scores},
+                        {"queries", queries},
+                        {"top_class", std::max_element(scores.begin(), scores.end()) - scores.begin()}};
+        });
+}
+
+trtmc::TextSource read_text_source(const Json& request);
+
+Json run_token_scores(const trtmc::Model& model, const Json& request, const Timing& timing,
+                      const std::string& task_id) {
+    if (task_id != trtmc::MaskedTextToTokenScores::kTask)
+        throw std::invalid_argument("token_scores requires MaskedTextToTokenScores");
+    const auto task = task_for_operation<trtmc::MaskedTextToTokenScores>(model, task_id);
+    const auto config = sdk_config(request, task.config_fields(), {"prompt", "token_ids"});
+    const auto text = read_text_source(request);
+    return measure(
+        timing, [&]() { return task.run({text}, config); },
+        [](const trtmc::VocabularyScoresResult& result) {
+            const auto logits = result.logits();
+            return Json{{"scored_sequences", 1},
+                        {"logits", json_values(logits.values)},
+                        {"logits_shape", {logits.rows, logits.columns}},
+                        {"vocabulary_id", std::string(result.vocabulary_id())}};
         });
 }
 
@@ -4035,6 +4165,12 @@ Json dispatch(const Session& session, const Json& operation_request, const Timin
             measured = run_disparity(model, operation_request, timing, selected);
         else if (operation == "classify")
             measured = run_classify(model, operation_request, timing, selected);
+        else if (operation == "classify_audio")
+            measured = run_classify_audio(model, operation_request, timing, selected);
+        else if (operation == "relevance")
+            measured = run_relevance(model, operation_request, timing, selected);
+        else if (operation == "token_scores")
+            measured = run_token_scores(model, operation_request, timing, selected);
         else if (operation == "detect")
             measured = run_detect(model, operation_request, timing, selected);
         else if (operation == "detect_prompted")
@@ -4086,6 +4222,7 @@ Json dispatch(const Session& session, const Json& operation_request, const Timin
             {"detect", run_detect},
             {"extract_features", run_extract_features},
             {"geometry", run_geometry},
+            {"depth", run_depth},
             {"disparity", run_disparity},
             {"rerank", run_rerank},
             {"decide", run_decide},

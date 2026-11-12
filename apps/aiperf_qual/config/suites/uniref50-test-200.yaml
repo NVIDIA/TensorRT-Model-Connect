@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# UniRef50 test sequences (zgcarvalho/uniref50-test, pinned; CC-BY-4.0): 200 seeded sequences of the first shard,
+# cut to the bundle's window by the benchmark. Masked-LM output parity: no gold label.
+suite: uniref50-test-200
+version: 1
+source:
+  kind: hf_dataset
+  dataset: zgcarvalho/uniref50-test
+  split: test
+  revision: 0e0e4f88b99cf30f5ec2432c1c38c9908a08e5e8
+  data_files: {test: data/test-00000-of-00008-c0f2d5a0ed5fe5d1.parquet}
+  prompt_column: sequence
+selection: {method: seeded, count: 200}
+fields: {prompt: prompt}

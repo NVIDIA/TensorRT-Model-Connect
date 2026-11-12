@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Imagenette validation (the pinned task-eval manifest under data_root): 500 images, 50 per class, each scored
+# against the 10 class prompts by a text-image relevance model; gold is the class name (zero-shot top-1).
+suite: imagenette-zero-shot-500
+version: 1
+source:
+  kind: json_manifest
+  path: Imagenette/imagenette2-320_task_eval.json
+  sha256: 07cd93194d148b8b68d89ba537b7a43741810e02a22429578a60bb85aeab5ea3
+  records: requests
+  file_fields: [image]
+  label_field: label_name
+selection: {method: stratified, field: label, count: 500}
+fields: {image: image_path}
+request:
+  queries: ["a photo of a tench", "a photo of a English springer", "a photo of a cassette player",
+            "a photo of a chain saw", "a photo of a church", "a photo of a French horn", "a photo of a garbage truck",
+            "a photo of a gas pump", "a photo of a golf ball", "a photo of a parachute"]
