@@ -10,9 +10,9 @@ problems, and each side is scored against the gold answers:
 - ``metric`` entries send a suite with gold labels (images, audio, sentence pairs) through AIPerf's
   trtmc_task endpoint and score the outputs here (gold_metrics).
 
-Each entry is a paired non-inferiority decision (``noninferiority``): pass when
-TRTMC's regression against the native model is shown to be below the benchmark's margin, fail when it
-is shown to exceed it, inconclusive otherwise. Native absolute capability does not veto the comparison.
+Each entry is a paired non-inferiority decision (``noninferiority``): fail when TRTMC's measured
+regression against the native model exceeds the benchmark's margin, pass otherwise. Native absolute
+capability does not veto the comparison.
 A sampled model answers once per seed on each side and
 is judged on the per-problem seed means.
 """
@@ -20,9 +20,12 @@ is judged on the per-problem seed means.
 from __future__ import annotations
 
 import functools
+import hashlib
 import json
 import re
+import shutil
 import statistics
+import tempfile
 import threading
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -65,10 +68,49 @@ def _has_tokenizer(name: str, revision: str | None, trust_remote_code: bool) -> 
     return True
 
 
+@functools.lru_cache(maxsize=None)
+def _tokenizer_json_directory(checkpoint: str, revision: str | None, repo: str, json_revision: str) -> str:
+    """A local tokenizer directory: ``repo``'s tokenizer.json as a plain fast tokenizer, with the checkpoint's
+    tokenizer settings (special tokens, chat template) but not its remote-code tokenizer class.
+
+    The directory lives in the user's Hugging Face home, not a shared temporary directory, because it is loaded
+    with the profile's trust_remote_code: it is written once into a private (0700) staging directory and renamed
+    into place, so every process of the run (the plan, both sides' AIPerf) reads the same complete files."""
+    from huggingface_hub import constants, hf_hub_download
+
+    key = hashlib.sha256(f"{checkpoint}@{revision}|{repo}@{json_revision}".encode()).hexdigest()[:16]
+    root = Path(constants.HF_HOME) / "trtmc-aiperf-tokenizers"
+    directory = root / key
+    if directory.is_dir():
+        return str(directory)
+    tokenizer_file = Path(hf_hub_download(repo, "tokenizer.json", revision=json_revision))
+    settings = json.loads(Path(hf_hub_download(checkpoint, "tokenizer_config.json", revision=revision)).read_text())
+    settings.pop("auto_map", None)
+    settings["tokenizer_class"] = "PreTrainedTokenizerFast"
+    root.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(dir=root, prefix=f".{key}-"))
+    shutil.copyfile(tokenizer_file, staging / "tokenizer.json")
+    (staging / "tokenizer_config.json").write_text(json.dumps(settings, indent=1, sort_keys=True))
+    try:
+        staging.rename(directory)
+    except OSError:
+        shutil.rmtree(staging)
+        if not directory.is_dir():  # not a copy another process of the run renamed first: a real failure
+            raise
+    return str(directory)
+
+
 def tokenizer_source(model: Mapping[str, Any]) -> tuple[str, str | None]:
     """The checkpoint whose tokenizer counts and formats the prompts: the candidate's, unless it carries
-    none (an adapter on a base model), then the native reference model's (that base model)."""
+    none (an adapter on a base model), then the native reference model's (that base model).
+
+    A profile's ``candidate.tokenizer_json`` (``{repo, revision}``) names the tokenizer.json the bundle
+    carries instead, for a checkpoint whose remote-code tokenizer counts differently (InternLM2 on
+    transformers 5.x splits text into characters): the source is then a local directory that loads it."""
     candidate = (str(model["candidate"]["checkpoint"]), model["candidate"].get("revision") or None)
+    json_source = model["candidate"].get("tokenizer_json")
+    if json_source:
+        return _tokenizer_json_directory(*candidate, str(json_source["repo"]), str(json_source["revision"])), None
     reference = model["reference"]
     if reference.get("model") and not _has_tokenizer(*candidate, bool(reference.get("trust_remote_code"))):
         return str(reference["model"]), reference.get("revision") or None
@@ -180,7 +222,8 @@ def _fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]], min_
     return kept
 
 
-PAIR_MARGIN_TOKENS = 4  # the bundle's own tokenizer may count a pair a few tokens apart from Transformers'
+# The bundle's own tokenizer may count a pair or a cut document a few tokens apart from Transformers'.
+PAIR_MARGIN_TOKENS = 4
 
 
 def _candidate_tokenizer(model: Mapping[str, Any]) -> Any:
@@ -203,6 +246,9 @@ def _pairs_fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]
         return list(samples)
     tokenizer = _candidate_tokenizer(model)
     limit = length - PAIR_MARGIN_TOKENS
+    if limit <= 0:
+        raise ValueError(f"no room for a query-document pair: max_sequence_length {length} with "
+                         f"{PAIR_MARGIN_TOKENS} tokens of margin")
 
     def excess(query: str, document: str) -> int:
         text = pair_format.format(query=query, document=document)
@@ -218,6 +264,10 @@ def _pairs_fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]
             while keep > 0 and (over := excess(query, text)) > 0:  # decoding can merge tokens: check again
                 keep = max(0, keep - over)
                 text = tokenizer.decode(ids[:keep], skip_special_tokens=True)
+            if excess(query, text) > 0:  # the query and the format alone exceed the bundle
+                raise ValueError(f"no room for a query-document pair: sample {sample.get('sample_id')} needs "
+                                 f"{excess(query, text)} tokens more than max_sequence_length {length} allows "
+                                 f"with {PAIR_MARGIN_TOKENS} tokens of margin")
             documents.append(text)
         request["documents"] = documents
         result.append({**sample, "request": request, "request_sha": request_sha(request)})
@@ -225,12 +275,16 @@ def _pairs_fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]
 
 
 def _head_truncated(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]], limit: int) -> list[dict[str, Any]]:
-    """Samples whose ``prompt`` keeps only its first ``limit`` tokens (the model's tokenizer)."""
-    from transformers import AutoTokenizer
-
-    name, revision = tokenizer_source(model)
-    tokenizer = AutoTokenizer.from_pretrained(name, revision=revision,
-                                              trust_remote_code=bool(model["reference"].get("trust_remote_code")))
+    """Samples whose ``prompt`` keeps only its first ``limit`` tokens (the model's tokenizer), fewer when the
+    bundle's max_sequence_length cannot hold that many with the tokenizer's special tokens (less the margin)."""
+    tokenizer = _candidate_tokenizer(model)
+    length = int(model["candidate"].get("max_sequence_length") or 0)
+    if length:
+        specials = len(tokenizer("", add_special_tokens=True)["input_ids"])
+        limit = min(limit, length - specials - PAIR_MARGIN_TOKENS)
+    if limit <= 0:  # a negative slice would keep most of the text, an empty one all of it away
+        raise ValueError(f"no room for document tokens: limit {limit} (max_sequence_length {length or 'unset'}, "
+                         f"{PAIR_MARGIN_TOKENS} tokens of margin)")
     result = []
     for sample in samples:
         request = dict(sample["request"])
@@ -295,6 +349,8 @@ def _suite_side(environment: Environment, service: Mapping[str, Any], model: Map
         body = json.loads(record["responses"][-1]["text"])
         key = request_sha(record["payload"]["request"])
         by_request[key] = body.get("trtmc_observation") or {}
+        if item.get("postprocess"):
+            by_request[key]["artifact_directory"] = str(Path(service["records"]).parent / "scratch" / body["id"])
         timing_by_request[key] = {"model_call_ms": float((body.get("trtmc_timing") or {}).get("model_call_ms", 0)),
                                   "completion_tokens": by_request[key].get("output_tokens")}
     observations = {index: by_request[problem["request_sha"]] for index, problem in enumerate(problems)
@@ -308,7 +364,34 @@ def _suite_side(environment: Environment, service: Mapping[str, Any], model: Map
         side["rejected"] = {"greedy": out_of_capacity}
     if failing:
         side["failed"] = {"greedy": failed_reason(failing, len(failing))}
+    if item.get("postprocess"):
+        from .services import reference_python
+
+        postprocess(environment, item, observations, out, python=reference_python(environment, model))
     return side
+
+
+def postprocess(environment: Environment, item: Mapping[str, Any], observations: dict[int, Any], out: Path, *,
+                python: str | None = None) -> None:
+    """Augment saved outputs after profiling; a separate process releases its model on exit."""
+    import subprocess
+
+    config = item["postprocess"]
+    source, target = out.parent / f"{out.name}.postprocess-input.json", out.parent / f"{out.name}.postprocess-output.json"
+    source.write_text(json.dumps(observations))
+    command = [str(environment.values.get("scoring_python") or python or environment["serve_python"]),
+               str(environment.path("repo") / config["script"]), "--input", str(source), "--output", str(target),
+               *config.get("arguments", [])]
+    with (out.parent / f"{out.name}.postprocess.log").open("w") as log:
+        subprocess.run(command, check=True, stdout=log, stderr=subprocess.STDOUT,
+                       timeout=float(config.get("timeout_s", 14400)))
+    updated = {int(index): value for index, value in json.loads(target.read_text()).items()}
+    if set(updated) != set(observations):
+        raise ValueError("output postprocessing changed the sample identities")
+    for index, original in observations.items():
+        if any(updated[index].get(key) != value for key, value in original.items()):
+            raise ValueError("output postprocessing changed original evidence")
+    observations.update(updated)
 
 
 def run_side(environment: Environment, service: Mapping[str, Any], model: Mapping[str, Any],
@@ -530,7 +613,8 @@ def status(entry: Mapping[str, Any]) -> tuple[str, list[str]]:
     """Compare the conversion's scored difference, regardless of native absolute capability.
 
     Old reports may carry ``min_native``; it no longer overrides the difference
-    test. Missing answers and statistical uncertainty retain their own outcomes.
+    test. Missing answers retain their own outcome. An ``inconclusive`` test of a report written before
+    pass/fail-only judging is decided on its measured regression.
     """
     metrics, gate = entry.get("metrics") or {}, entry.get("gate") or {}
     expected, paired = int(entry.get("expected_samples") or 0), int(entry.get("samples") or 0)
@@ -541,10 +625,13 @@ def status(entry: Mapping[str, Any]) -> tuple[str, list[str]]:
     test = metrics.get("test") or {}
     if test.get("outcome") is None:
         return "error", ["no non-inferiority outcome"]
-    reasons = [] if test["outcome"] == "pass" else [
+    result = test["outcome"]
+    if result == "inconclusive":
+        result = noninferiority.outcome(float(test.get("regression_points", 0.0)), noninferiority.margin(gate, native))
+    reasons = [] if result == "pass" else [
         f"regression {test.get('regression_points', 0.0):+.3f} points against margin "
-        f"{noninferiority.margin(gate, native):g}: {test['outcome']}"]
-    return test["outcome"], reasons
+        f"{noninferiority.margin(gate, native):g}: {result}"]
+    return result, reasons
 
 
 def binary_test(entry: Mapping[str, Any]) -> dict[str, Any]:
@@ -632,10 +719,36 @@ def judge_parity(item: Mapping[str, Any], problems: Sequence[Mapping[str, Any]],
                 "reasons": [f"{len(unreadable)} of {expected} outputs lack readable evidence ({unreadable[0][:200]})"]}
     failures = [{"sample_id": problems[index].get("sample_id", str(index)), "explanation": reason}
                 for index, ok, reason in results if not ok]
+    allowed = _tolerated_outliers(item["gate"], compare, mine, theirs, results, expected) if failures else None
+    if allowed is not None:  # single-sample outliers of one precision, each within the relaxed outlier gate
+        entry.update(passed=expected - len(failures), required_passes=expected - allowed, failures=[],
+                     outliers=failures[:10], status="pass", reasons=[],
+                     notes=[f"{len(failures)} of {expected} outputs outside the tolerance but within the outlier gate "
+                            f"(at most {allowed} allowed)"])
+        return entry
     entry.update(passed=expected - len(failures), required_passes=expected, failures=failures[:5],
                  status="pass" if not failures else "fail",
                  reasons=[f"{len(failures)} of {expected} outputs outside the tolerance"] if failures else [])
     return entry
+
+
+def _tolerated_outliers(gate: Mapping[str, Any], compare: Callable, mine: Mapping[int, Any], theirs: Mapping[int, Any],
+                        results: Sequence[tuple[int, bool | None, str]], expected: int) -> int | None:
+    """How many outliers the gate's ``outliers`` policy (``max_fraction`` of the problems, each within
+    ``outliers.gate`` merged over the gate) allows, when every output outside the tolerance is such an
+    outlier; None otherwise. A missing answer is never an outlier, and a systematic error fails as before."""
+    policy = gate.get("outliers")
+    if not policy:
+        return None
+    failed = [(index, reason) for index, ok, reason in results if not ok]
+    allowed = int(float(policy["max_fraction"]) * expected)
+    if len(failed) > allowed:
+        return None
+    relaxed = {**{key: value for key, value in gate.items() if key != "outliers"}, **dict(policy.get("gate") or {})}
+    if any(reason == NO_ANSWER or compare(mine[index], theirs[index], relaxed)[0] is not True
+           for index, reason in failed):
+        return None
+    return allowed
 
 
 def _as_observations(side: Mapping[str, Any]) -> dict[str, Any]:
@@ -782,7 +895,8 @@ def _probe(service: Mapping[str, Any], operation: str, request: Mapping[str, Any
 
 def keeps_artifacts(model: Mapping[str, Any]) -> bool:
     """A benchmark reads the output files the servers write (their scratch is then kept)."""
-    return any(item.get("metric") in gold_metrics.ARTIFACT_METRICS for item in model.get("absolute", []))
+    return any(item.get("postprocess") or item.get("metric") in gold_metrics.ARTIFACT_METRICS
+               for item in model.get("absolute", []))
 
 
 def run_native(environment: Environment, model: Mapping[str, Any], python: str, plans: Mapping[str, Sequence],
@@ -790,47 +904,49 @@ def run_native(environment: Environment, model: Mapping[str, Any], python: str, 
                precisions: Sequence[str] | None = None, started: Callable[[Mapping[str, Any]], None] | None = None,
                go: threading.Event | None = None, finished: threading.Event | None = None,
                release: threading.Event | None = None, copies: int | None = None) -> dict[str, Any]:
-    """Every benchmark on the native model: the reference adapter, eager, at the first precision of
-    ``timing_precisions`` it serves. The adapter runs as up to ``native_replicas`` (environment) copies
-    that fit on the GPU, each answering one problem at a time: the answers do not change, its model-call
-    times are then not comparable."""
-    from .runner import timing_precisions
+    """Every benchmark on the native model: the reference adapter at the first precision of
+    ``timing_precisions`` and mode of ``native_modes`` it serves (torch.compile, else eager in its place). The
+    adapter runs as up to ``native_replicas`` (environment) copies that fit on the GPU, each answering one
+    problem at a time: the answers do not change, its model-call times are then not comparable."""
+    from .runner import first_native
 
-    errors = []
-    for precision in precisions or timing_precisions(model["reference"]):
-        evidence_start = execution.checkpoint()
-        try:
-            count = copies or native_copies(environment)
-            with serving_replicas(environment, dict(model), "reference", out / f"absolute-native-server-{precision}",
-                                  count=count, mode="eager", precision=precision, python=python,
-                                  keep_artifacts=keeps_artifacts(model), mps_env=mps_env) as service:
-                try:
-                    if started is not None:  # the copies hold their memory, idle: the other side may size its own
-                        started(service)
-                    while go is not None and not go.wait(1):  # the other side's copies are starting
-                        cancel.check()
-                    if probe_request is not None:
-                        _probe(service, model["operation"], probe_request)
-                    runs = {item["suite"]: run_side(environment, service, model, item, plans[item["suite"]],
-                                                    out / f"absolute-native-{precision}")
-                            for item in model["absolute"]}
-                    for name, side in runs.items():
-                        answers = side.get("observations") or side.get("records") or {}
-                        if side.get("failed") and not any(answers.values()):
-                            raise RuntimeError(f"{name}: no successful native responses "
-                                               f"({next(iter(side['failed'].values()))})")
-                finally:  # sharing an MPS daemon, no copy leaves while the other side's copies still answer
-                    if finished is not None:
-                        finished.set()
-                    while release is not None and not release.wait(1):
-                        cancel.check()
-            return {"backend": "reference", "precision": precision, "runs": runs, "replicas": service["replicas"],
-                    "mps": bool(service.get("mps")),
-                    **({"fallback_from": "; ".join(errors)[:600]} if errors else {})}
-        except Exception as error:  # noqa: BLE001 - the next precision
-            execution.supersede(evidence_start)
-            errors.append(f"{precision}: {type(error).__name__}: {str(error)[-300:]}")
-    raise RuntimeError("; ".join(errors)[:1500])
+    def answer(attempt: Any) -> dict[str, Any]:
+        tag = f"{attempt.mode}-{attempt.precision}"
+        count = copies or native_copies(environment)
+        with serving_replicas(environment, dict(model), "reference", out / f"absolute-native-server-{tag}",
+                              count=count, mode=attempt.mode, precision=attempt.precision, python=python,
+                              compile_fallback=attempt.compile_fallback, keep_artifacts=keeps_artifacts(model),
+                              mps_env=mps_env) as service:
+            try:
+                if started is not None:  # the copies hold their memory, idle: the other side may size its own
+                    started(service)
+                while go is not None and not go.wait(1):  # the other side's copies are starting
+                    cancel.check()
+                if probe_request is not None:
+                    _probe(service, model["operation"], probe_request)
+                runs = {item["suite"]: run_side(environment, service, model, item, plans[item["suite"]],
+                                                out / f"absolute-native-{tag}")
+                        for item in model["absolute"]}
+                for name, side in runs.items():
+                    answers = side.get("observations") or side.get("records") or {}
+                    if side.get("failed") and not any(answers.values()):
+                        raise RuntimeError(f"{name}: no successful native responses "
+                                           f"({next(iter(side['failed'].values()))})")
+                # A compiled run that left problems unanswered (a request timed out while it compiled, say) answers
+                # again in eager mode; an incomplete eager run is returned (fewer copies may then answer it).
+                if attempt.mode == "compile" and (gap := incomplete(model, plans, runs)):
+                    raise RuntimeError(f"incomplete under torch.compile: {gap}")
+            finally:  # sharing an MPS daemon, no copy leaves while the other side's copies still answer
+                if finished is not None:
+                    finished.set()
+                while release is not None and not release.wait(1):
+                    cancel.check()
+        return {"runs": runs, "replicas": service["replicas"], "mps": bool(service.get("mps"))}
+
+    native, attempt = first_native(model["reference"], answer, precisions=precisions)
+    return {"backend": "reference", "precision": attempt.precision, "mode": attempt.mode, **native,
+            **({"compile_fallback": attempt.compile_fallback} if attempt.compile_fallback else {}),
+            **({"fallback_from": attempt.precision_fallback} if attempt.precision_fallback else {})}
 
 
 def native_copies(environment: Environment) -> int:
@@ -996,8 +1112,14 @@ def entries(model: Mapping[str, Any], plans: Mapping[str, Sequence], candidate: 
             entry = judge_in_capacity(item, problems, candidate[item["suite"]], runs[item["suite"]])
             if item.get("precision_note"):
                 entry["notes"] = [*entry.get("notes", []), item["precision_note"]]
-            entry["native"] = {"backend": native.get("backend"), "precision": native.get("precision"), "mode": "eager",
+            if native.get("compile_fallback"):
+                entry["notes"] = [*entry.get("notes", []), "native torch.compile failed; eager answered in its "
+                                  f"place: {str(native['compile_fallback'])[:200]}"]
+            entry["native"] = {"backend": native.get("backend"), "precision": native.get("precision"),
+                               "mode": native.get("mode", "eager"),
                                "replicas": native.get("replicas", 1), "mps": bool(native.get("mps")),
+                               **({"compile_fallback": native["compile_fallback"]} if native.get("compile_fallback")
+                                  else {}),
                                **({"fallback_from": native["fallback_from"]} if native.get("fallback_from") else {}),
                                **({"copies_reduced": native["copies_reduced"]} if native.get("copies_reduced") else {})}
             concurrent = [f"{side} ran as {copies} concurrent copies" for side, copies in

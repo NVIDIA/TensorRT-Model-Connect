@@ -85,7 +85,6 @@ def test_families_package_selects_all_directly(tmp_path: Path) -> None:
     [
         ".coderabbit.yaml",
         ".gitignore",
-        "ASSET_LICENSES.md",
         "examples/removed.py",
         "plugins/removed/SKILL.md",
         "requirements/community-ci.txt",
@@ -103,6 +102,21 @@ def test_docs_do_not_select_model_proofs(tmp_path: Path) -> None:
     impact = test_impact.classify(_repo(tmp_path), ["website/docs/architecture/overview.md"])
     assert impact.scope == "docs"
     assert impact.families == ()
+    assert impact.run_docs is True
+
+
+def test_asset_license_record_selects_only_the_fixture_owner(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    alone = test_impact.classify(repo, ["ASSET_LICENSES.md"])
+    assert alone.scope == "docs"
+    assert alone.families == ()
+
+    impact = test_impact.classify(
+        repo,
+        ["ASSET_LICENSES.md", "families/alpha/tests/data/frame.png"],
+    )
+    assert impact.scope == "families"
+    assert impact.families == ("alpha",)
     assert impact.run_docs is True
 
 

@@ -153,7 +153,12 @@ class _XLNetModel:
         from .xlnet_builder import build_xlnet_engine
 
         return build_xlnet_engine(
-            config, weights, max_seq_length=max_cache_length, precision=precision, verbose=verbose
+            config,
+            weights,
+            max_seq_length=max_cache_length,
+            precision=precision,
+            verbose=verbose,
+            quant_ctx=quant_ctx,
         )
 
 
@@ -234,8 +239,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task not in {"encoding", "embedding", "reranking"}:
-        raise ValueError("xlnet task must be encoding, embedding, or reranking")
+    if request.task not in {"text_to_pooled_features", "text_to_embedding"}:
+        raise ValueError("xlnet task must be text_to_pooled_features or text_to_embedding")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower() != "xlnet":
@@ -249,8 +254,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("XLNet max_sequence_length exceeds checkpoint capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("XLNet has no family-owned quantized build")
+    quantization = request.quantization
+    if quantization in {None, "none"}:
+        quantization = None
+    elif quantization != "fp8":
+        raise NotImplementedError(
+            f"XLNet supports quantization 'fp8' or none; got {quantization!r}"
+        )
+    elif precision != "fp16":
+        # FP8 in an fp32 graph is faster than fp32 but slower than plain fp16.
+        raise ValueError("xlnet quantization=fp8 requires precision=fp16")
     if request.fp32_layers:
         raise NotImplementedError("XLNet does not expose mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -259,8 +272,19 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
     parallel.validate()
+    if quantization is not None and parallel.enabled:
+        raise ValueError("XLNet tensor-parallel builds do not support quantization")
+    if quantization is not None:
+        from .quantization import check_not_quantized
+
+        check_not_quantized(model_dir, config)
     model = _XLNetModel()
     weights = model.load_weights(str(model_dir), config)
+    quant_ctx = None
+    if quantization is not None:
+        from .quantization import create_quant_context
+
+        quant_ctx = create_quant_context(weights, config, quantization)
     writer.set_header(family="xlnet", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -280,7 +304,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             parallel_config=parallel,
         )
@@ -290,6 +314,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         {
             **_tokenizer_runtime_contract(model_dir),
             "tensor_parallel_size": parallel.tp_size,
+            "vocab_size": _positive_int(config.vocab_size, "vocab_size"),
         },
     )
     for filename in _BUNDLE_FILES:

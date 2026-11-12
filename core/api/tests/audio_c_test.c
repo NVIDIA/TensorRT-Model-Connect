@@ -215,13 +215,15 @@ static void test_audio(trtmc_model* model, trtmc_model* restricted) {
     const trtmc_audio_language_identification_api_v1* language =
         (const trtmc_audio_language_identification_api_v1*)table(
             model, TRTMC_TASK_AUDIO_LANGUAGE_IDENTIFICATION);
+    const trtmc_audio_to_class_scores_api_v1* events =
+        (const trtmc_audio_to_class_scores_api_v1*)table(model, TRTMC_TASK_AUDIO_TO_CLASS_SCORES);
     const trtmc_batch_speech_transcription_api_v1* batch =
         (const trtmc_batch_speech_transcription_api_v1*)table(
             model, TRTMC_TASK_BATCH_SPEECH_TRANSCRIPTION);
     const trtmc_mixed_batch_speech_to_text_api_v1* mixed =
         (const trtmc_mixed_batch_speech_to_text_api_v1*)table(
             model, TRTMC_TASK_MIXED_BATCH_SPEECH_TO_TEXT);
-    if (!generation || !asr || !translation || !language || !batch || !mixed)
+    if (!generation || !asr || !translation || !language || !events || !batch || !mixed)
         return;
     trtmc_error* error = NULL;
     trtmc_result* result = NULL;
@@ -305,6 +307,19 @@ static void test_audio(trtmc_model* model, trtmc_model* restricted) {
     check(scores.count == 2 && scores.labels.size == 2 && scores.kind == TRTMC_SCORE_PROBABILITY &&
               scores.labels.data[0].size == 2 && memcmp(scores.labels.data[0].data, "en", 2) == 0,
           "language labels and score meaning are explicit");
+    core->result_release(result);
+
+    trtmc_audio_to_class_scores_request_v1 events_input = {request.audio};
+    status = events->run(model, &events_input, NULL, &result, &error);
+    status_is(status, TRTMC_OK, error, "C audio class scores succeed");
+    trtmc_label_scores_view_v1 event_scores = {0};
+    status = events->result_view(result, &event_scores, &error);
+    status_is(status, TRTMC_OK, error, "C audio class scores result view succeeds");
+    check(event_scores.count == 3 && event_scores.labels.size == 3 &&
+              event_scores.kind == TRTMC_SCORE_LOGIT && event_scores.vocabulary_id.size == 0 &&
+              event_scores.labels.data[0].size == 6 &&
+              memcmp(event_scores.labels.data[0].data, "Speech", 6) == 0,
+          "sound-event labels are named and the scores stay raw logits");
     core->result_release(result);
 
     trtmc_batch_speech_transcription_item_v1 item = {0};

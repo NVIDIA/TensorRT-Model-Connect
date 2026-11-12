@@ -46,7 +46,10 @@ Eagle3::Eagle3(const FamilyContext& context, Engine& target, Engine& draft, int 
     valid_ = DeviceTensor({depth}, DType::kInt32, stream);
     limits_ = DeviceTensor({2}, DType::kInt32, stream);
     root_ = DeviceTensor({1}, DType::kInt32, stream);
-    if (!starts_.ok() || !tokens_.ok() || !valid_.ok() || !limits_.ok() || !root_.ok())
+    sampled_features_ = DeviceTensor({depth + 1, target_.contract().feature_width}, DType::kFloat16,
+                                     target_.stream());
+    if (!starts_.ok() || !tokens_.ok() || !valid_.ok() || !limits_.ok() || !root_.ok() ||
+        !sampled_features_.ok())
         throw std::runtime_error("device policy allocation failed");
     upload_ = pinned((depth + 4) * sizeof(std::int32_t));
     readback_ = pinned((depth + 5) * sizeof(std::int32_t));
@@ -104,8 +107,7 @@ ITrtModule& Eagle3::prepare(int width, int depth, int offset, cudaStream_t ready
     return module;
 }
 
-void Eagle3::propose_and_verify(int root, int committed, int remaining, int width,
-                                bool ignore_eos) {
+void Eagle3::propose(int root, int committed, int remaining, int width, bool ignore_eos) {
     width_ = width;
     depth_ =
         std::min({max_depth_, remaining, (target_.contract().capacity - committed - 1) / width});
@@ -147,7 +149,14 @@ void Eagle3::propose_and_verify(int root, int committed, int remaining, int widt
                 {}, draft_result_.features.slice(draft_result_.features.rows - 1, 1));
         }
     }
-    auto& metadata = prepare(width, depth_, 0, stream);
+    // The sampled path reads these real proposals but verifies the target
+    // with its ordinary one-row shape, preserving the native RNG sequence.
+}
+
+void Eagle3::propose_and_verify(int root, int committed, int remaining, int width,
+                                bool ignore_eos) {
+    propose(root, committed, remaining, width, ignore_eos);
+    auto& metadata = prepare(width, depth_, 0, mapping_->stream());
     order(target_.stream(), metadata.stream());
     target_result_ = target_.run_device(static_cast<std::int32_t*>(tokens_.data()), rows_, metadata,
                                         static_cast<std::int32_t*>(starts_.data()), true);
@@ -199,6 +208,61 @@ void Eagle3::feedback(int length) {
                           metadata, static_cast<std::int32_t*>(starts_.data()), false,
                           {static_cast<const std::uint16_t*>(features_->device_ptr("features_out")),
                            length, target_.contract().feature_width});
+}
+
+Acceptance Eagle3::sample(int root, int committed, int remaining, int width, bool ignore_eos,
+                          LlamaISampler& sampler, const LlamaSamplingParams& params) {
+    // Host sampling never borrows the prior greedy policy's device bonus.
+    root_on_device_ = false;
+    propose(root, committed, remaining, width, ignore_eos);
+    std::vector<std::int32_t> proposed(rows_), valid(depth_);
+    checked(cudaMemcpyAsync(proposed.data(), tokens_.data(), proposed.size() * sizeof(int32_t),
+                            cudaMemcpyDeviceToHost, mapping_->stream()));
+    if (depth_)
+        checked(cudaMemcpyAsync(valid.data(), valid_.data(), valid.size() * sizeof(int32_t),
+                                cudaMemcpyDeviceToHost, mapping_->stream()));
+    mapping_->sync();
+    if (std::any_of(valid.begin(), valid.end(), [](int32_t value) { return value != 1; }))
+        throw std::runtime_error("non-finite draft logits consumed by sampled policy");
+
+    Acceptance result{0, false, {}};
+    const int feature_width = target_.contract().feature_width;
+    int current = root;
+    for (int row = 0; row <= depth_; ++row) {
+        const auto verified =
+            target_.run(Phase::kDecode, {current}, committed + row, {-1}, false, {}, {}, true);
+        checked(cudaMemcpyAsync(static_cast<std::uint16_t*>(sampled_features_.data()) +
+                                    std::size_t(row) * feature_width,
+                                verified.features.data,
+                                std::size_t(feature_width) * sizeof(std::uint16_t),
+                                cudaMemcpyDeviceToDevice, target_.stream()));
+        ++result.length;
+        // This draw is the next output even when it rejects the proposal.
+        // Never redraw the same distribution at a block boundary.
+        const int next = verified.sample(sampler, params);
+        result.emitted.push_back(next);
+        result.stopped =
+            result.length >= remaining || (!ignore_eos && llama_is_eos_token(params, next));
+        if (result.stopped || row == depth_)
+            break;
+        // Only the primary branch was extended by the draft. A sampled
+        // secondary or rejected token becomes the next root; no stale
+        // descendant or rejected K/V row is committed to the target.
+        if (next != proposed[1 + row * width])
+            break;
+        current = next;
+    }
+    checked(cudaStreamSynchronize(target_.stream()));
+    if (!result.stopped) {
+        std::vector<std::int32_t> parents(result.length);
+        std::iota(parents.begin(), parents.end(), -1);
+        const auto feedback =
+            draft_.run(Phase::kDecode, result.emitted, committed, parents, false,
+                       {static_cast<const std::uint16_t*>(sampled_features_.data()), result.length,
+                        feature_width});
+        draft_result_ = draft_.device_result(feedback.features);
+    }
+    return result;
 }
 
 void Eagle3::finish() {

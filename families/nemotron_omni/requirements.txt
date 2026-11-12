@@ -1,0 +1,6 @@
+numpy>=1.26
+ml_dtypes>=0.5
+safetensors>=0.4
+torch>=2.5
+Pillow>=13,<14
+librosa>=0.11

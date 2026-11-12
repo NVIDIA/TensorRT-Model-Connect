@@ -10,8 +10,6 @@ from tools.e2e_evidence import evidence_stage, record_evidence
 import gc
 import json
 import os
-import re
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -22,7 +20,6 @@ from families.qwen3_8.cli import build
 
 _TEST_DIR = Path(__file__).resolve().parent
 _FAMILY = _TEST_DIR.parent.name
-_MPI_RANK_ZERO = re.compile(r"^\[[^,]+,0\]<stdout>:(.*)$")
 
 
 def _load_cases() -> dict[str, tuple[dict, dict]]:
@@ -92,8 +89,6 @@ def _required_environment(tp_size: int):
     assert torch.cuda.device_count() >= tp_size, (
         f"{_FAMILY} TP{tp_size} requires {tp_size} visible GPUs; found {torch.cuda.device_count()}"
     )
-    if tp_size > 1:
-        assert shutil.which("mpirun"), "selected TP E2E requires mpirun"
     return binary, runtime_root, torch
 
 
@@ -169,7 +164,8 @@ def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int,
     payload = json.loads(inspected.stdout)
     assert payload["family"] == _FAMILY
     edge = "edge_llm.json" in payload["sections"]
-    expected_task = "images_text_to_text" if edge and task == "vision_language_generation" else task
+    media = edge or "native_visual.json" in payload["sections"]
+    expected_task = "images_text_to_text" if media and task == "vision_language_generation" else task
     # Previously published single-image bundles retain the legacy task ID.
     assert payload["task"] in {task, expected_task}
     if edge:
@@ -185,6 +181,10 @@ def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int,
             if name.startswith("engine.rank") and name.endswith(".plan")
         }
         assert rank_sections == {f"engine.rank{rank}.plan" for rank in range(tp_size)}
+    if not edge and "native_visual.json" in payload["sections"]:
+        expected_visual = ({f"native_visual.rank{rank}.plan" for rank in range(tp_size)}
+                           if tp_size > 1 else {"native_visual.plan"})
+        assert expected_visual <= payload["sections"].keys()
     return edge
 
 
@@ -241,14 +241,9 @@ def _run_native(
 ) -> dict:
     command = [str(binary), *_native_arguments(bundle, runtime_root, prompt, case)]
     environment = dict(os.environ)
-    # Edge owns threaded TP in one process; native plans use the existing MPI launch.
-    if tp_size > 1 and not edge:
-        environment["TRTMC_NCCL_RENDEZVOUS"] = str(tmp_path / "nccl.rendezvous")
-        prefix = ["mpirun", "--tag-output", "-np", str(tp_size)]
-        for name in ("LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "TRTMC_NCCL_RENDEZVOUS"):
-            if name in environment:
-                prefix.extend(["-x", name])
-        command = [*prefix, *command]
+    # Both Edge and the family-native TP2 runtime own their rank threads and
+    # NCCL communicators in one process. An MPI wrapper would load duplicate
+    # two-GPU models and is not the family runtime contract.
 
     completed = subprocess.run(
         command,
@@ -263,16 +258,7 @@ def _run_native(
     (tmp_path / "native.stdout.log").write_text(completed.stdout, encoding="utf-8")
     (tmp_path / "native.stderr.log").write_text(completed.stderr, encoding="utf-8")
     completed.check_returncode()
-    if tp_size == 1 or edge:
-        return json.loads(completed.stdout)
-
-    rank_zero_payloads = []
-    for line in completed.stdout.splitlines():
-        match = _MPI_RANK_ZERO.fullmatch(line)
-        if match and match.group(1).lstrip().startswith("{"):
-            rank_zero_payloads.append(match.group(1))
-    assert len(rank_zero_payloads) == 1, completed.stdout
-    return json.loads(rank_zero_payloads[0])
+    return json.loads(completed.stdout)
 
 
 def _render_prompt(tokenizer, prompt: str, case: dict):
@@ -356,90 +342,84 @@ def _record_text_diagnostics(native_ids: list[int], reference_ids: list[int]) ->
 
 
 def _reference_inputs(model_dir: Path, manifest: dict, tokenizer, prompt: str, case: dict):
-    """Validate processor dependencies and media before loading large source weights."""
-    if "image" in case or "images" in case:
-        from PIL import Image
-        from transformers import AutoProcessor
-        assert case.get("use_chat_template", True), "Image requests require the source chat template"
-        processor = AutoProcessor.from_pretrained(
-            model_dir, local_files_only=True, trust_remote_code=bool(manifest.get("trust_remote_code", False)),
-        )
-        # Match the owning visual profile, using the source patch and merge sizes.
-        factor = processor.image_processor.patch_size * processor.image_processor.merge_size
-        processor.image_processor.size = {
-            "shortest_edge": 128 * factor * factor,
-            "longest_edge": 1280 * factor * factor,
-        }
-        if "image" in case and "images" in case:
-            raise ValueError("Specify image or ordered images, not both")
-        paths = case["images"] if "images" in case else [case["image"]]
-        if not paths:
-            raise ValueError("Ordered images cannot be empty")
-        messages = [{"role": "user", "content": [
-            *({"type": "image"} for _ in paths), {"type": "text", "text": prompt},
-        ]}]
-        rendered = processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True,
-            enable_thinking=case.get("enable_thinking", False),
-        )
-        images = []
-        for path in paths:
-            with Image.open(path) as image:
-                images.append(image.convert("RGB"))
-        try:
-            inputs = processor(text=[rendered], images=images, return_tensors="pt")
-        finally:
-            for image in images:
-                image.close()
-        record_evidence("inputs", {"images": list(map(str, paths)),
-                                  "image_grid_thw": inputs["image_grid_thw"].tolist()})
-    elif "video_frames" in case:
-        import math
-        import numpy as np
-        from PIL import Image
-        from transformers import AutoProcessor
-        from transformers.video_utils import VideoMetadata
+    """Validate every supplied modality before loading large source weights."""
+    has_images = "image" in case or "images" in case
+    has_video = "video_frames" in case
+    if not has_images and not has_video:
+        return _render_prompt(tokenizer, prompt, case)
 
-        assert case.get("use_chat_template", True), "Video requires the source chat template"
-        paths = case["video_frames"]
-        fps = float(case["video_fps"])
-        assert paths and math.isfinite(fps) and fps > 0
-        processor = AutoProcessor.from_pretrained(model_dir, local_files_only=True)
-        video_processor = processor.video_processor
-        factor = video_processor.patch_size * video_processor.merge_size
-        temporal = video_processor.temporal_patch_size
-        # Edge translates per-media tokens into a temporal pixel budget.
-        video_processor.size = {
-            "shortest_edge": 128 * temporal * factor * factor,
-            "longest_edge": 1280 * temporal * factor * factor,
-        }
-        frames = []
-        for path in paths:
-            with Image.open(path) as image:
-                frames.append(np.asarray(image.convert("RGB")))
-        frames = np.stack(frames)
-        messages = [{"role": "user", "content": [
-            {"type": "video"}, {"type": "text", "text": prompt},
-        ]}]
+    import math
+    import numpy as np
+    from PIL import Image
+    from transformers import AutoProcessor
+    from transformers.video_utils import VideoMetadata
+
+    assert case.get("use_chat_template", True), "Media requires the source chat template"
+    if "image" in case and "images" in case:
+        raise ValueError("Specify image or ordered images, not both")
+    processor = AutoProcessor.from_pretrained(
+        model_dir, local_files_only=True, trust_remote_code=bool(manifest.get("trust_remote_code", False)),
+    )
+    content, images, arguments = [], [], {}
+    try:
+        if has_images:
+            factor = processor.image_processor.patch_size * processor.image_processor.merge_size
+            processor.image_processor.size = {
+                "shortest_edge": 128 * factor * factor,
+                "longest_edge": 1280 * factor * factor,
+            }
+            image_paths = case["images"] if "images" in case else [case["image"]]
+            if not image_paths:
+                raise ValueError("Ordered images cannot be empty")
+            for path in image_paths:
+                with Image.open(path) as image:
+                    images.append(image.convert("RGB"))
+                content.append({"type": "image"})
+            arguments["images"] = images
+        if has_video:
+            paths = case["video_frames"]
+            fps = float(case["video_fps"])
+            assert paths and math.isfinite(fps) and fps > 0
+            video_processor = processor.video_processor
+            factor = video_processor.patch_size * video_processor.merge_size
+            temporal = video_processor.temporal_patch_size
+            # Preserve the existing per-media temporal pixel budget.
+            video_processor.size = {
+                "shortest_edge": 128 * temporal * factor * factor,
+                "longest_edge": 1280 * temporal * factor * factor,
+            }
+            frames = []
+            for path in paths:
+                with Image.open(path) as image:
+                    frames.append(np.asarray(image.convert("RGB")))
+            frames = np.stack(frames)
+            arguments.update(
+                videos=[frames],
+                video_metadata=[VideoMetadata(
+                    total_num_frames=len(frames), fps=fps,
+                    height=frames.shape[1], width=frames.shape[2],
+                    duration=len(frames) / fps, frames_indices=list(range(len(frames))),
+                )],
+                do_sample_frames=False,
+            )
+            content.append({"type": "video"})
+        content.append({"type": "text", "text": prompt})
         rendered = processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True,
+            [{"role": "user", "content": content}], tokenize=False, add_generation_prompt=True,
             enable_thinking=case.get("enable_thinking", False),
         )
-        metadata = VideoMetadata(
-            total_num_frames=len(frames), fps=fps,
-            height=frames.shape[1], width=frames.shape[2],
-            duration=len(frames) / fps, frames_indices=list(range(len(frames))),
-        )
-        inputs = processor(
-            text=[rendered], videos=[frames], video_metadata=[metadata],
-            do_sample_frames=False, return_tensors="pt",
-        )
+        inputs = processor(text=[rendered], return_tensors="pt", **arguments)
+    finally:
+        for image in images:
+            image.close()
+    if has_images:
+        record_evidence("inputs", {"images": list(map(str, image_paths)),
+                                  "image_grid_thw": inputs["image_grid_thw"].tolist()})
+    if has_video:
         record_evidence("inputs", {
             "video_frames": list(map(str, paths)), "video_fps": fps,
             "video_grid_thw": inputs["video_grid_thw"].tolist(),
         })
-    else:
-        inputs = _render_prompt(tokenizer, prompt, case)
     return inputs
 
 

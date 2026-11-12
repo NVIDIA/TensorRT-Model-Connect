@@ -98,6 +98,18 @@
           "help": "Edge AWQ INT4 backend; default 2. Version 1 is mapped for the tested InternVL3-2B SM80 profile."
         },
         {
+          "name": "quantization",
+          "flags": [
+            "--quantization"
+          ],
+          "type": "string",
+          "choices": [
+            "none",
+            "fp8"
+          ],
+          "help": "fp8: self-quantize the original checkpoint's language model to FP8 at build time (requires --precision fp16); activation scales are committed in the family"
+        },
+        {
           "name": "verbose",
           "flags": [
             "--verbose"

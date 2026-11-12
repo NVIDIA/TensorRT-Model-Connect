@@ -1,0 +1,5 @@
+{
+  "threshold_overrides": {
+    "normalized_text_edit_distance": 0.5
+  }
+}

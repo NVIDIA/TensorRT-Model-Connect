@@ -258,7 +258,8 @@ def _add_marian_tp_decoder_layer(
         local_ffn_dim,
         weights[f"{prefix}.fc1_bias"],
     )
-    act = graph_ops.add_activation(network, fc1, "silu")
+    act_fn = weights.get("_activation_function", "silu")
+    act = graph_ops.add_activation(network, fc1, act_fn)
     fc2 = graph_ops.add_matmul_rhs_constant(
         network, act, local_ffn_dim, hidden_size, weights[f"{prefix}.w_fc2"])
     fc2 = _add_row_parallel_bias(

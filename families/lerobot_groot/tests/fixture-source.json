@@ -1,0 +1,49 @@
+{
+  "repository": "huggingface/lerobot",
+  "revision": "7e241bd630a3719a56157a497ce5d08f244784f1",
+  "package": "lerobot[groot]==0.6.1",
+  "model": {
+    "hf_id": "nvidia/gr00t17-lerobot-libero_spatial-640",
+    "hf_revision": "32a6ec786d6509df31b40392b4e4dcdda78c0f11"
+  },
+  "base_model": {
+    "hf_id": "nvidia/GR00T-N1.7-3B",
+    "hf_revision": "2fc962b973bccdd5d8ce4f67cc63b264d6886495"
+  },
+  "tokenizer": {
+    "name": "nvidia/Cosmos-Reason2-2B",
+    "revision": "9ce19a195e423419c349abfc86fd07178b230561",
+    "public_copy": "Qwen/Qwen3-VL-2B-Instruct@89644892e4d85e24eaac8bacfd4f463576704203",
+    "bytes": 7032403
+  },
+  "frames": {
+    "dataset": "physical-intelligence/libero",
+    "revision": "a4336d589d589045d1c56423ffdf3b88a0e19b1f",
+    "observations": [
+      {
+        "episode": 1272,
+        "frame": 0
+      },
+      {
+        "episode": 1262,
+        "frame": 40
+      },
+      {
+        "episode": 1267,
+        "frame": 80
+      }
+    ]
+  },
+  "alternate": {
+    "frame": "ep1272_f000",
+    "task": "pick up the black bowl on the stove and place it on the plate"
+  },
+  "noise": {
+    "seed": 0,
+    "shape": [
+      40,
+      132
+    ],
+    "generator": "torch.randn, CPU, float32"
+  }
+}

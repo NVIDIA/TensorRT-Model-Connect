@@ -1,0 +1,272 @@
+{
+  "model": "nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4",
+  "revision": "16993199e436da4ba75ddc410855f87e0d996ee6",
+  "reference_backend": "vllm==0.20.0",
+  "reference_arguments": {
+    "trust_remote_code": true,
+    "tensor_parallel_size": 1,
+    "dtype": "bfloat16",
+    "seed": 0,
+    "gpu_memory_utilization": 0.3,
+    "max_model_len": 4096,
+    "max_num_seqs": 1,
+    "enforce_eager": true,
+    "enable_prefix_caching": false,
+    "limit_mm_per_prompt": {
+      "image": 1,
+      "video": 1,
+      "audio": 1
+    },
+    "mm_encoder_attn_backend": "TORCH_SDPA",
+    "video_pruning_rate": 0.7,
+    "kv_cache_dtype": "bfloat16"
+  },
+  "sampling": {
+    "temperature": 0,
+    "top_p": 1,
+    "max_tokens": 96,
+    "seed": 0
+  },
+  "chat_template": {
+    "add_generation_prompt": true,
+    "enable_thinking": false
+  },
+  "assets": {
+    "example_reasoning_input.png": {
+      "repo_id": "nvidia/Cosmos3-Edge",
+      "revision": "344d602b128d1bbdacb43b08d0a3626f46343e29",
+      "filename": "assets/example_reasoning_input.png",
+      "local": "example_reasoning_input.png"
+    },
+    "example_action_id_av_0_input.mp4": {
+      "repo_id": "nvidia/Cosmos3-Edge",
+      "revision": "344d602b128d1bbdacb43b08d0a3626f46343e29",
+      "filename": "assets/example_action_id_av_0_input.mp4"
+    },
+    "speech_16k_mono.wav": {
+      "local": "speech_16k_mono.wav",
+      "source": "Existing TensorRT-Model-Connect speech fixture at commit c348158806710ed93eda5e07edb8b1b4b77692a2; duplicated into the owning family"
+    },
+    "video-frame-0.png": {
+      "local": "video-frame-0.png",
+      "source": {
+        "asset": "example_action_id_av_0_input.mp4",
+        "frame_index": 0,
+        "timestamp_seconds": 0.0
+      }
+    },
+    "video-frame-20.png": {
+      "local": "video-frame-20.png",
+      "source": {
+        "asset": "example_action_id_av_0_input.mp4",
+        "frame_index": 20,
+        "timestamp_seconds": 2.0
+      }
+    },
+    "video-frame-40.png": {
+      "local": "video-frame-40.png",
+      "source": {
+        "asset": "example_action_id_av_0_input.mp4",
+        "frame_index": 40,
+        "timestamp_seconds": 4.0
+      }
+    },
+    "video-frame-60.png": {
+      "local": "video-frame-60.png",
+      "source": {
+        "asset": "example_action_id_av_0_input.mp4",
+        "frame_index": 60,
+        "timestamp_seconds": 6.0
+      }
+    }
+  },
+  "video": {
+    "original_fps": 10.0,
+    "original_frame_count": 61,
+    "frame_indices": [
+      0,
+      20,
+      40,
+      60
+    ],
+    "timestamps_seconds": [
+      0.0,
+      2.0,
+      4.0,
+      6.0
+    ],
+    "decoder": "Original OpenCV-extracted real RGB frames preserved losslessly as versioned PNG; do not re-decode compressed video in CI."
+  },
+  "scope": "Six exact requests; not an all-platform or general audio/video synchronization qualification. Golden outputs come from pinned independent vLLM, never the implementation under test. Factual image/video questions constrain wording while retaining the same inputs, modalities, decoding and NED threshold.",
+  "cases": [
+    {
+      "id": "text",
+      "prompt": "What is the capital of France? Answer briefly.",
+      "modalities": [],
+      "text": "\nParis.",
+      "token_ids": [
+        1010,
+        42572,
+        1046,
+        11
+      ],
+      "finish_reason": "stop"
+    },
+    {
+      "id": "image",
+      "prompt": "List the colors of the three small vases on the table, from left to right. Reply only with the colors separated by commas.",
+      "modalities": [
+        "image"
+      ],
+      "text": "\nblue, red, yellow",
+      "token_ids": [
+        1010,
+        23493,
+        1044,
+        4804,
+        1044,
+        19502,
+        11
+      ],
+      "finish_reason": "stop"
+    },
+    {
+      "id": "audio",
+      "prompt": "Transcribe the speech in this recording.",
+      "modalities": [
+        "audio"
+      ],
+      "text": "Hello there, how is the weather today?",
+      "token_ids": [
+        22177,
+        2156,
+        1044,
+        2606,
+        1395,
+        1278,
+        17253,
+        9406,
+        1063,
+        11
+      ],
+      "finish_reason": "stop"
+    },
+    {
+      "id": "video",
+      "prompt": "In which direction does the road curve in this video? Reply with only the completed sentence: The road curves to the <direction>.",
+      "modalities": [
+        "video"
+      ],
+      "text": "\nThe road curves to the right.",
+      "token_ids": [
+        1010,
+        1784,
+        9480,
+        22416,
+        1317,
+        1278,
+        3169,
+        1046,
+        11
+      ],
+      "finish_reason": "stop"
+    },
+    {
+      "id": "image_audio",
+      "prompt": "List the colors of the three small vases on the table from left to right, and transcribe the speech. Reply using exactly two lines: Colors: <comma-separated colors>\nSpeech: <verbatim transcription>.",
+      "modalities": [
+        "image",
+        "audio"
+      ],
+      "text": "\nColors: blue, red, yellow\nSpeech: Hello there, how is the weather today?",
+      "token_ids": [
+        1010,
+        38365,
+        1058,
+        10991,
+        1044,
+        4804,
+        1044,
+        19502,
+        1010,
+        116428,
+        1058,
+        45383,
+        2156,
+        1044,
+        2606,
+        1395,
+        1278,
+        17253,
+        9406,
+        1063,
+        11
+      ],
+      "finish_reason": "stop"
+    },
+    {
+      "id": "audio_video",
+      "prompt": "Describe the video and transcribe the speech.",
+      "modalities": [
+        "video",
+        "audio"
+      ],
+      "text": "The video shows a view from inside a car driving on a road with a truck ahead. The sky is overcast, and there are trees and grass on both sides of the road. The speech is: 'Hello there, how is the weather today?'",
+      "token_ids": [
+        1784,
+        7476,
+        6122,
+        1261,
+        3719,
+        1562,
+        6625,
+        1261,
+        2382,
+        15538,
+        1408,
+        1261,
+        9480,
+        1454,
+        1261,
+        22676,
+        17277,
+        1046,
+        1531,
+        21283,
+        1395,
+        2136,
+        8799,
+        1044,
+        1321,
+        2156,
+        1584,
+        16429,
+        1321,
+        23170,
+        1408,
+        2960,
+        15819,
+        1307,
+        1278,
+        9480,
+        1046,
+        1531,
+        16181,
+        1395,
+        1058,
+        1576,
+        22177,
+        2156,
+        1044,
+        2606,
+        1395,
+        1278,
+        17253,
+        9406,
+        46121,
+        11
+      ],
+      "finish_reason": "stop"
+    }
+  ]
+}

@@ -16,10 +16,8 @@ import pytest
 pytest.importorskip("tensorrt", reason="TensorRT is required for family builder tests")
 
 try:
-    from families.gemma.model import _SUPPORTED_MODEL_TYPES, build as build_family
-    from families.gemma.support import describe
+    from families.gemma.model import build as build_family
     from tensorrt_model_connect import BuildRequest
-    from tensorrt_model_connect.model_support import ModelMetadata
 except (ImportError, ModuleNotFoundError):
     pytest.skip("tensorrt_model_connect requires TensorRT", allow_module_level=True)
 
@@ -65,25 +63,37 @@ def _build(model_dir: Path) -> None:
     )
 
 
-def test_the_gate_matches_what_support_claims() -> None:
-    """The builder and the identity check must name the same generations."""
-    for model_type in _SUPPORTED_MODEL_TYPES:
-        assert (
-            describe(ModelMetadata(config={"model_type": model_type}, model_index={})) is not None
-        )
+def test_a_later_gemma_generation_is_refused(tmp_path: Path, monkeypatch) -> None:
+    """Gemma4 dense text has its own graph, never the earlier Gemma topology."""
+    from families.gemma import gemma4_text
+    from families.gemma.edge_llm import standalone
 
+    monkeypatch.setattr(standalone, "try_build", lambda *_: False)
+    seen = []
+    native_build = gemma4_text.build
+    monkeypatch.setattr(gemma4_text, "build",
+                        lambda request, writer, config: seen.append(config.model_type))
+    for model_type in ("gemma4", "gemma4_text", "gemma4_unified", "gemma4_unified_text"):
+        _build(_model_dir(tmp_path / model_type, model_type))
+    assert seen == ["gemma4", "gemma4_text", "gemma4_unified", "gemma4_unified_text"]
+    monkeypatch.setattr(gemma4_text, "build", native_build)
+    from dataclasses import replace
+    from families.gemma.config import ModelConfig
 
-def test_a_later_gemma_generation_is_refused(tmp_path: Path) -> None:
-    """Gemma 3n and 4 need machinery this family still does not have.
-
-    Gemma 4 adds vision and audio towers, per-layer input embeddings and
-    KV-shared layers; Gemma 3n is its own architecture again. Neither is built through the ordinary native entrypoint;
-    explicit paired Edge offload is separate, so a prefix check would let them build a full-attention graph and
-    generate quietly wrong text. The refusal names the type so the message is
-    actionable. Gemma 3 text is supported and is covered below.
-    """
-    for model_type in ("gemma3n", "gemma4", "gemma4_text", "gemma4_unified"):
-        directory = _model_dir(tmp_path / model_type.replace("_", ""), model_type)
+    for model_type in seen:
+        directory = tmp_path / model_type
+        request = BuildRequest(directory, directory / "out.bundle", "gemma",
+                               "text_generation", "fp16")
+        config = ModelConfig.from_dir(directory)
+        for field, value in (("fp32_layers", (0,)), ("mtp_seq_len", 2),
+                             ("graph_transform", lambda *args: None)):
+            unsupported = replace(request, **{field: value})
+            with pytest.raises(NotImplementedError, match=field):
+                build_family(unsupported, writer=None)
+            with pytest.raises(NotImplementedError, match=field):
+                native_build(unsupported, None, config)
+    for model_type in ("gemma3n",):
+        directory = _model_dir(tmp_path / model_type, model_type)
         with pytest.raises(ValueError, match=re.escape(f"model_type={model_type!r}")):
             _build(directory)
 
@@ -279,6 +289,7 @@ def test_bad_edge_cli_inputs_fail_before_backend_and_bundle(tmp_path, monkeypatc
 def test_edge_family_failure_preserves_existing_publication(tmp_path, monkeypatch, failure):
     from families.gemma.edge_llm import builder as edge_builder
 
+    real_pair_build = edge_builder.build
     request = with_execution(execution_request(tmp_path), inputs(tmp_path))
     request.output_path.write_bytes(b"previous valid publication")
 
@@ -293,6 +304,38 @@ def test_edge_family_failure_preserves_existing_publication(tmp_path, monkeypatc
     assert caught.value is failure
     assert request.output_path.read_bytes() == b"previous valid publication"
     assert sorted(path.name for path in tmp_path.iterdir()) == ["model.bundle"]
+
+    if isinstance(failure, RuntimeError):
+        from families.gemma import gemma4_text
+
+        paired = []
+        monkeypatch.setattr(edge_builder, "validate_pair", lambda *_: ({}, tmp_path, 64))
+        monkeypatch.setattr(edge_builder, "local_target",
+                            lambda: {"os": "linux", "arch": "x86_64", "sm": 86})
+        monkeypatch.setattr(gemma4_text, "build", lambda request, writer, config, **kw:
+                            paired.append((kw["companion"], request.max_sequence_length)))
+        source = _model_dir(tmp_path / "target", "gemma4_unified")
+        from dataclasses import replace
+
+        native_request = replace(request, model_dir=source)
+        # The real pair builder must preserve the explicit companion on fallback.
+        real_pair_build(native_request, None, native_request.execution)
+        assert paired == [(tmp_path, 64)]
+
+        # The block7 DFlash fallback must retain the explicit draft and variant.
+        (tmp_path / "config.json").write_text(json.dumps({
+            "architectures": ["Gemma4DSparkModel"]}))
+        seen = []
+        monkeypatch.setattr(gemma4_text, "build", lambda request, writer, config, **kw:
+                            seen.append((kw["companion"], kw["companion_variant"])))
+        variants = (("dflash", "Gemma4DSparkModel"), ("dspark", "Gemma4DSparkModel"),
+                    ("eagle3", "Gemma4Eagle3Model"), ("dflash", "DFlashDraftModel"))
+        for variant, architecture in variants:
+            (tmp_path / "config.json").write_text(json.dumps({"architectures": [architecture]}))
+            block_execution = replace(native_request.execution, variant=variant)
+            real_pair_build(native_request, None, block_execution)
+        assert seen == [(tmp_path, variant) for variant, _ in variants]
+
 
 
 def test_edge_request_keeps_graph_callback_and_all_ordinary_fields(tmp_path):
@@ -445,7 +488,7 @@ def test_edge_package_rejects_escaping_media_executable(tmp_path, monkeypatch):
         builder.installed_package(target, vision=True)
 
 
-def _packed_gemma_fixture(source):
+def _packed_gemma_fixture(source, *, dense=False):
     raw = {"model_type": "gemma4", "text_config": {
         "model_type": "gemma4_text", "enable_moe_block": True,
         "hidden_size": 2816, "num_hidden_layers": 30, "num_experts": 128,
@@ -460,6 +503,9 @@ def _packed_gemma_fixture(source):
                                 "kv_cache_scheme": {"dynamic": False, "num_bits": 8, "type": "float"}}}
     quant = {"quantization": {"quant_algo": "NVFP4", "group_size": 16,
                               "kv_cache_quant_algo": "FP8"}}
+    if dense:
+        raw["text_config"].update(enable_moe_block=False, hidden_size=5376,
+                                  num_hidden_layers=60, num_experts=None, top_k_experts=None)
     (source / "config.json").write_text(json.dumps(raw))
     (source / "hf_quant_config.json").write_text(json.dumps(quant))
     return raw
@@ -488,12 +534,14 @@ def test_standalone_packed_admission_preserves_known_boundaries(tmp_path, unsupp
         standalone.checkpoint_quantization(raw, tmp_path, target)
 
 
-def test_standalone_packed_export_preserves_quantization_and_native_target(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cache_dtype", ["fp16", "fp8"])
+@pytest.mark.parametrize("dense", [False, True])
+def test_standalone_packed_export_preserves_quantization_and_native_target(tmp_path, monkeypatch, cache_dtype, dense):
     from families.gemma.edge_llm import standalone
 
     source = tmp_path / "source"
     source.mkdir()
-    raw = _packed_gemma_fixture(source)
+    raw = _packed_gemma_fixture(source, dense=dense)
     before = {path.name: path.read_bytes() for path in source.iterdir()}
     staging = tmp_path / "staging"
     package = {"python": "/sdk/python", "onnx_builder": "/sdk/llm_build",
@@ -504,7 +552,10 @@ def test_standalone_packed_export_preserves_quantization_and_native_target(tmp_p
     monkeypatch.setattr(standalone, "installed_package", installed)
     commands = []
     def run(command, **kwargs):
-        assert kwargs["env"]["EDGELLM_NVFP4_MOE_TARGET"] == "sm12x"
+        if dense:
+            assert "EDGELLM_NVFP4_MOE_TARGET" not in kwargs["env"]
+        else:
+            assert kwargs["env"]["EDGELLM_NVFP4_MOE_TARGET"] == "sm12x"
         assert kwargs["check"] is True
         commands.append(command)
         engine = staging / "edge_llm/engine"
@@ -512,12 +563,78 @@ def test_standalone_packed_export_preserves_quantization_and_native_target(tmp_p
         for name in ("llm.engine", "config.json", "embedding.safetensors", "tokenizer.json",
                      "tokenizer_config.json", "chat_template.jinja"):
             (engine / name).write_bytes(b"fixture")
+        (engine / "config.json").write_text(json.dumps({"kv_cache_dtype": cache_dtype}))
     monkeypatch.setattr(standalone.subprocess, "run", run)
     _, marker = standalone.prepare(execution_request(source), raw, {"sm": 120},
                                     staging, tmp_path / "edge.log")
     assert commands[0] == ["/sdk/python", "-I", "-m", "tensorrt_edgellm.scripts.export",
                            str(source), str(staging / "onnx"), "--dtype", "float16"]
     assert marker["checkpoint_quantization"] == "nvfp4"
-    assert marker["kv_cache_quantization"] == "fp8"
+    assert marker["kv_cache_quantization"] == ("fp8" if cache_dtype == "fp8" else None)
     assert marker["precision"] == "fp16"
     assert before == {path.name: path.read_bytes() for path in source.iterdir()}
+
+
+@pytest.mark.parametrize("model_type,moe,variant", [
+    ("gemma4", False, "mtp"), ("gemma4", True, "mtp"),
+    ("gemma4", False, "dflash"), ("gemma4", True, "dflash"),
+    ("gemma4_unified", False, "dflash"),
+])
+def test_original_and_unified_gemma_pair_geometry(tmp_path, model_type, moe, variant):
+    """Original dense/MoE targets retain explicit, geometry-matched companions."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+    from families.gemma.edge_llm.builder import validate_pair
+
+    target, draft = tmp_path / "target", tmp_path / "draft"
+    target.mkdir()
+    draft.mkdir()
+    base = {"hidden_size": 16, "num_hidden_layers": 6, "vocab_size": 32,
+            "max_position_embeddings": 2048, "enable_moe_block": moe}
+    raw = {"model_type": model_type, "text_config": base}
+    if variant == "mtp":
+        companion = {"model_type": model_type + "_assistant", "backbone_hidden_size": 16,
+                     "text_config": {**base, "hidden_size": 8, "enable_moe_block": False}}
+    else:
+        companion = {"architectures": ["DFlashDraftModel"], "model_type": "qwen3",
+                     "hidden_size": 16, "num_target_layers": 6, "vocab_size": 32,
+                     "max_position_embeddings": 2048, "block_size": 16,
+                     "dflash_config": {"target_layer_ids": [1, 4], "mask_token_id": 4}}
+    (target / "config.json").write_text(json.dumps(raw))
+    (draft / "config.json").write_text(json.dumps(companion))
+    for directory in (target, draft):
+        (directory / "model.safetensors").touch()
+    execution = SimpleNamespace(variant=variant,
+        checkpoints=(SimpleNamespace(role="draft", model_dir=draft),))
+    request = replace(execution_request(target), max_sequence_length=64)
+    assert validate_pair(request, execution) == (raw, draft, 64)
+    if variant == "mtp":
+        companion["backbone_hidden_size"] += 1
+    else:
+        companion["num_target_layers"] += 1
+    (draft / "config.json").write_text(json.dumps(companion))
+    with pytest.raises(ValueError, match="geometry"):
+        validate_pair(request, execution)
+
+
+def test_zlab_original_rotary_config_has_identical_unscaled_theta():
+    from families.gemma.gemma4_zlab_dflash import draft_rope_theta
+
+    assert draft_rope_theta({"rope_theta": 1000000, "rope_scaling": None}) == \
+        draft_rope_theta({"rope_parameters": {"rope_theta": 1000000, "rope_type": "default"}})
+    with pytest.raises(NotImplementedError, match="unscaled"):
+        draft_rope_theta({"rope_theta": 1000000, "rope_scaling": {"rope_type": "linear"}})
+    with pytest.raises(NotImplementedError, match="default"):
+        draft_rope_theta({"rope_parameters": {"rope_theta": 1000000, "rope_type": "yarn"}})
+    with pytest.raises(ValueError, match="positive"):
+        draft_rope_theta({"rope_theta": 0})
+
+
+@pytest.mark.parametrize("sm", [80, 103, 120])
+def test_dense_nvfp4_does_not_inherit_moe_plugin_target_restriction(tmp_path, sm):
+    from families.gemma.edge_llm.standalone import checkpoint_quantization
+
+    raw = _packed_gemma_fixture(tmp_path, dense=True)
+    # Metadata admission is not a GPU qualification claim: the installed
+    # backend reports any missing FP4 implementation, with native fallback.
+    assert checkpoint_quantization(raw, tmp_path, {"sm": sm}) == "nvfp4"

@@ -54,6 +54,11 @@ import tensorrt as trt
 
 from .config import ModelConfig
 from .parallel import ParallelConfig
+from .quantization import (
+    NemotronHQuantContext,
+    calibrate_nemotron_h,
+    is_quantized_checkpoint,
+)
 from .checkpoint_mapper import (
     WeightDict,
     _open_safetensors,
@@ -63,13 +68,45 @@ from .checkpoint_mapper import (
 )
 from . import graph_ops
 from . import graph_blocks
+from . import ssd_rows
 from .parallel import normalize_parallel_config
+from .prepared_quantization import PreparedPolicy, PreparedQuantContext, checkpoint_policy
+
+
+# Prefill engine rows, bounded by the SSD chunk masks.
+PREFILL_MAX_TOKENS = ssd_rows.MAX_ROWS
+PREFILL_OPT_TOKENS = 64
 
 
 def _parse_layer_types(pattern: str) -> list[str]:
     """Parse hybrid_override_pattern: M=mamba2, -=mlp, *=attention."""
-    mapping = {"M": "mamba2", "-": "mlp", "*": "attention"}
-    return [mapping[ch] for ch in pattern if ch in mapping]
+    mapping = {"M": "mamba2", "-": "mlp", "*": "attention", "E": "moe"}
+    invalid = sorted(set(pattern) - mapping.keys())
+    if invalid:
+        raise ValueError(f"Invalid hybrid pattern characters: {invalid}")
+    return [mapping[ch] for ch in pattern]
+
+
+def _config_layer_types(raw: dict, num_layers: int) -> list[str]:
+    forms = []
+    pattern = raw.get("hybrid_override_pattern")
+    if pattern is not None:
+        if not isinstance(pattern, str) or any(ch not in "M-*E" for ch in pattern):
+            raise ValueError("Unsupported Nemotron-H hybrid layer marker")
+        forms.append(_parse_layer_types(pattern))
+    for field in ("layer_types", "layers_block_type"):
+        if field in raw:
+            kinds = raw[field]
+            if not isinstance(kinds, list) or any(k not in {"mamba", "mlp", "attention", "moe"} for k in kinds):
+                raise ValueError("Unsupported Nemotron-H explicit layer type")
+            forms.append(["mamba2" if k == "mamba" else k for k in kinds])
+    if not forms:
+        forms.append(["mamba2"] * num_layers)
+    if any(form != forms[0] for form in forms):
+        raise ValueError("Conflicting Nemotron-H hybrid layer specifications")
+    if len(forms[0]) != num_layers:
+        raise ValueError(f"Pattern length {len(forms[0])} != num_hidden_layers {num_layers}")
+    return forms[0]
 
 
 if TYPE_CHECKING:
@@ -77,14 +114,64 @@ if TYPE_CHECKING:
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
+def _shape_only(in_features: int, out_features: int) -> np.ndarray:
+    """Zero-stride placeholder with the shape of a projection that is never loaded.
+
+    The quantized graph takes the checkpoint's packed bytes from the quantization
+    context, so the full-precision weight is not read.
+    """
+    return np.broadcast_to(np.zeros((), dtype=np.float16), (in_features, out_features))
+
+
+def _load_projection(
+    readers,
+    hf_key: str,
+    name: str,
+    quant_ctx: NemotronHQuantContext | PreparedQuantContext | None,
+    in_features: int,
+    out_features: int,
+    *,
+    precision: str = "fp32",
+) -> np.ndarray:
+    """Load a projection in its graph storage dtype, or retain packed weights."""
+    if isinstance(quant_ctx, NemotronHQuantContext) and quant_ctx.should_quantize(name):
+        return _shape_only(in_features, out_features)
+    return _transpose_2d(_load_tensor(readers, hf_key), name, precision=precision)
+
+
+def _projection(network, x, in_features, out_features, weights, key, *, dtype, quant_ctx):
+    """Projection matmul: the quantized Q/DQ graph when ``key`` is quantized, else constant."""
+    if quant_ctx is not None:
+        return quant_ctx.maybe_quantized_matmul(
+            network, x, in_features, out_features, weights[key], key, dtype=dtype
+        )
+    return graph_ops.add_matmul_rhs_constant(
+        network, x, in_features, out_features, weights[key], dtype=dtype, rank=2
+    )
+
+
 class _NemotronHModel:
     def load_weights(
         self,
         model_dir: str,
         config: ModelConfig,
+        quant_ctx: NemotronHQuantContext | PreparedQuantContext | None = None,
+        *,
+        prepared_policy: PreparedPolicy | None = None,
+        precision: str = "fp32",
     ) -> WeightDict:
+        if precision not in {"fp16", "fp32"}:
+            raise ValueError(f"Unsupported Nemotron-H weight precision {precision!r}")
+        fp32_layers = frozenset(int(layer) for layer in config.raw.get("_fp32_layers", ()))
         model_dir_path = Path(model_dir)
-        readers = _open_safetensors(model_dir_path)
+        if isinstance(quant_ctx, NemotronHQuantContext):
+            # The dense context owns raw packed projections and their validation.
+            # The ordinary mapper reads only its excluded full-precision tensors.
+            readers = _open_safetensors(model_dir_path, prepared=False)
+        elif prepared_policy is not None:
+            readers = _open_safetensors(model_dir_path, policy=prepared_policy)
+        else:
+            readers = _open_safetensors(model_dir_path)
 
         hidden = config.hidden_size
         vocab = config.vocab_size
@@ -93,12 +180,7 @@ class _NemotronHModel:
         head_dim = config.head_dim
         raw = config.raw
 
-        # Parse layer types from hybrid_override_pattern
-        pattern = raw.get("hybrid_override_pattern", "M" * num_layers)
-        layer_types = _parse_layer_types(pattern)
-        assert len(layer_types) == num_layers, (
-            f"Pattern length {len(layer_types)} != num_hidden_layers {num_layers}"
-        )
+        layer_types = _config_layer_types(raw, num_layers)
 
         # Mamba-2 dimensions
         mamba_num_heads = raw.get("mamba_num_heads", 64)
@@ -115,12 +197,18 @@ class _NemotronHModel:
         # Attention dimensions
         q_dim = num_heads * head_dim
         weights = WeightDict()
+        weights["_nvfp4_weights"] = prepared_policy is not None and prepared_policy.request_format == "nvfp4"
+        # Exported scale tensors, not broad checkpoint metadata, enable FP8 KV.
+        fp8_kv_cache = any(
+            _has_tensor(readers, f"backbone.layers.{i}.mixer.k_proj.k_scale")
+            for i, kind in enumerate(layer_types) if kind == "attention"
+        )
+        weights["_fp8_kv_cache"] = fp8_kv_cache
 
         # Embedding
         embedding = _load_tensor(readers, "backbone.embeddings.weight")
-        assert embedding.shape == (vocab, hidden), (
-            f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
-        )
+        if embedding.shape != (vocab, hidden):
+            raise ValueError(f"Embedding shape {embedding.shape} != ({vocab}, {hidden})")
         weights["embedding"] = embedding.astype(np.float32)
 
         mamba_count = 0
@@ -130,6 +218,9 @@ class _NemotronHModel:
             lt = layer_types[layer_idx]
             prefix = f"layer.{layer_idx}"
             hf_prefix = f"backbone.layers.{layer_idx}"
+            # Match the existing graph constant dtype instead of retaining an
+            # additional full FP32 projection copy throughout an FP16 build.
+            projection_precision = "fp32" if layer_idx in fp32_layers else precision
 
             # RMSNorm (all layer types)
             norm = _load_tensor(readers, f"{hf_prefix}.norm.weight")
@@ -137,8 +228,15 @@ class _NemotronHModel:
 
             if lt == "mamba2":
                 # in_proj: [proj_size, hidden] where proj_size = d_inner + conv_dim + mamba_num_heads
-                in_proj_raw = _load_tensor(readers, f"{hf_prefix}.mixer.in_proj.weight")
-                weights[f"{prefix}.mamba_in_proj"] = _transpose_2d(in_proj_raw, "mamba_in_proj")
+                weights[f"{prefix}.mamba_in_proj"] = _load_projection(
+                    readers,
+                    f"{hf_prefix}.mixer.in_proj.weight",
+                    f"{prefix}.mamba_in_proj",
+                    quant_ctx,
+                    hidden,
+                    d_inner + conv_dim + mamba_num_heads,
+                    precision=projection_precision,
+                )
 
                 # conv1d: [conv_dim, 1, d_conv] -> [conv_dim, d_conv]
                 conv1d_w = _load_tensor(readers, f"{hf_prefix}.mixer.conv1d.weight")
@@ -150,8 +248,15 @@ class _NemotronHModel:
                 weights[f"{prefix}.conv1d_bias"] = conv1d_b.astype(np.float32)
 
                 # out_proj: [hidden, d_inner]
-                out_proj_raw = _load_tensor(readers, f"{hf_prefix}.mixer.out_proj.weight")
-                weights[f"{prefix}.mamba_out_proj"] = _transpose_2d(out_proj_raw, "mamba_out_proj")
+                weights[f"{prefix}.mamba_out_proj"] = _load_projection(
+                    readers,
+                    f"{hf_prefix}.mixer.out_proj.weight",
+                    f"{prefix}.mamba_out_proj",
+                    quant_ctx,
+                    d_inner,
+                    hidden,
+                    precision=projection_precision,
+                )
 
                 # A_log: [mamba_num_heads]
                 A_log = _load_tensor(readers, f"{hf_prefix}.mixer.A_log")
@@ -179,22 +284,89 @@ class _NemotronHModel:
 
             elif lt == "mlp":
                 # MLP: up_proj -> relu2 -> down_proj (NO gate_proj)
-                up_raw = _load_tensor(readers, f"{hf_prefix}.mixer.up_proj.weight")
-                down_raw = _load_tensor(readers, f"{hf_prefix}.mixer.down_proj.weight")
-                weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj")
-                weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj")
+                weights[f"{prefix}.w_up"] = _load_projection(
+                    readers,
+                    f"{hf_prefix}.mixer.up_proj.weight",
+                    f"{prefix}.w_up",
+                    quant_ctx,
+                    hidden,
+                    mlp_intermediate,
+                    precision=projection_precision,
+                )
+                weights[f"{prefix}.w_down"] = _load_projection(
+                    readers,
+                    f"{hf_prefix}.mixer.down_proj.weight",
+                    f"{prefix}.w_down",
+                    quant_ctx,
+                    mlp_intermediate,
+                    hidden,
+                    precision=projection_precision,
+                )
+
+            elif lt == "moe":
+                mixer = f"{hf_prefix}.mixer"
+                weights[f"{prefix}.router"] = _transpose_2d(
+                    _load_tensor(readers, f"{mixer}.gate.weight"), "router"
+                )
+                weights[f"{prefix}.router_bias"] = _load_tensor(
+                    readers, f"{mixer}.gate.e_score_correction_bias"
+                )
+                for expert in range(int(raw["n_routed_experts"])):
+                    for projection in ("up", "down"):
+                        weights[f"{prefix}.expert.{expert}.{projection}"] = _transpose_2d(
+                            _load_tensor(readers, f"{mixer}.experts.{expert}.{projection}_proj.weight"),
+                            f"expert.{expert}.{projection}",
+                        )
+                for projection in ("up", "down"):
+                    weights[f"{prefix}.shared.{projection}"] = _transpose_2d(
+                        _load_tensor(readers, f"{mixer}.shared_experts.{projection}_proj.weight"),
+                        f"shared.{projection}",
+                    )
+                if raw.get("moe_latent_size") is not None:
+                    for logical, source in (("latent_in", "fc1_latent_proj"), ("latent_out", "fc2_latent_proj")):
+                        weights[f"{prefix}.{logical}"] = _transpose_2d(
+                            _load_tensor(readers, f"{mixer}.{source}.weight"), logical
+                        )
 
             elif lt == "attention":
                 # Attention: q/k/v/o projections (no bias, no RoPE)
-                q_raw = _load_tensor(readers, f"{hf_prefix}.mixer.q_proj.weight")
-                k_raw = _load_tensor(readers, f"{hf_prefix}.mixer.k_proj.weight")
-                v_raw = _load_tensor(readers, f"{hf_prefix}.mixer.v_proj.weight")
-                o_raw = _load_tensor(readers, f"{hf_prefix}.mixer.o_proj.weight")
-
-                q_t = _transpose_2d(q_raw, "q_proj")
-                k_t = _transpose_2d(k_raw, "k_proj")
-                v_t = _transpose_2d(v_raw, "v_proj")
-                o_t = _transpose_2d(o_raw, "o_proj")
+                kv_dim = config.num_key_value_heads * head_dim
+                q_t = _load_projection(
+                    readers,
+                    f"{hf_prefix}.mixer.q_proj.weight",
+                    f"{prefix}.w_q",
+                    quant_ctx,
+                    hidden,
+                    q_dim,
+                    precision=projection_precision,
+                )
+                k_t = _load_projection(
+                    readers,
+                    f"{hf_prefix}.mixer.k_proj.weight",
+                    f"{prefix}.w_k",
+                    quant_ctx,
+                    hidden,
+                    kv_dim,
+                    precision=projection_precision,
+                )
+                v_t = _load_projection(
+                    readers,
+                    f"{hf_prefix}.mixer.v_proj.weight",
+                    f"{prefix}.w_v",
+                    quant_ctx,
+                    hidden,
+                    kv_dim,
+                    precision=projection_precision,
+                )
+                o_t = _load_projection(
+                    readers,
+                    f"{hf_prefix}.mixer.o_proj.weight",
+                    f"{prefix}.w_o",
+                    quant_ctx,
+                    q_dim,
+                    hidden,
+                    precision=projection_precision,
+                )
 
                 # Compact GQA/MQA K/V
 
@@ -202,6 +374,16 @@ class _NemotronHModel:
                 weights[f"{prefix}.w_k"] = k_t
                 weights[f"{prefix}.w_v"] = v_t
                 weights[f"{prefix}.w_o"] = o_t
+
+                if fp8_kv_cache:
+                    scales = []
+                    for projection in ("q", "k", "v"):
+                        key = f"{hf_prefix}.mixer.{projection}_proj.{projection}_scale"
+                        value = np.asarray(_load_tensor(readers, key)) if _has_tensor(readers, key) else np.array(1.0)
+                        if value.size != 1 or not np.isfinite(value).all() or (value <= 0).any():
+                            raise ValueError(f"Invalid Nemotron-H FP8 attention scale: {key}")
+                        scales.append(float(value.item()))
+                    weights[f"{prefix}.kv_scales"] = tuple(scales)
 
                 attn_count += 1
 
@@ -246,10 +428,40 @@ class _NemotronHModel:
         verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
+        target_feature_layers: tuple[int, ...] = (),
+        prefill_rows: int | None = None,
+        release_weights: bool = True,
     ) -> bytes:
-        """Build hybrid TRT engine with heterogeneous layer stack."""
+        """Build hybrid TRT engine, optionally exporting paired-draft features.
+
+        ``prefill_rows`` builds the prefill engine of a split bundle instead:
+        ``S`` token rows with one profile ``1..prefill_rows``, Mamba-2 as one SSD
+        chunk and attention over the cache plus the chunk. Its logits come from
+        the last row; present K/V cover all rows and the recurrent outputs hold
+        the state after the last row. Decoding stays on the one-token engine.
+
+        ``release_weights`` drops the loaded checkpoint before the TensorRT
+        build; pass False to build another engine from the same weights.
+        """
+        if prefill_rows is not None and (target_feature_layers or parallel_config is not None
+                                         and normalize_parallel_config(parallel_config).enabled):
+            raise NotImplementedError(
+                "Nemotron-H prefill engines are single-GPU without paired-draft features"
+            )
+        if prefill_rows is not None and not 1 <= prefill_rows <= PREFILL_MAX_TOKENS:
+            raise ValueError(f"Nemotron-H prefill_rows must be in 1..{PREFILL_MAX_TOKENS}")
+        if (
+            len(set(target_feature_layers)) != len(target_feature_layers)
+            or any(type(index) is not int or not 0 <= index < config.num_hidden_layers
+                   for index in target_feature_layers)
+        ):
+            raise ValueError("Nemotron-H target feature layers must be unique valid layer indices")
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
+            if quant_ctx is not None:
+                raise NotImplementedError("Nemotron-H quantized builds do not support tensor parallelism")
+            if target_feature_layers:
+                raise ValueError("Nemotron-H paired target features require tensor_parallel_size=1")
             parallel.validate()
             from .tp_builder import build_nemotron_h_tp_engine
 
@@ -313,11 +525,36 @@ class _NemotronHModel:
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 3
+        if "moe" not in layer_types and (
+            getattr(quant_ctx, "has_nvfp4_weights", False)
+            or weights.get("_nvfp4_weights", False)
+        ):
+            trt_config.max_aux_streams = 0
+        if quant_ctx is not None:
+            # The plan inspector reads kernel names from the engine.
+            trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
 
         # --- Inputs ---
-        token_id = network.add_input("token_id", trt.int32, (1,))
-        position_id = network.add_input("position_id", trt.int32, (1,))
-        attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
+        rows = None if prefill_rows else 1
+        row_dim = -1 if prefill_rows else 1
+        token_id = network.add_input("token_id", trt.int32, (row_dim,))
+        position_id = network.add_input("position_id", trt.int32, (row_dim,))
+        attention_mask = network.add_input(
+            "attention_mask", trt.float32, (row_dim, -1 if prefill_rows else attention_window)
+        )
+        if prefill_rows:
+            max_rows = min(prefill_rows, max_cache_length)
+            opt_rows = min(PREFILL_OPT_TOKENS, max_rows)
+            profile = builder.create_optimization_profile()
+            for name in ("token_id", "position_id"):
+                profile.set_shape(name, (1,), (opt_rows,), (max_rows,))
+            profile.set_shape(
+                "attention_mask",
+                (1, max_cache_length + 1),
+                (opt_rows, max_cache_length + opt_rows),
+                (max_rows, max_cache_length + max_rows),
+            )
+            trt_config.add_optimization_profile(profile)
 
         conv_state_inputs = []
         ssm_state_inputs = []
@@ -333,17 +570,18 @@ class _NemotronHModel:
             conv_state_inputs.append(cs)
             ssm_state_inputs.append(ss)
 
+        cache_trt_dtype = trt.fp8 if weights.get("_fp8_kv_cache", False) else work_trt_dtype
         cache_k_inputs = []
         cache_v_inputs = []
         for ai in range(num_attn):
             ck = network.add_input(
                 graph_ops.layer_tensor_name("cache_k", ai),
-                work_trt_dtype,
+                cache_trt_dtype,
                 (max_cache_length, kv_attention_size),
             )
             cv = network.add_input(
                 graph_ops.layer_tensor_name("cache_v", ai),
-                work_trt_dtype,
+                cache_trt_dtype,
                 (max_cache_length, kv_attention_size),
             )
             cache_k_inputs.append(ck)
@@ -382,6 +620,7 @@ class _NemotronHModel:
         mamba_counter = 0
         attn_counter = 0
 
+        target_features = {}
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
             lt = layer_types[layer_idx]
@@ -417,6 +656,8 @@ class _NemotronHModel:
                     mamba_head_dim=mamba_head_dim,
                     n_groups=n_groups,
                     dtype=layer_np_dtype,
+                    quant_ctx=quant_ctx,
+                    sequence_length=rows,
                 )
                 hidden_state = result["hidden"]
                 present_conv_outputs.append(result["present_conv"])
@@ -433,16 +674,25 @@ class _NemotronHModel:
                     hidden_size=hidden,
                     mlp_size=mlp_size,
                     dtype=layer_np_dtype,
+                    quant_ctx=quant_ctx,
                 )
                 hidden_state = result["hidden"]
+
+            elif lt == "moe":
+                from .moe import add_moe_layer
+
+                hidden_state = add_moe_layer(
+                    network, layer_hidden, layer_eps, weights=weights, prefix=prefix,
+                    raw=config.raw, dtype=layer_np_dtype, quant_ctx=quant_ctx,
+                )
 
             elif lt == "attention":
                 cache_k = cache_k_inputs[attn_counter]
                 cache_v = cache_v_inputs[attn_counter]
                 layer_mask = attention_mask
-                if cache_k.dtype != layer_trt_dtype:
+                if cache_k.dtype not in (trt.fp8, layer_trt_dtype):
                     cache_k = network.add_cast(cache_k, layer_trt_dtype).get_output(0)
-                if cache_v.dtype != layer_trt_dtype:
+                if cache_v.dtype not in (trt.fp8, layer_trt_dtype):
                     cache_v = network.add_cast(cache_v, layer_trt_dtype).get_output(0)
                 if layer_mask.dtype != layer_trt_dtype:
                     layer_mask = network.add_cast(layer_mask, layer_trt_dtype).get_output(0)
@@ -458,12 +708,16 @@ class _NemotronHModel:
                     hidden_size=hidden,
                     attention_size=attention_size,
                     kv_attention_size=kv_attention_size,
+                    fp8_kv_scales=weights.get(f"{prefix}.kv_scales"),
+                    decompose_attention="moe" in layer_types[:layer_idx],
                     num_heads=num_heads,
                     num_kv_heads=num_kv_heads,
                     head_dim=head_dim,
                     max_cache_length=max_cache_length,
                     eps_tensor=layer_eps,
                     dtype=layer_np_dtype,
+                    quant_ctx=quant_ctx,
+                    sequence_length=rows,
                 )
                 # add_attention_block does NOT apply residual
                 residual = network.add_elementwise(
@@ -476,6 +730,12 @@ class _NemotronHModel:
 
             if debug_layer_outputs:
                 _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
+            if layer_idx in target_feature_layers and layer_idx != num_layers - 1:
+                target_features[layer_idx] = hidden_state
+
+        if prefill_rows:
+            # Only the last row can affect the next token.
+            hidden_state = ssd_rows.last_row(network, hidden_state, hidden)
 
         # --- Final norm ---
         if hidden_state.dtype != io_trt_dtype:
@@ -486,12 +746,33 @@ class _NemotronHModel:
                 network, hidden_state, hidden, final_norm, io_eps_tensor, dtype=io_np_dtype
             )
 
+        if target_feature_layers:
+            # The final provider feature follows norm_f; earlier features are
+            # residual streams. Preserve companion-declared concatenation order.
+            if num_layers - 1 in target_feature_layers:
+                target_features[num_layers - 1] = hidden_state
+            features = [target_features[index] for index in target_feature_layers]
+            features = [
+                value if value.dtype == io_trt_dtype
+                else network.add_cast(value, io_trt_dtype).get_output(0)
+                for value in features
+            ]
+            seed = graph_ops.add_constant(
+                network, (1, hidden), np.zeros((1, hidden)), dtype=io_np_dtype
+            )
+            joined = network.add_concatenation([seed] * len(features))
+            joined.axis = 1
+            for index, feature in enumerate(features):
+                joined.set_input(index, feature)
+            target_hidden = joined.get_output(0)
+            target_hidden.name = "target_hidden"
+            network.mark_output(target_hidden)
+
         # --- LM head ---
-        logits = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, vocab, weights["w_lm_head"], dtype=io_np_dtype
-        )
+        matmul = graph_blocks.make_matmul_fn(network, io_np_dtype, quant_ctx)
+        logits = matmul(hidden_state, hidden, vocab, weights["w_lm_head"], "w_lm_head")
         b_out = np.zeros(vocab, dtype=io_np_dtype)
-        logits = graph_ops.add_bias_sum(network, logits, vocab, b_out, dtype=io_np_dtype)
+        logits = graph_ops.add_bias_sum(network, logits, vocab, b_out, dtype=io_np_dtype, rank=2)
         if logits.dtype != trt.float32:
             logits = network.add_cast(logits, trt.float32).get_output(0)
         logits.name = "logits"
@@ -513,10 +794,10 @@ class _NemotronHModel:
         for ai in range(num_attn):
             pk = present_k_outputs[ai]
             pv = present_v_outputs[ai]
-            if pk.dtype != work_trt_dtype:
-                pk = network.add_cast(pk, work_trt_dtype).get_output(0)
-            if pv.dtype != work_trt_dtype:
-                pv = network.add_cast(pv, work_trt_dtype).get_output(0)
+            if pk.dtype != cache_trt_dtype:
+                pk = network.add_cast(pk, cache_trt_dtype).get_output(0)
+            if pv.dtype != cache_trt_dtype:
+                pv = network.add_cast(pv, cache_trt_dtype).get_output(0)
             pk.name = graph_ops.layer_tensor_name("present_k", ai)
             pv.name = graph_ops.layer_tensor_name("present_v", ai)
             network.mark_output(pk)
@@ -535,6 +816,11 @@ class _NemotronHModel:
                 file=sys.stderr,
             )
 
+        # Every tensor the network needs is already embedded in it; drop the
+        # resident checkpoint before the engine build, which runs its own
+        # TensorRT workspace allocation on top of whatever weights hold.
+        if release_weights:
+            weights.clear()
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
             raise RuntimeError("TensorRT engine build failed")
@@ -544,8 +830,7 @@ class _NemotronHModel:
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict:
         """Inject hybrid-specific config fields into the bundle."""
         raw = config.raw
-        pattern = raw.get("hybrid_override_pattern", "")
-        layer_types = _parse_layer_types(pattern)
+        layer_types = _config_layer_types(raw, config.num_hidden_layers)
 
         mamba_num_heads = raw.get("mamba_num_heads", 64)
         mamba_head_dim = raw.get("mamba_head_dim", 64)
@@ -603,8 +888,10 @@ def _add_mamba2_layer(
     mamba_head_dim: int,
     n_groups: int,
     dtype: np.dtype = np.float32,
+    quant_ctx: NemotronHQuantContext | PreparedQuantContext | None = None,
+    sequence_length: int | None = 1,
 ) -> dict[str, trt.ITensor]:
-    """Add one Mamba-2 SSD layer (single-step decode).
+    """Add one Mamba-2 SSD layer over one row, or ``S`` rows when ``sequence_length`` is None.
 
     Mamba-2 in_proj splits: [gate(d_inner), hidden_B_C(conv_dim), dt(nheads)]
     Conv1d operates on hidden_B_C (d_inner + 2*n_groups*d_state channels).
@@ -613,8 +900,6 @@ def _add_mamba2_layer(
 
     Returns: {hidden, present_conv, present_ssm}
     """
-    groups_state_size = n_groups * d_state
-
     # ===== 1. RMSNorm =====
     normed = graph_ops.add_rms_norm(
         network, hidden, hidden_size, weights[f"{prefix}.input_norm"], eps_tensor, dtype=dtype
@@ -622,9 +907,75 @@ def _add_mamba2_layer(
 
     # ===== 2. Input projection =====
     proj_dim = d_inner + conv_dim + mamba_num_heads
-    projected = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, proj_dim, weights[f"{prefix}.mamba_in_proj"], dtype=dtype
-    )  # [1, proj_dim]
+    projected = _projection(
+        network,
+        normed,
+        hidden_size,
+        proj_dim,
+        weights,
+        f"{prefix}.mamba_in_proj",
+        dtype=dtype,
+        quant_ctx=quant_ctx,
+    )  # [rows, proj_dim]
+
+    mixer = _add_mamba2_mixer_rows if sequence_length is None else _add_mamba2_mixer_step
+    gated_tensor, present_conv, present_ssm = mixer(
+        network,
+        projected=projected,
+        conv_state_in=conv_state_in,
+        ssm_state_in=ssm_state_in,
+        weights=weights,
+        prefix=prefix,
+        d_inner=d_inner,
+        d_state=d_state,
+        d_conv=d_conv,
+        conv_dim=conv_dim,
+        mamba_num_heads=mamba_num_heads,
+        mamba_head_dim=mamba_head_dim,
+        n_groups=n_groups,
+        dtype=dtype,
+    )
+
+    # ===== 8. Output projection + residual =====
+    out = _projection(
+        network,
+        gated_tensor,
+        d_inner,
+        hidden_size,
+        weights,
+        f"{prefix}.mamba_out_proj",
+        dtype=dtype,
+        quant_ctx=quant_ctx,
+    )
+
+    residual = network.add_elementwise(hidden, out, trt.ElementWiseOperation.SUM)
+
+    return {
+        "hidden": residual.get_output(0),
+        "present_conv": present_conv,
+        "present_ssm": present_ssm,
+    }
+
+
+def _add_mamba2_mixer_step(
+    network: trt.INetworkDefinition,
+    *,
+    projected: trt.ITensor,
+    conv_state_in: trt.ITensor,
+    ssm_state_in: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    d_inner: int,
+    d_state: int,
+    d_conv: int,
+    conv_dim: int,
+    mamba_num_heads: int,
+    mamba_head_dim: int,
+    n_groups: int,
+    dtype: np.dtype,
+) -> tuple[trt.ITensor, trt.ITensor, trt.ITensor]:
+    """Conv step, SSM update and gated norm for one token: ``(gated [1, d_inner], conv, ssm)``."""
+    groups_state_size = n_groups * d_state
 
     # Split: gate [d_inner], hidden_B_C [conv_dim], dt [nheads]
     offset = 0
@@ -669,7 +1020,7 @@ def _add_mamba2_layer(
     conv_flat = network.add_shuffle(conv_sum.get_output(0))
     conv_flat.reshape_dims = (1, conv_dim)
     conv_out = graph_ops.add_bias_sum(
-        network, conv_flat.get_output(0), conv_dim, weights[f"{prefix}.conv1d_bias"], dtype=dtype
+        network, conv_flat.get_output(0), conv_dim, weights[f"{prefix}.conv1d_bias"], dtype=dtype, rank=2
     )
     hbc_activated = graph_ops.add_activation(network, conv_out, "silu", dtype=dtype)
 
@@ -876,23 +1227,145 @@ def _add_mamba2_layer(
     if gated_tensor.dtype != norm_output_dtype:
         gated_tensor = network.add_cast(gated_tensor, norm_output_dtype).get_output(0)
 
-    # ===== 8. Output projection + residual =====
-    out = graph_ops.add_matmul_rhs_constant(
-        network,
-        gated_tensor,
-        d_inner,
-        hidden_size,
-        weights[f"{prefix}.mamba_out_proj"],
-        dtype=dtype,
+    return gated_tensor, present_conv, present_ssm
+
+
+def _add_mamba2_mixer_rows(
+    network: trt.INetworkDefinition,
+    *,
+    projected: trt.ITensor,
+    conv_state_in: trt.ITensor,
+    ssm_state_in: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    d_inner: int,
+    d_state: int,
+    d_conv: int,
+    conv_dim: int,
+    mamba_num_heads: int,
+    mamba_head_dim: int,
+    n_groups: int,
+    dtype: np.dtype,
+) -> tuple[trt.ITensor, trt.ITensor, trt.ITensor]:
+    """Conv, SSD and gated norm over ``S`` rows in one launch: ``(gated [S, d_inner], conv, ssm)``.
+
+    Same arithmetic as :func:`_add_mamba2_mixer_step` applied token by token;
+    the SSM runs as one chunk (see :mod:`.ssd_rows`).
+    """
+    groups_state_size = n_groups * d_state
+    rows = ssd_rows.row_count(network, projected)
+
+    def columns(tensor, offset, width):
+        return ssd_rows.dynamic_slice(network, tensor, (0, offset), (rows, width))
+
+    def fp32(tensor):
+        if tensor.dtype == trt.float32:
+            return tensor
+        return network.add_cast(tensor, trt.float32).get_output(0)
+
+    gate = columns(projected, 0, d_inner)
+    hidden_b_c = columns(projected, d_inner, conv_dim)
+    dt_raw = columns(projected, d_inner + conv_dim, mamba_num_heads)
+
+    conv_w = graph_ops.add_constant(
+        network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"], dtype=dtype
     )
+    conv_columns, present_conv = ssd_rows.add_short_conv_rows(
+        network,
+        columns=ssd_rows.shuffle(network, hidden_b_c, transpose=(1, 0)),
+        conv_state=conv_state_in,
+        weight=conv_w,
+        channels=conv_dim,
+        kernel=d_conv,
+    )
+    conv_out = graph_ops.add_bias_sum(
+        network,
+        ssd_rows.shuffle(network, conv_columns, transpose=(1, 0)),
+        conv_dim,
+        weights[f"{prefix}.conv1d_bias"],
+        dtype=dtype,
+        rank=2,
+    )
+    activated = graph_ops.add_activation(network, conv_out, "silu", dtype=dtype)
+    hidden_x = columns(activated, 0, d_inner)
+    heads_per_group = mamba_num_heads // n_groups
 
-    residual = network.add_elementwise(hidden, out, trt.ElementWiseOperation.SUM)
+    def heads_from_groups(tensor):
+        # [S, groups * N] -> head-major [H, S, N], head = group * heads_per_group + j.
+        grouped = ssd_rows.shuffle(network, tensor, reshape=(-1, n_groups, 1, d_state))
+        if heads_per_group > 1:
+            tile = graph_ops.add_constant(
+                network, (1, 1, heads_per_group, 1),
+                np.ones((1, 1, heads_per_group, 1), dtype=dtype), dtype=dtype,
+            )
+            grouped = network.add_elementwise(grouped, tile, trt.ElementWiseOperation.PROD).get_output(0)
+        heads = ssd_rows.shuffle(network, grouped, reshape=(-1, mamba_num_heads, d_state))
+        return ssd_rows.shuffle(network, fp32(heads), transpose=(1, 0, 2))
 
-    return {
-        "hidden": residual.get_output(0),
-        "present_conv": present_conv,
-        "present_ssm": present_ssm,
-    }
+    b_heads = heads_from_groups(columns(activated, d_inner, groups_state_size))
+    c_heads = heads_from_groups(columns(activated, d_inner + groups_state_size, groups_state_size))
+    x_heads = ssd_rows.shuffle(
+        network,
+        fp32(ssd_rows.shuffle(network, hidden_x, reshape=(-1, mamba_num_heads, mamba_head_dim))),
+        transpose=(1, 0, 2),
+    )  # [H, S, P]
+
+    # dt = softplus(dt_raw + dt_bias), FP32 (dt_bias reaches 33.5).
+    dt_bias = graph_ops.add_constant(
+        network, (1, mamba_num_heads), weights[f"{prefix}.dt_bias"], dtype=dtype
+    )
+    dt_biased = fp32(network.add_elementwise(dt_raw, dt_bias, trt.ElementWiseOperation.SUM).get_output(0))
+    one = graph_ops.add_constant(network, (1, 1), np.array([1.0], dtype=np.float32), dtype=np.float32)
+    dt = network.add_unary(
+        network.add_elementwise(
+            network.add_unary(dt_biased, trt.UnaryOperation.EXP).get_output(0), one,
+            trt.ElementWiseOperation.SUM,
+        ).get_output(0),
+        trt.UnaryOperation.LOG,
+    ).get_output(0)  # [S, H]
+
+    y_heads, present_ssm = ssd_rows.add_chunked_ssd(
+        network,
+        x=x_heads,
+        b=b_heads,
+        c=c_heads,
+        dt=ssd_rows.shuffle(network, dt, transpose=(1, 0)),
+        a=weights[f"{prefix}.A"],
+        d=weights[f"{prefix}.D"],
+        state=fp32(ssm_state_in),
+        num_heads=mamba_num_heads,
+    )
+    y = ssd_rows.shuffle(network, y_heads, transpose=(1, 0, 2), reshape=(-1, d_inner))
+    if y.dtype != gate.dtype:
+        y = network.add_cast(y, gate.dtype).get_output(0)
+
+    # Gated group RMSNorm (norm_before_gate=False), as in the one-token mixer.
+    gate_activated = graph_ops.add_activation(network, gate, "silu", dtype=dtype)
+    y_gated = network.add_elementwise(y, gate_activated, trt.ElementWiseOperation.PROD).get_output(0)
+    group_size = d_inner // n_groups
+    norm_input = ssd_rows.shuffle(network, y_gated, reshape=(-1, n_groups, group_size))
+    norm_output_dtype = norm_input.dtype
+    if dtype != np.float32:
+        norm_input = network.add_cast(norm_input, trt.float32).get_output(0)
+    eps_small = graph_ops.add_constant(
+        network, (1, 1, 1), np.array([[[1e-5]]], dtype=np.float32), dtype=np.float32
+    )
+    square = network.add_elementwise(norm_input, norm_input, trt.ElementWiseOperation.PROD)
+    mean = network.add_reduce(square.get_output(0), trt.ReduceOperation.AVG, 1 << 2, keep_dims=True)
+    denom = network.add_elementwise(mean.get_output(0), eps_small, trt.ElementWiseOperation.SUM)
+    recip = network.add_unary(
+        network.add_unary(denom.get_output(0), trt.UnaryOperation.SQRT).get_output(0),
+        trt.UnaryOperation.RECIP,
+    )
+    normalized = network.add_elementwise(norm_input, recip.get_output(0), trt.ElementWiseOperation.PROD)
+    gamma_t = graph_ops.add_constant(network, (1, d_inner), weights[f"{prefix}.mamba_norm"], dtype=np.float32)
+    gated = network.add_elementwise(
+        ssd_rows.shuffle(network, normalized.get_output(0), reshape=(-1, d_inner)), gamma_t,
+        trt.ElementWiseOperation.PROD,
+    ).get_output(0)
+    if gated.dtype != norm_output_dtype:
+        gated = network.add_cast(gated, norm_output_dtype).get_output(0)
+    return gated, present_conv, present_ssm
 
 
 def _add_mlp_layer(
@@ -905,18 +1378,33 @@ def _add_mlp_layer(
     hidden_size: int,
     mlp_size: int,
     dtype: np.dtype = np.float32,
+    quant_ctx: NemotronHQuantContext | PreparedQuantContext | None = None,
 ) -> dict[str, trt.ITensor]:
     """Add MLP layer: RMSNorm -> up -> relu2 -> down -> residual."""
     normed = graph_ops.add_rms_norm(
         network, hidden, hidden_size, weights[f"{prefix}.input_norm"], eps_tensor, dtype=dtype
     )
 
-    up = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, mlp_size, weights[f"{prefix}.w_up"], dtype=dtype
+    up = _projection(
+        network,
+        normed,
+        hidden_size,
+        mlp_size,
+        weights,
+        f"{prefix}.w_up",
+        dtype=dtype,
+        quant_ctx=quant_ctx,
     )
     activated = graph_ops.add_activation(network, up, "relu2", dtype=dtype)
-    down = graph_ops.add_matmul_rhs_constant(
-        network, activated, mlp_size, hidden_size, weights[f"{prefix}.w_down"], dtype=dtype
+    down = _projection(
+        network,
+        activated,
+        mlp_size,
+        hidden_size,
+        weights,
+        f"{prefix}.w_down",
+        dtype=dtype,
+        quant_ctx=quant_ctx,
     )
 
     residual = network.add_elementwise(hidden, down, trt.ElementWiseOperation.SUM)
@@ -992,6 +1480,34 @@ def _runtime_config(
     return runtime
 
 
+def _native_quantization(request, config, model_dir: Path, precision: str):
+    """Return the source policy and its dense or extended Q/DQ context."""
+    requested = request.quantization
+    explicit = requested in {"fp8", "nvfp4"}
+    if requested not in {None, "none", "fp8", "nvfp4"}:
+        raise NotImplementedError(f"Nemotron-H does not support quantization={requested!r}")
+    if precision != "fp16" and (explicit or is_quantized_checkpoint(model_dir)):
+        raise ValueError(
+            "Nemotron-H quantized builds require precision fp16; "
+            "use --quantization fp8 or nvfp4 for the matching dense source"
+        )
+    if explicit and request.tensor_parallel_size != 1:
+        raise NotImplementedError("Nemotron-H quantized builds do not support tensor parallelism")
+    policy = checkpoint_policy(model_dir, allow_legacy_producer=explicit)
+    if explicit and (policy is None or requested != policy.request_format):
+        raise ValueError("Nemotron-H quantization must match the prepared checkpoint")
+    if policy is None:
+        return None, None
+    if precision != "fp16":
+        raise ValueError("Prepared Nemotron-H weights require precision fp16")
+    layer_types = _config_layer_types(config.raw, config.num_hidden_layers)
+    if explicit and policy.algorithm in {"FP8", "NVFP4"} and "moe" not in layer_types:
+        # Preserve the existing dense route, including bit-exact constants,
+        # shape-only placeholders and the FP8 overflow avoidance boundary.
+        return policy, calibrate_nemotron_h(model_dir, graph_ops, requested, layer_types=layer_types)
+    return policy, PreparedQuantContext()
+
+
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Dispatch complete offload or execute the unchanged native implementation."""
     from .build_request import coerce_request
@@ -1032,6 +1548,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         if request.mtp_seq_len is not None:
             raise NotImplementedError("Nemotron-H does not support MTP speculative decoding")
 
+        if request.graph_transform is not None:
+            raise NotImplementedError("Nemotron-H does not support graph_transform")
+
         model_dir = Path(request.model_dir)
         config = ModelConfig.from_dir(model_dir)
         if str(config.model_type).lower() not in {"nemotron_h", "nemotron_hybrid"}:
@@ -1045,27 +1564,23 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         )
         if max_sequence_length > config.max_position_embeddings:
             raise ValueError("Nemotron-H max_sequence_length exceeds checkpoint context capacity")
-        if request.quantization not in {None, "none"}:
-            raise NotImplementedError("Nemotron-H has no qualified family-owned quantized build")
-        # Native weight loading does not apply packed-source quantization scales.
-        # Auto/none controls cannot reinterpret an already quantized checkpoint.
-        if config.raw.get("quantization_config") is not None or any(
-            (model_dir / name).exists()
-            for name in ("hf_quant_config.json", "quantize_config.json", "quant_config.json")
-        ):
-            raise NotImplementedError(
-                "Nemotron-H native fallback cannot load a quantized checkpoint; "
-                "use the Edge builder on a supported platform"
-            )
+        policy, quant_ctx = _native_quantization(request, config, model_dir, precision)
         if request.fp32_layers:
             raise NotImplementedError("Nemotron-H does not expose mixed-precision layers")
         parallel = ParallelConfig(
             tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
         )
         parallel.validate()
+        if parallel.enabled and (quant_ctx is not None or "moe" in _config_layer_types(config.raw, config.num_hidden_layers)):
+            raise NotImplementedError("Prepared/MoE Nemotron-H tensor parallelism is not implemented")
+        from .tokenizer_assets import native_tokenizer_assets
+
+        assets = native_tokenizer_assets(model_dir, _BUNDLE_FILES)
         model = _NemotronHModel()
         config.raw["_model_dir"] = str(model_dir)
-        weights = model.load_weights(str(model_dir), config)
+        weights = model.load_weights(
+            str(model_dir), config, quant_ctx, prepared_policy=policy, precision=precision
+        )
         writer.set_header(family="nemotron_h", task=request.task, backend=request.backend)
         if parallel.enabled:
             for rank in range(parallel.tp_size):
@@ -1074,7 +1589,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                     weights,
                     max_sequence_length,
                     precision=precision,
-                    quant_ctx=None,
+                    quant_ctx=quant_ctx,
                     verbose=bool(request.verbose),
                     debug_layer_outputs=False,
                     parallel_config=parallel.for_rank(rank),
@@ -1082,18 +1597,41 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 writer.add_bytes(f"engine.rank{rank}.plan", plan)
             layout = "dual_profile"
         else:
+            # Single-GPU bundles without MoE layers add an engine that prefills
+            # the prompt in multi-token chunks; it is built first because the
+            # decoder build releases the weights. TensorRT 11.4 cannot lower
+            # NVFP4 dynamic activation quantization over a runtime row count,
+            # so NVFP4 bundles keep the token loop.
+            nvfp4 = (policy is not None and policy.request_format == "nvfp4") or getattr(
+                quant_ctx, "has_nvfp4_weights", False)
+            split = not nvfp4 and "moe" not in _config_layer_types(config.raw, config.num_hidden_layers)
+            prefill_plan = None
+            if split:
+                prefill_plan = model.build_engine(
+                    config,
+                    weights,
+                    max_sequence_length,
+                    precision=precision,
+                    quant_ctx=quant_ctx,
+                    verbose=bool(request.verbose),
+                    parallel_config=parallel,
+                    prefill_rows=PREFILL_MAX_TOKENS,
+                    release_weights=False,
+                )
             plan = model.build_engine(
                 config,
                 weights,
                 max_sequence_length,
                 precision=precision,
-                quant_ctx=None,
+                quant_ctx=quant_ctx,
                 verbose=bool(request.verbose),
                 debug_layer_outputs=False,
                 parallel_config=parallel,
             )
             writer.add_bytes("engine.plan", plan)
-            layout = "single"
+            if prefill_plan is not None:
+                writer.add_bytes("prefill.plan", prefill_plan)
+            layout = "split" if split else "single"
         writer.add_json(
             "runtime.json",
             _runtime_config(
@@ -1102,14 +1640,14 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 model,
                 precision=precision,
                 max_cache_length=max_sequence_length,
+                quantization=policy.request_format if policy is not None else "none",
+                kv_cache_quantization="fp8" if weights.get("_fp8_kv_cache", False) else "none",
                 decoder_engine_layout=layout,
                 tensor_parallel_size=parallel.tp_size,
                 tensor_parallel_mode="tensor_parallel" if parallel.enabled else "single",
             ),
         )
-        for filename in _BUNDLE_FILES:
-            path = model_dir / filename
-            if path.is_file():
-                writer.add_bytes(filename, path.read_bytes())
+        for filename, content in assets.items():
+            writer.add_bytes(filename, content)
 
     dispatch_build(request, writer, _build_native)

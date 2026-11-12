@@ -29,14 +29,14 @@ batch1. Ordinary execution is mapped to native Linux x86_64 SM80; the explicit
 EAGLE3 pair is mapped to SM120. The local packed-format extension admits ModelOpt FP8/NVFP4 8B sources on
 SM120 using upstream --dense auto to preserve source format.
 Its exact profiles pass both build-tree and installed-wheel checks below.
-Other platforms are not admitted. A matching shape is not qualification for
+Other platforms are not admitted for Edge offload. A matching shape is not qualification for
 every checkpoint, generation policy or capacity.
 
 A nonmatching ordinary request retains the original native builder. An Edge
 preparation failure retains its diagnostic log, warns, then attempts that native
 builder once with the unchanged request. Publication and runtime errors
-propagate; they do not silently switch backends. The current-main native body,
-including chat-template and multi-EOS handling, is preserved unchanged.
+propagate; they do not silently switch backends. Native chat-template and
+multi-EOS handling remain family-owned.
 
 The family maps supported build arguments, preserves the checkpoint assets
 required for external weights, and packages the resulting engines. TensorRT and
@@ -78,10 +78,82 @@ Use explicit capacity 2048 for the recorded pair. Geometry, source precision
 and the draft context limit are checked before construction. The pinned builder
 receives `--spec-type eagle3`; the bundle contains both engines and checkpoints.
 Pinned drafting defaults are top-k 10, six steps and verification size 60.
-A failed explicit pair never becomes a base-only deployment. The separate
-`trtmc llama build-speculative` native EAGLE3 prototype remains available with
-its own profile and controls; it is not an automatic replacement for this Edge
-profile. See [native speculative decoding](../SPECULATIVE_DECODING.md).
+A failed explicit pair never becomes a base-only deployment. It now reuses the
+existing `trtmc llama build-speculative` native EAGLE3 implementation, preserving
+the target, companion, context capacity, and FP16 compute. It constructs graphs
+with TensorRT Python APIs and executes them in the family C++ runtime, without
+ONNX or an Edge SDK. The native fallback uses six draft steps and its existing
+verification schedule; it does not duplicate Edge's top-k10/tree60 scheduler.
+The native runtime preserves the family sampler for greedy and sampled requests,
+including the seed. Sampled execution verifies real proposals one target row at
+a time, preserving ordinary-target RNG order and committed-prefix feedback.
+Unsupported generation controls still fail explicitly. This correctness-first
+schedule is not a speculative speedup claim. The standalone command remains
+available with its own controls. See
+[native speculative decoding](../SPECULATIVE_DECODING.md).
+
+Native fallback evidence: the exact base/draft revisions below built and ran on
+A30/SM80 with TensorRT 11.1, FP16 compute and capacity 2048, with Edge and BYOK
+disabled. Capital, arithmetic and raw-continuation cases all matched fresh
+official-source FP32 token IDs exactly (NED 0.0, unchanged gates 0.15/0.15/0.25).
+One persistent native C++ runtime served all three requests. A subsequent native
+sampling check preserved all three original-FP32 quality passes and matched
+ordinary execution of the same compiled target in 12 sampled public requests.
+The existing C++ validation also passed 16 sampled policy/width/prompt
+combinations with repeated seeds, accepted real draft tokens, and retained its
+EOS/reset/capacity checks. These are retained TensorRT 11.1 results, not fresh
+qualification of the repository-pinned SDK or other platforms.
+
+## Prepared source native fallback
+
+When the Edge route is unavailable, the same prepared ModelOpt FP8/NVFP4
+checkpoint can use family-owned TensorRT Python graphs and the existing native
+C++ runtime. No ONNX conversion, Edge SDK, ModelOpt execution, Torch source
+reader, or GPU-specific model graph is required. The declared safetensors,
+NumPy and ml_dtypes dependencies preserve the exact source packed weights and
+calibrated activation, block and global scales.
+
+Projection Q/DQ preserves source quantized arithmetic rather than silently
+turning NVFP4 into ordinary FP16 inference. Source FP8 K/V scales round cached
+values through Q/DQ; existing native cache buffers remain FP16, so this does
+**not** provide packed FP8 cache memory savings. One engine supplies the existing
+prefill/decode contexts. The automatic fallback detects the prepared source
+format when the quantization option is omitted. The existing explicit
+`--quantization fp8` / `--quantization nvfp4` path remains available; both routes
+read prepared checkpoints rather than calibrating new ones. Keep the admitted
+FP16 compute request. Automatic prepared-source reading does not require Torch;
+the existing explicit path retains its own dependency contract.
+
+```bash
+python -m tensorrt_model_connect llama build /path/to/prepared-checkpoint \
+  --precision fp16 --max-sequence-length 256 -o llama-prepared.bundle
+trtmc run llama-prepared.bundle --prompt "The capital of France is" \
+  --max-new-tokens 32 --temperature 1 --top-k 1
+```
+
+Native validation uses the exact packed revisions listed below, capacity 256,
+TP1 and the unchanged capital/arithmetic/raw cases. The oracle is the original
+FP32 model with each prepared checkpoint's exact tokenizer inputs, not a reused
+oracle with a different chat template.
+
+- FP8 on RTX4000 Ada / SM89: build and native C++ inference pass all three
+  cases with exact original-FP32 generated IDs and NED 0.
+- NVFP4 on the 20GB RTX4000 Ada / SM89: build succeeds, but native context
+  creation runs out of memory requesting an additional 13,952,389,120 bytes.
+  This is an executed capacity failure, not an unsupported-SM89 rejection.
+  TensorRT warns that FP4 compute is unaccelerated on this device.
+- NVFP4 on the 32GB RTX PRO4500 Blackwell / SM120: a fresh native build and
+  C++ inference pass all three cases. Both chat cases have NED 0; raw
+  continuation has NED 0.092025 against the unchanged 0.25 limit. This build
+  uses the dependency-free source reader. Across both prepared checkpoints,
+  all 803 FP8 and 1027 NVFP4 source tensors match the independent safetensors
+  Torch reader byte-for-byte; this is a reader check, not extra model coverage.
+- TensorRT 11.1's native Q/DQ graph rejects SM80 when it contains FP8 operations.
+  No model-SKU denylist or silent precision downgrade is added to bypass this
+  backend limitation.
+
+These exact local results do not qualify other contexts, source revisions,
+sampling policies, CPU architectures or operating systems.
 
 ## Fresh Edge 0.11.0 qualification
 
@@ -210,3 +282,27 @@ Llama3.0 merely because their layer geometry matches. Access to the attempted
 `meta-llama/Meta-Llama-3-8B-Instruct` checkpoint was denied, so no Edge profile
 for it is added. The original 1B route remains executable despite its recorded
 quality failure; quality scores are not dispatch criteria.
+
+
+### Native EAGLE3 sampling
+
+The family-native EAGLE3 runtime maps temperature, top-k and top-p to the
+existing Llama sampler; native seeds are preserved as well. Real draft
+proposals still execute. Sampled verification uses ordinary one-row target
+execution and consumes each target distribution exactly once, including the
+replacement token after rejection. Only committed target features condition
+draft feedback. The existing greedy device policy remains unchanged. This
+conservative path makes no speculative speedup claim or promise of matching
+another framework's random-number sequence. Repetition penalties remain
+unsupported, as in the Edge adapter.
+
+For Llama-3.1-8B-Instruct revision
+0e9e39f249a16976918f6564b8830bc894c89659 with EAGLE3 draft revision
+ada412b672e293d682423de84a095447bf38a637, a fresh FP16/context2048,
+TP1/batch1 native build on x86 A30 / TensorRT 11.1 passed all three unchanged
+original-FP32 quality cases (NED 0). Twelve public sampled comparisons matched
+ordinary same-engine target output exactly, with non-greedy continuations.
+Existing runtime validation additionally covers two draft widths, multiple
+seeds, short/chunked prompts, repeated requests, sampled EOS, capacity limits
+and genuine draft acceptance. These results do not qualify other checkpoints
+or platforms.

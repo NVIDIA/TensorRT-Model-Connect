@@ -9,6 +9,8 @@ import json
 import re
 from pathlib import Path
 
+from tools.ci.e2e import SDK_CONSUMER_LANGUAGES
+
 
 REPO = Path(__file__).resolve().parents[2]
 FAMILIES = REPO / "families"
@@ -422,6 +424,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/include/trtmc/internal/model.h",
         "core/runtime/include/trtmc/internal/numeric.h",
         "core/runtime/include/trtmc/internal/perception.h",
+        "core/runtime/include/trtmc/internal/point_cloud.h",
         "core/runtime/include/trtmc/internal/recurrent.h",
         "core/runtime/include/trtmc/internal/scores.h",
         "core/runtime/include/trtmc/internal/speech.h",
@@ -497,6 +500,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     for group in (
         "audio", "features", "numeric", "stream", "video", "perception",
         "language", "tracking", "speech", "action", "recurrent", "structure",
+        "point_cloud",
     ):
         expected_api.update(
             {
@@ -549,6 +553,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_new_ci.py",
         "tools/tests/test_model_benchmark.py",
         "tools/tests/test_pr_metadata.py",
+        "tools/tests/test_process_github_files.py",
         "tools/tests/test_public_source_hygiene.py",
     }
     expected_cmake = {
@@ -1516,17 +1521,22 @@ def test_family_tp_runtimes_load_nccl_only_for_collective_communicators() -> Non
             if 'getenv("RANK")' in source:
                 violations.append(f"{path.relative_to(REPO)}:RANK")
             loads_nccl = 'dlopen("libnccl.so.2"' in source
-            initializes_nccl = "ncclCommInitRank" in source
+            initializes_nccl = "ncclCommInitRank" in source or "ncclCommInitAll" in source
             if loads_nccl and not initializes_nccl:
                 violations.append(f"{path.relative_to(REPO)}:NCCL-without-communicator")
             if initializes_nccl:
                 communicator_implementations += 1
-                for token in (
-                    '"OMPI_COMM_WORLD_SIZE"',
-                    '"OMPI_COMM_WORLD_RANK"',
-                    '"OMPI_COMM_WORLD_LOCAL_RANK"',
-                    'dlopen("libnccl.so.2"',
-                ):
+                tokens = ['dlopen("libnccl.so.2"']
+                # Single-process ncclCommInitAll does not need MPI rank discovery.
+                if "ncclCommInitRank" in source:
+                    tokens.extend(
+                        (
+                            '"OMPI_COMM_WORLD_SIZE"',
+                            '"OMPI_COMM_WORLD_RANK"',
+                            '"OMPI_COMM_WORLD_LOCAL_RANK"',
+                        )
+                    )
+                for token in tokens:
                     if token not in source:
                         violations.append(f"{path.relative_to(REPO)}:missing:{token}")
 
@@ -1537,7 +1547,7 @@ def test_family_tp_runtimes_load_nccl_only_for_collective_communicators() -> Non
             if "tests" not in path.relative_to(family).parts
         )
         builds_collectives = "add_dist_collective" in build_source
-        initializes_nccl = "ncclCommInitRank" in runtime
+        initializes_nccl = "ncclCommInitRank" in runtime or "ncclCommInitAll" in runtime
         passes_communicator = "distributed_communicator" in runtime
         if builds_collectives != initializes_nccl or builds_collectives != passes_communicator:
             violations.append(f"{family.name}:collective-runtime-mismatch")
@@ -2127,3 +2137,19 @@ def test_builder_config_policy_guard_rejects_control_flow_gaps() -> None:
     assert all(
         _builder_config_policy_violations(source, "adversarial.py") for source in adversarial
     )
+
+
+def test_family_sdk_consumers_define_the_targets_ci_builds() -> None:
+    """CI builds ``tests/sdk_consumer.<language>`` as ``test_<family>_sdk_<language>``."""
+    violations: list[str] = []
+    for family in family_dirs():
+        cmake = family / "runtime/CMakeLists.txt"
+        text = cmake.read_text(encoding="utf-8") if cmake.is_file() else ""
+        for language in SDK_CONSUMER_LANGUAGES:
+            if not (family / "tests" / f"sdk_consumer.{language}").is_file():
+                continue
+            # Accept a literal target or the shared foreach(_language IN ITEMS c cpp) form.
+            target = rf"add_executable\(\s*test_{re.escape(family.name)}_sdk_(?:{language}\b|\$\{{)"
+            if not re.search(target, text):
+                violations.append(f"{family.name}:test_{family.name}_sdk_{language}")
+    assert violations == []

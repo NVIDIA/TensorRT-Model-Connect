@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Qwen35-owned CLI options for explicit paired Edge execution."""
+"""Qwen35-owned CLI options for explicit speculative Edge execution."""
 
 from pathlib import Path
 
@@ -16,8 +16,10 @@ def execution_inputs(
         if companion:
             raise ValueError("--companion requires --execution-variant")
         return None
-    if execution_variant not in ['dflash']:
+    if execution_variant not in {"dflash", "dflash_ddtree", "mtp"}:
         raise ValueError("unsupported qwen3_5 execution variant")
+    if execution_variant == "mtp" and companion:
+        raise ValueError("Qwen3.5 MTP uses embedded draft layers, not --companion")
     checkpoints = []
     for value in companion:
         role, separator, directory = value.partition("=")

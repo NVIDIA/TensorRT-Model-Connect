@@ -51,6 +51,15 @@ def test_case_resolves_current_task_and_manifest_fields(tmp_path: Path) -> None:
     assert case.measurement.timing_scope == "public_task_call_wall"
 
 
+@pytest.mark.parametrize("profile", ["nemotron-omni-nvfp4-text-image", "qwen35-moe-gptq-edge"])
+def test_vision_language_catalog_case_carries_its_prompt_and_image(profile: str, tmp_path: Path) -> None:
+    # AIPerf qualification prepares these bundles from the catalog case; without a prompt and an image the case
+    # does not resolve and the build fails before it starts.
+    case = resolve_case(ManifestCatalog(REPO / "families").resolve(profile), tmp_path / "model.bundle")
+    assert case.request["prompt"]
+    assert Path(case.request["image_path"]).is_file()
+
+
 def test_forecast_case_uses_public_forecast_request(tmp_path: Path) -> None:
     model = ManifestCatalog(REPO / "families").resolve("chronos-bolt-tiny-official")
     case = resolve_case(model, tmp_path / "model.bundle")
@@ -641,6 +650,8 @@ def test_tracking_and_pose_rates_count_actual_output_units() -> None:
     ("image_points_to_masks", "segment", {"image": "image.ppm"}, {"image_path": "image.ppm"}),
     ("image_text_to_instance_masks", "segment_prompted", {"image": "image.ppm", "prompt": "cup"},
      {"image_path": "image.ppm", "prompt": "cup"}),
+    ("image_text_to_boxes", "detect_prompted", {"image": "image.ppm", "prompt": "a car."},
+     {"image_path": "image.ppm", "prompt": "a car."}),
     ("stereo_images_to_disparity", "disparity", {"inputs": {"left_image": "image.ppm", "right_image": "second.ppm"}},
      {"left_image_path": "image.ppm", "right_image_path": "second.ppm"}),
     ("text_to_pooled_features", "encode", {"prompt": "text"}, {"prompt": "text"}),

@@ -11,15 +11,20 @@
 // plugin. Architecture-specific behavior remains in this model directory and
 // in the TRT engine emitted by the matching family builder.
 
+#include "families/gemma/runtime/gemma4_audio.h"
+#include "families/gemma/runtime/gemma4_image.h"
 #include "families/gemma/runtime/inference_state.h"
 #include "families/gemma/runtime/sampler.h"
 #include "families/gemma/runtime/tokenizer.h"
+#include "trtmc/internal/model.h"
+#include "trtmc/internal/text.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
 
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace trtmc {
@@ -32,6 +37,7 @@ struct GemmaTextGenConfig {
     int32_t id_eos{0};
     std::vector<int32_t> id_eos_ids;
     std::string chat_template_format{};
+    std::string primary_task{"text_generation"};
     std::string token_id_name{"token_id"};
     std::string logits_output_name{"logits"};
     // Required family-owned batched prefill contract.
@@ -39,15 +45,44 @@ struct GemmaTextGenConfig {
     std::string present_v_pattern{"present_v_{i}"};
     int32_t prefill_max_length{0};
     int32_t num_layers{0};
+    int32_t mtp_hidden_size{0};
+    int32_t draft_block_size{0};
+    int32_t draft_mask_token_id{0};
+    int32_t draft_feature_width{0};
+    bool draft_markov{false};
+    bool draft_eagle{false};
+    bool draft_skip_first{false};
+    // A dynamic decoder context can also own batched prefill.
+    bool single_context{false};
+    // Last target-owned KV layer for each assistant attention type.
+    std::vector<std::pair<std::string, int32_t>> mtp_target_layers;
 };
 
-class GemmaTextGenerationPipeline final : public ITextGeneration {
+class GemmaTextGenerationPipeline final : public ITextGeneration,
+                                          public internal::IModel,
+                                          public internal::ITextContinuation,
+                                          public internal::IImagesTextToText,
+                                          public internal::IAudioTextToText,
+                                          public internal::IImageAudioTextToText {
   public:
     GemmaTextGenerationPipeline(std::unique_ptr<ITrtModule> decoder,
                                 std::unique_ptr<GemmaInferenceState> state,
                                 GemmaTextGenConfig config, std::shared_ptr<ITokenizer> tokenizer,
                                 std::unique_ptr<ITrtModule> prefill,
-                                std::shared_ptr<void> distributed_owner = nullptr);
+                                std::shared_ptr<void> distributed_owner = nullptr,
+                                std::unique_ptr<GemmaVisionEncoder> vision = nullptr,
+                                std::unique_ptr<GemmaAudioEncoder> audio = nullptr,
+                                std::unique_ptr<ITrtModule> assistant = nullptr);
+
+    const char* task() const noexcept override { return config_.primary_task.c_str(); }
+    std::vector<internal::TaskInstance> task_bindings() override;
+    TextResult run(const internal::TextContinuationRequest& request,
+                   internal::ConfigView config) override;
+
+    TextResult run(const internal::ImagesTextToTextRequest&, internal::ConfigView) override;
+
+    TextResult run(const internal::AudioTextToTextRequest&, internal::ConfigView) override;
+    TextResult run(const internal::ImageAudioTextToTextRequest&, internal::ConfigView) override;
 
     // Public API: takes raw text, returns typed result.
     TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg = {}) override;
@@ -60,15 +95,50 @@ class GemmaTextGenerationPipeline final : public ITextGeneration {
     GenerationResult generate_ids(const std::vector<int32_t>& input_ids,
                                   const TextGenerationConfig& cfg);
 
+    struct MtpStats {
+        int32_t proposed{0};
+        int32_t accepted{0};
+        int32_t verified{0};
+    };
+    MtpStats mtp_stats() const { return mtp_stats_; }
+    struct BlockDraftStats {
+        int32_t proposed{0};
+        int32_t accepted{0};
+        int32_t verified{0};
+    };
+    BlockDraftStats block_draft_stats() const { return block_stats_; }
+
   private:
     // Kept before TRT modules so TP communicators outlive contexts/engines.
     std::shared_ptr<void> distributed_owner_;
     std::unique_ptr<ITrtModule> decoder_;
     std::unique_ptr<ITrtModule> prefill_;
+    std::unique_ptr<ITrtModule> assistant_;
+    std::vector<float> target_hidden_;
+    MtpStats mtp_stats_;
+    BlockDraftStats block_stats_;
+    std::vector<float> draft_context_;
+    std::vector<int32_t> propose_block(int32_t pending, const std::vector<int32_t>& output);
+    void verify_block(const std::vector<int32_t>&, std::vector<float>&, std::vector<float>&);
+    void run_block_loop(GemmaISampler*, const GemmaSamplingParams&, std::vector<int32_t>&,
+                        std::vector<float>&, int32_t, const TextGenerationConfig&, int32_t);
+    int32_t propose_mtp(int32_t token);
+    void run_mtp_loop(GemmaISampler*, const GemmaSamplingParams&, std::vector<int32_t>&,
+                      std::vector<float>&, int32_t, const TextGenerationConfig&, int32_t);
+    void verify_mtp(const std::vector<int32_t>& tokens, std::vector<float>& logits,
+                    std::vector<float>& hidden);
+    void commit_verified_prefix(int32_t count);
     std::unique_ptr<GemmaInferenceState> state_;
     GemmaTextGenConfig config_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string logits_output_name_;
+    std::unique_ptr<GemmaVisionEncoder> vision_;
+    std::unique_ptr<GemmaAudioEncoder> audio_;
+    TextResult run_media(const internal::ImageAudioTextToTextRequest&, internal::ConfigView);
+    std::vector<float> media_features_;
+    std::vector<int32_t> media_mask_;
+    void add_media_inputs(TensorMap&, int32_t sequence_length, bool prefill);
+    TextGenerationConfig request_config(internal::ConfigView, bool media) const;
     bool state_bound_{false};
     double last_setup_ms_{0.0};
 
@@ -93,6 +163,7 @@ class GemmaTextGenerationPipeline final : public ITextGeneration {
                             int32_t max_new_tokens, const TextGenerationConfig& cfg,
                             int32_t prompt_token_count);
     ITrtModule& bind_decoder_for_step();
+    ITrtModule& prefill_module() { return config_.single_context ? *decoder_ : *prefill_; }
     void run_prefill(const std::vector<int32_t>& input_ids, std::vector<float>& logits);
     // Execute the required family-owned batched prefill engine.
     void run_prefill_batched(const std::vector<int32_t>& input_ids, std::vector<float>& logits);

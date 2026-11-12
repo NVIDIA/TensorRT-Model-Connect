@@ -96,19 +96,50 @@ support that placement.
 | Route | Supported behavior |
 | --- | --- |
 | `POST /v1/completions` | One string `prompt`; `model` is required. |
-| `POST /v1/chat/completions` | One text `user` message and optional preceding `system` message; content may be a string or text-only content blocks. |
-| `GET /v1/models` | Configured text models. |
+| `POST /v1/responses` | Stateless, nonstreaming text: one `input` string or one user message with string/`input_text` content; optional string `instructions`; `model` is required. |
+| `POST /v1/chat/completions` | One text `user` message and optional preceding `system` message. Native `TextConversation` models also accept nonstreaming text history (up to 64 messages, final role `user`). Vision-language bundles accept one user message with text and one embedded image. |
+| `GET /v1/models` | Configured models and their native capabilities. |
 | `GET /health/live` | Control-plane process liveness. |
 | `GET /health/ready` | Worker readiness and admission state. |
 | `GET /metrics` | Prometheus text metrics for admission and inference. |
 
-Generation accepts `temperature`, `top_p`, `min_p`, `top_k`, `seed`,
+Completions and chat accept `temperature`, `top_p`, `min_p`, `top_k`, `seed`,
 `enable_thinking`, `n`, `stream`, and `stream_options.include_usage`.
 Completions accept `max_tokens`;
 chat accepts either `max_tokens` or `max_completion_tokens`. The MVP
-requires `n=1`. It rejects unknown fields, prompt arrays, non-text content
-blocks, multi-turn chat, stop sequences, tools, and log probabilities instead
+requires `n=1`. It rejects unknown fields, prompt arrays, unsupported media content,
+unsupported history, stop sequences, tools, and log probabilities instead
 of silently ignoring them.
+
+For text history, the current Qwen family implements the existing
+`TextConversation` Task for its supported ChatML templates. Send user/assistant
+messages in their original order, optionally preceded by a system message,
+and end with a user message. History requests are nonstreaming and must fit
+the complete context limit; unsupported models return an explicit error.
+
+Responses supports a [subset of the Responses wire protocol](https://developers.openai.com/api/reference/resources/responses/methods/create):
+one text user input and optional string `instructions`, `max_output_tokens`
+(at least 16), `temperature`, `top_p`, `min_p`, `top_k`, `seed`, and
+`enable_thinking`. `store` defaults to
+`false`. `store=true`, `previous_response_id`, conversations/history, tools,
+media, reasoning-specific fields and `stream=true` are rejected. The endpoint
+returns one typed assistant message containing native output text. Its
+`completed` status indicates that the native Task call completed; native
+EOS-versus-limit termination metadata is unavailable. `usage` is `null` because
+native input-token counts are unavailable; output counts remain in the server's
+request records. Streaming support described below applies to completions/chat.
+
+For example, with the same built bundle and server:
+
+```bash
+curl http://127.0.0.1:8000/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Qwen/Qwen3-0.6B","input":"Explain why the sky is blue.","max_output_tokens":32,"temperature":0,"enable_thinking":false,"store":false}'
+```
+
+For single-image chat, see [Profile Image Understanding with AIPerf](./profile-vision-with-aiperf.md).
+Image requests require a vision-language bundle and accept one embedded RGB PNG/JPEG
+plus text. System prompts, streaming, and thinking controls are rejected for this workload.
 
 Streaming responses use OpenAI-compatible SSE and end with `data: [DONE]`.
 Single-process Qwen bundles implement the existing `StreamingTextContinuation`
@@ -156,6 +187,8 @@ composition, and validation remain inside the family selected by the bundle.
 For migrated bundles, the native worker calls the public header-only C++ Task
 wrapper over the stable C ABI. It uses `TextContinuation`, or the primary
 `ConditionalTextGeneration` / `TextTranslation` contract for those bundles.
+History calls the existing `TextConversation` contract only when the loaded
+model advertises it. The family formats and tokenizes the typed messages.
 Translation uses the family's bundled language defaults; this HTTP protocol
 does not add source/target-language parameters.
 

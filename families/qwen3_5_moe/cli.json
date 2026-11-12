@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "help": "Build one Qwen3.5/3.6 hybrid-MoE TensorRT Edge-LLM bundle",
+      "executor": "python",
+      "handler": "cli:build",
+      "arguments": [
+        {
+          "name": "model",
+          "type": "string",
+          "help": "Hugging Face model ID or local snapshot"
+        },
+        {
+          "name": "output",
+          "flags": [
+            "-o",
+            "--output"
+          ],
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "flags": [
+            "--revision"
+          ],
+          "type": "string"
+        },
+        {
+          "name": "task",
+          "flags": [
+            "--task"
+          ],
+          "type": "string",
+          "choices": [
+            "text_generation",
+            "vision_language_generation"
+          ],
+          "default": "text_generation"
+        },
+        {
+          "name": "precision",
+          "flags": [
+            "--precision"
+          ],
+          "type": "string",
+          "choices": [
+            "fp16"
+          ],
+          "default": "fp16"
+        },
+        {
+          "name": "backend",
+          "flags": [
+            "--backend"
+          ],
+          "type": "string",
+          "choices": [
+            "trt"
+          ],
+          "default": "trt"
+        },
+        {
+          "name": "max_sequence_length",
+          "flags": [
+            "--max-sequence-length"
+          ],
+          "type": "int"
+        },
+        {
+          "name": "quantization",
+          "flags": [
+            "--quantization"
+          ],
+          "type": "string",
+          "choices": [
+            "int4",
+            "nvfp4"
+          ],
+          "help": "Optional assertion of the source checkpoint format; no quantization is performed"
+        },
+        {
+          "name": "verbose",
+          "flags": [
+            "--verbose"
+          ],
+          "type": "bool",
+          "action": "store_true",
+          "default": false
+        },
+        {
+          "name": "execution_variant",
+          "flags": [
+            "--execution-variant"
+          ],
+          "type": "string",
+          "choices": [
+            "dflash",
+            "dflash_ddtree",
+            "mtp"
+          ],
+          "help": "Explicit family-owned speculative recipe"
+        },
+        {
+          "name": "companion",
+          "flags": [
+            "--companion"
+          ],
+          "type": "string",
+          "action": "append",
+          "help": "Matched local draft checkpoint as draft=LOCAL_DIR"
+        }
+      ]
+    }
+  ]
+}

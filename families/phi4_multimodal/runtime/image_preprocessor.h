@@ -38,6 +38,8 @@ struct Phi4MultimodalPreprocessConfig {
 struct Phi4MultimodalPreprocessedImage {
     std::vector<float> pixel_values;     // Layout depends on preprocessor_type
     std::vector<int32_t> image_grid_hws; // [height, width] patch grid for patchified inputs
+    std::vector<int32_t> hd_crop_valid;  // phi4_hd_chw: [entries, 2] valid patch rows/cols
+    std::vector<int32_t> hd_token_rows;  // phi4_hd_chw: image-token rows of the vision engine
     int32_t channels{0};                 // C*T for merge_group_chw, C for simple_chw
     int32_t height{0};
     int32_t width{0};
@@ -52,6 +54,7 @@ struct Phi4MultimodalPreprocessedImage {
 //   "aspect_preserve_chw": [C, H, W] aspect-ratio-preserving resize + zero-pad
 //   "pad_center_chw":      [C, H, W] aspect-ratio-preserving resize + center-pad with mean color
 //   "patchify_chw": [num_patches, C, patch_size, patch_size]
+//   "phi4_hd_chw":  [entries, C, 448, 448] Dynamic-HD global view + crops
 //
 // NOTE: Only single-image input is supported. Multi-image batching
 // is not yet implemented; callers must process one image at a time.
@@ -63,6 +66,10 @@ phi4_multimodal_preprocess_decoded_image(const runtime::adapters::io::DecodedIma
 // Replaces {image_pads} and {prompt} in vl_prompt_template.
 std::string phi4_multimodal_format_prompt(const std::string& user_prompt,
                                           const Phi4MultimodalPreprocessConfig& config);
+// Same, with an explicit image token count (Dynamic-HD images vary).
+std::string phi4_multimodal_format_prompt(const std::string& user_prompt,
+                                          const Phi4MultimodalPreprocessConfig& config,
+                                          int32_t num_image_tokens);
 
 // Parse Phi4MultimodalPreprocessConfig from config.json text.
 Phi4MultimodalPreprocessConfig

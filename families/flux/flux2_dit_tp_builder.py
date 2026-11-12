@@ -269,6 +269,8 @@ def build_flux2_dit_engine(
     config = builder.create_builder_config()
     config.builder_optimization_level = 1
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 128 << 30)
+    if fp8_scales is not None:
+        graph_ops.disable_quantize_propagation(config)
 
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 

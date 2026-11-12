@@ -5,12 +5,11 @@
 
 #pragma once
 
-// EncoderPipeline: single-pass encoding and embedding.
-
 #include "families/roberta/runtime/tokenizer.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -37,6 +36,7 @@ class EncoderPipeline final : public IEmbedding, public IEncoding {
 
   private:
     std::unique_ptr<ITrtModule> encoder_;
+    std::size_t sequence_capacity_{0};
     std::string mode_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;

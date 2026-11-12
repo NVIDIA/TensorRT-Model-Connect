@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Qwen3.8-owned NVFP4 + FP8 TensorRT Q/DQ graph context.
+"""Qwen3.8-owned NVFP4, FP8 and ModelOpt INT4-AWQ TensorRT graph context.
 
 nvidia/Qwen3.8-27B-NVFP4 is a ModelOpt MIXED_PRECISION export that carries
 two quantization schemes side by side:
@@ -65,7 +65,7 @@ fused FP8 GEMM kernel).
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -148,9 +148,20 @@ class _FP8Weight:
 
 
 @dataclass(frozen=True)
+class _AWQWeight:
+    """Signed INT4 codes, repacked losslessly along contiguous input channels."""
+
+    packed: np.ndarray  # [out, in // 2], low nibble first
+    block_scale: np.ndarray  # [out, in // 128]
+    pre_quant_scale: np.ndarray | None  # [in], applied to activations, not weights
+    out_features: int
+    in_features: int
+
+
+@dataclass(frozen=True)
 class _LayerScales:
-    input_scale: float
-    weight: _NVFP4Weight | _FP8Weight
+    input_scale: float | None
+    weight: _NVFP4Weight | _FP8Weight | _AWQWeight
 
 
 class _NVFP4Format:
@@ -188,9 +199,12 @@ class _NVFP4Format:
         w_bs_const = network.add_constant((n, k // NVFP4_BLOCK_SIZE), w_fp8_bs).get_output(0)
 
         w_gs = scale_const(w.global_scale)
-        w_effective_scale = network.add_dequantize(w_bs_const, w_gs, output_dtype)
-        w_dequant = network.add_dequantize(w_const, w_effective_scale.get_output(0), output_dtype)
+        # Reconstruct source weights in FP32, then round the complete weight
+        # to the compute dtype; rounding the intermediate scale changes codes.
+        w_effective_scale = network.add_dequantize(w_bs_const, w_gs, trt.float32)
+        w_dequant = network.add_dequantize(w_const, w_effective_scale.get_output(0), trt.float32)
         w_dequant.axis = 1
+        w_compute = network.add_cast(w_dequant.get_output(0), output_dtype).get_output(0)
 
         # --- activation side: dynamic-quantize with the checkpoint's real scale ---
         act_gs = scale_const(scales.input_scale)
@@ -201,14 +215,19 @@ class _NVFP4Format:
         a_f4 = a_dynq.get_output(0)
         a_block_scales_f8 = a_dynq.get_output(1)
 
-        a_effective_scale = network.add_dequantize(a_block_scales_f8, act_gs, output_dtype)
+        # Source quantization uses the FP32 scale; reconstruction first rounds
+        # that scale to the compute dtype before multiplying the FP8 block scales.
+        reconstruction_scale = network.add_cast(act_gs, output_dtype).get_output(0)
+        a_effective_scale = network.add_dequantize(
+            a_block_scales_f8, reconstruction_scale, output_dtype
+        )
         a_dequant = network.add_dequantize(a_f4, a_effective_scale.get_output(0), output_dtype)
         a_dequant.axis = 1
 
         output = network.add_matrix_multiply(
             a_dequant.get_output(0),
             trt.MatrixOperation.NONE,
-            w_dequant.get_output(0),
+            w_compute,
             trt.MatrixOperation.TRANSPOSE,
         ).get_output(0)
         return (
@@ -266,11 +285,46 @@ class _FP8Format:
         )
 
 
+class _AWQFormat:
+    name = "int4_awq"
+
+    @staticmethod
+    def wrap_matmul(network, activation, scales, *, dtype, graph_ops, keep_alive):
+        weight = scales.weight
+        n, k = weight.out_features, weight.in_features
+        output_dtype = activation.dtype
+        keep_alive.append(weight.packed)
+        raw = trt.Weights(trt.DataType.INT4, weight.packed.ctypes.data, n * k)
+        packed = network.add_constant((n, k), raw).get_output(0)
+
+        def constant(values):
+            # The source Edge W4A16 flow rounds its scales to FP16 before
+            # dequantization and smoothing. Keep that boundary explicitly.
+            values = np.ascontiguousarray(values, dtype=np.float16)
+            keep_alive.append(values)
+            result = network.add_constant(tuple(values.shape), trt.Weights(values)).get_output(0)
+            return result if result.dtype == output_dtype else network.add_cast(result, output_dtype).get_output(0)
+
+        scale = constant(weight.block_scale)
+        dequant = network.add_dequantize(packed, scale, output_dtype)
+        dequant.axis = 1
+        if weight.pre_quant_scale is not None:
+            smooth = constant(weight.pre_quant_scale.reshape(1, k))
+            activation = network.add_elementwise(activation, smooth, trt.ElementWiseOperation.PROD).get_output(0)
+        return network.add_matrix_multiply(
+            activation, trt.MatrixOperation.NONE,
+            dequant.get_output(0), trt.MatrixOperation.TRANSPOSE,
+        ).get_output(0)
+
+
+
 def _wrap_matmul(network, activation, scales: _LayerScales, *, dtype, graph_ops, keep_alive):
     if isinstance(scales.weight, _NVFP4Weight):
         fmt = _NVFP4Format
     elif isinstance(scales.weight, _FP8Weight):
         fmt = _FP8Format
+    elif isinstance(scales.weight, _AWQWeight):
+        fmt = _AWQFormat
     else:
         raise TypeError(f"Unsupported quantized weight type: {type(scales.weight)!r}")
     return fmt.wrap_matmul(
@@ -378,6 +432,8 @@ def _read_fp8_weight(readers, hf_prefix: str) -> _FP8Weight | None:
     if not (_has_tensor(readers, weight_key) and _has_tensor(readers, scale_key)):
         return None
     raw = _get_raw_tensor(readers, weight_key)
+    if getattr(raw, "dtype", None) != torch.float8_e4m3fn:
+        raise ValueError(f"{weight_key}: expected FP8 E4M3 weights, not a different packed format")
     if not hasattr(raw, "view"):
         raise TypeError(f"{weight_key} is not a torch tensor (fp8 needs a raw byte view)")
     packed = np.ascontiguousarray(raw.view(torch.uint8).numpy())
@@ -386,6 +442,78 @@ def _read_fp8_weight(readers, hf_prefix: str) -> _FP8Weight | None:
     return _FP8Weight(
         packed=packed, weight_scale=weight_scale,
         out_features=out_features, in_features=in_features)
+
+
+def _read_awq_weight(readers, hf_prefix: str) -> _AWQWeight | None:
+    """Read ModelOpt W4A16_AWQ, not the unrelated GPTQ/AutoAWQ layouts."""
+    key = hf_prefix + ".weight"
+    if not _has_tensor(readers, key):
+        return None
+    raw = _get_raw_tensor(readers, key)
+    if raw.dtype != torch.uint8:
+        if _has_tensor(readers, hf_prefix + ".weight_scale"):
+            raise ValueError(f"{hf_prefix}: AWQ cannot reinterpret a different prepared weight format")
+        return None  # An excluded projection retains its ordinary source dtype.
+    if raw.ndim != 2 or _has_tensor(readers, hf_prefix + ".weight_scale_2"):
+        raise ValueError(f"{hf_prefix}: AWQ requires rank-2 packed UINT8 weights, not NVFP4")
+    packed = raw.numpy()
+    n, k = packed.shape[0] * 2, packed.shape[1]
+    scale = _to_numpy_fp32(_get_raw_tensor(readers, hf_prefix + ".weight_scale"))
+    if k % 128 or scale.shape != (n, k // 128):
+        raise ValueError(f"{hf_prefix}: AWQ requires group-128 scales with shape {(n, k // 128)}")
+    if not np.isfinite(scale).all() or np.any(scale <= 0):
+        raise ValueError(f"{hf_prefix}: AWQ weight scales must be finite and positive")
+    smooth = None
+    if _has_tensor(readers, hf_prefix + ".pre_quant_scale"):
+        smooth = _to_numpy_fp32(_get_raw_tensor(readers, hf_prefix + ".pre_quant_scale")).reshape(-1)
+        if smooth.shape != (k,) or not np.isfinite(smooth).all() or np.any(smooth <= 0):
+            raise ValueError(f"{hf_prefix}: AWQ input smoothing scales must be positive with shape {(k,)}")
+        smooth = np.ascontiguousarray(smooth)
+    # Source bytes contain adjacent OUTPUT rows; TensorRT constants contain
+    # adjacent INPUT columns. The two's-complement nibble values never change.
+    codes = np.empty((n, k), dtype=np.uint8)
+    codes[0::2] = packed & 15
+    codes[1::2] = packed >> 4
+    contiguous = np.ascontiguousarray(codes[:, 0::2] | (codes[:, 1::2] << 4))
+    return _AWQWeight(contiguous, np.ascontiguousarray(scale), smooth, n, k)
+
+
+def _read_prepared_weight(readers, hf_prefix: str) -> _NVFP4Weight | _FP8Weight | None:
+    """Select the actual checkpoint format, not the projection's usual format."""
+    if _has_tensor(readers, f"{hf_prefix}.weight_scale_2"):
+        raw = _get_raw_tensor(readers, f"{hf_prefix}.weight")
+        if len(raw.shape) != 2 or getattr(raw, "dtype", None) != torch.uint8:
+            raise ValueError(f"{hf_prefix}: NVFP4 requires a rank-2 packed UINT8 weight")
+        return _read_nvfp4_weight(readers, hf_prefix, raw.shape[0], raw.shape[1] * 2)
+    return _read_fp8_weight(readers, hf_prefix)
+
+
+def _read_prepared_weight_split_q(
+    readers, hf_prefix: str, num_heads: int, head_dim: int, *, awq: bool = False,
+):
+    """Split Q and gate rows without decoding/requantizing either packed format."""
+    weight = (_read_awq_weight if awq else _read_prepared_weight)(readers, hf_prefix)
+    if weight is None:
+        return None, None
+    attn_size = num_heads * head_dim
+    if weight.out_features != 2 * attn_size:
+        raise ValueError(f"{hf_prefix}: Q/gate rows do not match attention dimensions")
+
+    def split(array, gate: bool):
+        columns = array.shape[1]
+        rows = array.reshape(num_heads, 2 * head_dim, columns)
+        selected = rows[:, head_dim:, :] if gate else rows[:, :head_dim, :]
+        return np.ascontiguousarray(selected.reshape(attn_size, columns))
+
+    def part(gate: bool):
+        fields = {"packed": split(weight.packed, gate), "out_features": attn_size}
+        if isinstance(weight, _NVFP4Weight):
+            fields["block_scale_f8"] = split(weight.block_scale_f8, gate)
+        elif isinstance(weight, _AWQWeight):
+            fields["block_scale"] = split(weight.block_scale, gate)
+        return replace(weight, **fields)
+
+    return part(False), part(True)
 
 
 def _read_fp8_weight_split_q(readers, hf_prefix: str, num_heads: int, head_dim: int):
@@ -495,6 +623,50 @@ def calibrate_qwen3_8_fp8(
     not recomputed -- that is the one part of this whole scheme that is not
     cheap to redo on every build.
 
+    The bundled scales are hand-collected rather than produced by Model
+    Optimizer. That looks like a gap, so it was measured; the summary below is
+    so nobody repeats the experiment expecting a different answer.
+
+    Model Optimizer produces the same statistic. Running
+    `mtq.quantize(model, mtq.FP8_DEFAULT_CFG, forward_loop)` over the same 64
+    prompts and reading `input_quantizer._amax / 448` reproduces the bundled
+    file almost exactly: 349 of 416 entries bit-identical, mean relative
+    difference 0.2%. Its activation calibration is plain max, which is what
+    the forward hooks already compute.
+
+    More calibration data made accuracy worse, not better. Recalibrating on
+    2048 real chat conversations (nvidia/Nemotron-Post-Training-Dataset-v2,
+    rendered through the chat template) raised 384 of 416 scales, one by
+    10.5x. Measured as perplexity over 1024 held-out conversations from the
+    same corpus, with weights and everything else held fixed (PyTorch
+    fake-quantisation, not an engine build, so the absolute values are only
+    meaningful relative to each other):
+
+        bf16                    51.77
+        bundled scales          50.76   (-2.0% vs bf16)
+        2048-sample recalib     56.15   (+8.5% vs bf16)
+
+    The cause is the estimator, not the corpus. e4m3 is floating point, so a
+    larger scale buys no precision -- it only trades clipping for underflow.
+    Instrumenting 1.7e11 activation values showed the recalibrated scales
+    removed clipping (0.00024% -> 0) but doubled underflow (0.45% -> 0.93%)
+    at identical mean relative error. A single outlier in 2048 samples is
+    enough to inflate one projection's amax and flush that projection's
+    normal-range values to zero.
+
+    The robust estimators Model Optimizer ships do not apply here.
+    `MseCalibConfig` and `LocalHessianCalibConfig` both calibrate weights only
+    ("input quantizers untouched"), and Local-Hessian is NVFP4-only.
+    Percentile and entropy calibration exist as `HistogramCalibrator`, but
+    nothing in the public calibration path passes the `method` argument
+    `compute_amax()` requires, so they cannot be driven for activations in
+    0.46.1.
+
+    So: max calibration on a modest prompt set is what this format supports,
+    and the bundled file is the best-measured version of it. Revisit if a
+    newer Model Optimizer exposes percentile or entropy calibration for
+    activations.
+
     Sets `disable_dual_gemm_fusion=True` on the returned context so
     `engine_builder.py` disables TRT's dual-GEMM auto-fusion at build
     time (see `_FP8_SELF_QUANTIZED_MLP_PROJECTIONS`'s comment above for why).
@@ -573,7 +745,7 @@ def calibrate_qwen3_8_fp8(
 def calibrate_qwen3_8_nvfp4(
     model_dir: Path, config, graph_ops, *, readers=None,
 ) -> Qwen38QuantContext:
-    """Build the NVFP4 + FP8 Q/DQ context from the checkpoint's own quantized
+    """Build the mixed or uniform NVFP4 Q/DQ context from the checkpoint's own quantized
     weights and calibrated activation scales.
 
     This checkpoint already ships a fully calibrated ModelOpt MIXED_PRECISION
@@ -616,23 +788,23 @@ def calibrate_qwen3_8_nvfp4(
             scales[f"layer.{layer}.{weight_stem}"] = _LayerScales(
                 input_scale=input_scale, weight=weight)
 
-        # --- FP8: DeltaNet projections ---
+        # Mixed exports use FP8 here; uniform exports retain NVFP4 here too.
         for hf_stem, weight_stem in _FP8_DELTANET_PROJECTIONS:
             hf_prefix = f"model.language_model.layers.{layer}.{hf_stem}"
             input_scale = _read_input_scale(readers, hf_prefix)
             if input_scale is None:
                 continue
-            weight = _read_fp8_weight(readers, hf_prefix)
+            weight = _read_prepared_weight(readers, hf_prefix)
             if weight is None:
                 continue
             scales[f"layer.{layer}.{weight_stem}"] = _LayerScales(
                 input_scale=input_scale, weight=weight)
 
-        # --- FP8: attention q_proj (split into w_q + w_gate_attn) ---
+        # Split quantized Q/gate rows while retaining their original scales.
         q_hf_prefix = f"model.language_model.layers.{layer}.self_attn.q_proj"
         q_input_scale = _read_input_scale(readers, q_hf_prefix)
         if q_input_scale is not None:
-            q_weight, gate_weight = _read_fp8_weight_split_q(
+            q_weight, gate_weight = _read_prepared_weight_split_q(
                 readers, q_hf_prefix, num_heads, head_dim)
             if q_weight is not None:
                 scales[f"layer.{layer}.w_q"] = _LayerScales(
@@ -640,13 +812,13 @@ def calibrate_qwen3_8_nvfp4(
                 scales[f"layer.{layer}.w_gate_attn"] = _LayerScales(
                     input_scale=q_input_scale, weight=gate_weight)
 
-        # --- FP8: attention k_proj/v_proj/o_proj ---
+        # Attention may likewise be FP8 (mixed) or NVFP4 (uniform).
         for hf_stem, weight_stem in _FP8_ATTENTION_SIMPLE_PROJECTIONS:
             hf_prefix = f"model.language_model.layers.{layer}.{hf_stem}"
             input_scale = _read_input_scale(readers, hf_prefix)
             if input_scale is None:
                 continue
-            weight = _read_fp8_weight(readers, hf_prefix)
+            weight = _read_prepared_weight(readers, hf_prefix)
             if weight is None:
                 continue
             scales[f"layer.{layer}.{weight_stem}"] = _LayerScales(
@@ -660,6 +832,29 @@ def calibrate_qwen3_8_nvfp4(
             scales[_NVFP4_LM_HEAD_WEIGHT_NAME] = _LayerScales(
                 input_scale=lm_head_scale, weight=lm_head_weight)
 
+    # Official uniform preparation may quantize the embedded draft as well.
+    # Reuse its own packed weights and activation scales, never the target's.
+    mtp_projections = [("mtp.fc", "fc")]
+    mtp_projections.extend(
+        (f"mtp.layers.0.{stem}", name)
+        for stem, name in (*_NVFP4_MLP_PROJECTIONS, *_FP8_ATTENTION_SIMPLE_PROJECTIONS)
+    )
+    for hf_prefix, name in mtp_projections:
+        input_scale = _read_input_scale(readers, hf_prefix)
+        if input_scale is not None:
+            weight = _read_prepared_weight(readers, hf_prefix)
+            if weight is None:
+                raise ValueError(f"{hf_prefix}: activation scale has no packed weight")
+            scales[f"mtp_layer.{name}"] = _LayerScales(input_scale=input_scale, weight=weight)
+    q_prefix = "mtp.layers.0.self_attn.q_proj"
+    input_scale = _read_input_scale(readers, q_prefix)
+    if input_scale is not None:
+        query, gate = _read_prepared_weight_split_q(readers, q_prefix, num_heads, head_dim)
+        if query is None:
+            raise ValueError(f"{q_prefix}: activation scale has no packed weight")
+        scales["mtp_layer.w_q"] = _LayerScales(input_scale=input_scale, weight=query)
+        scales["mtp_layer.w_gate_attn"] = _LayerScales(input_scale=input_scale, weight=gate)
+
     if not scales:
         raise RuntimeError(
             "Qwen3.8 quantization calibration found no quantized tensors in "
@@ -671,3 +866,38 @@ def calibrate_qwen3_8_nvfp4(
         profile=_Profile(scales),
         graph_ops=graph_ops,
     )
+
+
+def load_qwen3_8_awq(model_dir: Path, config, graph_ops, *, readers=None) -> Qwen38QuantContext:
+    """Reuse prepared target and embedded-draft AWQ tensors without calibration."""
+    if readers is None:
+        readers = _open_safetensors(Path(model_dir))
+    scales = {}
+    simple = (*_NVFP4_MLP_PROJECTIONS, *_FP8_ATTENTION_SIMPLE_PROJECTIONS,
+              *_FP8_DELTANET_PROJECTIONS,
+              ("linear_attn.in_proj_a", "deltanet_a_proj"),
+              ("linear_attn.in_proj_b", "deltanet_b_proj"))
+
+    def add(hf_prefix, name):
+        weight = _read_awq_weight(readers, hf_prefix)
+        if weight is not None:
+            scales[name] = _LayerScales(None, weight)
+
+    def layer(hf_prefix, name):
+        for source, target in simple:
+            add(f"{hf_prefix}.{source}", f"{name}.{target}")
+        query, gate = _read_prepared_weight_split_q(
+            readers, f"{hf_prefix}.self_attn.q_proj", config.num_attention_heads,
+            config.head_dim, awq=True)
+        if query is not None:
+            scales[f"{name}.w_q"] = _LayerScales(None, query)
+            scales[f"{name}.w_gate_attn"] = _LayerScales(None, gate)
+
+    for index in range(config.num_hidden_layers):
+        layer(f"model.language_model.layers.{index}", f"layer.{index}")
+    add("lm_head", "w_lm_head")
+    add("mtp.fc", "mtp_layer.fc")
+    layer("mtp.layers.0", "mtp_layer")
+    if not scales:
+        raise ValueError("Native INT4-AWQ requires a prepared ModelOpt W4A16_AWQ checkpoint")
+    return Qwen38QuantContext(profile=_Profile(scales), graph_ops=graph_ops)

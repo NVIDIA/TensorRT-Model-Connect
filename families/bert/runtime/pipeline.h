@@ -5,8 +5,6 @@
 
 #pragma once
 
-// EncoderPipeline: single-pass encoding and embedding.
-
 #include "families/bert/runtime/tokenizer.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"

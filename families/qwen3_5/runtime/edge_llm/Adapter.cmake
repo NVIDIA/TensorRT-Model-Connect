@@ -26,3 +26,15 @@ if(TARGET EdgeLLM::Core)
     VERBATIM
   )
 endif()
+
+# Extend the existing owning native regression executable when Edge is provisioned.
+if(TARGET EdgeLLM::Core AND TARGET test_qwen3_5_recurrent_output_initializers)
+  target_compile_definitions(test_qwen3_5_recurrent_output_initializers PRIVATE TRTMC_HAS_EDGE_LLM=1)
+  target_link_libraries(test_qwen3_5_recurrent_output_initializers PRIVATE EdgeLLM::Core)
+  target_sources(test_qwen3_5_recurrent_output_initializers PRIVATE "${CMAKE_CURRENT_LIST_DIR}/device_link.cu")
+  set_target_properties(test_qwen3_5_recurrent_output_initializers PROPERTIES
+    CUDA_ARCHITECTURES "${EdgeLLM_CUDA_ARCHITECTURE}"
+    CUDA_SEPARABLE_COMPILATION ON
+    CUDA_RESOLVE_DEVICE_SYMBOLS ON
+  )
+endif()

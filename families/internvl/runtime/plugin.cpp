@@ -93,15 +93,22 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     options.stream = stream_owner->get();
     std::unique_ptr<ITrtModule> decode;
     std::unique_ptr<ITrtModule> prefill;
-    if (tp_size > 1) {
-        const std::string section = "engine.rank" + std::to_string(group.rank) + ".plan";
+    const auto layout =
+        config.value("decoder_engine_layout", tp_size > 1 ? "dual_profile" : "split");
+    if (layout != "dual_profile" && layout != "split")
+        throw std::runtime_error("InternVL runtime.json has an invalid decoder_engine_layout");
+    if (tp_size > 1 && layout != "dual_profile")
+        throw std::runtime_error("InternVL TP requires a dual-profile decoder engine");
+    if (layout == "dual_profile") {
+        const std::string section =
+            tp_size > 1 ? "engine.rank" + std::to_string(group.rank) + ".plan" : "engine.plan";
         const auto& plan = internvl_factory::require_section(context.reader, section.c_str());
         options.distributed_communicator = group.communicator;
         options.distributed_owner = group.owner;
         auto dual = context.backend.create_dual_profile_modules(plan.data(), plan.size(), options);
         if (dual.decode == nullptr || !dual.decode->ok() || dual.prefill == nullptr ||
             !dual.prefill->ok())
-            throw std::runtime_error("InternVL TP engine did not create both profiles");
+            throw std::runtime_error("InternVL decoder engine did not create both profiles");
         decode = std::move(dual.decode);
         prefill = std::move(dual.prefill);
     } else {
@@ -132,8 +139,14 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         throw std::runtime_error("InternVL decode engine has invalid KV-cache shape");
     const auto kv_dim = static_cast<std::int32_t>(cache_shape[1]);
     const auto cache_dtype = decode->tensor_dtype(cache_k_name);
-    std::unique_ptr<InternvlInferenceState> state = std::make_unique<InternvlKvCache>(
+    auto kv_cache = std::make_unique<InternvlKvCache>(
         num_layers, max_cache_length, kv_dim, decode->stream(), cache_dtype, std::move(kv_names));
+    // Bundles without the key predate valid-prefix attention.
+    const auto kv_window = config.value("kv_attention_window", std::string("full"));
+    if (kv_window != "full" && kv_window != "valid_prefix")
+        throw std::runtime_error("InternVL runtime.json has an invalid kv_attention_window");
+    kv_cache->set_valid_prefix_attention(kv_window == "valid_prefix");
+    std::unique_ptr<InternvlInferenceState> state = std::move(kv_cache);
 
     auto tokenizer = create_tokenizer_from_bundle(context.reader);
     if (!tokenizer)

@@ -5,6 +5,7 @@
 
 #include "cli/cli.h"
 
+#include "bundle_provenance.h"
 #include "cli/family_cli.h"
 #include "cli/io.h"
 #include "cli/sdk_dispatch.h"
@@ -96,7 +97,7 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
          {CommandKind::kEmbed,
           {"--text", "--token-ids", "--image", "--title", "--body", "--role"}}},
         {"rerank", {CommandKind::kRerank, {"--query", "--document", "--image", "--documents"}}},
-        {"classify", {CommandKind::kClassify, {"--image"}}},
+        {"classify", {CommandKind::kClassify, {"--image", "--audio"}}},
         {"detect", {CommandKind::kDetect, {"--image", "--prompt"}}},
         {"extract-features", {CommandKind::kExtractFeatures, {"--image"}}},
         {"predict-structure",
@@ -112,8 +113,8 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"video-segment", {CommandKind::kVideoSegment, {"--frame", "--prompt"}}},
         {"generate-audio",
          {CommandKind::kGenerateAudio,
-          {"--prompt", "--output", "--max-new-tokens", "--talker-max-new-tokens", "--seed",
-           "--stream", "--chunk-frames", "--language"}}},
+          {"--prompt", "--description", "--output", "--max-new-tokens", "--talker-max-new-tokens",
+           "--seed", "--stream", "--chunk-frames", "--language"}}},
         {"transcribe",
          {CommandKind::kTranscribe,
           {"--input", "--max-output-tokens", "--source-language", "--target-language",
@@ -397,19 +398,7 @@ void write_json(std::ostream& output, const nlohmann::json& value) {
     output << value.dump() << '\n';
 }
 
-// Core build provenance is optional metadata; older bundles report null.
-nlohmann::json read_provenance(const std::string& bundle_path) {
-    constexpr std::string_view kSection = "trtmc.provenance.json";
-    constexpr std::uint64_t kMaxBytes = 1U << 20U;
-    const BundleReader reader(bundle_path);
-    const BundleSectionInfo* section = reader.find_section(kSection);
-    if (section == nullptr)
-        return nullptr;
-    if (section->length > kMaxBytes)
-        throw std::runtime_error("bundle provenance exceeds 1 MiB");
-    const std::vector<char> bytes = reader.read_section(kSection);
-    return nlohmann::json::parse(bytes.begin(), bytes.end());
-}
+using app::read_provenance;
 
 nlohmann::json text_json(const TextResult& result) {
     nlohmann::json value{{"text", result.text},
@@ -1153,6 +1142,8 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
         config.max_new_tokens = int_option(command, "--max-new-tokens", 128, 1);
         config.talker_max_new_tokens = int_option(command, "--talker-max-new-tokens", 0, 0);
         config.seed = int_option(command, "--seed", -1);
+        if (has_option(command, "--description"))
+            config.description = command.options.at("--description");
         const bool streaming = has_option(command, "--stream") &&
                                parse_bool(command.options.at("--stream"), "--stream");
         if (!streaming && has_option(command, "--chunk-frames"))
@@ -1647,6 +1638,9 @@ void print_usage(std::ostream& output) {
               "  predict-structure BUNDLE --input REQUEST [--input-encoding ENCODING]\n"
               "  .yaml/.yml, .json and .b2rq select their declared encodings.\n"
               "  SDK output defaults to prediction.cif or prediction.pdb.\n\n"
+              "Audio classification input:\n"
+              "  classify BUNDLE --audio WAV scores an audio model's own classes;\n"
+              "  classify BUNDLE --image FILE stays the image path.\n\n"
               "BYOK options:\n"
               "  --byok-library DSO --byok-function FUNCTION --byok-name KERNEL\n\n"
               "Runtime-sized KV cache:\n"

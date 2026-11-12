@@ -2,6 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # TRTMC plugins for AIPerf 0.13.0 (see trtmc_aiperf_plugins/__init__.py for deployment notes).
 
+transport:
+  trtmc_video_capture:
+    class: trtmc_aiperf_plugins.video_transport:VideoCaptureTransport
+    description: Opt-in complete video download capture for native frame identity checks.
+    metadata:
+      transport_type: http
+      url_schemes: []
+
 endpoint:
   trtmc_task:
     class: trtmc_aiperf_plugins.endpoint:TrtmcTaskEndpoint

@@ -24,6 +24,18 @@ oracle is retained; the two SDK consumers use the same decoded RGB pixels and
 compare every score after releasing the model. Different JPEG decoders are not
 claimed bitwise equivalent.
 
+## FP8 quantization
+
+`quantization=fp8` self-quantizes the original checkpoint at build time (fp16 precision
+only). Weight scale is `amax / 448` per projection, activation scales are static and were
+calibrated once with ModelOpt (`calibrate_fp8_scales.py`), stored in
+`fp8_activation_scales.json` per model config (swin tiny, small and base, patch 4,
+window 7, 224). Quantized: `attn.qkv`, `mlp.fc1`, `mlp.fc2` of every block and the
+patch-merging reduction. Left fp16: patch embedding, norms, window attention, `attn.proj`
+(TensorRT 11.4 cannot compile an FP8 Quantize after the fused attention) and the head.
+An unknown model config or a projection without a scale raises and names the calibration
+tool. No FP8 manifest or premerge case exists.
+
 ## Benchmark scope
 
 The existing family-owned reference protocol retains the original entry ID,

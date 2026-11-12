@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Native pipeline, dataset preparation and offline scoring in one isolated environment.
+einops==0.7.0
+soundfile==0.14.0
+datasets==5.0.0
+pyarrow==24.0.0
+librosa==0.11.0

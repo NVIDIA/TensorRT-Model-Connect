@@ -150,31 +150,6 @@ def validate_execution_capacity(request, config: dict, target: dict, weight_form
         )
 
 
-def validate_native_capacity(request, raw: dict) -> None:
-    """Avoid the recorded native OOM even when the optional Edge SDK is absent."""
-    config = raw.get("text_config", raw.get("llm_config", raw))
-    if not (
-        candidate(request, raw) and config.get("model_type") == "qwen3"
-        and config.get("num_hidden_layers") == 40 and config.get("hidden_size") == 5120
-        and request.max_sequence_length == 384
-        and edge_llm.request_weight_format(request, raw) == "fp16"
-    ):
-        return
-    target = edge_llm.local_target()
-    # TP1's native factory retains independent prefill and decode engines.
-    # The recorded decode plan is 29.54 GB and the next weight allocation is
-    # 29.54 GB: neither available 40/48 GiB device can hold this pair. This is
-    # an admission estimate, not an observed native SM86 execution result.
-    if (target.get("tensorrt_version") == "11.1.0.106"
-            and target.get("sm") in {80, 86}
-            and device_memory_bytes() <= 48 * 1024 ** 3):
-        raise UnavailableEdgeConfiguration(
-            "InternVL3.5-14B native FP16/context384 is unavailable on this GPU: "
-            "the recorded runtime exhausted memory while loading two resident "
-            "roughly 29.5 GB decoder plans. A 40/48 GiB device cannot hold this pair."
-        )
-
-
 def build(request, writer, native) -> None:
     """Dispatch locally or warn and retry native once with the original request.
 
@@ -199,7 +174,6 @@ def build(request, writer, native) -> None:
     if not isinstance(config, dict):
         raise ValueError("checkpoint text_config must contain an object")
     def run_native():
-        validate_native_capacity(request, raw)
         native(request, writer)
 
     if not candidate(request, raw):
@@ -263,11 +237,13 @@ def build(request, writer, native) -> None:
                 if request.max_sequence_length and request.max_sequence_length > capacity:
                     raise ValueError("max_sequence_length exceeds checkpoint context capacity")
                 files, marker = adapter(request, raw, target, Path(directory), log_path)
-        except UnavailableEdgeConfiguration:
-            # Do not silently rerun a recorded failing configuration via fallback.
-            log_path.unlink(missing_ok=True)
-            raise
         except Exception as error:
+            if (isinstance(error, UnavailableEdgeConfiguration)
+                    and getattr(request, "int4_gemm_plugin_version", None) is not None):
+                # An explicitly requested Edge plugin cannot be substituted by
+                # a native implementation of a different backend control.
+                log_path.unlink(missing_ok=True)
+                raise
             failure = error
             with log_path.open("a", encoding="utf-8") as log:
                 traceback.print_exception(error, file=log)

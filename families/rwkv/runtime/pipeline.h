@@ -36,7 +36,7 @@ class RecurrentPipeline final : public ITextGeneration {
                       std::unique_ptr<RwkvInferenceState> state, RecurrentGenConfig config,
                       cudaStream_t stream, const char* name,
                       std::shared_ptr<ITokenizer> tokenizer = nullptr,
-                      std::string model_id_str = "");
+                      std::string model_id_str = "", std::unique_ptr<ITrtModule> prefill = nullptr);
 
     TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg = {}) override;
     int32_t default_max_new_tokens() const override { return 128; }
@@ -51,6 +51,9 @@ class RecurrentPipeline final : public ITextGeneration {
   private:
     std::unique_ptr<ITrtModule> decoder_;
     std::unique_ptr<RwkvInferenceState> state_;
+    // Multi-row prefill engine of a split bundle; decode stays on decoder_.
+    std::unique_ptr<ITrtModule> prefill_;
+    int32_t prefill_rows_{0};
     RecurrentGenConfig config_;
     cudaStream_t stream_;
     const char* name_;
@@ -62,6 +65,9 @@ class RecurrentPipeline final : public ITextGeneration {
                                            const RwkvSamplingParams& params);
 
     void run_step(int32_t token_id, std::vector<float>& logits);
+    // Feed the prompt to prefill_ in chunks of up to prefill_rows_ tokens and
+    // return the logits of the last token.
+    void run_prefill_chunks(const std::vector<int32_t>& input_ids, std::vector<float>& logits);
 
     using SteadyClock = std::chrono::steady_clock;
     void report_timing(SteadyClock::time_point t_prefill_start,

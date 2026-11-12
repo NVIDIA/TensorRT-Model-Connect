@@ -117,6 +117,14 @@ def _media_service_metrics(service_metrics: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+def native_modes(result: Mapping[str, Any]) -> str:
+    """The native modes that answered (``compile``, or ``eager``, also where it replaced a failed compile)."""
+    modes = {str(item["native"]["mode"]) for item in result.get("accuracy", []) if (item.get("native") or {}).get("mode")}
+    modes |= {str(item["reference_mode"]) for item in result.get("performance", [])
+              if item.get("reference_mode") and item.get("light") != "n/a"}
+    return ", ".join(sorted(modes))
+
+
 def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
     result = normalized_report(result)
     json_path = out / "report.json"
@@ -126,7 +134,7 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
     lines = [f"# {result['model']} — AIPerf qualification", "",
              f"Task `{result.get('task')}`, operation `{result.get('operation')}`; verdict **{verdict.get('category')}** "
              f"(Acc {verdict.get('acc')}, Perf {verdict.get('perf')}).", "",
-             f"Reference: backend `{reference.get('backend')}`, perf precision "
+             f"Reference: backend `{reference.get('backend')}`, native mode {native_modes(result) or 'n/a'}, perf precision "
              f"{reference.get('timing_precision') or reference.get('perf_precision')}; "
              f"platform `{result.get('platform', {}).get('id')}`; "
              f"aiperf {result['provenance'].get('aiperf')}, plugins {result['provenance'].get('plugins')}.", ""]
@@ -150,6 +158,9 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
         if item.get("reasons") or item.get("notes"):
             text = "; ".join([*item.get("reasons", []), *item.get("notes", [])])
             lines.append(f"|  | {text[:300].replace('|', '/')} |  |  |  |")
+        for outlier in item.get("outliers") or []:  # every sample a parity gate tolerated, with its measurement
+            text = f"{outlier.get('sample_id')}: {outlier.get('explanation')}".replace("|", "/")
+            lines.append(f"|  | tolerated outlier {text} |  |  |  |")
     lines += ["", "## Performance (server task-call time)", "",
               "| reference mode | light | TRTMC ms | CI % | reference ms (aggregation) | CI % | notes |",
               "|---|---|---|---|---|---|---|"]
@@ -161,7 +172,8 @@ def write_report(out: Path, result: Mapping[str, Any]) -> tuple[Path, Path]:
                                  for label, side in (("Native", ref), ("TRTMC", cand)))
             if item.get("out_of_capacity"):
                 coverage += f"; {item['out_of_capacity']} capacity rejections excluded on both sides"
-            lines.append(f"| {item['request']} (shared quality outputs) | {item.get('measurement_status', 'measured')} | "
+            lines.append(f"| {item.get('reference_mode', 'eager')} {item['request']} (shared quality outputs) | "
+                         f"{item.get('measurement_status', 'measured')} | "
                          f"{_fmt(cand.get('p50_ms'))} | — | {_fmt(ref.get('p50_ms'))} | — | {notes} |")
             lines += ["", f"{coverage}. {item.get('matched_pairs')}/{item.get('pairs')} paired responses have matching work. "
                       "Task-call timings reuse the benchmark outputs; work differences are informational.", ""]

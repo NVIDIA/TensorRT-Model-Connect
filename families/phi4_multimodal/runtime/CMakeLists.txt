@@ -49,6 +49,7 @@ if(TRTMC_BUILD_TESTS)
   add_executable(test_phi4_multimodal_runtime_config_contract
     ${PROJECT_SOURCE_DIR}/families/phi4_multimodal/tests/cpp/test_phi4_multimodal_runtime_config_contract.cpp
     image_preprocessor.cpp
+    sampler.cpp
   )
   target_include_directories(test_phi4_multimodal_runtime_config_contract PRIVATE
     ${PROJECT_SOURCE_DIR}
@@ -58,6 +59,7 @@ if(TRTMC_BUILD_TESTS)
   )
   target_link_libraries(test_phi4_multimodal_runtime_config_contract PRIVATE
     nlohmann_json::nlohmann_json
+    trtmc_core
   )
   target_compile_options(test_phi4_multimodal_runtime_config_contract PRIVATE
     -Wall -Wextra -Wpedantic
@@ -66,6 +68,21 @@ if(TRTMC_BUILD_TESTS)
     COMMAND test_phi4_multimodal_runtime_config_contract
   )
   set_tests_properties(test_phi4_multimodal_runtime_config_contract PROPERTIES LABELS cpu)
+
+  add_executable(test_phi4_dynamic_hd
+    ${PROJECT_SOURCE_DIR}/families/phi4_multimodal/tests/cpp/test_phi4_dynamic_hd.cpp
+    image_preprocessor.cpp
+  )
+  target_include_directories(test_phi4_dynamic_hd PRIVATE ${PROJECT_SOURCE_DIR})
+  target_include_directories(test_phi4_dynamic_hd SYSTEM PRIVATE
+    ${PROJECT_SOURCE_DIR}/third_party/stb
+  )
+  target_link_libraries(test_phi4_dynamic_hd PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_phi4_dynamic_hd PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME test_phi4_dynamic_hd
+    COMMAND test_phi4_dynamic_hd ${PROJECT_SOURCE_DIR}/families/phi4_multimodal/tests/data/dynamic-hd
+  )
+  set_tests_properties(test_phi4_dynamic_hd PROPERTIES LABELS cpu)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/edge_llm/Adapter.cmake")

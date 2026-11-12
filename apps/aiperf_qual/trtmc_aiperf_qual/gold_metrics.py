@@ -41,6 +41,39 @@ def choice(gold: Any, observation: Mapping[str, Any] | None, task: str | None = 
     return bool(answer) and answer == str(gold).strip().upper(), answer
 
 
+def spoken_choice(gold: Any, observation: Mapping[str, Any] | None,
+                  task: str | None = None) -> tuple[bool, str]:
+    """Score a transcribed MCQ reply by an explicit letter or unique complete option text.
+
+    Missing, ambiguous and unparsable answers are wrong. Never guess a letter.
+    """
+    text = _text(observation).strip().lower()
+    def affirmative(start: int) -> bool:
+        clause = re.split(r"[.,;:!?]", text[:start])[-1]
+        return not re.search(r"\b(?:not|never|don't|doesn't|isn't|aren't|can't|cannot|won't)\b", clause)
+
+    patterns = (
+        r"\b(?:option|choice)\s+([a-d])\b",
+        r"\b(?:the\s+)?(?:correct\s+)?answer\s+(?:is|would be)\s+([a-d])(?=\s*(?:[.,:;!?]|$))",
+        r"\b([a-d])\s+is\s+(?:the\s+)?(?:correct\s+)?answer\b",
+        r"\b(?:i|you|we)(?:'d| would)?\s+(?:say|choose|pick)\s+([a-d])(?=\s*(?:[.,:;!?]|$))",
+    )
+    letters = {match.group(1) for pattern in patterns for match in re.finditer(pattern, text)
+               if affirmative(match.start())}
+    direct = re.fullmatch(r"(?:the (?:correct )?answer is\s+)?([a-d])[.!]?", text)
+    if direct:
+        letters.add(direct.group(1))
+    if not letters:
+        for letter, option in re.findall(r"(?m)^([A-D])\.\s*(.+)$", gold["prompt"]):
+            option = " ".join(re.findall(r"\w+", option.lower()))
+            raw = re.escape(option).replace(r"\ ", r"\W+")
+            positive = any(affirmative(match.start()) for match in re.finditer(r"(?<!\w)" + raw + r"(?!\w)", text))
+            if len(option) >= 3 and positive:
+                letters.add(letter.lower())
+    answer = next(iter(letters)).upper() if len(letters) == 1 else ""
+    return bool(answer) and answer == str(gold["answer"]).strip().upper(), answer
+
+
 def _squash(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
@@ -108,6 +141,22 @@ SETPRIV = ["setpriv", f"--reuid={NOBODY}", f"--regid={NOBODY}", "--clear-groups"
            "--inh-caps=-all", "--bounding-set=-all"]
 
 
+class SandboxUnavailable(RuntimeError):
+    pass
+
+
+def protected_roots(environment: Mapping[str, Any], out: Path) -> list[Any]:
+    return [out, *(environment.get(key) for key in (
+        "bundle_root", "hf_hub_cache", "hf_datasets_cache", "data_root", "reference_env_root", "runtime_root"))]
+
+
+def preflight_code_sandbox(model: Mapping[str, Any], environment: Mapping[str, Any], out: Path) -> None:
+    # Note (Jiaxin Deng): Reject an unavailable grading boundary before spending model preparation or GPU work.
+    if any(item.get("metric") == "code_pass" for item in model.get("absolute", [])):
+        out.mkdir(parents=True, exist_ok=True)
+        _sandbox_verified([str(path) for path in protected_roots(environment, out) if path])
+
+
 def protect(paths: Sequence[Any]) -> None:
     """Directories the generated programs must not be able to write (result, bundle, cache, data roots)."""
     PROTECTED_WRITE.update(str(path) for path in paths if path)
@@ -119,14 +168,19 @@ def _sandbox_verified(protected: Sequence[str]) -> None:
     Raises otherwise (fail closed)."""
     import subprocess
 
+    try:
+        identity = subprocess.run([*SETPRIV, "true"], capture_output=True)
+    except OSError as error:
+        raise SandboxUnavailable(f"code sandbox: setpriv is unavailable: {error}") from error
+    if identity.returncode != 0:
+        raise SandboxUnavailable("code sandbox: cannot switch to the nobody user (setpriv); "
+                                 "the host must provide the required UID/GID and capability boundary")
     for path in protected:
         if Path(path).exists() and subprocess.run([*SETPRIV, "test", "-w", path]).returncode == 0:
-            raise RuntimeError(f"code sandbox: nobody can write {path}")
+            raise SandboxUnavailable(f"code sandbox: nobody can write {path}")
     for path in PROTECTED_READ:
         if Path(path).exists() and subprocess.run([*SETPRIV, "ls", path], capture_output=True).returncode == 0:
-            raise RuntimeError(f"code sandbox: nobody can read {path}")
-    if subprocess.run([*SETPRIV, "true"]).returncode != 0:
-        raise RuntimeError("code sandbox: cannot switch to the nobody user (setpriv)")
+            raise SandboxUnavailable(f"code sandbox: nobody can read {path}")
 
 
 def code_pass(gold: Any, observation: Mapping[str, Any] | None, task: str | None = None) -> tuple[bool, str]:
@@ -206,7 +260,7 @@ def box_iou50(gold: Any, observation: Mapping[str, Any] | None, task: str | None
     return _iou(predicted, target) >= 0.5, match.group(0)
 
 
-BINARY: dict[str, Callable[..., tuple[bool, str]]] = {"choice": choice, "contains": contains, "code_pass": code_pass,
+BINARY: dict[str, Callable[..., tuple[bool, str]]] = {"choice": choice, "spoken_choice": spoken_choice, "contains": contains, "code_pass": code_pass,
                                                       "top1": top1, "box_iou50": box_iou50}
 
 

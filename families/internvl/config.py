@@ -88,8 +88,9 @@ class ModelConfig:
 
         # Some multimodal configs nest LLM config under "llm_config".
         # Merge into top level like text_config, preserving top-level
-        # model_type, architectures, and vision_config.
-        if not d.get("hidden_size"):
+        # model_type, architectures, and vision_config. Original checkpoints
+        # may also have root hidden_size without the other decoder fields.
+        if not isinstance(text_config, dict):
             llm_config = d.get("llm_config")
             if isinstance(llm_config, dict):
                 top_model_type = d.get("model_type")

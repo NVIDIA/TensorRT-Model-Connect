@@ -393,6 +393,8 @@ void SpeechPipeline::prepare_depth_input(const SpeechTemporalDeviceOutput& tempo
                                     forced_audio_provided &&
                                     forced_audio_provided[previous_codebook] != 0;
     const int32_t forced_previous = previous_is_forced ? forced_audio_tokens[previous_codebook] : 0;
+    // The depth transformer computes in its KV-cache dtype; its input is built in that dtype.
+    const DType depth_dtype = depth_engine_for_codebook(codebook).tensor_dtype("cache_k_0");
     personaplex_prepare_depth_embedding(
         static_cast<float*>(device_workspace_->depth_embed.data()), temporal_output.hidden,
         temporal_output.hidden_dtype,
@@ -404,7 +406,7 @@ void SpeechPipeline::prepare_depth_input(const SpeechTemporalDeviceOutput& tempo
         device_workspace_->depth_audio_embeddings.numel(), selected_tokens, codebook, text_token,
         text_token_is_forced, forced_previous, previous_is_forced, config_.depth_hidden_size,
         config_.temporal_hidden_size, config_.depth_text_vocab, config_.audio_vocab_size,
-        config_.num_depformer_emb, stream_);
+        config_.num_depformer_emb, depth_dtype, stream_);
     if (const auto error = cudaGetLastError(); error != cudaSuccess) {
         throw std::runtime_error(std::string("SpeechPipeline depth embedding: ") +
                                  cudaGetErrorString(error));
@@ -540,6 +542,12 @@ namespace {
 
 void compute_text_prompt_frame_embed(const SpeechConfig& cfg, int32_t text_token_id, int32_t hidden,
                                      float* summed_embed) {
+    if (cfg.temporal_embed_half) {
+        const int32_t bos = speech_clamp_token(cfg.codebook_size, cfg.audio_vocab_size);
+        const std::vector<int32_t> audio_tokens(static_cast<std::size_t>(cfg.num_codebooks), bos);
+        compute_half_summed_embed(cfg, hidden, audio_tokens, text_token_id, summed_embed);
+        return;
+    }
     std::fill(summed_embed, summed_embed + hidden, 0.0F);
     const int32_t text_tok = speech_clamp_token(text_token_id, cfg.temporal_text_vocab);
     const auto text_offset = static_cast<std::size_t>(text_tok) * hidden;
@@ -756,11 +764,20 @@ void SpeechPipeline::speak_run_generation_loop(const SpeechGenerationSettings& s
     CudaStageTimer depth_timer;
 
     frames_collected = 0;
-    for (int32_t offset = 0; offset < plan.total_iters && frames_collected < plan.output_frames;
-         ++offset) {
+    for (int32_t step = 0; step < plan.total_iters && frames_collected < plan.output_frames;
+         ++step) {
+        const int32_t offset = config_.system_prompt_offset + step;
         write_user_tokens_to_delay_cache(delay_state, codec_tokens, offset, settings.stream_cb,
                                          settings.num_frames, settings.encode_codebooks,
-                                         settings.audio_bos);
+                                         settings.audio_bos, step);
+        if (step < settings.listen_frames)
+            write_listening_tokens_to_delay_cache(delay_state, offset, settings.text_pad_id);
+        else if (config_.listen_before_answer && step == settings.listen_frames) {
+            // EPAD (0) starts the response after the complete spoken question.
+            const auto index = delay_cache_index(delay_state, 0, offset);
+            delay_state.cache[index] = 0;
+            delay_state.provided[index] = 1;
+        }
         fill_initial_delay_tokens(delay_state, offset, settings.text_bos, settings.audio_bos);
         if (offset == 0) {
             seed_delay_offset_zero(delay_state, settings.text_bos, settings.audio_bos);
@@ -804,6 +821,12 @@ void SpeechPipeline::speak_run_generation_loop(const SpeechGenerationSettings& s
             ++frames_collected;
         }
 
+        if (config_.system_prompt_offset > 0) {
+            // The benchmark's input includes its reply window; process the same timeline on both
+            // sides.
+            speech_maybe_log_interleaved_debug(offset, text_input, sampled_text_token, frame_codes);
+            continue;
+        }
         SpeechDecodeStopInput stop_input;
         stop_input.text_eos_token_id = config_.text_eos_token_id;
         stop_input.text_padding_id = config_.text_padding_id;
@@ -864,6 +887,22 @@ AudioResult SpeechPipeline::speak(const float* audio_in, int32_t num_samples,
         input_sample_rate = target_rate;
     }
 
+    std::vector<float> reply_window;
+    if (config_.system_prompt_offset > 0 && cfg.tail_frames != 0) {
+        if (cfg.tail_frames < 0 || cfg.tail_frames > max_output_frames)
+            throw std::invalid_argument("tail_frames must fit the output frame budget");
+        const auto frame_size =
+            static_cast<int32_t>(std::lround(config_.sample_rate / config_.frame_rate));
+        const int64_t padded = static_cast<int64_t>(samples_count) +
+                               static_cast<int64_t>(cfg.tail_frames) * frame_size;
+        if (padded > std::numeric_limits<int32_t>::max())
+            throw std::invalid_argument("PersonaPlex reply window is too large");
+        reply_window.assign(samples_ptr, samples_ptr + samples_count);
+        reply_window.resize(static_cast<std::size_t>(padded), 0.0F);
+        samples_ptr = reply_window.data();
+        samples_count = static_cast<int32_t>(padded);
+    }
+
     std::cerr << "[speech] Starting pipeline with " << samples_count << " input samples"
               << std::endl;
 
@@ -892,12 +931,26 @@ AudioResult SpeechPipeline::speak(const float* audio_in, int32_t num_samples,
 
     temporal_state_->reset();
 
-    if (should_run_text_prompt_injection(config_))
+    if (!config_.system_prompt_embeddings.empty()) {
+        const int32_t hidden = config_.temporal_hidden_size;
+        for (std::size_t index = 0; index < config_.system_prompt_embeddings.size();
+             index += hidden)
+            run_temporal_embed_step(config_.system_prompt_embeddings.data() + index, hidden);
+    } else if (should_run_text_prompt_injection(config_))
         run_text_prompt();
 
     const int32_t num_cb = config_.num_codebooks;
     const int32_t hidden = config_.temporal_hidden_size;
     auto delay_state = make_delay_cache_state(config_.delays, num_cb);
+    if (config_.system_prompt_offset > 0) {
+        if (config_.system_prompt_cache.size() != delay_state.cache.size() ||
+            config_.system_prompt_provided.size() != delay_state.provided.size() ||
+            config_.system_prompt_offset - 1 + num_frames > temporal_state_->max_length())
+            throw std::invalid_argument(
+                "PersonaPlex prompt and audio exceed the bundle context or cache geometry");
+        delay_state.cache = config_.system_prompt_cache;
+        delay_state.provided = config_.system_prompt_provided;
+    }
     SpeechOutputPlanInput plan_input;
     plan_input.sample_rate = config_.sample_rate;
     plan_input.frame_rate = config_.frame_rate;
@@ -907,7 +960,13 @@ AudioResult SpeechPipeline::speak(const float* audio_in, int32_t num_samples,
     plan_input.tail_frames = cfg.tail_frames;
     plan_input.max_output_frames = max_output_frames;
     plan_input.max_delay = delay_state.max_delay;
-    const auto plan = ComputeSpeechOutputPlan(plan_input);
+    auto plan = ComputeSpeechOutputPlan(plan_input);
+    if (config_.system_prompt_offset > 0) {
+        // A primed LMGen returns one frame per user step; it has no cold-start delay.
+        plan.effective_frames = num_frames;
+        plan.output_frames = std::min(num_frames, max_output_frames);
+        plan.total_iters = plan.output_frames;
+    }
     const int32_t mimi_cb = config_.mimi_decode_codebooks;
     std::vector<int32_t> output_codes;
     output_codes.reserve(static_cast<std::size_t>(mimi_cb) * plan.output_frames);
@@ -918,8 +977,10 @@ AudioResult SpeechPipeline::speak(const float* audio_in, int32_t num_samples,
               << ", input_effective=" << plan.effective_frames
               << ", tail_frames=" << plan.extra_tail << ")" << std::endl;
 
-    const SpeechGenerationSettings settings =
+    SpeechGenerationSettings settings =
         make_speech_generation_settings(config_, hidden, encoder_shape);
+    if (config_.listen_before_answer)
+        settings.listen_frames = std::max(0, num_frames - cfg.tail_frames);
 
     int32_t frames_collected = 0;
     speak_run_generation_loop(settings, plan, delay_state, codec_tokens, output_codes,

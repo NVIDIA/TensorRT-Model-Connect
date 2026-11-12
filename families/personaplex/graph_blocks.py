@@ -313,6 +313,27 @@ def add_attention_block(
     }
 
 
+def add_swiglu_activation(
+    network: trt.INetworkDefinition, gate: trt.ITensor, up: trt.ITensor
+) -> trt.ITensor:
+    """SiLU(gate) * up in FP32, rounded once to the projections' dtype.
+
+    The reference gating kernel computes the activation and the product in FP32
+    from Half/BF16 projections and rounds only the result; rounding SiLU(gate)
+    first changes the product.
+    """
+    work_dtype = gate.dtype
+    if work_dtype != trt.float32:
+        gate = network.add_cast(gate, trt.float32).get_output(0)
+        up = network.add_cast(up, trt.float32).get_output(0)
+    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID).get_output(0)
+    swish = network.add_elementwise(gate, sigmoid, trt.ElementWiseOperation.PROD).get_output(0)
+    gated = network.add_elementwise(swish, up, trt.ElementWiseOperation.PROD).get_output(0)
+    if work_dtype != trt.float32:
+        gated = network.add_cast(gated, work_dtype).get_output(0)
+    return gated
+
+
 def add_swiglu_mlp(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
@@ -332,13 +353,9 @@ def add_swiglu_mlp(
     gate = matmul(inp, hidden_size, mlp_size, weights[f"{prefix}.w_gate"], f"{_lp}.w_gate")
     up = matmul(inp, hidden_size, mlp_size, weights[f"{prefix}.w_up"], f"{_lp}.w_up")
 
-    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-    gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+    gated = add_swiglu_activation(network, gate, up)
 
-    mlp_out = matmul(
-        gated.get_output(0), mlp_size, hidden_size, weights[f"{prefix}.w_down"], f"{_lp}.w_down"
-    )
+    mlp_out = matmul(gated, mlp_size, hidden_size, weights[f"{prefix}.w_down"], f"{_lp}.w_down")
     return mlp_out
 
 

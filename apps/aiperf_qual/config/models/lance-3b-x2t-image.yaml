@@ -11,6 +11,7 @@ candidate:
   benchmark_sequence_length: {extra_tokens: 288}
 
 reference:
+  mode: eager  # the official reference runs eager only (its adapter refuses compile)
   adapter: families/lance/reference/adapter.py
   prepare: families/lance/reference/prepare.py
   requirements: families/lance/requirements.txt  # the family's dependencies, layered on the serving interpreter

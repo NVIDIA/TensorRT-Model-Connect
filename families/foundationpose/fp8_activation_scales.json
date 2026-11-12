@@ -1,0 +1,50 @@
+{
+  "foundationpose-refiner-h512": {
+    "activation_scales": {
+      "/encodeAB/encodeAB.0/conv1/Conv": 0.053974781717572896,
+      "/encodeAB/encodeAB.0/conv2/Conv": 0.02061163101877485,
+      "/encodeAB/encodeAB.1/conv1/Conv": 0.04777344635554722,
+      "/encodeAB/encodeAB.1/conv2/Conv": 0.0178703601871218,
+      "/encodeAB/encodeAB.2/net/net.0/Conv": 0.050782540014811924,
+      "/encodeAB/encodeAB.3/conv1/Conv": 0.017377586237021854,
+      "/encodeAB/encodeAB.3/conv2/Conv": 0.018611871770450046,
+      "/encodeAB/encodeAB.4/conv1/Conv": 0.021775820425578525,
+      "/encodeAB/encodeAB.4/conv2/Conv": 0.01646877293075834
+    },
+    "weight_amax": {
+      "/encodeAB/encodeAB.0/conv1/Conv": 0.1179436594247818,
+      "/encodeAB/encodeAB.0/conv2/Conv": 0.29983755946159363,
+      "/encodeAB/encodeAB.1/conv1/Conv": 0.10394635796546936,
+      "/encodeAB/encodeAB.1/conv2/Conv": 0.471518874168396,
+      "/encodeAB/encodeAB.2/net/net.0/Conv": 0.06746529787778854,
+      "/encodeAB/encodeAB.3/conv1/Conv": 0.22760292887687683,
+      "/encodeAB/encodeAB.3/conv2/Conv": 0.29183098673820496,
+      "/encodeAB/encodeAB.4/conv1/Conv": 0.15064623951911926,
+      "/encodeAB/encodeAB.4/conv2/Conv": 0.23015309870243073
+    }
+  },
+  "foundationpose-scorer-h512": {
+    "activation_scales": {
+      "/encoderAB/encoderAB.0/conv1/Conv": 0.045510441064834595,
+      "/encoderAB/encoderAB.0/conv2/Conv": 0.015581813241754259,
+      "/encoderAB/encoderAB.1/conv1/Conv": 0.050396927765437534,
+      "/encoderAB/encoderAB.1/conv2/Conv": 0.019724352019173757,
+      "/encoderAB/encoderAB.2/net/net.0/Conv": 0.05172999841826303,
+      "/encoderAB/encoderAB.3/conv1/Conv": 0.018936385001455034,
+      "/encoderAB/encoderAB.3/conv2/Conv": 0.024022979395730153,
+      "/encoderAB/encoderAB.4/conv1/Conv": 0.021526694297790527,
+      "/encoderAB/encoderAB.4/conv2/Conv": 0.020620201315198625
+    },
+    "weight_amax": {
+      "/encoderAB/encoderAB.0/conv1/Conv": 0.0649493858218193,
+      "/encoderAB/encoderAB.0/conv2/Conv": 0.16646000742912292,
+      "/encoderAB/encoderAB.1/conv1/Conv": 0.06291703134775162,
+      "/encoderAB/encoderAB.1/conv2/Conv": 0.1365952342748642,
+      "/encoderAB/encoderAB.2/net/net.0/Conv": 0.039884112775325775,
+      "/encoderAB/encoderAB.3/conv1/Conv": 0.09431098401546478,
+      "/encoderAB/encoderAB.3/conv2/Conv": 0.04025791957974434,
+      "/encoderAB/encoderAB.4/conv1/Conv": 0.09541043639183044,
+      "/encoderAB/encoderAB.4/conv2/Conv": 0.03377724066376686
+    }
+  }
+}

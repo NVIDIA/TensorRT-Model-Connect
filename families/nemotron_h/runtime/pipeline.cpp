@@ -6,6 +6,7 @@
 #include "families/nemotron_h/runtime/pipeline.h"
 
 #include "families/nemotron_h/runtime/chat_templates.h"
+#include "families/nemotron_h/runtime/paired.h"
 #include "families/nemotron_h/runtime/recurrent_generation_plan.h"
 
 #include <algorithm>
@@ -30,12 +31,27 @@ RecurrentPipeline::RecurrentPipeline(std::unique_ptr<ITrtModule> decoder,
                                      std::unique_ptr<NemotronHInferenceState> state,
                                      RecurrentGenConfig config, cudaStream_t stream,
                                      const char* name, std::shared_ptr<ITokenizer> tokenizer,
-                                     std::string model_id_str)
+                                     std::string model_id_str,
+                                     std::unique_ptr<NemotronHPairedDraft> paired,
+                                     std::unique_ptr<ITrtModule> prefill)
     : decoder_(std::move(decoder)), state_(std::move(state)), config_(config), stream_(stream),
-      name_(name), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)) {
+      name_(name), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
+      paired_(std::move(paired)), prefill_(std::move(prefill)) {
     if (!decoder_ || !decoder_->ok())
         throw std::runtime_error(std::string(name_) + ": invalid decoder module");
+    if (prefill_) {
+        if (!prefill_->ok() || paired_)
+            throw std::runtime_error(std::string(name_) +
+                                     ": batched prefill needs a plain text decoder");
+        const auto rows = prefill_->input_profile_shape("token_id", prefill_->profile_idx(),
+                                                        ProfileShapeSelector::kMax);
+        if (rows.size() != 1 || rows[0] < 1)
+            throw std::runtime_error(std::string(name_) + ": invalid prefill token profile");
+        prefill_rows_ = static_cast<int32_t>(std::min<int64_t>(rows[0], state_->max_length()));
+    }
 }
+
+RecurrentPipeline::~RecurrentPipeline() = default;
 
 static std::vector<int32_t> encode_prompt(const ITokenizer& tokenizer,
                                           const RecurrentGenConfig& config,
@@ -92,6 +108,8 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
     auto* active_sampler = local_sampler.get();
     active_sampler->reset();
 
+    if (paired_)
+        paired_->reset(*decoder_, input_ids.size(), max_new_tokens, params);
     state_->reset();
     state_->bind_to(*decoder_);
 
@@ -104,9 +122,15 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
 
     // ── Prefill phase ──
     auto t_prefill_start = SteadyClock::now();
-    for (std::size_t i = 0; i < input_ids.size(); ++i)
-        run_step(input_ids[i], logits,
-                 nemotron_h_recurrent::prefill_step_needs_logits(i, input_ids.size()));
+    // A prompt longer than the cache keeps the token loop, whose KV cache
+    // slides once full.
+    if (prefill_ && static_cast<int64_t>(input_ids.size()) <= state_->max_length()) {
+        run_prefill_chunks(input_ids, logits);
+    } else {
+        for (std::size_t i = 0; i < input_ids.size(); ++i)
+            run_step(input_ids[i], logits,
+                     nemotron_h_recurrent::prefill_step_needs_logits(i, input_ids.size()));
+    }
     auto t_prefill_end = SteadyClock::now();
 
     // ── Decode phase ──
@@ -115,20 +139,114 @@ std::vector<int32_t> RecurrentPipeline::generate_from_ids(const std::vector<int3
     int32_t decode_steps = 0;
 
     auto t_decode_start = SteadyClock::now();
-    for (int32_t step = 0; step < max_new_tokens; ++step) {
-        NemotronHSampleResult result = active_sampler->sample(logits.data(), vocab_size, params);
-        output.push_back(result.token_id);
-        if (result.is_eos)
-            break;
-        run_step(result.token_id, logits, true);
-        ++decode_steps;
-    }
+    if (paired_) {
+        output = generate_paired(input_ids, max_new_tokens, params, logits, decode_steps);
+    } else
+        for (int32_t step = 0; step < max_new_tokens; ++step) {
+            NemotronHSampleResult result =
+                active_sampler->sample(logits.data(), vocab_size, params);
+            output.push_back(result.token_id);
+            if (result.is_eos)
+                break;
+            run_step(result.token_id, logits, true);
+            ++decode_steps;
+        }
     auto t_decode_end = SteadyClock::now();
 
     report_timing(t_prefill_start, t_prefill_end, t_decode_start, t_decode_end,
                   static_cast<int>(input_ids.size()), decode_steps);
 
     return output;
+}
+
+std::vector<int32_t> RecurrentPipeline::generate_paired(const std::vector<int32_t>& input_ids,
+                                                        int32_t max_new_tokens,
+                                                        const NemotronHSamplingParams& sampling,
+                                                        std::vector<float>& logits,
+                                                        int32_t& decode_steps) {
+    std::vector<int32_t> output = input_ids;
+    std::uint64_t rng = sampling.seed >= 0 ? static_cast<std::uint64_t>(sampling.seed) : 42;
+    const auto probabilities = [&] {
+        return nemotron_h_probabilities(logits.data(), config_.vocab_size, sampling);
+    };
+    const auto append = [&](int32_t token) {
+        output.push_back(token);
+        return output.size() - input_ids.size() >= static_cast<std::size_t>(max_new_tokens) ||
+               std::find(sampling.eos_token_ids.begin(), sampling.eos_token_ids.end(), token) !=
+                   sampling.eos_token_ids.end();
+    };
+    const auto consume = [&](int32_t token) {
+        run_step(token, logits, true);
+        ++decode_steps;
+    };
+    int32_t rounds = 0, proposed = 0, accepted_count = 0, rejections = 0;
+    const auto finish = [&] {
+        std::cerr << "[trtmc-perf] Nemotron paired: rounds=" << rounds << " proposed=" << proposed
+                  << " accepted=" << accepted_count << " rejected=" << rejections << "\n";
+        return output;
+    };
+    int32_t anchor = nemotron_h_sample_probabilities(probabilities(), rng);
+    while (true) {
+        if (append(anchor))
+            return finish();
+        // Features exclude the pending anchor, just as in the source draft.
+        const auto proposals = paired_->propose(anchor, sampling, rng);
+        ++rounds;
+        proposed += static_cast<int32_t>(proposals.size()) - 1;
+        consume(anchor);
+        if (paired_->tree()) {
+            int32_t parent = 0;
+            while (true) {
+                const int32_t target = nemotron_h_sample_probabilities(probabilities(), rng);
+                const auto child = std::find_if(
+                    proposals.begin(), proposals.end(), [&](const NemotronHProposal& node) {
+                        return node.parent == parent && node.token == target;
+                    });
+                if (child == proposals.end()) {
+                    ++rejections;
+                    anchor = target;
+                    break;
+                }
+                ++accepted_count;
+                if (append(target))
+                    return finish();
+                consume(target);
+                parent = static_cast<int32_t>(child - proposals.begin());
+            }
+        } else {
+            bool rejected = false;
+            for (std::size_t index = 1; index < proposals.size(); ++index) {
+                const auto& proposal = proposals[index];
+                auto p = probabilities();
+                const auto& q = proposal.probabilities;
+                const float ratio =
+                    q[proposal.token] > 0 ? p[proposal.token] / q[proposal.token] : 0;
+                const bool accepted = ratio >= 1 || (ratio > 0 && nemotron_h_uniform(rng) < ratio);
+                if (!accepted) {
+                    double mass = 0;
+                    for (std::size_t token = 0; token < p.size(); ++token) {
+                        p[token] = std::max(0.0F, p[token] - q[token]);
+                        mass += p[token];
+                    }
+                    if (mass <= 0)
+                        throw std::runtime_error(
+                            "Nemotron speculative rejection has no residual mass");
+                    for (auto& value : p)
+                        value = static_cast<float>(value / mass);
+                    anchor = nemotron_h_sample_probabilities(p, rng);
+                    ++rejections;
+                    rejected = true;
+                    break;
+                }
+                ++accepted_count;
+                if (append(proposal.token))
+                    return finish();
+                consume(proposal.token);
+            }
+            if (!rejected)
+                anchor = nemotron_h_sample_probabilities(probabilities(), rng);
+        }
+    }
 }
 
 void RecurrentPipeline::report_timing(SteadyClock::time_point t_prefill_start,
@@ -153,8 +271,8 @@ void RecurrentPipeline::report_timing(SteadyClock::time_point t_prefill_start,
                   << " tok/s, " << std::setprecision(2) << (decode_ms / decode_steps) << " ms/tok)";
     std::cerr << "\n";
 
-    std::cerr << "[trtmc-perf] Total generation: " << total_ms << " ms"
-              << " (" << (prefill_tokens + decode_steps) << " tokens)\n";
+    std::cerr << "[trtmc-perf] Total generation: " << total_ms << " ms" << " ("
+              << (prefill_tokens + decode_steps) << " tokens)\n";
 
     if (prof_steps_ > 0) {
         std::cerr << std::setprecision(2);
@@ -175,6 +293,31 @@ void RecurrentPipeline::report_timing(SteadyClock::time_point t_prefill_start,
                   << host_outputs.tensor_count << " tensor/copy, " << prof_logits_copies_
                   << " copies)\n";
     }
+}
+
+void RecurrentPipeline::run_prefill_chunks(const std::vector<int32_t>& input_ids,
+                                           std::vector<float>& logits) {
+    const auto total = static_cast<int32_t>(input_ids.size());
+    state_->bind_prefill(*prefill_);
+    for (int32_t start = 0; start < total; start += prefill_rows_) {
+        const int32_t rows = std::min(prefill_rows_, total - start);
+        TensorMap inputs;
+        inputs["token_id"] =
+            Tensor{const_cast<int32_t*>(input_ids.data() + start), {rows}, DType::kInt32};
+        state_->prepare_step(inputs, rows);
+        prefill_->forward_async(inputs);
+        state_->commit_prefill(*prefill_, rows);
+    }
+    prefill_->sync();
+    const auto* device_logits = prefill_->device_ptr("logits");
+    if (device_logits == nullptr)
+        throw std::runtime_error(std::string(name_) + ": prefill context has no logits output");
+    logits.resize(static_cast<std::size_t>(config_.vocab_size));
+    const cudaError_t copied = cudaMemcpy(logits.data(), device_logits,
+                                          logits.size() * sizeof(float), cudaMemcpyDeviceToHost);
+    if (copied != cudaSuccess)
+        throw std::runtime_error(std::string(name_) +
+                                 ": failed to copy prefill logits: " + cudaGetErrorString(copied));
 }
 
 void RecurrentPipeline::run_step(int32_t token_id, std::vector<float>& logits, bool copy_logits) {
@@ -229,6 +372,9 @@ void RecurrentPipeline::run_step(int32_t token_id, std::vector<float>& logits, b
     }
 
     auto t3 = SteadyClock::now();
+
+    if (paired_)
+        paired_->observe(*decoder_, state_->position());
 
     // Advance the logical position; recurrent buffers update in place.
     state_->advance();

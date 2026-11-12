@@ -91,6 +91,70 @@ void check_uniform_image(const Generation& generation, const trtmc::QwenVlPrepro
     check(seen[0] && seen[1] && seen[2], label + " pixels cover every channel");
 }
 
+void check_qwen3_smart_geometry(int height, int width) {
+    trtmc::QwenVlPreprocessConfig config;
+    config.preprocessor_type = "qwen3_smart_resize_patchify";
+    config.dynamic_image_resolution = true;
+    config.patch_size = 16;
+    config.min_pixels = 1024;
+    config.max_pixels = 448 * 448;
+    config.vision_embed_dim = 1024;
+    config.vision_num_heads = 16;
+    config.vision_position_grid_size = 48;
+    for (int channel = 0; channel < 3; ++channel) {
+        config.image_mean[channel] = 0.5F;
+        config.image_std[channel] = 0.5F;
+    }
+    trtmc::runtime::adapters::io::DecodedImage image;
+    image.width = width;
+    image.height = height;
+    image.channels = 3;
+    image.pixels.resize(height * width * 3);
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            image.pixels[(y * width + x) * 3] = x;
+            image.pixels[(y * width + x) * 3 + 1] = y;
+            image.pixels[(y * width + x) * 3 + 2] = 128;
+        }
+    }
+    const auto result = trtmc::qwen_vl_preprocess_decoded_image(image, config);
+    check(result.ok, "Qwen3 smart geometry preprocesses");
+    check(result.height == height && result.width == width,
+          "aligned portrait/landscape/square images keep their original geometry");
+    const int gh = height / 16, gw = width / 16;
+    check(result.image_grid_hws == std::vector<int32_t>({gh, gw}), "actual image grid");
+    check(result.pixel_values.size() == static_cast<std::size_t>(height * width * 6),
+          "no extra square image patches");
+    for (int i = 0; i < gh * gw; ++i) {
+        const int group = i / 4;
+        const int row = group / (gw / 2) * 2 + (i % 4) / 2;
+        const int col = group % (gw / 2) * 2 + i % 2;
+        const int patch_base = i * 6 * 16 * 16;
+        const float red = (col * 16 / 255.0F - 0.5F) / 0.5F;
+        const float green = (row * 16 / 255.0F - 0.5F) / 0.5F;
+        check(std::fabs(result.pixel_values[patch_base] - red) < 1e-5F,
+              "merge-group patch x coordinate");
+        check(std::fabs(result.pixel_values[patch_base + 2 * 16 * 16] - green) < 1e-5F,
+              "merge-group patch y coordinate");
+        float h = 0, w = 0, weight = 0;
+        for (int corner = 0; corner < 4; ++corner) {
+            const int index = result.vision_position_indices[corner][i];
+            const float blend = result.vision_position_weights[corner][i];
+            check(index >= 0 && index < 48 * 48, "learned position index in bounds");
+            h += blend * (index / 48);
+            w += blend * (index % 48);
+            weight += blend;
+        }
+        check(std::fabs(weight - 1.0F) < 1e-5F, "position weights form a partition of unity");
+        check(std::fabs(h - row * 47.0F / (gh - 1)) < 1e-5F,
+              "interpolation preserves linear height coordinates");
+        check(std::fabs(w - col * 47.0F / (gw - 1)) < 1e-5F,
+              "interpolation preserves linear width coordinates");
+        check(std::fabs(result.vision_cos_half[i * 32] - std::cos(float(row))) < 1e-6F,
+              "spatial RoPE follows merge-group rows without window permutation");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -104,6 +168,9 @@ int main() {
         check_uniform_image(*generation, config, 0);
         check_uniform_image(*generation, config, 255);
     }
+    check_qwen3_smart_geometry(64, 96);
+    check_qwen3_smart_geometry(96, 64);
+    check_qwen3_smart_geometry(64, 64);
     if (g_failures != 0) {
         std::cerr << g_failures << " Qwen-VL image normalization check(s) failed\n";
         return 1;

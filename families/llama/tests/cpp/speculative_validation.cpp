@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
+#include "families/llama/runtime/plugin_helpers.h"
 #include "families/llama/runtime/speculative/pipeline.h"
 #include "trtmc/runtime/trt_backend.h"
 
@@ -80,7 +81,77 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        nlohmann::json sampling_checks = nlohmann::json::array();
+        bool sampled_non_greedy = false;
+        int sampled_accepted = 0;
+        for (int seed : {7, 19})
+            for (int policy : {0, 1}) {
+                trtmc::LlamaSamplingParams params;
+                params.seed = seed;
+                params.temperature = policy == 0 ? 0.8F : 1.0F;
+                params.top_k = policy == 0 ? 50 : 0;
+                params.top_p = policy == 0 ? 0.95F : 0.9F;
+                for (const std::size_t length : {std::size_t(1), ids.size()}) {
+                    const std::vector<std::int32_t> prompt(ids.begin(), ids.begin() + length);
+                    const auto target =
+                        pipeline.generate_ids(prompt, count, false, true, 1, params);
+                    const auto greedy = pipeline.generate_ids(prompt, count, false, true);
+                    sampled_non_greedy |= target.token_ids != greedy.token_ids;
+                    for (int width : {1, 2}) {
+                        for (int repeat = 0; repeat < 2; ++repeat) {
+                            const auto actual =
+                                pipeline.generate_ids(prompt, count, true, true, width, params);
+                            if (actual.token_ids != target.token_ids)
+                                throw std::runtime_error(
+                                    "sampled EAGLE3 changes seeded target tokens");
+                            for (int accepted : pipeline.accepted_lengths())
+                                sampled_accepted += accepted;
+                        }
+                        if (pipeline.generate_ids(prompt, count, false, true, width, params)
+                                .token_ids != target.token_ids)
+                            throw std::runtime_error("sampled reset changes target RNG or cache");
+                        sampling_checks.push_back({{"seed", seed},
+                                                   {"policy", policy},
+                                                   {"input_tokens", length},
+                                                   {"width", width},
+                                                   {"token_ids", target.token_ids},
+                                                   {"repeats", 2}});
+                    }
+                    // Stop on a genuinely sampled token, not a compiled greedy EOS.
+                    params.eos_token_id =
+                        target.token_ids[std::min<std::size_t>(2, target.token_ids.size() - 1)];
+                    const auto stopped =
+                        pipeline.generate_ids(prompt, count, false, false, 1, params);
+                    const auto actual =
+                        pipeline.generate_ids(prompt, count, true, false, 2, params);
+                    if (actual.token_ids != stopped.token_ids ||
+                        actual.token_ids.back() != params.eos_token_id)
+                        throw std::runtime_error("sampled EAGLE3 ignores the effective EOS");
+                    params.eos_token_id = -1;
+                }
+            }
+        if (!sampled_non_greedy || sampled_accepted == 0)
+            throw std::runtime_error(
+                "sampling coverage lacks stochastic output or draft acceptance");
+        // The last available cache slot must not trigger an out-of-profile draft.
+        const auto manifest =
+            nlohmann::json::parse(trtmc::llama::require_text_section(bundle, "speculative.json"));
+        const int capacity = manifest.at("target").at("capacity");
+        std::vector<std::int32_t> boundary(capacity - 2, ids.front());
+        trtmc::LlamaSamplingParams boundary_params;
+        boundary_params.top_k = 20;
+        boundary_params.seed = 7;
+        const auto boundary_target =
+            pipeline.generate_ids(boundary, 2, false, true, 1, boundary_params);
+        if (pipeline.generate_ids(boundary, 2, true, true, 2, boundary_params).token_ids !=
+            boundary_target.token_ids)
+            throw std::runtime_error("sampled EAGLE3 capacity-boundary output differs");
+
         nlohmann::json result{
+            {"sampling_checks", sampling_checks},
+            {"sampled_non_greedy", sampled_non_greedy},
+            {"sampled_accepted", sampled_accepted},
+            {"sampled_capacity_equal", true},
             {"input_tokens", ids.size()},
             {"requested_output_tokens", count},
             {"autoregressive_ids", vanilla.token_ids},

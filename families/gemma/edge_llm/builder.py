@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import logging
 import os
 from pathlib import Path
@@ -96,6 +97,8 @@ def validate_pair(request, execution) -> tuple[dict, Path, int]:
     base = raw.get("text_config")
     if not isinstance(base, dict):
         raise ValueError("Gemma4 target requires nested text configuration")
+    zlab_draft = (execution.variant == "dflash"
+                  and companion.get("architectures") == ["DFlashDraftModel"])
     if execution.variant == "mtp":
         if companion.get("model_type") != raw["model_type"] + "_assistant":
             raise ValueError("Gemma4 MTP requires the matching target architecture assistant")
@@ -109,9 +112,12 @@ def validate_pair(request, execution) -> tuple[dict, Path, int]:
             "eagle3": ("Gemma4Eagle3Model",),
             "dflash": ("Gemma4DSparkModel", "DFlashDraftModel"),
         }[execution.variant]
-        if (raw["model_type"] != "gemma4_unified"
+        # z-lab publishes block16 drafts for both original and unified targets.
+        # Their Qwen-style draft topology does not change the Gemma target owner.
+        target_type = raw["model_type"] if zlab_draft else "gemma4_unified"
+        if (raw["model_type"] != target_type
                 or companion.get("architectures") not in ([name] for name in architectures)
-                or companion.get("target_model_type", "gemma4_unified" if execution.variant == "dflash" else None) != "gemma4_unified"
+                or companion.get("target_model_type", target_type if execution.variant == "dflash" else None) != target_type
                 or companion.get("hidden_size") != base.get("hidden_size")
                 or companion.get("num_target_layers") != base.get("num_hidden_layers")):
             raise ValueError("Gemma4 speculative draft does not match the target geometry")
@@ -135,8 +141,9 @@ def validate_pair(request, execution) -> tuple[dict, Path, int]:
             if type(mask) is not int or not 0 <= mask < base["vocab_size"]:
                 raise ValueError("Invalid Gemma4 speculative mask token")
     if (assistant.get("vocab_size") != base.get("vocab_size")
-            or base.get("enable_moe_block") or assistant.get("enable_moe_block")):
-        raise ValueError("Gemma4 pair vocabulary or dense topology is incompatible")
+            or assistant.get("enable_moe_block")
+            or (base.get("enable_moe_block") and execution.variant != "mtp" and not zlab_draft)):
+        raise ValueError("Gemma4 pair vocabulary or target/draft topology is incompatible")
     for directory, config in ((source, raw), (draft, companion)):
         if (config.get("quantization_config") or config.get("text_config", config).get("quantization_config")
                 or any((directory / name).exists() for name in
@@ -261,10 +268,24 @@ def build(request, writer, execution) -> None:
             with log_path.open("a", encoding="utf-8") as log:
                 traceback.print_exception(error, file=log)
             _LOG.warning("Gemma4 Edge build failed: %s. Diagnostics: %s. "
-                         "Native fallback cannot preserve the requested paired variant.", error, log_path)
-            # The native family has no paired Gemma4 topology; do not substitute
-            # an autoregressive decoder and misrepresent execution semantics.
-            raise NotImplementedError("Native Gemma does not implement the requested paired variant") from error
+                         "Trying the family-owned native paired graph.", error, log_path)
+            architectures = (json.loads((draft / "config.json").read_text()).get("architectures")
+                             if execution.variant != "mtp" else None)
+            block_draft = (
+                execution.variant in {"dflash", "dspark", "eagle3"}
+                and (architectures == (["Gemma4Eagle3Model"] if execution.variant == "eagle3"
+                                       else ["Gemma4DSparkModel"])
+                     or (execution.variant == "dflash" and architectures == ["DFlashDraftModel"])))
+            if execution.variant != "mtp" and not block_draft:
+                raise NotImplementedError(
+                    "Native Gemma does not implement the requested paired variant") from error
+            from ..config import ModelConfig
+            from ..gemma4_text import build as build_native
+
+            build_native(replace(request, max_sequence_length=limit), writer,
+                         ModelConfig.from_dir(Path(request.model_dir)), companion=draft,
+                         companion_variant=execution.variant)
+            return
         writer.set_header(family="gemma", task=request.task, backend=request.backend)
         for name, path in files.items():
             with path.open("rb") as source, writer.open_section(name) as destination:

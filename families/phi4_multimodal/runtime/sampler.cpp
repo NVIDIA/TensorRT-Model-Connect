@@ -25,7 +25,7 @@ namespace trtmc {
 
 // Shared argmax helper — returns {token_id, logprob} for the highest logit.
 static Phi4MultimodalSampleResult argmax_over_logits(const float* logits, int32_t vocab_size,
-                                                     int32_t eos_token_id) {
+                                                     const Phi4MultimodalSamplingParams& params) {
     Phi4MultimodalSampleResult result;
     const float* best = logits;
     for (int32_t i = 1; i < vocab_size; ++i) {
@@ -34,7 +34,7 @@ static Phi4MultimodalSampleResult argmax_over_logits(const float* logits, int32_
     }
     result.token_id = static_cast<int32_t>(best - logits);
     result.logprob = *best;
-    result.is_eos = (result.token_id == eos_token_id);
+    result.is_eos = params.is_eos(result.token_id);
     return result;
 }
 
@@ -176,11 +176,11 @@ class GreedySampler final : public Phi4MultimodalISampler {
         if (vocab_size <= 0 || logits == nullptr) {
             Phi4MultimodalSampleResult result;
             result.token_id = 0;
-            result.is_eos = (0 == params.eos_token_id);
+            result.is_eos = params.is_eos(0);
             return result;
         }
 
-        return argmax_over_logits(logits, vocab_size, params.eos_token_id);
+        return argmax_over_logits(logits, vocab_size, params);
     }
 };
 
@@ -201,12 +201,12 @@ class TopKSampler final : public Phi4MultimodalISampler {
 
         if (vocab_size <= 0 || logits == nullptr) {
             result.token_id = 0;
-            result.is_eos = (0 == params.eos_token_id);
+            result.is_eos = params.is_eos(0);
             return result;
         }
 
         if (greedy_equivalent(params))
-            return argmax_over_logits(logits, vocab_size, params.eos_token_id);
+            return argmax_over_logits(logits, vocab_size, params);
 
         const FilteredDistribution dist = build_filtered_distribution(logits, vocab_size, params);
 
@@ -224,7 +224,7 @@ class TopKSampler final : public Phi4MultimodalISampler {
                 result.token_id = dist.indices[static_cast<std::size_t>(i)];
                 result.logprob = std::log(std::max(dist.probs[static_cast<std::size_t>(i)],
                                                    std::numeric_limits<float>::min()));
-                result.is_eos = (result.token_id == params.eos_token_id);
+                result.is_eos = params.is_eos(result.token_id);
                 return result;
             }
         }
@@ -232,7 +232,7 @@ class TopKSampler final : public Phi4MultimodalISampler {
         result.token_id = dist.indices[static_cast<std::size_t>(dist.keep - 1)];
         result.logprob = std::log(std::max(dist.probs[static_cast<std::size_t>(dist.keep - 1)],
                                            std::numeric_limits<float>::min()));
-        result.is_eos = (result.token_id == params.eos_token_id);
+        result.is_eos = params.is_eos(result.token_id);
         return result;
     }
 

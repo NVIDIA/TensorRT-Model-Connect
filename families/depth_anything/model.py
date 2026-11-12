@@ -31,6 +31,7 @@ from safetensors import safe_open
 
 from . import config as config_module
 from . import graph as graph_ops
+from .quantization import calibrate_depth_anything
 
 _IMAGENET_MEAN = (0.485, 0.456, 0.406)
 _IMAGENET_STD = (0.229, 0.224, 0.225)
@@ -69,8 +70,19 @@ def _require(tensors: dict, name: str) -> np.ndarray:
     return np.asarray(tensors[name], dtype=np.float32)
 
 
-def _backbone(network, image, tensors, cfg, work_np):
-    """DINOv2 ViT. Returns the hidden states at the configured tap layers."""
+def _project(network, x, tensors, name, work_np, quant=None):
+    """One backbone projection ``name`` (checkpoint name without ``.weight``), FP8 when ``quant`` says so."""
+    matmul = None if quant is None else quant.matmul(name)
+    weight = None if matmul is not None else _require(tensors, f"{name}.weight")
+    return graph_ops.add_linear(
+        network, x, weight, _require(tensors, f"{name}.bias"), dtype=work_np, matmul=matmul)
+
+
+def _backbone(network, image, tensors, cfg, work_np, quant=None):
+    """DINOv2 ViT. Returns the hidden states at the configured tap layers.
+
+    ``quant`` (a ``DepthAnythingQuantContext``) routes its projections through FP8 Q/DQ.
+    """
     hidden = cfg["hidden_size"]
     heads = cfg["num_attention_heads"]
     head_dim = cfg["head_dim"]
@@ -121,25 +133,18 @@ def _backbone(network, image, tensors, cfg, work_np):
             _require(tensors, f"{prefix}.norm1.bias"), eps, dtype=work_np)
         attention = f"{prefix}.attention.attention"
         query = graph_ops.split_heads(
-            network, graph_ops.add_linear(
-                network, normed, _require(tensors, f"{attention}.query.weight"),
-                _require(tensors, f"{attention}.query.bias"), dtype=work_np),
+            network, _project(network, normed, tensors, f"{attention}.query", work_np, quant),
             tokens, heads, head_dim)
         key = graph_ops.split_heads(
-            network, graph_ops.add_linear(
-                network, normed, _require(tensors, f"{attention}.key.weight"),
-                _require(tensors, f"{attention}.key.bias"), dtype=work_np),
+            network, _project(network, normed, tensors, f"{attention}.key", work_np, quant),
             tokens, heads, head_dim)
         value = graph_ops.split_heads(
-            network, graph_ops.add_linear(
-                network, normed, _require(tensors, f"{attention}.value.weight"),
-                _require(tensors, f"{attention}.value.bias"), dtype=work_np),
+            network, _project(network, normed, tensors, f"{attention}.value", work_np, quant),
             tokens, heads, head_dim)
         context = graph_ops.merge_heads(
             network, graph_ops.add_attention(network, query, key, value, scale), tokens, hidden)
-        projected = graph_ops.add_linear(
-            network, context, _require(tensors, f"{prefix}.attention.output.dense.weight"),
-            _require(tensors, f"{prefix}.attention.output.dense.bias"), dtype=work_np)
+        projected = _project(
+            network, context, tensors, f"{prefix}.attention.output.dense", work_np, quant)
         projected = _layer_scale(network, projected, tensors, f"{prefix}.layer_scale1", work_np)
         states = graph_ops.add_sum(network, projected, residual)
 
@@ -148,12 +153,8 @@ def _backbone(network, image, tensors, cfg, work_np):
             network, states, _require(tensors, f"{prefix}.norm2.weight"),
             _require(tensors, f"{prefix}.norm2.bias"), eps, dtype=work_np)
         inner = graph_ops.add_gelu(
-            network, graph_ops.add_linear(
-                network, normed, _require(tensors, f"{prefix}.mlp.fc1.weight"),
-                _require(tensors, f"{prefix}.mlp.fc1.bias"), dtype=work_np))
-        outer = graph_ops.add_linear(
-            network, inner, _require(tensors, f"{prefix}.mlp.fc2.weight"),
-            _require(tensors, f"{prefix}.mlp.fc2.bias"), dtype=work_np)
+            network, _project(network, normed, tensors, f"{prefix}.mlp.fc1", work_np, quant))
+        outer = _project(network, inner, tensors, f"{prefix}.mlp.fc2", work_np, quant)
         outer = _layer_scale(network, outer, tensors, f"{prefix}.layer_scale2", work_np)
         states = graph_ops.add_sum(network, outer, residual)
 
@@ -295,14 +296,14 @@ def _head(network, fused, tensors, cfg, work_np):
     return hidden
 
 
-def _build_network(network, tensors: dict, cfg: dict, work_np, work_trt):
+def _build_network(network, tensors: dict, cfg: dict, work_np, work_trt, quant=None):
     pixel_values = network.add_input(
         "pixel_values", trt.float32, (1, 3, cfg["image_size"], cfg["image_size"]))
     image = pixel_values
     if image.dtype != work_trt:
         image = network.add_cast(image, work_trt).get_output(0)
 
-    taps = _backbone(network, image, tensors, cfg, work_np)
+    taps = _backbone(network, image, tensors, cfg, work_np, quant)
     features = _reassemble(network, taps, tensors, cfg, work_np)
 
     # Spatial size of each tap after its reassemble factor, needed because the
@@ -326,18 +327,36 @@ def _build_network(network, tensors: dict, cfg: dict, work_np, work_trt):
     network.mark_output(depth)
 
 
-def build_engine(tensors: dict, cfg: dict, *, precision: str, verbose: bool = False) -> bytes:
+_DUAL_GEMM_KNOB = "peep:match_dual_gemm"
+
+
+def _apply_quant_options(builder_config, quant_ctx) -> None:
+    """Build options of a quantized engine; nothing changes for an unquantized one."""
+    if quant_ctx is None:
+        return
+    # Keep layer names so the plan inspector shows which kernels run.
+    builder_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+    if (quant_ctx.has_fp8_weights
+            and _DUAL_GEMM_KNOB in getattr(builder_config, "all_build_routes", "")):
+        # TensorRT's fused dual-GEMM kernel fails to compile with scalar-scale FP8.
+        # The route is set only when this TensorRT build lists the knob.
+        builder_config.build_route = f"-{_DUAL_GEMM_KNOB}=off"
+
+
+def build_engine(tensors: dict, cfg: dict, *, precision: str, verbose: bool = False,
+                 quant_ctx=None) -> bytes:
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     builder_config = builder.create_builder_config()
     builder_config.builder_optimization_level = 3
+    _apply_quant_options(builder_config, quant_ctx)
     if precision == "fp16":
         work_np, work_trt = np.float16, trt.float16
     else:
         work_np, work_trt = np.float32, trt.float32
-    _build_network(network, tensors, cfg, work_np, work_trt)
+    _build_network(network, tensors, cfg, work_np, work_trt, quant_ctx)
     plan = builder.build_serialized_network(network, builder_config)
     if plan is None:
         raise RuntimeError("Depth Anything TensorRT engine build failed")
@@ -362,8 +381,9 @@ def build(request, writer) -> None:
         raise NotImplementedError("depth_anything does not support context parallelism")
     if request.video_num_frames is not None:
         raise NotImplementedError("depth_anything does not support video_num_frames")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("depth_anything does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"depth_anything supports quantization fp8 or none; got {request.quantization!r}")
     if request.fp32_layers:
         raise NotImplementedError("depth_anything does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -394,7 +414,13 @@ def build(request, writer) -> None:
     if max(cfg["out_layer_indices"]) >= counted:
         raise ValueError(
             f"Depth Anything out_indices name a layer past the checkpoint's {counted}")
-    plan = build_engine(tensors, cfg, precision=precision, verbose=bool(request.verbose))
+    # fp8: the backbone projections are quantized from the original checkpoint, one at a
+    # time, with the stored activation scales. FP8 weights are never stored.
+    quant_ctx = None
+    if request.quantization == "fp8":
+        quant_ctx = calibrate_depth_anything(tensors, cfg, "fp8")
+    plan = build_engine(tensors, cfg, precision=precision, verbose=bool(request.verbose),
+                        quant_ctx=quant_ctx)
 
     writer.set_header(family="depth_anything", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)

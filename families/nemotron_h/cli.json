@@ -94,6 +94,19 @@
           "default": false
         },
         {
+          "name": "quantization",
+          "flags": [
+            "--quantization"
+          ],
+          "type": "string",
+          "choices": [
+            "none",
+            "fp8",
+            "nvfp4"
+          ],
+          "help": "Build from an already quantized ModelOpt checkpoint (for example nvidia/NVIDIA-Nemotron-Nano-9B-v2-FP8 or -NVFP4, fp16 only); its packed weights and scales are used as-is"
+        },
+        {
           "name": "execution_variant",
           "flags": [
             "--execution-variant"

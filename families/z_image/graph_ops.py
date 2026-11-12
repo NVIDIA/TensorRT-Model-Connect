@@ -389,19 +389,35 @@ def add_conv2d(
     Input: [N, C_in, H, W]
     Weight: [C_out, C_in/groups, kH, kW]
     Output: [N, C_out, H', W']
-    """
-    conv_w = trt.Weights(np.ascontiguousarray(weight, dtype=dtype))
-    conv_b = trt.Weights()
-    if bias is not None:
-        conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=dtype))
 
-    conv = network.add_convolution_nd(
-        inp,
-        num_output_maps=out_channels,
-        kernel_shape=kernel_size,
-        kernel=conv_w,
-        bias=conv_b,
-    )
+    numpy has no bf16, so a bf16 input takes its kernel and bias as fp32
+    constants cast to bf16 in the graph.
+    """
+    if inp.dtype == trt.bfloat16:
+        conv = network.add_convolution_nd(
+            inp,
+            num_output_maps=out_channels,
+            kernel_shape=kernel_size,
+            kernel=trt.Weights(),
+            bias=trt.Weights(),
+        )
+        kernel = add_constant(network, tuple(np.shape(weight)), weight)
+        conv.set_input(1, _cast_back_to_trt_dtype(network, kernel, trt.bfloat16))
+        if bias is not None:
+            bias_t = add_constant(network, (out_channels,), bias)
+            conv.set_input(2, _cast_back_to_trt_dtype(network, bias_t, trt.bfloat16))
+    else:
+        conv_w = trt.Weights(np.ascontiguousarray(weight, dtype=dtype))
+        conv_b = trt.Weights()
+        if bias is not None:
+            conv_b = trt.Weights(np.ascontiguousarray(bias, dtype=dtype))
+        conv = network.add_convolution_nd(
+            inp,
+            num_output_maps=out_channels,
+            kernel_shape=kernel_size,
+            kernel=conv_w,
+            bias=conv_b,
+        )
     conv.stride_nd = stride
     conv.padding_nd = padding
     conv.num_groups = groups

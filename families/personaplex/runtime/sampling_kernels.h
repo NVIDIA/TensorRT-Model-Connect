@@ -31,6 +31,7 @@ void personaplex_prepare_depth_embedding(
     const int32_t* selected_tokens, int32_t codebook, int32_t forced_text_token,
     bool text_token_is_forced, int32_t forced_previous_token, bool previous_token_is_forced,
     int32_t depth_hidden, int32_t temporal_hidden_dim, int32_t depth_text_vocab,
-    int32_t audio_vocab_size, int32_t num_depformer_embeddings, cudaStream_t stream);
+    int32_t audio_vocab_size, int32_t num_depformer_embeddings, DType depth_dtype,
+    cudaStream_t stream);
 
 } // namespace trtmc

@@ -13,18 +13,25 @@
 # Optional service metrics (`service_metrics`) are opt-in reports, set per model.
 #
 # Suite "catalog" is the profile's catalog testcase request (model-specific shapes and settings).
+#
+# A Task renamed by a Task SDK migration (same operation and output) aliases its old entry. A ready catalog
+# profile whose Task has no entry is a configuration error that reports leave out.
 
 defaults:
   reference:
     backend: auto              # the generic adapter of the operation (unsupported: no native path)
+    # The native model runs torch.compiled (PyTorch's default mode): its quality answers and their timings come
+    # from one run. A compile run that fails is run again in eager mode in its place, and reports name the mode
+    # that answered. A profile whose native model cannot compile sets `reference.mode: eager`.
+    mode: compile
   performance:
     suite: catalog
-    reference_modes: [eager]
+    # reference_modes: the fixed request's native modes (default: [reference.mode]); the first one qualifies.
     # settle_s: the request sent back to back first (a fresh server times short requests slower at first).
     # min_run_s: a request faster than the settle's pace gets enough requests per run to last this long (12
     # sub-millisecond requests spread their run's median by more than max_ci_percent).
     measurement: {settle_s: 10, warmup: 3, requests: 12, runs: 5, min_run_s: 1.0}
-    aggregation: {candidate: mean, eager: mean, compile: best}
+    aggregation: {candidate: mean, eager: mean, compile: mean}
     margin_percent: 5
     # The green / red bounds widen by this (multiplicatively): the largest speedup effect of server instances and
     # timing order that the order check measured on the formal hosts (October 2026: 11.4%).
@@ -66,7 +73,8 @@ benchmarks:
                           metric: wer, gate: {margin: 0.5, relative_margin: 0.10}}
   sts: {suite: stsb, suite_definition: stsbenchmark-pairs-1379, metric: sts_spearman, gate: {margin: 0.5}}
   # Raw encoders (BERT, RoBERTa, ...: STS-B is not their task): conversion parity of the encode output (the
-  # first-token hidden state) on 400 STS-B test sentences, every sentence within the tolerance.
+  # first-token hidden state) on 400 STS-B test sentences, every sentence within the tolerance (a profile's family
+  # file may allow rare outliers: see the README).
   encoder_parity: {suite: encoder-parity, suite_definition: stsbenchmark-sentences-400, metric: vector_parity,
                    gate: {min_cosine: 0.999, max_relative_l2: 0.02},
                    # A native model that cannot run the candidate's precision (fp16) runs at fp32: TRTMC's half-
@@ -144,18 +152,32 @@ tasks:
     performance: {output_grader: parity_top1, output_grader_params: {tie_cosine: 0.999}}
   image_to_class_scores: *classify
 
-  encoding:
+  encoding: &encode
     absolute: [encoder_parity]
     performance: {output_grader: parity_vector}
-  embedding:
+  text_to_pooled_features: *encode  # the migrated encoders pool the first token, as encode did
+  # Every token's features, compared as one matrix: a family that frames the text otherwise than its checkpoint's
+  # tokenizer (a different token count) states `exclude`
+  text_to_token_features:
+    <<: *encode
+    reference: {options: {all_tokens: true}}
+  embedding: &embed
     absolute: [sts, retrieval]
     performance: {output_grader: parity_vector}
+  # The generic embed reference mean-pools and L2-normalizes the unprefixed text: profiles of a family that pools
+  # otherwise or needs a query/document role state `exclude`.
+  text_to_embedding: *embed
 
   image_features:
     performance: {output_grader: parity_numeric, output_grader_params: {min_cosine: 0.99}}
 
   object_detection:
     absolute: [coco]
+    performance: {output_grader: parity_boxes}
+  # The Task SDK detection families (YOLO, DETR) fix their score threshold in the bundle, as their native references
+  # default it, and declare no score_threshold config: the suite's field is not sent.
+  image_to_boxes:
+    absolute: [{name: coco, request: {score_threshold: null}}]
     performance: {output_grader: parity_boxes}
 
   segmentation:
@@ -176,7 +198,7 @@ tasks:
     absolute: [librispeech_streaming]
 
   # Generative media are slow per request: fewer requests per run, still three runs for the CI.
-  audio_generation:
+  audio_generation: &generate_audio
     # Sampling models cannot be judged per sample, but what they say can: both sides speak 200 Seed-TTS
     # eval sentences, Whisper large-v3-turbo transcribes them, and TRTMC's corpus WER is judged against the
     # native model's (margin 2 points or 10%); every output must be valid audio (tts-validity).
@@ -184,6 +206,7 @@ tasks:
                      asr_revision: 41f01f3fe87f28c78e2fbf8b568835947dd65ed9,
                      gate: {margin: 2.0, relative_margin: 0.10}}]
     performance: {output_grader: parity_audio, measurement: {settle_s: 0, warmup: 1, requests: 3, runs: 3}}
+  text_to_audio: *generate_audio
   speech_to_speech:
     absolute: [speech_parity]
     performance: {output_grader: parity_audio, measurement: {settle_s: 0, warmup: 1, requests: 3, runs: 3}}
@@ -249,15 +272,17 @@ tasks:
     absolute: [etth1]
     # The catalog testcases are a few values, not the models' context: Perf times the first ETTh1 window.
     performance: {suite: {from_benchmark: etth1-mse}, output_grader: parity_numeric}
-  reranking:
+  reranking: &rerank_documents
     absolute: [rerank]
     performance: {output_grader: parity_scores}
+  text_query_documents_to_relevance: *rerank_documents  # eagle_vlm (#1939) still reranks and returns scores
 
-  robot_control:
+  robot_control: &control
     absolute: [action_parity]
     # Perf only checks that both sides computed the same output: counts may differ slightly across
     # precisions (for example valid pixels), which is the Acc checks' concern.
     performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}
+  image_state_to_action_chunk: *control
   stereo_disparity:
     absolute: [disparity_parity]
     performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}

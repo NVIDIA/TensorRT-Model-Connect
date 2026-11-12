@@ -11,6 +11,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <stdexcept>
@@ -26,13 +27,18 @@ void require(bool condition, const char* message) {
 }
 
 std::filesystem::path write_bundle(const std::filesystem::path& root, const std::string& task,
-                                   const std::string& family = "api_fixture") {
+                                   const std::string& family = "api_fixture",
+                                   const Json* provenance = nullptr) {
     const auto path = root / ("server-sdk-" + family + "-" + task + ".bundle");
+    const auto metadata = provenance == nullptr ? std::string{} : provenance->dump();
+    Json sections{{"engine.plan", {{"offset", 0}, {"length", 4}}}};
+    if (provenance != nullptr)
+        sections["trtmc.provenance.json"] = {{"offset", 4}, {"length", metadata.size()}};
     const auto header = Json{{"format", 1},
                              {"family", family},
                              {"task", task},
                              {"backend", "fake"},
-                             {"sections", {{"engine.plan", {{"offset", 0}, {"length", 4}}}}}}
+                             {"sections", std::move(sections)}}
                             .dump();
     std::ofstream file(path, std::ios::binary);
     file.write("BUNDLE\x01\x00", 8);
@@ -41,6 +47,7 @@ std::filesystem::path write_bundle(const std::filesystem::path& root, const std:
         file.put(static_cast<char>((size >> shift) & 0xffU));
     file.write(header.data(), static_cast<std::streamsize>(header.size()));
     file.write("PLAN", 4);
+    file.write(metadata.data(), static_cast<std::streamsize>(metadata.size()));
     require(static_cast<bool>(file), "write SDK worker fixture bundle");
     return path;
 }
@@ -164,6 +171,19 @@ void test_task_selection_and_failures(const std::filesystem::path& root,
                     run.messages[1].at("result").at("text") == item.second,
                 "primary Task selection does not inject undeclared defaults or languages");
     }
+    for (const auto& item : std::vector<std::pair<std::string, std::string>>{
+             {"text_conversation", "language_fixture"}, {"images_text_to_text", "text_fixture"}}) {
+        std::istringstream input;
+        std::ostringstream output;
+        try {
+            trtmc::server::run_bundle_worker(write_bundle(root, item.first, item.second).string(),
+                                             options, input, output);
+            throw std::runtime_error("server selected a secondary Task instead of the primary");
+        } catch (const trtmc::Error& error) {
+            require(error.code() == TRTMC_UNSUPPORTED && output.str().empty(),
+                    "secondary capabilities cannot enable or replace a bundle's primary Task");
+        }
+    }
     const auto failure = invoke(write_bundle(root, "must_not_run"), options,
                                 {generate("failure"), generate("must-not-retry")});
     require(failure.status == 1 && failure.messages.size() == 2 &&
@@ -193,7 +213,8 @@ void test_incremental_stream(const std::filesystem::path& root, const trtmc::Loa
             "stream emits one delta and one terminal then shutdown");
     require(run.messages[0].at("protocol_version") == 2 &&
                 run.messages[0].at("capabilities") ==
-                    Json::array({"text_generation", "streaming_text_continuation"}),
+                    Json::array(
+                        {"text_generation", "streaming_text_continuation", "text_conversation"}),
             "ready advertises actual SDK stream capability");
     require(run.messages[1].at("id") == "stream" && run.messages[1].at("event") == "delta" &&
                 run.messages[1].at("result").at("text_delta") == "hello!",
@@ -204,6 +225,23 @@ void test_incremental_stream(const std::filesystem::path& root, const trtmc::Loa
                     "public_task_stream_wall_including_backpressure" &&
                 run.messages[2].at("result").at("model_call_ms").get<double>() >= 0,
             "terminal result carries scoped timing");
+
+    const auto invalid_history =
+        invoke(bundle, options,
+               {{{"id", "bad-history"}, {"op", "converse"}, {"messages", Json::array()}},
+                {{"id", "bad-role"},
+                 {"op", "converse"},
+                 {"messages", Json::array({{{"role", "tool"}, {"content", "unsupported"}}})}},
+                {{"id", "after-history-errors"}, {"op", "generate"}, {"prompt", "hello"}}});
+    require(invalid_history.status == 0 && invalid_history.messages.size() == 4,
+            "invalid conversation requests preserve the worker");
+    for (std::size_t index = 1; index < 3; ++index)
+        require(invalid_history.messages[index].at("ok") == false &&
+                    invalid_history.messages[index].at("error").at("type") ==
+                        "invalid_request_error",
+                "bad histories are recoverable request errors");
+    require(invalid_history.messages.back().at("result").at("text") == "sync",
+            "text generation remains usable after conversation errors");
 }
 void test_audio_task(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
     const auto bundle = write_bundle(root, "speech_transcription", "audio_fixture");
@@ -224,6 +262,82 @@ void test_audio_task(const std::filesystem::path& root, const trtmc::LoadOptions
                 result.at("audio_sample_rate") == 8000 &&
                 result.at("timing_scope") == "public_task_call_wall",
             "SDK defaults, declared Config, transcript and audio identity survive transport");
+}
+
+void test_optional_image_geometry(const std::filesystem::path& root,
+                                  const trtmc::LoadOptions& options) {
+    const auto png = root / "server-sdk-optional-geometry.png";
+    const Json request{{"id", "image"},
+                       {"op", "generate_image"},
+                       {"prompt", "hello"},
+                       {"output_path", png.string()}};
+    const auto check_image = [&](const Json* provenance) {
+        const auto run = invoke(write_bundle(root, "image_generation", "image_fixture", provenance),
+                                options, {request});
+        require(run.status == 0 && run.messages.size() == 2 &&
+                    run.messages[0]["capabilities"] == Json::array({"image_generation"}) &&
+                    run.messages[1]["result"]["width"] == 1 &&
+                    run.messages[1]["result"]["height"] == 1,
+                "optional core geometry preserves the image Task and its own dimensions");
+        const auto image = trtmc::cli::io::read_image(png.string());
+        require(image.width == 1 && image.height == 1 && image.pixels[0] == 64.0F / 255.0F,
+                "legacy image metadata still produces actual complete image pixels");
+    };
+    check_image(nullptr);
+    for (const auto& metadata : std::vector<Json>{
+             nullptr,
+             Json::array(),
+             Json::object(),
+             {{"build", nullptr}},
+             {{"build", Json::array()}},
+             {{"build", Json::object()}},
+             {{"build",
+               {{"video_num_frames", nullptr},
+                {"image_width", nullptr},
+                {"image_height", nullptr}}}},
+             {{"build", {{"video_num_frames", 1}, {"image_width", "family default"}}}}})
+        check_image(&metadata);
+    for (const auto& build :
+         std::vector<Json>{{{"video_num_frames", 0}},
+                           {{"video_num_frames", -1}},
+                           {{"video_num_frames", 1.5}},
+                           {{"video_num_frames", true}},
+                           {{"video_num_frames", "2"}},
+                           {{"video_num_frames", std::numeric_limits<std::uint64_t>::max()}},
+                           {{"video_num_frames", 3}},
+                           {{"video_num_frames", 3}, {"image_width", nullptr}, {"image_height", 4}},
+                           {{"video_num_frames", 3}, {"image_width", 8}, {"image_height", -1}},
+                           {{"video_num_frames", 3}, {"image_width", 8}, {"image_height", 4.5}},
+                           {{"video_num_frames", 2147483647},
+                            {"image_width", 2147483647},
+                            {"image_height", 2147483647}}}) {
+        const Json metadata{{"build", build}};
+        try {
+            invoke(write_bundle(root, "image_generation", "image_fixture", &metadata), options, {});
+            throw std::runtime_error("invalid explicit video geometry was accepted");
+        } catch (const std::invalid_argument& error) {
+            require(std::string(error.what()).find("built") != std::string::npos,
+                    "invalid video metadata fails before Task selection");
+        }
+    }
+    const Json video{{"build", {{"video_num_frames", 3}, {"image_width", 8}, {"image_height", 4}}}};
+    try {
+        invoke(write_bundle(root, "image_generation", "image_fixture", &video), options, {});
+        throw std::runtime_error("an SDK image binding was advertised as a video Task");
+    } catch (const std::invalid_argument& error) {
+        require(std::string(error.what()) == "SDK image binding cannot serve a video bundle",
+                "valid multi-frame metadata selects video before the SDK compatibility guard");
+    }
+    // A family whose SDK Tasks are video takes the existing runtime for an image_generation
+    // video bundle; this fixture then lacks the existing image interface the runtime needs.
+    try {
+        invoke(write_bundle(root, "image_generation", "video_fixture", &video), options, {});
+        throw std::runtime_error("a fixture without an image interface served a video bundle");
+    } catch (const std::invalid_argument& error) {
+        require(std::string(error.what()) == "bundle does not implement image generation",
+                "SDK video Tasks route an image_generation video bundle to the existing runtime");
+    }
+    std::filesystem::remove(png);
 }
 void test_audio_task_new_token_field(const std::filesystem::path& root,
                                      const trtmc::LoadOptions& options) {
@@ -274,7 +388,64 @@ void test_detection_task(const std::filesystem::path& root, const trtmc::LoadOpt
                 result.at("timing_scope") == "public_task_call_wall",
             "SDK defaults and complete native image detection results survive transport");
 }
+
+void test_vision_task(const std::filesystem::path& root, const trtmc::LoadOptions& options,
+                      const std::string& primary) {
+    const auto bundle = write_bundle(root, primary, "language_fixture");
+    const auto path = root / "server-sdk-vision.png";
+    std::vector<float> pixels(8 * 4 * 3, 0.0F);
+    pixels[0] = 1.0F;
+    trtmc::cli::io::save_png(path.string(), pixels, 8, 4);
+    const Json valid{{"id", "vision"},
+                     {"op", "generate_vision"},
+                     {"image_path", path.string()},
+                     {"prompt", "Question?"},
+                     {"config", {{"suffix", "tail"}}}};
+    auto invalid = valid;
+    invalid["config"]["unknown"] = 1;
+    const auto run = invoke(bundle, options, {invalid, valid});
+    std::filesystem::remove(path);
+    require(run.status == 0 && run.messages.size() == 3 &&
+                run.messages[0].at("capabilities") == Json::array({"vision_language_generation"}) &&
+                run.messages[1].at("error").at("type") == "invalid_request_error",
+            "SDK vision capability and family-declared Config are honored");
+    const auto& result = run.messages[2].at("result");
+    const auto text = result.at("text").get<std::string>();
+    require(text.find("I:1;") != std::string::npos &&
+                text.find("T:Question?;") != std::string::npos && text.size() >= 4 &&
+                text.compare(text.size() - 4, 4, "tail") == 0 && result.at("image_height") == 4 &&
+                result.at("image_width") == 8 && result.at("model_call_ms").get<double>() >= 0 &&
+                result.at("timing_scope") == "public_task_call_wall",
+            "actual public SDK Task receives image and question with its own Config");
+}
 } // namespace
+
+void test_image_edit_task(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
+    const auto bundle = write_bundle(root, "images_text_to_image_edit", "image_fixture");
+    const auto image = root / "reference.png", noise = root / "edit-noise.f32",
+               png = root / "edited.png";
+    trtmc::cli::io::save_png(image.string(), std::vector<float>{1, 0, 0}, 1, 1);
+    const float values[]{0.25F, 0, 0};
+    std::ofstream(noise, std::ios::binary)
+        .write(reinterpret_cast<const char*>(values), sizeof(values));
+    const auto run = invoke(bundle, options,
+                            {{{"id", "edit"},
+                              {"op", "edit_image"},
+                              {"prompt", "watercolor"},
+                              {"image_path", image.string()},
+                              {"output_path", png.string()},
+                              {"initial_latents_path", noise.string()},
+                              {"config", {{"level", 0.0}}}}});
+    require(run.status == 0 && run.messages.size() == 2 &&
+                run.messages[0]["capabilities"] == Json::array({"image_edit"}),
+            "the declared SDK edit Task is selected");
+    const auto result = run.messages[1].at("result");
+    const auto decoded = trtmc::cli::io::read_image(png.string());
+    require(decoded.width == 1 && decoded.height == 1 && decoded.pixels[0] == 64.0F / 255.0F &&
+                decoded.pixels[1] == 1 && decoded.pixels[2] == 1 && result["image_width"] == 1 &&
+                result["image_height"] == 1 && result["timing_scope"] == "public_task_call_wall",
+            "SDK edit consumes the image, explicit Config and actual replay noise");
+}
 
 int main(int argc, char** argv) {
     if (argc != 2)
@@ -288,8 +459,12 @@ int main(int argc, char** argv) {
         test_task_selection_and_failures(root, options);
         test_incremental_stream(root, options);
         test_audio_task(root, options);
+        test_optional_image_geometry(root, options);
         test_audio_task_new_token_field(root, options);
         test_detection_task(root, options);
+        test_vision_task(root, options, "images_text_to_text");
+        test_image_edit_task(root, options);
+        test_vision_task(root, options, "vision_language_generation");
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

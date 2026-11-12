@@ -64,6 +64,9 @@ EncoderPipeline::EncoderPipeline(std::unique_ptr<ITrtModule> encoder, std::strin
             "RoBERTa reranking requires a scoring head and is not supported");
     if (!encoder_ || !encoder_->ok())
         throw std::runtime_error("EncoderPipeline: invalid encoder module");
+    const auto shape = encoder_->tensor_shape("input_ids");
+    if (!encoder_->input_is_dynamic("input_ids") && shape.size() == 1 && shape[0] > 0)
+        sequence_capacity_ = static_cast<std::size_t>(shape[0]);
 }
 
 EmbeddingResult EncoderPipeline::embed(const std::string& text) {
@@ -107,6 +110,10 @@ EmbeddingResult EncoderPipeline::encode(const std::string& text) {
 
 EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_ids) {
     const auto n = input_ids.size();
+    if (sequence_capacity_ != 0 && n > sequence_capacity_)
+        throw std::invalid_argument("RoBERTa input has " + std::to_string(n) +
+                                    " tokens, exceeding engine capacity " +
+                                    std::to_string(sequence_capacity_));
     std::vector<int32_t> mask_i32(n, 1);
     std::vector<float> mask_f32(n, 1.0f);
 

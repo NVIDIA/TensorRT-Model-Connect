@@ -49,7 +49,34 @@ def test_current_catalog_keeps_every_matching_checkpoint():
     repo = Path(__file__).resolve().parents[3]
     entries = ManifestCatalog(repo / "families").entries()
     for group, tasks in GROUP_TASKS.items():
+        if group in {"images", "videos"}:
+            continue  # Legacy video bundles need the explicit geometry check below.
         expected = {(e.family, e.hf_id) for e in entries if e.model and e.model.task in tasks}
         actual = inventory(repo, group)
         assert {(row["family"], row["checkpoint"]) for row in actual} == expected
         assert len(actual) == len(expected)
+
+
+def test_image_inventory_covers_existing_checkpoints_and_excludes_legacy_video():
+    repo = Path(__file__).resolve().parents[3]
+    rows = inventory(repo, "images")
+    assert {row["profile"] for row in rows if row["profile"]} == {
+        "flux-2-dev", "flux-schnell", "pixart-sigma-1024", "qwen-image", "qwen-image-2512",
+        "stable-diffusion-v1-5", "z-image-turbo"}
+    assert all("Wan" not in row["checkpoint"] and "MiniMax" not in row["checkpoint"] for row in rows)
+
+
+def test_edit_inventory_requires_the_declared_reference_conditioned_task():
+    for task in ("image_edit", "images_text_to_image_edit"):
+        row, = group_inventory([entry("generator", task="image_generation"), entry("editor", task=task)], "image-edit")
+        assert row["profile"] == "editor" and row["variants"][0]["task"] == task
+
+
+def test_video_inventory_retains_three_full_models_and_two_partial_gaps():
+    repo = Path(__file__).resolve().parents[3]
+    rows = inventory(repo, "videos")
+    assert {r["profile"] for r in rows if r["profile"]} == {
+        "minimax-h3-768p", "wan21-t2v-1.3b", "wan22-ti2v-5b"}
+    assert {r["checkpoint"] for r in rows if r["profile"] is None} == {
+        "nvidia/Cosmos3-Nano", "Lightricks/LTX-Video"}
+    assert all(r["family"] not in {"sana_wm", "sam2"} for r in rows)

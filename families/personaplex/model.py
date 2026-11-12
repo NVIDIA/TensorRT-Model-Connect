@@ -64,6 +64,7 @@ from .utils import BuilderContextFactory, with_builder_context
 from . import graph_ops
 from .default_decoder import build_standard_decoder_engine
 from .parallel import ParallelConfig, normalize_parallel_config
+from .quantization import create_quant_context
 
 if TYPE_CHECKING:
     from tensorrt_model_connect.build import BuildRequest
@@ -202,6 +203,8 @@ class _PersonaPlexModel:
         self,
         model_dir: str,
         config: ModelConfig,
+        *,
+        quantization: str | None = None,
     ) -> WeightDict:
         """Load PersonaPlex / Moshi weights from safetensors.
 
@@ -210,6 +213,10 @@ class _PersonaPlexModel:
           - temporal.*  (Temporal Transformer, standard decoder format)
           - depth.*     (Depth Transformer, per-codebook structure)
           - Various embedding and projection weights
+
+        With ``quantization="fp8"`` the temporal projections are quantized while they
+        are read and the dense weights are replaced by shape-only placeholders; the
+        FP8 context is returned under ``weights["_quant_ctx"]``.
         """
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -218,11 +225,15 @@ class _PersonaPlexModel:
         inferred = _infer_config_from_weights(readers)
 
         weights = WeightDict()
+        quant_ctx = None
+        if quantization not in (None, "none"):
+            quant_ctx = create_quant_context(readers, inferred, graph_ops, quantization)
+            weights["_quant_ctx"] = quant_ctx
 
         # ---------------------------------------------------------------
         # Temporal Transformer weights (standard decoder format)
         # ---------------------------------------------------------------
-        _load_temporal_weights(weights, readers, inferred)
+        _load_temporal_weights(weights, readers, inferred, quant_ctx)
 
         # ---------------------------------------------------------------
         # Depth Transformer weights (stored as-is for custom engine)
@@ -267,6 +278,8 @@ class _PersonaPlexModel:
         num_heads = weights["_num_attention_heads"]
         head_dim = weights["_head_dim"]
         intermediate_size = weights["_intermediate_size"]
+        if quant_ctx is None:
+            quant_ctx = weights.get("_quant_ctx")
         selected_fp32 = {int(index) for index in config.raw.get("_fp32_layers", ())}
         valid_fp32 = set(range(_TEMPORAL_LAYER_SELECTOR_BASE + num_layers))
         invalid_fp32 = sorted(selected_fp32 - valid_fp32)
@@ -383,7 +396,11 @@ class _PersonaPlexModel:
         # the official Mimi codec numerics in FP32, so an FP16 model build must
         # not accidentally request an unsupported encoder engine.
         mimi_encoder_precision = "fp32"
-        mimi_decoder_precision = _component_precision(config, _MIMI_DECODER_COMPONENT, precision)
+        # The official pipeline also decodes with the FP32 Mimi codec
+        # (loaders.get_mimi), whatever the language model's precision. An FP16
+        # decoder changes the waveform enough to fail the reference's spectral
+        # parity, so the decoder follows the codec, not the bundle precision.
+        mimi_decoder_precision = "fp32"
         mimi_frame_capacity = _mimi_frame_capacity(max_cache_length)
 
         # --- Per-codebook Depth Transformer engines ---
@@ -415,10 +432,10 @@ class _PersonaPlexModel:
         for cb in range(num_codebooks):
             cb_prefix = f"depth_cb{cb}."
             depth_weights = WeightDict()
-            for key, val in weights.items():
-                if key.startswith(cb_prefix):
-                    new_key = key[len(cb_prefix) :]
-                    depth_weights[new_key] = val
+            # Pop rather than copy: this codebook's slice is not read again
+            # by a later iteration or by the embedding/Mimi sections below.
+            for key in [name for name in weights if name.startswith(cb_prefix)]:
+                depth_weights[key[len(cb_prefix) :]] = weights.pop(key)
 
             if verbose:
                 print(
@@ -568,6 +585,7 @@ def _load_temporal_weights(
     weights: WeightDict,
     readers,
     inferred: dict,
+    quant_ctx=None,
 ) -> None:
     """Load temporal transformer weights in standard decoder format.
 
@@ -593,6 +611,14 @@ def _load_temporal_weights(
 
     attention_size = hidden  # Q,K,V are all hidden-dim
 
+    def _projection(stem: str, layer: int, raw: np.ndarray, label: str) -> np.ndarray:
+        """One projection as [in, out]; FP8-quantized ones keep a shape-only placeholder."""
+        name = f"layer.{layer}.{stem}"
+        if quant_ctx is not None and quant_ctx.should_quantize(name):
+            in_features, out_features = quant_ctx.add_weight(name, raw)
+            return np.broadcast_to(np.zeros((), dtype=np.float32), (in_features, out_features))
+        return _transpose_2d(raw, label)
+
     for i in range(num_layers):
         hf_prefix = f"transformer.layers.{i}"
         out_prefix = f"temporal.layer.{i}"
@@ -613,13 +639,13 @@ def _load_temporal_weights(
         v_raw = in_proj[2 * hidden :, :]  # [hidden, hidden]
 
         # Transpose [out, in] -> [in, out] for TRT matmul
-        weights[f"{out_prefix}.w_q"] = _transpose_2d(q_raw, "q_proj")
-        weights[f"{out_prefix}.w_k"] = _transpose_2d(k_raw, "k_proj")
-        weights[f"{out_prefix}.w_v"] = _transpose_2d(v_raw, "v_proj")
+        weights[f"{out_prefix}.w_q"] = _projection("w_q", i, q_raw, "q_proj")
+        weights[f"{out_prefix}.w_k"] = _projection("w_k", i, k_raw, "k_proj")
+        weights[f"{out_prefix}.w_v"] = _projection("w_v", i, v_raw, "v_proj")
 
         # --- Output projection ---
         out_proj = _load_tensor(readers, f"{hf_prefix}.self_attn.out_proj.weight")
-        weights[f"{out_prefix}.w_o"] = _transpose_2d(out_proj, "o_proj")
+        weights[f"{out_prefix}.w_o"] = _projection("w_o", i, out_proj, "o_proj")
 
         # --- MLP: split fused gating.linear_in [2*intermediate, hidden] -> gate, up ---
         gating_in = _load_tensor(readers, f"{hf_prefix}.gating.linear_in.weight")
@@ -627,12 +653,12 @@ def _load_temporal_weights(
         gate_raw = gating_in[:intermediate_size, :]  # [intermediate, hidden]
         up_raw = gating_in[intermediate_size:, :]  # [intermediate, hidden]
 
-        weights[f"{out_prefix}.w_gate"] = _transpose_2d(gate_raw, "gate_proj")
-        weights[f"{out_prefix}.w_up"] = _transpose_2d(up_raw, "up_proj")
+        weights[f"{out_prefix}.w_gate"] = _projection("w_gate", i, gate_raw, "gate_proj")
+        weights[f"{out_prefix}.w_up"] = _projection("w_up", i, up_raw, "up_proj")
 
         # --- Down projection: gating.linear_out [hidden, intermediate] ---
         gating_out = _load_tensor(readers, f"{hf_prefix}.gating.linear_out.weight")
-        weights[f"{out_prefix}.w_down"] = _transpose_2d(gating_out, "down_proj")
+        weights[f"{out_prefix}.w_down"] = _projection("w_down", i, gating_out, "down_proj")
 
     # --- Final norm (out_norm.alpha) ---
     out_norm = _load_tensor(readers, "out_norm.alpha")
@@ -1404,8 +1430,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.task != "speech_to_speech":
         raise ValueError("personaplex supports only task=speech_to_speech")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("PersonaPlex does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"PersonaPlex does not support quantization={request.quantization!r}"
+        )
+    quantized = request.quantization == "fp8"
+    if quantized and request.precision != "fp16":
+        raise NotImplementedError("PersonaPlex fp8 quantization requires precision fp16")
+    if quantized and (request.fp32_layers or int(request.tensor_parallel_size) != 1):
+        raise NotImplementedError(
+            "PersonaPlex fp8 quantization does not support fp32_layers or tensor parallelism"
+        )
 
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
@@ -1415,10 +1450,27 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     parallel = ParallelConfig(tp_size=int(request.tensor_parallel_size))
     parallel.validate()
     max_length = int(request.max_sequence_length or 512)
+    max_length = max(max_length, int(config.raw.get("personaplex_benchmark_capacity", 0)))
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_fp32_layers"] = tuple(request.fp32_layers)
     model = _PersonaPlexModel()
-    weights = model.load_weights(str(model_dir), config)
+    weights = model.load_weights(
+        str(model_dir), config, quantization=request.quantization if quantized else None
+    )
+
+    system_prompt = None
+    if prompt_path := config.raw.get("personaplex_system_prompt"):
+        from .system_prompt import load
+
+        prompt_file = Path(prompt_path)
+        if not prompt_file.is_absolute():
+            prompt_file = model_dir / prompt_file
+        system_prompt = load(
+            prompt_file,
+            _component_precision(config, _TEMPORAL_COMPONENT, request.precision),
+            int(weights["_hidden_size"]),
+            max_length,
+        )
 
     writer.set_header(family="personaplex", task=request.task, backend=request.backend)
     if parallel.enabled:
@@ -1446,6 +1498,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 parallel_config=parallel,
             ),
         )
+
+    # The temporal decoder engine(s) are built. build_extra_engines never
+    # reads a "temporal."-prefixed key, so drop them now instead of holding
+    # the largest weight slice resident through the depth/Mimi builds too.
+    for key in [name for name in weights if name.startswith("temporal.")]:
+        del weights[key]
 
     extras = model.build_extra_engines(
         config,
@@ -1492,4 +1550,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         "delays": [0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1],
         "text_prompt_ids": [],
     }
+    if system_prompt is not None:
+        runtime["system_prompt"], embeddings = system_prompt
+        runtime["listen_before_answer"] = bool(
+            config.raw.get("personaplex_listen_before_answer", False)
+        )
+        writer.add_bytes("system_prompt.embeddings", embeddings)
     writer.add_json("runtime.json", runtime)

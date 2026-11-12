@@ -47,7 +47,8 @@ class GlmAsrPipeline final : public ITranscription {
     GlmAsrPipeline(std::unique_ptr<ITrtModule> encoder, std::unique_ptr<ITrtModule> decoder,
                    std::unique_ptr<GlmAsrInferenceState> state, GlmAsrConfig config,
                    MelFilterbank mel_filterbank, cudaStream_t stream,
-                   std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "");
+                   std::shared_ptr<ITokenizer> tokenizer = nullptr, std::string model_id_str = "",
+                   std::unique_ptr<ITrtModule> prefill = nullptr);
 
     ~GlmAsrPipeline() override;
 
@@ -70,6 +71,11 @@ class GlmAsrPipeline final : public ITranscription {
     // audio_embed is one projected frame for an audio placeholder position,
     // or nullptr for an ordinary text token.
     int32_t run_decode_step(int32_t token_id, const float* audio_embed = nullptr);
+    // Prefill the whole prompt (tokens and audio frames) in one launch of the
+    // prefill context and return the first generated token.
+    int32_t run_prefill(const std::vector<int32_t>& input_ids,
+                        const std::vector<float>& audio_embeds, int32_t audio_offset,
+                        int32_t num_audio_embeddings);
     std::vector<int32_t> run_decoder(const std::vector<int32_t>& input_ids,
                                      const std::vector<float>& audio_embeds, int32_t audio_offset,
                                      int32_t num_audio_embeddings, int32_t max_new_tokens);
@@ -83,6 +89,9 @@ class GlmAsrPipeline final : public ITranscription {
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
     GlmAsrRunStats stats_;
+    // Prefill engine of split bundles: the whole prompt in one launch.
+    std::unique_ptr<ITrtModule> prefill_;
+    int32_t prefill_rows_{0};
 };
 
 } // namespace trtmc

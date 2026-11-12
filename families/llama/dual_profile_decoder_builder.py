@@ -20,9 +20,9 @@ Scope: covers the same architectural variants the explicit
 ``standard_decoder_builder`` supports — RMSNorm or LayerNorm; SwiGLU or
 GeluFC MLP; RoPE (full / partial / interleaved), learned absolute, or
 ALiBi position; sequential or parallel residual; optional q/k_norm,
-QKV/output/MLP biases, and a Bloom-style embedding LayerNorm. Quantized
-builds (fp8 / int8 ``quant_ctx``) thread Q/DQ insertion through every
-projection matmul via ``QuantContext.maybe_quantized_matmul``. Per-layer
+QKV/output/MLP biases, and a Bloom-style embedding LayerNorm. Prepared
+ModelOpt FP8/NVFP4 projections retain source packed weights and calibrated
+scales through family-owned ``PreparedLinear`` TensorRT Q/DQ graphs. Per-layer
 debug outputs, hidden-state outputs, and the VL ``embed_input`` path stay
 on ``standard_decoder_builder`` for now and are dispatched there from
 inside ``build_standard_decoder_engine``.
@@ -62,6 +62,10 @@ if TYPE_CHECKING:
     from .config import ModelConfig
     from .checkpoint_mapper import WeightDict
 
+# Tactic-selection point for the native-KV active key-row count (typical chat
+# and benchmark contexts); any count from 1 to the cache capacity is valid.
+NATIVE_KV_ACTIVE_KEY_ROWS_OPTIMUM = 256
+
 
 def _const_in_work_dtype(
     network: trt.INetworkDefinition,
@@ -89,11 +93,15 @@ def _const_in_work_dtype(
 def _make_matmul_fn(
     network: trt.INetworkDefinition,
     dtype: np.dtype,
+    quant_ctx=None,
 ):
     """Create the Llama projection matmul callable."""
 
     def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
-        del weight_name
+        if quant_ctx is not None:
+            return quant_ctx.maybe_quantized_matmul(
+                network, lhs, lhs_w, rhs_w, rhs_weights, weight_name, dtype=dtype
+            )
         return graph_ops.add_matmul_rhs_constant(
             network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype
         )
@@ -212,6 +220,7 @@ def build_dual_profile_decoder_engine(
     profile_mode: str = "dual_profile",
     native_kv_cache: bool = False,
     runtime_sized_kv_cache: bool = False,
+    quant_ctx=None,
 ) -> bytes:
     """Build a prefill/decode-capable dynamic-Sq decoder engine.
 
@@ -240,6 +249,8 @@ def build_dual_profile_decoder_engine(
     from one row through the bundle capacity.
     """
     _supports_config(config, weights)
+    if quant_ctx is not None and native_kv_cache:
+        raise NotImplementedError("native Llama KV cache does not support quantized builds")
     if profile_mode not in ("dual_profile", "prefill", "decode"):
         raise ValueError(
             f"profile_mode must be 'dual_profile', 'prefill', or 'decode', got {profile_mode!r}"
@@ -288,7 +299,14 @@ def build_dual_profile_decoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
-    trt_config.builder_optimization_level = 1
+    trt_config.builder_optimization_level = (
+        1 if quant_ctx is None else quant_ctx.builder_optimization_level
+    )
+    if quant_ctx is not None and quant_ctx.disable_dual_gemm_fusion:
+        trt_config.build_route = "-peep:match_dual_gemm=off"
+    if quant_ctx is not None:
+        # Keep per-layer tactic details so the plan inspector shows the quantized GEMM kernels.
+        trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
     # Native full-context Llama builds can require substantial tactic workspace
     # while TensorRT compiles the primitive attention graph. This is build-time
     # scratch only (it is not serialized as runtime KV memory), and the limit
@@ -310,9 +328,12 @@ def build_dual_profile_decoder_engine(
     attention_mask: trt.ITensor | None = None
     cache_write_indices: trt.ITensor | None = None
     key_value_lengths: trt.ITensor | None = None
+    key_positions: trt.ITensor | None = None
     if native_kv_cache:
         cache_write_indices = network.add_input("cache_write_indices", trt.int32, (1,))
         key_value_lengths = network.add_input("key_value_lengths", trt.int32, (1,))
+        # 0..R-1 for the cache rows attention reads; R is bucketed by the runtime.
+        key_positions = network.add_input("key_positions", trt.int32, (-1,))
     else:
         attention_mask = network.add_input("attention_mask", trt.float32, (-1, -1))
 
@@ -347,6 +368,13 @@ def build_dual_profile_decoder_engine(
         opt_cache_rows = max_cache_length
         prof.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
         prof.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
+        if native_kv_cache:
+            prof.set_shape(
+                "key_positions",
+                (1,),
+                (min(NATIVE_KV_ACTIVE_KEY_ROWS_OPTIMUM, max_cache_length),),
+                (max_cache_length,),
+            )
         if not native_kv_cache:
             prof.set_shape(
                 "attention_mask",
@@ -468,7 +496,7 @@ def build_dual_profile_decoder_engine(
     # Attention scale.
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
 
-    matmul = _make_matmul_fn(network, work_np_dtype)
+    matmul = _make_matmul_fn(network, work_np_dtype, quant_ctx)
 
     # ---- Embedding -------------------------------------------------------
     emb = network.add_gather(embedding_table, token_id, 0)
@@ -531,6 +559,7 @@ def build_dual_profile_decoder_engine(
             cache_write_indices,
             key_value_lengths,
             max_cache_length,
+            key_positions=key_positions,
         )
 
     present_k_outs: list[trt.ITensor] = []
@@ -621,6 +650,11 @@ def build_dual_profile_decoder_engine(
                 sequence_length=None,
             )
 
+        from .prepared_quantization import quantize_cache_value
+        if f"{prefix}.kv_k_scale" in weights:
+            k = quantize_cache_value(network, k, weights[f"{prefix}.kv_k_scale"])
+            v = quantize_cache_value(network, v, weights[f"{prefix}.kv_v_scale"])
+
         if native_kv_cache:
             assert cache_write_indices is not None
             assert native_attention_masks is not None
@@ -633,6 +667,7 @@ def build_dual_profile_decoder_engine(
                 cache_v_inputs[layer_idx],
                 cache_write_indices,
                 native_attention_masks,
+                key_positions=key_positions,
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,

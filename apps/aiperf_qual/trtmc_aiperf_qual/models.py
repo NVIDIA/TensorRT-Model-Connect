@@ -8,7 +8,8 @@ accuracy comes from the Task's gold-labelled benchmarks (``absolute``) and whole
 (``supplementary``); a model with neither declares ``accuracy_source: none`` (Perf only). The native
 reference is the generic Hugging Face adapter of the operation. Family-owned exceptions live in
 families/<family>/tests/aiperf/<profile>.yaml. Legacy config/models/<profile>.yaml remains supported;
-the family's definition is merged last.
+the family's definition is merged last. A quantized profile is qualified as its model's highest-precision
+configuration (``qualified_as``): the same benchmarks, requests and native reference, its own candidate.
 """
 
 from __future__ import annotations
@@ -32,6 +33,9 @@ HF_OPERATIONS = {"generate", "translate", "encode", "embed", "rerank", "classify
 # masks): only a family's own native adapter (``reference.adapter``) serves them.
 NO_GENERIC_TASKS = {"world_model_generation", "text_prompted_segmentation"}
 PRECISIONS = ("fp16", "bf16", "fp32")
+# A configuration's numeric precision (its quantization, else its precision): a quantized checkpoint ranks below
+# every unquantized one, and bf16, the usual checkpoint dtype, above fp16.
+PRECISION_RANK = {"int4": 1, "nvfp4": 1, "int8": 2, "fp8": 2, "fp16": 3, "bf16": 4, "fp32": 5}
 # Checkpoints above this size (bytes) measure fewer requests per run: native references of large models
 # take seconds per request, and three runs still give the confidence interval.
 LARGE_CHECKPOINT_BYTES = 16 * 2**30
@@ -135,6 +139,55 @@ def _absolute(names: list[Any], definitions: Mapping[str, Any], testcase: Mappin
     return items
 
 
+def _definition(path: Path) -> Any:
+    """A definition file's YAML. One that cannot be read or parsed is a ConfigError: an error of its profile alone,
+    which the catalog listing (``selection.catalog``) and a campaign's other profiles survive."""
+    try:
+        return yaml.safe_load(path.read_text())
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as error:
+        raise ConfigError(f"{path}: {error}") from error
+
+
+def profile_override(profile: str, family: str, repository: Path, root: Path = CONFIG_ROOT) -> dict[str, Any]:
+    """A profile's own configuration: legacy config/models/<profile>.yaml, then the family's definition."""
+    override_path = root / "models" / f"{profile}.yaml"
+    override = configuration((_definition(override_path) if override_path.is_file() else None) or {})
+    family_path = repository / "families" / family / "tests" / "aiperf" / f"{profile}.yaml"
+    if family_path.is_file():
+        owned = _definition(family_path)
+        if not isinstance(owned, dict):
+            raise ConfigError(f"{family_path} must contain a mapping")
+        override = deep_merge(override, configuration(owned))
+    return override
+
+
+def _catalog_manifest(entry: Any) -> dict[str, Any]:
+    return json.loads(Path(entry.model.manifest_path).read_text())
+
+
+def qualified_as(profile: str, entries: Mapping[str, Any]) -> str:
+    """The configuration a quantized profile is qualified as: its model's ready profile of the highest precision
+    (``PRECISION_RANK``; the same family and Task, and the same name apart from precision and quantization,
+    so qwen35-9b for qwen35-9b-nvfp4), else the profile itself (not quantized, or nothing ranks higher)."""
+    def stem(name: str) -> str:
+        return "-".join(part for part in name.split("-") if part not in PRECISION_RANK)
+
+    def rank(manifest: Mapping[str, Any]) -> int:
+        return PRECISION_RANK.get(manifest.get("quantization") or manifest.get("precision"), 0)
+
+    own, manifest = entries[profile].model, _catalog_manifest(entries[profile])
+    if not manifest.get("quantization"):
+        return profile
+    best, best_rank = profile, rank(manifest)
+    for name, entry in sorted(entries.items()):
+        if name == profile or (entry.model.family, entry.model.task, stem(name)) != (own.family, own.task, stem(profile)):
+            continue
+        candidate = rank(_catalog_manifest(entry))
+        if candidate > best_rank:
+            best, best_rank = name, candidate
+    return best
+
+
 def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_ROOT) -> dict[str, Any]:
     repository = environment.path("repo")
     entries = {entry.name: entry for entry in catalog_profiles(repository)}
@@ -148,14 +201,12 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     tasks = yaml.safe_load((root / "tasks.yaml").read_text())
     if catalog_model.task not in tasks["tasks"]:
         raise ConfigError(f"no Task defaults for {catalog_model.task!r} ({profile})")
-    override_path = root / "models" / f"{profile}.yaml"
-    override = configuration((yaml.safe_load(override_path.read_text()) if override_path.is_file() else None) or {})
-    family_path = repository / "families" / catalog_model.family / "tests" / "aiperf" / f"{profile}.yaml"
-    if family_path.is_file():
-        owned = yaml.safe_load(family_path.read_text())
-        if not isinstance(owned, dict):
-            raise ConfigError(f"{family_path} must contain a mapping")
-        override = deep_merge(override, configuration(owned))
+    override = profile_override(profile, catalog_model.family, repository, root)
+    base = qualified_as(profile, entries)
+    if base != profile:  # the base's configuration under the profile's own; the candidate stays the profile's
+        inherited = profile_override(base, catalog_model.family, repository, root)
+        inherited.pop("candidate", None)
+        override = deep_merge(inherited, override)
     config = deep_merge(deep_merge(configuration(tasks["defaults"]),
                         configuration(tasks["tasks"][catalog_model.task])), override)
     candidate = dict(config.get("candidate", {}))
@@ -169,7 +220,13 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         # ``not_covered``: a native pipeline the harness cannot run yet (the reason is reported): not-covered.
         backend = ("unsupported" if reference.get("not_covered") else
                    "reference" if reference.get("adapter") else _reference_backend(operation, catalog_model.task))
-    trust_remote_code = bool(manifest.get("trust_remote_code", False) or reference.pop("trust_remote_code", False))
+    native_manifest = manifest
+    if base != profile:
+        native_manifest = _catalog_manifest(entries[base])
+        if entries[base].model.hf_id != catalog_model.hf_id and not reference.get("model"):
+            # A pre-quantized checkpoint (an -FP8 or -NVFP4 repository): the native reference loads the base's.
+            reference.update(model=entries[base].model.hf_id, revision=entries[base].model.hf_revision or None)
+    trust_remote_code = bool(native_manifest.get("trust_remote_code", False) or reference.pop("trust_remote_code", False))
     candidate_precision = catalog_model.precision
     # One immutable checkpoint for the bundle and the native reference: the catalog pin, else
     # config/models' (the build then uses it too); without either both sides load the cached snapshot.
@@ -181,13 +238,17 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         build.setdefault("name", f"{profile}-qual")
 
     definitions = deep_merge(tasks.get("benchmarks", {}), config.get("benchmarks", {}))
-    absolute = _absolute(list(config.get("absolute") or []), definitions,
-                         (manifest.get("testcases") or [{}])[0], bool(quantization))
+    # A quantized profile answers the benchmarks on its base's route (chat or completions), as the base does; the
+    # sampling stays its own catalog request's, the request its server starts from.
+    testcase = {**(manifest.get("testcases") or [{}])[0],
+                "use_chat_template": (native_manifest.get("testcases") or [{}])[0].get("use_chat_template")}
+    absolute = _absolute(list(config.get("absolute") or []), definitions, testcase, bool(quantization))
     for item in absolute:  # gold suites: the suite definition, with the benchmark's request settings
         if item.get("metric"):
             suite = _suite(item["suite_definition"], profile, config.get("request"))
-            if item.get("request"):
-                suite = {**suite, "request": {**suite.get("request", {}), **item.pop("request")}}
+            if item.get("request"):  # a null removes the suite's field (a Task that declares no such config)
+                request = {**suite.get("request", {}), **item.pop("request")}
+                suite = {**suite, "request": {key: value for key, value in request.items() if value is not None}}
             item["suite_definition"] = suite
     supplementary = [dict(item) for item in config.get("supplementary", [])]
     if config.get("accuracy_source") not in (None, "none"):
@@ -202,6 +263,8 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         accuracy_source = "missing"
 
     policy = dict(config["performance"])
+    # The fixed request is timed in the native mode the quality runs use, unless the profile names its own.
+    policy.setdefault("reference_modes", [reference.get("mode", "eager")])
     if isinstance(policy["suite"], Mapping) and policy["suite"].get("from_benchmark"):
         # The first problem of one of the model's benchmarks (a catalog testcase that is no workload,
         # for example a 28-value time series against a 512-step model).
@@ -211,7 +274,9 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
             raise ConfigError(f"{profile}: performance.suite.from_benchmark {name!r} is not one of its gold suites")
         policy["suite"] = {**source["suite_definition"], "suite": f"{profile}-{name}-first", "selection": {"method": "first", "count": 1}}
     policy["suite"] = _suite(policy["suite"], profile, config.get("request"))
-    size = checkpoint_bytes(catalog_model.hf_id, revision)
+    reference_model = reference.pop("model", None)
+    reference_revision = reference.pop("revision", None) or (None if reference_model else revision)
+    size = checkpoint_bytes(reference_model or catalog_model.hf_id, reference_revision)  # the native's checkpoint
     task_measurement = deep_merge(configuration(tasks["defaults"]),
                                   configuration(tasks["tasks"][catalog_model.task]))["performance"]["measurement"]
     if size and size > LARGE_CHECKPOINT_BYTES and task_measurement["requests"] > LARGE_MODEL_MEASUREMENT["requests"]:
@@ -220,10 +285,9 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         policy["measurement"] = deep_merge(LARGE_MODEL_MEASUREMENT, stated)
         policy["measurement_reason"] = f"checkpoint {size / 2**30:.0f} GiB > {LARGE_CHECKPOINT_BYTES / 2**30:.0f} GiB"
     bundle = f"{build.get('name', profile)}/{build.get('bundle', catalog_model.bundle_name)}"
-    reference_model = reference.pop("model", None)
-    reference_revision = reference.pop("revision", None) or (None if reference_model else revision)
     return {
         "model": profile, "catalog_profile": profile, "operation": operation, "family": catalog_model.family,
+        **({"qualified_as": base} if base != profile else {}),
         **({"catalog_request": dict(config["request"])} if config.get("request") else {}),
         "task": catalog_model.task,
         "candidate": {"bundle": bundle, "precision": candidate_precision, "build": build,

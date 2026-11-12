@@ -1,0 +1,19 @@
+{
+  "name": "albert-base-token-features",
+  "hf_id": "albert/albert-base-v2",
+  "hf_revision": "8e2f239c5f8a2c0f253781ca60135db913e5c80c",
+  "bundle": "albert-base-token-features.bundle",
+  "family": "albert",
+  "task": "text_to_token_features",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "albert-base-token-features",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is Paris."
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 256
+}

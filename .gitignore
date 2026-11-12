@@ -125,10 +125,15 @@ engines
 *.png
 !website/static/img/readme/*.png
 !website/static/img/blog/ai-native-by-design/*.png
+!families/vit/tests/data/test_img.png
+!families/dinov2/tests/data/test_img.png
+!families/siglip/tests/data/test_img.png
 *.wav
 *.bundle
 *.ttrtb
 results.json
 !**/Recording.wav
 !families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav
+!families/wav2vec2/tests/data/speech_16k_mono.wav
+!families/ast/tests/data/speech_16k_mono.wav
 worktrees/

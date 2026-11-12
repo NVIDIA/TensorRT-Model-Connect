@@ -36,9 +36,48 @@ engine is substituted. ONNX projection weights are baked into plans and are not
 duplicated in the bundle. Successfully consumed ONNX intermediates are removed.
 
 Ordinary preparation failure warns, retains a diagnostic log and attempts the
-unchanged native request once. Native fallback rejects packed checkpoints it
-cannot interpret. Paired native fallback is unavailable and fails explicitly.
-Cancellation, publication and runtime errors propagate without retry.
+unchanged native request once. The native path consumes prepared ModelOpt FP8,
+NVFP4 and mixed FP8/NVFP4 or FP8/W4A16-NVFP4 projections through family-owned
+TensorRT Q/DQ.
+It preserves source scales and keeps weight-only activations unquantized. Native
+projection accumulation follows the same FP32 boundary as the original dense
+graph. It does not export ONNX or calibrate a replacement checkpoint.
+
+Use `--precision fp16 --quantization fp8` or `--quantization nvfp4` to require a
+matching prepared source. Omitting the quantization option still preserves an
+already prepared checkpoint. These are family-owned arguments; the shared CLI
+and builder contracts are unchanged.
+
+Native MoE graphs include sigmoid/grouped top-k routing, correction bias,
+non-gated routed/shared experts, and optional latent projections. Operator checks
+are not full-model qualification. Exported attention scale tensors enable native
+E4M3 KV storage: the family owns checkpoint scale loading, TensorRT Q/DQ and cache
+allocation; the shared runtime only provides the generic one-byte dtype mapping.
+The recurrent graph uses single-token attention for both prompt and generation.
+It keeps Q in compute precision and quantizes K/V with source scales, matching
+the Edge decode path rather than its quantized block-prefill kernel.
+
+Native paired preparation preserves the complete DFlash or DSpark request when
+Edge is absent, unmapped or fails preparation. It builds a target feature-output
+plan, the actual prepared draft, and (for DSpark) its Markov correction head.
+The native C++ runtime reconstructs draft context from accepted target features,
+then verifies proposals sequentially before advancing recurrent state. Rejected
+tokens never enter Mamba state. This is a correctness fallback, not a claim of
+speculative speedup. DFlash and DDTree are greedy-only; DSpark chain retains
+filtered sampling with rejection correction and a request-local seed.
+
+The native DDTree uses top-four depth candidates from Markov-corrected greedy
+chain logits, matching the pinned source, with a sixteen-node verification
+budget. Proposal siblings do not silently recompute a different Markov policy.
+The target's actual untied LM head and companion-owned embeddings are retained.
+
+The exact native DFlash and greedy DDTree profiles below pass full-checkpoint
+checks, including token-identical output to the same native target. DSpark chain
+runs but retains a long-response accuracy failure. A stricter synthetic draft-logit
+comparison remains under investigation; it is not silently waived by those
+end-to-end results. Prepared/MoE tensor parallelism is not implemented; Edge
+admission here remains TP1. Cancellation, publication and runtime errors propagate
+without retry.
 
 ## Request and runtime contracts
 
@@ -62,10 +101,54 @@ submitted counts, total capacity and generation completion are checked.
 The runtime is persistent and serialized, with scoped plugin, stream and artifact
 ownership. Supported ordinary sampling controls are forwarded; unmapped controls
 are rejected. The current DFlash adapter uses block16/verify16 and remains
-greedy-only; stochastic paired execution is not qualified. Runtime errors are not converted to native
-inference.
+greedy-only, as does DSpark DDTree. DSpark chain forwards filtered sampling.
+Exact native paired outcomes are listed below. Runtime errors are not converted
+to native inference.
+
+## Exact native fallback results
+
+These results use family-owned TensorRT graphs and the MC C++ runtime, with
+FP16 compute, declared source quantization, TP1/batch1 and capacity 256. They do
+not qualify other capacities, platforms or speculative sampling modes. Short
+checks use the retained matching independent HF oracle and unchanged NED <=0.15;
+long checks retain the existing ROUGE-1 >=0.25 / ROUGE-L >=0.20 gates.
+
+| Checkpoint / execution | Tested SM | Short NED | Long ROUGE-1 / ROUGE-L | Outcome |
+| --- | --- | --- | --- | --- |
+| 4B BF16, ordinary | 86 | 0.0 | 0.596685 / 0.364641 | Pass |
+| 4B FP8, ordinary | 120 | 0.0 | 0.551724 / 0.310345 | Pass |
+| 9B v2 BF16, ordinary | 86 | 0.0 | 0.540230 / 0.321839 | Pass |
+| 9B v2 FP8, ordinary | 89 | 0.0 | 0.435294 / 0.282353 | Pass |
+| 9B v2 NVFP4, ordinary | 120 | 0.0 | 0.520231 / 0.335260 | Pass |
+| Nano30B NVFP4, ordinary | 120 | 0.0 | 0.285714 / 0.165414 | Accuracy failure; runnable |
+| Lightning NVFP4, ordinary stochastic | 120 | 0.0 | 0.100000 / 0.060000 | Accuracy failure; runnable |
+| Lightning + DFlash, greedy | 120 | 0.0 | 0.472727 / 0.278788 | Pass |
+| Lightning + DSpark chain, stochastic | 120 | 0.0 | 0.079208 / 0.059406 | Accuracy failure; runnable |
+| Lightning + DSpark DDTree, greedy | 120 | 0.0 | 0.472727 / 0.278788 | Pass |
+
+The paired checks reuse real native target-feature, companion and Markov plans
+in a private validation container; they do not substitute a target-only runtime
+for speculative execution. DFlash and DDTree match the same feature-output target
+on both short and 128-token greedy requests. Their long runs record 61 rounds /
+915 proposed / 67 accepted and 39 rounds / 585 proposed / 88 accepted, respectively.
+DSpark chain records real proposals and exact short greedy parity, but its long
+stochastic quality failure remains open. These are not speculative-speedup claims.
+No failed quality mode is blacklisted or silently downgraded.
+
+Super120B native checkpoint qualification is blocked by a TensorRT 11.1 compiler
+crash on the tested native ARM configuration: the default 8 MiB CPU stack is
+exhausted inside the compiler. A 64 MiB-stack diagnostic was stopped after more
+than 14 hours without an engine; that intervention is not proof of a compiler
+hang, a GPU-memory failure, or an Edge-LLM failure. No native inference result
+is claimed for this checkpoint. Native ARM C++ runtime contract tests passing
+on SM103 do not qualify it. The tested-SM column records evidence, not native
+family admission restrictions.
 
 ## Documented Edge 0.11.0 scope and results
+
+The following results exercise the Edge-backed adapter, not the pure TensorRT
+native fallback. Native qualification is tracked separately; the presence of a
+source format or graph path is not a catalog-wide native support claim.
 
 This scope follows the pinned public [supported-model catalog](https://github.com/NVIDIA/TensorRT-Edge-LLM/blob/95515c2f87fba8982db5a519f9022277667b3cc9/docs/source/user_guide/getting_started/supported-models.md):
 eight standalone Nemotron-H checkpoints and the listed Lightning DFlash,
@@ -76,9 +159,9 @@ Nemotron Omni and ASR use distinct interfaces and are not this language family.
 - **Nine passing profiles:** the table below.
 - **Nano30B NVFP4:** build and inference work, but the unchanged output-128
   accuracy gate fails. The adapter remains available.
-- **Super120B NVFP4:** not executed because compatible single-device capacity
-  was insufficient; there is no qualified family tensor-parallel route.
-  This is a resource limitation, not an observed Edge command failure.
+- **Super120B NVFP4:** not executed in the recorded Edge-backed validation,
+  which lacked sufficient single-device capacity. There is no qualified family
+  tensor-parallel route. This is not an observed Edge command failure.
 
 The following exact profiles were rebuilt and run locally on native SM120 with
 CUDA 13.3 and TensorRT 11.1.0.106: FP16 compute, original declared source
@@ -121,8 +204,8 @@ MC (0.1594) and direct Edge (0.1618). A separately sampled greedy HF diagnostic
 also fails (0.1231), with verbose text truncated before the CEO answer. Actual
 MC, Edge and HF prompt token IDs match. This suggests a response-budget/fixture
 interaction, not an established TensorRT or Edge defect; the failure remains open.
-Super120B is unexecuted because the available supported devices lack capacity
-and this adapter has no qualified parallel route for that checkpoint.
+Super120B remains unexecuted in these recorded Edge-backed results; their
+single-device capacity limitation is not a permanent native-platform exclusion.
 
 The initial Lightning standalone build requested external-weight kinds forbidden
 by Edge for mixed W4A16 NVFP4. The family now follows the upstream externalization

@@ -1,0 +1,24 @@
+{
+  "name": "cosmos3-edge-fp16",
+  "hf_id": "nvidia/Cosmos3-Edge",
+  "hf_revision": "344d602b128d1bbdacb43b08d0a3626f46343e29",
+  "bundle": "cosmos3-edge-fp16.bundle",
+  "family": "cosmos3_edge",
+  "task": "image_video_text_to_text",
+  "precision": "fp16",
+  "max_sequence_length": 1024,
+  "tensor_parallel_size": 1,
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "cosmos3-edge-fp16",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "reference_backend": "hf_transformers",
+      "modalities": [
+        "text",
+        "image"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "name": "sam2-public-core-l0-fp16",
+  "hf_id": "facebook/sam2.1-hiera-small",
+  "hf_revision": "6c381d9c16faed5e8a7c4a2cd99918bdca8316e4",
+  "bundle": "sam2-public-core-l0-fp16.bundle",
+  "family": "sam2",
+  "task": "video_segmentation",
+  "testcases": [
+    {
+      "name": "sam2-public-core-l0-fp16",
+      "premerge": true
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "precision": "fp16",
+  "image_height": 1280,
+  "image_width": 1088,
+  "video_num_frames": 5
+}

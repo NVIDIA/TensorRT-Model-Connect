@@ -5,9 +5,11 @@
 
 #include "families/qwen3_5/runtime/chat_templates.h"
 #include "families/qwen3_5/runtime/hybrid_state.h"
+#include "families/qwen3_5/runtime/native_media.h"
 #include "families/qwen3_5/runtime/pipeline.h"
 #include "families/qwen3_5/runtime/plugin_helpers.h"
 #include "families/qwen3_5/runtime/recurrent_state.h"
+#include "families/qwen3_5/runtime/tensor_parallel.h"
 #include "trtmc/runtime/family_factory.h"
 #ifdef TRTMC_HAS_EDGE_LLM
 #include "families/qwen3_5/runtime/edge_llm/adapter.h"
@@ -32,7 +34,7 @@ struct RuntimeConfig {
     std::int32_t head_dim;
     std::int32_t vocab_size;
     std::int32_t bos_token_id;
-    std::int32_t eos_token_id;
+    std::vector<std::int32_t> eos_token_ids;
     std::int32_t num_attention_layers;
     std::int32_t num_mamba_layers;
     std::int32_t d_inner;
@@ -43,6 +45,12 @@ struct RuntimeConfig {
     std::int32_t conv_dim;
     std::int32_t max_cache_length;
     std::string precision;
+    std::string kv_cache_quantization;
+    bool has_mtp;
+    std::int32_t mtp_num_draft_tokens;
+    std::int32_t tensor_parallel_size;
+    // A second engine prefills prompt chunks; decoding stays on engine.plan.
+    bool split;
 };
 
 template <typename T>
@@ -56,6 +64,20 @@ T require_value(const nlohmann::json& json, const char* name) {
     }
 }
 
+std::vector<std::int32_t> require_eos_ids(const nlohmann::json& json) {
+    if (!json.contains("eos_token_id"))
+        throw std::runtime_error("qwen3_5 runtime.json missing eos_token_id");
+    const auto& value = json.at("eos_token_id");
+    if (value.is_number_integer())
+        return {require_value<std::int32_t>(json, "eos_token_id")};
+    if (!value.is_array() || value.empty() ||
+        std::any_of(value.begin(), value.end(),
+                    [](const auto& id) { return !id.is_number_integer(); }))
+        throw std::runtime_error(
+            "qwen3_5 eos_token_id must be an integer or nonempty integer array");
+    return require_value<std::vector<std::int32_t>>(json, "eos_token_id");
+}
+
 RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     const std::string text = require_text_section(bundle, "runtime.json");
     nlohmann::json json;
@@ -66,10 +88,13 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     }
     if (!json.is_object())
         throw std::runtime_error("qwen3_5 runtime.json must be an object");
-    if (json.size() != 20)
+    if (json.size() != 20 + static_cast<std::size_t>(json.contains("kv_cache_quantization")) +
+                           (json.contains("has_mtp") ? 2 : 0) +
+                           static_cast<std::size_t>(json.contains("tensor_parallel_size")))
         throw std::runtime_error("qwen3_5 runtime.json has an unexpected field set");
-    if (require_value<std::string>(json, "decoder_engine_layout") != "single")
-        throw std::runtime_error("qwen3_5 requires decoder_engine_layout='single'");
+    const auto layout = require_value<std::string>(json, "decoder_engine_layout");
+    if (layout != "single" && layout != "split")
+        throw std::runtime_error("qwen3_5 requires decoder_engine_layout 'single' or 'split'");
 
     RuntimeConfig config{
         require_value<std::int32_t>(json, "hidden_size"),
@@ -79,7 +104,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_value<std::int32_t>(json, "head_dim"),
         require_value<std::int32_t>(json, "vocab_size"),
         require_value<std::int32_t>(json, "bos_token_id"),
-        require_value<std::int32_t>(json, "eos_token_id"),
+        require_eos_ids(json),
         require_value<std::int32_t>(json, "num_attention_layers"),
         require_value<std::int32_t>(json, "num_mamba_layers"),
         require_value<std::int32_t>(json, "d_inner"),
@@ -90,7 +115,18 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_value<std::int32_t>(json, "conv_dim"),
         require_value<std::int32_t>(json, "max_cache_length"),
         require_value<std::string>(json, "precision"),
+        json.contains("kv_cache_quantization")
+            ? require_value<std::string>(json, "kv_cache_quantization")
+            : "none",
+        json.contains("has_mtp") ? require_value<bool>(json, "has_mtp") : false,
+        json.contains("has_mtp") ? require_value<std::int32_t>(json, "mtp_num_draft_tokens") : 0,
+        json.contains("tensor_parallel_size")
+            ? require_value<std::int32_t>(json, "tensor_parallel_size")
+            : 1,
+        layout == "split",
     };
+    if (config.split && (config.tensor_parallel_size != 1 || config.has_mtp))
+        throw std::runtime_error("qwen3_5 split bundles are single-GPU without MTP");
     const auto layer_types = require_value<std::vector<std::string>>(json, "layer_types");
     if (config.hidden_size <= 0 || config.num_layers <= 0 || config.num_attention_heads <= 0 ||
         config.num_key_value_heads <= 0 || config.head_dim <= 0 || config.vocab_size <= 0 ||
@@ -104,6 +140,19 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
     }
     if (config.precision != "fp16" && config.precision != "fp32")
         throw std::runtime_error("qwen3_5 runtime.json contains invalid precision");
+    if (config.kv_cache_quantization != "none" && config.kv_cache_quantization != "fp8")
+        throw std::runtime_error("qwen3_5 runtime.json contains invalid KV cache quantization");
+    if ((config.has_mtp && config.mtp_num_draft_tokens != 3) ||
+        (!config.has_mtp && config.mtp_num_draft_tokens != 0))
+        throw std::runtime_error(
+            "Qwen3.5 native MTP requires three draft steps and four verification positions");
+    const int tp = config.tensor_parallel_size;
+    if ((tp != 1 && tp != 2) ||
+        (tp == 2 &&
+         (config.has_mtp || config.precision != "fp16" || config.kv_cache_quantization != "none" ||
+          config.num_attention_heads % tp || config.num_key_value_heads % tp ||
+          config.mamba_nheads % tp || config.d_inner % tp || config.conv_dim % tp)))
+        throw std::runtime_error("Invalid Qwen3.5 native TP2 metadata");
     return config;
 }
 
@@ -121,30 +170,44 @@ std::string chat_template(const BundleReader& bundle) {
 
 } // namespace
 
-ITask* create(const FamilyContext& context) {
-    if (context.reader.find_section("edge_llm.json")) {
-#ifdef TRTMC_HAS_EDGE_LLM
-        return edge_llm::create(context.reader);
-#else
-        throw std::runtime_error("Qwen3.5 Edge bundle requires a runtime configured with "
-                                 "-DTRTMC_ENABLE_EDGELLM=ON; rebuild and install Model Connect");
-#endif
+ITask* create_native(const FamilyContext& context, const RuntimeConfig& config, int rank,
+                     const ModuleCreateOptions& options) {
+    const bool parallel = config.tensor_parallel_size == 2;
+    const auto plan = require_section(
+        context.reader, parallel ? "engine.rank" + std::to_string(rank) + ".plan" : "engine.plan");
+    auto decoder = context.backend.create_module(plan.data(), plan.size(), options);
+    if (!decoder || !decoder->ok())
+        throw std::runtime_error("Qwen3.5 native decoder failed to load");
+    decoder->set_timing_label("qwen3_5 decoder");
+    std::unique_ptr<ITrtModule> prefill;
+    if (config.split) {
+        // The prefill engine shares the decoder's stream so state copies stay ordered.
+        ModuleCreateOptions prefill_options = options;
+        prefill_options.stream = decoder->stream();
+        const auto prefill_plan = require_section(context.reader, "prefill.plan");
+        prefill = context.backend.create_module(prefill_plan.data(), prefill_plan.size(),
+                                                prefill_options);
+        if (!prefill || !prefill->ok())
+            throw std::runtime_error("Qwen3.5 native prefill engine failed to load");
+        prefill->set_timing_label("qwen3_5 prefill");
     }
-    const RuntimeConfig config = parse_runtime_config(context.reader);
-    auto decoder = load_engine(context.backend, require_section(context.reader, "engine.plan"),
-                               "qwen3_5 decoder");
     const cudaStream_t stream = decoder->stream();
-    const std::int32_t kv_dim = config.num_key_value_heads * config.head_dim;
+    const std::int32_t kv_dim =
+        config.num_key_value_heads / config.tensor_parallel_size * config.head_dim;
 
+    const auto cache_dtype =
+        config.kv_cache_quantization == "fp8" ? DType::kFloat8E4M3 : state_dtype(config.precision);
     auto kv = std::make_unique<Qwen35KvCache>(config.num_attention_layers, config.max_cache_length,
-                                              kv_dim, stream, state_dtype(config.precision));
+                                              kv_dim, stream, cache_dtype);
     if (!kv->ok())
         throw std::runtime_error("qwen3_5 failed to create KV cache");
 
     const std::int64_t conv_elements =
-        static_cast<std::int64_t>(config.conv_dim) * config.mamba_d_conv;
-    const std::int64_t state_elements = static_cast<std::int64_t>(config.mamba_nheads) *
-                                        config.mamba_head_dim * config.mamba_d_state;
+        static_cast<std::int64_t>(config.conv_dim / config.tensor_parallel_size) *
+        config.mamba_d_conv;
+    const std::int64_t state_elements =
+        static_cast<std::int64_t>(config.mamba_nheads / config.tensor_parallel_size) *
+        config.mamba_head_dim * config.mamba_d_state;
     auto recurrent =
         std::make_unique<Qwen35RecurrentState>(config.num_mamba_layers,
                                                std::vector<Qwen35RecurrentState::TensorSpec>{
@@ -156,17 +219,77 @@ ITask* create(const FamilyContext& context) {
     if (!state->ok())
         throw std::runtime_error("qwen3_5 failed to create hybrid state");
 
+    std::unique_ptr<Qwen35MtpScheduler> mtp_scheduler;
+    if (config.has_mtp) {
+        auto draft =
+            load_engine(context.backend, require_section(context.reader, "mtp_engine.plan"),
+                        "qwen3_5 MTP draft");
+        auto verifier =
+            load_engine(context.backend, require_section(context.reader, "multi_token_engine.plan"),
+                        "qwen3_5 MTP verifier");
+        mtp_scheduler = std::make_unique<Qwen35MtpScheduler>(
+            std::move(draft), nullptr, std::move(verifier), *state, config.hidden_size,
+            config.vocab_size, config.mtp_num_draft_tokens, stream);
+    } else if (context.reader.find_section("mtp_engine.plan") ||
+               context.reader.find_section("multi_token_engine.plan")) {
+        throw std::runtime_error("Qwen3.5 MTP engine sections require explicit runtime metadata");
+    }
+
+    auto paired_draft = create_qwen35_paired(
+        context, config.hidden_size, config.num_layers, config.vocab_size, config.max_cache_length,
+        config.precision, config.tensor_parallel_size, config.has_mtp);
+
     RecurrentGenConfig generation;
     generation.vocab_size = config.vocab_size;
     generation.id_bos = config.bos_token_id;
-    generation.id_eos = config.eos_token_id;
+    generation.id_eos_ids = config.eos_token_ids;
+    generation.id_eos = config.eos_token_ids.front();
     generation.has_position_input = decoder->has_input("position_id");
     generation.chat_template_format =
         qwen3_5_detect_chat_template_format(chat_template(context.reader));
 
-    return new RecurrentPipeline(std::move(decoder), std::move(state), std::move(generation),
-                                 stream, "Qwen3.5", create_tokenizer(context.reader),
-                                 std::string{});
+    auto tokenizer = create_tokenizer(context.reader);
+    auto pipeline = std::make_unique<RecurrentPipeline>(
+        std::move(decoder), std::move(state), std::move(generation), stream, "Qwen3.5", tokenizer,
+        std::string{}, std::move(mtp_scheduler), std::move(paired_draft), std::move(prefill));
+    if (context.reader.find_section("native_visual.json")) {
+        auto visual = load_engine(
+            context.backend,
+            require_section(context.reader,
+                            parallel ? "native_visual.rank" + std::to_string(rank) + ".plan"
+                                     : "native_visual.plan"),
+            "qwen3_5 native visual");
+        return create_native_media_task(context.reader, std::move(pipeline), std::move(visual),
+                                        std::move(tokenizer));
+    }
+    if (context.reader.info().task != "text_generation")
+        throw std::runtime_error("Qwen3.5 native media bundle is missing visual metadata");
+    return pipeline.release();
+}
+
+ITask* create(const FamilyContext& context) {
+    if (context.reader.find_section("edge_llm.json")) {
+#ifdef TRTMC_HAS_EDGE_LLM
+        return edge_llm::create(context.reader);
+#else
+        throw std::runtime_error("Qwen3.5 Edge bundle requires a runtime configured with "
+                                 "-DTRTMC_ENABLE_EDGELLM=ON; rebuild and install Model Connect");
+#endif
+    }
+    const auto config = parse_runtime_config(context.reader);
+    if (config.tensor_parallel_size == 2) {
+        // The rank factory may run again after a failed request. Retain the
+        // reader metadata/path, not the loading scope's borrowed reference.
+        auto bundle = std::make_shared<BundleReader>(context.reader);
+        return create_native_tensor_parallel_task(
+            [bundle, backend = &context.backend, config](int rank,
+                                                         const ModuleCreateOptions& options) {
+                const FamilyContext local{*bundle, *backend, 0};
+                return create_native(local, config, rank, options);
+            },
+            context.reader.find_section("native_visual.json") != nullptr);
+    }
+    return create_native(context, config, 0, {});
 }
 
 } // namespace trtmc::qwen3_5
