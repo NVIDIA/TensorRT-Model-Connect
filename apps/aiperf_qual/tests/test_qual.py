@@ -406,7 +406,9 @@ def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():
     from trtmc_aiperf_qual.config import CONFIG_ROOT
     from trtmc_aiperf_qual.selection import catalog
 
-    not_qualified: dict[str, str] = {}  # Task -> why no generic native reference or benchmark serves it yet
+    not_qualified: dict[str, str] = {  # Task -> why no generic native reference or benchmark serves it yet
+        "text_to_head_scores": "no generic native adapter or reference for per-token head scores",
+    }
     tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
     assert {profile.task for profile in catalog(REPOSITORY)} - set(tasks) == set(not_qualified)
 
