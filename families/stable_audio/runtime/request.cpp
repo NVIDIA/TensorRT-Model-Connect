@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string_view>
 
 namespace trtmc::stable_audio {
@@ -64,8 +65,10 @@ GenerationPlan plan_request(const StableAudioConfig& config,
     plan.num_inference_steps = static_cast<std::int32_t>(steps);
     plan.guidance_scale = config_get<double>(supplied, kConfigFields, "guidance_scale")
                               .value_or(config.default_guidance_scale);
-    if (!std::isfinite(plan.guidance_scale))
-        throw ConfigError("stable_audio: guidance_scale must be finite");
+    // The guidance arithmetic runs in float32: a value outside its range cannot be converted.
+    if (!std::isfinite(plan.guidance_scale) ||
+        std::fabs(plan.guidance_scale) > static_cast<double>(std::numeric_limits<float>::max()))
+        throw ConfigError("stable_audio: guidance_scale must be a finite float32 value");
     const auto seed = *config_get<std::int64_t>(supplied, kConfigFields, "seed");
     if (seed < 0)
         throw ConfigError("stable_audio: seed must be non-negative");

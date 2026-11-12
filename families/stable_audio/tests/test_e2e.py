@@ -441,7 +441,7 @@ def _assert_contract(native: dict, references: dict, case: dict, precision: str,
     summary["decoder_relative_l2"] = relative_l2(native["decoded"], reference["decoder"]["audio"])
     if precision == "fp32":
         bound = float(thresholds.get("fp32_max_relative_l2", _FP32_MAX_RELATIVE_L2))
-        step_bound = float(thresholds.get("fp32_teacher_forced_max", _FP32_TEACHER_FORCED_MAX))
+        step_bounds = [float(thresholds.get("fp32_teacher_forced_max", _FP32_TEACHER_FORCED_MAX))] * len(steps)
         decoder_bound = float(thresholds.get("fp32_decoder_max", _FP32_DECODER_MAX))
     else:
         official = relative_l2(references["fp16"]["audio"], reference["audio"])
@@ -449,22 +449,28 @@ def _assert_contract(native: dict, references: dict, case: dict, precision: str,
         bound = min(max(float(thresholds.get("fp16_drift_factor", _FP16_DRIFT_FACTOR)) * official,
                         float(thresholds.get("fp16_drift_floor", _FP16_DRIFT_FLOOR))),
                     float(thresholds.get("fp16_drift_cap", _FP16_DRIFT_CAP)))
+        assert len(references["fp16"]["teacher_forced"]) == len(calls)
         official_steps = [relative_l2(output, call["sample"])
                           for output, call in zip(references["fp16"]["teacher_forced"], calls)]
         summary["official_fp16_teacher_forced_max_relative_l2"] = max(official_steps)
-        step_bound = max(float(thresholds.get("fp16_teacher_forced_factor", _FP16_TEACHER_FORCED_FACTOR))
-                         * max(official_steps),
-                         float(thresholds.get("fp16_teacher_forced_floor", _FP16_TEACHER_FORCED_FLOOR)))
+        # Per call: the official FP16 denoiser's error on that same input sets that call's bound.
+        factor = float(thresholds.get("fp16_teacher_forced_factor", _FP16_TEACHER_FORCED_FACTOR))
+        floor = float(thresholds.get("fp16_teacher_forced_floor", _FP16_TEACHER_FORCED_FLOOR))
+        step_bounds = [max(factor * official, floor) for official in official_steps]
         official_decoder = relative_l2(references["fp16"]["decoder_forced"], reference["decoder"]["audio"])
         summary["official_fp16_decoder_relative_l2"] = official_decoder
         decoder_bound = max(float(thresholds.get("fp16_decoder_factor", _FP16_DECODER_FACTOR)) * official_decoder,
                             float(thresholds.get("fp16_decoder_floor", _FP16_DECODER_FLOOR)))
+    worst = max(range(len(steps)), key=lambda index: steps[index] / step_bounds[index])
     summary["bound"] = bound
-    summary["teacher_forced_bound"] = step_bound
+    summary["teacher_forced_worst_call"] = worst
+    summary["teacher_forced_worst_relative_l2"] = steps[worst]
+    summary["teacher_forced_bound"] = step_bounds[worst]
+    summary["teacher_forced_worst_fraction_of_bound"] = steps[worst] / step_bounds[worst]
     summary["decoder_bound"] = decoder_bound
     record_evidence("comparison", summary)
     assert distance <= bound, summary
-    assert summary["teacher_forced_max_relative_l2"] <= step_bound, summary
+    assert all(error <= limit for error, limit in zip(steps, step_bounds)), summary
     assert summary["conditioner_max_relative_l2"] <= summary["conditioner_bound"], summary
     assert summary["decoder_relative_l2"] <= decoder_bound, summary
     return summary

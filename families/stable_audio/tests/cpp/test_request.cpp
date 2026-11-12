@@ -103,6 +103,10 @@ void check_overrides() {
     expect(window.num_inference_steps == 30 && window.guidance_scale == 1.0 && window.seed == 2,
            "overrides applied");
     expect(window.negative_prompt && *window.negative_prompt == "Low quality.", "negative prompt");
+    const auto largest = plan(
+        {{"guidance_scale", ConfigValue{static_cast<double>(std::numeric_limits<float>::max())}}});
+    expect(largest.guidance_scale == static_cast<double>(std::numeric_limits<float>::max()),
+           "the largest float32 guidance is accepted");
     // An end past the window is clipped like a Python slice.
     const auto clipped =
         plan({{"audio_start_in_s", ConfigValue{40.0}}, {"audio_end_in_s", ConfigValue{50.0}}});
@@ -115,6 +119,8 @@ void check_rejections() {
     expect_rejected({{"seed", ConfigValue{std::int64_t{-1}}}}, "negative seed");
     expect_rejected({{"guidance_scale", ConfigValue{std::numeric_limits<double>::quiet_NaN()}}},
                     "NaN guidance");
+    expect_rejected({{"guidance_scale", ConfigValue{1e40}}}, "guidance beyond the float32 range");
+    expect_rejected({{"guidance_scale", ConfigValue{-1e40}}}, "guidance below the float32 range");
     expect_rejected({{"audio_start_in_s", ConfigValue{5.0}}, {"audio_end_in_s", ConfigValue{5.0}}},
                     "empty request");
     expect_rejected({{"audio_start_in_s", ConfigValue{6.0}}, {"audio_end_in_s", ConfigValue{5.0}}},

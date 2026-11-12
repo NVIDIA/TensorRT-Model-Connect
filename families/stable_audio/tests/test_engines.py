@@ -23,6 +23,13 @@ import pytest
 T5_REVISION = "a9723ea7f1b39c1eae772870f3b547bf6ef7e6c1"
 
 
+def _tf32(values) -> np.ndarray:
+    """float32 values rounded to TF32 (10 explicit mantissa bits), to nearest, ties to even."""
+    bits = np.asarray(values, dtype=np.float32).view(np.uint32).astype(np.uint64)
+    bits = (bits + ((bits >> 13) & 1) + 0xFFF) & ~np.uint64(0x1FFF)
+    return bits.astype(np.uint32).view(np.float32)
+
+
 def _relative(actual, expected) -> float:
     actual = np.asarray(actual, dtype=np.float64)
     expected = np.asarray(expected, dtype=np.float64)
@@ -70,9 +77,11 @@ def _run(plan: bytes, inputs: dict, outputs: list[str], torch) -> dict:
 def test_fp32_projections_stay_fp32_in_tf32_engines():
     """FP16 engines enable TF32; their FP32-input projections must not be TF32-rounded.
 
-    The denoiser's 1x1 pre / post convolutions are such projections, at this shape. A graph
-    that does not know about TF32 (``tf32_engine=False``) is the negative control: on a
-    device with TF32 tensor cores its matrix multiply is off by about 3e-4.
+    The denoiser's 1x1 pre / post convolutions are such projections, at this shape. The
+    negative control is deterministic: the same product with TF32-rounded operands (NumPy)
+    is off by about 3e-4, so the 1e-6 bound rejects TF32 rounding. A graph that does not
+    know about TF32 is built too; whether TensorRT rounds it depends on its tactic choice,
+    so its error is only reported.
     """
     torch = pytest.importorskip("torch")
     trt = pytest.importorskip("tensorrt")
@@ -99,10 +108,10 @@ def test_fp32_projections_stay_fp32_in_tf32_engines():
         assert plan is not None
         return _relative(EngineRunner(bytes(plan))({"x": sample}, ["y"])["y"], expected)
 
-    exact, rounded = error(True), error(False)
-    assert exact < 1e-6, (exact, rounded)
-    if torch.cuda.get_device_capability() >= (8, 0):
-        assert rounded > 1e-5, ("the negative control was not TF32-rounded", exact, rounded)
+    emulated = _relative(_tf32(sample).astype(np.float64) @ _tf32(weight).T.astype(np.float64), expected)
+    assert emulated > 1e-5, ("TF32 rounding must exceed the bound by far", emulated)
+    exact, unaware = error(True), error(False)
+    assert exact < 1e-6, {"fp32_path": exact, "tf32_emulated": emulated, "tf32_unaware_graph": unaware}
 
 
 def test_conditioner_matches_encode_prompt_and_duration(stack):

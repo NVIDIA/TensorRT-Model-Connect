@@ -52,9 +52,11 @@ The Task's config fields (`--set NAME=VALUE` on the CLI, `--seed` for `seed`):
 | `seed` | int | 0 | Seed of the family noise generator |
 
 Like diffusers, the pipeline always denoises the whole latent window (1,024 frames,
-47.55 s) and returns samples `[int(start * 44100), int(end * 44100))`. Start and end must
-lie in the duration conditioners' range [0, 512] s, `end - start` must not exceed the
-window, and the window must not be empty.
+47.55 s) and returns samples `[int(start * 44100), int(end * 44100))`, clipped to the
+window. Start and end must lie in the duration conditioners' range [0, 512] s, end must
+exceed start, `end - start` must not exceed the window, and start must lie inside the
+window (below 47.55 s): a request that would return no samples is rejected, where
+diffusers returns empty audio. `guidance_scale` must be a finite float32 value.
 
 ## Sampling and noise
 
