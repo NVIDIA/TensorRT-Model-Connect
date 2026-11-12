@@ -1,0 +1,27 @@
+{
+  "name": "svd-xt",
+  "hf_id": "stabilityai/stable-video-diffusion-img2vid-xt",
+  "hf_revision": "9e43909513c6714f1bc78bcb44d96e733cd242aa",
+  "bundle": "svd-xt.bundle",
+  "family": "stable_video_diffusion",
+  "task": "initial_image_text_to_video",
+  "precision": "fp16",
+  "trust_remote_code": false,
+  "image_height": 576,
+  "image_width": 1024,
+  "video_num_frames": 25,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "svd-xt-fp16",
+      "premerge": false,
+      "image": "test_img.jpeg",
+      "seed": 42,
+      "num_steps": 25,
+      "reference_precisions": [
+        "fp32",
+        "fp16"
+      ]
+    }
+  ]
+}
