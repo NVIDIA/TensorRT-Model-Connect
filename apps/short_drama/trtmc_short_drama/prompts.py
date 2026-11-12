@@ -32,9 +32,9 @@ _WORDS = {
         "line_rule": "in Chinese, under 16 characters",
         "heading": "第一章 <title>", "chapter_length": "500 to 900 characters",
         "quote_marks": "「」",
-        "example_character": """{"id": "wangu", "name": "王胡", "role": "未庄的闲汉，满脸络腮胡子",
-  "look": "三十多岁的壮汉，满脸浓密的络腮胡，剃光的前额，拖着长辫，穿打补丁的灰色短褂",
-  "voice": "粗哑响亮的男声"}""",
+        "example_character": """{"id": "linlan", "name": "林岚", "role": "广告公司的项目经理，做事利落",
+  "look": "二十八岁的女人，齐肩黑色短发，戴细框眼镜，穿浅灰色西装外套和白衬衫",
+  "voice": "清亮干脆的女声"}""",
         "example_shot": """{"location": "office", "characters": ["linlan"], "props": ["phone"], "seconds": 6,
   "summary": "linlan 在窗边接电话，听到惊人的消息",
   "camera": "手持中近景，镜头缓缓推近",
@@ -48,9 +48,9 @@ _WORDS = {
         "line_rule": "in English, under 12 words",
         "heading": "Chapter 1: <title>", "chapter_length": "300 to 600 words",
         "quote_marks": "‘’",
-        "example_character": """{"id": "wang", "name": "Wang Hu", "role": "an idler of the village with a full beard",
-  "look": "a burly man in his thirties with a thick full beard, a shaved forehead and a long queue, wearing a patched grey jacket",
-  "voice": "a gruff, loud male voice"}""",
+        "example_character": """{"id": "linlan", "name": "Lin Lan", "role": "a brisk project manager at an ad agency",
+  "look": "a woman of twenty-eight with a black shoulder-length bob and thin-rimmed glasses, wearing a light grey blazer over a white shirt",
+  "voice": "a clear, crisp female voice"}""",
         "example_shot": """{"location": "office", "characters": ["linlan"], "props": ["phone"], "seconds": 6,
   "summary": "linlan takes a call by the window and hears shocking news",
   "camera": "A handheld medium close-up slowly pushes in",
@@ -142,7 +142,7 @@ Rules:
 - "sound" is never empty: the same ambience for every shot of one scene, then the physical sounds of
   the action. No sound effect in the first second of a shot.
 - Write "camera", "action", "after", "then", "sound", "summary" and the line in {language}, and refer
-  to people by their ids (for example: aq slaps his own face). Never use double quotes inside them.
+  to people by their ids (for example: linlan picks up the phone). Never use double quotes inside them.
 
 Example of one shot from another drama (follow its form, not its content):
 {example_shot}
@@ -362,7 +362,7 @@ def video_prompts(plan: dict[str, Any], shot: dict[str, Any], references: list[t
     def mention(text: str) -> str:
         for identifier, label in labels.items():
             text = re.sub(rf"\b{re.escape(identifier)}\b", label, text)
-            if names.get(identifier):  # models sometimes write the Chinese name, even as 阿 Q
+            if names.get(identifier):  # models sometimes write the Chinese name, even with spaces in it
                 pattern = r"\s*".join(map(re.escape, names[identifier].replace(" ", "")))
                 text = re.sub(pattern, label, text)
         return text

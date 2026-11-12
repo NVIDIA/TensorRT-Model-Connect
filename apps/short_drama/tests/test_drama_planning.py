@@ -8,27 +8,27 @@ from trtmc_short_drama.flow import Context
 from trtmc_short_drama.store import Store
 
 BIBLE = {
-    "title": "阿Q正传", "setting": "a river town", "style": "period drama",
-    "characters": [{"id": "A Q", "name": "阿Q", "look": "thin"}, {"id": "zhao", "name": "赵太爷", "look": "stout"},
-                   {"id": "zhao", "name": "赵秀才", "look": "young"}],
-    "relationships": [{"from": "a_q", "to": "zhao", "relation": "雇工"}, {"from": "a_q", "to": "nobody"}],
-    "locations": [{"id": "temple", "name": "土谷祠", "look": "a shrine"}],
-    "props": [{"id": "pipe", "name": "烟管", "look": "a bamboo pipe"}],
-    "episodes": [{"number": 1, "title": "优胜", "summary": "s1", "chapters": [1, 2]}],
+    "title": "渡口", "setting": "a river town", "style": "period drama",
+    "characters": [{"id": "Lao Zhou", "name": "老周", "look": "thin"}, {"id": "li", "name": "李掌柜", "look": "stout"},
+                   {"id": "li", "name": "李少爷", "look": "young"}],
+    "relationships": [{"from": "lao_zhou", "to": "li", "relation": "老主顾"}, {"from": "lao_zhou", "to": "nobody"}],
+    "locations": [{"id": "dock", "name": "渡口", "look": "a wooden dock"}],
+    "props": [{"id": "lantern", "name": "灯笼", "look": "a paper lantern"}],
+    "episodes": [{"number": 1, "title": "渡河", "summary": "s1", "chapters": [1, 2]}],
 }
-SHOTS = [{"location": "temple", "characters": ["a_q", "ghost"], "speaker": "ghost", "line": "阿 Q 说：我们先前比你阔多啦！",
+SHOTS = [{"location": "dock", "characters": ["lao_zhou", "ghost"], "speaker": "ghost", "line": "老周说：我开了 30 年船！",
           "seconds": 12, "camera": "c", "action": "a", "after": "b", "then": "t", "sound": "s", "summary": "x"},
-         {"location": "nowhere", "characters": ["zhao"], "speaker": "zhao", "line": "", "seconds": 3},
-         {"location": "temple", "characters": [], "seconds": 9},
-         {"location": "temple", "characters": [], "seconds": 9}]
+         {"location": "nowhere", "characters": ["li"], "speaker": "li", "line": "", "seconds": 3},
+         {"location": "dock", "characters": [], "seconds": 9},
+         {"location": "dock", "characters": [], "seconds": 9}]
 
 
 def test_bible_gets_unique_ascii_ids_and_known_relationships():
     plan = planning.normalize_bible(BIBLE, [[1, 2], [3]])
-    assert [c["id"] for c in plan["characters"]] == ["a_q", "zhao", "zhao_"]
-    assert plan["relationships"] == [{"from": "a_q", "to": "zhao", "relation": "雇工"}]
+    assert [c["id"] for c in plan["characters"]] == ["lao_zhou", "li", "li_"]
+    assert plan["relationships"] == [{"from": "lao_zhou", "to": "li", "relation": "老主顾"}]
     assert [e["chapters"] for e in plan["episodes"]] == [[1, 2], [3]]
-    assert plan["episodes"][0]["title"] == "优胜" and plan["episodes"][1]["title"] == "第2集"
+    assert plan["episodes"][0]["title"] == "渡河" and plan["episodes"][1]["title"] == "第2集"
 
 
 def test_shots_keep_known_ids_clamp_seconds_and_fit_the_episode():
@@ -36,10 +36,10 @@ def test_shots_keep_known_ids_clamp_seconds_and_fit_the_episode():
     shots = planning.normalize_shots(SHOTS, plan, episode=1, max_seconds=24)
     assert [s["id"] for s in shots] == ["e1s1", "e1s2", "e1s3"]
     assert [s["seconds"] for s in shots] == [9, 4, 9]
-    assert shots[0]["characters"] == ["a_q"] and shots[0]["speaker"] == "a_q"
-    assert shots[1]["location"] == "temple" and shots[1]["speaker"] == ""
-    phone = {"location": "temple", "characters": ["a_q"], "speaker": "zhao", "line": "回来！", "seconds": 6}
-    assert planning.normalize_shots([phone], plan, episode=1, max_seconds=24)[0]["speaker"] == "zhao"
+    assert shots[0]["characters"] == ["lao_zhou"] and shots[0]["speaker"] == "lao_zhou"
+    assert shots[1]["location"] == "dock" and shots[1]["speaker"] == ""
+    phone = {"location": "dock", "characters": ["lao_zhou"], "speaker": "li", "line": "回来！", "seconds": 6}
+    assert planning.normalize_shots([phone], plan, episode=1, max_seconds=24)[0]["speaker"] == "li"
     assert sum(s["seconds"] for s in shots) <= 24
 
 
@@ -55,7 +55,7 @@ class FakeChat:
     def complete_json(self, system, user, **_):
         self.prompts.append(user)
         if user.startswith("Summarize this chapter"):
-            return {"summary": "事件", "characters": ["阿Q"], "places": ["未庄"], "quotes": []}
+            return {"summary": "事件", "characters": ["老周"], "places": ["渡口"], "quotes": []}
         if user.startswith("Plan a vertical short drama"):
             return BIBLE
         return SHOTS
@@ -71,18 +71,18 @@ class FakeServices:
 
 
 def test_plan_step_reads_every_chapter_then_writes_shots(tmp_path):
-    project = Store(tmp_path).create("阿Q", "第一章 序\n甲\n第二章 优胜\n乙", flow="default@1",
+    project = Store(tmp_path).create("渡口", "第一章 序\n甲\n第二章 渡河\n乙", flow="default@1",
                                      episodes=1, max_seconds=24)
     services = FakeServices()
     planning.run(Context(project, {"shot_seconds": 8}, "llm", None, services, progress=lambda _: None))
     plan = project.plan
-    assert [note["heading"] for note in plan["chapters"]] == ["第一章 序", "第二章 优胜"]
-    assert plan["episodes"][0]["shots"][0]["line"] == "阿Q说：我们先前比你阔多啦！"
+    assert [note["heading"] for note in plan["chapters"]] == ["第一章 序", "第二章 渡河"]
+    assert plan["episodes"][0]["shots"][0]["line"] == "老周说：我开了30年船！"
     assert "第一章 序" in services.client.prompts[-1]  # the shot list sees the source chapters
 
 
 def test_a_style_chosen_with_the_project_is_kept_and_shapes_the_looks(tmp_path):
-    project = Store(tmp_path).create("阿Q", "第一章 序\n甲", flow="default@1", episodes=1, max_seconds=24,
+    project = Store(tmp_path).create("渡口", "第一章 序\n甲", flow="default@1", episodes=1, max_seconds=24,
                                      style="bright 3D cartoon animation")
     services = FakeServices()
     planning.run(Context(project, {}, "llm", None, services, progress=lambda _: None))

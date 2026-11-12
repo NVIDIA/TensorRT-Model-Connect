@@ -11,13 +11,13 @@ from trtmc_short_drama.store import Store
 
 SHOT = {"camera": "c", "action": "a", "after": "b", "then": "t", "sound": "s", "summary": "x", "props": []}
 PLAN = {"title": "t", "setting": "a town", "style": "drama",
-        "characters": [{"id": "aq", "name": "阿Q", "role": "雇工", "look": "a thin man", "voice": "hoarse"}],
-        "locations": [{"id": "temple", "name": "土谷祠", "look": "a shrine"}], "props": [],
+        "characters": [{"id": "zhou", "name": "老周", "role": "船夫", "look": "a thin man", "voice": "hoarse"}],
+        "locations": [{"id": "dock", "name": "渡口", "look": "a wooden dock"}], "props": [],
         "chapters": [{"number": 1, "summary": "s", "quotes": []}],
         "episodes": [{"number": 1, "chapters": [1], "shots": [
-            {**SHOT, "id": "e1s1", "seconds": 6, "location": "temple", "characters": ["aq"], "speaker": "aq",
-             "line": "滚！"},
-            {**SHOT, "id": "e1s2", "seconds": 8, "location": "temple", "characters": ["aq"], "speaker": "",
+            {**SHOT, "id": "e1s1", "seconds": 6, "location": "dock", "characters": ["zhou"], "speaker": "zhou",
+             "line": "嘿！"},
+            {**SHOT, "id": "e1s2", "seconds": 8, "location": "dock", "characters": ["zhou"], "speaker": "",
              "line": ""}]}]}
 
 
@@ -72,18 +72,18 @@ def test_a_story_without_chapters_is_refused(store):
 def test_revising_a_shot_changes_only_that_shot_and_keeps_the_old_plan(store):
     project = store.create("t", "第一章\n文", flow="default@1", episodes=1, max_seconds=20)
     project.save_plan(copy.deepcopy(PLAN))
-    revised = {**SHOT, "location": "temple", "characters": ["aq"], "speaker": "aq", "line": "我们先前比你阔多啦！",
-               "seconds": 9, "action": "aq rubs his head, then speaks"}
+    revised = {**SHOT, "location": "dock", "characters": ["zhou"], "speaker": "zhou", "line": "今天风大，坐稳了！",
+               "seconds": 9, "action": "zhou wipes his brow, then speaks"}
     chat = FakeChat(revised)
-    act(project, assist.run_revise, chat, target="shot:e1s1", instruction="让他先摸头再开口")
+    act(project, assist.run_revise, chat, target="shot:e1s1", instruction="让他先擦汗再开口")
     shots = project.plan["episodes"][0]["shots"]
-    assert shots[0]["id"] == "e1s1" and shots[0]["line"] == "我们先前比你阔多啦！"
+    assert shots[0]["id"] == "e1s1" and shots[0]["line"] == "今天风大，坐稳了！"
     assert shots[0]["seconds"] == 9 and shots[1] == PLAN["episodes"][0]["shots"][1]
-    assert "让他先摸头再开口" in chat.prompts[0] and '"e1s2"' not in chat.prompts[0]  # neighbours without ids
+    assert "让他先擦汗再开口" in chat.prompts[0] and '"e1s2"' not in chat.prompts[0]  # neighbours without ids
     history = project.snapshots()
     assert len(history) == 1 and history[0]["note"].startswith("before revising shot e1s1")
     project.restore(history[0]["name"])
-    assert project.plan["episodes"][0]["shots"][0]["line"] == "滚！" and len(project.snapshots()) == 2
+    assert project.plan["episodes"][0]["shots"][0]["line"] == "嘿！" and len(project.snapshots()) == 2
 
 
 def test_a_revised_shot_must_fit_the_time_left_in_its_episode(store):
@@ -96,10 +96,10 @@ def test_a_revised_shot_must_fit_the_time_left_in_its_episode(store):
 def test_revising_a_character_keeps_its_id(store):
     project = store.create("t", "第一章\n文", flow="default@1", episodes=1, max_seconds=60)
     project.save_plan(copy.deepcopy(PLAN))
-    act(project, assist.run_revise, FakeChat({"id": "evil", "name": "阿 Q", "look": "a thin man with a scar",
-                                               "voice": ""}), target="character:aq", instruction="脸上加一道疤")
+    act(project, assist.run_revise, FakeChat({"id": "evil", "name": "老周", "look": "a thin man with a scar",
+                                               "voice": ""}), target="character:zhou", instruction="脸上加一道疤")
     character = project.plan["characters"][0]
-    assert character == {**PLAN["characters"][0], "name": "阿Q", "look": "a thin man with a scar"}
+    assert character == {**PLAN["characters"][0], "name": "老周", "look": "a thin man with a scar"}
 
 
 def test_revision_requests_name_a_target_and_a_short_note():
@@ -113,11 +113,11 @@ def test_revision_requests_name_a_target_and_a_short_note():
 def test_the_model_review_keeps_problems_about_real_shots(store):
     project = store.create("t", "第一章\n文", flow="default@1", episodes=1, max_seconds=60)
     project.save_plan(copy.deepcopy(PLAN))
-    chat = FakeChat([{"shot": "e1s2", "problem": "阿 Q 的烟管突然消失", "fix": "让他把烟管别在腰间"},
+    chat = FakeChat([{"shot": "e1s2", "problem": "老周的灯笼在第 2 秒突然消失", "fix": "让他一直提着灯笼"},
                      {"shot": "e9s9", "problem": "no such shot"}, {"shot": "e1s1", "problem": ""}])
     act(project, assist.run_review, chat)
     saved = project.review
-    assert saved["items"] == [{"shot": "e1s2", "episode": 1, "problem": "阿Q的烟管突然消失", "fix": "让他把烟管别在腰间"}]
+    assert saved["items"] == [{"shot": "e1s2", "episode": 1, "problem": "老周的灯笼在第2秒突然消失", "fix": "让他一直提着灯笼"}]
     assert saved["plan"] == assist.fingerprint(project.plan)
     plan = project.plan
     plan["episodes"][0]["shots"][1]["line"] = "嗯"

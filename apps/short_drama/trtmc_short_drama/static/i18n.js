@@ -87,7 +87,7 @@ const ZH = {
   "Visual style": "画风", "Custom": "自定义", "Language": "语言", "Your idea": "你的创意",
   "A panda cub named Tuantuan finds a glowing seed in the bamboo forest…": "熊猫宝宝团团在竹林里捡到一颗会发光的种子……",
   "Paste the novel": "粘贴小说", "Chapter 1 …": "第一章 …", "Or open a text file": "或打开文本文件",
-  "《团团的星星树》: one chapter, about 630 characters, about a panda cub and a rabbit who grow a tree of stars.": "《团团的星星树》：一章，约 630 字，熊猫宝宝和小兔子种出一棵星星树。",
+  "Tuantuan's Star Tree: one chapter, about 440 words, about a panda cub and a rabbit who grow a tree of stars.": "《团团的星星树》（Tuantuan's Star Tree）：一章英文故事，约 440 词，熊猫宝宝和小兔子种出一棵星星树。",
   "for example: watercolor picture-book illustration, soft daylight": "例如：水彩绘本插画，柔和的日光",
   "About {shots} in all (up to {each} per episode). ": "共约 {shots}（每集最多 {each} 个）。",
   "Rendering them takes {time} of GPU time on this machine; you render a sample shot first and decide after.":
@@ -104,7 +104,7 @@ const ZH = {
   "Create project": "创建项目",
   "idea": "创意", "An idea": "一个创意", "One or two sentences; the language model writes the story first.": "一两句话；语言模型先写成故事。",
   "novel": "小说", "My novel": "我的小说", "Paste the text or open a .txt file.": "粘贴文本或打开 .txt 文件。",
-  "sample": "示例", "The sample story": "示例故事", "《团团的星星树》, a children's story written for this app.": "《团团的星星树》，为本应用写的儿童故事。",
+  "sample": "示例", "The sample story": "示例故事", "Tuantuan's Star Tree, an English children's story written for this app.": "《团团的星星树》（Tuantuan's Star Tree），为本应用写的英文儿童故事。",
   "Auto": "自动", "The planner picks a style that suits the story.": "由规划模型选一个适合故事的画风。",
   "Live action": "真人实拍", "3D cartoon": "3D 卡通", "Anime": "日式动画", "Ink painting": "水墨",
   // settings

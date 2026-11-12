@@ -13,11 +13,11 @@ from trtmc_short_drama.flow import Context
 from trtmc_short_drama.store import Store
 
 PLAN = {"title": "t", "setting": "a town", "style": "drama",
-        "characters": [{"id": "aq", "name": "阿Q", "look": "a thin man", "voice": "a hoarse voice"}],
-        "locations": [{"id": "temple", "name": "土谷祠", "look": "a shrine"}], "props": [],
+        "characters": [{"id": "zhou", "name": "老周", "look": "a thin man", "voice": "a hoarse voice"}],
+        "locations": [{"id": "dock", "name": "渡口", "look": "a wooden dock"}], "props": [],
         "episodes": [{"number": 1, "title": "一", "summary": "", "chapters": [1],
-                      "shots": [{"id": "e1s1", "seconds": 6, "location": "temple", "characters": ["aq"],
-                                 "props": [], "speaker": "aq", "line": "滚！", "camera": "c", "action": "a",
+                      "shots": [{"id": "e1s1", "seconds": 6, "location": "dock", "characters": ["zhou"],
+                                 "props": [], "speaker": "zhou", "line": "嘿！", "camera": "c", "action": "a",
                                  "after": "b", "then": "t", "sound": "s", "summary": "x"}]}]}
 
 
@@ -48,10 +48,10 @@ def project(tmp_path, monkeypatch):
     project = Store(tmp_path).create("t", "第一章\n文", flow="default@1", episodes=1, max_seconds=60)
     project.save_plan(PLAN)
     (project.root / "stills").mkdir()
-    for key in ("character-aq", "location-temple"):
+    for key in ("character-zhou", "location-dock"):
         (project.root / "stills" / f"{key}.png").write_bytes(b"png")
-    project.save_stills({"character:aq": {"file": "stills/character-aq.png", "status": "approved", "seed": 1},
-                         "location:temple": {"file": "stills/location-temple.png", "status": "draft", "seed": 1}})
+    project.save_stills({"character:zhou": {"file": "stills/character-zhou.png", "status": "approved", "seed": 1},
+                         "location:dock": {"file": "stills/location-dock.png", "status": "draft", "seed": 1}})
     return project
 
 
@@ -61,13 +61,13 @@ def render(project, services, only=None):
 
 
 def test_shots_wait_for_every_still_to_be_approved(project):
-    with pytest.raises(ValueError, match="location:temple"):
+    with pytest.raises(ValueError, match="location:dock"):
         render(project, FakeServices())
 
 
 def test_takes_are_numbered_after_every_existing_take(project):
     stills = project.stills
-    stills["location:temple"]["status"] = "approved"
+    stills["location:dock"]["status"] = "approved"
     project.save_stills(stills)
     services = FakeServices()
     render(project, services)
@@ -83,7 +83,7 @@ def test_takes_are_numbered_after_every_existing_take(project):
     assert state["e1s1"]["file"].endswith("e1s1-take3.mp4") and Path(project.root / state["e1s1"]["file"]).is_file()
     assert [call["seed"] for call in services.engine.calls] == [7, 8, 9]
     assert services.engine.calls[-1]["prompt"] == "my prompt"
-    assert services.engine.calls[0]["references"] == ["character-aq.png", "location-temple.png"]
+    assert services.engine.calls[0]["references"] == ["character-zhou.png", "location-dock.png"]
 
 
 class TranslatingServices(FakeServices):
@@ -110,16 +110,16 @@ class TranslatingServices(FakeServices):
 
 def test_shots_reach_the_video_model_in_english_and_are_translated_once(project):
     stills = project.stills
-    stills["location:temple"]["status"] = "approved"
+    stills["location:dock"]["status"] = "approved"
     project.save_stills(stills)
     plan = project.plan
-    plan["episodes"][0]["shots"][0] = {**plan["episodes"][0]["shots"][0], "action": "阿Q 跪下", "sound": "风声"}
+    plan["episodes"][0]["shots"][0] = {**plan["episodes"][0]["shots"][0], "action": "老周 跪下", "sound": "风声"}
     project.save_plan(plan)
     services = TranslatingServices()
     render(project, services)
     prompt = services.engine.calls[0]["prompt"]
-    assert services.asked == [["阿Q 跪下", "风声"]]
-    assert "EN <Subject 1> 跪下." in prompt and "EN 风声." in prompt and "<d>[Chinese] 滚！</d>" in prompt
+    assert services.asked == [["老周 跪下", "风声"]]
+    assert "EN <Subject 1> 跪下." in prompt and "EN 风声." in prompt and "<d>[Chinese] 嘿！</d>" in prompt
     render(project, services, only=["e1s1"])
     assert len(services.asked) == 1 and services.engine.calls[1]["prompt"] == prompt  # kept, not asked again
     episode, shot = plan["episodes"][0], plan["episodes"][0]["shots"][0]
@@ -143,17 +143,17 @@ class FakeImages:
 
 def test_only_what_appears_in_a_shot_gets_a_still(project):
     plan = project.plan
-    plan["characters"].append({"id": "wang", "name": "王胡", "look": "a bearded man"})
+    plan["characters"].append({"id": "chen", "name": "陈伯", "look": "a bearded man"})
     project.save_plan(plan)
     project.save_stills({})
     services = FakeServices()
     services.engine = FakeImages()
     media.run_stills(Context(project, {"seed": 3}, "img", None, services, progress=lambda _: None))
     stills = project.stills
-    assert sorted(stills) == ["character:aq", "location:temple"]  # 王胡 is in no shot
+    assert sorted(stills) == ["character:zhou", "location:dock"]  # 陈伯 is in no shot
     assert services.engine.sizes == [media.STILL_SIZE] * 2
-    assert stills["character:aq"]["model"] == "img" and stills["character:aq"]["seconds"] >= 0
-    assert media.usage(plan) == {"character:aq": ["e1s1"], "location:temple": ["e1s1"]}
+    assert stills["character:zhou"]["model"] == "img" and stills["character:zhou"]["seconds"] >= 0
+    assert media.usage(plan) == {"character:zhou": ["e1s1"], "location:dock": ["e1s1"]}
     assert media.average_seconds([{"model": "img", "seconds": 4}, {"model": "img", "seconds": 6},
                                   {"model": "other", "seconds": 60}], "img") == 5.0
 
@@ -169,7 +169,7 @@ def test_stills_take_the_size_the_served_image_bundle_renders(project):
 
 def test_a_take_is_outdated_when_a_still_or_the_plan_behind_it_changes(project):
     stills = project.stills
-    stills["location:temple"]["status"] = "approved"
+    stills["location:dock"]["status"] = "approved"
     project.save_stills(stills)
     render(project, FakeServices())
 
@@ -180,12 +180,12 @@ def test_a_take_is_outdated_when_a_still_or_the_plan_behind_it_changes(project):
                               use_previous=False)
 
     assert reasons() == []
-    (project.root / "stills" / "character-aq-2.png").write_bytes(b"png")
-    stills["character:aq"]["file"] = "stills/character-aq-2.png"  # redrawn
+    (project.root / "stills" / "character-zhou-2.png").write_bytes(b"png")
+    stills["character:zhou"]["file"] = "stills/character-zhou-2.png"  # redrawn
     project.save_stills(stills)
     assert reasons() == ["references"]
     plan = project.plan
-    plan["episodes"][0]["shots"][0]["line"] = "滚出去！"
+    plan["episodes"][0]["shots"][0]["line"] = "快上船！"
     project.save_plan(plan)
     assert reasons() == ["references", "prompt"]
     render(project, FakeServices(), only=["e1s1"])
@@ -199,7 +199,7 @@ def test_a_take_is_outdated_when_a_still_or_the_plan_behind_it_changes(project):
 def test_new_prompt_wording_leaves_takes_and_stills_current_but_plan_edits_do_not(project, monkeypatch):
     services = FakeServices()
     services.engine = FakeImages()
-    media.run_stills(Context(project, {"seed": 3, "only": ["character:aq", "location:temple"]}, "img", None,
+    media.run_stills(Context(project, {"seed": 3, "only": ["character:zhou", "location:dock"]}, "img", None,
                              services, progress=lambda _: None))
     stills = project.stills
     for still in stills.values():
@@ -223,16 +223,16 @@ def test_new_prompt_wording_leaves_takes_and_stills_current_but_plan_edits_do_no
     plan["episodes"][0]["shots"][0]["action"] = "a, slowly"
     plan["characters"][0]["look"] = "a thin man in rags"
     project.save_plan(plan)
-    assert outdated() == (["prompt"], ["character:aq"])
+    assert outdated() == (["prompt"], ["character:zhou"])
 
 
 def test_takes_from_before_takes_kept_their_source_follow_the_plan(project):
     stills = project.stills
-    stills["location:temple"]["status"] = "approved"
+    stills["location:dock"]["status"] = "approved"
     project.save_stills(stills)
     plan = project.plan
     plan["episodes"][0]["shots"][0] = {**plan["episodes"][0]["shots"][0], "speaker": "", "line": "",
-                                       "action": "aq 跪下"}
+                                       "action": "zhou 跪下"}
     project.save_plan(plan)
     render(project, FakeServices())
     state = project.shot_state(1)
@@ -240,7 +240,7 @@ def test_takes_from_before_takes_kept_their_source_follow_the_plan(project):
         del record["source"]
         record["prompt"] = record["prompt"].replace(f" {prompts.NO_ONE_SPEAKS}", "")
     project.save_shot_state(1, state)
-    (project.root / media.TRANSLATIONS).write_text(json.dumps({"aq 跪下": "aq kneels"}))  # put into English since
+    (project.root / media.TRANSLATIONS).write_text(json.dumps({"zhou 跪下": "zhou kneels"}))  # put into English since
 
     def reasons():
         plan = project.plan
@@ -249,7 +249,7 @@ def test_takes_from_before_takes_kept_their_source_follow_the_plan(project):
                               use_previous=False)
 
     assert reasons() == []
-    plan["episodes"][0]["shots"][0]["action"] = "aq 站起"
+    plan["episodes"][0]["shots"][0]["action"] = "zhou 站起"
     project.save_plan(plan)
     assert reasons() == ["prompt"]
     state = project.shot_state(1)
@@ -267,17 +267,17 @@ def test_each_shot_opens_where_the_shot_before_it_ends_in_the_same_place(project
     project.save_plan(plan)
     (project.root / "stills" / "location-street.png").write_bytes(b"png")
     stills = project.stills
-    stills["location:temple"]["status"] = "approved"
+    stills["location:dock"]["status"] = "approved"
     stills["location:street"] = {"file": "stills/location-street.png", "status": "approved", "seed": 1}
     project.save_stills(stills)
     services = FakeServices()
     render(project, services)
     first, second, third = services.engine.calls
-    assert first["references"] == ["character-aq.png", "location-temple.png"]
-    assert second["references"] == ["e1s1-take1-last.png", "character-aq.png", "location-temple.png"]
+    assert first["references"] == ["character-zhou.png", "location-dock.png"]
+    assert second["references"] == ["e1s1-take1-last.png", "character-zhou.png", "location-dock.png"]
     assert "final frame of the previous shot in <Picture 1>" in second["prompt"]
     assert "[Shot 1] The shot opens exactly on the frame in <Picture 1>" in second["prompt"]
-    assert third["references"] == ["character-aq.png", "location-street.png"]  # a new place is a cut
+    assert third["references"] == ["character-zhou.png", "location-street.png"]  # a new place is a cut
 
     def reasons(shot_id):
         plan = project.plan
@@ -292,7 +292,7 @@ def test_each_shot_opens_where_the_shot_before_it_ends_in_the_same_place(project
     state["chain_shots"] = False
     project.save_shot_state(1, state)
     render(project, services, only=["e1s2"])
-    assert services.engine.calls[-1]["references"] == ["character-aq.png", "location-temple.png"]
+    assert services.engine.calls[-1]["references"] == ["character-zhou.png", "location-dock.png"]
 
 
 def test_a_clip_skips_the_lead_in_and_keeps_its_planned_length(monkeypatch, tmp_path):
@@ -342,7 +342,7 @@ def test_a_clip_starts_after_the_reference_pictures_it_holds(tmp_path):
 
 def test_assembling_cuts_takes_of_an_older_rule_again(project, monkeypatch):
     stills = project.stills
-    stills["location:temple"]["status"] = "approved"
+    stills["location:dock"]["status"] = "approved"
     project.save_stills(stills)
     render(project, FakeServices())
     state = project.shot_state(1)
@@ -408,22 +408,22 @@ def test_an_animated_shot_opens_on_a_keyframe_or_where_the_shot_before_it_ends(p
     project.save_plan(plan)
     (project.root / "stills" / "location-street.png").write_bytes(b"png")
     stills = project.stills
-    stills["location:temple"]["status"] = "approved"
+    stills["location:dock"]["status"] = "approved"
     stills["location:street"] = {"file": "stills/location-street.png", "status": "approved", "seed": 1}
     project.save_stills(stills)
     services = FirstFrameServices()
     render(project, services)
     assert services.loaded == ["e", "v"]  # every keyframe first, so each model loads once
-    assert fitted == [("character-aq.png", 704, 1280), ("location-street.png", 704, 1280),  # the edit inputs
+    assert fitted == [("character-zhou.png", 704, 1280), ("location-street.png", 704, 1280),  # the edit inputs
                       # then every first frame, at the size the video bundle takes
                       ("e1s1-take1.png", 704, 1280), ("e1s1-take1-last.png", 704, 1280), ("e1s3-take1.png", 704, 1280)]
     person, place = services.engine.edits
-    assert "Use the person in the picture (阿Q, a thin man)" in person["prompt"] and "The place: a shrine." in person["prompt"]
+    assert "Use the person in the picture (老周, a thin man)" in person["prompt"] and "The place: a wooden dock." in person["prompt"]
     assert "Use the place in the picture" in place["prompt"] and person["picture"] == b"picture"
     first, second, third = services.engine.calls
     assert [c["references"] for c in (first, second, third)] == [
         ["e1s1-take1-first.png"], ["e1s2-take1-first.png"], ["e1s3-take1-first.png"]]
-    assert "阿Q talks." in first["prompt"] and "talks" not in second["prompt"] and "<Subject" not in first["prompt"]
+    assert "老周 talks." in first["prompt"] and "talks" not in second["prompt"] and "<Subject" not in first["prompt"]
     assert finished == [0.0, 0.0, 0.0]  # a first frame is the shot itself: nothing is skipped
     state = project.shot_state(1)
     assert state["e1s1"]["silent"] and state["e1s1"]["keyframe"]["file"] == "episodes/01/keyframes/e1s1-take1.png"
@@ -449,7 +449,7 @@ def test_without_an_edit_model_an_animated_shot_opens_on_its_reference_picture(p
         clip.parent.mkdir(parents=True, exist_ok=True) or clip.write_bytes(b"clip")) and 0.0)
     monkeypatch.setattr(video, "fit_picture", lambda picture, output, width, height: output.write_bytes(b"picture"))
     stills = project.stills
-    stills["location:temple"]["status"] = "approved"
+    stills["location:dock"]["status"] = "approved"
     project.save_stills(stills)
     services = FirstFrameServices()
     services.serving = lambda role: None  # a 24 GB tier: no edit model
@@ -458,22 +458,22 @@ def test_without_an_edit_model_an_animated_shot_opens_on_its_reference_picture(p
     assert services.engine.calls[0]["references"] == ["e1s1-take1-first.png"]
     picture = "episodes/01/keyframes/e1s1-take1-picture.png"
     entry = project.shot_state(1)["e1s1"]
-    assert entry["keyframe"] == {"file": picture, "still": "stills/character-aq.png", "picture": picture, "model": None}
+    assert entry["keyframe"] == {"file": picture, "still": "stills/character-zhou.png", "picture": picture, "model": None}
     assert entry["first_frame"] == picture and entry["silent"]
 
 
 def test_keyframe_and_motion_prompts_name_the_people_and_never_quote():
-    plan = {**PLAN, "characters": [*PLAN["characters"], {"id": "wu", "name": "吴妈", "look": "an old maid"}]}
-    shot = {**PLAN["episodes"][0]["shots"][0], "characters": ["aq", "wu"], "action": 'aq grabs wu\'s "sleeve"',
+    plan = {**PLAN, "characters": [*PLAN["characters"], {"id": "mei", "name": "小梅", "look": "a young woman"}]}
+    shot = {**PLAN["episodes"][0]["shots"][0], "characters": ["zhou", "mei"], "action": 'zhou hands mei a "lantern"',
             "camera": "close-up"}
     keyframe = prompts.keyframe_prompt(plan, shot, ("character", plan["characters"][0]))
-    assert "Use the person in the picture (阿Q, a thin man)" in keyframe
-    assert "Also in the shot: 吴妈, an old maid. Exactly 2 people, each of them once." in keyframe
-    assert "It shows the moment this begins: 阿Q grabs 吴妈's sleeve." in keyframe and '"' not in keyframe
+    assert "Use the person in the picture (老周, a thin man)" in keyframe
+    assert "Also in the shot: 小梅, a young woman. Exactly 2 people, each of them once." in keyframe
+    assert "It shows the moment this begins: 老周 hands 小梅 a lantern." in keyframe and '"' not in keyframe
     assert "lose-up" not in keyframe  # how the camera moves is the video model's to show
     motion = prompts.motion_prompt(plan, shot)
     assert motion.startswith("A vertical short-drama shot set in a town, drama. Close-up.")
-    assert "阿Q is a thin man. 吴妈 is an old maid. 阿Q grabs 吴妈's sleeve." in motion and "阿Q talks." in motion
+    assert "老周 is a thin man. 小梅 is a young woman. 老周 hands 小梅 a lantern." in motion and "老周 talks." in motion
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs FFmpeg")

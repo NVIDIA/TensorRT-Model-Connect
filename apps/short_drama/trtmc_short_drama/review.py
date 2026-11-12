@@ -111,7 +111,7 @@ def uncast(plan: dict[str, Any], parts: list[str]) -> list[dict[str, str]]:
                     continue
                 if (times := source.count(name)) >= NAMED_TIMES:
                     found[name] = (episode["number"], str(raw), times)
-    # 太太 is part of 赵太太: report the fuller name only.
+    # 学徒 is part of 小学徒: report the fuller name only.
     return [problem("warning", f"episode {number}", f"{raw} is named {times} times in its chapters but is "
                     "not in Characters", "add them if they appear on screen, then add them to their shots")
             for name, (number, raw, times) in found.items()
@@ -121,7 +121,7 @@ def uncast(plan: dict[str, Any], parts: list[str]) -> list[dict[str, str]]:
 def origins(plan: dict[str, Any], novel: str) -> dict[str, str]:
     """Shot id -> "novel" when its line is quoted from the novel, else "adapted".
 
-    A one-character line such as 滚 tells nothing either way and gets no mark.
+    A one-character line such as 嗯 tells nothing either way and gets no mark.
     """
 
     text = normalize(novel)

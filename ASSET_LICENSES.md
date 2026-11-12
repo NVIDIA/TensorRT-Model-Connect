@@ -272,10 +272,14 @@ of the source checkpoint.
 
 ## Short-drama sample story
 
-`apps/short_drama/samples/tuantuan_star_tree.txt`, 《团团的星星树》, is an
+`apps/short_drama/samples/tuantuan_star_tree.txt`, *Tuantuan's Star Tree*, is an
 original one-chapter children's story written for this app. A language model
-drafted it, through the app's own story-from-an-idea step, from this idea by a
-project contributor: 幼儿3D卡通动画，适合3到5岁的孩子：熊猫宝宝团团在竹林里捡到一颗会发光的种子，和好朋友小兔子朵朵一起把它种下、浇水、守着它过夜；第二天早上，种子长成了一棵挂满星星小灯的小树，照亮了整片竹林。故事温暖简单，没有坏人，只有团团和朵朵两个角色、竹林一个场景，台词短小可爱。
+drafted it, through the app's own story-from-an-idea step, from an idea by a
+project contributor: a warm 3D cartoon for children aged 3 to 5, in which a
+panda cub, Tuantuan, finds a glowing seed in a bamboo forest, plants it with
+his friend Duoduo, a little rabbit, and watches over it through the night;
+the next morning it has grown into a small tree hung with star lamps that
+light up the forest. A language model then translated the story into English.
 It is distributed under the Apache License 2.0 with the rest of the project.
 
 <!-- Collaborative review anchor: batch 2. -->

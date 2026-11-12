@@ -136,8 +136,8 @@ header says what the GPU is doing; click it for the activity panel: the models l
 running and queued steps of every project, recent steps with their errors, and the end of
 `logs/trtmc-server.log`.
 
-1. **Story.** Paste a novel, open a text file, use the bundled sample, 《团团的星星树》, a
-   one-chapter children's story written for this app, or start from an idea: one or two sentences that the language model turns
+1. **Story.** Paste a novel, open a text file, use the bundled sample, *Tuantuan's Star Tree*, a
+   one-chapter English children's story written for this app, or start from an idea: one or two sentences that the language model turns
    into a short story with one chapter per episode, which you can edit before planning.
 2. **Plan.** One click, once a language model is chosen in Settings. Edit the cast (each character's `look` and `voice` feed the image and
    video prompts), places, props, episodes and every shot: place, characters, seconds, the

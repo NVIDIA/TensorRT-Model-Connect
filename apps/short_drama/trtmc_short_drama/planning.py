@@ -14,7 +14,7 @@ from .flow import Context, Step
 
 MIN_SHOT_SECONDS, MAX_SHOT_SECONDS = 4, 9
 ASCII_ID = re.compile(r"[^a-z0-9_]+")
-# Some models put a space between Chinese and Latin text (阿 Q); names and lines should not.
+# Some models put a space between Chinese and Latin text (第 3 集); names and lines should not.
 CJK_GAP = re.compile(r"(?<=[\u4e00-\u9fff])\s+(?=[A-Za-z0-9])|(?<=[A-Za-z0-9])\s+(?=[\u4e00-\u9fff])")
 
 

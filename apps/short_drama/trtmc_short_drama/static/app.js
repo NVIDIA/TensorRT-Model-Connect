@@ -413,9 +413,9 @@ function emptyHome() {
 const SOURCES = [
   ["idea", "An idea", "One or two sentences; the language model writes the story first."],
   ["novel", "My novel", "Paste the text or open a .txt file."],
-  ["sample", "The sample story", "《团团的星星树》, a children's story written for this app."],
+  ["sample", "The sample story", "Tuantuan's Star Tree, an English children's story written for this app."],
 ];
-const SAMPLE_TITLE = "团团的星星树";
+const SAMPLE_TITLE = "Tuantuan's Star Tree";
 const CARTOON = "bright 3D cartoon animation for children, soft rounded shapes, warm pastel colors, gentle soft light";
 // Presets are written in English, which the image and video models follow best; a custom style
 // may use any language.
@@ -459,8 +459,8 @@ function renderNew() {
     el("button", { class: `option${d.source === key ? " on" : ""}`, "aria-pressed": String(d.source === key),
       onclick: () => {
         d.source = key;
-        if (key === "sample") {  // a one-chapter Chinese cartoon: one 30 s episode
-          d.language = "zh";
+        if (key === "sample") {  // a one-chapter English cartoon: one 30 s episode
+          d.language = "en";
           if (!d.style) { d.style = CARTOON; d.custom = false; }
           if (d.episodes === 4 && d.seconds === 60) { d.episodes = 1; d.seconds = 30; }
         } else if (key === "novel" && d.episodes === 1 && d.seconds === 30) { d.episodes = 4; d.seconds = 60; }
@@ -475,7 +475,7 @@ function renderNew() {
   const file = el("input", { type: "file", accept: ".txt,text/plain", onchange: (e) => { d.file = e.target.files[0] || null; } });
   const content = d.source === "idea" ? el("label", {}, t("Your idea"), idea)
     : d.source === "novel" ? [el("label", {}, t("Paste the novel"), novel), el("label", {}, t("Or open a text file"), file)]
-      : el("p", { class: "idea" }, t("《团团的星星树》: one chapter, about 630 characters, about a panda cub and a rabbit who grow a tree of stars."));
+      : el("p", { class: "idea" }, t("Tuantuan's Star Tree: one chapter, about 440 words, about a panda cub and a rabbit who grow a tree of stars."));
 
   const styleText = el("input", { value: d.style, placeholder: t("for example: watercolor picture-book illustration, soft daylight"),
     oninput: (e) => { d.style = e.target.value; } });

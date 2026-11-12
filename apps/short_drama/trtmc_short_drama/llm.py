@@ -174,7 +174,7 @@ def parse_json(text: str) -> Any:
 
 
 def escape_inner_quotes(text: str) -> str:
-    """Escape double quotes that sit inside prose, such as 用“阿Q"称呼, which models often emit.
+    """Escape double quotes that sit inside prose, such as 取名“小白"吧, which models often emit.
 
     A structural quote opens after one of `{[,:` or whitespace, or closes before one of `,:]}` or
     whitespace; any other unescaped quote is part of a string.
