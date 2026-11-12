@@ -42,14 +42,23 @@ class Graph:
     anchors: list[np.ndarray] = field(default_factory=list)
 
 
+_LOGGERS: dict[bool, trt.Logger] = {}
+
+
+def _logger(verbose: bool) -> trt.Logger:
+    """Process-wide logger: TensorRT requires it to outlive every object created through it."""
+    if verbose not in _LOGGERS:
+        _LOGGERS[verbose] = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
+    return _LOGGERS[verbose]
+
+
 def create_graph(
     *, verbose: bool, workspace_bytes: int, optimization_level: int, compute: trt.DataType
 ) -> Graph:
     """Create a strongly typed network and its builder configuration."""
     if compute not in (BF16, FP32):
         raise ValueError(f"unsupported compute type {compute}")
-    logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
-    builder = trt.Builder(logger)
+    builder = trt.Builder(_logger(verbose))
     config = builder.create_builder_config()
     config.builder_optimization_level = optimization_level
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, workspace_bytes)

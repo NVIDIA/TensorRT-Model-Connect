@@ -77,8 +77,15 @@ def _tiny_checkpoint(directory: Path):
     return model
 
 
+# One logger and runtime for the module: TensorRT requires them to outlive the engines they create.
+_RUNTIME: list = []
+
+
 def _engine(plan: bytes):
-    engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(plan)
+    if not _RUNTIME:
+        logger = trt.Logger(trt.Logger.WARNING)
+        _RUNTIME.extend((logger, trt.Runtime(logger)))
+    engine = _RUNTIME[1].deserialize_cuda_engine(plan)
     assert engine is not None
     return engine
 
@@ -95,7 +102,7 @@ def _execute(context, engine, inputs: dict, outputs: dict) -> None:
         assert context.set_tensor_address(name, tensor.data_ptr()), name
     for name, tensor in outputs.items():
         assert context.set_tensor_address(name, tensor.data_ptr()), name
-    assert context.all_binding_shapes_specified
+    assert context.infer_shapes() == []
     assert context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
     torch.cuda.synchronize()
 

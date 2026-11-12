@@ -98,10 +98,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     languages = tokens.language_suffixes(tokenizer)
     encoder = config.encoder
     longest_language = max(len(entry["ids"]) for entry in languages)
-    # One full chunk of audio, the prompt, the longest forced language and one generated token.
-    minimum = len(prefix) + len(suffix) + longest_language + encoder.tokens_per_chunk + 1
+    # One full chunk of audio, the prompt, the longest forced language and the default output limit.
+    minimum = len(prefix) + len(suffix) + longest_language + encoder.tokens_per_chunk + max_output_tokens
     if capacity < minimum:
-        raise ValueError(f"qwen3_asr needs max_sequence_length >= {minimum}, got {capacity}")
+        raise ValueError(
+            f"qwen3_asr needs max_sequence_length >= {minimum} (one second of audio, the prompt and the "
+            f"default max_output_tokens {max_output_tokens}), got {capacity}"
+        )
     max_audio_tokens = capacity - len(prefix) - len(suffix) - 1
     encoder_windows = min(-(-max_audio_tokens // encoder.window_tokens), ENCODER_WINDOWS_PER_LAUNCH)
     prefill_tokens = min(capacity, PREFILL_CHUNK_TOKENS)

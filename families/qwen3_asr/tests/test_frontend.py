@@ -111,6 +111,14 @@ def test_configuration_is_read_and_checked(tmp_path) -> None:
         {"text": {"tie_word_embeddings": False}},
         {"text": {"use_sliding_window": True}},
         {"text": {"rope_parameters": {"rope_theta": 1.0e6, "rope_type": "yarn"}}},
+        # Transformers applies a legacy ``rope_scaling`` (``type`` alias) in place of ``rope_parameters``.
+        {"text": {"rope_scaling": {"type": "linear", "factor": 2.0}}},
+        {"text": {"rope_parameters": None, "rope_scaling": {"rope_type": "dynamic", "factor": 2.0},
+                  "rope_theta": 1.0e6}},
+        {"text": {"rope_parameters": {"full_attention": {"rope_theta": 1.0e6, "rope_type": "linear",
+                                                         "factor": 2.0}}}},
+        {"text": {"rope_parameters": {"rope_theta": 1.0e6, "rope_type": "default",
+                                      "partial_rotary_factor": 0.5}}},
         {"audio": {"n_window_infer": 750}},
         {"audio": {"output_dim": 16}},
         {"architectures": ["Qwen3ASRForTokenClassification"]},
@@ -121,6 +129,28 @@ def test_unsupported_layouts_are_rejected(tmp_path, overrides) -> None:
     _write_checkpoint(tmp_path, **overrides)
     with pytest.raises(ValueError):
         config_module.load_config(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("text", "theta"),
+    [
+        ({"rope_parameters": None, "rope_scaling": {"type": "default"}, "rope_theta": 5.0e5}, 5.0e5),
+        ({"rope_parameters": None, "rope_theta": 2.0e5}, 2.0e5),
+        ({"rope_parameters": {"full_attention": {"rope_type": "default", "rope_theta": 3.0e5}}}, 3.0e5),
+    ],
+)
+def test_equivalent_rope_layouts_are_read(tmp_path, text, theta) -> None:
+    _write_checkpoint(tmp_path, text=text)
+    assert config_module.load_config(tmp_path).decoder.rope_theta == theta
+
+
+def test_feature_extractor_defaults_follow_the_reference(tmp_path) -> None:
+    # Qwen3ASRFeatureExtractor pads clips shorter than min_length, 8000 samples by default.
+    _write_checkpoint(tmp_path)
+    processor = json.loads((tmp_path / "processor_config.json").read_text())
+    del processor["feature_extractor"]["min_length"]
+    (tmp_path / "processor_config.json").write_text(json.dumps(processor))
+    assert config_module.load_config(tmp_path).features.min_samples == 8000
 
 
 def test_byte_decoder_inverts_the_byte_level_alphabet() -> None:

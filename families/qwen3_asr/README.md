@@ -10,7 +10,7 @@ checkpoints, validated on [`Qwen/Qwen3-ASR-0.6B-hf`](https://huggingface.co/Qwen
 | Section | Content |
 |---|---|
 | `audio_encoder.plan` | Chunked audio encoder and projector. Input `[windows, 8, 128, 100]` log-mel chunks plus the valid tokens of every chunk; output `[windows, 104, hidden]` projected rows. Attention stays inside windows of 8 chunks (104 tokens), as in the reference. |
-| `decoder.plan` | Qwen3 decoder with an in-place KV cache of `max_sequence_length` positions (`IKVCacheUpdateLayer`). Profile 0 appends up to 1024 prompt tokens per launch, profile 1 one token; audio rows replace the `<|audio_pad|>` embeddings. |
+| `decoder.plan` | Qwen3 decoder with an in-place KV cache of `max_sequence_length` positions (`IKVCacheUpdateLayer`). Profile 0 appends up to 1024 prompt tokens per launch, profile 1 one token; audio rows replace the `<\|audio_pad\|>` embeddings. |
 | `mel_filters.bin` | Slaney filterbank, 201 x 128. |
 | `vocab.bin` | Bytes of every token id, for detokenization without a BPE encoder. |
 | `runtime.json` | Geometry, prompt ids, forced-language prefills, stop ids. |
@@ -25,7 +25,8 @@ grow with `max_sequence_length`; the KV cache does (112 KiB per position in BF16
 
 ```bash
 trtmc build Qwen/Qwen3-ASR-0.6B-hf --output qwen3-asr-0.6b.bundle --max-sequence-length 4096
-trtmc transcribe qwen3-asr-0.6b.bundle --input speech.wav [--source-language en] [--max-output-tokens 512]
+trtmc transcribe qwen3-asr-0.6b.bundle --input speech.wav
+trtmc transcribe qwen3-asr-0.6b.bundle --input speech.wav --source-language en --max-output-tokens 256
 ```
 
 - Audio: 16 kHz PCM, any channel count (channels are averaged). The family ships no resampler.
@@ -36,6 +37,8 @@ trtmc transcribe qwen3-asr-0.6b.bundle --input speech.wav [--source-language en]
   tag as well.
 - Length: the prompt (15 ids + 13 audio tokens per second of audio) plus `max_output_tokens` must fit
   `max_sequence_length` (default 4096: about 275 s of audio with 512 output tokens). Longer requests are rejected.
+  The build refuses a `max_sequence_length` that cannot hold one second of audio with the default
+  `max_output_tokens`.
 - Precision: `bf16` (default, the checkpoint's) or `fp32`.
 
 ## Validation

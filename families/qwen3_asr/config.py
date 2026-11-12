@@ -138,8 +138,15 @@ def _decoder(raw: dict) -> DecoderConfig:
              "sliding-window attention")
     layer_types = raw.get("layer_types")
     _require(layer_types is None or set(layer_types) == {"full_attention"}, "decoder layer types")
-    rope = raw.get("rope_parameters") or {}
-    _require(rope.get("rope_type", "default") == "default", "rope scaling")
+    # Transformers prefers a legacy ``rope_scaling`` over ``rope_parameters`` and accepts ``type`` for
+    # ``rope_type``; parameters may also be nested by layer type.
+    rope = raw.get("rope_scaling") or raw.get("rope_parameters") or {}
+    if isinstance(rope.get("full_attention"), dict):
+        rope = rope["full_attention"]
+    _require(not any(isinstance(value, dict) for value in rope.values()), "rope parameters per layer type")
+    _require(rope.get("rope_type", rope.get("type", "default")) == "default", "rope scaling")
+    partial = rope.get("partial_rotary_factor", raw.get("partial_rotary_factor"))
+    _require(partial is None or float(partial) == 1.0, "partial rotary embedding")
     theta = rope.get("rope_theta", raw.get("rope_theta"))
     _require(theta is not None, "rope_theta")
     config = DecoderConfig(
@@ -169,7 +176,8 @@ def _features(raw: dict) -> FeatureConfig:
         n_fft=int(extractor["n_fft"]),
         hop_length=int(extractor["hop_length"]),
         num_mel_bins=int(extractor["feature_size"]),
-        min_samples=int(extractor.get("min_length", 0)),
+        # ``Qwen3ASRFeatureExtractor`` pads shorter clips to 8000 samples unless configured otherwise.
+        min_samples=int(extractor.get("min_length", 8000)),
         n_window=int(extractor["n_window"]),
     )
 
