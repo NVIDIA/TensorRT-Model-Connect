@@ -39,8 +39,8 @@ the graph-parity check only.
 `tests/test_e2e.py` compares the native CLI on six single-line images, and the
 public C and C++ SDK on three requests (two of those images) served by one
 loaded model, with Transformers in float32: token ids and text must be equal.
-`tests/test_graph_parity.py` compares the engines' cross-attention
-states and teacher-forced logits with the reference; injected defects such as
+The same module then compares the engines' cross-attention states and
+teacher-forced logits with the reference (`tests/graph_parity.py`); injected defects such as
 a tanh GELU or a wrong layer-norm epsilon keep the greedy tokens on every image,
 so these gates catch what token equality cannot. An fp16 graph was measured
 and not shipped: it kept every token but moved the logits two to three times
