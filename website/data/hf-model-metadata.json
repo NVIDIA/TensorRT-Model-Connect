@@ -1504,6 +1504,17 @@
         "DeepseekV3ForCausalLM"
       ],
       "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "OpenMOSS-Team/MOSS-Transcribe-Diarize",
+      "revision": "10304d926740cf5a5cee05a268086e3265197910",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "moss_transcribe_diarize",
+      "architectures": [
+        "MossTranscribeDiarizeForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
     }
   ]
 }
