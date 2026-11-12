@@ -169,10 +169,10 @@ PeftPairs collect_peft_pairs(const qwen3_vl_moe::PeftLoraArtifact& artifact,
     for (const auto& tensor : artifact.tensors()) {
         std::smatch match;
         if (!std::regex_match(tensor.name, match, weight_pattern))
-            continue;
+            throw std::runtime_error("Qwen3-VL-MoE LoRA: unsupported tensor " + tensor.name);
         const std::string module = match[3].str();
         if (targets.find(module) == targets.end())
-            continue;
+            throw std::runtime_error("Qwen3-VL-MoE LoRA: undeclared target tensor " + tensor.name);
         auto& pair = pairs[{std::stoi(match[1].str()), module}];
         (match[4].str() == "A" ? pair.a : pair.b) = &tensor;
     }

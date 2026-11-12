@@ -187,10 +187,12 @@ def add_rms_norm(
     sqrt_l = network.add_unary(denom_in.get_output(0), trt.UnaryOperation.SQRT)
     recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
     normalized = network.add_elementwise(inp, recip.get_output(0), trt.ElementWiseOperation.PROD)
+    normalized_t = normalized.get_output(0)
+    if need_cast:
+        normalized_t = network.add_cast(normalized_t, output_dtype).get_output(0)
+        normalized_t = network.add_cast(normalized_t, trt.float32).get_output(0)
     gamma_t = add_constant(network, (1, hidden_size), gamma, dtype=np.float32)
-    scaled = network.add_elementwise(
-        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD
-    )
+    scaled = network.add_elementwise(normalized_t, gamma_t, trt.ElementWiseOperation.PROD)
     result = scaled.get_output(0)
     if need_cast:
         result = _cast_back_to_trt_dtype(network, result, output_dtype)
@@ -236,6 +238,10 @@ def add_rms_norm_per_head(
     normalized = network.add_elementwise(
         reshaped, recip.get_output(0), trt.ElementWiseOperation.PROD
     )
+    normalized_t = normalized.get_output(0)
+    if need_cast:
+        normalized_t = network.add_cast(normalized_t, output_dtype).get_output(0)
+        normalized_t = network.add_cast(normalized_t, trt.float32).get_output(0)
     gamma_arr = np.asarray(gamma, dtype=np.float32)
     if gamma_arr.size == head_dim:
         gamma_t = add_constant(
@@ -248,9 +254,7 @@ def add_rms_norm_per_head(
             gamma_arr.reshape(num_heads, head_dim),
             dtype=np.float32,
         )
-    scaled = network.add_elementwise(
-        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD
-    )
+    scaled = network.add_elementwise(normalized_t, gamma_t, trt.ElementWiseOperation.PROD)
 
     result = scaled.get_output(0)
     if need_cast:

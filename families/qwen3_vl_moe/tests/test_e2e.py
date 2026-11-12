@@ -11,9 +11,9 @@ import json
 import gc
 import os
 from pathlib import Path
-import re
 import string
 import subprocess
+import shutil
 import pytest
 from tensorrt_model_connect import BuildRequest, build
 
@@ -45,12 +45,6 @@ def _canonical_vl_answers(left: str, right: str) -> tuple[str, str]:
 
     left = normalize(left)
     right = normalize(right)
-    left_words = re.findall(r"\b\w+\b", left)
-    right_words = re.findall(r"\b\w+\b", right)
-    if len(left_words) == 1 and len(right_words) > 1 and left_words[0] in right_words:
-        return left_words[0], left_words[0]
-    if len(right_words) == 1 and len(left_words) > 1 and right_words[0] in left_words:
-        return right_words[0], right_words[0]
     return left, right
 
 
@@ -145,7 +139,83 @@ def artifacts(tmp_path_factory):
     del reference
     gc.collect()
     torch.cuda.empty_cache()
+    _verify_task_sdk(bundle, runtime, expected, work)
     return bundle, binary, runtime, expected
+
+
+def _verify_task_sdk(bundle, runtime, references, work):
+    from PIL import Image
+
+    sdk = runtime / "test_qwen3_vl_moe_sdk"
+    if not sdk.is_file():
+        compiler = shutil.which(os.environ.get("CXX", "c++"))
+        assert compiler is not None, "Task SDK regression requires the C++ client compiler"
+        sdk = work / "task-sdk"
+        repo = ROOT.parents[2]
+        subprocess.run(
+            [
+                compiler,
+                "-std=c++17",
+                "-O1",
+                "-I",
+                str(repo / "core/api/include"),
+                str(ROOT / "cpp/run_task_sdk.cpp"),
+                "-L",
+                str(runtime),
+                "-ltrtmc_c",
+                "-Wl,-rpath," + str(runtime),
+                "-o",
+                str(sdk),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    name = next(iter(references))
+    image_path, expected, ids, input_tokens = references[name]
+    with Image.open(image_path) as source:
+        image = source.convert("RGB")
+        raw = work / "sdk-image.rgb"
+        raw.write_bytes(image.tobytes())
+        width, height = image.size
+    case = CASES[name]
+    command = [
+        str(sdk),
+        str(bundle),
+        str(runtime),
+        str(raw),
+        str(height),
+        str(width),
+        case["prompt"],
+        str(case["max_new_tokens"]),
+    ]
+    completed = subprocess.run(command, capture_output=True, timeout=900)
+    (work / "task-sdk.stdout").write_bytes(completed.stdout)
+    (work / "task-sdk.stderr").write_bytes(completed.stderr)
+    assert completed.returncode == 0, completed.stderr.decode(errors="replace")[-6000:]
+    size, separator, payload = completed.stdout.partition(b"\n")
+    assert separator, completed.stdout[-1000:]
+    count = int(size)
+    text = payload[:count].decode("utf-8")
+    actual_ids = [int(value) for value in payload[count:].split()]
+    assert text.strip() and actual_ids
+    actual, reference = _canonical_vl_answers(text, expected)
+    distance = _edit_distance(actual, reference)
+    print(
+        json.dumps(
+            {
+                "case": name + "-task-sdk",
+                "native_text": text,
+                "reference_text": expected,
+                "native_ids": actual_ids,
+                "reference_ids": ids,
+                "input_tokens": input_tokens,
+                "normalized_edit_distance": distance,
+            }
+        ),
+        flush=True,
+    )
+    assert distance <= 0.15
 
 
 def _reference_answer(case_name, case, work, processor, reference):
@@ -246,6 +316,17 @@ def test_official_checkpoint_e2e(case_name, artifacts):
     assert distance <= 0.15
 
 
-def test_parity_oracle_rejects_wrong_color():
-    actual, expected = _canonical_vl_answers("Red.", "Gray")
+@pytest.mark.parametrize(
+    "left,right",
+    [
+        ("Red.", "Gray"),
+        ("Gray", "not gray"),
+        ("not gray", "Gray"),
+        ("Gray", "Red, not gray"),
+        ("Red, not gray", "Gray"),
+        ("Gray", "gray and red"),
+    ],
+)
+def test_parity_oracle_rejects_wrong_color(left, right):
+    actual, expected = _canonical_vl_answers(left, right)
     assert _edit_distance(actual, expected) > 0.15

@@ -14,6 +14,9 @@
 #include "families/qwen3_vl_moe/runtime/lora_runtime.h"
 #include "families/qwen3_vl_moe/runtime/sampler.h"
 #include "families/qwen3_vl_moe/runtime/tokenizer.h"
+#include "trtmc/internal/language.h"
+#include "trtmc/internal/model.h"
+#include "trtmc/internal/text.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
 
@@ -42,10 +45,19 @@ struct Qwen3VlMoeConfig {
 
 class Qwen3VlMoePipeline final : public ITextGeneration,
                                  public IVisionLanguageGeneration,
-                                 public ILoraAdapterManager {
+                                 public ILoraAdapterManager,
+                                 public internal::IModel,
+                                 public internal::ITextContinuation,
+                                 public internal::IImagesTextToText {
   public:
     const char* task() const noexcept override { return IVisionLanguageGeneration::kTask; }
     std::int32_t default_max_new_tokens() const override { return config_.prefill_max_length; }
+    std::vector<internal::TaskInstance> task_bindings() override;
+    ILoraAdapterManager* lora_adapters() noexcept override {
+        return has_dynamic_lora() ? this : nullptr;
+    }
+    TextResult run(const internal::TextContinuationRequest&, internal::ConfigView) override;
+    TextResult run(const internal::ImagesTextToTextRequest&, internal::ConfigView) override;
 
     Qwen3VlMoePipeline(std::unique_ptr<ITrtModule> text_decoder,
                        std::unique_ptr<ITrtModule> vision_encoder,

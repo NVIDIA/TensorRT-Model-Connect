@@ -279,21 +279,7 @@ void Qwen3VlMoeKvCache::advance(int32_t n_tokens) {
         }
         ++position_;
     } else {
-        // Cache full: shift [1..max) → [0..max-1), then write at tail
-        auto shift_bytes = static_cast<std::size_t>(max_length_ - 1) * row_bytes;
-        auto tail_offset = shift_bytes;
-        for (int32_t i = 0; i < num_layers_; ++i) {
-            auto li = static_cast<std::size_t>(i);
-            auto* ck = static_cast<uint8_t*>(cache_k_[li].data());
-            auto* cv = static_cast<uint8_t*>(cache_v_[li].data());
-            cudaMemcpyAsync(ck, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(ck + tail_offset, present_k_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv + tail_offset, present_v_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
-        }
-        // position_ stays at max_length_ (cache is full, all slots visible)
+        throw std::runtime_error("Qwen3VlMoeKvCache::advance: KV cache is full");
     }
 }
 
@@ -317,11 +303,12 @@ std::size_t Qwen3VlMoeKvCache::device_memory_bytes() const {
 }
 
 bool Qwen3VlMoeKvCache::ok() const {
-    if (cache_k_.size() != static_cast<std::size_t>(num_layers_))
-        return false;
-    for (const auto& t : cache_k_) {
-        if (!t.ok())
+    for (const auto* group : {&cache_k_, &cache_v_, &present_k_, &present_v_}) {
+        if (group->size() != static_cast<std::size_t>(num_layers_))
             return false;
+        for (const auto& tensor : *group)
+            if (!tensor.ok())
+                return false;
     }
     return true;
 }

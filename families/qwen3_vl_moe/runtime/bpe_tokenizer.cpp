@@ -15,6 +15,7 @@
 #include <queue>
 #include <stdexcept>
 #include <string>
+#include <unicode/uchar.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -164,54 +165,21 @@ enum class Variant { kGpt2, kQwen3, kBloom, kDeepSeek, kClip };
 
 // ── Character classification ──
 
-struct UnicodeRange {
-    char32_t lo, hi;
-};
-
-constexpr UnicodeRange kLetterRanges[] = {
-    {'A', 'Z'},         {'a', 'z'},       {0xB5, 0xB5},   // µ (micro sign, treated as letter)
-    {0xC0, 0xD6},       {0xD8, 0xF6},     {0xF8, 0x1BA},  // Latin-1 + Extended A/B
-    {0x1BC, 0x1BF},     {0x1C4, 0x293},   {0x295, 0x2AF}, // Latin Extended B cont.
-    {0x370, 0x373},     {0x376, 0x377},   {0x37B, 0x37D},   {0x37F, 0x37F}, // Greek
-    {0x386, 0x386},     {0x388, 0x38A},   {0x38C, 0x38C},   {0x38E, 0x3A1},
-    {0x3A3, 0x3F5},     {0x3F7, 0x481},   {0x48A, 0x52F},   // Greek + Cyrillic
-    {0x531, 0x556},     {0x559, 0x559},                     // Armenian
-    {0x560, 0x588},                                         // Armenian lowercase
-    {0x600, 0x6FF},                                         // Arabic
-    {0x900, 0x97F},                                         // Devanagari
-    {0xE00, 0xE7F},                                         // Thai
-    {0x10A0, 0x10C5},                                       // Georgian
-    {0x13A0, 0x13F5},                                       // Cherokee
-    {0x1C90, 0x1CBA},   {0x1CBD, 0x1CBF},                   // Georgian Extended
-    {0x1D00, 0x1D2B},   {0x1D6B, 0x1D77}, {0x1D79, 0x1D9A}, // Phonetic Extensions
-    {0x1E00, 0x1F15},   {0x1F18, 0x1F1D}, {0x1F20, 0x1F45}, // Latin Ext. Additional + Greek Ext.
-    {0x2C00, 0x2C5F},                                       // Glagolitic
-    {0x3040, 0x309F},                                       // Hiragana
-    {0x30A0, 0x30FF},                                       // Katakana
-    {0x3400, 0x4DBF},                                       // CJK Extension A
-    {0x4E00, 0x9FFF},                                       // CJK Unified Ideographs
-    {0xAC00, 0xD7AF},                                       // Hangul Syllables
-    {0xFB00, 0xFDFF},   // Alphabetic Presentation Forms + Arabic Forms
-    {0x10000, 0x1007F}, // Linear B Syllabary
-};
-
 inline bool is_letter(char32_t cp) {
-    for (const auto& r : kLetterRanges) {
-        if (cp >= r.lo && cp <= r.hi)
-            return true;
-    }
-    return false;
+    const auto category = u_charType(static_cast<UChar32>(cp));
+    return category == U_UPPERCASE_LETTER || category == U_LOWERCASE_LETTER ||
+           category == U_TITLECASE_LETTER || category == U_MODIFIER_LETTER ||
+           category == U_OTHER_LETTER;
 }
 
 inline bool is_digit(char32_t cp) {
-    return (cp >= '0' && cp <= '9');
+    const auto category = u_charType(static_cast<UChar32>(cp));
+    return category == U_DECIMAL_DIGIT_NUMBER || category == U_LETTER_NUMBER ||
+           category == U_OTHER_NUMBER;
 }
 
 inline bool is_whitespace(char32_t cp) {
-    return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' || cp == 0x0B || cp == 0x0C // VT, FF
-           || cp == 0xA0                   // non-breaking space
-           || cp == 0x2000 || cp == 0x200A // en space through hair space
-           || cp == 0x3000;                // ideographic space
+    return u_isUWhiteSpace(static_cast<UChar32>(cp));
 }
 
 // BLOOM punctuation set: .,!?...
@@ -315,30 +283,22 @@ inline void scan_all_whitespace(const char*& p, const char* end) {
 }
 
 // Qwen3 regex branch: \s*[\r\n]+
-// Consume any leading whitespace up to the first newline, then consume the
-// contiguous newline run itself, but stop before whitespace that follows the
-// last newline.
+// The greedy match includes indentation between newline runs, but excludes
+// trailing whitespace after the last newline.
 inline void scan_qwen3_newline_chunk(char32_t first_cp, const char*& p, const char* end) {
-    bool saw_newline = is_newline(first_cp);
-    while (p < end) {
-        const char* peek = p;
+    const char* last_newline = is_newline(first_cp) ? p : nullptr;
+    const char* scan = p;
+    while (scan < end) {
+        const char* peek = scan;
         char32_t nc = read_utf8(peek, end);
-        if (!saw_newline) {
-            if (is_newline(nc)) {
-                saw_newline = true;
-                p = peek;
-                continue;
-            }
-            if (is_whitespace(nc)) {
-                p = peek;
-                continue;
-            }
+        if (!is_whitespace(nc))
             break;
-        }
-        if (!is_newline(nc))
-            break;
-        p = peek;
+        if (is_newline(nc))
+            last_newline = peek;
+        scan = peek;
     }
+    if (last_newline != nullptr)
+        p = last_newline;
 }
 
 inline void scan_bloom_words(const char*& p, const char* end) {
@@ -375,13 +335,16 @@ inline bool is_two_char_contraction(char c1, char c2) {
 }
 
 // Returns length of contraction suffix after apostrophe ('s 't 'm 'd 're 've 'll)
-inline int match_contraction_suffix(const char* p, const char* end) {
+inline int match_contraction_suffix(const char* p, const char* end, bool ignore_case) {
     if (p >= end)
         return 0;
-    char c = *p;
+    const auto fold = [ignore_case](char c) {
+        return ignore_case && c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+    };
+    char c = fold(*p);
     if (c == 's' || c == 't' || c == 'm' || c == 'd')
         return 1;
-    if (p + 1 < end && is_two_char_contraction(c, p[1]))
+    if (p + 1 < end && is_two_char_contraction(c, fold(p[1])))
         return 2;
     return 0;
 }
@@ -390,15 +353,13 @@ inline int match_contraction_suffix(const char* p, const char* end) {
 
 // Handle apostrophe: either contraction or "other" chars run
 inline bool try_contraction(char32_t cp, const char*& p, const char* end, const char* start,
-                            std::vector<std::string>& result) {
+                            Variant variant, std::vector<std::string>& result) {
     if (cp != '\'')
         return false;
-    int suffix = match_contraction_suffix(p, end);
-    if (suffix > 0) {
-        p += suffix;
-    } else {
-        scan_others(p, end);
-    }
+    int suffix = match_contraction_suffix(p, end, variant == Variant::kQwen3);
+    if (suffix == 0)
+        return false;
+    p += suffix;
     result.emplace_back(start, p);
     return true;
 }
@@ -429,6 +390,10 @@ inline bool try_prefix_run(char32_t cp, const char*& p, const char* end, const c
         return true;
     }
     if (!is_whitespace(next_cp)) {
+        if (variant == Variant::kQwen3 && cp != ' ' && is_whitespace(cp)) {
+            p = after_prefix;
+            return false;
+        }
         scan_others(p, end);
         if (variant == Variant::kQwen3)
             scan_newlines(p, end);
@@ -519,7 +484,7 @@ std::vector<std::string> pre_tokenize(const std::string& text, Variant variant,
         const char* start = p;
         char32_t cp = read_utf8(p, end);
 
-        if (try_contraction(cp, p, end, start, result))
+        if (try_contraction(cp, p, end, start, variant, result))
             continue;
         if (try_prefix_run(cp, p, end, start, variant, result))
             continue;

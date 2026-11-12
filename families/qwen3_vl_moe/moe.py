@@ -33,26 +33,6 @@ def add_moe(network, hidden, weights, prefix, *, top_k, dtype):
             tensor if tensor.dtype == runtime else network.add_cast(tensor, runtime).get_output(0)
         )
 
-    reshaped = network.add_shuffle(hidden)
-    reshaped.reshape_dims = (1, -1, width)
-
-    # TensorRT broadcasts the input batch over expert weight matrices.
-    def matmul(lhs, rhs):
-        return network.add_matrix_multiply(
-            lhs, trt.MatrixOperation.NONE, rhs, trt.MatrixOperation.NONE
-        ).get_output(0)
-
-    projected_gate = matmul(reshaped.get_output(0), constant(gate))
-    projected_up = matmul(reshaped.get_output(0), constant(weights[prefix + ".experts.w_up"]))
-    sigmoid = network.add_activation(projected_gate, trt.ActivationType.SIGMOID).get_output(0)
-    swish = network.add_elementwise(
-        projected_gate, sigmoid, trt.ElementWiseOperation.PROD
-    ).get_output(0)
-    activation = network.add_elementwise(
-        swish, projected_up, trt.ElementWiseOperation.PROD
-    ).get_output(0)
-    output = matmul(activation, constant(weights[prefix + ".experts.w_down"]))
-
     # The reference visits experts in ascending ID order and updates the BF16
     # accumulator after each contribution. Gather the selected experts in that
     # order rather than reducing a dense expert axis in FP32.
@@ -63,14 +43,35 @@ def add_moe(network, hidden, weights, prefix, *, top_k, dtype):
         1 << 1,
     )
     sorted_ids = network.add_cast(sort.get_output(0), trt.int32).get_output(0)
+
+    # Gather each token's selected weights before GEMM. The expert batch is K,
+    # rather than E, so unselected expert weights are not read by the matmuls.
+    reshaped = network.add_shuffle(hidden)
+    reshaped.reshape_dims = (0, 1, 1, width)
+
+    def project(lhs, expert_weights):
+        selected_weights = network.add_gather(constant(expert_weights), sorted_ids, 0)
+        return network.add_matrix_multiply(
+            lhs,
+            trt.MatrixOperation.NONE,
+            selected_weights.get_output(0),
+            trt.MatrixOperation.NONE,
+        ).get_output(0)
+
+    projected_gate = project(reshaped.get_output(0), gate)
+    projected_up = project(reshaped.get_output(0), weights[prefix + ".experts.w_up"])
+    swish = graph_ops.add_silu(network, projected_gate)
+    activation = network.add_elementwise(
+        swish, projected_up, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    output = project(activation, weights[prefix + ".experts.w_down"])
+    selected = network.add_shuffle(output)
+    selected.reshape_dims = (-1, top_k, width)
+
     probabilities = network.add_gather(normalized, sort.get_output(1), 1)
     probabilities.num_elementwise_dims = 1
     scale = network.add_shuffle(probabilities.get_output(0))
     scale.reshape_dims = (0, top_k, 1)
-    transpose = network.add_shuffle(output)
-    transpose.first_transpose = (1, 0, 2)
-    selected = network.add_gather(transpose.get_output(0), sorted_ids, 1)
-    selected.num_elementwise_dims = 1
     weighted_output = network.add_elementwise(
         selected.get_output(0), scale.get_output(0), trt.ElementWiseOperation.PROD
     ).get_output(0)

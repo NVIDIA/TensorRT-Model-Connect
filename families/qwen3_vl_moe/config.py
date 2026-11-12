@@ -12,7 +12,7 @@ from pathlib import Path
 
 def get_rope_scaling(raw: dict) -> dict:
     """Return decoder RoPE settings from flat or multimodal HF configs."""
-    rope_scaling = raw.get("rope_scaling")
+    rope_scaling = raw.get("rope_scaling", raw.get("rope_parameters"))
     if isinstance(rope_scaling, dict):
         return rope_scaling
 
@@ -20,7 +20,7 @@ def get_rope_scaling(raw: dict) -> dict:
         nested = raw.get(key)
         if not isinstance(nested, dict):
             continue
-        rope_scaling = nested.get("rope_scaling")
+        rope_scaling = nested.get("rope_scaling", nested.get("rope_parameters"))
         if isinstance(rope_scaling, dict):
             return rope_scaling
 
@@ -28,7 +28,7 @@ def get_rope_scaling(raw: dict) -> dict:
     if isinstance(thinker, dict):
         nested = thinker.get("text_config")
         if isinstance(nested, dict):
-            rope_scaling = nested.get("rope_scaling")
+            rope_scaling = nested.get("rope_scaling", nested.get("rope_parameters"))
             if isinstance(rope_scaling, dict):
                 return rope_scaling
     return {}

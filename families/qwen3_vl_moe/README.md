@@ -8,12 +8,14 @@ The decoder implements grouped-query attention, interleaved multimodal RoPE,
 top-8 routed experts, and the three vision DeepStack injections. Expert
 weights use the checkpoint's packed input/output layout. BF16 constants retain
 the checkpoint's BF16 range. TensorRT lowers the graph; the family supplies no
-GPU kernels. The current graph evaluates all experts and weights their outputs
-with the sparse router probabilities.
+GPU kernels. The graph gathers each token's selected expert weights before
+GEMMs and accumulates their weighted outputs in ascending expert order.
 
 One serialized decoder engine has separate prefill and decode profiles. The
 native runtime shares that engine between its two execution contexts. A second
 engine owns dynamic vision encoding and the main and DeepStack features.
+Native builds require ICU's `uc` component for Unicode tokenizer categories;
+its upstream attribution is in [NOTICE](NOTICE).
 
 ## Build and run
 
@@ -41,7 +43,8 @@ Configure the native build with the matched SDK settings described in the
 build the CLI, TensorRT backend, and family DSO. Run using their build directory:
 
 ```bash
-cmake --build build --target trtmc trtmc_backend_trt trtmc_model_qwen3_vl_moe -j 8
+cmake --build build --target trtmc trtmc_backend_trt trtmc_model_qwen3_vl_moe \
+  test_qwen3_vl_moe_sdk -j 8
 
 build/trtmc run qwen3-vl-30b-a3b-bf16.bundle \
   --runtime-root build \
@@ -54,17 +57,27 @@ The recipe uses one GPU, batch one, BF16, and a 512-token cache. The multirow
 prefill profile accepts up to 64 tokens; longer prompts currently prefill one
 token at a time. The declared image cases exercise that sequential path.
 Images preserve their aspect ratio and are resized within 65,536 to 200,704
-pixels. Prompt and generated tokens together must fit the cache. Quantization,
+pixels. Prompt and requested generated tokens together must fit the cache;
+oversized requests are rejected before prefill, and the cache does not slide. Quantization,
 tensor or context parallelism, video, and runtime-sized KV caches are
 unsupported. FP32 is available for component debugging; this checkpoint recipe
 uses BF16.
 
 ## Validation
 
+The Task SDK exposes `text_continuation` for UTF-8 prefixes and
+`images_text_to_text` for one user turn with one RGB image and text. The image
+Task accepts contiguous UInt8 RGB pixels or Float32 RGB values in [0,1]. Tools,
+additional turns, and additional images are rejected. LoRA management is
+advertised only when the loaded decoder has adapter inputs.
+
 The manifest contains original and mirrored vehicle-image cases. The official
 Transformers reference uses the same processor bounds, BF16 weights, prompt,
 and greedy generation. The native answer must pass the existing Qwen-VL
-canonicalization and normalized edit-distance limit of 0.15. Separate small
+case, whitespace, and edge-punctuation normalization and the normalized
+edit-distance limit of 0.15. Full normalized answers are compared; shared words
+do not excuse negation or conflicting colors. The fixture also loads the bundle
+through the public C++ Task SDK and checks an image answer before CLI execution. Separate small
 graphs compare routed-expert and dynamic vision/DeepStack outputs against the
 official reference modules.
 
@@ -83,3 +96,6 @@ PYTHONPATH=core/builder:apps/benchmark:. \
 
 The E2E fixture builds a bundle unless `TRTMC_QWEN3_VL_MOE_BUNDLE` explicitly
 selects an existing bundle built from the current family source.
+Build the SDK test client with `TRTMC_BUILD_TESTS=ON` (the CMake default). When
+it is absent, the selected E2E fixture compiles the client using the public SDK
+headers and `libtrtmc_c` in `TRTMC_RUNTIME_ROOT`.

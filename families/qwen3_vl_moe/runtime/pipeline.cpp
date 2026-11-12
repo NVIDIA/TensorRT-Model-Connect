@@ -657,6 +657,10 @@ std::vector<int32_t> Qwen3VlMoePipeline::generate_from_ids(const std::vector<int
                                                            const Qwen3VlMoeSamplingParams& params) {
     if (max_new_tokens == 0 || input_ids.empty())
         return input_ids;
+    if (max_new_tokens < 0 || input_ids.size() > static_cast<std::size_t>(state_->max_length()) ||
+        static_cast<std::size_t>(max_new_tokens) >
+            static_cast<std::size_t>(state_->max_length()) - input_ids.size())
+        throw std::invalid_argument("Qwen3-VL-MoE prompt and output budget exceed KV capacity");
 
     auto local_sampler = create_qwen3_vl_moe_sampler(params);
     auto* active_sampler = local_sampler.get();
@@ -677,7 +681,8 @@ std::vector<int32_t> Qwen3VlMoePipeline::generate_from_ids(const std::vector<int
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         Qwen3VlMoeSampleResult result = active_sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
-        if (result.is_eos || qwen3_vl_moe_is_eos_token(params, result.token_id))
+        if (result.is_eos || qwen3_vl_moe_is_eos_token(params, result.token_id) ||
+            step + 1 == max_new_tokens)
             break;
         run_text_step(result.token_id, logits);
     }
@@ -692,6 +697,10 @@ std::vector<int32_t> Qwen3VlMoePipeline::generate_vl_from_ids(
     int32_t max_new_tokens, const Qwen3VlMoeSamplingParams& params) {
     if (max_new_tokens == 0 || input_ids.empty())
         return input_ids;
+    if (max_new_tokens < 0 || input_ids.size() > static_cast<std::size_t>(state_->max_length()) ||
+        static_cast<std::size_t>(max_new_tokens) >
+            static_cast<std::size_t>(state_->max_length()) - input_ids.size())
+        throw std::invalid_argument("Qwen3-VL-MoE prompt and output budget exceed KV capacity");
 
     auto local_sampler = create_qwen3_vl_moe_sampler(params);
     auto* active_sampler = local_sampler.get();
@@ -790,7 +799,8 @@ void Qwen3VlMoePipeline::run_vl_decode_loop(Qwen3VlMoeISampler* sampler,
     for (int32_t step = 0; step < max_new_tokens; ++step) {
         Qwen3VlMoeSampleResult result = sampler->sample(logits.data(), vocab_size, params);
         output.push_back(result.token_id);
-        if (result.is_eos || qwen3_vl_moe_is_eos_token(params, result.token_id))
+        if (result.is_eos || qwen3_vl_moe_is_eos_token(params, result.token_id) ||
+            step + 1 == max_new_tokens)
             break;
         run_text_step(result.token_id, logits, mrope_position);
         if (mrope_position >= 0)
