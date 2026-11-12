@@ -45,6 +45,11 @@ class Config:
             if raw.get(key) != expected:
                 raise ValueError(f"unsupported Flint {key}: {raw.get(key)!r}")
         values = {key: raw[key] for key in cls.__dataclass_fields__}
+        eos = values["eos_token_id"]
+        if not isinstance(eos, list) or not eos or any(
+            type(token) is not int or not 0 <= token < values["vocab_size"] for token in eos
+        ):
+            raise ValueError("Flint eos_token_id must be a non-empty list of vocabulary IDs")
         for key in ("layer_types", "no_rope_layer_indices", "mlp_only_layers", "eos_token_id"):
             values[key] = tuple(values[key])
         result = cls(**values)
@@ -54,6 +59,10 @@ class Config:
             raise ValueError("Flint query heads must be divisible by KV heads")
         if not 0 < result.num_experts_per_tok <= result.num_experts:
             raise ValueError("invalid Flint expert selection count")
+        if "sliding_attention" in result.layer_types and (
+            type(result.sliding_window) is not int or result.sliding_window < 2
+        ):
+            raise ValueError("Flint sliding_window must be at least two for sliding attention")
         for i, kind in enumerate(result.layer_types):
             if kind not in {"full_attention", "sliding_attention"}:
                 raise ValueError(f"unsupported Flint attention kind: {kind}")

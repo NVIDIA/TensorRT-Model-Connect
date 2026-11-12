@@ -10,6 +10,28 @@ import numpy as np
 import pytest
 
 
+def logit_metrics(actual, expected):
+    assert actual.shape == expected.shape
+    assert np.isfinite(actual).all() and np.isfinite(expected).all()
+    relative = np.linalg.norm(actual - expected, axis=1) / np.maximum(
+        np.linalg.norm(expected, axis=1), 1e-12
+    )
+    cosine = np.sum(actual * expected, axis=1) / np.maximum(
+        np.linalg.norm(actual, axis=1) * np.linalg.norm(expected, axis=1), 1e-12
+    )
+    return {
+        "relative_l2": relative.tolist(),
+        "cosine_similarity": cosine.tolist(),
+        "top1_agreement": float(np.mean(actual.argmax(-1) == expected.argmax(-1))),
+    }
+
+
+def assert_logit_metrics(metrics, thresholds):
+    assert max(metrics["relative_l2"]) < thresholds["max_relative_l2"]
+    assert min(metrics["cosine_similarity"]) > thresholds["min_cosine_similarity"]
+    assert metrics["top1_agreement"] >= thresholds["min_top1_agreement"]
+
+
 def test_flint_bf16_logits(request, tmp_path):
     directory = Path(__file__).parent
     manifest = json.loads((directory / "manifests/flint-bf16.json").read_text())
@@ -110,6 +132,9 @@ def test_flint_bf16_logits(request, tmp_path):
     tokenizer = Tokenizer.from_file(str(checkpoint / "tokenizer.json"))
     ids = tokenizer.encode(case["prompt"], add_special_tokens=False).ids
     assert ids == metadata["prompt_ids"], "native tokenization must match upstream exactly"
+    assert metadata["text"] == tokenizer.decode(metadata["generated_ids"], skip_special_tokens=True), (
+        "native generated text must match independent decoding"
+    )
     actual = np.fromfile(prefix.with_suffix(".f32"), dtype=np.float32).reshape(
         metadata["rows"], metadata["columns"]
     )
@@ -121,24 +146,13 @@ def test_flint_bf16_logits(request, tmp_path):
     expected = np.stack(
         [row for i, row in enumerate(reference.logits_for_tokens(tokens)) if i >= len(ids) - 1]
     )
-    assert actual.shape == expected.shape
-    relative = np.linalg.norm(actual - expected, axis=1) / np.maximum(
-        np.linalg.norm(expected, axis=1), 1e-12
-    )
-    cosine = np.sum(actual * expected, axis=1) / np.maximum(
-        np.linalg.norm(actual, axis=1) * np.linalg.norm(expected, axis=1), 1e-12
-    )
-    top1 = float(np.mean(actual.argmax(-1) == expected.argmax(-1)))
+    metrics = logit_metrics(actual, expected)
     evidence = {
         "checkpoint": manifest["hf_id"],
         "revision": manifest["hf_revision"],
-        "relative_l2": relative.tolist(),
-        "cosine_similarity": cosine.tolist(),
-        "top1_agreement": top1,
+        **metrics,
         "native": metadata,
     }
     (tmp_path / "comparison.json").write_text(json.dumps(evidence, indent=2))
     print(json.dumps(evidence, indent=2), flush=True)
-    assert float(relative.max()) < thresholds["max_relative_l2"]
-    assert float(cosine.min()) > thresholds["min_cosine_similarity"]
-    assert top1 >= thresholds["min_top1_agreement"]
+    assert_logit_metrics(metrics, thresholds)
