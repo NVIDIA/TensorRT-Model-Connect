@@ -64,6 +64,10 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 `families/timm_resnet/tests/data/test_img_car.jpeg`, a crop of the same
 photograph, and is distributed under the same terms.
 
+`families/siglip2/tests/data/test_img.png` is a lossless PNG encoding of the same
+photograph, pixel-identical to `families/detr/tests/data/test_img.jpeg` decoded by
+Pillow, and is distributed under the same terms.
+
 `families/swinv2/tests/data/test_img.png` is the same photograph decoded to RGB
 and saved losslessly as PNG (its pixels equal Pillow's decode of the
 `test_img.jpeg` copies listed above) and is distributed under the same terms.
