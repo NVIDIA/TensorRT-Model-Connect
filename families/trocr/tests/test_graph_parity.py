@@ -63,6 +63,8 @@ class _Engines:
         self.encoder = runtime.deserialize_cuda_engine(encoder_plan)
         self.decoder = runtime.deserialize_cuda_engine(decoder_plan)
         self.dtypes = {trt.float32: torch.float32, trt.int32: torch.int32}
+        # Cache rows, [layers, heads, capacity, head_dim]: the runtime's default token limit.
+        self.capacity = int(self.decoder.get_tensor_shape("cache_key")[2])
 
     def _tensor(self, engine, name: str):
         shape = tuple(engine.get_tensor_shape(name))
@@ -131,7 +133,8 @@ def _measure(engines: _Engines, reference: Reference, image) -> dict:
     pixel_values = reference.pixel_values(image)
     cross_key, cross_value = engines.encode(pixel_values)
     expected_key, expected_value = _reference_cross(reference, pixel_values)
-    generated = reference.generate(image, max_new_tokens=int(cross_key.shape[2]))
+    # Bounded like the runtime: every fed token needs a cache row.
+    generated = reference.generate(image, max_new_tokens=engines.capacity)
     tokens = [reference.model.generation_config.decoder_start_token_id, *generated[:-1]]
     logits = engines.teacher_forced_logits(cross_key, cross_value, tokens)
     expected_logits = _reference_logits(reference, pixel_values, tokens)
