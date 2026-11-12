@@ -214,6 +214,10 @@ def _preprocess(path: Path, encoder: EncoderConfig) -> PreprocessConfig:
     if resample != _BILINEAR:
         raise ValueError(f"trocr resizes with Pillow bilinear (2), not resample={resample!r}")
     rescale = float(config.get("rescale_factor", 1.0 / 255.0))
+    # The runtime multiplies 8-bit levels by this factor and refuses any other value.
+    if not (math.isfinite(rescale) and rescale > 0.0):
+        raise ValueError(
+            f"trocr preprocessor rescale_factor must be positive and finite, not {rescale!r}")
 
     def triple(key: str) -> tuple[float, float, float]:
         value = config.get(key, 0.5)

@@ -19,7 +19,7 @@ trtmc run trocr.bundle --image line.png --prompt ""
 | Item | Behavior |
 |---|---|
 | Input | exactly one image (RGB, RGBA or grayscale; uint8, or float32 in [0, 1]) and empty text parts. TrOCR takes no instruction; a non-empty text part, a second image, another role, reasoning or tool parts are refused. |
-| Preprocessing | the checkpoint's ViT image processor: the whole image squashed to 384 x 384 with Pillow's bilinear filter, rescaled and normalized. Reproduced bit for bit. |
+| Preprocessing | the checkpoint's ViT image processor: the whole image squashed to 384 x 384 with Pillow's bilinear filter, rescaled and normalized. Reproduced bit for bit for 8-bit pixels. Float32 pixels are first rounded to the nearest 8-bit level: exact for values k / 255 (a decoded 8-bit image); other float32 values are not compared with Transformers. |
 | Decoding | greedy from `decoder_start_token_id` until `eos_token_id`; the end token stays in `token_ids`, special tokens are left out of `text`. |
 | Parameter | `max_new_tokens` (1 to the bundle's `max_sequence_length`, default: until the end token or that capacity). Transformers' `generate()` stops at `max_length=20` unless told otherwise. |
 | Build options | `--max-sequence-length` (2 to 512, default 512) sizes the decoder cache; the image size is the checkpoint's. Other precisions, batch, parallelism, quantization and `--kv-cache-size` are refused. |
