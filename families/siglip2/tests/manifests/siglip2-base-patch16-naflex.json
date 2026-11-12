@@ -1,0 +1,26 @@
+{
+  "name": "siglip2-base-patch16-naflex",
+  "hf_id": "google/siglip2-base-patch16-naflex",
+  "hf_revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+  "bundle": "siglip2-base-patch16-naflex.bundle",
+  "family": "siglip2",
+  "task": "text_image_to_relevance",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "siglip2-base-patch16-naflex",
+      "premerge": true,
+      "test_image": "data/test_img.png",
+      "image_crops": [[220, 0, 420, 382], [300, 150, 340, 180]],
+      "query": "a photo of a car",
+      "negative_query": "a photo of a cat",
+      "texts": [
+        "A White Car Parked On A Coastal Road",
+        "une voiture blanche au bord de la mer",
+        "海边的一辆白色汽车",
+        "a photo of a white electric car parked on a dirt road above the ocean, with hills, dry grass, a blue sky and a few clouds behind it, taken on a sunny afternoon in late summer near the coast of california, where the road winds along the cliffs and the waves break on the rocks far below while a light breeze moves the tall grass on the slope next to the car"
+      ]
+    }
+  ],
+  "tensor_parallel_size": 1
+}
