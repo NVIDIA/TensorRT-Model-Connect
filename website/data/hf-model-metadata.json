@@ -1275,6 +1275,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "openbmb/MiniCPM-OCR-1.0",
+      "revision": "883ca368d17335b9ce5aa6fef4d000ef0684fcaa",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "minicpm_ocr",
+      "architectures": [
+        "MiniCPMOcrForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "sentence-transformers/all-MiniLM-L6-v2",
       "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
       "revision_source": "resolved",
