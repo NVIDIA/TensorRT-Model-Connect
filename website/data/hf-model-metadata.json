@@ -1504,6 +1504,17 @@
         "DeepseekV3ForCausalLM"
       ],
       "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "zai-org/GLM-OCR",
+      "revision": "2e85a62840ccac27daa451df36c736c4636b8628",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "glm_ocr",
+      "architectures": [
+        "GlmOcrForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
     }
   ]
 }

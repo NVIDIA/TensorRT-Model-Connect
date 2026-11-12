@@ -56,6 +56,12 @@ distributed under the Apache License 2.0 with the rest of the project:
 - `families/timm_inception_v4/tests/data/orc_test_img.jpeg` — byte-identical copy of
   `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the input of the FP8
   E2E case, chosen for its clear top-1 margin
+- `families/glm_ocr/tests/data/orc_test_img.jpeg` — byte-identical copy of
+  `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the page the GLM-OCR E2E
+  cases read
+- `families/glm_ocr/tests/data/orc_test_img_line.png` — the first line of that
+  page (columns 0 to 839, rows 0 to 55, decoded and saved again as PNG), the
+  single-line GLM-OCR E2E cases
 
 ## Project overview media
 

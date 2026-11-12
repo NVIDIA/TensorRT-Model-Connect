@@ -1,0 +1,26 @@
+{
+  "name": "glm-ocr-bf16",
+  "hf_id": "zai-org/GLM-OCR",
+  "hf_revision": "2e85a62840ccac27daa451df36c736c4636b8628",
+  "bundle": "glm-ocr-bf16.bundle",
+  "family": "glm_ocr",
+  "task": "images_text_to_text",
+  "precision": "bf16",
+  "testcases": [
+    {
+      "name": "glm-ocr-bf16-line",
+      "premerge": true,
+      "image": "data/orc_test_img_line.png",
+      "prompt": "Text Recognition:",
+      "max_new_tokens": 64
+    },
+    {
+      "name": "glm-ocr-bf16-page",
+      "premerge": true,
+      "image": "data/orc_test_img.jpeg",
+      "prompt": "Text Recognition:",
+      "max_new_tokens": 512
+    }
+  ],
+  "tensor_parallel_size": 1
+}

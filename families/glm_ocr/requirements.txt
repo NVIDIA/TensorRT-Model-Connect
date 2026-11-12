@@ -1,0 +1,15 @@
+# Build: safetensors through NumPy with ml_dtypes' bfloat16.
+ml_dtypes>=0.5
+safetensors>=0.8
+# Reference implementation the E2E and host-parity tests measure against
+# (GlmOcrForConditionalGeneration and the torchvision Glm46VImageProcessor).
+transformers==5.22.2
+pillow
+# Pinned where resolving this file alone would leave the CI image's versions:
+# transformers 5.22.2 needs tokenizers 0.23 and huggingface-hub >= 1.31 (the
+# image has 1.21; 2.x would break packages that require < 2), an unpinned
+# torchvision would pull another torch, and numpy stays below 2.5.
+tokenizers==0.23.3
+huggingface-hub==1.33.0
+torchvision==0.27.0
+numpy>=1.24,<2.5
