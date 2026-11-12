@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import re
 import struct
@@ -53,11 +54,22 @@ class Checkpoint:
             return path
         repository = self.directory.parent.parent
         blobs = repository / "blobs"
+        # Retain the snapshot's first hop: a repository blob can itself link
+        # into the cache-wide shared store in current Hub cache layouts.
+        blob = Path(os.path.abspath(lexical.parent / os.readlink(lexical))) if lexical.is_symlink() else lexical
         if (not lexical.is_symlink() or self.directory.parent.name != "snapshots"
                 or not re.fullmatch(r"[0-9a-f]{40}", self.directory.name)
-                or blobs.is_symlink() or path.parent != blobs
-                or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", path.name)):
+                or blobs.is_symlink() or blob.parent != blobs
+                or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", blob.name)):
             raise ValueError("diffusion_gemma weight shard must be inside the checkpoint directory or its verified Hub cache")
+        if path != blob:
+            shared = repository.parent / "blobs"
+            marker = shared / ".huggingface-shared-blobs"
+            if (not blob.is_symlink() or shared.is_symlink()
+                    or not re.fullmatch(r"[0-9a-f]{64}", path.name)
+                    or path.parent != shared / path.name[:2]
+                    or not marker.is_file() or marker.read_text().strip() != "1"):
+                raise ValueError("diffusion_gemma weight shard must resolve inside its Hub cache blob stores")
         if self._cache_files is None:
             from huggingface_hub import scan_cache_dir
 
@@ -71,7 +83,8 @@ class Checkpoint:
                 if revision.snapshot_path == self.directory and revision.commit_hash == self.directory.name
                 for cached in revision.files
             }
-        if self._cache_files.get(lexical) != path:
+        inventoried = self._cache_files.get(lexical)
+        if inventoried != blob or inventoried.resolve() != path:
             raise ValueError("diffusion_gemma weight shard is not verified by the Hub cache inventory")
         return path
 

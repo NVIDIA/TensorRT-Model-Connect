@@ -67,13 +67,22 @@ def test_bf16_finite_check_keeps_subnormals_and_negative_values():
 
 
 @pytest.mark.parametrize("indexed", [False, True])
-def test_hub_snapshot_accepts_inventory_verified_blob_links(tmp_path, indexed):
+@pytest.mark.parametrize("shared", [False, True])
+def test_hub_snapshot_accepts_inventory_verified_blob_links(tmp_path, indexed, shared):
     snapshot = tmp_path / "hub/models--google--diffusiongemma-26B-A4B-it/snapshots" / ("a" * 40)
     snapshot.mkdir(parents=True)
     blobs = snapshot.parent.parent / "blobs"
     blobs.mkdir()
     blob = blobs / ("b" * 64)
-    write_shard(blob, [[1, 2]])
+    if shared:
+        shared_root = tmp_path / "hub/blobs"
+        target = shared_root / "cc" / ("c" * 64)
+        target.parent.mkdir(parents=True)
+        (shared_root / ".huggingface-shared-blobs").write_text("1")
+        write_shard(target, [[1, 2]])
+        blob.symlink_to("../../blobs/cc/" + target.name)
+    else:
+        write_shard(blob, [[1, 2]])
     name = "part.safetensors" if indexed else "model.safetensors"
     (snapshot / name).symlink_to("../../blobs/" + blob.name)
     if indexed:
@@ -113,4 +122,34 @@ def test_hub_layout_alone_does_not_bypass_inventory_verification(tmp_path, monke
     (snapshot / "model.safetensors").symlink_to(blob)
     monkeypatch.setattr(huggingface_hub, "scan_cache_dir", lambda path: SimpleNamespace(repos=[]))
     with pytest.raises(ValueError, match="Hub cache inventory"):
+        Checkpoint(snapshot, config())
+
+
+@pytest.mark.parametrize("marker", [None, "2"])
+def test_shared_blob_requires_recognized_store(tmp_path, marker):
+    snapshot = tmp_path / "hub/models--google--diffusiongemma/snapshots" / ("a" * 40)
+    snapshot.mkdir(parents=True)
+    blob = snapshot.parent.parent / "blobs" / ("b" * 64)
+    blob.parent.mkdir()
+    target = tmp_path / "hub/blobs/cc" / ("c" * 64)
+    target.parent.mkdir(parents=True)
+    write_shard(target, [1, 2])
+    if marker is not None:
+        (target.parent.parent / ".huggingface-shared-blobs").write_text(marker)
+    blob.symlink_to(target)
+    (snapshot / "model.safetensors").symlink_to(blob)
+    with pytest.raises(ValueError, match="Hub cache blob stores"):
+        Checkpoint(snapshot, config())
+
+
+def test_repository_blob_cannot_link_outside_its_cache(tmp_path):
+    snapshot = tmp_path / "hub/models--google--diffusiongemma/snapshots" / ("a" * 40)
+    snapshot.mkdir(parents=True)
+    blob = snapshot.parent.parent / "blobs" / ("b" * 64)
+    blob.parent.mkdir()
+    target = tmp_path / ("c" * 64)
+    write_shard(target, [1, 2])
+    blob.symlink_to(target)
+    (snapshot / "model.safetensors").symlink_to(blob)
+    with pytest.raises(ValueError, match="Hub cache blob stores"):
         Checkpoint(snapshot, config())
