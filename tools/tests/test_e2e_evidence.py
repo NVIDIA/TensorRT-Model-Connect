@@ -2462,3 +2462,77 @@ def test_contract_only_preserves_an_observed_reference_without_claiming_agreemen
     assert "No reference output was generated" not in report
     summary = _output_summary(data["reference"], role="reference", task="text_generation")
     assert "reference agreement was not asserted" in summary
+
+
+@pytest.mark.parametrize("key", ["prompt", "test_prompt", "text", "query", "source_text"])
+def test_current_input_scope_precedes_recipe_text_key_priority(key):
+    from tools.e2e_report import _demo_input
+
+    data = {"inputs": {
+        "case": {"prompt": "RECIPE_PROMPT", "query": "RECIPE_QUERY",
+                 "inputs": {"prompt": "NESTED_RECIPE_PROMPT"}},
+        key: "CURRENT_OPERATION_INPUT",
+    }}
+    rendered = _demo_input(data)
+    assert "CURRENT_OPERATION_INPUT" in rendered
+    assert "RECIPE_PROMPT" not in rendered and "RECIPE_QUERY" not in rendered
+
+
+def test_recipe_input_fallback_preserves_its_own_scope_priority():
+    from tools.e2e_report import _demo_input
+
+    data = {"inputs": {"case": {"query": "CASE_QUERY", "inputs": {"prompt": "NESTED_PROMPT"}}}}
+    assert "CASE_QUERY" in _demo_input(data)
+    assert "NESTED_PROMPT" not in _demo_input(data)
+
+
+@pytest.mark.parametrize("score", [0, -2.5, 0.75])
+def test_same_kind_scalar_scores_show_both_values_in_the_default_card(tmp_path, score):
+    data = _case()
+    data["inputs"]["manifest"]["task"] = "text_image_to_relevance"
+    data["native"] = {"score": score, "score_kind": "logit"}
+    data["reference"] = {"score": score + 0.125, "score_kind": "logit"}
+    top = render_case(data, tmp_path).split('<details class="case-details">', 1)[0]
+    assert "Score (logit)" in top
+    assert "<th>Native</th><th>Reference</th>" in top
+    assert f"{score + 0.125:.6g}" in top
+
+
+@pytest.mark.parametrize("score", [True, False, float("nan"), float("inf"), -float("inf"), 10**1000, "0.5"])
+def test_scalar_score_preview_requires_a_finite_number(score):
+    from tools.e2e_report import _demo_numeric_value
+
+    assert _demo_numeric_value({"score": score, "score_kind": "logit"}) is None
+
+
+@pytest.mark.parametrize("kind", [None, "", 7, False])
+def test_scalar_score_preview_does_not_guess_an_unspecified_kind(kind):
+    from tools.e2e_report import _demo_numeric_value
+
+    assert _demo_numeric_value({"score": 0.5, "score_kind": kind}) is None
+
+
+def test_scalar_score_kinds_are_not_normalized_or_paired(tmp_path):
+    from tools.e2e_report import _demo_numeric_comparison, _demo_numeric_value
+
+    native = {"score": 0.5, "score_kind": "probability"}
+    reference = {"score": 0.0, "score_kind": "logit"}
+    assert _demo_numeric_value(native)[0] != _demo_numeric_value(reference)[0]
+    rendered = _demo_numeric_comparison(native, reference)
+    assert "<th>Native</th><th>Reference</th>" not in rendered
+    assert _demo_numeric_value({"score": 1, "score_kind": "Logit"})[0] != _demo_numeric_value(reference)[0]
+    data = _case()
+    data["inputs"]["manifest"]["task"] = "text_image_to_relevance"
+    data["native"] = {"score": 0, "score_kind": "<raw>"}
+    data["reference"] = {"score": 1, "score_kind": "<raw>"}
+    top = render_case(data, tmp_path).split('<details class="case-details">', 1)[0]
+    assert "Score (&lt;raw&gt;)" in top and "<raw>" not in top
+
+
+def test_primary_tensor_keeps_priority_over_auxiliary_scalar_score():
+    from tools.e2e_report import _demo_numeric_value, _numeric_data
+
+    original_label, original_values = _demo_numeric_value({"values": [1, 2]})
+    label, values = _demo_numeric_value({"values": [1, 2], "score": 0.5, "score_kind": "logit"})
+    assert label == original_label
+    assert _numeric_data(values) == _numeric_data(original_values)

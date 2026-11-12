@@ -395,6 +395,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
 
     text_deltas = []
     for text, expected in zip((case["query"], case["negative_query"]), reference_texts):
+        record_evidence("inputs", {"text": str(text), "query": str(text)})
+        record_evidence("native", None)
+        record_evidence("reference", {"operation": "text_to_embedding", "values": expected})
         with evidence_stage("native"):
             native = _native_embedding(binary, runtime_root, bundle, case, "--task",
                                        "text_to_embedding", "--text", str(text))
@@ -437,6 +440,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     scores = []
     logit_deltas = []
     for text, expected_text in zip((case["query"], case["negative_query"]), reference_texts):
+        record_evidence("inputs", {"text": str(text), "query": str(text)})
+        record_evidence("native", None)
+        record_evidence("reference", None)
         with evidence_stage("native"):
             payload = _run_json(binary, runtime_root, bundle, case, "rerank", "--task",
                                 "text_image_to_relevance", "--query", str(text), "--image",
@@ -447,11 +453,17 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         assert 0.0 <= score <= 1.0, f"{FAMILY} returned a score outside [0, 1]: {score}"
         expected_logit = scale * sum(a * b for a, b in zip(reference_image, expected_text)) + bias
         delta = abs(_logit(score) - expected_logit)
+        record_evidence("native", {
+            **payload, "text": f"Native pair relevance probability: {score:.9g}",
+        })
+        record_evidence("reference", {
+            "logit": expected_logit, "score": expected_logit, "score_kind": "logit",
+            "text": f"Independent reference logit: {expected_logit:.9g}; comparison uses logit space.",
+        })
         assert delta <= logit_tolerance, (
             f"relevance logit for {text!r} differs from the reference by {delta}"
         )
         logit_deltas.append(delta)
-        record_evidence("reference", {"logit": expected_logit})
         record_reference_comparison(
             "Text-image relevance logit",
             payload,

@@ -309,6 +309,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     text_cosines = []
     native_texts = []
     for text, expected in zip((case["query"], case["negative_query"]), reference_texts):
+        record_evidence("inputs", {"text": str(text), "query": str(text)})
+        record_evidence("native", None)
+        record_evidence("reference", {"operation": "text_to_embedding", "values": expected})
         with evidence_stage("native"):
             native = _native_embedding(binary, runtime_root, bundle, case, "--task",
                                        "text_to_embedding", "--text", str(text))
@@ -338,6 +341,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     # still rank the wrong way round, so the ordering is checked separately.
     scores = []
     for text, expected_text in zip((case["query"], case["negative_query"]), reference_texts):
+        record_evidence("inputs", {"text": str(text), "query": str(text)})
+        record_evidence("native", None)
+        record_evidence("reference", None)
         with evidence_stage("native"):
             payload = _run_json(binary, runtime_root, bundle, case, "rerank", "--task",
                                 "text_image_to_relevance", "--query", str(text), "--image",
@@ -346,11 +352,11 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         assert payload["score_kind"] == "logit"
         score = float(payload["score"])
         expected_score = scale * sum(a * b for a, b in zip(reference_image, expected_text))
+        record_evidence("reference", {"score": expected_score, "score_kind": "logit"})
         assert abs(score - expected_score) <= _SCORE_TOLERANCE, (
             f"relevance {score} differs from reference {expected_score} for {text!r}"
         )
         scores.append(score)
-        record_evidence("reference", {"score": expected_score, "score_kind": "logit"})
         record_reference_comparison(
             "Text-image relevance",
             payload,

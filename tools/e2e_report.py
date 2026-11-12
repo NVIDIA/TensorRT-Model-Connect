@@ -1338,6 +1338,11 @@ def _demo_numeric_value(value: Any, task: str = "") -> tuple[str, Any] | None:
         if candidate is not None:
             return (label if task == "series_to_regression_values" and key == "values"
                     else _label(key)), candidate
+    kind = value.get("score_kind")
+    if isinstance(kind, str) and kind:
+        candidate = _demo_numeric_candidate([value.get("score")])
+        if candidate is not None:
+            return f"Score ({kind})", candidate
     return None
 
 
@@ -1514,9 +1519,10 @@ def _demo_input(data: dict[str, Any], media: str = "") -> str:
         request.pop("past_values", None)
     text = next(
         (
-            request[key]
+            scope[key]
+            for scope in (inputs, case, _mapping(case.get("inputs")))
             for key in ("prompt", "test_prompt", "text", "query", "source_text")
-            if isinstance(request.get(key), str) and request[key]
+            if isinstance(scope.get(key), str) and scope[key]
         ),
         "",
     )
