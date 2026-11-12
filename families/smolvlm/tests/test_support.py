@@ -3,9 +3,8 @@
 
 """SmolVLM checkpoints have exactly one Model Connect owner and one default task."""
 
-import pytest
-
-from tensorrt_model_connect.model_support import FamilyResolutionError, ModelMetadata, resolve_family
+from families.smolvlm.support import describe
+from tensorrt_model_connect.model_support import ModelMetadata, resolve_family
 
 
 def test_smolvlm2_checkpoint_resolves_to_this_family():
@@ -20,9 +19,9 @@ def test_smolvlm2_checkpoint_resolves_to_this_family():
 
 
 def test_idefics3_checkpoints_are_not_claimed():
-    # SmolVLM v1 checkpoints declare the Idefics3 architecture; this family does not own it.
-    with pytest.raises(FamilyResolutionError):
-        resolve_family(ModelMetadata(
-            config={"model_type": "idefics3", "architectures": ["Idefics3ForConditionalGeneration"]},
-            model_index={},
-        ))
+    # SmolVLM v1 checkpoints declare the Idefics3 architecture; this family declines them,
+    # whichever family owns that architecture.
+    assert describe(ModelMetadata(
+        config={"model_type": "idefics3", "architectures": ["Idefics3ForConditionalGeneration"]},
+        model_index={},
+    )) is None

@@ -131,6 +131,8 @@ TOKENIZER_TEXTS = [
     "x<x><y>y<x>z", "nbsp ideographic　space line", "emoji 🙂 and 'll 've 're 'd 'm 't",
     "", "trailing space ", "\u0085next line\u000bvertical tab",
     "a\x04b!\x04!", "\U00040000z and \x04\x06",
+    # Long single pieces: repeated merges, and a lower-ranked pair at the end of a run.
+    "Hello" * 600, "l" * 1001 + "d", " " * 1000 + "x",
 ]
 
 

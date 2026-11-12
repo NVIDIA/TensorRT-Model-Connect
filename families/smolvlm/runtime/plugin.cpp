@@ -23,6 +23,7 @@
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace trtmc::smolvlm {
@@ -155,10 +156,20 @@ class Pipeline final : public IModel, public IImagesTextToText {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto setup = Clock::now();
         std::vector<TiledImage> images;
+        size_t image_tokens = 0;
         const auto text = render_chat(request.messages, [&](const ImageView& view) {
-            images.push_back(tile_image(to_rgb8(view), processing_));
-            if (images.back().frames > max_tiles_)
+            auto tiled = tile_image(to_rgb8(view), processing_);
+            if (tiled.frames > max_tiles_)
                 throw std::logic_error("SmolVLM image produced more tiles than the vision profile");
+            // Every frame adds image_seq_len prompt tokens, a lower bound of the prompt length
+            // checked below: stop before tiling more images than the context can hold.
+            image_tokens += size_t(tiled.frames) * size_t(processing_.image_seq_len);
+            if (image_tokens + size_t(config.max_new_tokens) - 1 > size_t(capacity_))
+                throw std::invalid_argument(
+                    "SmolVLM images (" + std::to_string(image_tokens) +
+                    " image tokens) plus max_new_tokens exceed the built context (" +
+                    std::to_string(capacity_) + ")");
+            images.push_back(std::move(tiled));
             return image_prompt(images.back().rows, images.back().cols, processing_.image_seq_len);
         });
         const auto ids = tokenizer_.encode(text);

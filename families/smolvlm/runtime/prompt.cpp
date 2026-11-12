@@ -6,6 +6,7 @@
 // processing_smolvlm.py) and renders the checkpoint chat template; see ../NOTICE.
 #include "prompt.h"
 
+#include <array>
 #include <stdexcept>
 #include <type_traits>
 #include <variant>
@@ -16,6 +17,11 @@ namespace {
 constexpr const char* kImage = "<image>";
 constexpr const char* kFakeImage = "<fake_token_around_image>";
 constexpr const char* kGlobalImage = "<global-img>";
+// Literals that a text part may not carry: the processor reads <image> as an image
+// slot, and the tokenizer reads the template's message delimiters as message
+// boundaries, after which the text could pose as another role's message.
+constexpr std::array<const char*, 3> kReservedLiterals{kImage, "<end_of_utterance>",
+                                                       "<|im_start|>"};
 
 std::string repeated(const char* token, int count) {
     std::string result;
@@ -73,10 +79,11 @@ std::string render_chat(Span<const internal::ImagesTextMessage> messages,
                 [&](const auto& value) {
                     using Value = std::decay_t<decltype(value)>;
                     if constexpr (std::is_same_v<Value, internal::TextPartView>) {
-                        // The processor would read a literal <image> as an image slot.
-                        if (value.text.find(kImage) != std::string_view::npos)
-                            throw std::invalid_argument(
-                                "SmolVLM text parts must not contain the <image> token");
+                        for (const char* literal : kReservedLiterals)
+                            if (value.text.find(literal) != std::string_view::npos)
+                                throw std::invalid_argument(
+                                    std::string("SmolVLM text parts must not contain the ") +
+                                    literal + " token");
                         result += value.text;
                     } else if constexpr (std::is_same_v<Value, internal::ImageView>) {
                         result += image_text(value);

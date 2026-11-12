@@ -4,6 +4,7 @@
 """CPU checks of the checkpoint contract the builder enforces before any engine build."""
 
 import copy
+import json
 
 import pytest
 
@@ -101,10 +102,22 @@ def test_processor_and_generation_contracts():
         parse(generation={"eos_token_id": [49279, 2]})
 
 
+# The pinned checkpoint's chat_template.json, copied verbatim (JSON-escaped) and kept apart from
+# the family's constant so that a change anywhere in either one fails the test.
+CHECKPOINT_CHAT_TEMPLATE_JSON = (
+    '{"chat_template": "'
+    r"<|im_start|>{% for message in messages %}{{message['role'] | capitalize}}"
+    r"{% if message['content'][0]['type'] == 'image' %}{{':'}}{% else %}{{': '}}{% endif %}"
+    r"{% for line in message['content'] %}{% if line['type'] == 'text' %}{{line['text']}}"
+    r"{% elif line['type'] == 'image' %}{{ '<image>' }}{% endif %}{% endfor %}"
+    r"<end_of_utterance>\n{% endfor %}{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}"
+    '"}'
+)
+
+
 def test_chat_template_is_the_checkpoint_template():
     # Rendered by the runtime; any other template must be rejected at build time.
-    assert CHAT_TEMPLATE.startswith("<|im_start|>{% for message in messages %}")
-    assert CHAT_TEMPLATE.endswith("{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}")
+    assert CHAT_TEMPLATE == json.loads(CHECKPOINT_CHAT_TEMPLATE_JSON)["chat_template"]
 
 
 def _tokenizer_document():

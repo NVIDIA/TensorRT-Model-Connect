@@ -18,7 +18,10 @@ The bundle is built from the pinned checkpoint and driven through the public
   checkpoint has reference near-ties within the first tokens of several
   conversations, after which free-running greedy texts are no longer
   comparable; teacher forcing checks every generated token without that
-  cascade. BF16 bundles are not qualified.
+  cascade. BF16 bundles are not qualified;
+* public result: generation stops at the first end-of-sequence token or at the
+  token limit, and the returned text is the reference tokenizer's decoding of
+  the native tokens.
 """
 
 from __future__ import annotations
@@ -198,11 +201,15 @@ def _reference(checkpoint: Path, images: dict, actual: list) -> dict:
             tokens = output[0, inputs["input_ids"].shape[1]:].cpu().tolist()
             step_logits = list(forced.logits[0, :-1].float().cpu().numpy())
             results.append({"text": processor.decode(tokens, skip_special_tokens=True), "token_ids": tokens,
+                            # The reference decoding of the native tokens: the text the public Task must return.
+                            "native_text": processor.decode(native["token_ids"], skip_special_tokens=True),
                             "input_ids": inputs["input_ids"][0].cpu().tolist(),
                             "disagreements": reference_disagreements(native["token_ids"], step_logits)})
             del inputs, output, forced
         strings = [processor.tokenizer(text, add_special_tokens=True)["input_ids"] for text in TOKENIZER_STRINGS]
-        return {"pixels": pixels, "results": results, "strings": strings}
+        eos = model.generation_config.eos_token_id
+        eos_token_ids = sorted(eos) if isinstance(eos, (list, tuple, set)) else [eos]
+        return {"pixels": pixels, "results": results, "strings": strings, "eos_token_ids": eos_token_ids}
     finally:
         del model
         gc.collect()
@@ -312,15 +319,24 @@ def test_e2e(case_name, request, tmp_path):
     # The longest prompt must exceed one prefill chunk so that chunked prefill is exercised.
     from families.smolvlm.model import MAX_PREFILL_CHUNK
     assert max(len(b["input_ids"]) for b in expected) > MAX_PREFILL_CHUNK
+    eos = set(reference["eos_token_ids"])
     rows = []
     for a, b in zip(actual, expected):
-        assert a["text"] and 0 < len(a["token_ids"]) <= MAX_NEW_TOKENS
-        rows.append({"actual": a, "reference": {"text": b["text"], "token_ids": b["token_ids"]},
+        ids = a["token_ids"]
+        rows.append({"actual": a, "reference": {"text": b["text"], "token_ids": b["token_ids"],
+                                                "decoding_of_native_tokens": b["native_text"]},
                      "prompt_tokens": len(b["input_ids"]),
-                     "first_divergence": first_divergence(a["token_ids"], b["token_ids"]),
+                     "first_divergence": first_divergence(ids, b["token_ids"]),
                      "teacher_forced_disagreements": b["disagreements"],
                      "normalized_text_edit_distance": _ned(a["text"], b["text"])})
     record_evidence("metrics", {"oracle": case["oracle"], "cases": rows})
+    for row in rows:
+        ids, text = row["actual"]["token_ids"], row["actual"]["text"]
+        # Generation stops at the first end-of-sequence token or at the token limit, nowhere else.
+        assert 0 < len(ids) <= MAX_NEW_TOKENS and not eos.intersection(ids[:-1]), row
+        assert ids[-1] in eos or len(ids) == MAX_NEW_TOKENS, row
+        # The public text is the reference tokenizer's decoding of the native tokens.
+        assert text and text == row["reference"]["decoding_of_native_tokens"], row
     if case["oracle"] == "token_exact":
         assert all(row["first_divergence"] is None for row in rows), rows
     else:
