@@ -92,3 +92,20 @@ def test_27b_profiles_declare_the_thor_capacity_limit_and_quantized_variants_do_
         assert set(limits) == {"sm110"} and "#2189" in limits["sm110"]
     for profile in ("qwen38-27b-fp8", "qwen38-27b-nvfp4"):
         assert "capacity_limits" not in resolve_model(profile, environment)
+
+
+def test_a_failed_platform_probe_is_the_profile_error_and_never_builds(tmp_path, monkeypatch):
+    monkeypatch.setattr(campaign, "_GPU_ARCH", {})
+
+    def broken(environment, python=None):
+        raise RuntimeError("serving interpreter crashed")
+
+    monkeypatch.setattr(campaign, "platform_fingerprint", broken)
+    _forbid_model_work(monkeypatch)
+    environment = Environment({"serve_python": "python"})
+    records = campaign.run_all(environment, [LIMITED, {**LIMITED, "model": "big-27b-2"}], tmp_path / "results")
+    assert [r["category"] for r in records] == ["error", "error"]  # the batch goes on to the next profile
+    assert "platform probe for capacity_limits failed" in records[0]["reason"]
+    assert not (tmp_path / "results/big-27b/build.json").exists()
+    resumed = campaign.run_all(environment, [LIMITED], tmp_path / "results")
+    assert resumed[0].get("status") != "skipped" and resumed[0]["category"] == "error"  # retried, not resumed

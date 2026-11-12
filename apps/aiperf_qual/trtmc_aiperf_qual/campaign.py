@@ -207,6 +207,14 @@ def device_capacity_limit(environment: Environment, model: Mapping[str, Any]) ->
     return f"device capacity ({arch}): {limits[arch]}" if arch in limits else None
 
 
+def _probe_capacity(environment: Environment, model: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """(capacity limit, probe failure): a platform probe that fails is the profile's error, never built past."""
+    try:
+        return device_capacity_limit(environment, model), None
+    except Exception as error:  # noqa: BLE001 - reported as the profile's result
+        return None, f"platform probe for capacity_limits failed: {_error(error)}"
+
+
 def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[str, Any]:
     """Build the bundle when missing, qualify, and apply the bundle retention policy. A previous run
     in ``out`` is set aside first."""
@@ -219,7 +227,13 @@ def run_one(environment: Environment, model: dict[str, Any], out: Path) -> dict[
         gold_metrics.preflight_code_sandbox(model, environment.values, out)
     except gold_metrics.SandboxUnavailable as error:
         return _sandbox_blocked_result(environment, configured_model, out, started, error)
-    if limit := device_capacity_limit(environment, model):  # before any download or build
+    limit, probe_error = _probe_capacity(environment, model)  # before any download or build
+    if probe_error:
+        record = {"profile": model["model"], "task": model.get("task"), "category": "error", "reason": probe_error,
+                  "seconds": round(time.time() - started)}
+        (out / "error.json").write_text(json.dumps(record, indent=2))
+        return record
+    if limit:
         return _blocked_result(environment, configured_model, out, started, "device_capacity", limit)
     (out / RUN_KEY).write_text(run_key(environment, model) + "\n")
     bundle_policy, hf_policy = retention.policies(environment)
@@ -316,20 +330,22 @@ def run_all(environment: Environment, models: Sequence[dict[str, Any]], out_root
                     # Note (Jiaxin Deng): run_one records the blocked profile without speculative weight downloads.
                     pass
                 else:
-                    if not device_capacity_limit(environment, following):
+                    if not any(_probe_capacity(environment, following)):  # blocked or unknown: no download
                         downloads.submit(prefetch, environment, following)
             started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             finished = None
             if out.is_dir():
+                key = None
                 try:
                     gold_metrics.preflight_code_sandbox(model, environment.values, out)
                 except gold_metrics.SandboxUnavailable as error:
                     key = _sandbox_run_key(environment, model, out, str(error))
                 else:
-                    limit = device_capacity_limit(environment, model)
-                    key = (_sandbox_run_key(environment, model, out, limit, "device_capacity") if limit
-                           else run_key(environment, model))
-                finished = _finished(out, key)
+                    limit, probe_error = _probe_capacity(environment, model)
+                    if not probe_error:  # a failed probe leaves the profile unfinished: run_one records it
+                        key = (_sandbox_run_key(environment, model, out, limit, "device_capacity") if limit
+                               else run_key(environment, model))
+                finished = _finished(out, key) if key else None
             if finished and not rerun:
                 record = {"profile": profile, "status": "skipped", "category": finished}
             else:
