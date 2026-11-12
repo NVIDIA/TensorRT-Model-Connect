@@ -394,3 +394,34 @@ def test_max_audio_seconds_drops_longer_clips_for_both_sides(tmp_path):
                for name, seconds in (("short", 12.0), ("limit", 30.0), ("long", 33.9))]
     kept = _audio_fitted(Environment({}), samples, 30.0)
     assert [sample["sample_id"] for sample in kept] == ["short", "limit"]
+
+
+def test_label_hit_and_query_hit_score_the_best_class_by_name():
+    clip = {"scores": [0.1, 0.9, 0.3], "labels": ["Speech", "Dog", "Music"]}
+    assert gold_metrics.label_hit(["Animal", "dog"], clip) == (True, "Dog")
+    assert gold_metrics.label_hit(["Music"], clip)[0] is False
+    assert gold_metrics.label_hit(["Dog"], {"scores": [], "labels": []}) == (False, "")
+    zero_shot = {"top_class": 2, "queries": ["a photo of a tench", "a photo of a church", "a photo of a golf ball"]}
+    assert gold_metrics.query_hit("golf ball", zero_shot)[0] is True
+    assert gold_metrics.query_hit("ball", zero_shot)[0] is True  # a suffix that is a whole word
+    assert gold_metrics.query_hit("church", zero_shot)[0] is False
+
+
+def test_depth_parity_applies_the_family_correlation_and_error_gate():
+    rng = np.random.default_rng(1)
+    depth = rng.uniform(1.0, 10.0, size=12)
+
+    def side(values):
+        return {"depth": list(values), "height": 3, "width": 4}
+
+    gate = {"min_correlation": 0.998, "max_relative_error": 0.01}
+    assert gold_metrics.depth_parity(side(depth * 1.0005), side(depth), gate)[0] is True
+    assert gold_metrics.depth_parity(side(depth + 0.5), side(depth), gate)[0] is False
+    assert gold_metrics.depth_parity(side(depth[::-1]), side(depth), gate)[0] is False
+    assert gold_metrics.depth_parity({"depth": [1.0], "height": 3, "width": 4}, side(depth), gate)[0] is None
+
+
+def test_vector_parity_reads_the_gate_field():
+    logits = {"logits": [1.0, 2.0, 3.0]}
+    assert gold_metrics.vector_parity(logits, {"logits": [1.0, 2.0, 3.001]}, {"field": "logits"})[0] is True
+    assert gold_metrics.vector_parity(logits, {"logits": [3.0, 2.0, 1.0]}, {"field": "logits"})[0] is False
