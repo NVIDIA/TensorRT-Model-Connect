@@ -8,8 +8,8 @@ decoding. An fp32 bundle must produce the reference's token ids and text
 exactly for every line image, stop where the reference stops, honour a
 ``max_new_tokens`` limit by returning the reference's first tokens, and give
 the same result through the public C and C++ SDK. The finer numeric gate, on
-the engines' cross-attention states and teacher-forced logits, is
-``test_graph_parity.py``.
+the engines' cross-attention states and teacher-forced logits, runs here too
+(helpers in ``graph_parity.py``), after the E2E.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from pathlib import Path
 
 from tensorrt_model_connect import BuildRequest, build
 
+from . import graph_parity
 from .common import (CASES, FAMILY, Reference, asset, model_dir, parametrize_cases,
                      required_path)
 
@@ -28,6 +29,9 @@ from .common import (CASES, FAMILY, Reference, asset, model_dir, parametrize_cas
 def pytest_generate_tests(metafunc) -> None:
     if "case_name" in metafunc.fixturenames:
         parametrize_cases(metafunc, "case_name")
+    if "fp32_case_name" in metafunc.fixturenames:
+        parametrize_cases(metafunc, "fp32_case_name",
+                          keep=lambda manifest: manifest["precision"] == "fp32")
 
 
 def _runtime() -> tuple[Path, Path]:
@@ -166,3 +170,35 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     refused = _cli(binary, runtime_root, bundle, image, prompt="Read the receipt.")
     assert refused.returncode != 0
     assert "takes no instruction" in refused.stderr + refused.stdout
+
+
+def test_engines_match_the_reference(case_name: str) -> None:
+    _, manifest, case = CASES[case_name]
+    checkpoint = model_dir(manifest["hf_id"], manifest.get("hf_revision"))
+    reference = Reference(checkpoint)
+    engines = graph_parity.build_engines(reference, checkpoint, manifest)
+    precision = manifest["precision"]
+    for raw in case["test_images"]:
+        measured = graph_parity.measure(engines, reference, asset(raw))
+        print(f"trocr {precision} {raw}: cross relative {measured['cross']:.3e}, logits maxabs "
+              f"{measured['logits']:.3e} over {measured['steps']} steps")
+        assert measured["cross"] <= graph_parity.CROSS_TOLERANCE[precision], raw
+        assert measured["logits"] <= graph_parity.LOGIT_TOLERANCE[precision], raw
+        assert measured["argmax"], f"{raw}: teacher-forced argmax differs from the reference"
+
+
+def test_the_logit_gate_rejects_a_tanh_gelu_decoder(fp32_case_name: str, monkeypatch) -> None:
+    """The weakest decoder defect checked: the gate must see it on the case images."""
+    from .. import graph
+
+    _, manifest, case = CASES[fp32_case_name]
+    checkpoint = model_dir(manifest["hf_id"], manifest.get("hf_revision"))
+    reference = Reference(checkpoint)
+    engines = graph_parity.build_engines(
+        reference, checkpoint, manifest,
+        patch=lambda: monkeypatch.setattr(graph, "add_gelu", graph_parity.tanh_gelu))
+    least = min(graph_parity.measure(engines, reference, asset(raw))["logits"]
+                for raw in case["test_images"])
+    print(f"trocr fp32 tanh-GELU decoder: smallest logits maxabs over the images {least:.3e}")
+    # Every image sees it, not only the most sensitive one.
+    assert least > 2 * graph_parity.LOGIT_TOLERANCE["fp32"]

@@ -3,9 +3,10 @@
 
 """Engine numerics against the reference: cross-attention states and teacher-forced logits.
 
-The family's two engines are built in this process from the case checkpoint
-and fed the reference's own pixel values. The encoder engine's
-``cross_key``/``cross_value`` are compared with every decoder layer's
+Helpers of the two numeric tests in ``test_e2e.py``, which run with the E2E
+selectors on a GPU. The family's two engines are built in the test process
+from the case checkpoint and fed the reference's own pixel values. The encoder
+engine's ``cross_key``/``cross_value`` are compared with every decoder layer's
 cross-attention projections of the reference encoder output; the decoder
 engine is then stepped through the reference's greedy tokens, writing its
 key/value rows into the cache as the runtime does, and its logits at every
@@ -16,7 +17,7 @@ from __future__ import annotations
 
 import math
 
-from .common import CASES, Reference, asset, model_dir, parametrize_cases
+from .common import Reference
 
 # Measured on the five line images the case started with (B300, TensorRT 11.4,
 # Transformers 5.2.0 on the same GPU with TF32 off); the sixth, a tall canvas
@@ -40,19 +41,11 @@ from .common import CASES, Reference, asset, model_dir, parametrize_cases
 # structural check (5x the correct worst case); the logit gate sits 3.4x above
 # the correct worst case and below every decoder defect and the worst encoder
 # layer-norm case.
-_CROSS_TOLERANCE = {"fp32": 1e-3}
-_LOGIT_TOLERANCE = {"fp32": 5e-4}
+CROSS_TOLERANCE = {"fp32": 1e-3}
+LOGIT_TOLERANCE = {"fp32": 5e-4}
 
 
-def pytest_generate_tests(metafunc) -> None:
-    if "case_name" in metafunc.fixturenames:
-        parametrize_cases(metafunc, "case_name")
-    if "fp32_case_name" in metafunc.fixturenames:
-        parametrize_cases(metafunc, "fp32_case_name",
-                          keep=lambda manifest: manifest["precision"] == "fp32")
-
-
-class _Engines:
+class Engines:
     """The family's encoder and decoder plans, run directly with TensorRT."""
 
     def __init__(self, torch, encoder_plan: bytes, decoder_plan: bytes) -> None:
@@ -128,7 +121,7 @@ def _reference_logits(reference: Reference, pixel_values, tokens: list[int]):
     return output.logits[0].float()
 
 
-def _measure(engines: _Engines, reference: Reference, image) -> dict:
+def measure(engines: Engines, reference: Reference, image) -> dict:
     """Largest absolute differences from the reference on one line image."""
     pixel_values = reference.pixel_values(image)
     cross_key, cross_value = engines.encode(pixel_values)
@@ -149,7 +142,7 @@ def _measure(engines: _Engines, reference: Reference, image) -> dict:
     }
 
 
-def _engines(reference: Reference, checkpoint, manifest: dict, patch=None) -> _Engines:
+def build_engines(reference: Reference, checkpoint, manifest: dict, patch=None) -> Engines:
     from .. import config as config_module, model
 
     cfg = config_module.resolve(checkpoint)
@@ -160,25 +153,10 @@ def _engines(reference: Reference, checkpoint, manifest: dict, patch=None) -> _E
     if patch is not None:
         patch()
     decoder = model.build_decoder_engine(weights, cfg, capacity)
-    return _Engines(reference.torch, encoder, decoder)
+    return Engines(reference.torch, encoder, decoder)
 
 
-def test_engines_match_the_reference(case_name: str) -> None:
-    _, manifest, case = CASES[case_name]
-    checkpoint = model_dir(manifest["hf_id"], manifest.get("hf_revision"))
-    reference = Reference(checkpoint)
-    engines = _engines(reference, checkpoint, manifest)
-    precision = manifest["precision"]
-    for raw in case["test_images"]:
-        measured = _measure(engines, reference, asset(raw))
-        print(f"trocr {precision} {raw}: cross relative {measured['cross']:.3e}, logits maxabs "
-              f"{measured['logits']:.3e} over {measured['steps']} steps")
-        assert measured["cross"] <= _CROSS_TOLERANCE[precision], raw
-        assert measured["logits"] <= _LOGIT_TOLERANCE[precision], raw
-        assert measured["argmax"], f"{raw}: teacher-forced argmax differs from the reference"
-
-
-def _tanh_gelu(network, inp, dtype=None):
+def tanh_gelu(network, inp, dtype=None):
     """The defect under test: the tanh approximation in place of the exact GELU."""
     import numpy as np
     import tensorrt as trt
@@ -200,19 +178,3 @@ def _tanh_gelu(network, inp, dtype=None):
                op(inp, op(constant(0.044715), cube, prod), total), prod)
     tanh = network.add_activation(inner, trt.ActivationType.TANH).get_output(0)
     return op(op(constant(0.5), inp, prod), op(constant(1.0), tanh, total), prod)
-
-
-def test_the_logit_gate_rejects_a_tanh_gelu_decoder(fp32_case_name: str, monkeypatch) -> None:
-    """The weakest decoder defect checked: the gate must see it on the case images."""
-    from .. import graph
-
-    _, manifest, case = CASES[fp32_case_name]
-    checkpoint = model_dir(manifest["hf_id"], manifest.get("hf_revision"))
-    reference = Reference(checkpoint)
-    engines = _engines(reference, checkpoint, manifest,
-                       patch=lambda: monkeypatch.setattr(graph, "add_gelu", _tanh_gelu))
-    least = min(_measure(engines, reference, asset(raw))["logits"]
-                for raw in case["test_images"])
-    print(f"trocr fp32 tanh-GELU decoder: smallest logits maxabs over the images {least:.3e}")
-    # Every image sees it, not only the most sensitive one.
-    assert least > 2 * _LOGIT_TOLERANCE["fp32"]
