@@ -30,6 +30,8 @@ class Weights:
         start, end = entry["data_offsets"]
         if entry["dtype"] not in {"BF16", "F32"}:
             raise ValueError(f"unsupported checkpoint dtype for {name}: {entry['dtype']}")
+        if type(start) is not int or type(end) is not int or not 0 <= start <= end:
+            raise ValueError(f"invalid safetensors offsets for {name}")
         elements = 1
         for dimension in entry["shape"]:
             elements *= dimension

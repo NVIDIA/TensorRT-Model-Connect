@@ -8,6 +8,23 @@ import numpy as np
 import pytest
 
 
+def assert_layer_output(name, predicted, reference):
+    predicted = predicted.astype(np.float32)
+    reference = reference.astype(np.float32)
+    assert predicted.shape == reference.shape
+    assert np.isfinite(predicted).all()
+
+    def compare(label, actual, expected):
+        relative = float(np.linalg.norm((actual - expected).ravel()) /
+                         max(np.linalg.norm(expected.ravel()), 1e-12))
+        print(f"Flint {label}: relative_l2={relative:.8g}", flush=True)
+        assert relative < 0.03
+
+    compare(name, predicted, reference)
+    if name in {"present_k", "present_v"}:
+        compare(name + " new position", predicted[:, -1:, :], reference[:, -1:, :])
+
+
 @pytest.mark.parametrize("layer", [0, 2, 5])
 def test_checkpoint_layer(layer):
     directory = os.environ.get("TRTMC_FLINT_CHECKPOINT")
@@ -51,11 +68,4 @@ def test_checkpoint_layer(layer):
         layer, tensor(hidden), tensor(k), tensor(v), torch.from_numpy(mask), 3
     )
     for name, reference in zip(("hidden_out", "present_k", "present_v"), expected):
-        predicted = actual[name].astype(np.float32).ravel()
-        reference = reference.float().numpy().ravel()
-        relative = float(
-            np.linalg.norm(predicted - reference) / max(np.linalg.norm(reference), 1e-12)
-        )
-        print(f"Flint layer {layer} {name}: relative_l2={relative:.8g}", flush=True)
-        assert np.isfinite(predicted).all()
-        assert relative < 0.03
+        assert_layer_output(name, actual[name], reference.float().numpy())

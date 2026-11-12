@@ -2,6 +2,6 @@
   "threshold_overrides": {
     "max_relative_l2": 0.05,
     "min_cosine_similarity": 0.999,
-    "min_top1_agreement": 0.75
+    "min_top1_agreement": 1.0
   }
 }
