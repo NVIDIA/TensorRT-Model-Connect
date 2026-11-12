@@ -1,0 +1,41 @@
+{
+  "name": "stable-audio-random-full",
+  "random_checkpoint": {
+    "size": "full",
+    "seed": 0
+  },
+  "hf_dependencies": [
+    {
+      "repo_id": "google-t5/t5-base",
+      "revision": "a9723ea7f1b39c1eae772870f3b547bf6ef7e6c1"
+    }
+  ],
+  "bundle": "stable-audio-random-full.bundle",
+  "family": "stable_audio",
+  "task": "text_to_audio",
+  "precision": "fp16",
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "stable-audio-random-full-hammer",
+      "prompt": "The sound of a hammer hitting a wooden surface.",
+      "seed": 0,
+      "config": {
+        "negative_prompt": "Low quality.",
+        "audio_end_in_s": 10.0,
+        "num_inference_steps": 100
+      }
+    },
+    {
+      "name": "stable-audio-random-full-loop-window-no-guidance",
+      "prompt": "128 BPM tech house drum loop",
+      "seed": 2,
+      "config": {
+        "audio_start_in_s": 2.0,
+        "audio_end_in_s": 7.5,
+        "num_inference_steps": 30,
+        "guidance_scale": 1.0
+      }
+    }
+  ]
+}
