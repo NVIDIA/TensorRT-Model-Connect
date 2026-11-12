@@ -576,8 +576,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task != "time_series_forecast":
-        raise ValueError("TimesFM supports only time_series_forecast")
+    if request.task != "series_to_point_forecast":
+        raise ValueError("TimesFM supports only series_to_point_forecast")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if "timesfm" not in config.model_type.lower().replace("_", ""):
