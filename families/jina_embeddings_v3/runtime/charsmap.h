@@ -23,7 +23,8 @@ class CharsMap {
         const std::string alphabet =
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         for (const unsigned char c : encoded) {
-            if (c == '=') break;
+            if (c == '=')
+                break;
             const auto position = alphabet.find(c);
             if (position == std::string::npos)
                 throw std::runtime_error("mt5 invalid normalization map encoding");
@@ -37,8 +38,9 @@ class CharsMap {
         auto word = [&bytes](std::size_t index) -> std::uint32_t {
             if (index > bytes.size() || bytes.size() - index < 4)
                 throw std::runtime_error("mt5 truncated normalization map");
-            return std::uint32_t(bytes[index]) | (std::uint32_t(bytes[index+1]) << 8)
-                | (std::uint32_t(bytes[index+2]) << 16) | (std::uint32_t(bytes[index+3]) << 24);
+            return std::uint32_t(bytes[index]) | (std::uint32_t(bytes[index + 1]) << 8) |
+                   (std::uint32_t(bytes[index + 2]) << 16) |
+                   (std::uint32_t(bytes[index + 3]) << 24);
         };
         const auto size = word(0);
         if (size == 0 || size % 4 || size > bytes.size() - 4)
@@ -50,7 +52,8 @@ class CharsMap {
     }
 
     std::string normalize(const std::string& input) const {
-        if (units_.empty()) return input;
+        if (units_.empty())
+            return input;
         std::string result;
         for (std::size_t start = 0; start < input.size();) {
             std::uint32_t node = offset(units_[0]);
@@ -58,11 +61,14 @@ class CharsMap {
             std::uint32_t replacement = 0;
             for (std::size_t end = start; end < input.size(); ++end) {
                 const auto c = static_cast<unsigned char>(input[end]);
-                if (c == 0) break;
+                if (c == 0)
+                    break;
                 node ^= c;
-                if (node >= units_.size()) break;
+                if (node >= units_.size())
+                    break;
                 const auto unit = units_[node];
-                if ((unit & 0x800000FFU) != c) break;
+                if ((unit & 0x800000FFU) != c)
+                    break;
                 node ^= offset(unit);
                 if (unit & 0x100U) {
                     if (node >= units_.size())

@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "families/jina_embeddings_v3/runtime/tokenizer.h"
 #include "families/jina_embeddings_v3/runtime/charsmap.h"
+#include "families/jina_embeddings_v3/runtime/tokenizer.h"
 
 #include <algorithm>
 #include <cassert>

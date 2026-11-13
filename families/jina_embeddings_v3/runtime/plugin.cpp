@@ -7,6 +7,7 @@
 #include "trtmc/internal/model.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
+
 #include <algorithm>
 #include <cmath>
 #include <nlohmann/json.hpp>
@@ -33,17 +34,25 @@ class Pipeline final : public internal::IModel, public internal::ITextToEmbeddin
     }
     internal::SemanticEmbeddingResult run(const internal::TextToEmbeddingRequest& request,
                                           internal::ConfigView config) override {
-        if (!config.empty()) throw internal::ConfigError("Jina embedding has no runtime config");
+        if (!config.empty())
+            throw internal::ConfigError("Jina embedding has no runtime config");
         int32_t adapter_id = 0;
         switch (request.role) {
-        case internal::EmbeddingRole::Default: break;
-        case internal::EmbeddingRole::Query: adapter_id = 1; break;
-        case internal::EmbeddingRole::Document: adapter_id = 2; break;
-        default: throw std::invalid_argument("Unknown Jina embedding role");
+        case internal::EmbeddingRole::Default:
+            break;
+        case internal::EmbeddingRole::Query:
+            adapter_id = 1;
+            break;
+        case internal::EmbeddingRole::Document:
+            adapter_id = 2;
+            break;
+        default:
+            throw std::invalid_argument("Unknown Jina embedding role");
         }
         auto ids = tokenizer_->encode(std::string(request.text));
         if (ids.empty() || ids.size() > static_cast<std::size_t>(length_))
-            throw std::invalid_argument("Jina embedding requires a nonempty input within the built profile");
+            throw std::invalid_argument(
+                "Jina embedding requires a nonempty input within the built profile");
         for (const auto id : ids) {
             if (id < 0 || id >= vocab_)
                 throw std::invalid_argument("Jina tokenizer returned an invalid token ID");
@@ -53,12 +62,18 @@ class Pipeline final : public internal::IModel, public internal::ITextToEmbeddin
         std::vector<int32_t> valid(length_, 0);
         std::fill(valid.begin(), valid.begin() + count, 1);
         Tensor input, mask;
-        input.data = ids.data(); input.shape = {length_}; input.dtype = DType::kInt32;
-        mask.data = valid.data(); mask.shape = {length_}; mask.dtype = DType::kInt32;
+        input.data = ids.data();
+        input.shape = {length_};
+        input.dtype = DType::kInt32;
+        mask.data = valid.data();
+        mask.shape = {length_};
+        mask.dtype = DType::kInt32;
         Tensor adapter;
-        adapter.data = &adapter_id; adapter.shape = {1}; adapter.dtype = DType::kInt32;
-        auto outputs = engine_->forward({{"input_ids", input}, {"attention_mask", mask},
-                                         {"adapter_id", adapter}});
+        adapter.data = &adapter_id;
+        adapter.shape = {1};
+        adapter.dtype = DType::kInt32;
+        auto outputs = engine_->forward(
+            {{"input_ids", input}, {"attention_mask", mask}, {"adapter_id", adapter}});
         const auto found = outputs.find("embedding");
         if (found == outputs.end() || !found->second.data ||
             found->second.dtype != DType::kFloat32 ||
@@ -68,13 +83,15 @@ class Pipeline final : public internal::IModel, public internal::ITextToEmbeddin
         internal::SemanticEmbeddingResult result;
         result.values.assign(values, values + width_);
         for (const auto value : result.values) {
-            if (!std::isfinite(value)) throw std::runtime_error("Jina embedding is nonfinite");
+            if (!std::isfinite(value))
+                throw std::runtime_error("Jina embedding is nonfinite");
         }
         result.embedding_space = "jina_embeddings_v3";
         result.pooling = "mean";
         result.normalization = "l2";
         return result;
     }
+
   private:
     std::unique_ptr<ITrtModule> engine_;
     std::unique_ptr<ITokenizer> tokenizer_;
@@ -95,9 +112,10 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         throw std::runtime_error("Invalid Jina embedding runtime dimensions");
     const auto plan = jina_embeddings_v3::section(context.reader, "model.plan");
     auto engine = context.backend.create_module(plan.data(), plan.size(), {});
-    if (!engine || !engine->ok()) throw std::runtime_error("Jina engine failed to load");
+    if (!engine || !engine->ok())
+        throw std::runtime_error("Jina engine failed to load");
     const auto tokenizer_json = jina_embeddings_v3::section(context.reader, "tokenizer.json");
     auto tokenizer = CreateUnigramTokenizer(tokenizer_json.data(), tokenizer_json.size(), true);
     return new jina_embeddings_v3::Pipeline(std::move(engine), std::move(tokenizer), length, width,
-        vocab, pad);
+                                            vocab, pad);
 }
