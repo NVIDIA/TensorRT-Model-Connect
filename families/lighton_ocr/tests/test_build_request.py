@@ -89,15 +89,19 @@ def test_missing_tokenizer_fails_before_runtime_assets_weights_or_bundle_output(
         model.build(replace(request(tmp_path), model_dir=directory), object())
 
 
-def test_runtime_metadata_retains_original_preprocessing_and_generation(tmp_path, monkeypatch):
+@pytest.mark.parametrize(("capacity", "output_budget"), [
+    (512, 512), (1023, 1023), (1024, 1024), (1025, 1024), (4096, 1024),
+])
+def test_runtime_metadata_retains_original_preprocessing_and_generation(tmp_path, monkeypatch, capacity, output_budget):
     data = Path(__file__).parent / "data"
     config = Config.from_dict(json.loads((data / "checkpoint-config.json").read_text()))
     (tmp_path / "processor_config.json").write_bytes((data / "processor-config.json").read_bytes())
     (tmp_path / "generation_config.json").write_bytes((data / "generation-config.json").read_bytes())
     monkeypatch.setattr(model, "_prompt_tokens", lambda _directory, _config: ([1, 3], [4, 5]))
-    runtime = model.runtime_config(tmp_path, config, 4096)
-    assert runtime["precision"] == "fp32" and runtime["max_sequence_length"] == 4096
-    assert runtime["max_new_tokens"] == 1024
+    runtime = model.runtime_config(tmp_path, config, capacity)
+    assert runtime["precision"] == "fp32" and runtime["max_sequence_length"] == capacity
+    assert runtime["max_new_tokens"] == output_budget
+    assert 0 < runtime["max_new_tokens"] <= runtime["max_sequence_length"]
     assert runtime["num_key_value_heads"] == 8 and runtime["head_dim"] == 128
     assert runtime["prompt_prefix_ids"] == [1, 3] and runtime["prompt_suffix_ids"] == [4, 5]
     assert runtime["image_processor"]["patch_size"] == 14

@@ -72,7 +72,7 @@ def runtime_config(directory, config, capacity):
         raise ValueError("lighton_ocr sequence capacity must fit the image, prompt framing, and output")
     text = config.text_config
     return {"format_version": 1, "precision": "fp32", "max_sequence_length": capacity,
-            "max_new_tokens": 1024, "vocab_size": text["vocab_size"], "hidden_size": text["hidden_size"],
+            "max_new_tokens": min(1024, capacity), "vocab_size": text["vocab_size"], "hidden_size": text["hidden_size"],
             "num_hidden_layers": text["num_hidden_layers"], "num_key_value_heads": text["num_key_value_heads"],
             "head_dim": text["head_dim"], "image_token_id": config.image_token_id,
             "eos_token_ids": eos, "prompt_prefix_ids": prefix, "prompt_suffix_ids": suffix,
