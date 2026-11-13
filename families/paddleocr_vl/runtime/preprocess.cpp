@@ -146,8 +146,9 @@ void validate(const PaddleOcrPreprocessConfig& config) {
 
 } // namespace
 
-PaddleOcrResizeShape compute_paddleocr_resize_shape(std::int32_t image_height, std::int32_t image_width,
-                                          const PaddleOcrPreprocessConfig& config) {
+PaddleOcrResizeShape compute_paddleocr_resize_shape(std::int32_t image_height,
+                                                    std::int32_t image_width,
+                                                    const PaddleOcrPreprocessConfig& config) {
     if (image_height <= 0 || image_width <= 0)
         throw std::invalid_argument("paddleocr source dimensions must be positive");
     validate(config);
@@ -157,8 +158,8 @@ PaddleOcrResizeShape compute_paddleocr_resize_shape(std::int32_t image_height, s
 }
 
 std::vector<float> preprocess_paddleocr_image(const float* image_pixels, std::int32_t image_height,
-                                         std::int32_t image_width,
-                                         const PaddleOcrPreprocessConfig& config) {
+                                              std::int32_t image_width,
+                                              const PaddleOcrPreprocessConfig& config) {
     if (image_pixels == nullptr || image_height <= 0 || image_width <= 0)
         throw std::invalid_argument("paddleocr source image must be non-empty");
     validate(config);
@@ -171,8 +172,7 @@ std::vector<float> preprocess_paddleocr_image(const float* image_pixels, std::in
     std::vector<float> pixel_values(3U * plane);
     for (std::int32_t y = 0; y < config.input_image_h; ++y) {
         for (std::int32_t x = 0; x < config.input_image_w; ++x) {
-            const auto source =
-                static_cast<std::size_t>((y * shape.width + x) * 3);
+            const auto source = static_cast<std::size_t>((y * shape.width + x) * 3);
             for (std::int32_t c = 0; c < 3; ++c) {
                 const auto channel = static_cast<std::size_t>(c);
                 pixel_values[channel * plane + static_cast<std::size_t>(y) * config.input_image_w +
@@ -185,7 +185,8 @@ std::vector<float> preprocess_paddleocr_image(const float* image_pixels, std::in
 }
 
 std::vector<float> prepare_paddleocr_image(const float* pixels, int32_t height, int32_t width,
-    int32_t profile_height, int32_t profile_width, int32_t min_pixels, int32_t max_pixels) {
+                                           int32_t profile_height, int32_t profile_width,
+                                           int32_t min_pixels, int32_t max_pixels) {
     if (height <= 0 || width <= 0 || min_pixels <= 0 || max_pixels < min_pixels)
         throw std::invalid_argument("Invalid PaddleOCR resize parameters");
     auto rounded = [](double value) {
@@ -194,8 +195,14 @@ std::vector<float> prepare_paddleocr_image(const float* pixels, int32_t height, 
     };
     constexpr int32_t factor = 28;
     double h = height, w = width;
-    if (h < factor) { w = rounded(w * factor / h); h = factor; }
-    if (w < factor) { h = rounded(h * factor / w); w = factor; }
+    if (h < factor) {
+        w = rounded(w * factor / h);
+        h = factor;
+    }
+    if (w < factor) {
+        h = rounded(h * factor / w);
+        w = factor;
+    }
     if (std::max(h, w) / std::min(h, w) > 200)
         throw std::invalid_argument("PaddleOCR image aspect ratio exceeds 200");
     double rh = rounded(h / factor) * factor, rw = rounded(w / factor) * factor;
@@ -211,13 +218,16 @@ std::vector<float> prepare_paddleocr_image(const float* pixels, int32_t height, 
     if (rh != profile_height || rw != profile_width)
         throw std::invalid_argument("PaddleOCR resized image does not fit the built image profile");
     PaddleOcrPreprocessConfig config;
-    config.input_image_h = profile_height; config.input_image_w = profile_width;
-    config.image_mean = {0.5F, 0.5F, 0.5F}; config.image_std = {0.5F, 0.5F, 0.5F};
+    config.input_image_h = profile_height;
+    config.input_image_w = profile_width;
+    config.image_mean = {0.5F, 0.5F, 0.5F};
+    config.image_std = {0.5F, 0.5F, 0.5F};
     return preprocess_paddleocr_image(pixels, height, width, config);
 }
 
 std::vector<int32_t> paddleocr_position_ids(const std::vector<int32_t>& ids, int32_t image_id,
-    int32_t image_sequence, int32_t grid_height, int32_t grid_width, int32_t profile_length) {
+                                            int32_t image_sequence, int32_t grid_height,
+                                            int32_t grid_width, int32_t profile_length) {
     const auto found = std::find(ids.begin(), ids.end(), image_id);
     if (found == ids.end() || ids.size() > static_cast<std::size_t>(profile_length) ||
         grid_height <= 0 || grid_width <= 0 || grid_height * grid_width != image_sequence)
@@ -226,7 +236,8 @@ std::vector<int32_t> paddleocr_position_ids(const std::vector<int32_t>& ids, int
     if (start + image_sequence > static_cast<int32_t>(ids.size()))
         throw std::invalid_argument("Incomplete PaddleOCR image-token block");
     for (int32_t i = 0; i < image_sequence; ++i)
-        if (ids[start + i] != image_id) throw std::invalid_argument("PaddleOCR image-token block is not contiguous");
+        if (ids[start + i] != image_id)
+            throw std::invalid_argument("PaddleOCR image-token block is not contiguous");
     std::vector<int32_t> positions(3 * profile_length);
     for (int32_t i = 0; i < profile_length; ++i) {
         if (i >= start && i < start + image_sequence) {
@@ -235,8 +246,11 @@ std::vector<int32_t> paddleocr_position_ids(const std::vector<int32_t>& ids, int
             positions[profile_length + i] = start + index / grid_width;
             positions[2 * profile_length + i] = start + index % grid_width;
         } else {
-            const int32_t position = i < start ? i : start + std::max(grid_height, grid_width) + i - start - image_sequence;
-            for (int32_t axis = 0; axis < 3; ++axis) positions[axis * profile_length + i] = position;
+            const int32_t position =
+                i < start ? i
+                          : start + std::max(grid_height, grid_width) + i - start - image_sequence;
+            for (int32_t axis = 0; axis < 3; ++axis)
+                positions[axis * profile_length + i] = position;
         }
     }
     return positions;

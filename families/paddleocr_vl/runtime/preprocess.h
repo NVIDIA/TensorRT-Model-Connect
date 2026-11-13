@@ -11,9 +11,11 @@
 namespace trtmc {
 
 std::vector<float> prepare_paddleocr_image(const float* pixels, int32_t height, int32_t width,
-    int32_t profile_height, int32_t profile_width, int32_t min_pixels, int32_t max_pixels);
+                                           int32_t profile_height, int32_t profile_width,
+                                           int32_t min_pixels, int32_t max_pixels);
 std::vector<int32_t> paddleocr_position_ids(const std::vector<int32_t>& ids, int32_t image_id,
-    int32_t image_sequence, int32_t grid_height, int32_t grid_width, int32_t profile_length);
+                                            int32_t image_sequence, int32_t grid_height,
+                                            int32_t grid_width, int32_t profile_length);
 
 struct PaddleOcrPreprocessConfig {
     std::int32_t input_image_h{224};
@@ -28,11 +30,12 @@ struct PaddleOcrResizeShape {
 };
 
 // Direct resize to the checkpoint dimensions, preserving the full source image.
-PaddleOcrResizeShape compute_paddleocr_resize_shape(std::int32_t image_height, std::int32_t image_width,
-                                          const PaddleOcrPreprocessConfig& config);
+PaddleOcrResizeShape compute_paddleocr_resize_shape(std::int32_t image_height,
+                                                    std::int32_t image_width,
+                                                    const PaddleOcrPreprocessConfig& config);
 
 std::vector<float> preprocess_paddleocr_image(const float* image_pixels, std::int32_t image_height,
-                                         std::int32_t image_width,
-                                         const PaddleOcrPreprocessConfig& config);
+                                              std::int32_t image_width,
+                                              const PaddleOcrPreprocessConfig& config);
 
 } // namespace trtmc
