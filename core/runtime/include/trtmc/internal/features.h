@@ -83,7 +83,12 @@ struct ImageTokenFeaturesResult {
     std::vector<ImageFeatureToken> tokens;
     uint64_t grid_rows{0}, grid_columns{0};
 };
-enum class VideoFeatureTokenRole : uint32_t { Patch = 1, Class = 2, Register = 3, GlobalPooled = 4 };
+enum class VideoFeatureTokenRole : uint32_t {
+    Patch = 1,
+    Class = 2,
+    Register = 3,
+    GlobalPooled = 4
+};
 struct VideoFeatureToken {
     VideoFeatureTokenRole role{VideoFeatureTokenRole::Patch};
     uint64_t grid_frame{0}, grid_row{0}, grid_column{0};
@@ -97,7 +102,9 @@ struct VideoTokenFeaturesResult {
     std::vector<VideoFeatureToken> tokens;
     uint64_t grid_frames{0}, grid_rows{0}, grid_columns{0}, source_frame_count{0};
 };
-struct VideoToTokenFeaturesRequest { VideoView video; };
+struct VideoToTokenFeaturesRequest {
+    VideoView video;
+};
 class IVideoToTokenFeatures {
   public:
     using TaskInterface = IVideoToTokenFeatures;

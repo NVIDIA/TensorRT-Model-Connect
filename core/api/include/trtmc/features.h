@@ -101,8 +101,10 @@ typedef struct {
     uint64_t grid_columns;
 } trtmc_image_token_features_view_v1;
 enum {
-    TRTMC_VIDEO_TOKEN_PATCH = 1, TRTMC_VIDEO_TOKEN_CLASS = 2,
-    TRTMC_VIDEO_TOKEN_REGISTER = 3, TRTMC_VIDEO_TOKEN_GLOBAL_POOLED = 4
+    TRTMC_VIDEO_TOKEN_PATCH = 1,
+    TRTMC_VIDEO_TOKEN_CLASS = 2,
+    TRTMC_VIDEO_TOKEN_REGISTER = 3,
+    TRTMC_VIDEO_TOKEN_GLOBAL_POOLED = 4
 };
 typedef struct {
     uint32_t role;

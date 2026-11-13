@@ -83,7 +83,9 @@ struct TextPredictionPositionsToTokenScoresRequest {
 struct ImageToTokenFeaturesRequest {
     ImageInput image;
 };
-struct VideoToTokenFeaturesRequest { VideoInput video; };
+struct VideoToTokenFeaturesRequest {
+    VideoInput video;
+};
 struct ImageToTokenAndPooledFeaturesRequest {
     ImageInput image;
 };
@@ -327,13 +329,17 @@ class VideoToTokenFeatures {
             table->byte_size < sizeof(trtmc_video_to_token_features_api_v1))
             throw Error(TRTMC_VERSION_MISMATCH, "incompatible video feature Task table");
     }
-    std::vector<ConfigField> config_fields() const { return detail::config_fields(state_, kTask, 1, 0); }
+    std::vector<ConfigField> config_fields() const {
+        return detail::config_fields(state_, kTask, 1, 0);
+    }
     VideoTokenFeaturesResult run(const VideoToTokenFeaturesRequest& input,
                                  const Config& config = {}) const {
         detail::VideoWireInputs backing;
         const trtmc_video_to_token_features_request_v1 request{backing.video(input.video)};
-        const auto entries = config.c_entries(); const auto options = entries.view();
-        trtmc_result* raw = nullptr; trtmc_error* error = nullptr;
+        const auto entries = config.c_entries();
+        const auto options = entries.view();
+        trtmc_result* raw = nullptr;
+        trtmc_error* error = nullptr;
         auto status = api_->run(state_->handle, &request, &options, &raw, &error);
         VideoTokenFeaturesResult result(state_, raw);
         detail::check(state_->api, status, error);
@@ -342,11 +348,13 @@ class VideoToTokenFeatures {
         detail::check(state_->api, status, error);
         return result;
     }
+
   private:
     friend class Model;
     VideoToTokenFeatures(std::shared_ptr<detail::ModelState> state,
                          const trtmc_api_header* table) noexcept
-        : state_(std::move(state)), api_(reinterpret_cast<const trtmc_video_to_token_features_api_v1*>(table)) {}
+        : state_(std::move(state)),
+          api_(reinterpret_cast<const trtmc_video_to_token_features_api_v1*>(table)) {}
     std::shared_ptr<detail::ModelState> state_;
     const trtmc_video_to_token_features_api_v1* api_;
 };
