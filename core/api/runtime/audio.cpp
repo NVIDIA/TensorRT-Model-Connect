@@ -62,6 +62,26 @@ token_history(const trtmc_semantic_acoustic_history_view_v1& input) {
     return {checked_span(input.semantic_tokens.data, input.semantic_tokens.size),
             codebook_history(input.coarse_tokens), codebook_history(input.fine_tokens)};
 }
+trtmc_status TRTMC_CALL codec_audio_run(
+    trtmc_model* model, const trtmc_audio_codebook_tokens_to_audio_request_v1* input,
+    const trtmc_config_view_v1* config, trtmc_result** output, trtmc_error** error) noexcept {
+    if (output) *output = nullptr;
+    return guarded(error, [&] {
+        require(input && output, "codec token request and output are required");
+        require(input->codes.codebooks > 0 && input->codes.frames > 0,
+                "codec token dimensions must be positive");
+        const internal::AudioCodebookTokensToAudioRequest request{codebook_history(input->codes)};
+        const ConvertedConfig options(config);
+        std::lock_guard<std::mutex> lock(model_mutex(model));
+        auto& family = require_interface<internal::IAudioCodebookTokensToAudio>(
+            model, internal::IAudioCodebookTokensToAudio::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::IAudioCodebookTokensToAudio>(),
+                             options.view());
+        *output = make_result<AudioResultStorage>(family.run(request, options.view()));
+    });
+}
+
 trtmc_status TRTMC_CALL history_audio_run(
     trtmc_model* model, const trtmc_text_audio_token_history_to_audio_request_v1* input,
     const trtmc_config_view_v1* config, trtmc_result** output, trtmc_error** error) noexcept {
@@ -523,6 +543,8 @@ const trtmc_audio_to_class_scores_api_v1 audio_class_scores_api{
     {1, 0, sizeof(audio_class_scores_api)}, audio_to_class_scores_run, label_scores_result_view};
 const trtmc_speech_to_speech_response_api_v1 response_api{
     {1, 0, sizeof(response_api)}, speech_response_run, audio_result_view};
+const trtmc_audio_codebook_tokens_to_audio_api_v1 codec_audio_api{
+    {1, 0, sizeof(codec_audio_api)}, codec_audio_run, audio_result_view};
 const trtmc_batch_speech_transcription_api_v1 batch_transcription_api{
     {1, 0, sizeof(batch_transcription_api)},
     batch_transcription_run,
@@ -558,6 +580,7 @@ const TaskBinding bindings[] = {
     {internal::ITextAudioTokenHistoryToAudio::kTask, 1, 0, &history_audio_api.header},
     {internal::ITextToAudio::kTask, 1, 0, &text_audio_api.header},
     {internal::ITextToSpeech::kTask, 1, 0, &text_speech_api.header},
+    {internal::IAudioCodebookTokensToAudio::kTask, 1, 0, &codec_audio_api.header},
     {internal::ISpeechTranscription::kTask, 1, 0, &transcription_api.header},
     {internal::ISpeechTranslation::kTask, 1, 0, &translation_api.header},
     {internal::IAudioLanguageIdentification::kTask, 1, 0, &language_api.header},
