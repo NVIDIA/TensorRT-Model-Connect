@@ -40,7 +40,7 @@ class MT5KvCache : public MT5InferenceState {
     // cache_dtype controls the element type for K/V cache buffers (default FP32).
     // names provides explicit tensor names for engine I/O binding.
     MT5KvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim, cudaStream_t stream,
-              DType cache_dtype = DType::kFloat32, MT5KvCacheNames names = {});
+               DType cache_dtype = DType::kFloat32, MT5KvCacheNames names = {});
 
     // --- MT5InferenceState overrides ---
     void reset() override;

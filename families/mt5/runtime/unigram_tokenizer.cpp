@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "families/mt5/runtime/tokenizer.h"
 #include "families/mt5/runtime/charsmap.h"
+#include "families/mt5/runtime/tokenizer.h"
 
 #include <algorithm>
 #include <cassert>

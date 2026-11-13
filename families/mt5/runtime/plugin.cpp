@@ -131,8 +131,7 @@ MT5RuntimeConfig parse_runtime_config(const std::string& text) {
         config.max_target_positions <= 0 || config.d_ff <= 0 ||
         config.relative_attention_num_buckets <= 0 || config.tensor_parallel_size != 1 ||
         !config.has_vision_engine || !config.is_encoder_decoder ||
-        config.decoder_engine_layout != "single" ||
-        config.tensor_parallel_mode != "single" ||
+        config.decoder_engine_layout != "single" || config.tensor_parallel_mode != "single" ||
         (config.precision != "fp16" && config.precision != "fp32")) {
         throw std::runtime_error("mt5 runtime.json contains invalid dimensions");
     }
@@ -170,10 +169,10 @@ void validate_runtime_config_json(std::string_view json) {
 class MT5Pipeline final : public ITextGeneration {
   public:
     MT5Pipeline(std::unique_ptr<ITrtModule> encoder, std::unique_ptr<ITrtModule> decoder,
-               std::unique_ptr<MT5KvCache> cache, int32_t hidden_size, int32_t num_decoder_layers,
-               int32_t max_enc_seq_len, int32_t vocab_size, int32_t decoder_start_token_id,
-               int32_t eos_token_id, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
-               std::string model_id_str)
+                std::unique_ptr<MT5KvCache> cache, int32_t hidden_size, int32_t num_decoder_layers,
+                int32_t max_enc_seq_len, int32_t vocab_size, int32_t decoder_start_token_id,
+                int32_t eos_token_id, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
+                std::string model_id_str)
         : encoder_(std::move(encoder)), decoder_(std::move(decoder)), cache_(std::move(cache)),
           hidden_size_(hidden_size), num_decoder_layers_(num_decoder_layers),
           max_enc_seq_len_(max_enc_seq_len), vocab_size_(vocab_size),
@@ -191,7 +190,8 @@ class MT5Pipeline final : public ITextGeneration {
 
         if (cfg.top_k != 1 || cfg.temperature != 1.0F || cfg.top_p != 1.0F || cfg.min_p != 0.0F)
             throw std::invalid_argument("mt5 supports greedy generation only");
-        const int32_t max_new = cfg.max_new_tokens > 0 ? cfg.max_new_tokens : default_max_new_tokens();
+        const int32_t max_new =
+            cfg.max_new_tokens > 0 ? cfg.max_new_tokens : default_max_new_tokens();
         if (max_new > cache_->max_length())
             throw std::invalid_argument("mt5 output length exceeds decoder cache capacity");
         // 1. Tokenize input
@@ -393,16 +393,16 @@ ITask* create_mt5(const FamilyContext& context) {
 
     cudaStream_t stream = decoder->stream();
     const int32_t kv_dim = decoder_cache_row_width(*decoder, config);
-    auto cache =
-        std::make_unique<MT5KvCache>(config.decoder_layers, config.max_cache_length, kv_dim, stream);
+    auto cache = std::make_unique<MT5KvCache>(config.decoder_layers, config.max_cache_length,
+                                              kv_dim, stream);
     if (!cache->ok())
         throw std::runtime_error("mt5 failed to create KV cache");
     auto tokenizer = mt5::create_tokenizer(context.reader);
 
     return new MT5Pipeline(std::move(encoder), std::move(decoder), std::move(cache),
-                          config.hidden_size, config.decoder_layers, config.max_source_positions,
-                          config.vocab_size, config.decoder_start_token_id, config.eos_token_id,
-                          stream, std::move(tokenizer), std::string{});
+                           config.hidden_size, config.decoder_layers, config.max_source_positions,
+                           config.vocab_size, config.decoder_start_token_id, config.eos_token_id,
+                           stream, std::move(tokenizer), std::string{});
 }
 
 } // namespace trtmc

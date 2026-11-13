@@ -15,7 +15,7 @@
 namespace trtmc {
 
 MT5KvCache::MT5KvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim, cudaStream_t stream,
-                     DType cache_dtype, MT5KvCacheNames names)
+                       DType cache_dtype, MT5KvCacheNames names)
     : num_layers_(num_layers), max_length_(max_length), kv_dim_(kv_dim), stream_(stream),
       cache_dtype_(cache_dtype), cache_element_size_(dtype_size(cache_dtype)),
       names_(std::move(names)) {
@@ -190,7 +190,7 @@ void MT5KvCache::bind_cache_inputs(ITrtModule& module) {
 }
 
 void MT5KvCache::write_prefill_kv(const std::vector<const void*>& prefill_k,
-                                 const std::vector<const void*>& prefill_v, int32_t seq_len) {
+                                  const std::vector<const void*>& prefill_v, int32_t seq_len) {
     if (seq_len <= 0)
         return;
     if (seq_len > max_length_)
@@ -212,7 +212,7 @@ void MT5KvCache::write_prefill_kv(const std::vector<const void*>& prefill_k,
 }
 
 void MT5KvCache::append_prefill_kv(const std::vector<const void*>& prefill_k,
-                                  const std::vector<const void*>& prefill_v, int32_t seq_len) {
+                                   const std::vector<const void*>& prefill_v, int32_t seq_len) {
     if (seq_len <= 0)
         return;
     if (position_ + seq_len > max_length_)

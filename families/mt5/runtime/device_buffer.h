@@ -61,7 +61,8 @@ inline void allocate_cross_kv(std::vector<DeviceBuffer>& keys, std::vector<Devic
         if (keys[layer].allocate(bytes) != cudaSuccess)
             throw std::runtime_error("MT5Pipeline: unable to allocate cross-attention key buffer");
         if (values[layer].allocate(bytes) != cudaSuccess)
-            throw std::runtime_error("MT5Pipeline: unable to allocate cross-attention value buffer");
+            throw std::runtime_error(
+                "MT5Pipeline: unable to allocate cross-attention value buffer");
     }
 }
 

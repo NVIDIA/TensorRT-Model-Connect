@@ -114,7 +114,8 @@ int main() {
             trtmc::mt5::ensure_encoder_mask(mask, bytes);
         } catch (const std::runtime_error& error) {
             mask_threw = true;
-            check(std::string(error.what()) == "MT5Pipeline: unable to allocate encoder mask buffer",
+            check(std::string(error.what()) ==
+                      "MT5Pipeline: unable to allocate encoder mask buffer",
                   "the encoder mask error should name the encoder mask");
         }
         check(mask_threw, "a failed encoder mask allocation should throw");
