@@ -1,5 +1,11 @@
 # MusicGen medium
 
+The native tokenizer supports the reconstructed T5 backend's WhitespaceSplit
+followed by Metaspace with `▁`, `prepend_scheme=always`, and `split=true`.
+Unsupported normalizers, pre-tokenizer layouts/options, and added-token matching
+flags are rejected when loading a bundle. Checkpoint loading requires PyTorch
+2.10 or newer.
+
 This family implements `facebook/musicgen-medium` as the native `text_to_audio`
 Task. The bundle contains three FP32 TensorRT engines: the T5 text encoder and
 projection, MusicGen's four-codebook causal decoder, and the non-causal 32 kHz
@@ -86,7 +92,7 @@ export TRTMC_E2E_ARTIFACT_DIR="$PWD/artifacts/musicgen"
 PYTHONPATH=core/builder:apps/benchmark:. python -m tools.model_ci validate
 PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \
   families/musicgen/tests --e2e-model musicgen -q
-build-musicgen/test_musicgen_sdk musicgen-medium.bundle build-musicgen
+build-musicgen/test_musicgen_sdk_cpp musicgen-medium.bundle build-musicgen
 git diff --check
 ```
 

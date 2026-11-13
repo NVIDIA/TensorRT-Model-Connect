@@ -179,7 +179,7 @@ class Pipeline final : public IModel, public ITextToAudio {
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     using namespace trtmc;
     if (context.kv_cache_size_bytes != 0)
-        throw std::invalid_argument("MusicGen does not support --kv-cache-size");
+        throw std::invalid_argument("musicgen does not support --kv-cache-size");
     if (context.reader.info().task != "text_to_audio")
         throw std::invalid_argument("MusicGen implements text_to_audio only");
     const auto require = [&](const char* name) {

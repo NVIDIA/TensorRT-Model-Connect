@@ -7,7 +7,6 @@
 
 #include <algorithm>
 #include <cassert>
-#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <limits>
@@ -176,20 +175,10 @@ class PrecompiledNormalizer {
     std::string pool_;
 };
 
-std::string lowercase_ascii(std::string text) {
-    std::transform(text.begin(), text.end(), text.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return text;
-}
-
 // ─── Metaspace Pre-tokenizer ───
 // Replaces spaces with ▁ (U+2581) and optionally adds prefix space.
 
 static const std::string kMetaspaceChar = "\xe2\x96\x81"; // ▁ U+2581
-
-inline bool is_ws(char c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
-}
 
 std::vector<std::string> whitespace_split(const std::string& text) {
     std::vector<std::string> words;
@@ -210,23 +199,6 @@ std::vector<std::string> whitespace_split(const std::string& text) {
     if (start != std::string::npos)
         words.push_back(text.substr(start));
     return words;
-}
-
-[[maybe_unused]] std::string metaspace_pre_tokenize(const std::string& text,
-                                                    bool add_prefix_space) {
-    std::string result;
-    result.reserve(text.size() + 8);
-    if (add_prefix_space && !text.empty() && text[0] != ' ') {
-        result += kMetaspaceChar;
-    }
-    for (size_t i = 0; i < text.size(); ++i) {
-        if (text[i] == ' ') {
-            result += kMetaspaceChar;
-        } else {
-            result += text[i];
-        }
-    }
-    return result;
 }
 
 // ─── Trie for efficient vocab prefix lookup ───
@@ -421,8 +393,6 @@ class UnigramTokenizer final : public ITokenizer {
 
     void append_plain_text(const std::string& text, std::vector<int32_t>& ids) const {
         std::string normalized = mUsePrecompiled ? mNormalizer.normalize(text) : text;
-        if (mLowercase)
-            normalized = lowercase_ascii(std::move(normalized));
         for (const auto& word : whitespace_split(normalized)) {
             const auto word_ids = viterbi_encode(kMetaspaceChar + word, mTrie, mUnkId, mUnkScore);
             ids.insert(ids.end(), word_ids.begin(), word_ids.end());
@@ -526,53 +496,50 @@ class UnigramTokenizer final : public ITokenizer {
             mNormalizer.load(norm.at("precompiled_charsmap").get<std::string>());
             return;
         }
-        if (ntype == "Lowercase") {
-            mLowercase = true;
-            return;
-        }
-        if (ntype == "Prepend") {
-            // T5-style: prepend a string (e.g., "▁") to input
-            mAddPrefixSpace = true;
-        }
+        throw std::runtime_error("Unsupported MusicGen normalizer type: " + ntype);
     }
 
     void parse_normalizer(const nlohmann::json& j) {
         if (!j.contains("normalizer") || j["normalizer"].is_null())
             return;
         const auto& norm = j["normalizer"];
-        if (norm.value("type", "") == "Sequence" && norm.contains("normalizers")) {
-            for (const auto& sub : norm["normalizers"])
-                apply_normalizer_config(sub);
+        if (norm.value("type", "") == "Sequence") {
+            const auto& normalizers = norm.at("normalizers");
+            if (!normalizers.is_array() || normalizers.size() != 1)
+                throw std::runtime_error("Unsupported MusicGen normalizer sequence");
+            apply_normalizer_config(normalizers.at(0));
             return;
         }
         apply_normalizer_config(norm);
     }
 
     void parse_pre_tokenizer(const nlohmann::json& j) {
-        if (!j.contains("pre_tokenizer") || j["pre_tokenizer"].is_null())
-            return;
-        auto& pt = j["pre_tokenizer"];
-        std::string ptype = pt.value("type", "");
-
-        if (ptype == "Metaspace") {
-            mAddPrefixSpace = pt.value("add_prefix_space", true);
-        } else if (ptype == "Sequence") {
-            // Look for Metaspace inside the sequence
-            if (pt.contains("pretokenizers")) {
-                for (auto& sub : pt["pretokenizers"]) {
-                    if (sub.value("type", "") == "Metaspace") {
-                        mAddPrefixSpace = sub.value("add_prefix_space", true);
-                        break;
-                    }
-                }
-            }
-        }
+        // append_plain_text implements WhitespaceSplit followed by Metaspace,
+        // with a prefix on every word. Other layouts have different semantics.
+        const auto& pt = j.at("pre_tokenizer");
+        if (pt.is_null() || pt.value("type", "") != "Sequence")
+            throw std::runtime_error("Unsupported MusicGen pre-tokenizer type");
+        const auto& sequence = pt.at("pretokenizers");
+        if (!sequence.is_array() || sequence.size() != 2 ||
+            sequence[0].value("type", "") != "WhitespaceSplit" ||
+            sequence[1].value("type", "") != "Metaspace")
+            throw std::runtime_error("Unsupported MusicGen pre-tokenizer sequence");
+        const auto& metaspace = sequence[1];
+        if (metaspace.value("replacement", kMetaspaceChar) != kMetaspaceChar ||
+            !metaspace.value("add_prefix_space", true) ||
+            metaspace.value("prepend_scheme", "always") != "always" ||
+            !metaspace.value("split", true))
+            throw std::runtime_error("Unsupported MusicGen Metaspace settings");
     }
 
     void parse_added_tokens(const nlohmann::json& j) {
         if (!j.contains("added_tokens"))
             return;
         for (auto& tok : j["added_tokens"]) {
+            for (const char* flag : {"lstrip", "rstrip", "normalized", "single_word"})
+                if (tok.value(flag, false))
+                    throw std::runtime_error(
+                        std::string("Unsupported MusicGen added-token flag: ") + flag);
             int32_t tok_id = tok.value("id", -1);
             std::string content = tok.value("content", "");
             if (tok_id >= 0 && !content.empty()) {
@@ -668,8 +635,6 @@ class UnigramTokenizer final : public ITokenizer {
     bool mAddSpecialTokens = true;
     bool mUsePrecompiled = false;
     PrecompiledNormalizer mNormalizer;
-    bool mLowercase = false;
-    bool mAddPrefixSpace = true;
 
     int32_t mBosId = -1;
     int32_t mEosId = -1;
