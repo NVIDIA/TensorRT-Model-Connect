@@ -73,10 +73,11 @@ class _BartModel:
         weights["_normalize_embedding"] = normalize_embedding
 
         # Shared embedding (used by both encoder and decoder)
-        if _has_tensor(readers, "shared.weight"):
-            shared_embed = _load_tensor(readers, "shared.weight").astype(np.float32)
-        elif _has_tensor(readers, "model.shared.weight"):
-            shared_embed = _load_tensor(readers, "model.shared.weight").astype(np.float32)
+        # Some checkpoints (facebook/bart-large-cnn) store the tied table only under the decoder.
+        for key in ("shared.weight", "model.shared.weight", "model.decoder.embed_tokens.weight"):
+            if _has_tensor(readers, key):
+                shared_embed = _load_tensor(readers, key).astype(np.float32)
+                break
         else:
             raise RuntimeError("BART: cannot find shared embedding weight")
         weights["shared_embedding"] = shared_embed
@@ -920,6 +921,11 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _BartModel, **u
             raise ValueError("generation_config.json must contain one JSON object")
         if "eos_token_id" in generation:
             runtime["eos_token_id"] = generation["eos_token_id"]
+    else:
+        # Without a generation config, Transformers takes generation settings from config.json.
+        generation = config.raw
+    forced_bos = generation.get("forced_bos_token_id")
+    runtime["forced_bos_token_id"] = -1 if forced_bos is None else int(forced_bos)
     runtime.update(updates)
     return runtime
 
