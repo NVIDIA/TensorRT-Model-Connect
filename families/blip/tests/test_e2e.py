@@ -54,6 +54,7 @@ def pytest_generate_tests(metafunc):
             )
             for name in names
         ],
+        scope="module",
     )
 
 
@@ -142,7 +143,8 @@ def engine_run(bundle, stage, values):
     return result.cpu().numpy()
 
 
-def test_official_checkpoint_e2e(case_name, artifacts, tmp_path):
+@pytest.fixture(scope="module")
+def case_inputs(case_name, artifacts, tmp_path_factory):
     import torch
     from PIL import Image, ImageOps
 
@@ -151,7 +153,7 @@ def test_official_checkpoint_e2e(case_name, artifacts, tmp_path):
     image = Image.open(image_path).convert("RGB")
     if case["mirror"]:
         image = ImageOps.mirror(image)
-    native_image = tmp_path / "input.png"
+    native_image = tmp_path_factory.mktemp("blip-" + case_name) / "input.png"
     image.save(native_image)
     inputs = processor(images=image, text=case["prompt"] or None, return_tensors="pt").to("cuda")
     with torch.inference_mode():
@@ -159,6 +161,13 @@ def test_official_checkpoint_e2e(case_name, artifacts, tmp_path):
         vision = model.vision_model(inputs["pixel_values"]).last_hidden_state
     prefix_length = inputs["input_ids"].shape[1] - 1 if "input_ids" in inputs else 1
     continuation = expected[prefix_length:].cpu().tolist()
+    return native_image, inputs, expected, vision, continuation
+
+
+def test_official_checkpoint_e2e(case_name, artifacts, case_inputs, tmp_path):
+    bundle, binary, runtime, _model, processor, _image_path = artifacts
+    native_image, inputs, _expected, _vision, continuation = case_inputs
+    case = CASES[case_name]
     env = dict(os.environ)
     env["LD_LIBRARY_PATH"] = str(runtime) + ":" + env.get("LD_LIBRARY_PATH", "")
     command = [
@@ -215,7 +224,14 @@ def test_official_checkpoint_e2e(case_name, artifacts, tmp_path):
     assert repeat_payload["token_ids"] == continuation
     assert repeat_payload["repeated_request"] == "passed"
     assert repeat_payload["invalid_requests"] == 4
+    print(json.dumps({"case": case_name, "tokens": continuation, "text": payload["text"]}))
 
+
+def test_official_checkpoint_tensors(case_name, artifacts, case_inputs):
+    import torch
+
+    bundle, _binary, _runtime, model, _processor, _image_path = artifacts
+    _native_image, inputs, expected, vision, _continuation = case_inputs
     actual_vision = engine_run(
         bundle, "vision", {"pixel_values": inputs["pixel_values"].cpu().numpy()}
     )
@@ -246,8 +262,6 @@ def test_official_checkpoint_e2e(case_name, artifacts, tmp_path):
         json.dumps(
             {
                 "case": case_name,
-                "tokens": continuation,
-                "text": payload["text"],
                 "vision_maxabs": float(np.max(np.abs(actual_vision - expected_vision))),
                 "logit_maxabs": float(np.max(np.abs(actual_logits - expected_logits))),
             }

@@ -16,7 +16,9 @@ family. TensorRT owns GPU lowering.
 
 Use the repository's [source build instructions](../../website/docs/getting-started/source-build.md)
 to prepare a matching CUDA/TensorRT environment. Install this family's
-`requirements.txt`, then build the selected native targets:
+`requirements.txt` (PyTorch 2.10 or newer), and install the ICU development
+library (`uc` component) for native Unicode normalization. Then build the
+selected native targets:
 
 ```bash
 cmake --build build --parallel 8 --target trtmc trtmc_backend_trt trtmc_model_blip
@@ -31,7 +33,11 @@ build/trtmc run blip-base.bundle --runtime-root build \
 ```
 
 The checkpoint publishes a PyTorch state dictionary, loaded with
-`torch.load(weights_only=True)`. BLIP VQA, image-text retrieval, and BLIP-2 are
+`torch.load(weights_only=True)` with a version above the affected range in
+[GHSA-63cw-57p8-fm3p](https://github.com/pytorch/pytorch/security/advisories/GHSA-63cw-57p8-fm3p).
+The native tokenizer uses ICU for Unicode NFD, nonspacing-mark removal, and
+lowercasing, matching the reference's per-code-point normalization order.
+BLIP VQA, image-text retrieval, and BLIP-2 are
 separate architectures and are not claimed by this family.
 
 Only greedy generation is exposed. `max_new_tokens` defaults to 20, and the
@@ -56,14 +62,18 @@ the example image.
 ```bash
 cmake -S . -B build -DTRTMC_BUILD_TESTS=ON
 cmake --build build --parallel 8 --target trtmc trtmc_backend_trt \
-  trtmc_model_blip test_blip_native
+  trtmc_model_blip test_blip_native test_blip_tokenizer
+ctest --test-dir build -R '^test_blip_tokenizer$' --output-on-failure
 TRTMC_BINARY="$PWD/build/trtmc" TRTMC_RUNTIME_ROOT="$PWD/build" \
   PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \
   families/blip/tests --e2e-model blip -q -s
 ```
 
-The four cases cover the original and mirrored image, each with and without
-a caption prefix. Gates require exact greedy continuation tokens, native
+The four input cases cover the original and mirrored image, each with and
+without a caption prefix. Caption checks and direct tensor checks run as
+separate tests that share the checkpoint and reference inputs, so a caption
+mismatch does not conceal decoder qualification. Gates require exact greedy
+continuation tokens, native
 preprocessing parity, tokenizer parity, repeatable requests after intervening
 valid and invalid requests, and numerical comparison of the vision features
 and teacher-forced decoder logits. The image-feature tolerance is
