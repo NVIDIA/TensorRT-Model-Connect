@@ -22,8 +22,9 @@ std::string require_text_section(const BundleReader& bundle, std::string_view na
 }
 
 std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<char>& plan,
-                                        const char* label) {
-    auto engine = backend.create_module(plan.data(), plan.size(), {});
+                                        const char* label,
+                                        const ModuleCreateOptions& options) {
+    auto engine = backend.create_module(plan.data(), plan.size(), options);
     if (engine == nullptr || !engine->ok())
         throw std::runtime_error(std::string("qwen failed to load ") + label);
     engine->set_timing_label(label);
