@@ -29,10 +29,10 @@ struct Dinov2WithRegistersRuntimeConfig {
 // and the class row is the pooled vector; they come out of the same forward
 // pass, which is what the contract asks for.
 class Dinov2WithRegistersPipeline final : public internal::IModel,
-                             public internal::IImageToTokenAndPooledFeatures {
+                                          public internal::IImageToTokenAndPooledFeatures {
   public:
-    Dinov2WithRegistersPipeline(std::unique_ptr<ITrtModule> engine, Dinov2WithRegistersRuntimeConfig config,
-                   std::string primary_task);
+    Dinov2WithRegistersPipeline(std::unique_ptr<ITrtModule> engine,
+                                Dinov2WithRegistersRuntimeConfig config, std::string primary_task);
 
     const char* task() const noexcept override { return primary_task_.c_str(); }
     std::vector<internal::TaskInstance> task_bindings() override;

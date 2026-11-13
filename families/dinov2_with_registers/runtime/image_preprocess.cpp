@@ -66,14 +66,16 @@ std::vector<PillowSpan> make_pillow_plan(std::int32_t input_size, std::int32_t o
             total += weight;
         }
         if (!std::isfinite(total) || total == 0.0)
-            throw std::runtime_error("dinov2_with_registers Pillow resize has invalid coefficients");
+            throw std::runtime_error(
+                "dinov2_with_registers Pillow resize has invalid coefficients");
         span.weights.reserve(floating.size());
         for (double weight : floating) {
             const double scaled = weight / total * static_cast<double>(kPillowScale);
             if (!std::isfinite(scaled) ||
                 scaled < static_cast<double>(std::numeric_limits<std::int32_t>::min()) ||
                 scaled > static_cast<double>(std::numeric_limits<std::int32_t>::max())) {
-                throw std::runtime_error("dinov2_with_registers Pillow resize coefficient overflowed");
+                throw std::runtime_error(
+                    "dinov2_with_registers Pillow resize coefficient overflowed");
             }
             span.weights.push_back(
                 static_cast<std::int32_t>(scaled < 0.0 ? scaled - 0.5 : scaled + 0.5));
@@ -137,11 +139,13 @@ void validate(const Dinov2WithRegistersPreprocessConfig& config) {
     if (config.input_image_h <= 0 || config.input_image_w <= 0)
         throw std::invalid_argument("dinov2_with_registers input dimensions must be positive");
     if (config.input_image_h != config.input_image_w)
-        throw std::invalid_argument("dinov2_with_registers crops to a square, so both sides must match");
+        throw std::invalid_argument(
+            "dinov2_with_registers crops to a square, so both sides must match");
     if (config.shortest_edge < config.input_image_h)
         throw std::invalid_argument("dinov2_with_registers resize must be at least the crop size");
     if (config.image_mean.size() != 3 || config.image_std.size() != 3)
-        throw std::invalid_argument("dinov2_with_registers image mean/std must contain three channels");
+        throw std::invalid_argument(
+            "dinov2_with_registers image mean/std must contain three channels");
     for (float value : config.image_std) {
         if (value == 0.0F)
             throw std::invalid_argument("dinov2_with_registers image std must be non-zero");
@@ -150,8 +154,9 @@ void validate(const Dinov2WithRegistersPreprocessConfig& config) {
 
 } // namespace
 
-Dinov2WithRegistersResizeShape compute_dinov2_with_registers_resize_shape(std::int32_t image_height, std::int32_t image_width,
-                                              const Dinov2WithRegistersPreprocessConfig& config) {
+Dinov2WithRegistersResizeShape
+compute_dinov2_with_registers_resize_shape(std::int32_t image_height, std::int32_t image_width,
+                                           const Dinov2WithRegistersPreprocessConfig& config) {
     if (image_height <= 0 || image_width <= 0)
         throw std::invalid_argument("dinov2_with_registers source dimensions must be positive");
     validate(config);
@@ -169,10 +174,11 @@ Dinov2WithRegistersResizeShape compute_dinov2_with_registers_resize_shape(std::i
     return {scaled, target};
 }
 
-Dinov2WithRegistersSourceTransform compute_dinov2_with_registers_source_transform(std::int32_t image_height,
-                                                      std::int32_t image_width,
-                                                      const Dinov2WithRegistersPreprocessConfig& config) {
-    const auto shape = compute_dinov2_with_registers_resize_shape(image_height, image_width, config);
+Dinov2WithRegistersSourceTransform
+compute_dinov2_with_registers_source_transform(std::int32_t image_height, std::int32_t image_width,
+                                               const Dinov2WithRegistersPreprocessConfig& config) {
+    const auto shape =
+        compute_dinov2_with_registers_resize_shape(image_height, image_width, config);
     // The crop offset floors, matching the reference's centre crop.
     const double crop_y = (shape.height - config.input_image_h) / 2;
     const double crop_x = (shape.width - config.input_image_w) / 2;
@@ -184,14 +190,16 @@ Dinov2WithRegistersSourceTransform compute_dinov2_with_registers_source_transfor
     return transform;
 }
 
-std::vector<float> preprocess_dinov2_with_registers_image(const float* image_pixels, std::int32_t image_height,
-                                           std::int32_t image_width,
-                                           const Dinov2WithRegistersPreprocessConfig& config) {
+std::vector<float>
+preprocess_dinov2_with_registers_image(const float* image_pixels, std::int32_t image_height,
+                                       std::int32_t image_width,
+                                       const Dinov2WithRegistersPreprocessConfig& config) {
     if (image_pixels == nullptr || image_height <= 0 || image_width <= 0)
         throw std::invalid_argument("dinov2_with_registers source image must be non-empty");
     validate(config);
 
-    const auto shape = compute_dinov2_with_registers_resize_shape(image_height, image_width, config);
+    const auto shape =
+        compute_dinov2_with_registers_resize_shape(image_height, image_width, config);
     const auto resized =
         resize_pillow_bicubic(image_pixels, image_height, image_width, shape.height, shape.width);
 

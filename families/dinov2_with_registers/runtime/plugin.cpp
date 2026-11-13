@@ -26,7 +26,8 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
 std::vector<float> triple(const nlohmann::json& json, const char* name) {
     auto values = json.at(name).get<std::vector<float>>();
     if (values.size() != 3)
-        throw std::runtime_error(std::string("dinov2_with_registers runtime.json has invalid ") + name);
+        throw std::runtime_error(std::string("dinov2_with_registers runtime.json has invalid ") +
+                                 name);
     return values;
 }
 
@@ -45,9 +46,11 @@ Dinov2WithRegistersRuntimeConfig parse_config(const std::vector<char>& data) {
     config.hidden_size = json.at("hidden_size").get<std::int32_t>();
     if (config.preprocess.input_image_h <= 0 || config.preprocess.input_image_w <= 0 ||
         config.preprocess.input_image_h != config.preprocess.input_image_w ||
-        config.num_register_tokens <= 0 || config.patch_size <= 0 || config.grid <= 0 || config.hidden_size <= 0 ||
+        config.num_register_tokens <= 0 || config.patch_size <= 0 || config.grid <= 0 ||
+        config.hidden_size <= 0 ||
         config.preprocess.shortest_edge < config.preprocess.input_image_h) {
-        throw std::runtime_error("dinov2_with_registers runtime.json does not match its runtime contract");
+        throw std::runtime_error(
+            "dinov2_with_registers runtime.json does not match its runtime contract");
     }
     return config;
 }
@@ -55,7 +58,8 @@ Dinov2WithRegistersRuntimeConfig parse_config(const std::vector<char>& data) {
 std::string require_task(const BundleReader& bundle) {
     const auto& task = bundle.info().task;
     if (task != internal::IImageToTokenAndPooledFeatures::kTask)
-        throw std::runtime_error("dinov2_with_registers bundle declares an unsupported task: " + task);
+        throw std::runtime_error("dinov2_with_registers bundle declares an unsupported task: " +
+                                 task);
     return task;
 }
 
@@ -65,7 +69,8 @@ std::string require_task(const BundleReader& bundle) {
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("dinov2_with_registers does not support --kv-cache-size");
-    const auto config_data = trtmc::dinov2_with_registers::require_section(context.reader, "runtime.json");
+    const auto config_data =
+        trtmc::dinov2_with_registers::require_section(context.reader, "runtime.json");
     const auto plan = trtmc::dinov2_with_registers::require_section(context.reader, "model.plan");
 
     auto config = trtmc::dinov2_with_registers::parse_config(config_data);
@@ -74,5 +79,6 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     auto engine = context.backend.create_module(plan.data(), plan.size(), options);
     if (!engine || !engine->ok())
         throw std::runtime_error("dinov2_with_registers engine failed to load");
-    return new trtmc::Dinov2WithRegistersPipeline(std::move(engine), std::move(config), std::move(primary_task));
+    return new trtmc::Dinov2WithRegistersPipeline(std::move(engine), std::move(config),
+                                                  std::move(primary_task));
 }

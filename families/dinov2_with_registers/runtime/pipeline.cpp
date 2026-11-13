@@ -20,27 +20,32 @@ const Tensor& require_output(const TensorMap& outputs, const char* name,
                              std::size_t expected_numel) {
     const auto found = outputs.find(name);
     if (found == outputs.end())
-        throw std::runtime_error(std::string("dinov2_with_registers engine did not return ") + name);
+        throw std::runtime_error(std::string("dinov2_with_registers engine did not return ") +
+                                 name);
     const auto& tensor = found->second;
     if (tensor.data == nullptr || tensor.dtype != DType::kFloat32 ||
         tensor.numel() != expected_numel) {
-        throw std::runtime_error(std::string("dinov2_with_registers engine returned an unusable ") + name);
+        throw std::runtime_error(std::string("dinov2_with_registers engine returned an unusable ") +
+                                 name);
     }
     return tensor;
 }
 
 } // namespace
 
-Dinov2WithRegistersPipeline::Dinov2WithRegistersPipeline(std::unique_ptr<ITrtModule> engine, Dinov2WithRegistersRuntimeConfig config,
-                               std::string primary_task)
+Dinov2WithRegistersPipeline::Dinov2WithRegistersPipeline(std::unique_ptr<ITrtModule> engine,
+                                                         Dinov2WithRegistersRuntimeConfig config,
+                                                         std::string primary_task)
     : engine_(std::move(engine)), config_(std::move(config)),
       primary_task_(std::move(primary_task)) {
     if (!engine_ || !engine_->ok())
         throw std::runtime_error("Dinov2WithRegistersPipeline: invalid model");
-    if (config_.num_register_tokens <= 0 || config_.patch_size <= 0 || config_.grid <= 0 || config_.hidden_size <= 0)
+    if (config_.num_register_tokens <= 0 || config_.patch_size <= 0 || config_.grid <= 0 ||
+        config_.hidden_size <= 0)
         throw std::runtime_error("dinov2_with_registers runtime config has invalid dimensions");
     if (config_.grid * config_.patch_size != config_.preprocess.input_image_h) {
-        throw std::runtime_error("dinov2_with_registers grid and patch size do not cover the input image");
+        throw std::runtime_error(
+            "dinov2_with_registers grid and patch size do not cover the input image");
     }
     if (config_.resample != 3)
         throw std::runtime_error("dinov2_with_registers is qualified for bicubic resize only");
@@ -52,7 +57,7 @@ std::vector<internal::TaskInstance> Dinov2WithRegistersPipeline::task_bindings()
 
 internal::ImageTokenAndPooledFeaturesResult
 Dinov2WithRegistersPipeline::run(const internal::ImageToTokenAndPooledFeaturesRequest& request,
-                    internal::ConfigView config) {
+                                 internal::ConfigView config) {
     if (!config.empty())
         throw internal::ConfigError("dinov2_with_registers has no runtime configuration");
     const auto& image = request.image;
@@ -69,8 +74,8 @@ Dinov2WithRegistersPipeline::run(const internal::ImageToTokenAndPooledFeaturesRe
 
     const auto source_h = static_cast<std::int32_t>(image.height);
     const auto source_w = static_cast<std::int32_t>(image.width);
-    auto pixel_values = preprocess_dinov2_with_registers_image(static_cast<const float*>(image.data), source_h,
-                                                source_w, config_.preprocess);
+    auto pixel_values = preprocess_dinov2_with_registers_image(
+        static_cast<const float*>(image.data), source_h, source_w, config_.preprocess);
     Tensor pixels;
     pixels.data = pixel_values.data();
     pixels.shape = {1, 3, config_.preprocess.input_image_h, config_.preprocess.input_image_w};
@@ -106,7 +111,8 @@ Dinov2WithRegistersPipeline::run(const internal::ImageToTokenAndPooledFeaturesRe
     // the resize and the crop are both undone here. The transform comes from
     // the preprocessing seam rather than being re-derived, so the forward and
     // inverse rules cannot drift apart.
-    const auto transform = compute_dinov2_with_registers_source_transform(source_h, source_w, config_.preprocess);
+    const auto transform =
+        compute_dinov2_with_registers_source_transform(source_h, source_w, config_.preprocess);
     const double patch = config_.patch_size;
     for (std::uint64_t row = 0; row < grid; ++row) {
         for (std::uint64_t column = 0; column < grid; ++column) {

@@ -38,15 +38,17 @@ struct Dinov2WithRegistersSourceTransform {
 
 // Shortest edge to shortest_edge, the other edge floored. Exposed so the unit
 // test can pin the rounding rule without running an engine.
-Dinov2WithRegistersResizeShape compute_dinov2_with_registers_resize_shape(std::int32_t image_height, std::int32_t image_width,
-                                              const Dinov2WithRegistersPreprocessConfig& config);
-
-Dinov2WithRegistersSourceTransform compute_dinov2_with_registers_source_transform(std::int32_t image_height,
-                                                      std::int32_t image_width,
-                                                      const Dinov2WithRegistersPreprocessConfig& config);
-
-std::vector<float> preprocess_dinov2_with_registers_image(const float* image_pixels, std::int32_t image_height,
-                                           std::int32_t image_width,
+Dinov2WithRegistersResizeShape
+compute_dinov2_with_registers_resize_shape(std::int32_t image_height, std::int32_t image_width,
                                            const Dinov2WithRegistersPreprocessConfig& config);
+
+Dinov2WithRegistersSourceTransform
+compute_dinov2_with_registers_source_transform(std::int32_t image_height, std::int32_t image_width,
+                                               const Dinov2WithRegistersPreprocessConfig& config);
+
+std::vector<float>
+preprocess_dinov2_with_registers_image(const float* image_pixels, std::int32_t image_height,
+                                       std::int32_t image_width,
+                                       const Dinov2WithRegistersPreprocessConfig& config);
 
 } // namespace trtmc
