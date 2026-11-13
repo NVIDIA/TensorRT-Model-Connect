@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Full-checkpoint native CLI / SDK proof against the official Arabic reference."""
+"""Full-checkpoint native CLI / SDK parity against the official Arabic reference."""
 
 import json
 import os
@@ -78,7 +78,6 @@ def test_official_arabic_transcription(pytestconfig, tmp_path):
     frontend.fb.numpy().tofile(tmp_path / "filters.f32")
     audio_paths = []
     expected = []
-    evidence = {}
     for audio_file in MANIFEST["testcases"][0]["audio_files"]:
         path = model_dir / audio_file
         audio, rate = sf.read(path, dtype="float32")
@@ -121,13 +120,6 @@ def test_official_arabic_transcription(pytestconfig, tmp_path):
         assert actual["token_ids"] == reference["token_ids"], (actual, reference["token_ids"])
         assert actual["text"] == reference["text"], (actual, reference["text"])
         expected.append({"text": reference["text"], "token_ids": reference["token_ids"]})
-        evidence[name] = {
-            "text": actual["text"],
-            "token_ids": actual["token_ids"],
-            "frontend_relative_l2": relative,
-            "frontend_max_abs": maximum,
-            "exact_reference_tokens": True,
-        }
     for language in ["c", "cpp"]:
         results = _json_command(
             [native / f"test_cohere_asr_sdk_{language}", bundle, runtime, *audio_paths]
@@ -139,4 +131,3 @@ def test_official_arabic_transcription(pytestconfig, tmp_path):
         for actual, wanted in zip(results, expected):
             assert bytes.fromhex(actual["text_hex"]).decode("utf-8") == wanted["text"]
             assert actual["token_ids"] == wanted["token_ids"]
-    (tmp_path / "parity.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n")
