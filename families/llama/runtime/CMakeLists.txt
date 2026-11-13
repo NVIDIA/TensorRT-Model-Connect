@@ -54,7 +54,7 @@ if(TRTMC_BUILD_TESTS)
   endforeach()
   add_test(NAME test_llama_speculative_contract COMMAND test_llama_speculative_contract)
   foreach(test_name IN ITEMS test_llama_chat_template test_llama_native_kv_cache
-                             test_llama_pretokenizer_variant)
+                             test_llama_pretokenizer_variant test_llama_tokenizer_special_tokens)
     add_executable(${test_name}
       ${PROJECT_SOURCE_DIR}/families/llama/tests/cpp/${test_name}.cpp
     )
@@ -69,6 +69,7 @@ if(TRTMC_BUILD_TESTS)
     )
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()
+  target_link_libraries(test_llama_tokenizer_special_tokens PRIVATE nlohmann_json::nlohmann_json)
   set_tests_properties(test_llama_native_kv_cache PROPERTIES SKIP_RETURN_CODE 77)
 
   add_executable(test_llama_plugin_helpers

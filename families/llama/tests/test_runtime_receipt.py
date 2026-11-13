@@ -78,3 +78,27 @@ def test_receipt_rejects_missing_decode_step() -> None:
     payload["decode_ms"] = 0.0
     with pytest.raises(AssertionError):
         assert_native_kv_receipt(payload, _case(), 65)
+
+
+@pytest.mark.parametrize("launches, max_chunk", [(1, 16), (2, 8)])
+def test_prefill_count_includes_bos_without_requiring_a_kv_only_case(launches, max_chunk):
+    from families.llama.tests.runtime_receipt import assert_prefill_token_count
+
+    stderr = f"[trtmc.prefill] tokens=16 launches={launches} max_chunk={max_chunk}"
+    assert_prefill_token_count(stderr, 16)
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "",
+        "[trtmc.prefill] tokens=18 launches=1 max_chunk=18",
+        "[trtmc.prefill] tokens=8 launches=1 max_chunk=8\n"
+        "[trtmc.prefill] tokens=8 launches=1 max_chunk=8",
+    ],
+)
+def test_prefill_count_rejects_missing_wrong_or_repeated_receipts(stderr):
+    from families.llama.tests.runtime_receipt import assert_prefill_token_count
+
+    with pytest.raises(AssertionError):
+        assert_prefill_token_count(stderr, 16)

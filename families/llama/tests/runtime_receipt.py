@@ -24,6 +24,15 @@ def prefill_observations(stderr: str) -> tuple[tuple[int, int, int], ...]:
     return tuple(values)
 
 
+def assert_prefill_token_count(stderr: str, expected_tokens: int) -> None:
+    """Check one generation's native prompt length, including special tokens."""
+    observations = prefill_observations(stderr)
+    assert len(observations) == 1, f"expected one prefill receipt, got {observations}"
+    assert observations[0][0] == expected_tokens, (
+        f"native prefill token count {observations[0][0]} != {expected_tokens}"
+    )
+
+
 def assert_native_kv_receipt(payload: dict, case: dict, prompt_tokens: int) -> None:
     stderr = str(payload["runtime_stderr"])
     expected_rows = int(case["expected_kv_cache_rows"])

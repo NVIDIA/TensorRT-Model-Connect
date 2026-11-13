@@ -124,7 +124,7 @@ def _checkpoint(manifest: dict) -> Path:
 def _prompt(case: dict) -> str:
     if "prompt" in case:
         prompt = case["prompt"]
-        assert isinstance(prompt, str) and prompt, case["name"]
+        assert isinstance(prompt, str) and (prompt or case.get("expected_prompt_token_ids")), case["name"]
         return prompt
     repeated = case["prompt_repeat"]
     count = int(repeated["count"])
@@ -584,6 +584,14 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
             assert (
                 f"[trtmc] KV cache rows={case['expected_kv_cache_rows']} "
                 f"(bundle max={manifest['max_sequence_length']})" in payload["runtime_stderr"]
+            )
+
+    if "expected_runtime_prefill_tokens" in case:
+        from families.llama.tests.runtime_receipt import assert_prefill_token_count
+
+        with evidence_stage("compare"):
+            assert_prefill_token_count(
+                payload["runtime_stderr"], int(case["expected_runtime_prefill_tokens"])
             )
 
     if _NATIVE_KV_FIELDS <= case.keys():

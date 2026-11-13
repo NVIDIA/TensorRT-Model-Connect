@@ -668,20 +668,20 @@ class BpeTokenizer final : public ITokenizer {
 
     std::vector<int32_t> encode(const std::string& text) const override {
         std::vector<int32_t> result;
-        if (text.empty())
-            return result;
 
         if (mAddSpecialTokens) {
             for (int32_t bos_id : mPostBosIds)
                 result.push_back(bos_id);
         }
 
-        auto segments = split_added_tokens(text);
-        for (const auto& seg : segments) {
-            if (seg.added_id >= 0)
-                result.push_back(seg.added_id);
-            else
-                encode_segment(seg.text, result);
+        if (!text.empty()) {
+            auto segments = split_added_tokens(text);
+            for (const auto& seg : segments) {
+                if (seg.added_id >= 0)
+                    result.push_back(seg.added_id);
+                else
+                    encode_segment(seg.text, result);
+            }
         }
 
         if (mAddSpecialTokens) {
