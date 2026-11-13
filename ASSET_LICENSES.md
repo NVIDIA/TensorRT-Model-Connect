@@ -56,6 +56,13 @@ distributed under the Apache License 2.0 with the rest of the project:
 - `families/timm_inception_v4/tests/data/orc_test_img.jpeg` — byte-identical copy of
   `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the input of the FP8
   E2E case, chosen for its clear top-1 margin
+- `families/layoutlm/tests/data/invoice.png`,
+  `families/layoutlm/tests/data/annual_report.png` and
+  `families/layoutlm/tests/data/blank_page.png` — invented documents (an
+  invoice, an annual-report page and a blank page) written by the checked-in
+  `families/layoutlm/tests/data/generate.py`; the text is rendered with the
+  DejaVu Sans fonts (Bitstream Vera Fonts license with public-domain DejaVu
+  changes), and the PNGs contain only the rendered pixels, not the fonts
 
 ## Project overview media
 

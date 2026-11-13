@@ -1,0 +1,46 @@
+{
+  "name": "layoutlm-document-qa",
+  "hf_id": "impira/layoutlm-document-qa",
+  "hf_revision": "beed3c4d02d86017ebca5bd0fdf210046b907aa6",
+  "bundle": "layoutlm-document-qa.bundle",
+  "family": "layoutlm",
+  "task": "images_text_to_text",
+  "precision": "fp32",
+  "max_sequence_length": 512,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "layoutlm-document-qa-invoice",
+      "premerge": true,
+      "image": "data/invoice.png",
+      "questions": [
+        "What is the invoice number?",
+        "What is the total amount due?",
+        "When is the invoice due?",
+        "Who is the invoice billed to?",
+        "What is the PO number?",
+        "What is the sales tax amount?"
+      ]
+    },
+    {
+      "name": "layoutlm-document-qa-annual-report",
+      "premerge": true,
+      "image": "data/annual_report.png",
+      "questions": [
+        "Who is the chief financial officer?",
+        "How many employees did the company have at year end?",
+        "What was the net revenue in the fourth quarter?",
+        "Where will the company open a service hub?",
+        "How many carts were shipped during the year?"
+      ]
+    },
+    {
+      "name": "layoutlm-document-qa-blank-page",
+      "premerge": true,
+      "image": "data/blank_page.png",
+      "questions": [
+        "What is the invoice number?"
+      ]
+    }
+  ]
+}
