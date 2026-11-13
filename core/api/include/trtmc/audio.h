@@ -66,7 +66,8 @@ typedef struct {
 } trtmc_audio_codebook_tokens_to_audio_request_v1;
 typedef struct {
     trtmc_api_header header;
-    trtmc_status(TRTMC_CALL* run)(trtmc_model*, const trtmc_audio_codebook_tokens_to_audio_request_v1*,
+    trtmc_status(TRTMC_CALL* run)(trtmc_model*,
+                                  const trtmc_audio_codebook_tokens_to_audio_request_v1*,
                                   const trtmc_config_view_v1*, trtmc_result**, trtmc_error**);
     trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_audio_result_view_v1*,
                                           trtmc_error**);

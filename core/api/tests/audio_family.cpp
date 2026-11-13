@@ -68,7 +68,8 @@ class AudioFixture final : public IModel,
             return {bind<IBatchTextToAudio>(*this, fields_for(IBatchTextToAudio::kTask))};
         if (mode_ == "batch_speech_only")
             return {bind<IBatchTextToSpeech>(*this, fields_for(IBatchTextToSpeech::kTask))};
-        if (mode_ == "codec_only") return {bind<IAudioCodebookTokensToAudio>(*this)};
+        if (mode_ == "codec_only")
+            return {bind<IAudioCodebookTokensToAudio>(*this)};
         return {
             bind<ITextToAudio>(*this, fields_for(ITextToAudio::kTask)),
             bind<ITextAudioTokenHistoryToAudio>(*this,
@@ -165,7 +166,8 @@ class AudioFixture final : public IModel,
     AudioResult run(const AudioCodebookTokensToAudioRequest& input, ConfigView config) override {
         validate_config({}, config);
         for (const auto token : input.codes.tokens)
-            if (token < 0 || token > 255) throw std::invalid_argument("fixture codec token out of range");
+            if (token < 0 || token > 255)
+                throw std::invalid_argument("fixture codec token out of range");
         AudioResult result;
         result.samples.assign(input.codes.tokens.begin(), input.codes.tokens.end());
         result.sample_rate = 24000;
