@@ -1,0 +1,22 @@
+{
+  "name": "vjepa2-vitl-fpc64-256",
+  "hf_id": "facebook/vjepa2-vitl-fpc64-256",
+  "hf_revision": "b3c1679b7c34d3255ef3547f27c7b226aefab26f",
+  "family": "vjepa2",
+  "bundle": "vjepa2-vitl-fpc64-256.bundle",
+  "task": "video_to_token_features",
+  "precision": "fp32",
+  "video_num_frames": 64,
+  "image_height": 256,
+  "image_width": 256,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "vjepa2-vitl-fpc64-256",
+      "premerge": true,
+      "image": "test_img.jpeg",
+      "max_abs_error": 0.0002,
+      "min_cosine": 0.99999
+    }
+  ]
+}

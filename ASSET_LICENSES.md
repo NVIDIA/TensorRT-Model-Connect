@@ -303,3 +303,4 @@ distributed under the
 of the source checkpoint.
 
 <!-- Collaborative review anchor: batch 2. -->
+- `families/vjepa2/tests/data/test_img.jpeg`
