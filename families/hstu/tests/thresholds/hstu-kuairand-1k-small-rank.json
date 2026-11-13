@@ -1,0 +1,6 @@
+{
+  "threshold_overrides": {
+    "max_abs": 1.0e-4,
+    "min_task_cosine": 0.99999
+  }
+}
