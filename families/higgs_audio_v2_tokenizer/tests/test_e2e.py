@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Pinned SpeechT5 HiFiGAN spectral-feature to PCM parity through the public Task API."""
+"""Pinned Higgs Audio V2 codec token to PCM parity through the public Task API."""
 
 from __future__ import annotations
 
