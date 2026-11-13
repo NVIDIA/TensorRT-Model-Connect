@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import json
-import math
 import os
 import subprocess
 from pathlib import Path
@@ -69,12 +68,10 @@ def _selected_cases(config) -> tuple[list[str], bool]:
 
 
 def pytest_generate_tests(metafunc) -> None:
-    for fixture in ("case_name", "fp16_case_name"):
+    for fixture in ("case_name",):
         if fixture not in metafunc.fixturenames:
             continue
         names, enabled = _selected_cases(metafunc.config)
-        if fixture == "fp16_case_name":
-            names = [name for name in names if _gate(CASES[name][1]) == "fp16"]
         parameters = names
         if not enabled:
             parameters = [
