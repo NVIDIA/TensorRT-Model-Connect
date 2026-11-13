@@ -303,3 +303,4 @@ distributed under the
 of the source checkpoint.
 
 <!-- Collaborative review anchor: batch 2. -->
+`families/mimi/tests/data/librispeech-test-clean-6930-75918-0003.wav`
