@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """FP16 Kolibri1 from block-scaled FP8 weights, with bounded build memory."""
 
+import gc
 import json
 from contextlib import ExitStack
 from pathlib import Path
@@ -345,12 +346,14 @@ def build(request, writer):
         with writer.open_section("embedding.plan") as section:
             graph.save(section)
         del graph
+        gc.collect()
         for layer in range(cfg["num_hidden_layers"]):
             graph = Graph(weights, cfg, logger)
             graph.layer(layer, length)
             with writer.open_section(f"layer.{layer}.plan") as section:
                 graph.save(section)
             del graph
+            gc.collect()
         graph = Graph(weights, cfg, logger)
         hidden = graph.net.add_input("hidden", trt.float16, (1, cfg["hidden_size"]))
         graph.output(
