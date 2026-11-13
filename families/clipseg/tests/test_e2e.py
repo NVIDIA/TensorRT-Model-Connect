@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Pinned checkpoint parity through build, native DSO, and the image-feature API."""
+
 from __future__ import annotations
 
 import json
-import math
 import os
 import subprocess
 from pathlib import Path
@@ -69,12 +69,10 @@ def _selected_cases(config) -> tuple[list[str], bool]:
 
 
 def pytest_generate_tests(metafunc) -> None:
-    for fixture in ("case_name", "fp16_case_name"):
+    for fixture in ("case_name",):
         if fixture not in metafunc.fixturenames:
             continue
         names, enabled = _selected_cases(metafunc.config)
-        if fixture == "fp16_case_name":
-            names = [name for name in names if _gate(CASES[name][1]) == "fp16"]
         parameters = names
         if not enabled:
             parameters = [
@@ -194,33 +192,45 @@ def _asset(raw: str) -> Path:
     return path
 
 
-
-
-def test_official_checkpoint_e2e(case_name,tmp_path):
+def test_official_checkpoint_e2e(case_name, tmp_path):
     import numpy as np
     import torch
     from PIL import Image
-    from transformers import AutoProcessor,CLIPSegForImageSegmentation
+    from transformers import AutoProcessor, CLIPSegForImageSegmentation
 
-    _,manifest,case=CASES[case_name]
-    directory=_model_dir(manifest)
-    binary,runtime_root=_runtime()
-    bundle=tmp_path/manifest['bundle']
-    _build(directory,bundle,manifest)
-    processor=AutoProcessor.from_pretrained(directory,use_fast=False)
-    model=CLIPSegForImageSegmentation.from_pretrained(directory,dtype=torch.float32).eval()
-    image=Image.open(_asset(case['test_image'])).convert('RGB')
-    image_path=tmp_path/'native-input.png';image.save(image_path)
-    masks=[]
-    for prompt in case['prompts']:
-        inputs=processor(text=[prompt],images=image,padding='max_length',max_length=77,return_tensors='pt')
-        with torch.no_grad():expected=model(**inputs).logits.sigmoid()[0].numpy()
-        actual=_run_json(binary,runtime_root,bundle,case,'segment-prompted','--image',str(image_path),'--prompt',prompt)
-        assert actual['num_masks']==1
-        assert [actual['height'],actual['width']]==list(expected.shape)
-        values=np.asarray(actual['masks'],dtype=np.float32).reshape(expected.shape)
-        assert np.isfinite(values).all() and values.min()>=0 and values.max()<=1
-        np.testing.assert_allclose(values,expected,atol=5e-4,rtol=1e-4)
+    _, manifest, case = CASES[case_name]
+    directory = _model_dir(manifest)
+    binary, runtime_root = _runtime()
+    bundle = tmp_path / manifest["bundle"]
+    _build(directory, bundle, manifest)
+    processor = AutoProcessor.from_pretrained(directory, use_fast=False)
+    model = CLIPSegForImageSegmentation.from_pretrained(directory, dtype=torch.float32).eval()
+    image = Image.open(_asset(case["test_image"])).convert("RGB")
+    image_path = tmp_path / "native-input.png"
+    image.save(image_path)
+    masks = []
+    for prompt in case["prompts"]:
+        inputs = processor(
+            text=[prompt], images=image, padding="max_length", max_length=77, return_tensors="pt"
+        )
+        with torch.no_grad():
+            expected = model(**inputs).logits.sigmoid()[0].numpy()
+        actual = _run_json(
+            binary,
+            runtime_root,
+            bundle,
+            case,
+            "segment-prompted",
+            "--image",
+            str(image_path),
+            "--prompt",
+            prompt,
+        )
+        assert actual["num_masks"] == 1
+        assert [actual["height"], actual["width"]] == list(expected.shape)
+        values = np.asarray(actual["masks"], dtype=np.float32).reshape(expected.shape)
+        assert np.isfinite(values).all() and values.min() >= 0 and values.max() <= 1
+        np.testing.assert_allclose(values, expected, atol=5e-4, rtol=1e-4)
         masks.append(values)
-        print(f"CLIPSeg {prompt!r} probability maxabs={np.max(np.abs(values-expected)):.6g}")
-    assert np.mean(np.abs(masks[0]-masks[1]))>0.001
+        print(f"CLIPSeg {prompt!r} probability maxabs={np.max(np.abs(values - expected)):.6g}")
+    assert np.mean(np.abs(masks[0] - masks[1])) > 0.001

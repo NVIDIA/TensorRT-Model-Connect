@@ -47,12 +47,15 @@ void test_resize_preserves_the_full_rectangular_source() {
 void test_resize_matches_pillow_bilinear_pixels() {
     auto config = base_config();
     config.input_image_h = config.input_image_w = 3;
-    config.image_mean = {0, 0, 0}; config.image_std = {1, 1, 1};
+    config.image_mean = {0, 0, 0};
+    config.image_std = {1, 1, 1};
     std::vector<float> source(24);
     for (std::size_t index = 0; index < source.size(); ++index)
         source[index] = static_cast<float>(index * 10) / 255.0F;
     // Pillow RGB resize of the 2x4 source to 3x3, BILINEAR; planar channel order.
-    const std::vector<int> expected = {9,45,81,69,105,141,129,165,201,19,55,91,79,115,151,139,175,211,29,65,101,89,125,161,149,185,221};
+    const std::vector<int> expected = {9,  45, 81,  69, 105, 141, 129, 165, 201,
+                                       19, 55, 91,  79, 115, 151, 139, 175, 211,
+                                       29, 65, 101, 89, 125, 161, 149, 185, 221};
     const auto result = trtmc::preprocess_clipseg_image(source.data(), 2, 4, config);
     check(result.size() == expected.size(), "Pillow golden output shape");
     for (std::size_t index = 0; index < expected.size(); ++index)

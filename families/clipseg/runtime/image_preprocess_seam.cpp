@@ -91,8 +91,8 @@ std::uint8_t apply_pillow_span(const std::uint8_t* source, std::int32_t stride,
 }
 
 std::vector<float> resize_pillow_bilinear(const float* source, std::int32_t input_h,
-                                         std::int32_t input_w, std::int32_t output_h,
-                                         std::int32_t output_w) {
+                                          std::int32_t input_w, std::int32_t output_h,
+                                          std::int32_t output_w) {
     std::vector<std::uint8_t> input(static_cast<std::size_t>(input_h) * input_w * 3U);
     std::transform(source, source + input.size(), input.begin(), [](float value) {
         return static_cast<std::uint8_t>(std::lround(std::clamp(value, 0.0F, 1.0F) * 255.0F));
@@ -142,7 +142,7 @@ void validate(const ClipsegPreprocessConfig& config) {
 } // namespace
 
 ClipsegResizeShape compute_clipseg_resize_shape(std::int32_t image_height, std::int32_t image_width,
-                                          const ClipsegPreprocessConfig& config) {
+                                                const ClipsegPreprocessConfig& config) {
     if (image_height <= 0 || image_width <= 0)
         throw std::invalid_argument("clipseg source dimensions must be positive");
     validate(config);
@@ -155,8 +155,8 @@ ClipsegResizeShape compute_clipseg_resize_shape(std::int32_t image_height, std::
 }
 
 std::vector<float> preprocess_clipseg_image(const float* image_pixels, std::int32_t image_height,
-                                         std::int32_t image_width,
-                                         const ClipsegPreprocessConfig& config) {
+                                            std::int32_t image_width,
+                                            const ClipsegPreprocessConfig& config) {
     if (image_pixels == nullptr || image_height <= 0 || image_width <= 0)
         throw std::invalid_argument("clipseg source image must be non-empty");
     validate(config);
@@ -169,8 +169,7 @@ std::vector<float> preprocess_clipseg_image(const float* image_pixels, std::int3
     std::vector<float> pixel_values(3U * plane);
     for (std::int32_t y = 0; y < config.input_image_h; ++y) {
         for (std::int32_t x = 0; x < config.input_image_w; ++x) {
-            const auto source =
-                static_cast<std::size_t>((y * shape.width + x) * 3);
+            const auto source = static_cast<std::size_t>((y * shape.width + x) * 3);
             for (std::int32_t c = 0; c < 3; ++c) {
                 const auto channel = static_cast<std::size_t>(c);
                 pixel_values[channel * plane + static_cast<std::size_t>(y) * config.input_image_w +

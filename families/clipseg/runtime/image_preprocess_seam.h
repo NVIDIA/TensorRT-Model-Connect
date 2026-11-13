@@ -24,10 +24,10 @@ struct ClipsegResizeShape {
 
 // Direct resize to the checkpoint dimensions, preserving the full source image.
 ClipsegResizeShape compute_clipseg_resize_shape(std::int32_t image_height, std::int32_t image_width,
-                                          const ClipsegPreprocessConfig& config);
+                                                const ClipsegPreprocessConfig& config);
 
 std::vector<float> preprocess_clipseg_image(const float* image_pixels, std::int32_t image_height,
-                                         std::int32_t image_width,
-                                         const ClipsegPreprocessConfig& config);
+                                            std::int32_t image_width,
+                                            const ClipsegPreprocessConfig& config);
 
 } // namespace trtmc
