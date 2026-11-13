@@ -7,12 +7,13 @@
 
 #include "families/sam/runtime/sam_output_selection.h"
 #include "families/sam/runtime/sam_postprocess_seam.h"
+#include "families/sam/runtime/sam_preprocess.h"
 #include "families/sam/runtime/sam_prompt_seam.h"
 
 #include <algorithm>
-#include <array>
-#include <cmath>
+#include <cstddef>
 #include <cstdint>
+#include <cuda_runtime_api.h>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -21,99 +22,6 @@
 namespace trtmc {
 
 namespace {
-
-struct SamPreprocessPlan {
-    std::vector<float> pixel_values;
-    int32_t rescaled_width{0};
-    int32_t rescaled_height{0};
-    int32_t original_width{0};
-    int32_t original_height{0};
-};
-
-std::array<float, 3> sam_channel_values(const std::vector<float>& values,
-                                        std::array<float, 3> defaults) {
-    const auto count = std::min(values.size(), defaults.size());
-    for (std::size_t i = 0; i < count; ++i)
-        defaults[i] = values[i];
-    return defaults;
-}
-
-float sample_hwc_channel(const float* pixels, int32_t height, int32_t width, int32_t channel,
-                         float x, float y) {
-    const float clamped_x = std::clamp(x, 0.0F, static_cast<float>(width - 1));
-    const float clamped_y = std::clamp(y, 0.0F, static_cast<float>(height - 1));
-    const int32_t x0 = static_cast<int32_t>(std::floor(clamped_x));
-    const int32_t y0 = static_cast<int32_t>(std::floor(clamped_y));
-    const int32_t x1 = std::min(x0 + 1, width - 1);
-    const int32_t y1 = std::min(y0 + 1, height - 1);
-    const float wx = clamped_x - static_cast<float>(x0);
-    const float wy = clamped_y - static_cast<float>(y0);
-
-    const auto idx = [width](int32_t yy, int32_t xx, int32_t cc) {
-        return static_cast<std::size_t>((yy * width + xx) * 3 + cc);
-    };
-
-    const float v00 = pixels[idx(y0, x0, channel)];
-    const float v01 = pixels[idx(y0, x1, channel)];
-    const float v10 = pixels[idx(y1, x0, channel)];
-    const float v11 = pixels[idx(y1, x1, channel)];
-    const float top = v00 * (1.0F - wx) + v01 * wx;
-    const float bottom = v10 * (1.0F - wx) + v11 * wx;
-    return top * (1.0F - wy) + bottom * wy;
-}
-
-void fill_sam_preprocessed_pixels(SamPreprocessPlan& plan, const float* image_pixels,
-                                  int32_t height, int32_t width, const SamConfig& config,
-                                  const std::array<float, 3>& mean,
-                                  const std::array<float, 3>& stdv) {
-    for (int32_t y = 0; y < plan.rescaled_height; ++y) {
-        const float src_y = (static_cast<float>(y) + 0.5F) * static_cast<float>(height) /
-                                static_cast<float>(plan.rescaled_height) -
-                            0.5F;
-        for (int32_t x = 0; x < plan.rescaled_width; ++x) {
-            const float src_x = (static_cast<float>(x) + 0.5F) * static_cast<float>(width) /
-                                    static_cast<float>(plan.rescaled_width) -
-                                0.5F;
-            for (int32_t c = 0; c < 3; ++c) {
-                float value = sample_hwc_channel(image_pixels, height, width, c, src_x, src_y);
-                value =
-                    (value - mean[static_cast<std::size_t>(c)]) / stdv[static_cast<std::size_t>(c)];
-                plan.pixel_values[static_cast<std::size_t>(c) *
-                                      static_cast<std::size_t>(config.image_size) *
-                                      static_cast<std::size_t>(config.image_size) +
-                                  static_cast<std::size_t>(y) *
-                                      static_cast<std::size_t>(config.image_size) +
-                                  static_cast<std::size_t>(x)] = value;
-            }
-        }
-    }
-}
-
-SamPreprocessPlan build_sam_preprocess_plan(const float* image_pixels, int32_t height,
-                                            int32_t width, const SamConfig& config) {
-    SamPreprocessPlan plan;
-    if (image_pixels == nullptr || height <= 0 || width <= 0 || config.image_size <= 0)
-        return plan;
-
-    const int32_t image_size = config.image_size;
-    const int32_t longest_side = std::max(width, height);
-    const float scale = static_cast<float>(image_size) / static_cast<float>(longest_side);
-    plan.rescaled_width =
-        std::max(1, static_cast<int32_t>(std::round(static_cast<float>(width) * scale)));
-    plan.rescaled_height =
-        std::max(1, static_cast<int32_t>(std::round(static_cast<float>(height) * scale)));
-    plan.original_width = width;
-    plan.original_height = height;
-    plan.pixel_values.assign(static_cast<std::size_t>(3) * static_cast<std::size_t>(image_size) *
-                                 static_cast<std::size_t>(image_size),
-                             0.0F);
-
-    const auto mean = sam_channel_values(config.image_mean, {0.485F, 0.456F, 0.406F});
-    const auto stdv = sam_channel_values(config.image_std, {0.229F, 0.224F, 0.225F});
-    fill_sam_preprocessed_pixels(plan, image_pixels, height, width, config, mean, stdv);
-
-    return plan;
-}
 
 bool parse_mask_shape(const std::vector<int64_t>& shape, int32_t& num_masks, int32_t& height,
                       int32_t& width) {
@@ -180,6 +88,16 @@ SamPipeline::SamPipeline(std::unique_ptr<ITrtModule> image_encoder,
         throw std::runtime_error("SamPipeline: invalid image_encoder");
     if (!mask_decoder_ || !mask_decoder_->ok())
         throw std::runtime_error("SamPipeline: invalid mask_decoder");
+    if (config_.image_size <= 0)
+        throw std::runtime_error("SamPipeline: image_size must be positive");
+    const auto image_size = static_cast<std::size_t>(config_.image_size);
+    void* pinned = nullptr;
+    const cudaError_t error = cudaMallocHost(&pinned, 3 * image_size * image_size * sizeof(float));
+    if (error != cudaSuccess) {
+        throw std::runtime_error(std::string("SamPipeline: page-locked pixel_values allocation: ") +
+                                 cudaGetErrorString(error));
+    }
+    pixel_values_ = {static_cast<float*>(pinned), [](float* p) { (void)cudaFreeHost(p); }};
 }
 
 SegmentResult SamPipeline::segment(const float* pixels, int32_t height, int32_t width) {
@@ -201,12 +119,13 @@ PromptedSegmentationResult SamPipeline::segment_prompted(const float* image_pixe
                                                          int32_t image_height, int32_t image_width,
                                                          float point_x, float point_y,
                                                          bool is_foreground) {
-    auto plan = build_sam_preprocess_plan(image_pixels, image_height, image_width, config_);
-    if (plan.pixel_values.empty())
+    const auto plan = plan_sam_preprocess(image_pixels, image_height, image_width, config_);
+    if (plan.rescaled_width == 0)
         return {};
+    write_sam_pixel_values(pixel_values_.get(), plan, image_pixels, config_);
 
     Tensor img_t;
-    img_t.data = plan.pixel_values.data();
+    img_t.data = pixel_values_.get();
     img_t.shape = {1, 3, config_.image_size, config_.image_size};
     img_t.dtype = DType::kFloat32;
 
