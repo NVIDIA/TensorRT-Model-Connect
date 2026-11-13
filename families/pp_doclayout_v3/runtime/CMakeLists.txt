@@ -19,6 +19,8 @@ target_link_libraries(trtmc_model_pp_doclayout_v3 PRIVATE trtmc_core nlohmann_js
 target_compile_options(trtmc_model_pp_doclayout_v3 PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(trtmc_model_pp_doclayout_v3 PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" BUILD_RPATH "\$ORIGIN")
+install(TARGETS trtmc_model_pp_doclayout_v3
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT runtime)
 
 if(TRTMC_BUILD_TESTS)
   add_executable(test_pp_doclayout_v3_layout ../tests/cpp/test_layout.cpp layout.cpp)

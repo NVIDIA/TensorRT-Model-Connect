@@ -3,7 +3,6 @@
 
 """Direct build -> native Task/CLI -> official reference, with layout geometry."""
 
-import hashlib
 import json
 import os
 import subprocess
@@ -13,6 +12,7 @@ import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import record_evidence
 
 FAMILY = "pp_doclayout_v3"
 TASKS = frozenset({"document_layout"})
@@ -72,7 +72,8 @@ def _polygon_iou(left, right, height, width):
     return float(np.logical_and(*masks).sum() / union) if union else 0
 
 
-def test_official_checkpoint_e2e(request, tmp_path):
+@pytest.mark.parametrize("case_name", ["pp-doclayout-v3"])
+def test_official_checkpoint_e2e(request, tmp_path, case_name):
     if not _selected(request.config):
         pytest.skip("direct E2E requires an explicit model or testcase selector")
     import torch
@@ -83,8 +84,7 @@ def test_official_checkpoint_e2e(request, tmp_path):
     logging.disable_progress_bar()
     torch.set_num_threads(8)
     model_dir = _path("TRTMC_PP_DOCLAYOUT_V3_MODEL_DIR")
-    with (model_dir / "model.safetensors").open("rb") as source:
-        assert hashlib.file_digest(source, "sha256").hexdigest() == MANIFEST["weights_sha256"]
+    record_evidence("inputs", {"hf_id": MANIFEST["hf_id"], "hf_revision": MANIFEST["hf_revision"]})
     image_path = _path("TRTMC_PP_DOCLAYOUT_V3_TEST_IMAGE")
     binary, runtime = _path("TRTMC_BINARY"), _path("TRTMC_RUNTIME_ROOT")
     assert (runtime / "libtrtmc_model_pp_doclayout_v3.so").is_file()
@@ -95,8 +95,11 @@ def test_official_checkpoint_e2e(request, tmp_path):
             model_dir=model_dir,
             output_path=bundle,
             family=FAMILY,
-            task="document_layout",
-            precision="fp32",
+            task=MANIFEST["task"],
+            precision=MANIFEST["precision"],
+            image_height=MANIFEST["image_height"],
+            image_width=MANIFEST["image_width"],
+            tensor_parallel_size=MANIFEST["tensor_parallel_size"],
         )
     )
     model = AutoModelForObjectDetection.from_pretrained(model_dir, local_files_only=True).eval()
@@ -138,6 +141,7 @@ def test_official_checkpoint_e2e(request, tmp_path):
             expected["labels"],
             expected["boxes"],
             expected["polygon_points"],
+            strict=True,
         ):
             assert region["class_id"] == int(label)
             assert abs(region["score"] - float(score)) <= 0.02

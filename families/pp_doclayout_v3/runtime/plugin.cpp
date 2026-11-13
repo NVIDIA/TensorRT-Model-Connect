@@ -15,9 +15,10 @@ namespace {
 class Pipeline final : public IDocumentLayout {
   public:
     explicit Pipeline(const FamilyContext& context) {
-        if (context.reader.info().task != kTask || context.kv_cache_size_bytes != 0)
-            throw std::invalid_argument(
-                "pp_doclayout_v3 requires document_layout without a KV cache");
+        if (context.kv_cache_size_bytes != 0)
+            throw std::invalid_argument("pp_doclayout_v3 does not support --kv-cache-size");
+        if (context.reader.info().task != kTask)
+            throw std::invalid_argument("pp_doclayout_v3 requires document_layout");
         const auto data = context.reader.read_section("runtime.json");
         const auto config = nlohmann::json::parse(data.begin(), data.end());
         if (config.at("input_size") != 800 || config.at("num_queries") != 300 ||

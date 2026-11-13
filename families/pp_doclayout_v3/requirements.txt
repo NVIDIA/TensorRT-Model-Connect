@@ -1,1 +1,0 @@
-# The builder uses the project's base numpy, safetensors and TensorRT packages.

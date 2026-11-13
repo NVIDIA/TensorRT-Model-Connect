@@ -51,6 +51,7 @@ def resolve(model_dir):
         "anchor_image_size": None,
         "eval_size": None,
         "use_timm_backbone": False,
+        "tie_word_embeddings": True,
     }
     for key, value in expected.items():
         if raw.get(key, value) != value:
@@ -85,6 +86,8 @@ def resolve(model_dir):
         or processor.get("image_std") != [1, 1, 1]
         or processor.get("rescale_factor") != 1 / 255
         or not all(processor.get(k) is True for k in ("do_resize", "do_rescale", "do_normalize"))
+        or processor.get("do_center_crop", False) not in (False, None)
+        or processor.get("do_pad", False) not in (False, None)
     ):
         raise NotImplementedError(
             "pp_doclayout_v3 requires the published 800px bicubic preprocessor"
@@ -115,6 +118,7 @@ def build_layout_engine(weights, cfg, *, verbose=False):
         tensor.name = name
         network.mark_output(tensor)
     config = builder.create_builder_config()
+    config.builder_optimization_level = 1
     config.clear_flag(trt.BuilderFlag.TF32)
     plan = builder.build_serialized_network(network, config)
     if plan is None:
@@ -127,11 +131,12 @@ def build(request, writer):
         raise ValueError("pp_doclayout_v3 supports document_layout on backend=trt")
     if request.precision != "fp32":
         raise ValueError("pp_doclayout_v3 supports precision=fp32")
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("pp_doclayout_v3 does not support dynamic_kv_cache")
     if (
         request.max_batch_size != 1
         or request.tensor_parallel_size != 1
         or request.context_parallel_size != 1
-        or request.dynamic_kv_cache
         or request.quantization not in (None, "none")
         or request.fp32_layers
         or request.max_sequence_length is not None

@@ -4,6 +4,7 @@
  */
 #include "families/pp_doclayout_v3/runtime/layout.h"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -65,6 +66,24 @@ int main() {
     result = decode(logits, boxes, order, masks.data(), 2, 2, 4, 16, 32, 32, 0.5F);
     check(result.regions[0].polygon[2][0] == 24 && result.regions[0].polygon[2][1] == 24,
           "empty mask must fall back to the detection rectangle");
+    // An L-shaped mask has five convex vertices after removing the concave turn.
+    // A rectangle fallback cannot satisfy these exact contour coordinates.
+    std::vector<float> nonrectangular(8 * 8, -10);
+    for (int row = 0; row < 8; ++row)
+        for (int column = 0; column < 8; ++column)
+            if (row < 4 || column < 4)
+                nonrectangular[row * 8 + column] = 10;
+    const float full_box[] = {0.5F, 0.5F, 1, 1};
+    auto contour =
+        decode(logits, full_box, order, nonrectangular.data(), 1, 1, 8, 32, 32, 32, 0.5F);
+    const std::vector<std::array<float, 2>> expected_polygon{
+        {0, 0}, {0, 31}, {15, 31}, {31, 15}, {31, 0}};
+    auto actual_polygon = contour.regions.at(0).polygon;
+    std::rotate(actual_polygon.begin(),
+                std::min_element(actual_polygon.begin(), actual_polygon.end()),
+                actual_polygon.end());
+    check(contour.regions.size() == 1 && actual_polygon == expected_polygon,
+          "nonrectangular masks must produce their contour instead of the detection rectangle");
     const float below[] = {-1, -1, -1, -1};
     check(decode(below, boxes, order, masks.data(), 2, 2, 4, 16, 32, 32, 0.5F).regions.empty(),
           "no detections is a valid layout result");
