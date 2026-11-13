@@ -1,0 +1,29 @@
+{
+  "name": "paddleocr-vl-1.6",
+  "hf_id": "PaddlePaddle/PaddleOCR-VL-1.6",
+  "hf_revision": "132c45f52c0a26ed5a6b2f6bd8e3985794cc27dd",
+  "bundle": "paddleocr-vl-1.6.bundle",
+  "family": "paddleocr_vl",
+  "task": "images_text_to_text",
+  "precision": "fp32",
+  "max_sequence_length": 512,
+  "image_height": 280,
+  "image_width": 560,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "paddleocr-vl-1.6",
+      "premerge": true,
+      "max_new_tokens": 64,
+      "pages": [
+        "MODEL CONNECT\nInvoice 2048\nTotal 125.00 USD",
+        "MODEL CONNECT\nInvoice 1234\nTotal 42.00 USD"
+      ],
+      "expected_values": [
+        "2048",
+        "1234"
+      ],
+      "question": "OCR:"
+    }
+  ]
+}
