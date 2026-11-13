@@ -230,6 +230,19 @@ struct ObjectDetectionResult {
     std::int32_t image_width{0};
 };
 
+struct DocumentRegion {
+    DetectionBox box;
+    // Contour vertices in original-image pixels.
+    std::vector<std::array<float, 2>> polygon;
+};
+
+struct DocumentLayoutResult {
+    // Logical reading order, starting with the first region.
+    std::vector<DocumentRegion> regions;
+    std::int32_t image_height{0};
+    std::int32_t image_width{0};
+};
+
 enum class PoseCropStage {
     kRefinement,
     kScoring,
@@ -778,6 +791,15 @@ class IObjectDetection : public virtual ITask {
     const char* task() const noexcept override { return kTask; }
     virtual ObjectDetectionResult detect(const float* pixels, std::int32_t height,
                                          std::int32_t width) = 0;
+};
+
+class IDocumentLayout : public virtual ITask {
+  public:
+    static constexpr const char* kTask = "document_layout";
+    const char* task() const noexcept override { return kTask; }
+    // Contiguous HWC RGB floats in [0, 1], at the original image size.
+    virtual DocumentLayoutResult analyze_layout(const float* pixels, std::int32_t height,
+                                                std::int32_t width) = 0;
 };
 
 class IPoseHypothesisRefinement : public virtual ITask {

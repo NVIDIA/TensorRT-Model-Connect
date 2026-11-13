@@ -1,0 +1,13 @@
+{
+  "name": "pp-doclayout-v3",
+  "family": "pp_doclayout_v3",
+  "hf_id": "PaddlePaddle/PP-DocLayoutV3_safetensors",
+  "hf_revision": "e4f489dc536556fc1be02b973ba06756e0d4a2ac",
+  "task": "document_layout",
+  "precision": "fp32",
+  "image_height": 800,
+  "image_width": 800,
+  "tensor_parallel_size": 1,
+  "bundle": "pp-doclayout-v3.bundle",
+  "testcases": [{"name": "pp-doclayout-v3", "premerge": true}]
+}
