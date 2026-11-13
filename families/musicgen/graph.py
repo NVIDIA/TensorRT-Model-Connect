@@ -114,7 +114,9 @@ class Graph:
     def lstm(self, x, w_ih, w_hh, b_ih, b_hh):
         _, length, hidden = x.shape
         loop = self.net.add_loop()
-        count = self.net.add_constant((), trt.Weights(np.array(length, np.int32))).get_output(0)
+        count_weight = np.array(length, np.int32)
+        self.weights.append(count_weight)
+        count = self.net.add_constant((), trt.Weights(count_weight)).get_output(0)
         loop.add_trip_limit(count, trt.TripLimit.COUNT)
         zero = self.const(np.zeros((1, hidden)))
         h, c = loop.add_recurrence(zero), loop.add_recurrence(zero)

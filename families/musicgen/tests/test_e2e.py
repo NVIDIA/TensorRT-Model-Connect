@@ -18,7 +18,7 @@ from tools.e2e_evidence import evidence_stage, record_evidence
 ROOT = Path(__file__).parent
 MANIFEST = json.loads((ROOT / "manifests/musicgen-medium-fp32.json").read_text())
 CASE = MANIFEST["testcases"][0]
-THRESHOLDS = json.loads((ROOT / "thresholds/musicgen-medium-fp32.json").read_text())
+THRESHOLDS = json.loads((ROOT / "thresholds/musicgen-medium-fp32.json").read_text())["threshold_overrides"]
 
 
 def pytest_generate_tests(metafunc):
@@ -101,9 +101,10 @@ def test_musicgen_e2e(case_name, tmp_path):
                     model_dir=model_dir,
                     output_path=bundle,
                     family="musicgen",
-                    task="text_to_audio",
-                    precision="fp32",
-                    max_sequence_length=54,
+                    task=MANIFEST["task"],
+                    precision=MANIFEST["precision"],
+                    tensor_parallel_size=MANIFEST["tensor_parallel_size"],
+                    max_sequence_length=MANIFEST["max_sequence_length"],
                 )
             )
         assert bundle.is_file()
@@ -126,8 +127,8 @@ def test_musicgen_e2e(case_name, tmp_path):
             with torch.inference_mode():
                 audio = reference.generate(
                     **inputs,
-                    do_sample=False,
-                    guidance_scale=3.0,
+                    do_sample=CASE["do_sample"],
+                    guidance_scale=CASE["guidance_scale"],
                     max_new_tokens=MANIFEST["max_sequence_length"] - 1,
                 )
             expected.append(audio[0, 0].float().cpu().numpy())
@@ -146,9 +147,9 @@ def test_musicgen_e2e(case_name, tmp_path):
                 "--prompt",
                 prompt,
                 "--set",
-                "do_sample=false",
+                f"do_sample={str(CASE['do_sample']).lower()}",
                 "--set",
-                "guidance_scale=3.0",
+                f"guidance_scale={CASE['guidance_scale']}",
                 "--output",
                 str(output),
             ]

@@ -199,27 +199,38 @@ def build_codec(state, config, frames, verbose):
     return g.finish(x, "waveform")
 
 
-def validate_request(request):
-    if request.task != "text_to_audio" or request.backend != "trt":
+def validate_request(
+    *,
+    backend,
+    context_parallel_size,
+    dynamic_kv_cache,
+    fp32_layers,
+    image_height,
+    image_width,
+    max_batch_size,
+    max_sequence_length,
+    mtp_seq_len,
+    precision,
+    quantization,
+    task,
+    tensor_parallel_size,
+    video_num_frames,
+):
+    if task != "text_to_audio" or backend != "trt":
         raise ValueError("MusicGen requires task=text_to_audio and backend=trt")
-    if request.precision != "fp32":
+    if precision != "fp32":
         raise ValueError("MusicGen currently supports fp32 only")
-    if request.tensor_parallel_size != 1 or request.context_parallel_size != 1:
+    if tensor_parallel_size != 1 or context_parallel_size != 1:
         raise ValueError("MusicGen currently supports one GPU only")
-    if request.max_batch_size != 1 or request.dynamic_kv_cache:
+    if dynamic_kv_cache:
+        raise NotImplementedError("musicgen does not support dynamic_kv_cache")
+    if max_batch_size != 1:
         raise ValueError("MusicGen supports batch size one with a bounded causal sequence")
-    if (
-        request.quantization not in (None, "none")
-        or request.fp32_layers
-        or request.mtp_seq_len is not None
-    ):
+    if quantization not in (None, "none") or fp32_layers or mtp_seq_len is not None:
         raise ValueError("MusicGen does not support quantization, mixed precision, or MTP")
-    if any(
-        value is not None
-        for value in (request.image_height, request.image_width, request.video_num_frames)
-    ):
+    if any(value is not None for value in (image_height, image_width, video_num_frames)):
         raise ValueError("MusicGen does not accept image or video build options")
-    length = request.max_sequence_length or 256
+    length = max_sequence_length or 256
     if not 11 <= length <= 1504:
         raise ValueError("MusicGen max_sequence_length must be in [11, 1504]")
     return length
@@ -230,7 +241,22 @@ def build(request, writer):
     import torch
     from transformers import AutoTokenizer
 
-    length = validate_request(request)
+    length = validate_request(
+        backend=request.backend,
+        context_parallel_size=request.context_parallel_size,
+        dynamic_kv_cache=request.dynamic_kv_cache,
+        fp32_layers=request.fp32_layers,
+        image_height=request.image_height,
+        image_width=request.image_width,
+        max_batch_size=request.max_batch_size,
+        max_sequence_length=request.max_sequence_length,
+        mtp_seq_len=request.mtp_seq_len,
+        precision=request.precision,
+        quantization=request.quantization,
+        task=request.task,
+        tensor_parallel_size=request.tensor_parallel_size,
+        video_num_frames=request.video_num_frames,
+    )
     root = Path(request.model_dir)
     config = json.loads((root / "config.json").read_text())
     if describe(ModelMetadata(config, {})) is None:
