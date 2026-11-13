@@ -24,7 +24,7 @@ def _conv(g, hidden, name, *, stride=1, dilation=1, transpose=False, padding=Non
     bias = (
         g.weights.read(name + ".bias")
         if name + ".bias" in g.weights.index
-        else np.empty(0, np.float32)
+        else trt.Weights(trt.float32)
     )
     operation = g.net.add_deconvolution_nd if transpose else g.net.add_convolution_nd
     layer = operation(
@@ -60,7 +60,7 @@ def _filter(g, hidden, name, *, transpose=False):
         channels,
         (1, weights.shape[-1]),
         np.ascontiguousarray(weights),
-        np.empty(0, np.float32),
+        trt.Weights(trt.float32),
     )
     layer.num_groups = channels
     layer.stride_nd = (1, 2)
