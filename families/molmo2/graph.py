@@ -154,8 +154,8 @@ class Graph:
 
     def finish(self):
         config = self.builder.create_builder_config()
-        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
         config.builder_optimization_level = 3
+        config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
         config.clear_flag(trt.BuilderFlag.TF32)
         config.add_optimization_profile(self.profile)
         plan = self.builder.build_serialized_network(self.net, config)

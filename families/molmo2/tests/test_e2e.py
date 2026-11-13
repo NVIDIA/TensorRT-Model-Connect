@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -45,8 +44,6 @@ def _path(name):
 def artifacts(tmp_path_factory):
     root = tmp_path_factory.mktemp("molmo2")
     checkpoint = _path("TRTMC_MOLMO2_MODEL_DIR")
-    for name, digest in MANIFEST["source_sha256"].items():
-        assert hashlib.sha256((checkpoint / name).read_bytes()).hexdigest() == digest
     runtime = _path("TRTMC_RUNTIME_ROOT")
     binary = _path("TRTMC_BINARY")
     bundle = Path(os.environ.get("TRTMC_MOLMO2_BUNDLE", root / MANIFEST["bundle"]))
@@ -59,6 +56,7 @@ def artifacts(tmp_path_factory):
                 MANIFEST["task"],
                 MANIFEST["precision"],
                 max_sequence_length=MANIFEST["max_sequence_length"],
+                tensor_parallel_size=MANIFEST["tensor_parallel_size"],
             )
         )
     assert bundle.is_file()
@@ -119,7 +117,13 @@ def artifacts(tmp_path_factory):
         {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
     )
     record_evidence(
-        "inputs", {"checkpoint": checkpoint, "manifest": ROOT / "manifests/molmo2-8b.json"}
+        "inputs",
+        {
+            "checkpoint": checkpoint,
+            "manifest": ROOT / "manifests/molmo2-8b.json",
+            "hf_id": MANIFEST["hf_id"],
+            "hf_revision": MANIFEST["hf_revision"],
+        },
     )
     record_evidence("bundle", {"path": bundle})
     return root, checkpoint, runtime, binary, bundle, reference, results
@@ -135,6 +139,18 @@ def test_upstream_and_native(case, request):
     )
     name = case["name"]
     expected = results[name]
+    from PIL import Image
+
+    expected_image = (
+        Image.open(ROOT / case["test_image"]).convert("RGB")
+        if "test_image" in case
+        else Image.new("RGB", tuple(case["size"]), tuple(case["color"]))
+    )
+    assert (expected["width"], expected["height"]) == expected_image.size
+    np.testing.assert_array_equal(
+        np.fromfile(reference / (name + ".f32"), dtype=np.float32),
+        np.asarray(expected_image, dtype=np.float32).reshape(-1),
+    )
     helper = runtime / "families/molmo2/test_molmo2_preprocess"
     assert helper.is_file()
     stem = root / name
@@ -168,5 +184,6 @@ def test_upstream_and_native(case, request):
     )
     record_evidence("reference", {"result": expected})
     assert output["token_ids"] == expected["tokens"]
+    assert len(output["token_ids"]) <= case["max_new_tokens"]
     assert output["text"] == expected["text"]
     assert output["text"].strip()

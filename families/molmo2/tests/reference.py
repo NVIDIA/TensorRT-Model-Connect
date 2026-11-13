@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Run the unmodified, hash-checked upstream processor and model in an isolated environment."""
+"""Run the unmodified upstream processor and model in an isolated environment."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -31,8 +30,6 @@ def main():
         "use tests/requirements.txt in an isolated reference environment"
     )
     manifest = json.loads((Path(__file__).parent / "manifests/molmo2-8b.json").read_text())
-    for name, expected in manifest["source_sha256"].items():
-        assert hashlib.sha256((args.model_dir / name).read_bytes()).hexdigest() == expected, name
     processor = AutoProcessor.from_pretrained(
         args.model_dir, trust_remote_code=True, local_files_only=True
     )

@@ -29,7 +29,23 @@ class Weights:
             return value
 
 
-def validate_request(request, config):
+def validate_request(
+    config,
+    *,
+    backend,
+    context_parallel_size,
+    dynamic_kv_cache,
+    fp32_layers,
+    image_height,
+    image_width,
+    max_batch_size,
+    mtp_seq_len,
+    precision,
+    quantization,
+    task,
+    tensor_parallel_size,
+    video_num_frames,
+):
     if config.get("model_type") != "molmo2" or config.get("architectures") != [
         "Molmo2ForConditionalGeneration"
     ]:
@@ -42,23 +58,25 @@ def validate_request(request, config):
         or text.get("qkv_bias")
         or text.get("rope_scaling")
         or text.get("rope_scaling_layers")
+        or text.get("hidden_act", "silu") != "silu"
     ):
         raise ValueError("unsupported Molmo2 decoder topology")
-    if request.task != "vision_language_generation" or request.backend != "trt":
+    if task != "vision_language_generation" or backend != "trt":
         raise ValueError("molmo2 requires task=vision_language_generation and backend=trt")
-    if request.precision not in {"fp32", "bf16"}:
+    if precision not in {"fp32", "bf16"}:
         raise ValueError("molmo2 supports fp32 or bf16 compute")
+    if dynamic_kv_cache:
+        raise NotImplementedError("molmo2 does not support dynamic_kv_cache")
     if (
-        request.max_batch_size != 1
-        or request.tensor_parallel_size != 1
-        or request.context_parallel_size != 1
-        or request.dynamic_kv_cache
-        or request.fp32_layers
-        or request.mtp_seq_len is not None
-        or request.quantization not in {None, "none"}
-        or request.image_height is not None
-        or request.image_width is not None
-        or request.video_num_frames is not None
+        max_batch_size != 1
+        or tensor_parallel_size != 1
+        or context_parallel_size != 1
+        or fp32_layers
+        or mtp_seq_len is not None
+        or quantization not in {None, "none"}
+        or image_height is not None
+        or image_width is not None
+        or video_num_frames is not None
     ):
         raise ValueError("molmo2 supports unquantized single-device, single-image requests")
     if config["vit_config"]["image_default_input_size"] != [378, 378]:
@@ -291,7 +309,22 @@ def build_vision(config, weights, precision, verbose=False):
 def build(request, writer):
     root = Path(request.model_dir)
     config = json.loads((root / "config.json").read_text())
-    validate_request(request, config)
+    validate_request(
+        config,
+        backend=request.backend,
+        context_parallel_size=request.context_parallel_size,
+        dynamic_kv_cache=request.dynamic_kv_cache,
+        fp32_layers=request.fp32_layers,
+        image_height=request.image_height,
+        image_width=request.image_width,
+        max_batch_size=request.max_batch_size,
+        mtp_seq_len=request.mtp_seq_len,
+        precision=request.precision,
+        quantization=request.quantization,
+        task=request.task,
+        tensor_parallel_size=request.tensor_parallel_size,
+        video_num_frames=request.video_num_frames,
+    )
     validate_image_contract(root, config)
     maximum = request.max_sequence_length or 2048
     if not 512 <= maximum <= config["text_config"]["max_position_embeddings"]:

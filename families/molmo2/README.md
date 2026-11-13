@@ -41,7 +41,17 @@ checkpoint's uint8 resize/normalization semantics.
 The unmodified upstream reference needs a separate environment using
 [tests/requirements.txt](tests/requirements.txt), because its Transformers
 4.57.1 API differs from the builder's 5.2.0 pin. The test manifest pins both
-the checkpoint revision and upstream implementation hashes. For direct E2E:
+the selected checkpoint revision as metadata; it does not authenticate supplied
+local files. Native Unicode tokenization requires ICU's development package.
+The native tokenizer applies the checkpoint's NFC normalizer and uses ICU's
+Unicode letter, number, and whitespace properties for Qwen3 pre-tokenization.
+
+To compare token IDs without downloading the model weights, build
+`test_molmo2_tokenizer`, set `TRTMC_MOLMO2_TOKENIZER_DIR` to the selected
+tokenizer snapshot and `TRTMC_RUNTIME_ROOT` to the native build directory, and run
+`python -m pytest families/molmo2/tests/test_tokenizer.py -q`.
+
+For direct E2E:
 
 ```bash
 export TRTMC_MOLMO2_MODEL_DIR=/path/to/pinned/checkpoint

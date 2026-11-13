@@ -264,6 +264,6 @@ ITask* create(const FamilyContext& context) {
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
-        throw std::invalid_argument("Molmo2 does not support --kv-cache-size");
+        throw std::invalid_argument("molmo2 does not support --kv-cache-size");
     return trtmc::molmo2::create(context);
 }

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Reject nearby model identities and unsupported topology before touching a GPU."""
 
+import json
 from dataclasses import replace
 from pathlib import Path
 import subprocess
@@ -9,11 +10,10 @@ import venv
 
 import pytest
 
-from families.molmo2.model import validate_request
-from families.molmo2.support import describe
+from families.molmo2.model import build
+from families.molmo2.tests.test_support import metadata
 from families.molmo2.tests.test_e2e import _path
 from tensorrt_model_connect.build import BuildRequest
-from tensorrt_model_connect.model_support import ModelMetadata, resolve_family
 
 
 def test_reference_python_preserves_virtual_environment(tmp_path, monkeypatch):
@@ -25,30 +25,6 @@ def test_reference_python_preserves_virtual_environment(tmp_path, monkeypatch):
         text=True,
     ).strip()
     assert Path(prefix) == environment
-
-
-def metadata():
-    return {
-        "model_type": "molmo2",
-        "architectures": ["Molmo2ForConditionalGeneration"],
-        "text_config": {"qk_norm_type": "qwen3", "use_qk_norm": True},
-        "vit_config": {"image_default_input_size": [378, 378]},
-    }
-
-
-def test_exact_ownership():
-    config = metadata()
-    family, support = resolve_family(ModelMetadata(config, {}))
-    assert family == "molmo2" and support.default_task == "vision_language_generation"
-    for kind, architecture in [
-        ("molmo", "MolmoForCausalLM"),
-        ("qwen3", "Qwen3ForCausalLM"),
-        ("molmo2", "OtherModel"),
-    ]:
-        assert (
-            describe(ModelMetadata({"model_type": kind, "architectures": [architecture]}, {}))
-            is None
-        )
 
 
 @pytest.mark.parametrize(
@@ -65,12 +41,14 @@ def test_exact_ownership():
         {"max_batch_size": 2},
     ],
 )
-def test_unsupported_requests_fail_before_build(override):
+def test_unsupported_requests_fail_before_build(override, tmp_path):
+    (tmp_path / "config.json").write_text(json.dumps(metadata()))
     request = BuildRequest(
-        Path("checkpoint"), Path("output.bundle"), "molmo2", "vision_language_generation", "bf16"
+        tmp_path, Path("output.bundle"), "molmo2", "vision_language_generation", "bf16"
     )
-    with pytest.raises(ValueError):
-        validate_request(replace(request, **override), metadata())
+    error = NotImplementedError if override.get("dynamic_kv_cache") else ValueError
+    with pytest.raises(error):
+        build(replace(request, **override), None)
 
 
 @pytest.mark.parametrize(
@@ -81,13 +59,15 @@ def test_unsupported_requests_fail_before_build(override):
         {"use_qk_norm": False},
         {"qkv_bias": True},
         {"rope_scaling": {"rope_type": "linear"}},
+        {"hidden_act": "gelu"},
     ],
 )
-def test_topology_changes_are_rejected(change):
+def test_topology_changes_are_rejected(change, tmp_path):
     config = metadata()
     config["text_config"].update(change)
+    (tmp_path / "config.json").write_text(json.dumps(config))
     request = BuildRequest(
-        Path("checkpoint"), Path("output.bundle"), "molmo2", "vision_language_generation", "bf16"
+        tmp_path, Path("output.bundle"), "molmo2", "vision_language_generation", "bf16"
     )
     with pytest.raises(ValueError, match="topology"):
-        validate_request(request, config)
+        build(request, None)
