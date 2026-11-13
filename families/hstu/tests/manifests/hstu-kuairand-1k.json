@@ -1,0 +1,17 @@
+{
+  "name": "hstu-kuairand-1k",
+  "bundle": "hstu-kuairand-1k.bundle",
+  "family": "hstu",
+  "task": "structured_decision",
+  "precision": "bf16",
+  "tensor_parallel_size": 1,
+  "small": false,
+  "testcases": [
+    {
+      "name": "hstu-kuairand-1k-rank",
+      "premerge": true,
+      "record": "fixtures/request.json",
+      "golden": "data/golden.json"
+    }
+  ]
+}
