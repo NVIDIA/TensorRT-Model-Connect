@@ -362,6 +362,15 @@ convert(const trtmc_image_text_to_embedding_request_v1& input) {
     return {image_input(input.image), string_view(input.text)};
 }
 
+internal::PointsToEmbeddingRequest convert(const trtmc_points_to_embedding_request_v1& input) {
+    require(input.input_dim > 0, "point-cloud input_dim must be positive");
+    require(input.num_points <= std::numeric_limits<uint32_t>::max(),
+            "point-cloud num_points exceeds the uint32 range");
+    // Both factors fit in 32 bits, so the float count cannot overflow uint64.
+    return {checked_span(input.points, input.num_points * input.input_dim),
+            static_cast<uint32_t>(input.num_points), input.input_dim};
+}
+
 internal::TextPairToRelevanceRequest convert(const trtmc_text_pair_to_relevance_request_v1& input) {
     return {string_view(input.query), string_view(input.document)};
 }
@@ -511,6 +520,13 @@ const trtmc_image_text_to_embedding_api_v1 image_text_to_embedding_api = {
         SemanticEmbeddingStorage>,
     result_view<SemanticEmbeddingStorage, trtmc_semantic_embedding_view_v1>};
 static_assert(offsetof(trtmc_image_text_to_embedding_api_v1, header) == 0);
+
+const trtmc_points_to_embedding_api_v1 points_to_embedding_api = {
+    {1, 0, sizeof(trtmc_points_to_embedding_api_v1)},
+    run<internal::IPointsToEmbedding, trtmc_points_to_embedding_request_v1,
+        SemanticEmbeddingStorage>,
+    result_view<SemanticEmbeddingStorage, trtmc_semantic_embedding_view_v1>};
+static_assert(offsetof(trtmc_points_to_embedding_api_v1, header) == 0);
 
 const trtmc_text_pair_to_relevance_api_v1 text_pair_to_relevance_api = {
     {1, 0, sizeof(trtmc_text_pair_to_relevance_api_v1)},
@@ -755,6 +771,7 @@ const TaskBinding bindings[] = {
     {internal::IImageToPooledFeatures::kTask, 1, 0, &image_to_pooled_features_api.header},
     {internal::IImageToEmbedding::kTask, 1, 0, &image_to_embedding_api.header},
     {internal::IImageTextToEmbedding::kTask, 1, 0, &image_text_to_embedding_api.header},
+    {internal::IPointsToEmbedding::kTask, 1, 0, &points_to_embedding_api.header},
     {internal::ITextPairToRelevance::kTask, 1, 0, &text_pair_to_relevance_api.header},
     {internal::ITextImageToRelevance::kTask, 1, 0, &text_image_to_relevance_api.header},
     {internal::ITextImageTextToRelevance::kTask, 1, 0, &text_image_text_to_relevance_api.header},

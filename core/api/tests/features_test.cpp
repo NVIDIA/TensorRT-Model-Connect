@@ -185,7 +185,7 @@ void global_pooled_contracts(const std::filesystem::path& root, const trtmc::Loa
 void exercise(const trtmc::Model& model) {
     const float pixels[] = {0.5F, 0.25F, 0.125F};
     const trtmc::ImageInput image({pixels, 3}, 1, 1);
-    check(model.tasks().size() == 28, "all 28 distinct typed feature contracts are discoverable");
+    check(model.tasks().size() == 29, "all 29 distinct typed feature contracts are discoverable");
     const trtmc::BatchImageToClassScoresRequest batch_input{
         {{{image}, {}}, {{image}, {{"scale", 2.0}}}}};
     auto batch_classes = model.task<trtmc::BatchImageToClassScores>().run(batch_input);
@@ -398,6 +398,21 @@ void exercise(const trtmc::Model& model) {
     auto joint = model.task<trtmc::ImageTextToEmbedding>().run({image, "doc"});
     check(joint.values().size() == 3 && joint.values()[0] == 14 && joint.values()[2] == 3,
           "joint image/text embedding is one complete input");
+    // Two points of three floats: six floats, so the float count differs from num_points.
+    const float cloud[6]{1, 2, 3, 4, 5, 6};
+    const auto cloud_task = model.task<trtmc::PointsToEmbedding>();
+    auto cloud_embedded = cloud_task.run({{cloud}, 2, 3});
+    check(cloud_embedded.values().size() == 4 && cloud_embedded.values()[0] == 19 &&
+              cloud_embedded.values()[1] == 4 && cloud_embedded.values()[2] == 2 &&
+              cloud_embedded.values()[3] == 3 &&
+              cloud_embedded.embedding_space() == "fixture.embedding" &&
+              cloud_embedded.pooling() == "mean" && cloud_embedded.normalization() == "none",
+          "point-cloud embedding sends num_points, not the float count, across the C ABI");
+    auto cloud_pairs = cloud_task.run({{cloud}, 3, 2}, {{"scale", 2.0}});
+    check(cloud_pairs.values().size() == 4 && cloud_pairs.values()[0] == 38 &&
+              cloud_pairs.values()[1] == 5 && cloud_pairs.values()[2] == 3 &&
+              cloud_pairs.values()[3] == 2,
+          "the same floats split by input_dim into a different point count");
     auto text_score = model.task<trtmc::TextPairToRelevance>().run({"q", "doc"});
     check(text_score.score() == 46 && text_score.kind() == TRTMC_SCORE_UNBOUNDED,
           "text query/document roles survive");
@@ -435,6 +450,14 @@ void exercise(const trtmc::Model& model) {
     wrong_image.wire.byte_size = 1;
     rejects([&] { model.task<trtmc::ImageToEmbedding>().run({wrong_image}); },
             TRTMC_INVALID_ARGUMENT, "malformed image uses the existing checked HWC converter");
+    rejects([&] { cloud_task.run({{cloud}, 3, 3}); }, TRTMC_INVALID_ARGUMENT,
+            "num_points * input_dim beyond the caller span is rejected before the call");
+    rejects([&] { cloud_task.run({{cloud}, 1, 3}); }, TRTMC_INVALID_ARGUMENT,
+            "a span longer than num_points * input_dim is rejected");
+    rejects([&] { cloud_task.run({{cloud}, 2, 0}); }, TRTMC_INVALID_ARGUMENT,
+            "a zero input_dim never matches a nonempty point span");
+    rejects([&] { cloud_task.run({{cloud}, 2, 3}, {{"scale", "bad"}}); }, TRTMC_INVALID_CONFIG,
+            "point-cloud embedding config types use the family field table");
 }
 } // namespace
 

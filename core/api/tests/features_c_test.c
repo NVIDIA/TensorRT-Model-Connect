@@ -390,6 +390,71 @@ static void unknown_embedding_space_contract(const trtmc_core_api_v1* core, cons
     consume_error(core, &error);
 }
 
+static void points_to_embedding_contract(const trtmc_core_api_v1* core, const char* root,
+                                         const trtmc_load_options_v1* options) {
+    char path[4096];
+    trtmc_model* model = NULL;
+    trtmc_result *result = NULL, *rejected = NULL;
+    trtmc_error* error = NULL;
+    const trtmc_api_header* header = NULL;
+    if (snprintf(path, sizeof(path), "%s/features_c_points.bundle", root) >= (int)sizeof(path) ||
+        !write_bundle(path, "all") ||
+        core->model_load(str(path), options, &model, &error) != TRTMC_OK ||
+        core->model_get_task_api(model, str(TRTMC_TASK_POINTS_TO_EMBEDDING), 1, 0, &header,
+                                 &error) != TRTMC_OK) {
+        check(0, "load C point-cloud embedding table");
+        consume_error(core, &error);
+        core->model_release(model);
+        return;
+    }
+    const trtmc_points_to_embedding_api_v1* task = (const trtmc_points_to_embedding_api_v1*)header;
+    check(header->major == 1 && header->minor == 0 && header->byte_size == sizeof(*task),
+          "C complete versioned point-cloud embedding table");
+    /* Two points of three floats: six floats, so the float count differs from num_points. */
+    const float points[6] = {1, 2, 3, 4, 5, 6};
+    const trtmc_points_to_embedding_request_v1 request = {points, 2, 3};
+    check(task->run(model, &request, NULL, &result, &error) == TRTMC_OK && result,
+          "C point-cloud embedding request");
+    trtmc_points_to_embedding_request_v1 invalid = request;
+    invalid.points = NULL;
+    check(task->run(model, &invalid, NULL, &rejected, &error) == TRTMC_INVALID_ARGUMENT &&
+              rejected == NULL,
+          "C nonempty NULL points rejects before dereference");
+    consume_error(core, &error);
+    invalid = request;
+    invalid.input_dim = 0;
+    check(task->run(model, &invalid, NULL, &rejected, &error) == TRTMC_INVALID_ARGUMENT &&
+              rejected == NULL,
+          "C zero input_dim rejects");
+    consume_error(core, &error);
+    invalid = request;
+    invalid.num_points = (uint64_t)UINT32_MAX + 3;
+    check(task->run(model, &invalid, NULL, &rejected, &error) == TRTMC_INVALID_ARGUMENT &&
+              rejected == NULL,
+          "C num_points beyond uint32 rejects instead of truncating");
+    consume_error(core, &error);
+    invalid = request;
+    invalid.num_points = 0;
+    check(task->run(model, &invalid, NULL, &rejected, &error) == TRTMC_INVALID_ARGUMENT &&
+              rejected == NULL && error &&
+              has_prefix(core->error_message(error), "fixture requires"),
+          "C empty cloud passes Core transport and is rejected by the family");
+    consume_error(core, &error);
+    check(task->run(model, NULL, NULL, &rejected, &error) == TRTMC_INVALID_ARGUMENT &&
+              rejected == NULL,
+          "C NULL point-cloud embedding request rejects");
+    consume_error(core, &error);
+    core->model_release(model);
+    trtmc_semantic_embedding_view_v1 view = {0};
+    check(task->result_view(result, &view, &error) == TRTMC_OK && view.count == 4 &&
+              view.values[0] == 19 && view.values[1] == 4 && view.values[2] == 2 &&
+              view.values[3] == 3 && view.embedding_space.size != 0 && view.pooling.size == 4 &&
+              view.normalization.size == 4,
+          "C point-cloud embedding follows num_points x input_dim rows after model release");
+    core->result_release(result);
+    consume_error(core, &error);
+}
+
 static void head_score_contracts(const trtmc_core_api_v1* core, const char* root,
                                  const trtmc_load_options_v1* options) {
     char path[4096];
@@ -471,6 +536,7 @@ int main(int argc, char** argv) {
     class_identity_contracts(core, argv[1], &options);
     anonymous_class_ownership(core, argv[1], &options);
     unknown_embedding_space_contract(core, argv[1], &options);
+    points_to_embedding_contract(core, argv[1], &options);
     head_score_contracts(core, argv[1], &options);
     trtmc_model *model = NULL, *disabled = NULL;
     if (core->model_load(str(path), &options, &model, &error) != TRTMC_OK)
