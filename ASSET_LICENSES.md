@@ -270,4 +270,16 @@ distributed under the
 [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license)
 of the source checkpoint.
 
+## Short-drama sample story
+
+`apps/short_drama/samples/tuantuan_star_tree.txt`, *Tuantuan's Star Tree*, is an
+original one-chapter children's story written for this app. A language model
+drafted it, through the app's own story-from-an-idea step, from an idea by a
+project contributor: a warm 3D cartoon for children aged 3 to 5, in which a
+panda cub, Tuantuan, finds a glowing seed in a bamboo forest, plants it with
+his friend Duoduo, a little rabbit, and watches over it through the night;
+the next morning it has grown into a small tree hung with star lamps that
+light up the forest. A language model then translated the story into English.
+It is distributed under the Apache License 2.0 with the rest of the project.
+
 <!-- Collaborative review anchor: batch 2. -->

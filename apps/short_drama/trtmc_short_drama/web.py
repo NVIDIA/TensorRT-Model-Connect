@@ -1,0 +1,504 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""The web app: projects, steps, flow versions and settings over a small JSON API."""
+
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+import hmac
+import logging
+from pathlib import Path
+import re
+import time
+from typing import Any
+
+from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+from . import analysis, assist, catalog, editing, media, planning, prompts, review
+from .engine import Engine, Served
+from .flow import Context, Flows, Steps
+from .jobs import Job, Jobs
+from .llm import FREE_APIS, ChatClient
+from .store import Project, Store, read_json, write_json, write_secret
+
+log = logging.getLogger(__name__)
+
+STATIC = Path(__file__).with_name("static")
+SAMPLE = Path(__file__).resolve().parents[1] / "samples" / "tuantuan_star_tree.txt"
+CORE_STEPS = [planning.STEP, media.STILLS, media.SHOTS, editing.SUBTITLES, editing.ASSEMBLE,
+              assist.STORY, assist.REVISE, assist.REVIEW, analysis.ANALYZE]
+WRITE_HEADER = "x-short-drama"
+TOKEN_COOKIE, TOKEN_HEADER = "short_drama_token", "x-short-drama-token"
+PLAN_ID = re.compile(r"[a-z0-9_]{1,40}")
+MAX_NOVEL = 400_000
+MAX_IDEA = 1000
+MAX_STYLE = 300
+# Job parameters a request may set; anything else comes from the flow.
+REQUEST_PARAMS = {"revise": {"target", "instruction"}}
+NO_CHAT = ("no language model yet: choose a chat API in Settings (NVIDIA and OpenRouter have free tiers), "
+           "or start the app with --llm local to plan on this GPU")
+
+
+@dataclass
+class Services:
+    """What steps use: the engine, the served models and the chat API from Settings."""
+
+    engine: Engine
+    models: dict[str, tuple[str, Served]]  # name -> (role, served bundle)
+    data: Path
+    languages: dict[str, str] = field(default_factory=dict)  # name -> the language a speech model hears
+    first_frames: frozenset[str] = frozenset()  # video models that animate one first frame, without sound
+    still_sizes: dict[str, str] = field(default_factory=dict)  # image model -> WIDTHxHEIGHT its bundle renders
+
+    def load(self, name: str | None) -> None:
+        if name is None or name not in self.models:
+            raise ValueError(f"model {name!r} is not served; see the Models list in Settings")
+        role, served = self.models[name]
+        wanted = [served]
+        # Speech recognition is small; keep it with a video model that speaks. A silent one leaves
+        # nothing to hear, and on a 24 GB card the two would not fit together.
+        if role == "video" and name not in self.first_frames:
+            wanted += [s for r, s in self.models.values() if r == "asr"]
+        self.engine.ensure(wanted)
+
+    def first_frame(self, name: str | None) -> bool:
+        return name in self.first_frames
+
+    def still_size(self, name: str | None) -> str | None:
+        return self.still_sizes.get(name)
+
+    def serving(self, role: str) -> str | None:
+        """The name of the served model with this role, if there is one."""
+
+        return next((name for name, (served, _) in self.models.items() if served == role), None)
+
+    def external(self) -> dict[str, str]:
+        return read_json(self.data / "settings.json", {}).get("external_chat", {})
+
+    def api_key(self) -> str:
+        """The saved key, only for the endpoint it was entered with."""
+
+        secrets = read_json(self.data / "secrets.json", {})
+        same = secrets.get("external_chat_base_url") == self.external().get("base_url")
+        return secrets.get("external_chat_api_key", "") if same else ""
+
+    def chat_ready(self) -> bool:
+        external = self.external()
+        return bool(external.get("base_url") and external.get("model")) or \
+            any(role == "llm" for role, _ in self.models.values())
+
+    def chat(self, name: str | None) -> ChatClient:
+        """The chat API from Settings when one is set, else the local language model."""
+
+        external = self.external()
+        if external.get("base_url") and external.get("model"):
+            return ChatClient(external["base_url"], external["model"], self.api_key(), local=False)
+        if not self.chat_ready():
+            raise ValueError(NO_CHAT)
+        # A flow saved while the app planned through an API names no model; use the one served here.
+        name = name if name in self.models else next(n for n, (role, _) in self.models.items() if role == "llm")
+        self.load(name)
+        return ChatClient(self.engine.url, name)
+
+    def vision_name(self) -> str | None:
+        """The model that looks at the shots: the one Settings name, else the one served here (--vision local)."""
+
+        external = self.external()
+        if external.get("base_url") and external.get("vision_model"):
+            return external["vision_model"]
+        return next((name for name, (role, _) in self.models.items() if role == "vision"), None)
+
+    def vision(self) -> ChatClient | None:
+        """A client for the model that looks at the shots, if there is one. A local one is loaded with
+        speech recognition, which the analysis uses too, so the server is not restarted shot by shot."""
+
+        external = self.external()
+        if external.get("base_url") and external.get("vision_model"):
+            return ChatClient(external["base_url"], external["vision_model"], self.api_key(), local=False)
+        name = self.vision_name()
+        if name is None:
+            return None
+        self.engine.ensure([served for role, served in self.models.values() if role in ("vision", "asr")])
+        return ChatClient(self.engine.url, name)
+
+
+def check_plan(plan: dict[str, Any]) -> None:
+    """Ids become file names, so an edited plan may only use short lowercase ids."""
+
+    if not isinstance(plan.get("episodes"), list) or not isinstance(plan.get("characters"), list):
+        raise HTTPException(400, "a plan has characters and episodes")
+    for group in ("characters", "locations", "props"):
+        for item in plan.get(group) or []:
+            if not isinstance(item, dict) or not PLAN_ID.fullmatch(str(item.get("id", ""))):
+                raise HTTPException(400, f"{group} ids use a-z, 0-9 and _ (at most 40)")
+    for episode in plan["episodes"]:
+        if not isinstance(episode, dict) or type(episode.get("number")) is not int:
+            raise HTTPException(400, "each episode needs an integer number")
+        for shot in episode.get("shots") or []:
+            if not isinstance(shot, dict) or not PLAN_ID.fullmatch(str(shot.get("id", ""))):
+                raise HTTPException(400, "shot ids use a-z, 0-9 and _ (at most 40)")
+
+
+def summary(project: Project) -> dict[str, Any]:
+    """How far a project is, for its card: what each stage has, and a picture of the cast."""
+
+    plan, stills = project.plan, project.stills
+    needed = sorted(media.usage(plan))
+    drawn = [key for key in needed if stills.get(key, {}).get("file")]
+    numbers = [episode["number"] for episode in plan.get("episodes", [])]
+    states = {number: project.shot_state(number) for number in numbers}
+    shots = [(episode["number"], shot["id"]) for episode in plan.get("episodes", [])
+             for shot in episode.get("shots", [])]
+    pictures = [key for key in drawn if key.startswith("character:")] + drawn
+    return {"story": bool(project.novel.strip()), "planned": bool(numbers),
+            "stills": {"needed": len(needed), "drawn": len(drawn),
+                       "approved": sum(stills[key].get("status") == "approved" for key in drawn)},
+            "shots": {"total": len(shots),
+                      "rendered": sum(bool(states[number].get(shot, {}).get("file")) for number, shot in shots)},
+            "episodes": {"total": len(numbers),
+                         "assembled": sum(bool(states[number].get("assembled")) for number in numbers)},
+            "picture": stills[pictures[0]]["file"] if pictures else None}
+
+
+def create_app(services: Services, *, plugins: Path | None, info: dict[str, Any],
+               allowed_hosts: list[str] | None = None, token: str | None = None) -> FastAPI:
+    data = services.data
+    store = Store(data)
+    roles = {}
+    for name, (role, _) in services.models.items():
+        roles.setdefault(role, name)
+    flows = Flows(data / "flows", roles)
+    steps = Steps(CORE_STEPS, plugins)
+
+    def execute(job: Job) -> None:
+        project = store.get(job.project)
+        _, flow = flows.load(project.meta.get("flow", "default"))
+        step = steps.get(job.step)
+        if step is None:
+            raise ValueError(f"step {job.step!r} is not installed; reload plugins or edit the flow")
+        entry = next((e for e in flow["steps"] if e["step"] == (step.model_from or job.step)),
+                     {"params": {}, "model": None})
+        params = {} if step.model_from else entry.get("params", {})  # an action keeps only the model
+        context = Context(project, {**params, **job.params}, entry.get("model"),
+                          job.episode, services, job.say, job.cancelled)
+        project.log(f"run {job.step}" + (f" episode {job.episode}" if job.episode else ""))
+        step.run(context)
+
+    jobs = Jobs(execute)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        yield
+        jobs.close()
+        services.engine.stop()
+
+    app = FastAPI(title="TRTMC Short Drama", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def same_app_only(request: Request, call_next):
+        # A page from another site cannot add this header without a CORS preflight, which the
+        # app never grants, so it cannot change settings or start jobs.
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and request.headers.get(WRITE_HEADER) != "1":
+            return JSONResponse({"detail": f"missing {WRITE_HEADER} header"}, status_code=403)
+        return await call_next(request)
+
+    if token:  # listening beyond loopback: every request but static assets needs the token
+        @app.middleware("http")
+        async def require_token(request: Request, call_next):
+            if request.url.path == "/" and hmac.compare_digest(request.query_params.get("token", ""), token):
+                response = await call_next(request)
+                response.set_cookie(TOKEN_COOKIE, token, httponly=True, samesite="strict")
+                return response
+            given = request.cookies.get(TOKEN_COOKIE) or request.headers.get(TOKEN_HEADER, "")
+            if not request.url.path.startswith("/static/") and not hmac.compare_digest(given, token):
+                return JSONResponse({"detail": "open the URL with ?token= printed at startup"}, status_code=401)
+            return await call_next(request)
+
+    if allowed_hosts:  # refuse other Host names, which a DNS-rebinding page would send
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+    app.state.jobs = jobs
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+    def project_or_404(project_id: str) -> Project:
+        try:
+            return store.get(project_id)
+        except KeyError:
+            raise HTTPException(404, "project not found") from None
+
+    @app.get("/")
+    def index() -> FileResponse:
+        return FileResponse(STATIC / "index.html")
+
+    @app.get("/api/state")
+    def state() -> dict[str, Any]:
+        external = services.external()
+        return {**info, "models": [{"name": n, "role": r, "bundle": s.bundle.name}
+                                   for n, (r, s) in services.models.items()],
+                "loaded": services.engine.loaded, "engine": services.engine.status(), "now": time.time(),
+                "projects": store.projects(), "jobs": jobs.views(),
+                "steps": steps.describe(), "plugin_errors": steps.errors,
+                "flows": {name: flows.versions(name) for name in flows.names()},
+                "external_chat": {"base_url": external.get("base_url", ""), "model": external.get("model", ""),
+                                  "vision_model": external.get("vision_model", ""),
+                                  "has_key": bool(services.api_key())},
+                "vision_model": services.vision_name() or "",
+                "tiers": catalog.describe_tiers(),
+                "chat_ready": services.chat_ready(),
+                "free_apis": {key: vars(api) for key, api in FREE_APIS.items()},
+                "sample": SAMPLE.is_file()}
+
+    @app.get("/api/projects")
+    def project_list() -> dict[str, Any]:
+        """Every project with how far it is, newest change first, and this machine's step times."""
+
+        found, stills, takes = [], [], []
+        for listed in store.projects():
+            project = store.get(listed["id"])
+            found.append({**listed, "progress": summary(project)})
+            stills += project.stills.values()
+            takes += [take for number in range(1, int(listed.get("episodes", 0)) + 1)
+                      for entry in project.shot_state(number).values() if isinstance(entry, dict)
+                      for take in entry.get("takes", [])]
+        found.sort(key=lambda listed: listed["updated"], reverse=True)
+        return {"projects": found, "estimates": {"still": media.average_seconds(stills, roles.get("image")),
+                                                 "shot": media.average_seconds(takes, roles.get("video"))}}
+
+    @app.post("/api/projects")
+    def create(body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        novel = SAMPLE.read_text(encoding="utf-8") if body.get("sample") else str(body.get("novel", ""))
+        idea = "" if novel.strip() else str(body.get("idea") or "")
+        style = str(body.get("style") or "")
+        language = body.get("language") if body.get("language") in prompts.LANGUAGES else "zh"
+        if len(novel) > MAX_NOVEL or len(idea) > MAX_IDEA or len(style) > MAX_STYLE:
+            raise HTTPException(413, f"novels are limited to {MAX_NOVEL:,}, ideas to {MAX_IDEA} "
+                                f"and styles to {MAX_STYLE} characters")
+        try:
+            reference, _ = flows.load(str(body.get("flow") or "default"))
+            project = store.create(str(body.get("title") or "drama")[:80], novel, flow=reference,
+                                   episodes=max(1, min(20, int(body.get("episodes", 4)))),
+                                   max_seconds=max(10, min(600, int(body.get("max_seconds", 60)))),
+                                   idea=idea, style=style, language=language)
+        except (KeyError, ValueError) as error:
+            raise HTTPException(400, str(error)) from None
+        return {"id": project.id}
+
+    @app.put("/api/projects/{project_id}/meta")
+    def rename(project_id: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        title = str(body.get("title") or "").strip()
+        if not title or len(title) > 80:
+            raise HTTPException(400, "a title has 1 to 80 characters")
+        return project_or_404(project_id).update_meta(title=title)
+
+    @app.delete("/api/projects/{project_id}")
+    def delete(project_id: str) -> dict[str, str]:
+        project = project_or_404(project_id)
+        if jobs.busy(project.id):
+            raise HTTPException(409, "this project has steps queued or running; wait for them or cancel them first")
+        store.delete(project.id)
+        return {"status": "deleted"}
+
+    @app.get("/api/projects/{project_id}")
+    def project_view(project_id: str) -> dict[str, Any]:
+        project = project_or_404(project_id)
+        plan, stills, novel = project.plan, project.stills, project.novel
+        _, flow = flows.load(project.meta.get("flow", "default"))
+        entries = {entry["step"]: entry for entry in flow["steps"]}
+        shots_entry = entries.get("shots", {})
+        default_previous = bool(shots_entry.get("params", {}).get("previous_last_frame", True))
+        default_chain = bool(shots_entry.get("params", {}).get("chain_shots", True))
+        animated = services.first_frame(shots_entry.get("model"))
+        episodes, previews = {}, {}  # previews: the video prompt each shot would get now
+        for episode in plan.get("episodes", []):
+            state = project.shot_state(episode["number"])
+            use_previous = media.uses_previous_frame(project, plan, episode["number"], default_previous)
+            chain = media.chains_shots(project, episode["number"], default_chain)
+            for shot in episode.get("shots", []):
+                previews[shot["id"]] = prompts.motion_prompt(plan, shot, media.english_of(project)) if animated \
+                    else media.shot_inputs(project, plan, episode, shot, use_previous=use_previous, chain=chain,
+                                           require_approval=False)[2]
+                if shot["id"] in state:
+                    state[shot["id"]]["outdated"] = media.outdated(project, plan, episode, shot, state[shot["id"]],
+                                                                   use_previous=use_previous, chain=chain)
+            episodes[str(episode["number"])] = {"continues": media.continues(plan, episode["number"]),
+                                                "chained": chain, "analysis": analysis.load(project, episode["number"]),
+                                                **state}
+        targets = media.still_targets(plan)
+        outdated_stills = [key for key, kind, item in targets
+                           if media.still_outdated(plan, kind, item, stills.get(key, {}))]
+        problems = review.check(plan, novel, float(project.meta.get("max_seconds", 60)))
+        model_review = project.review or None  # null, not {}, before the first review
+        if model_review:
+            model_review = {**model_review, "current": model_review.get("plan") == assist.fingerprint(plan)}
+        takes = [t for e in episodes.values() for v in e.values() if isinstance(v, dict) for t in v.get("takes", [])]
+        flow_steps = [{"step": entry["step"], "installed": steps.get(entry["step"]) is not None,
+                       "scope": getattr(steps.get(entry["step"]), "scope", None),
+                       "core": entry["step"] in steps.core} for entry in flow["steps"]]
+        return {"id": project.id, "meta": project.meta, "plan": plan, "stills": stills,
+                "episodes": episodes, "novel_chars": len(novel), "flow_steps": flow_steps,
+                "previews": previews, "usage": media.usage(plan), "outdated_stills": outdated_stills,
+                "problems": problems, "origins": review.origins(plan, novel), "model_review": model_review,
+                "stages": review.progress(plan, stills, episodes, novel=bool(novel.strip()), problems=problems,
+                                          chat_ready=services.chat_ready()),
+                "estimates": {"still": media.average_seconds(list(stills.values()),
+                                                             entries.get("stills", {}).get("model")),
+                              "shot": media.average_seconds(takes, shots_entry.get("model"))},
+                "history": project.snapshots()[:20]}
+
+    @app.get("/api/projects/{project_id}/novel")
+    def novel_text(project_id: str) -> dict[str, str]:
+        return {"novel": project_or_404(project_id).novel}
+
+    @app.put("/api/projects/{project_id}/novel")
+    def save_novel(project_id: str, body: dict[str, Any] = Body(...)) -> dict[str, str]:
+        project = project_or_404(project_id)
+        novel = str(body.get("novel", ""))
+        if not novel.strip() or len(novel) > MAX_NOVEL:
+            raise HTTPException(400, f"a story has 1 to {MAX_NOVEL:,} characters")
+        project.save_novel(novel)
+        return {"status": "saved"}
+
+    @app.put("/api/projects/{project_id}/plan")
+    def save_plan(project_id: str, plan: dict[str, Any] = Body(...)) -> dict[str, str]:
+        project = project_or_404(project_id)
+        check_plan(plan)
+        project.save_plan(plan, note="before saving edits")
+        return {"status": "saved"}
+
+    @app.post("/api/projects/{project_id}/history/{name}/restore")
+    def restore(project_id: str, name: str) -> dict[str, str]:
+        try:
+            project_or_404(project_id).restore(name)
+        except KeyError:
+            raise HTTPException(404, "no such snapshot") from None
+        return {"status": "restored"}
+
+    @app.put("/api/projects/{project_id}/stills/{key}")
+    def update_still(project_id: str, key: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        project = project_or_404(project_id)
+        stills = project.stills
+        if key not in stills:
+            raise HTTPException(404, "still not found")
+        if body.get("status") in {"approved", "draft"}:
+            stills[key]["status"] = body["status"]
+        if "prompt_override" in body:
+            stills[key]["prompt_override"] = str(body["prompt_override"] or "")
+        project.save_stills(stills)
+        return stills[key]
+
+    @app.put("/api/projects/{project_id}/episodes/{number}")
+    def update_episode(project_id: str, number: int, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        project = project_or_404(project_id)
+        state = project.shot_state(number)
+        if "use_previous_frame" in body:
+            state["use_previous_frame"] = bool(body["use_previous_frame"])
+        if "chain_shots" in body:
+            state["chain_shots"] = bool(body["chain_shots"])
+        for shot_id, prompt in (body.get("prompt_overrides") or {}).items():
+            state.setdefault(shot_id, {})["prompt_override"] = str(prompt or "")
+        for shot_id, take in (body.get("use_take") or {}).items():
+            chosen = next((t for t in state.get(shot_id, {}).get("takes", []) if t["take"] == take), None)
+            if chosen is None:
+                raise HTTPException(404, f"{shot_id} has no take {take}")
+            for key in ("speech", *media.FIRST_FRAME_KEYS):
+                state[shot_id].pop(key, None)
+            state[shot_id].update(chosen)
+            state.pop("assembled", None)
+        project.save_shot_state(number, state)
+        return state
+
+    @app.put("/api/projects/{project_id}/flow")
+    def select_flow(project_id: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        project = project_or_404(project_id)
+        try:
+            reference, _ = flows.load(str(body.get("flow", "")))
+        except KeyError as error:
+            raise HTTPException(400, str(error)) from None
+        return project.update_meta(flow=reference)
+
+    @app.post("/api/projects/{project_id}/run")
+    def run(project_id: str, body: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        project = project_or_404(project_id)
+        _, flow = flows.load(project.meta.get("flow", "default"))
+        names = [entry["step"] for entry in flow["steps"]]
+        episode = body.get("episode")
+        if body.get("step") == "episode":  # every episode step of the flow, in order
+            queued = [jobs.submit(project.id, name, int(episode), {}) for name in names
+                      if (step := steps.get(name)) and step.scope == "episode"]
+            return {"jobs": [job.id for job in queued]}
+        step = steps.get(str(body.get("step")))
+        if body.get("step") not in names and not (step and step.model_from in names):
+            raise HTTPException(400, "that step is not part of this project's flow")
+        if step is None:
+            raise HTTPException(400, f"step {body.get('step')} is not installed; reload plugins or edit the flow")
+        if step.scope == "episode" and not isinstance(episode, int):
+            raise HTTPException(400, "choose an episode")
+        allowed = {"only"} | REQUEST_PARAMS.get(step.name, set())
+        params = {key: value for key, value in (body.get("params") or {}).items() if key in allowed}
+        if step.name == "revise":
+            try:
+                assist.revision(params)
+            except ValueError as error:
+                raise HTTPException(400, str(error)) from None
+        return {"jobs": [jobs.submit(project.id, step.name, episode, params).id]}
+
+    @app.post("/api/jobs/cancel")
+    def cancel() -> dict[str, str]:
+        jobs.cancel()
+        return {"status": "cancelling"}
+
+    @app.get("/api/logs/server")
+    def server_log(lines: int = 200) -> dict[str, Any]:
+        """The end of the trtmc-server log: what the GPU process said while loading and serving."""
+
+        return {"lines": services.engine.log_tail(max(1, min(2000, lines)))}
+
+    @app.get("/api/projects/{project_id}/files/{relative:path}")
+    def file(project_id: str, relative: str) -> FileResponse:
+        try:
+            return FileResponse(project_or_404(project_id).file(relative))
+        except FileNotFoundError:
+            raise HTTPException(404, "file not found") from None
+
+    @app.get("/api/flows/{reference}")
+    def get_flow(reference: str) -> dict[str, Any]:
+        try:
+            canonical, flow = flows.load(reference)
+        except KeyError as error:
+            raise HTTPException(404, str(error)) from None
+        return {"reference": canonical, "flow": flow}
+
+    @app.post("/api/flows/{name}")
+    def save_flow(name: str, body: dict[str, Any] = Body(...)) -> dict[str, str]:
+        try:
+            return {"reference": flows.save(name, body.get("flow"), note=str(body.get("note", ""))[:200])}
+        except (ValueError, TypeError) as error:
+            raise HTTPException(400, str(error)) from None
+
+    @app.post("/api/plugins/reload")
+    def reload_plugins() -> dict[str, Any]:
+        steps.reload()
+        return {"steps": steps.describe(), "errors": steps.errors}
+
+    @app.put("/api/settings/external-chat")
+    def external_chat(body: dict[str, Any] = Body(...)) -> dict[str, str]:
+        base_url = str(body.get("base_url", "")).strip()
+        if base_url and not re.fullmatch(r"https?://[^\s]+", base_url):
+            raise HTTPException(400, "the base URL must start with http:// or https://")
+        settings = read_json(data / "settings.json", {})
+        settings["external_chat"] = {"base_url": base_url, "model": str(body.get("model", "")).strip(),
+                                     "vision_model": str(body.get("vision_model") or "").strip()[:200]}
+        write_json(data / "settings.json", settings)
+        secrets = read_json(data / "secrets.json", {})
+        if body.get("api_key"):
+            secrets = {"external_chat_api_key": str(body["api_key"]), "external_chat_base_url": base_url}
+        elif secrets.get("external_chat_base_url") != base_url:
+            secrets = {}  # a saved key never follows a new endpoint
+        write_secret(data / "secrets.json", secrets)
+        return {"status": "saved"}
+
+    return app
