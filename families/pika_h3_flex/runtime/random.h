@@ -17,9 +17,11 @@ class Random {
   public:
     explicit Random(uint32_t seed) : engine_(seed) {}
     std::vector<float> normal(std::size_t count) {
-        if (!count || count % 16) throw std::invalid_argument("Pika noise draws require groups of 16");
+        if (!count || count % 16)
+            throw std::invalid_argument("Pika noise draws require groups of 16");
         std::vector<float> result(count);
-        for (auto& value : result) value = static_cast<float>(engine_() & 0xffffffU) * (1.0F / 16777216);
+        for (auto& value : result)
+            value = static_cast<float>(engine_() & 0xffffffU) * (1.0F / 16777216);
         constexpr float two_pi = 6.2831853071795864769F;
         for (std::size_t start = 0; start < count; start += 16) {
             for (int index = 0; index < 8; ++index) {
@@ -31,6 +33,7 @@ class Random {
         }
         return result;
     }
+
   private:
     std::mt19937 engine_;
 };
