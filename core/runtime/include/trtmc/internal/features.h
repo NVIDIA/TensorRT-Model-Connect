@@ -550,7 +550,9 @@ class ISpatialFeaturesToClassScores {
 
 // Spectral convention and normalization belong to the loaded family. Output
 // rows map to input spectral frame indices, not waveform samples or seconds.
-struct SpectrogramToFrameFeaturesRequest { FloatMatrixView spectrogram; };
+struct SpectrogramToFrameFeaturesRequest {
+    FloatMatrixView spectrogram;
+};
 struct SpectrogramFrameFeaturesResult {
     FloatMatrix features;
     std::vector<uint64_t> input_frame_indices;
@@ -561,7 +563,8 @@ class ISpectrogramToFrameFeatures {
     using TaskInterface = ISpectrogramToFrameFeatures;
     static constexpr std::string_view kTask = "spectrogram_to_frame_features";
     virtual ~ISpectrogramToFrameFeatures() = default;
-    virtual SpectrogramFrameFeaturesResult run(const SpectrogramToFrameFeaturesRequest&, ConfigView) = 0;
+    virtual SpectrogramFrameFeaturesResult run(const SpectrogramToFrameFeaturesRequest&,
+                                               ConfigView) = 0;
 };
 
 } // namespace trtmc::internal

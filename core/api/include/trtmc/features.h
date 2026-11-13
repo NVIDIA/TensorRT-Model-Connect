@@ -630,7 +630,9 @@ typedef struct {
 } trtmc_spatial_features_to_class_scores_api_v1;
 /* Borrowed nonempty [time frame, spectral feature] matrix. The loaded family
  * defines spectral convention and normalization; shared code never transforms it. */
-typedef struct { trtmc_f32_matrix_view_v1 spectrogram; } trtmc_spectrogram_to_frame_features_request_v1;
+typedef struct {
+    trtmc_f32_matrix_view_v1 spectrogram;
+} trtmc_spectrogram_to_frame_features_request_v1;
 typedef struct {
     trtmc_f32_matrix_view_v1 features;
     trtmc_feature_u64_view input_frame_indices;
@@ -639,9 +641,11 @@ typedef struct {
 #define TRTMC_TASK_SPECTROGRAM_TO_FRAME_FEATURES "spectrogram_to_frame_features"
 typedef struct {
     trtmc_api_header header;
-    trtmc_status(TRTMC_CALL* run)(trtmc_model*, const trtmc_spectrogram_to_frame_features_request_v1*,
+    trtmc_status(TRTMC_CALL* run)(trtmc_model*,
+                                  const trtmc_spectrogram_to_frame_features_request_v1*,
                                   const trtmc_config_view_v1*, trtmc_result**, trtmc_error**);
-    trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_spectrogram_frame_features_view_v1*, trtmc_error**);
+    trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*,
+                                          trtmc_spectrogram_frame_features_view_v1*, trtmc_error**);
 } trtmc_spectrogram_to_frame_features_api_v1;
 
 #ifdef __cplusplus
