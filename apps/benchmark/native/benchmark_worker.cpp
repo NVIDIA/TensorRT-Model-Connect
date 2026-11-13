@@ -1837,13 +1837,14 @@ Json run_classify_audio(const trtmc::Model& model, const Json& request, const Ti
                         {"labels", std::move(labels)},
                         {"top_class", -1}};
             if (!scores.empty())
-                output["top_class"] = std::max_element(scores.begin(), scores.end()) - scores.begin();
+                output["top_class"] =
+                    std::max_element(scores.begin(), scores.end()) - scores.begin();
             return output;
         });
 }
 
-// Every query against the one image (a zero-shot choice scores the image against each class prompt): one
-// TextImageToRelevance call per query inside the timed call.
+// Every query against the one image (a zero-shot choice scores the image against each class
+// prompt): one TextImageToRelevance call per query inside the timed call.
 Json run_relevance(const trtmc::Model& model, const Json& request, const Timing& timing,
                    const std::string& task_id) {
     if (task_id != trtmc::TextImageToRelevance::kTask)
@@ -1874,10 +1875,11 @@ Json run_relevance(const trtmc::Model& model, const Json& request, const Timing&
             for (const float score : scores)
                 if (!std::isfinite(score))
                     throw std::runtime_error("benchmark output contains a non-finite value");
-            return Json{{"scored_pairs", scores.size()},
-                        {"scores", scores},
-                        {"queries", queries},
-                        {"top_class", std::max_element(scores.begin(), scores.end()) - scores.begin()}};
+            return Json{
+                {"scored_pairs", scores.size()},
+                {"scores", scores},
+                {"queries", queries},
+                {"top_class", std::max_element(scores.begin(), scores.end()) - scores.begin()}};
         });
 }
 
