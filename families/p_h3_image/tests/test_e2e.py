@@ -233,3 +233,40 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         assert rmse <= case["rmse_max"]
         assert maximum <= case["max_abs_error"]
         assert cosine >= case["cosine_min"]
+
+
+@pytest.mark.parametrize("rotary_dim", [96, 128])
+def test_bf16_rope_matches_pytorch(case_name, rotary_dim, tmp_path):
+    import tensorrt as trt
+    import torch
+    from families.p_h3_image.graph import Graph
+
+    logger = trt.Logger(trt.Logger.WARNING)
+    graph = Graph(None, logger)
+    hidden = graph.net.add_input("hidden", trt.bfloat16, (1, 19, 32, 128))
+    cosine = graph.net.add_input("cos", trt.bfloat16, (1, 19, 1, rotary_dim))
+    sine = graph.net.add_input("sin", trt.bfloat16, (1, 19, 1, rotary_dim))
+    graph.output(graph.rope(hidden, cosine, sine, rotary_dim), "result")
+    path = tmp_path / "rope.plan"
+    with path.open("wb") as stream:
+        graph.save(stream)
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(path.read_bytes())
+    assert engine is not None
+    context = engine.create_execution_context()
+    stream = torch.cuda.Stream()
+    generator = torch.Generator(device="cuda").manual_seed(42)
+    with torch.cuda.stream(stream):
+        inputs = torch.randn((1, 19, 32, 128), generator=generator, device="cuda").bfloat16()
+        angles = torch.randn((1, 19, 1, rotary_dim), generator=generator, device="cuda")
+        cosine, sine = angles.cos().bfloat16(), angles.sin().bfloat16()
+        rotated, tail = inputs[..., :rotary_dim], inputs[..., rotary_dim:]
+        first, second = rotated.chunk(2, dim=-1)
+        swapped = torch.cat((-second, first), dim=-1)
+        expected = torch.cat((rotated * cosine + swapped * sine, tail), dim=-1)
+        actual = torch.empty_like(inputs)
+        for name, value in (("hidden", inputs), ("cos", cosine), ("sin", sine), ("result", actual)):
+            context.set_tensor_address(name, value.data_ptr())
+        assert context.execute_async_v3(stream.cuda_stream)
+    stream.synchronize()
+    assert torch.equal(actual, expected)

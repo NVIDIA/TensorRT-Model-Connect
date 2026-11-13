@@ -155,8 +155,15 @@ class Graph:
             [self.mul(self.channels(rotated, half, half), -1), self.channels(rotated, 0, half)],
             len(x.shape) - 1,
         )
-        result = self.add(
-            self.mul(rotated, self.cast(cos, x.dtype)), self.mul(swap, self.cast(sin, x.dtype))
+        # Qwen and H3 round each low-precision product before adding them.
+        # Explicit FP32 opmath and casts preserve those boundaries when TensorRT
+        # fuses the rotary expression.
+        products = [
+            self.cast(self.mul(self.cast(value, trt.float32), self.cast(angle, trt.float32)), x.dtype)
+            for value, angle in ((rotated, self.cast(cos, x.dtype)), (swap, self.cast(sin, x.dtype)))
+        ]
+        result = self.cast(
+            self.add(*(self.cast(value, trt.float32) for value in products)), x.dtype
         )
         if x.shape[-1] > rotary_dim:
             result = self.concat(
