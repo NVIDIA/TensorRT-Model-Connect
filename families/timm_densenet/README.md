@@ -74,6 +74,12 @@ Scales are committed for `densenet121.ra_in1k`, `densenet121.tv_in1k`,
 `calibrate_fp8_scales.py` (ModelOpt `FP8_DEFAULT_CFG`, max calibration on 500
 ImageNet validation images). A checkpoint that is already quantized is refused.
 
+### NVFP4
+
+NVFP4 is not used. TensorRT has no FP4 convolution (block-scaled FP4 needs a
+2-D GEMM input), and every layer that FP8 quantizes is a convolution. The only
+GEMM in the model is the classifier, under 1% of the time. NVFP4 was not built.
+
 ## Benchmark timing
 
 `tests/performance.yaml` takes over the existing `timm_densenet.classify`
