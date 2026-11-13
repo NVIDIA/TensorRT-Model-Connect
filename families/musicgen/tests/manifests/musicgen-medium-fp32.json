@@ -1,0 +1,20 @@
+{
+  "name": "musicgen-medium-fp32",
+  "hf_id": "facebook/musicgen-medium",
+  "hf_revision": "d3bd7b00761b78ad7a8a05145ee31e7832e9916c",
+  "bundle": "musicgen-medium-fp32.bundle",
+  "family": "musicgen",
+  "task": "text_to_audio",
+  "precision": "fp32",
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 54,
+  "testcases": [
+    {
+      "name": "musicgen-medium-fp32",
+      "premerge": true,
+      "prompts": ["A mellow jazz piano with soft drums.", "Energetic rock music with electric guitar."],
+      "do_sample": false,
+      "guidance_scale": 3.0
+    }
+  ]
+}
