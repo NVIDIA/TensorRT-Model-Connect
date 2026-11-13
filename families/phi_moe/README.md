@@ -45,3 +45,39 @@ Decode is one 200-step loop at position 100; prefill is one pass of S tokens.
   1.03x to 1.05x faster on B200 and 1.04x to 1.05x faster on B300, but the
   decode engine is 1.07x slower on B300 (2.685 vs 2.508 ms/token with CUDA
   graph, 3 builds), so the FP8 decode engine stays at level 1.
+
+## NVFP4
+
+NVFP4 was measured and is not shipped: it is faster than FP8, but the quality
+loss is more than 2x the FP8 loss, so NVFP4 is not shipped. No NVFP4 code is in
+the family.
+
+Setup: Phi-tiny-MoE-instruct, fp16, `max_sequence_length` 256, TensorRT 11.4,
+one job per GPU (B200 and B300). The routed experts are NVFP4 W4A4 (block size
+16, one second scale per layer and projection, activations quantized at run
+time, input scale from a max calibration on 64 prompts); attention q/k/v stay
+FP8 as in the shipped recipe. TensorRT cannot gather FP4 weights, so the
+decode engine runs one batched FP4 GEMM over all 16 experts and keeps the 2
+selected rows; the prefill engine runs batched FP4 GEMMs. Decode is one token
+with a CUDA graph. KL and top-1 are against the fp16 engine on 508 wikitext-2
+positions; the non-finite scan covers these steps, 8 prefill prompts and 5
+stress prompts (prefill and 600 decode steps).
+
+| GPU | Variant | Decode plan GiB | Decode ms (vs FP8) | Prefill 16 / 256 tokens vs FP8 | KL vs fp16 engine (x FP8) | Top-1 vs fp16 engine | WikiText ppl | Non-finite |
+|---|---|---|---|---|---|---|---|---|
+| B200 | fp16 | 7.00 | 2.109 | 1.36x / 1.27x | - | - | 13.11 | 0 |
+| B200 | FP8 (shipped) | 4.00 | 2.423 (1.00x) | 1.00x / 1.00x | 0.0207 (1.0x) | 94.1% | 13.27 | 0 |
+| B200 | NVFP4 experts | 2.87 | 2.193 (1.10x) | 1.43x / 0.83x | 0.1168 (5.6x) | 86.2% | 14.39 | 0 |
+| B300 | fp16 | 7.00 | 2.101 | 1.40x / 1.29x | - | - | 13.02 | 0 |
+| B300 | FP8 (shipped) | 4.00 | 2.558 (1.00x) | 1.00x / 1.00x | 0.0229 (1.0x) | 91.9% | 13.36 | 0 |
+| B300 | NVFP4 experts | 2.87 | 2.165 (1.18x) | 1.48x / 0.80x | 0.1120 (4.9x) | 85.6% | 13.90 | 0 |
+
+Reasons:
+
+- Speed: decode is 1.10x (B200) and 1.18x (B300) faster than FP8 and the plan
+  is 28% smaller, but it is still slower than the fp16 engine (0.96x to 0.97x).
+  Prefill is faster than FP8 for short prompts and slower at 256 tokens.
+- Quality: KL is 4.9x to 5.6x the FP8 KL. Weight-only FP4 with an expert
+  gather (activations fp16) still has 3.2x to 3.8x the FP8 KL and is slower
+  than FP8, so the loss comes from the 4-bit expert weights.
+- No non-finite values.
