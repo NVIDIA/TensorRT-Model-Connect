@@ -65,9 +65,25 @@ class Graph:
         return self.const(np.full((1,) * len(x.shape), value), x.dtype)
 
     def op(self, x, y, kind):
+        dtype = x.dtype
+        if dtype == trt.bfloat16:
+            # Each explicit PyTorch binary operation rounds its BF16 result.
+            # Preserve that boundary when TensorRT fuses neighboring operations.
+            x = self.cast(x, trt.float32)
+            if isinstance(y, trt.ITensor):
+                y = self.cast(y, trt.float32)
         if not isinstance(y, trt.ITensor):
             y = self.scalar(y, x)
-        return self.net.add_elementwise(x, y, kind).get_output(0)
+        result = self.net.add_elementwise(x, y, kind).get_output(0)
+        return (
+            self.cast(result, dtype)
+            if dtype == trt.bfloat16 and result.dtype != trt.bool
+            else result
+        )
+
+    def affine_bias(self, value, bias):
+        # Bias belongs to the affine operator, before its output is rounded.
+        return self.net.add_elementwise(value, bias, trt.ElementWiseOperation.SUM).get_output(0)
 
     def add(self, x, y):
         return self.op(x, y, trt.ElementWiseOperation.SUM)
@@ -117,7 +133,7 @@ class Graph:
         value = self.mm(x, self.const(self.weights.read(name + ".weight"), dtype), True)
         if bias and name + ".bias" in self.weights.index:
             weight = self.weights.read(name + ".bias").reshape((1,) * (len(x.shape) - 1) + (-1,))
-            value = self.add(value, self.const(weight, dtype))
+            value = self.affine_bias(value, self.const(weight, dtype))
         adapter = self.weights.adapter
         if adapter is not None and name + ".lora_A.default.weight" in adapter.index:
             # PEFT casts the released FP32 storage to the base layer's BF16
@@ -168,8 +184,13 @@ class Graph:
         # Explicit FP32 opmath and casts preserve those boundaries when TensorRT
         # fuses the rotary expression.
         products = [
-            self.cast(self.mul(self.cast(value, trt.float32), self.cast(angle, trt.float32)), x.dtype)
-            for value, angle in ((rotated, self.cast(cos, x.dtype)), (swap, self.cast(sin, x.dtype)))
+            self.cast(
+                self.mul(self.cast(value, trt.float32), self.cast(angle, trt.float32)), x.dtype
+            )
+            for value, angle in (
+                (rotated, self.cast(cos, x.dtype)),
+                (swap, self.cast(sin, x.dtype)),
+            )
         ]
         result = self.cast(
             self.add(*(self.cast(value, trt.float32) for value in products)), x.dtype
