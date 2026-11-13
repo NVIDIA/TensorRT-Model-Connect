@@ -143,6 +143,10 @@ class _T5Model:
             weights["w_out"] = _transpose_2d(_load_tensor(readers, "lm_head.weight"), "lm_head")
         else:
             weights["w_out"] = _transpose_2d(shared_embed.copy(), "embedding_tied")
+        # Original T5 scales the decoder output by d_model**-0.5 before lm_head; T5 v1.1
+        # configs disable it with tie_word_embeddings=false. Fold the scale into w_out.
+        if raw.get("scale_decoder_outputs", raw.get("tie_word_embeddings", True) is True):
+            weights["w_out"] = weights["w_out"] * np.float32(hidden**-0.5)
         return weights
 
     def build_engine(
