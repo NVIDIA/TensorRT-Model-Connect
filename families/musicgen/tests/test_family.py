@@ -86,6 +86,9 @@ def test_native_tokenizer_matches_official_checkpoint(tmp_path):
         "<pad> soft music",
         "<unk><extra_id_99></s>",
         "guitar 🎹🎶",
+        "▁hello",
+        "▁hello world",
+        "▁▁hello",
     ]
     official = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
     tokenizer_json = tmp_path / "tokenizer.json"
