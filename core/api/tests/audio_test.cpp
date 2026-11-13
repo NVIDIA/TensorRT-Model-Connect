@@ -120,24 +120,33 @@ void test_spectrogram(const std::filesystem::path& root, const trtmc::LoadOption
     const auto path = root / "audio-spectrogram.bundle";
     write_bundle(path, "spectrogram_only");
     std::vector<float> values{-2.0F, 0.25F, 3.0F, 4.5F, -6.0F, 1.0F};
-    auto owned = Model::load(path.string(), options).task<SpectrogramToAudio>().run(
-        {{{values.data(), values.size()}, 2, 3}});
+    auto owned = Model::load(path.string(), options)
+                     .task<SpectrogramToAudio>()
+                     .run({{{values.data(), values.size()}, 2, 3}});
     check(owned.sample_rate() == 22050 && owned.channels() == 1 && owned.frame_count() == 6 &&
               owned.setup_ms() == 2 && owned.inference_ms() == 3 &&
               std::equal(values.begin(), values.end(), owned.samples().begin()),
           "spectrogram axes and raw values reach family without shared normalization");
     const auto model = Model::load(path.string(), options);
     const auto task = model.task<SpectrogramToAudio>();
-    check(model.tasks().size() == 1 && !model.supports<TextToAudio>() && task.config_fields().empty(),
+    check(model.tasks().size() == 1 && !model.supports<TextToAudio>() &&
+              task.config_fields().empty(),
           "spectrogram synthesis is distinct from text-conditioned audio generation");
     check(rejects([&] { (void)task.run({{{values.data(), values.size()}, 3, 3}}); },
-                  TRTMC_INVALID_ARGUMENT), "spectrogram shape/count mismatch rejected");
+                  TRTMC_INVALID_ARGUMENT),
+          "spectrogram shape/count mismatch rejected");
     check(rejects([&] { (void)task.run({{{nullptr, values.size()}, 2, 3}}); },
-                  TRTMC_INVALID_ARGUMENT), "spectrogram null storage rejected");
+                  TRTMC_INVALID_ARGUMENT),
+          "spectrogram null storage rejected");
     check(rejects([&] { (void)task.run({{{values.data(), values.size()}, UINT64_MAX, 2}}); },
-                  TRTMC_INVALID_ARGUMENT), "spectrogram shape overflow rejected");
-    check(rejects([&] { (void)task.run({{{values.data(), values.size()}, 2, 3}}, {{"normalize", true}}); },
-                  TRTMC_INVALID_ARGUMENT), "undeclared spectrogram normalization option rejected");
+                  TRTMC_INVALID_ARGUMENT),
+          "spectrogram shape overflow rejected");
+    check(rejects(
+              [&] {
+                  (void)task.run({{{values.data(), values.size()}, 2, 3}}, {{"normalize", true}});
+              },
+              TRTMC_INVALID_ARGUMENT),
+          "undeclared spectrogram normalization option rejected");
     values.clear();
     check(owned.samples()[0] == -2 && owned.samples()[5] == 1,
           "spectrogram audio owns PCM after request and temporary model destruction");

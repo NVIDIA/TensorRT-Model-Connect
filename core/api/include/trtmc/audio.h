@@ -8,7 +8,6 @@
 
 #include "trtmc/matrix.h"
 #include "trtmc/scores.h"
-#include "trtmc/matrix.h"
 #include "trtmc/types.h"
 
 #ifdef __cplusplus

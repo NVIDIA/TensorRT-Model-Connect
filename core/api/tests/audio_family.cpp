@@ -59,7 +59,8 @@ class AudioFixture final : public IModel,
     explicit AudioFixture(std::string mode) : mode_(std::move(mode)) {}
     const char* task() const noexcept override { return mode_.c_str(); }
     std::vector<TaskInstance> task_bindings() override {
-        if (mode_ == "spectrogram_only") return {bind<ISpectrogramToAudio>(*this)};
+        if (mode_ == "spectrogram_only")
+            return {bind<ISpectrogramToAudio>(*this)};
         if (mode_ == "asr_only" || mode_ == "asr_new_tokens")
             return {bind<ISpeechTranscription>(*this, fields_for(ISpeechTranscription::kTask))};
         if (mode_ == "history_single_only")

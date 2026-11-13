@@ -51,10 +51,12 @@ trtmc_status TRTMC_CALL audio_result_view(const trtmc_result* result,
 
 namespace {
 
-trtmc_status TRTMC_CALL spectrogram_audio_run(
-    trtmc_model* model, const trtmc_spectrogram_to_audio_request_v1* input,
-    const trtmc_config_view_v1* config, trtmc_result** output, trtmc_error** error) noexcept {
-    if (output) *output = nullptr;
+trtmc_status TRTMC_CALL spectrogram_audio_run(trtmc_model* model,
+                                              const trtmc_spectrogram_to_audio_request_v1* input,
+                                              const trtmc_config_view_v1* config,
+                                              trtmc_result** output, trtmc_error** error) noexcept {
+    if (output)
+        *output = nullptr;
     return guarded(error, [&] {
         require(input && output, "spectrogram request and output are required");
         const internal::SpectrogramToAudioRequest request{matrix_input(input->spectrogram)};
@@ -63,7 +65,8 @@ trtmc_status TRTMC_CALL spectrogram_audio_run(
         auto& family = require_interface<internal::ISpectrogramToAudio>(
             model, internal::ISpectrogramToAudio::kTask);
         validate_task_config(model_owner(model),
-                             internal::contract_key<internal::ISpectrogramToAudio>(), options.view());
+                             internal::contract_key<internal::ISpectrogramToAudio>(),
+                             options.view());
         *output = make_result<AudioResultStorage>(family.run(request, options.view()));
     });
 }
