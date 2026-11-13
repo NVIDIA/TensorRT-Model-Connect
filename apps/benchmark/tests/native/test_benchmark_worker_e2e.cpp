@@ -50,6 +50,32 @@ void write_bundle(const std::filesystem::path& path,
         throw std::runtime_error("failed to write fake bundle");
 }
 
+void write_pcm16_wav(const std::filesystem::path& path, std::uint32_t sample_rate,
+                     const std::vector<std::int16_t>& samples) {
+    const auto data_bytes = static_cast<std::uint32_t>(samples.size() * sizeof(std::int16_t));
+    std::ofstream output(path, std::ios::binary);
+    const auto put = [&output](std::uint32_t value, int bytes) {
+        for (int shift = 0; shift < 8 * bytes; shift += 8)
+            output.put(static_cast<char>((value >> shift) & 0xffU));
+    };
+    output.write("RIFF", 4);
+    put(36 + data_bytes, 4);
+    output.write("WAVEfmt ", 8);
+    put(16, 4);
+    put(1, 2); // PCM
+    put(1, 2); // mono
+    put(sample_rate, 4);
+    put(sample_rate * sizeof(std::int16_t), 4);
+    put(sizeof(std::int16_t), 2);
+    put(16, 2);
+    output.write("data", 4);
+    put(data_bytes, 4);
+    for (const auto sample : samples)
+        put(static_cast<std::uint16_t>(sample), 2);
+    if (!output)
+        throw std::runtime_error("failed to write fake WAV");
+}
+
 std::string shell_quote(const std::string& value) {
     std::string result{"'"};
     for (const char character : value)
@@ -234,6 +260,40 @@ int main(int argc, char** argv) {
                   std::filesystem::is_regular_file(runtime_root / audio_artifact),
               "legacy audio generation retains the actual WAV outside timed execution");
         std::filesystem::remove(audio_bundle);
+
+        const auto transcription_audio = runtime_root / "benchmark_fake_transcription.wav";
+        write_pcm16_wav(transcription_audio, 8000, {8192, -8192, 16384, -16384});
+        const auto transcription_bundle = runtime_root / "benchmark_fake_transcription.bundle";
+        write_bundle(transcription_bundle, "transcription");
+        Json transcription_request = request;
+        transcription_request["case_name"] = "fake-transcription";
+        transcription_request["bundle"] = transcription_bundle.string();
+        transcription_request["operation"] = "transcribe";
+        transcription_request["request"] = {{"audio_path", transcription_audio.string()}};
+        {
+            std::ofstream request_file(request_path);
+            request_file << transcription_request << '\n';
+        }
+        check(std::system(command.c_str()) == 0, "legacy transcription worker process completed");
+        std::ifstream transcription_output_file(output_path);
+        Json transcription_result;
+        transcription_output_file >> transcription_result;
+        const auto& transcriptions = transcription_result.at("observations");
+        check(transcriptions.is_array() && transcriptions.size() == 2,
+              "legacy transcription returns one observation per timed call");
+        for (const auto& observation : transcriptions)
+            check(observation.at("text") == "samples:4" && observation.at("output_tokens") == 1 &&
+                      observation.at("input_audio_seconds") == 0.0005 &&
+                      observation.at("setup_ms") == 1.5 && observation.at("prefill_ms") == 8.0 &&
+                      observation.at("decode_ms") == 4.25 &&
+                      observation.at("runtime_e2e_wall_ms").is_number(),
+                  "legacy transcription reports the task's stage times in every observation");
+        const auto& transcription = transcription_result.at("output_summary");
+        check(transcription.at("setup_ms") == 1.5 && transcription.at("prefill_ms") == 8.0 &&
+                  transcription.at("decode_ms") == 4.25,
+              "legacy transcription summary retains the task's stage times");
+        std::filesystem::remove(transcription_bundle);
+        std::filesystem::remove(transcription_audio);
 
         const auto legacy_image = runtime_root / "benchmark_legacy_segment.ppm";
         {

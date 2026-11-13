@@ -24,6 +24,7 @@
 namespace trtmc {
 
 struct MelFilterbank;
+struct CanaryStageTimes;
 struct CanaryBatchSegment;
 struct CanaryBatchWorkGroup;
 
@@ -69,7 +70,8 @@ class CanaryPipeline final : public ITranscription, public IBatchTranscription {
     std::vector<std::vector<int32_t>>
     run_decoder_batch(const std::vector<std::vector<int32_t>>& initial_tokens,
                       const std::vector<int32_t>& max_new_tokens, int32_t beam_size,
-                      float length_penalty, const std::vector<int32_t>& actual_enc_seq_lens);
+                      float length_penalty, const std::vector<int32_t>& actual_enc_seq_lens,
+                      CanaryStageTimes& times);
     std::vector<std::vector<int32_t>>
     run_greedy_decoder_batch(const std::vector<std::vector<int32_t>>& initial_tokens,
                              const std::vector<int32_t>& max_new_tokens);

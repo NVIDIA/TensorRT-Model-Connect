@@ -45,6 +45,7 @@ if(TRTMC_BUILD_TESTS)
       test_canary_decode_policy
       test_canary_host_plan
       test_canary_mel_spectrogram
+      test_canary_stage_timing
   )
     add_executable(${test_name}
       ${PROJECT_SOURCE_DIR}/families/canary/tests/cpp/${test_name}.cpp

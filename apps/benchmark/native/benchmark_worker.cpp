@@ -492,7 +492,10 @@ Json run_transcribe(trtmc::ITask& task, const Json& request, const Timing& timin
             [](const auto& value) {
                 return Json{{"input_audio_seconds", value.second},
                             {"output_tokens", value.first.token_ids.size()},
-                            {"text", value.first.text}};
+                            {"text", value.first.text},
+                            {"setup_ms", value.first.setup_ms},
+                            {"prefill_ms", value.first.prefill_ms},
+                            {"decode_ms", value.first.decode_ms}};
             });
     }
 
