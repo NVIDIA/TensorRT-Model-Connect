@@ -141,51 +141,35 @@ def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
     )
 
 
-def test_official_checkpoint_e2e(case_name, tmp_path, monkeypatch):
+def test_official_checkpoint_e2e(case_name, tmp_path):
     import gc
     import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer, FineGrainedFP8Config
 
     _, manifest, case = CASES[case_name]
     directory = _model_dir(manifest)
     _, runtime_root = _runtime()
     runner = runtime_root / "test_kolibri1_runtime"
     assert runner.is_file()
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    # Expert packing must complete sequentially, so asynchronous source tensors
-    # cannot occupy the GPU alongside their dequantized packed replacements.
-    monkeypatch.setenv("HF_DEACTIVATE_ASYNC_LOAD", "1")
-    tokenizer = AutoTokenizer.from_pretrained(directory)
-    # Keep the oracle, builder, and native runtime in separate memory phases.
-    # Dequantization is the official FP8 loader path, with FP16 execution.
-    reference = AutoModelForCausalLM.from_pretrained(
-        directory,
-        dtype=torch.float16,
-        device_map={"": "cuda:0"},
-        quantization_config=FineGrainedFP8Config(dequantize=True),
-        attn_implementation="eager",
-        experts_implementation="eager",
-    ).eval()
-    # The loader preserves storage dtype for renamed source tensors. Set the
-    # requested compute dtype on the renamed norms and the router's FP32 bias.
-    for layer in reference.model.layers:
-        layer.post_self_attn_layernorm.to(dtype=torch.float16)
-        layer.post_mlp_layernorm.to(dtype=torch.float16)
-        layer.mlp.gate.e_score_correction_bias = layer.mlp.gate.e_score_correction_bias.float()
-    del layer
-    torch.cuda.empty_cache()
-    expected = []
-    for prompt in case["prompts"]:
-        inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
-        with torch.no_grad():
-            generated = reference.generate(
-                **inputs, do_sample=False, max_new_tokens=case["max_new_tokens"]
-            )
-        ids = generated[0, inputs["input_ids"].shape[1] :].tolist()
-        expected.append({"token_ids": ids, "text": tokenizer.decode(ids, skip_special_tokens=True)})
-        print(f"Official Kolibri1: {expected[-1]!r}", flush=True)
-    del reference, generated, inputs
+    import sys
+
+    case_path, expected_path = tmp_path / "reference-case.json", tmp_path / "reference.json"
+    case_path.write_text(json.dumps(case))
+    oracle = subprocess.run(
+        [
+            sys.executable,
+            str(TEST_ROOT / "reference.py"),
+            str(directory),
+            str(case_path),
+            str(expected_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=case.get("runtime_timeout_s", 3600),
+    )
+    assert oracle.returncode == 0, oracle.stderr + oracle.stdout
+    print(oracle.stdout, end="", flush=True)
+    expected = json.loads(expected_path.read_text())
     gc.collect()
     torch.cuda.empty_cache()
     bundle = tmp_path / manifest["bundle"]
