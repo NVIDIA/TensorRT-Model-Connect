@@ -39,10 +39,12 @@ Tensor output(const TensorMap& outputs, const std::string& name, std::size_t cou
 
 class Pipeline final : public internal::IModel, public internal::ITextContinuation {
   public:
-    Pipeline(std::unique_ptr<ITrtModule> embedding, std::vector<std::unique_ptr<ITrtModule>> layers,
-             std::unique_ptr<ITrtModule> head, std::unique_ptr<ITokenizer> tokenizer,
-             nlohmann::json cfg)
-        : embedding_(std::move(embedding)), layers_(std::move(layers)), head_(std::move(head)),
+    Pipeline(IBackend& backend, std::unique_ptr<ITrtModule> embedding,
+             std::vector<std::unique_ptr<ITrtModule>> layers,
+             std::vector<std::vector<char>> streamed_plans, std::unique_ptr<ITrtModule> head,
+             std::unique_ptr<ITokenizer> tokenizer, nlohmann::json cfg)
+        : backend_(backend), embedding_(std::move(embedding)), layers_(std::move(layers)),
+          streamed_plans_(std::move(streamed_plans)), head_(std::move(head)),
           tokenizer_(std::move(tokenizer)), cfg_(std::move(cfg)),
           fields_{{"max_new_tokens", internal::ConfigKind::I64, internal::ConfigValue{int64_t{32}},
                    "Maximum generated tokens"},
@@ -99,7 +101,18 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
                     {"cache_k", tensor(keys[i].data(), {1, heads, length, dim}, DType::kFloat16)},
                     {"cache_v",
                      tensor(values[i].data(), {1, heads, length, dim}, DType::kFloat16)}};
-                const auto predicted = layers_[i]->forward(inputs);
+                std::unique_ptr<ITrtModule> transient;
+                ITrtModule* layer = nullptr;
+                if (static_cast<std::size_t>(i) < layers_.size()) {
+                    layer = layers_[i].get();
+                } else {
+                    const auto& plan = streamed_plans_.at(i - layers_.size());
+                    transient = backend_.create_module(plan.data(), plan.size(), {});
+                    if (!transient || !transient->ok())
+                        throw std::runtime_error("Kolibri1 streamed engine failed to load");
+                    layer = transient.get();
+                }
+                const auto predicted = layer->forward(inputs);
                 const auto& result = output(predicted, "result", width, DType::kFloat16);
                 const auto& key = output(predicted, "present_k", cache_count, DType::kFloat16);
                 const auto& value = output(predicted, "present_v", cache_count, DType::kFloat16);
@@ -136,8 +149,10 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
     }
 
   private:
+    IBackend& backend_;
     std::unique_ptr<ITrtModule> embedding_;
     std::vector<std::unique_ptr<ITrtModule>> layers_;
+    std::vector<std::vector<char>> streamed_plans_;
     std::unique_ptr<ITrtModule> head_;
     std::unique_ptr<ITokenizer> tokenizer_;
     nlohmann::json cfg_;
@@ -171,14 +186,24 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
             throw std::runtime_error("Kolibri1 engine failed to load: " + name);
         return engine;
     };
-    // Read and deserialize one plan at a time; never retain a full CPU weight copy.
+    // Keep half the decoder engines resident and retain the remaining serialized
+    // plans on the host. Stream one transient engine at a time without rereading
+    // its large plan for every token. KV state remains explicit and family-owned.
     auto embedding = load("embedding.plan");
     std::vector<std::unique_ptr<ITrtModule>> engines;
-    for (int32_t i = 0; i < layers; ++i)
-        engines.push_back(load("layer." + std::to_string(i) + ".plan"));
+    std::vector<std::vector<char>> streamed_plans;
+    const int32_t resident_layers = (layers + 1) / 2;
+    for (int32_t i = 0; i < layers; ++i) {
+        const auto name = "layer." + std::to_string(i) + ".plan";
+        if (i < resident_layers)
+            engines.push_back(load(name));
+        else
+            streamed_plans.push_back(kolibri1::section(context.reader, name.c_str()));
+    }
     auto head = load("head.plan");
     const auto raw_tokenizer = kolibri1::section(context.reader, "tokenizer.json");
     auto tokenizer = CreateBpeTokenizer(raw_tokenizer.data(), raw_tokenizer.size(), false);
-    return new kolibri1::Pipeline(std::move(embedding), std::move(engines), std::move(head),
-                                  std::move(tokenizer), cfg);
+    return new kolibri1::Pipeline(context.backend, std::move(embedding), std::move(engines),
+                                  std::move(streamed_plans), std::move(head), std::move(tokenizer),
+                                  cfg);
 }
