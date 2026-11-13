@@ -521,6 +521,25 @@ def _square_crop(path: Path, cache: Path) -> Path:
     return target
 
 
+def _cover_crop(path: Path, cache: Path, width: int, height: int) -> Path:
+    """The image scaled to cover ``width`` x ``height`` and center-cropped to it (cached by content and size), for
+    a model that takes a conditioning image only at its built size: both sides get the same pixels."""
+    from PIL import Image
+
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()[:24]
+    target = cache / "trtmc-derived" / f"{digest}-{width}x{height}.png"
+    if not target.is_file():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(path) as image:
+            rgb = image.convert("RGB")
+            scale = max(width / rgb.width, height / rgb.height)
+            size = (max(width, round(rgb.width * scale)), max(height, round(rgb.height * scale)))
+            rgb = rgb.resize(size, Image.Resampling.BICUBIC)
+            left, top = (rgb.width - width) // 2, (rgb.height - height) // 2
+            rgb.crop((left, top, left + width, top + height)).save(target)
+    return target
+
+
 SELECTION_SEED = 20261003  # the seeded selections of every suite
 ETTH1_TRAIN_ROWS = 8640  # the standard split's training months: the scaler of the scored MSE
 
@@ -774,6 +793,9 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
         request.update(definition.get("request") or {})
         for source_field, request_field in (definition.get("fields") or {}).items():
             request[request_field] = record[source_field] if source_field in record else _field(record, source_field)
+        for field in definition.get("fit_to_request", []):  # an image at the request's width x height
+            request[field] = str(_cover_crop(Path(request[field]), Path(environment["hf_datasets_cache"]),
+                                             int(request["width"]), int(request["height"])))
         if isinstance(request.get("prompt"), str) and (definition.get("prompt_prefix") or definition.get("prompt_suffix")):
             request["prompt"] = f"{definition.get('prompt_prefix', '')}{request['prompt']}{definition.get('prompt_suffix', '')}"
         try:  # the media go to the shared store once; the request keeps their digests

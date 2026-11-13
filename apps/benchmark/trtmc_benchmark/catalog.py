@@ -331,6 +331,7 @@ def resolve_case(
     request = dict(resolution.request)
     if resolution.task in {
         "image_generation", "image_edit", "image_generation_batch", "world_model_generation",
+        "initial_image_text_to_video",
     }:
         for field, manifest_field in (
             ("height", "image_height"),

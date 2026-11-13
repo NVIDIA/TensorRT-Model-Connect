@@ -15,6 +15,7 @@ from trtmc_benchmark.types import BenchmarkError
     ("monocular_depth", "depth", "depth_images"),
     ("points_to_semantic_segmentation", "segment_points", "segmented_points"),
     ("images_state_text_to_action_chunk", "control_chunk", "action_values"),
+    ("initial_image_text_to_video", "generate_image", "generated_images"),
 ])
 def test_new_tasks_have_an_operation_and_its_rate(task, operation, observed):
     assert task in supported_tasks()
@@ -80,3 +81,14 @@ def test_recorded_frames_send_named_cameras_state_instruction_and_noise(tmp_path
     case["inputs"]["cameras"] = {"observation.images.image": "missing.png"}
     with pytest.raises(BenchmarkError):
         resolve_task_case("images_state_text_to_action_chunk", case, tmp_path)
+
+
+def test_image_to_video_requests_send_only_the_stated_controls_and_an_optional_image(tmp_path):
+    (tmp_path / "start.png").write_bytes(b"fixture")
+    case = {"test_prompt": "waves", "initial_image": True, "num_inference_steps": 50, "guidance_scale": 5.0,
+            "seed": 42}
+    flagged = resolve_task_case("initial_image_text_to_video", case, tmp_path)
+    assert flagged.operation == "generate_image"
+    assert flagged.request == {"prompt": "waves", "seed": 42, "num_steps": 50, "guidance_scale": 5.0}
+    pictured = resolve_task_case("initial_image_text_to_video", {**case, "image": "start.png"}, tmp_path)
+    assert pictured.request["image_path"] == str(tmp_path / "start.png")

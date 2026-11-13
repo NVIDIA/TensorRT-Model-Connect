@@ -332,6 +332,13 @@ tasks:
     # validity and coarse agreement (PSNR >= 5 dB, SSIM >= 0.1); action-conditional fidelity is not covered.
     supplementary: [{check: world_model_parity, suite: coco-world-model-10, min_psnr_db: 5.0, min_ssim: 0.1}]
     performance: *media_policy
+  initial_image_text_to_video:  # the family states its native pipeline (reference.adapter)
+    reference: {precision: bf16}
+    # 10 COCO images fitted to the profile's video size, with the catalog's prompt and seed on both sides: video
+    # validity (frame count, motion) and coarse agreement (PSNR >= 5 dB, SSIM >= 0.1); the two sides draw their
+    # noise differently, so pixel fidelity and prompt following are not covered.
+    supplementary: [{check: world_model_parity, suite: coco-initial-image-video-10, min_psnr_db: 5.0, min_ssim: 0.1}]
+    performance: {<<: *media_policy, suite: coco-initial-image-video-1}
 
   time_series_forecast: &forecast
     absolute: [etth1]

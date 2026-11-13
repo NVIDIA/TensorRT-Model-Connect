@@ -489,3 +489,19 @@ def test_action_parity_takes_an_absolute_tolerance_in_robot_units():
     assert gold_metrics.action_parity(close, native, {"max_error_of_range": 0.001})[0] is False
     assert gold_metrics.action_parity(close, native, {"max_error_of_range": 0.001, "max_abs_error": 0.03})[0] is True
     assert gold_metrics.action_parity(close, native, {"max_abs_error": 0.01})[0] is False
+
+
+def test_a_fitted_image_covers_the_video_size_and_keeps_its_center(tmp_path):
+    from PIL import Image
+
+    from trtmc_aiperf_qual.suites import _cover_crop
+
+    source = tmp_path / "wide.png"
+    pixels = np.zeros((40, 80, 3), np.uint8)
+    pixels[:, 30:50] = 255  # a white band in the middle third
+    Image.fromarray(pixels).save(source)
+    fitted = _cover_crop(source, tmp_path / "cache", 16, 32)
+    with Image.open(fitted) as image:
+        assert image.size == (16, 32)
+        assert np.asarray(image)[16, 8].tolist() == [255, 255, 255]
+    assert _cover_crop(source, tmp_path / "cache", 16, 32) == fitted

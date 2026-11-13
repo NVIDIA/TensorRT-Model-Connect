@@ -134,6 +134,7 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "monocular_depth": ("depth", 50, 500),
     "points_to_semantic_segmentation": ("segment_points", 50, 500),
     "images_state_text_to_action_chunk": ("control_chunk", 2, 10),
+    "initial_image_text_to_video": ("generate_image", 1, 5),
 }
 
 _ALLOWED_OPERATIONS: dict[str, frozenset[str]] = {
@@ -340,6 +341,8 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         return {"image_path": _semantic_asset(case, root, "image_path", "image", "test_image")}
     if task == "images_state_text_to_action_chunk":
         return _recorded_frame_request(case, root)
+    if task == "initial_image_text_to_video":
+        return _initial_image_video_request(case, root)
     if task == "points_to_semantic_segmentation":
         # Row-major float32 [num_points, input_dim] points (a raw .f32 file).
         sizes = {name: _explicit(case, name) for name in ("num_points", "input_dim")}
@@ -954,6 +957,24 @@ def _image_generation_request(task: str, case: Mapping[str, Any], root: Path) ->
     seeds = inputs.get("batch_seeds")
     if seeds is not None:
         request["seeds"] = [int(value) for value in seeds]
+    return request
+
+
+def _initial_image_video_request(case: Mapping[str, Any], root: Path) -> dict[str, Any]:
+    """The Task's inputs (prompt, initial image) and only the generation controls the testcase states; the
+    image is optional here because a testcase may only flag ``initial_image`` and leave the picture to the
+    benchmark (an AIPerf suite supplies one of the bundle's size)."""
+    base = _image_generation_request("image_generation", case, root)
+    request: dict[str, Any] = {"prompt": base["prompt"]}
+    if base["negative_prompt"]:
+        request["negative_prompt"] = base["negative_prompt"]
+    for name in ("seed", "num_steps", "height", "width"):
+        if base[name] > 0 or (name == "seed" and base[name] == 0):
+            request[name] = base[name]
+    if base["guidance_scale"] >= 0:
+        request["guidance_scale"] = base["guidance_scale"]
+    if _explicit(case, "image_path", "test_image", "image") is not _MISSING:
+        request["image_path"] = _image_path(case, root)
     return request
 
 

@@ -2577,8 +2577,9 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
     auto write_images = image_artifact_writer(request.at("_artifact_prefix").get<std::string>());
     auto write_inputs =
         image_artifact_writer(request.at("_artifact_prefix").get<std::string>() + ".input");
-    const bool video =
-        primary == trtmc::TextToVideo::kTask || primary == trtmc::ImageTextActionToVideo::kTask;
+    const bool initial = primary == trtmc::InitialImageTextToVideo::kTask;
+    const bool video = primary == trtmc::TextToVideo::kTask ||
+                       primary == trtmc::ImageTextActionToVideo::kTask || initial;
     if (request.contains("media_type") &&
         (!request.at("media_type").is_string() ||
          request.at("media_type").get<std::string>() != (video ? "video" : "image")))
@@ -2654,8 +2655,8 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
         paths = request.at("image_paths").get<std::vector<std::string>>();
     const bool edit = primary == trtmc::ImagesTextToImageEdit::kTask;
     const bool world = primary == trtmc::ImageTextActionToVideo::kTask;
-    if ((!edit && !world && !paths.empty()) || (edit && paths.empty()) ||
-        (world && paths.size() != 1))
+    if ((!edit && !world && !initial && !paths.empty()) || (edit && paths.empty()) ||
+        ((world || initial) && paths.size() != 1))
         throw std::invalid_argument("conditioning image count does not match the selected Task");
     const auto replay_path = request.value("initial_latents_path", std::string{});
     if (request.contains("initial_latents_path") && replay_path.empty())
@@ -2755,6 +2756,26 @@ Json run_generate_image(const trtmc::Model& model, const Json& request, const Ti
                                                  {assets.second.data(), assets.second.size()}};
             },
             observe_video);
+    }
+    if (initial) {
+        // The frame count is fixed by the bundle; a stated one must be what it produced.
+        const auto expected = request.value("num_frames", std::int64_t{0});
+        const auto task = task_for_operation<trtmc::InitialImageTextToVideo>(model, task_id);
+        const auto config = sdk_config(request, task.config_fields(),
+                                       {"prompt", "image_path", "image_paths", "num_frames",
+                                        "batch_size", "media_type", "_artifact_prefix"});
+        return run(
+            task, config,
+            [&](const auto& assets) {
+                return trtmc::InitialImageTextToVideoRequest{sdk_image_view(assets.first[0]),
+                                                             prompt};
+            },
+            [&](const trtmc::VideoGenerationResult& result) {
+                auto output = observe_video(result);
+                if (expected > 0 && output.at("num_frames").get<std::int64_t>() != expected)
+                    throw std::runtime_error("generated video does not have the stated num_frames");
+                return output;
+            });
     }
     if (!world)
         throw std::invalid_argument(

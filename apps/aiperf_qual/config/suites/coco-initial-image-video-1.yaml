@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The timed request of image-to-video profiles: the first image of coco-initial-image-video-10's seeded order,
+# fitted to the profile's video size like that suite's images.
+suite: coco-initial-image-video-1
+version: 1
+base: catalog
+source:
+  kind: hf_dataset
+  dataset: detection-datasets/coco
+  split: val
+  revision: cf0b22332314a937e9dc8a1957b21725430bb41d
+  data_files: {val: data/val-*.parquet}
+  image_column: image
+selection: {method: seeded, count: 1}
+fields: {image: image_path}
+fit_to_request: [image_path]
