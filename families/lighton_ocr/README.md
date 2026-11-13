@@ -40,8 +40,9 @@ The default sequence capacity is 4,096 tokens, shared by the expanded image
 prompt and output. The bundle stores `vision.plan`, `decoder.plan`, the FP32
 embedding table, tokenizer assets, and family-owned runtime metadata.
 The decoder maintains compact key/value caches during greedy generation.
-The default output budget is 1,024 tokens, including EOS. The runtime checks
-that each image prompt and requested output budget fit the bundle capacity.
+The default output budget, including EOS, is capped at 1,024 tokens and the
+bundle's sequence capacity. The runtime checks that each image prompt and
+requested output budget fit the bundle capacity.
 
 ## Native OCR
 
