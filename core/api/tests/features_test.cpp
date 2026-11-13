@@ -151,6 +151,34 @@ void spectral_features(const std::filesystem::path& root, const trtmc::LoadOptio
     std::filesystem::remove(path);
 }
 
+void document_features(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
+    using namespace trtmc;
+    const auto path = root / "document_features.bundle"; bundle(path, "document_features");
+    const float pixels[18]{};
+    const DocumentWordsToTokenFeaturesRequest input{ImageInput({pixels}, 2, 3), {{"First", {0.25F, 0, 1, 1}}, {"Last", {1, 1, 3, 2}}}};
+    const auto model = Model::load(path.string(), options); const auto task = model.task<DocumentWordsToTokenFeatures>();
+    auto result = Model::load(path.string(), options).task<DocumentWordsToTokenFeatures>().run(input);
+    check(result.features().rows == 4 && result.features().values[2] == 0.25F && result.features().values[4] == 2 &&
+          result.tokens()[0].word_index == -1 && result.tokens()[2].word_index == 1 && result.tokens()[3].word_index == -2 && result.source_word_count() == 2,
+          "document words preserve order, original pixel boxes and explicit text-token mapping");
+    check(model.tasks().size() == 1 && !model.supports<TextToTokenFeatures>(), "document features retain their own Task identity");
+    auto bad = input; bad.words[0].box.x_min = -1;
+    rejects([&] { task.run(bad); }, TRTMC_INVALID_ARGUMENT, "document box outside source rejected");
+    bad = input; bad.words[0].text.clear();
+    rejects([&] { task.run(bad); }, TRTMC_INVALID_ARGUMENT, "empty document word rejected");
+    bad = input; bad.words.clear();
+    rejects([&] { task.run(bad); }, TRTMC_INVALID_ARGUMENT, "empty document words rejected");
+    rejects([&] { task.run(input, {{"ocr", true}}); }, TRTMC_INVALID_CONFIG, "shared API does not invent OCR options");
+    for (const char* mode : {"document_bad_word", "document_bad_source", "document_bad_count"}) {
+        const auto file = root / (std::string(mode) + ".bundle"); bundle(file, mode);
+        rejects([&] { Model::load(file.string(), options).task<DocumentWordsToTokenFeatures>().run(input); }, TRTMC_INTERNAL_ERROR, "invalid family document mapping rejected");
+        std::filesystem::remove(file);
+    }
+    auto moved = std::move(result);
+    check(moved.tokens()[2].word_index == 1 && moved.features().values[2] == 0.25F && result.tokens().empty(), "document result retains feature and token ownership across moves");
+    std::filesystem::remove(path);
+}
+
 template <class Function>
 void rejects_index(Function function, trtmc_status code, size_t index, const char* message) {
     bool matched = false;
@@ -627,6 +655,8 @@ int main(int argc, char** argv) {
         options.runtime_root = root.string();
         video_features(root, options);
         spectral_features(root, options);
+
+        document_features(root, options);
         global_pooled_contracts(root, options);
         for (const std::string mode :
              {"all", "none", "missing", "bad_shape", "bad_count", "missing_pooler",
