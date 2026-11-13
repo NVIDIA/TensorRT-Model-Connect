@@ -304,11 +304,14 @@ struct SpectrogramFrameFeaturesStorage final : ResultStorage {
 };
 
 struct DocumentTokenFeaturesStorage final : ResultStorage {
-    explicit DocumentTokenFeaturesStorage(internal::DocumentTokenFeaturesResult result) : value(std::move(result)) {
+    explicit DocumentTokenFeaturesStorage(internal::DocumentTokenFeaturesResult result)
+        : value(std::move(result)) {
         result_require(value.source_word_count > 0 && value.tokens.size() == value.features.rows,
                        "document text rows lack source word mapping");
         for (const auto& token : value.tokens) {
-            result_require(token.word_index >= -2 && (token.word_index < 0 || static_cast<uint64_t>(token.word_index) < value.source_word_count),
+            result_require(token.word_index >= -2 &&
+                               (token.word_index < 0 ||
+                                static_cast<uint64_t>(token.word_index) < value.source_word_count),
                            "document token refers to an invalid input word");
             tokens.push_back({token.token_id, token.word_index, token.token_index});
         }
@@ -498,7 +501,8 @@ const trtmc_spectrogram_to_frame_features_api_v1 spectral_features_api{
 trtmc_status TRTMC_CALL document_features_run(
     trtmc_model* model, const trtmc_document_words_to_token_features_request_v1* input,
     const trtmc_config_view_v1* config, trtmc_result** output, trtmc_error** error) noexcept {
-    if (output) *output = nullptr;
+    if (output)
+        *output = nullptr;
     return guarded(error, [&] {
         require(input && output, "document feature request and output are required");
         const auto image = image_input(input->image);
@@ -507,23 +511,32 @@ trtmc_status TRTMC_CALL document_features_run(
         std::vector<internal::DocumentWordView> words;
         words.reserve(supplied.size());
         for (const auto& word : supplied) {
-            const auto text = string_view(word.text); const auto& b = word.box;
+            const auto text = string_view(word.text);
+            const auto& b = word.box;
             require(!text.empty(), "document word text must be nonempty");
-            require(std::isfinite(b.x_min) && std::isfinite(b.y_min) && std::isfinite(b.x_max) && std::isfinite(b.y_max) &&
-                    b.x_min >= 0 && b.y_min >= 0 && b.x_max >= b.x_min && b.y_max >= b.y_min && b.x_max <= image.width && b.y_max <= image.height,
+            require(std::isfinite(b.x_min) && std::isfinite(b.y_min) && std::isfinite(b.x_max) &&
+                        std::isfinite(b.y_max) && b.x_min >= 0 && b.y_min >= 0 &&
+                        b.x_max >= b.x_min && b.y_max >= b.y_min && b.x_max <= image.width &&
+                        b.y_max <= image.height,
                     "document word box must be inside the original image");
             words.push_back({text, {b.x_min, b.y_min, b.x_max, b.y_max}});
         }
-        const ConvertedConfig options(config); std::lock_guard<std::mutex> lock(model_mutex(model));
-        auto& family = require_interface<internal::IDocumentWordsToTokenFeatures>(model, internal::IDocumentWordsToTokenFeatures::kTask);
-        validate_task_config(model_owner(model), internal::contract_key<internal::IDocumentWordsToTokenFeatures>(), options.view());
+        const ConvertedConfig options(config);
+        std::lock_guard<std::mutex> lock(model_mutex(model));
+        auto& family = require_interface<internal::IDocumentWordsToTokenFeatures>(
+            model, internal::IDocumentWordsToTokenFeatures::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::IDocumentWordsToTokenFeatures>(),
+                             options.view());
         auto result = family.run({image, {words.data(), words.size()}}, options.view());
-        result_require(result.source_word_count == words.size(), "family changed the document input word count");
+        result_require(result.source_word_count == words.size(),
+                       "family changed the document input word count");
         *output = make_result<DocumentTokenFeaturesStorage>(std::move(result));
     });
 }
 const trtmc_document_words_to_token_features_api_v1 document_features_api{
-    {1, 0, sizeof(document_features_api)}, document_features_run,
+    {1, 0, sizeof(document_features_api)},
+    document_features_run,
     result_view<DocumentTokenFeaturesStorage, trtmc_document_token_features_view_v1>};
 
 template <class Interface, class Request, class Storage>

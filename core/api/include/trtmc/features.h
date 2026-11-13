@@ -7,8 +7,8 @@
 #define TRTMC_FEATURES_H
 
 #include "trtmc/image.h"
-#include "trtmc/perception.h"
 #include "trtmc/matrix.h"
+#include "trtmc/perception.h"
 #include "trtmc/scores.h"
 #include "trtmc/video.h"
 
@@ -683,13 +683,19 @@ typedef struct {
 
 /* Caller-supplied words in reading order with original-image XYXY pixel boxes.
  * The shared boundary never runs OCR or normalizes boxes into checkpoint units. */
-typedef struct { trtmc_string_view text; trtmc_pixel_box_v1 box; } trtmc_document_word_v1;
+typedef struct {
+    trtmc_string_view text;
+    trtmc_pixel_box_v1 box;
+} trtmc_document_word_v1;
 typedef struct {
     trtmc_image_input_v1 image;
     const trtmc_document_word_v1* words;
     uint64_t word_count;
 } trtmc_document_words_to_token_features_request_v1;
-typedef struct { int64_t token_id, word_index; uint64_t token_index; } trtmc_document_feature_token_v1;
+typedef struct {
+    int64_t token_id, word_index;
+    uint64_t token_index;
+} trtmc_document_feature_token_v1;
 typedef struct {
     trtmc_f32_matrix_view_v1 features;
     const trtmc_document_feature_token_v1* tokens;
@@ -698,9 +704,11 @@ typedef struct {
 #define TRTMC_TASK_DOCUMENT_WORDS_TO_TOKEN_FEATURES "document_words_to_token_features"
 typedef struct {
     trtmc_api_header header;
-    trtmc_status(TRTMC_CALL* run)(trtmc_model*, const trtmc_document_words_to_token_features_request_v1*,
+    trtmc_status(TRTMC_CALL* run)(trtmc_model*,
+                                  const trtmc_document_words_to_token_features_request_v1*,
                                   const trtmc_config_view_v1*, trtmc_result**, trtmc_error**);
-    trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_document_token_features_view_v1*, trtmc_error**);
+    trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*,
+                                          trtmc_document_token_features_view_v1*, trtmc_error**);
 } trtmc_document_words_to_token_features_api_v1;
 
 #ifdef __cplusplus

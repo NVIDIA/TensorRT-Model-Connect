@@ -6,8 +6,8 @@
 #pragma once
 
 #include "trtmc/internal/image.h"
-#include "trtmc/internal/perception.h"
 #include "trtmc/internal/matrix.h"
+#include "trtmc/internal/perception.h"
 #include "trtmc/internal/scores.h"
 #include "trtmc/internal/text.h"
 #include "trtmc/internal/video.h"
@@ -600,8 +600,14 @@ class ISpectrogramToFrameFeatures {
 
 // Ordered caller-supplied document words and original-image pixel boxes.
 // OCR, tokenization and checkpoint coordinate normalization are family-owned.
-struct DocumentWordView { std::string_view text; PixelBox box; };
-struct DocumentWordsToTokenFeaturesRequest { ImageView image; Span<const DocumentWordView> words; };
+struct DocumentWordView {
+    std::string_view text;
+    PixelBox box;
+};
+struct DocumentWordsToTokenFeaturesRequest {
+    ImageView image;
+    Span<const DocumentWordView> words;
+};
 struct DocumentFeatureToken {
     int64_t token_id{0}, word_index{-1}; // -1 special, -2 padding; otherwise input word index.
     uint64_t token_index{0};
@@ -616,7 +622,8 @@ class IDocumentWordsToTokenFeatures {
     using TaskInterface = IDocumentWordsToTokenFeatures;
     static constexpr std::string_view kTask = "document_words_to_token_features";
     virtual ~IDocumentWordsToTokenFeatures() = default;
-    virtual DocumentTokenFeaturesResult run(const DocumentWordsToTokenFeaturesRequest&, ConfigView) = 0;
+    virtual DocumentTokenFeaturesResult run(const DocumentWordsToTokenFeaturesRequest&,
+                                            ConfigView) = 0;
 };
 
 } // namespace trtmc::internal
