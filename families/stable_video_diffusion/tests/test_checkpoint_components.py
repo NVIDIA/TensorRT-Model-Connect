@@ -3,9 +3,10 @@
 
 """One call of each engine built from the real checkpoint against its reference module.
 
-Runs only with TRTMC_STABLE_VIDEO_DIFFUSION_MODEL_DIR pointing at the checkpoint
-and a CUDA GPU. Shapes are reduced (the graphs are shape-specialized, the weights
-are the real ones). The oracles are relative to the reference itself: an FP32
+A hardware test (GPU and TensorRT). The checkpoint is the E2E manifests' pinned
+revision, from TRTMC_STABLE_VIDEO_DIFFUSION_MODEL_DIR or the Hugging Face cache, as
+the E2E resolves it. Shapes are reduced (the graphs are shape-specialized, the
+weights are the real ones). The oracles are relative to the reference itself: an FP32
 engine's error against a float64 run of the reference must stay within a small
 factor of the reference's own FP32 error, and an FP16 engine's error against the
 reference's FP32 run within a per-component factor of the reference's own FP16
@@ -14,6 +15,7 @@ error.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 from pathlib import Path
@@ -33,10 +35,8 @@ from families.stable_video_diffusion.model import (  # noqa: E402
     _vae_encoder_work,
 )
 
-MODEL_DIR = os.environ.get("TRTMC_STABLE_VIDEO_DIFFUSION_MODEL_DIR")
-pytestmark = pytest.mark.skipif(
-    not MODEL_DIR or not torch.cuda.is_available(),
-    reason="needs TRTMC_STABLE_VIDEO_DIFFUSION_MODEL_DIR and a CUDA GPU")
+pytestmark = [pytest.mark.gpu, pytest.mark.trt]
+MANIFEST = Path(__file__).resolve().parent / "manifests" / "svd-xt-fp32.json"
 FRAMES = 3
 LATENT = (8, 16)
 # Allowed ratio of the engine's error to the reference's own error at the same precision.
@@ -51,6 +51,19 @@ LATENT = (8, 16)
 # accumulation in the UNet is caught by the end-to-end FP16 shortfall bound.
 FP32_RATIO = 2.0
 FP16_RATIOS = {"image encoder": 2.0, "VAE encoder": 1.5, "VAE decoder": 1.5, "UNet": 1.5}
+
+
+@pytest.fixture(scope="module")
+def model_dir() -> Path:
+    """The pinned checkpoint, resolved as the E2E resolves it."""
+    explicit = os.environ.get("TRTMC_STABLE_VIDEO_DIFFUSION_MODEL_DIR")
+    if explicit:
+        return Path(explicit)
+    from huggingface_hub import snapshot_download
+
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    return Path(snapshot_download(repo_id=manifest["hf_id"], revision=manifest["hf_revision"],
+                                  local_files_only=True))
 
 
 @pytest.fixture(autouse=True)
@@ -118,8 +131,7 @@ def _check(name: str, precision: str, actual, reference, baseline) -> None:
 
 
 @pytest.mark.parametrize("precision", ["fp32", "fp16"])
-def test_image_encoder_matches_the_checkpoint(precision):
-    model_dir = Path(MODEL_DIR)
+def test_image_encoder_matches_the_checkpoint(precision, model_dir):
     cfg = config_module.resolve(model_dir)
     weights = _load_weights(model_dir, "image_encoder", "model.safetensors")
     work = _work(precision)
@@ -135,8 +147,7 @@ def test_image_encoder_matches_the_checkpoint(precision):
 
 
 @pytest.mark.parametrize("precision", ["fp32", "fp16"])
-def test_vae_matches_the_checkpoint(precision):
-    model_dir = Path(MODEL_DIR)
+def test_vae_matches_the_checkpoint(precision, model_dir):
     cfg = config_module.resolve(model_dir)
     weights = _load_weights(model_dir, "vae", "diffusion_pytorch_model.safetensors")
     height, width = LATENT[0] * 8, LATENT[1] * 8
@@ -172,8 +183,7 @@ def test_vae_matches_the_checkpoint(precision):
 
 
 @pytest.mark.parametrize("precision", ["fp32", "fp16"])
-def test_unet_matches_the_checkpoint(precision):
-    model_dir = Path(MODEL_DIR)
+def test_unet_matches_the_checkpoint(precision, model_dir):
     cfg = config_module.resolve(model_dir)
     weights = _load_weights(model_dir, "unet", "diffusion_pytorch_model.safetensors")
     work = _work(precision)
