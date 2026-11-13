@@ -32,13 +32,15 @@ int main() {
         return 1;
     } catch (const std::invalid_argument&) {
     }
+    const std::vector<float> short_audio(511, 0.0F);
     try {
-        (void)trtmc::cohere_asr::features(audio.data(), 511, window, filters);
+        (void)trtmc::cohere_asr::features(short_audio.data(), short_audio.size(), window, filters);
         return 1;
     } catch (const std::invalid_argument&) {
     }
+    const std::vector<float> long_audio(560001, 0.0F);
     try {
-        (void)trtmc::cohere_asr::features(audio.data(), 560001, window, filters);
+        (void)trtmc::cohere_asr::features(long_audio.data(), long_audio.size(), window, filters);
         return 1;
     } catch (const std::invalid_argument&) {
     }
