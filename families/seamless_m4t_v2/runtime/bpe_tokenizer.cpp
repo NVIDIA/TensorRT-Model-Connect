@@ -5,9 +5,6 @@
 
 #include "families/seamless_m4t_v2/runtime/tokenizer.h"
 
-#include <unicode/normalizer2.h>
-#include <unicode/regex.h>
-#include <unicode/uchar.h>
 #include <algorithm>
 #include <cassert>
 #include <climits>
@@ -18,6 +15,9 @@
 #include <queue>
 #include <stdexcept>
 #include <string>
+#include <unicode/normalizer2.h>
+#include <unicode/regex.h>
+#include <unicode/uchar.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -611,7 +611,8 @@ class BpeTokenizer final : public ITokenizer {
 
     void encode_segment(const std::string& text, std::vector<int32_t>& result) const {
         const auto normalized = normalize_text(text);
-        if (normalized.empty()) return;
+        if (normalized.empty())
+            return;
         if (mIsSentencePiece) {
             encode_sentencepiece(normalized, result);
         } else if (mIsMetaspace) {
@@ -685,12 +686,14 @@ class BpeTokenizer final : public ITokenizer {
             if (type == "NFKC") {
                 auto* normalizer = icu::Normalizer2::getNFKCInstance(status);
                 icu::UnicodeString next;
-                if (U_SUCCESS(status)) normalizer->normalize(normalized, next, status);
+                if (U_SUCCESS(status))
+                    normalizer->normalize(normalized, next, status);
                 normalized = std::move(next);
             } else if (type == "Strip") {
                 if (operation.value("strip_left", false)) {
                     int32_t first = 0;
-                    while (first < normalized.length() && u_isUWhiteSpace(normalized.char32At(first)))
+                    while (first < normalized.length() &&
+                           u_isUWhiteSpace(normalized.char32At(first)))
                         first = normalized.moveIndex32(first, 1);
                     normalized.remove(0, first);
                 }
@@ -698,28 +701,39 @@ class BpeTokenizer final : public ITokenizer {
                     int32_t end = normalized.length();
                     while (end > 0) {
                         const int32_t previous = normalized.moveIndex32(end, -1);
-                        if (!u_isUWhiteSpace(normalized.char32At(previous))) break;
+                        if (!u_isUWhiteSpace(normalized.char32At(previous)))
+                            break;
                         end = previous;
                     }
                     normalized.truncate(end);
                 }
             } else if (type == "Replace") {
-                const auto replacement = icu::UnicodeString::fromUTF8(operation.at("content").get<std::string>());
+                const auto replacement =
+                    icu::UnicodeString::fromUTF8(operation.at("content").get<std::string>());
                 const auto& pattern = operation.at("pattern");
                 if (pattern.contains("Regex")) {
                     std::unique_ptr<icu::RegexPattern> regex(icu::RegexPattern::compile(
-                        icu::UnicodeString::fromUTF8(pattern.at("Regex").get<std::string>()), 0, status));
-                    if (U_FAILURE(status)) throw std::runtime_error("Invalid SeamlessM4T normalization regex");
+                        icu::UnicodeString::fromUTF8(pattern.at("Regex").get<std::string>()), 0,
+                        status));
+                    if (U_FAILURE(status))
+                        throw std::runtime_error("Invalid SeamlessM4T normalization regex");
                     std::unique_ptr<icu::RegexMatcher> matcher(regex->matcher(normalized, status));
-                    if (U_FAILURE(status)) throw std::runtime_error("Invalid SeamlessM4T normalization matcher");
+                    if (U_FAILURE(status))
+                        throw std::runtime_error("Invalid SeamlessM4T normalization matcher");
                     normalized = matcher->replaceAll(replacement, status);
                 } else {
-                    normalized.findAndReplace(icu::UnicodeString::fromUTF8(pattern.at("String").get<std::string>()), replacement);
+                    normalized.findAndReplace(
+                        icu::UnicodeString::fromUTF8(pattern.at("String").get<std::string>()),
+                        replacement);
                 }
-            } else throw std::runtime_error("Unsupported SeamlessM4T text normalizer");
-            if (U_FAILURE(status)) throw std::runtime_error("SeamlessM4T normalization failed");
+            } else
+                throw std::runtime_error("Unsupported SeamlessM4T text normalizer");
+            if (U_FAILURE(status))
+                throw std::runtime_error("SeamlessM4T normalization failed");
         }
-        std::string result; normalized.toUTF8String(result); return result;
+        std::string result;
+        normalized.toUTF8String(result);
+        return result;
     }
 
     struct Segment {
@@ -857,7 +871,8 @@ class BpeTokenizer final : public ITokenizer {
                 result.push_back(it->second);
                 previous_unknown = false;
             } else {
-                if (!previous_unknown) result.push_back(mTokenToId.at("<unk>"));
+                if (!previous_unknown)
+                    result.push_back(mTokenToId.at("<unk>"));
                 previous_unknown = true;
             }
         }
@@ -1405,7 +1420,8 @@ class BpeTokenizer final : public ITokenizer {
         parse_added_tokens(j);
         parse_post_processor(j);
         mTextNormalizer = j.at("normalizer");
-        if (mTextNormalizer.value("type", "") != "Sequence") throw std::runtime_error("Expected SeamlessM4T normalizer sequence");
+        if (mTextNormalizer.value("type", "") != "Sequence")
+            throw std::runtime_error("Expected SeamlessM4T normalizer sequence");
         detect_normalizer(j);
         detect_pre_tokenizer(j);
         detect_decoder(j);
