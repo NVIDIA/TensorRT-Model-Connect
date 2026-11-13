@@ -631,6 +631,32 @@ class SpatialModel final : public IModel, public ISpatialFeaturesToClassScores {
     std::string mode_;
 };
 
+class SpectralFeaturesFixture final : public IModel, public ISpectrogramToFrameFeatures {
+  public:
+    explicit SpectralFeaturesFixture(std::string mode) : mode_(std::move(mode)) {}
+    const char* task() const noexcept override { return mode_.c_str(); }
+    std::vector<TaskInstance> task_bindings() override { return {bind<ISpectrogramToFrameFeatures>(*this)}; }
+    SpectrogramFrameFeaturesResult run(const SpectrogramToFrameFeaturesRequest& input, ConfigView config) override {
+        validate_config({}, config);
+        SpectrogramFrameFeaturesResult result;
+        result.source_frame_count = input.spectrogram.rows; result.features.columns = 2;
+        for (uint64_t index = 0; index < input.spectrogram.rows; index += 2) {
+            result.input_frame_indices.push_back(index);
+            const auto begin = index * input.spectrogram.columns;
+            result.features.values.push_back(input.spectrogram.values[begin]);
+            result.features.values.push_back(input.spectrogram.values[begin + input.spectrogram.columns - 1]);
+        }
+        result.features.rows = result.input_frame_indices.size();
+        if (mode_ == "spectral_bad_source") ++result.source_frame_count;
+        if (mode_ == "spectral_bad_index") result.input_frame_indices[0] = result.source_frame_count;
+        if (mode_ == "spectral_bad_count") result.input_frame_indices.pop_back();
+        if (mode_ == "spectral_bad_shape") ++result.features.rows;
+        return result;
+    }
+  private:
+    std::string mode_;
+};
+
 class MissingFixture final : public IModel {
   public:
     const char* task() const noexcept override { return "missing"; }
@@ -644,6 +670,8 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         throw std::runtime_error("wrong feature fixture family");
     if (context.reader.info().task.rfind("spatial_", 0) == 0)
         return new SpatialModel(context.reader.info().task);
+    if (context.reader.info().task.rfind("spectral_", 0) == 0)
+        return new SpectralFeaturesFixture(context.reader.info().task);
     if (context.reader.info().task == "missing")
         return new MissingFixture;
     return new FeaturesFixture(context.reader.info().task);

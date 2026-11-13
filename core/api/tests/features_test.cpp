@@ -49,6 +49,37 @@ void rejects(Function function, trtmc_status expected, const char* message) {
     check(rejected, message);
 }
 
+void spectral_features(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
+    using namespace trtmc;
+    const auto path = root / "spectral_frames.bundle"; bundle(path, "spectral_frames");
+    const float values[]{-2, 1, 3, 7, -5, 9, 2, 0, 6};
+    const SpectrogramToFrameFeaturesRequest input{{{values, 9}, 3, 3}};
+    const auto model = Model::load(path.string(), options);
+    const auto task = model.task<SpectrogramToFrameFeatures>();
+    auto retained = Model::load(path.string(), options).task<SpectrogramToFrameFeatures>().run(input);
+    check(retained.features().rows == 2 && retained.features().columns == 2 &&
+          retained.features().values[0] == -2 && retained.features().values[3] == 6 &&
+          retained.input_frame_indices()[0] == 0 && retained.input_frame_indices()[1] == 2 && retained.source_frame_count() == 3,
+          "spectral input values and temporal row mapping remain family-owned");
+    check(model.tasks().size() == 1 && !model.supports<TextToTokenFeatures>() && task.config_fields().empty(),
+          "spectral feature Task is independently discoverable");
+    rejects([&] { task.run(input, {{"normalize", true}}); }, TRTMC_INVALID_CONFIG, "undeclared spectral options rejected");
+    rejects([&] { task.run({{{values, 9}, 4, 3}}); }, TRTMC_INVALID_ARGUMENT, "spectral shape mismatch rejected");
+    rejects([&] { task.run({{{nullptr, 9}, 3, 3}}); }, TRTMC_INVALID_ARGUMENT, "spectral null storage rejected");
+    rejects([&] { task.run({{{values, 9}, UINT64_MAX, 3}}); }, TRTMC_INVALID_ARGUMENT, "spectral shape overflow rejected");
+    rejects([&] { task.run({{{}, 0, 3}}); }, TRTMC_INVALID_ARGUMENT, "empty spectral input rejected");
+    for (const char* mode : {"spectral_bad_source", "spectral_bad_index", "spectral_bad_count", "spectral_bad_shape"}) {
+        const auto bad = root / (std::string(mode) + ".bundle"); bundle(bad, mode);
+        rejects([&] { Model::load(bad.string(), options).task<SpectrogramToFrameFeatures>().run(input); }, TRTMC_INTERNAL_ERROR,
+                "invalid family spectral row mapping rejected");
+        std::filesystem::remove(bad);
+    }
+    auto moved = std::move(retained);
+    check(moved.input_frame_indices()[1] == 2 && moved.features().values[3] == 6 && retained.input_frame_indices().empty(),
+          "spectral result retains matrix and row mapping ownership across moves");
+    std::filesystem::remove(path);
+}
+
 template <class Function>
 void rejects_index(Function function, trtmc_status code, size_t index, const char* message) {
     bool matched = false;
@@ -523,6 +554,7 @@ int main(int argc, char** argv) {
         const std::filesystem::path root(argv[1]);
         trtmc::LoadOptions options;
         options.runtime_root = root.string();
+        spectral_features(root, options);
         global_pooled_contracts(root, options);
         for (const std::string mode :
              {"all", "none", "missing", "bad_shape", "bad_count", "missing_pooler",

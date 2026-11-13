@@ -934,4 +934,46 @@ class SpatialFeaturesToClassScores {
     const trtmc_spatial_features_to_class_scores_api_v1* api_;
 };
 
+struct SpectrogramToFrameFeaturesRequest { FloatMatrixView spectrogram; };
+class SpectrogramFrameFeaturesResult
+    : public detail::FeatureResultOwner<trtmc_spectrogram_frame_features_view_v1> {
+  public:
+    using FeatureResultOwner::FeatureResultOwner;
+    FloatMatrixView features() const noexcept { return detail::feature_matrix(view_.features); }
+    Span<const uint64_t> input_frame_indices() const noexcept {
+        return {view_.input_frame_indices.data, static_cast<size_t>(view_.input_frame_indices.size)};
+    }
+    uint64_t source_frame_count() const noexcept { return view_.source_frame_count; }
+};
+class SpectrogramToFrameFeatures {
+  public:
+    static constexpr std::string_view kTask = TRTMC_TASK_SPECTROGRAM_TO_FRAME_FEATURES;
+    static constexpr uint32_t kMajor = 1, kMinor = 0;
+    static void validate_table(const trtmc_api_header* table) {
+        if (!table || table->major != 1 || table->minor != 0 ||
+            table->byte_size < sizeof(trtmc_spectrogram_to_frame_features_api_v1))
+            throw Error(TRTMC_VERSION_MISMATCH, "incompatible spectral feature Task table");
+    }
+    std::vector<ConfigField> config_fields() const { return detail::config_fields(state_, kTask, 1, 0); }
+    SpectrogramFrameFeaturesResult run(const SpectrogramToFrameFeaturesRequest& input,
+                                      const Config& config = {}) const {
+        const trtmc_spectrogram_to_frame_features_request_v1 request{input.spectrogram.c_view()};
+        const auto entries = config.c_entries(); const auto options = entries.view();
+        trtmc_result* raw = nullptr; trtmc_error* error = nullptr;
+        auto status = api_->run(state_->handle, &request, &options, &raw, &error);
+        SpectrogramFrameFeaturesResult result(state_, raw);
+        detail::check(state_->api, status, error);
+        error = nullptr;
+        status = api_->result_view(raw, &result.wire_view(), &error);
+        detail::check(state_->api, status, error);
+        return result;
+    }
+  private:
+    friend class Model;
+    SpectrogramToFrameFeatures(std::shared_ptr<detail::ModelState> state, const trtmc_api_header* table) noexcept
+        : state_(std::move(state)), api_(reinterpret_cast<const trtmc_spectrogram_to_frame_features_api_v1*>(table)) {}
+    std::shared_ptr<detail::ModelState> state_;
+    const trtmc_spectrogram_to_frame_features_api_v1* api_;
+};
+
 } // namespace trtmc
