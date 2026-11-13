@@ -18,8 +18,9 @@ comparing full generated video and stereo PCM. The provided sigma grid is
 shifted independently by 12 for video and 3 for audio.
 
 The family loads engines in phases. Text blocks are consumed once and released;
-denoiser blocks remain resident for the six steps; video and audio decoders are
-loaded afterward. It returns one completed synchronized clip per request.
+each sampling step loads and releases one denoiser block at a time to bound
+live weights and execution workspace. Video and audio decoders load afterward.
+It returns one completed synchronized clip per request.
 Keyframes, references, batching, quantization and larger profiles are outside
 this bring-up.
 

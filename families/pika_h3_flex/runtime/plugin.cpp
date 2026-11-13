@@ -83,8 +83,6 @@ class Pipeline final : public internal::IModel, public internal::ITextToAudioVid
         constexpr int video_rows = 14430, audio_rows = 414, width = 5376;
         const int total = text_rows + audio_rows + video_rows;
         auto prepare = loader_.load("denoise.prepare"), time_engine = loader_.load("denoise.time"), head = loader_.load("denoise.head");
-        std::vector<std::unique_ptr<ITrtModule>> layers;
-        for (int i = 0; i < 50; ++i) layers.push_back(loader_.load("denoise.layer." + std::to_string(i)));
         BF cos(total * 96), sin(total * 96);
         const double root = std::sqrt(30.0 * 52), hy = (1 - 30.0 / root) / 2, wx = (1 - 52.0 / root) / 2;
         constexpr std::array<int, 5> spans{1, 4, 4, 4, 4};
@@ -133,13 +131,17 @@ class Pipeline final : public internal::IModel, public internal::ITextToAudioVid
                 {"context", tensor(context.data(), {text_rows, 5120}, DType::kBFloat16)},
                 {"video", tensor(video.data(), {video_rows, 96}, DType::kFloat32)},
                 {"audio", tensor(audio.data(), {audio_rows, 32}, DType::kFloat32)}}), "result", total * width);
-            for (auto& layer : layers)
+            // Each execution context owns activation workspace. Consume and
+            // release one block at a time to bound live weights and workspace.
+            for (int i = 0; i < 50; ++i) {
+                auto layer = loader_.load("denoise.layer." + std::to_string(i));
                 hidden = copy_bf(layer->forward({
                     {"hidden", tensor(hidden.data(), {total, width}, DType::kBFloat16)},
                     {"time", tensor(time.data(), {time_rows, 2688}, DType::kBFloat16)},
                     {"adaln_indices", tensor(adaln_indices.data(), {total}, DType::kInt32)},
                     {"cos", tensor(cos.data(), {1, total, 1, 96}, DType::kBFloat16)},
                     {"sin", tensor(sin.data(), {1, total, 1, 96}, DType::kBFloat16)}}), "result", total * width);
+            }
             const auto predicted = head->forward({
                 {"hidden", tensor(hidden.data(), {total, width}, DType::kBFloat16)},
                 {"time", tensor(time.data(), {time_rows, 2688}, DType::kBFloat16)},
