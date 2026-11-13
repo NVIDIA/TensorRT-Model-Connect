@@ -734,7 +734,7 @@ def _family_input_records(source: Mapping[str, Any], selection: Mapping[str, Any
     count = int(selection.get("count", 1))
     completed = subprocess.run([str(require(source, "python", "source")), str(repo / source["module"]), "--count",
                                 str(count), "--output", str(output)], capture_output=True, text=True, timeout=3600,
-                               cwd=repo, env={**os.environ, "PYTHONPATH": f"{repo}:{repo}/apps/perf_serving"})
+                               cwd=repo, env={**os.environ, "PYTHONPATH": f"{repo}:{repo}/apps/perf_serving:{repo}/core/builder"})
     if completed.returncode:
         raise ConfigError(f"{source['module']} failed: {completed.stderr[-600:]}")
     return json.loads(completed.stdout.strip().splitlines()[-1])
