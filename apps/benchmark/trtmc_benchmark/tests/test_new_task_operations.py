@@ -16,6 +16,7 @@ from trtmc_benchmark.types import BenchmarkError
     ("points_to_semantic_segmentation", "segment_points", "segmented_points"),
     ("images_state_text_to_action_chunk", "control_chunk", "action_values"),
     ("initial_image_text_to_video", "generate_image", "generated_images"),
+    ("structure_prediction", "predict_structure", "structures"),
 ])
 def test_new_tasks_have_an_operation_and_its_rate(task, operation, observed):
     assert task in supported_tasks()
@@ -92,3 +93,10 @@ def test_image_to_video_requests_send_only_the_stated_controls_and_an_optional_i
     assert flagged.request == {"prompt": "waves", "seed": 42, "num_steps": 50, "guidance_scale": 5.0}
     pictured = resolve_task_case("initial_image_text_to_video", {**case, "image": "start.png"}, tmp_path)
     assert pictured.request["image_path"] == str(tmp_path / "start.png")
+
+
+def test_structure_requests_name_the_document_and_only_stated_sampling_controls(tmp_path):
+    (tmp_path / "protein.yaml").write_text("version: 1\n")
+    resolved = resolve_task_case("structure_prediction", {"request": "protein.yaml", "sampling_steps": 50}, tmp_path)
+    assert resolved.operation == "predict_structure"
+    assert resolved.request == {"document_path": str(tmp_path / "protein.yaml"), "sampling_steps": 50}

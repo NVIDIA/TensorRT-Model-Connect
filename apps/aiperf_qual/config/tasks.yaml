@@ -176,6 +176,10 @@ benchmarks:
   # LeRobot action chunks (GR00T, pi0.5) on recorded LIBERO observations with the family's fixed flow noise on
   # both sides (each family states its suite and its precision's E2E tolerance: tests/aiperf), every observation.
   action_chunk_parity: {suite: action-chunk-parity, metric: action_parity, gate: {max_error_of_range: 0.001}}
+  # Structure prediction from the same noise as the native model (the family's suite): lDDT, aligned RMSD, pLDDT
+  # and confidence against the native structure, the family's E2E gate.
+  structure_parity: {suite: structure-parity, metric: structure_parity,
+                     gate: {min_lddt: 0.55, max_rmsd: 9.0, max_plddt_mean_abs: 0.10, max_confidence_abs: 0.10}}
   # Fast-FoundationStereo on the 15 Middlebury v3 trainingQ scenes of its 700x700 profile (conversion parity).
   disparity_parity: {suite: disparity-parity, suite_definition: middlebury-q-700-15, metric: disparity_parity,
                      gate: {max_mean_epe: 0.1}}
@@ -378,6 +382,10 @@ tasks:
   images_state_text_to_action_chunk:
     absolute: [action_chunk_parity]
     performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}
+  structure_prediction:  # the family prepares its package and requests (reference.prepare, family_inputs)
+    absolute: [structure_parity]
+    performance: {output_grader: parity_numeric,
+                  output_grader_params: {fields: [structures, confidence.confidence_score], rtol: 0.2}}
   stereo_disparity:
     absolute: [disparity_parity]
     performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}

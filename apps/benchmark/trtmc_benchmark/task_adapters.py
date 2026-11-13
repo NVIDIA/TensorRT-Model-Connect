@@ -135,6 +135,7 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "points_to_semantic_segmentation": ("segment_points", 50, 500),
     "images_state_text_to_action_chunk": ("control_chunk", 2, 10),
     "initial_image_text_to_video": ("generate_image", 1, 5),
+    "structure_prediction": ("predict_structure", 1, 5),
 }
 
 _ALLOWED_OPERATIONS: dict[str, frozenset[str]] = {
@@ -355,6 +356,10 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         if _explicit(case, "prompt", "test_prompt", "source_text") is not _MISSING:
             raise BenchmarkError("image-only detection has no prompt input")
         return {"image_path": _semantic_asset(case, root, "image_path", "image", "test_image")}
+    if task == "structure_prediction":  # the existing runtime: the request document and its sampling controls
+        request = {"document_path": _semantic_asset(case, root, "document_path", "request")}
+        _copy_explicit(request, case, "recycling_steps", "sampling_steps", "diffusion_samples", "seed")
+        return request
     if task == "molecular_document_to_structure":
         document = _semantic_asset(case, root, "document_path", "input_path", "input")
         encoding = _explicit(case, "input_encoding", "encoding")

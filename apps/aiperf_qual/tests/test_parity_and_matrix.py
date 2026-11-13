@@ -505,3 +505,22 @@ def test_a_fitted_image_covers_the_video_size_and_keeps_its_center(tmp_path):
         assert image.size == (16, 32)
         assert np.asarray(image)[16, 8].tolist() == [255, 255, 255]
     assert _cover_crop(source, tmp_path / "cache", 16, 32) == fitted
+
+
+def test_structure_parity_compares_the_written_structure_with_the_native_coordinates(tmp_path):
+    import json
+
+    atoms = [[0.0, 0.0, 0.0], [1.5, 0.0, 0.0], [3.0, 0.5, 0.0], [4.0, 2.0, 1.0]]
+    cif = tmp_path / "out.cif"
+    cif.write_text("data_x\n" + "".join(
+        f"ATOM {i + 1} C CA ALA A 1 {x} {y} {z} 1.0 50.0 1\n" for i, (x, y, z) in enumerate(atoms)))
+    metadata = tmp_path / "out.metadata.json"
+    metadata.write_text(json.dumps({"plddt": [0.8, 0.9], "confidence_score": 0.85}))
+    candidate = {"structure_artifact": str(cif), "metadata_artifact": str(metadata)}
+    native = {"coords": [value for atom in atoms for value in atom],
+              "confidence": {"plddt": [0.8, 0.9], "confidence_score": 0.84}}
+    ok, message = gold_metrics.structure_parity(candidate, native, {})
+    assert ok is True and message.startswith("lDDT 1.000, RMSD 0.00")
+    moved = {**native, "coords": [value * 3 for value in native["coords"]]}
+    assert gold_metrics.structure_parity(candidate, moved, {})[0] is False
+    assert gold_metrics.structure_parity({}, native, {})[0] is None
