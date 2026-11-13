@@ -60,6 +60,9 @@ class CanaryPipeline final : public ITranscription, public IBatchTranscription {
                      int32_t valid_mel_frames);
     void run_encoder_batch(const std::vector<std::vector<float>>& mel_data, int32_t mel_bins,
                            int32_t mel_length, const std::vector<int32_t>& valid_mel_frames);
+    void validate_projected_cross_kv();
+    void bind_projected_cross_kv(const std::vector<int32_t>& lane_to_sample,
+                                 std::size_t sample_count);
     void setup_cross_attention(int32_t actual_enc_seq_len);
     void setup_cross_attention(const std::vector<int32_t>& actual_enc_seq_lens,
                                const std::vector<int32_t>& lane_to_sample);
@@ -110,6 +113,12 @@ class CanaryPipeline final : public ITranscription, public IBatchTranscription {
 
     void* cross_kv_ptr_{nullptr};
     std::size_t cross_kv_sample_bytes_{0};
+    // Single-GPU bundles: the encoder outputs each decoder layer's projected
+    // cross-attention K/V (cross_k_<i>, cross_v_<i>, in that order here).
+    bool projected_cross_kv_{false};
+    std::vector<std::vector<int64_t>> cross_head_shapes_;
+    std::vector<std::size_t> cross_head_sample_bytes_;
+    std::vector<void*> cross_head_lanes_;
     int32_t encoder_batch_capacity_{1};
     int32_t decoder_lane_capacity_{1};
     std::vector<float> cross_attention_mask_;

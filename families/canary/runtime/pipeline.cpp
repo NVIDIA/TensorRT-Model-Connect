@@ -6,6 +6,7 @@
 #include "families/canary/runtime/pipeline.h"
 
 #include "families/canary/runtime/canary_cross_kv_apply.h"
+#include "families/canary/runtime/canary_cross_kv_heads.h"
 #include "families/canary/runtime/canary_cross_kv_plan.h"
 #include "families/canary/runtime/canary_decode_policy.h"
 #include "families/canary/runtime/canary_host_plan.h"
@@ -17,6 +18,7 @@
 #include "families/canary/runtime/tokenizer.h"
 #include "plugin_helpers.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstring>
@@ -676,9 +678,19 @@ CanaryPipeline::CanaryPipeline(
             "CanaryPipeline: inference-state batch capacity is smaller than decoder profile");
     }
 
-    // All decoder layers consume the same raw encoder output and perform their
-    // own cross-attention projections, so one stable external buffer can back
-    // every cross_k/cross_v input.
+    if (num_decoder_layers_ > 0 && decoder_->input_rank("cross_k_0") == 4) {
+        validate_projected_cross_kv();
+        return;
+    }
+
+    // Tensor-parallel decoders consume the same raw encoder output and project
+    // their own head shards, so one stable external buffer can back every
+    // cross_k/cross_v input.
+    if (!encoder_->has_output("encoder_output")) {
+        throw std::runtime_error("CanaryPipeline: the encoder does not output encoder_output, "
+                                 "which this decoder's rank-3 cross-attention inputs need; "
+                                 "rebuild the bundle");
+    }
     const DType encoder_output_dtype = encoder_->tensor_dtype("encoder_output");
     const DType cross_input_dtype = decoder_->tensor_dtype("cross_k_0");
     if (encoder_output_dtype != cross_input_dtype) {
@@ -695,6 +707,80 @@ CanaryPipeline::CanaryPipeline(
 CanaryPipeline::~CanaryPipeline() {
     if (cross_kv_ptr_)
         cudaFree(cross_kv_ptr_);
+    for (void* buffer : cross_head_lanes_)
+        cudaFree(buffer);
+}
+
+void CanaryPipeline::validate_projected_cross_kv() {
+    // Every decoder layer reads its cross-attention K/V from the encoder
+    // engine's output of the same name, already projected and split into heads.
+    for (int32_t layer = 0; layer < num_decoder_layers_; ++layer) {
+        for (const char* kind : {"cross_k_", "cross_v_"}) {
+            const std::string name = kind + std::to_string(layer);
+            if (!encoder_->has_output(name) || decoder_->input_rank(name) != 4) {
+                throw std::runtime_error("CanaryPipeline: the encoder does not output the "
+                                         "decoder's projected cross-attention input " +
+                                         name + "; rebuild the bundle");
+            }
+            if (encoder_->tensor_dtype(name) != decoder_->tensor_dtype(name))
+                throw std::runtime_error("CanaryPipeline: " + name + " dtypes differ");
+            const auto produced = encoder_->tensor_shape(name);
+            const auto consumed = decoder_->input_profile_shape(name, decoder_->profile_idx(),
+                                                                ProfileShapeSelector::kMax);
+            if (produced.size() != 4 || consumed.size() != 4 ||
+                !std::equal(produced.begin() + 1, produced.end(), consumed.begin() + 1)) {
+                throw std::runtime_error("CanaryPipeline: " + name + " shapes differ");
+            }
+            if (consumed[2] != canary_config_.max_source_positions)
+                throw std::runtime_error("CanaryPipeline: " + name +
+                                         " does not span max_source_positions");
+            cross_head_shapes_.push_back(consumed);
+            cross_head_sample_bytes_.push_back(
+                canary_cross_head_sample_bytes(consumed, dtype_size(decoder_->tensor_dtype(name))));
+        }
+    }
+    projected_cross_kv_ = true;
+}
+
+void CanaryPipeline::bind_projected_cross_kv(const std::vector<int32_t>& lane_to_sample,
+                                             std::size_t sample_count) {
+    // Greedy decoding maps lane i to sample i: the decoder reads the encoder's
+    // outputs in place. Beam search maps several lanes to one sample: each
+    // lane's K/V is copied to a lane buffer, allocated on first use.
+    const bool in_place = canary_lanes_are_samples(lane_to_sample, sample_count);
+    if (!in_place && cross_head_lanes_.empty()) {
+        // All or nothing: a failed allocation frees what it took, so a later
+        // beam request allocates again instead of reading a short vector.
+        std::vector<void*> lanes;
+        lanes.reserve(cross_head_sample_bytes_.size());
+        try {
+            for (const std::size_t sample_bytes : cross_head_sample_bytes_) {
+                lanes.push_back(allocate_canary_cross_kv_buffer(
+                    num_decoder_layers_,
+                    static_cast<std::size_t>(decoder_lane_capacity_) * sample_bytes));
+            }
+        } catch (...) {
+            for (void* buffer : lanes)
+                cudaFree(buffer);
+            throw;
+        }
+        cross_head_lanes_.swap(lanes);
+    }
+    for (std::size_t input = 0; input < cross_head_shapes_.size(); ++input) {
+        const std::string name =
+            (input % 2 == 0 ? "cross_k_" : "cross_v_") + std::to_string(input / 2);
+        auto* produced = static_cast<uint8_t*>(encoder_->device_ptr(name));
+        void* bound = produced;
+        if (!in_place) {
+            copy_canary_cross_attention_lanes(static_cast<uint8_t*>(cross_head_lanes_[input]),
+                                              produced, lane_to_sample, sample_count,
+                                              cross_head_sample_bytes_[input], stream_);
+            bound = cross_head_lanes_[input];
+        }
+        auto shape = cross_head_shapes_[input];
+        shape[0] = static_cast<int64_t>(lane_to_sample.size());
+        decoder_->bind_external(name, bound, shape);
+    }
 }
 
 TextResult CanaryPipeline::transcribe(const float* audio_data, int32_t num_samples,
@@ -806,7 +892,7 @@ TextResult CanaryPipeline::transcribe_segment(const float* audio_data, int32_t n
 
     // Step 2: Run encoder. The mel is chunk-padded, so mel.n_frames is the full
     // (padded) length; mel.valid_frames is the real audio length, used to mask
-    // the padded tail in self-attention and to zero-pad the cross-attention K/V.
+    // the padded tail in self-attention and in cross-attention.
     const int32_t valid_mel_frames = mel.valid_frames > 0 ? mel.valid_frames : mel.n_frames;
     std::cerr << "[canary] Running encoder ..." << std::endl;
     run_encoder(mel.data.data(), mel.n_mels, mel.n_frames, valid_mel_frames);
@@ -820,8 +906,8 @@ TextResult CanaryPipeline::transcribe_segment(const float* audio_data, int32_t n
                   << canary_config_.max_source_positions << std::endl;
     }
 
-    // Step 3: Set up cross-attention K/V
-    std::cerr << "[canary] Computing cross-attention K/V ..." << std::endl;
+    // Step 3: Bind the decoder's cross-attention inputs
+    std::cerr << "[canary] Binding cross-attention K/V ..." << std::endl;
     setup_cross_attention(actual_enc_seq_len);
 
     // Step 4: Run decoder
@@ -894,22 +980,29 @@ void CanaryPipeline::setup_cross_attention(const std::vector<int32_t>& actual_en
                                            const std::vector<int32_t>& lane_to_sample) {
     if (num_decoder_layers_ <= 0)
         return;
-    if (cross_kv_ptr_ == nullptr || lane_to_sample.empty() ||
+    if ((!projected_cross_kv_ && cross_kv_ptr_ == nullptr) || lane_to_sample.empty() ||
         lane_to_sample.size() > static_cast<std::size_t>(decoder_lane_capacity_)) {
         throw std::invalid_argument("Canary cross-attention batch is invalid");
     }
 
-    auto* encoder_output = static_cast<uint8_t*>(encoder_->device_ptr("encoder_output"));
-    zero_pad_canary_encoder_batch(encoder_output, actual_enc_seq_lens,
-                                  canary_config_.max_source_positions, hidden_size_,
-                                  cross_kv_sample_bytes_, stream_);
-    copy_canary_cross_attention_lanes(static_cast<uint8_t*>(cross_kv_ptr_), encoder_output,
-                                      lane_to_sample, actual_enc_seq_lens.size(),
+    if (projected_cross_kv_) {
+        // Padded encoder positions keep their projected K/V; the cross-attention
+        // mask below hides them, as it hides the biases of zeroed rows.
+        bind_projected_cross_kv(lane_to_sample, actual_enc_seq_lens.size());
+    } else {
+        auto* encoder_output = static_cast<uint8_t*>(encoder_->device_ptr("encoder_output"));
+        zero_pad_canary_encoder_batch(encoder_output, actual_enc_seq_lens,
+                                      canary_config_.max_source_positions, hidden_size_,
                                       cross_kv_sample_bytes_, stream_);
+        copy_canary_cross_attention_lanes(static_cast<uint8_t*>(cross_kv_ptr_), encoder_output,
+                                          lane_to_sample, actual_enc_seq_lens.size(),
+                                          cross_kv_sample_bytes_, stream_);
 
-    const std::vector<int64_t> cross_shape{static_cast<int64_t>(lane_to_sample.size()),
-                                           canary_config_.max_source_positions, hidden_size_};
-    bind_canary_cross_attention_layers(*decoder_, num_decoder_layers_, cross_kv_ptr_, cross_shape);
+        const std::vector<int64_t> cross_shape{static_cast<int64_t>(lane_to_sample.size()),
+                                               canary_config_.max_source_positions, hidden_size_};
+        bind_canary_cross_attention_layers(*decoder_, num_decoder_layers_, cross_kv_ptr_,
+                                           cross_shape);
+    }
     decoder_->sync();
 
     // NeMo masks encoder padding in decoder cross-attention. Zeroing padded
