@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -80,11 +81,24 @@ void k2_horizon_validate_generation_inputs(const std::vector<int32_t>& token_ids
 
 K2HorizonTextGenerationPipeline::K2HorizonTextGenerationPipeline(
     std::unique_ptr<ITrtModule> decoder, std::unique_ptr<K2HorizonKvCache> cache,
-    K2HorizonTextGenConfig config, std::shared_ptr<ITokenizer> tokenizer)
-    : decoder_(std::move(decoder)), cache_(std::move(cache)), config_(std::move(config)),
-      tokenizer_(std::move(tokenizer)) {
+    K2HorizonTextGenConfig config, std::shared_ptr<ITokenizer> tokenizer,
+    std::unique_ptr<ITrtModule> prefill)
+    : decoder_(std::move(decoder)), prefill_(std::move(prefill)), cache_(std::move(cache)),
+      config_(std::move(config)), tokenizer_(std::move(tokenizer)) {
     if (!decoder_ || !decoder_->ok())
         throw std::runtime_error("K2HorizonTextGenerationPipeline: invalid decoder module");
+    if (prefill_) {
+        if (!prefill_->ok())
+            throw std::runtime_error("K2HorizonTextGenerationPipeline: invalid prefill module");
+        const auto max_shape = prefill_->input_profile_shape(
+            config_.token_id_name, prefill_->profile_idx(), ProfileShapeSelector::kMax);
+        if (max_shape.size() != 1 || max_shape[0] < 1 ||
+            max_shape[0] > std::numeric_limits<int32_t>::max()) {
+            throw std::runtime_error(
+                "K2HorizonTextGenerationPipeline: invalid prefill token profile");
+        }
+        prefill_chunk_tokens_ = static_cast<int32_t>(max_shape[0]);
+    }
     if (!cache_ || !cache_->ok())
         throw std::runtime_error("K2HorizonTextGenerationPipeline: invalid native KV cache");
     if (config_.vocab_size <= 0)
@@ -148,8 +162,7 @@ K2HorizonTextGenerationPipeline::TimedGenResult K2HorizonTextGenerationPipeline:
     reset_generation_context();
     std::vector<float> logits;
     const auto prefill_start = std::chrono::steady_clock::now();
-    for (int32_t token_id : input_ids)
-        run_step(token_id, logits);
+    run_prefill(input_ids, logits);
     const auto prefill_end = std::chrono::steady_clock::now();
 
     std::vector<int32_t> output = input_ids;
@@ -168,6 +181,10 @@ void K2HorizonTextGenerationPipeline::reset_generation_context() {
     cache_->reset();
     decoder_->reset_execution_context();
     cache_->bind_to(*decoder_);
+    if (prefill_) {
+        prefill_->reset_execution_context();
+        cache_->bind_to(*prefill_);
+    }
     last_setup_ms_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
@@ -177,7 +194,39 @@ void K2HorizonTextGenerationPipeline::run_step(int32_t token_id, std::vector<flo
     inputs[config_.token_id_name] = Tensor{&token_id, {1}, DType::kInt32};
     cache_->prepare_step(inputs);
 
-    const TensorMap outputs = decoder_->forward(inputs);
+    read_logits(decoder_->forward(inputs), logits);
+    cache_->advance();
+}
+
+void K2HorizonTextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
+                                                  std::vector<float>& logits) {
+    if (!prefill_) {
+        for (int32_t token_id : input_ids)
+            run_step(token_id, logits);
+        return;
+    }
+    // Both contexts alias the same native KV buffers, so the decoder continues
+    // from the rows each prefill chunk wrote.
+    const auto total = static_cast<int32_t>(input_ids.size());
+    for (int32_t start = 0; start < total;) {
+        const int32_t count = std::min(prefill_chunk_tokens_, total - start);
+        run_prefill_chunk(input_ids.data() + start, count, logits);
+        start += count;
+    }
+}
+
+void K2HorizonTextGenerationPipeline::run_prefill_chunk(const int32_t* token_ids, int32_t count,
+                                                        std::vector<float>& logits) {
+    TensorMap inputs;
+    inputs[config_.token_id_name] =
+        Tensor{const_cast<int32_t*>(token_ids), {static_cast<int64_t>(count)}, DType::kInt32};
+    cache_->prepare_step(inputs, count);
+    read_logits(prefill_->forward(inputs), logits);
+    cache_->advance(count);
+}
+
+void K2HorizonTextGenerationPipeline::read_logits(const TensorMap& outputs,
+                                                  std::vector<float>& logits) const {
     const auto found = outputs.find(config_.logits_output_name);
     if (found == outputs.end()) {
         throw std::runtime_error("K2HorizonTextGenerationPipeline: logits output is missing");
@@ -189,7 +238,6 @@ void K2HorizonTextGenerationPipeline::run_step(int32_t token_id, std::vector<flo
     }
     logits.resize(count);
     std::memcpy(logits.data(), found->second.data, count * sizeof(float));
-    cache_->advance();
 }
 
 int32_t K2HorizonTextGenerationPipeline::run_decode_loop(K2HorizonISampler& sampler,

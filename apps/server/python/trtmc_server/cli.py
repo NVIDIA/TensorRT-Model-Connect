@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import math
 from pathlib import Path
 
 
@@ -29,10 +30,17 @@ def positive(value: str) -> int:
     return parsed
 
 
+def positive_seconds(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("duration must be finite and positive")
+    return parsed
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         prog="trtmc-server",
-        description="Serve text-generation bundles through persistent native workers",
+        description="Serve text-generation bundles alongside vision-language, image-generation, image-editing, embedding, reranking, audio-transcription, and object-detection bundles through persistent native workers",
     )
     result.add_argument("bundle", nargs="?", help="single .bundle artifact")
     result.add_argument("--model-name", help="API model name for the positional bundle")
@@ -41,7 +49,7 @@ def parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="NAME=PATH",
-        help="register another text model; repeatable",
+        help="register another model; repeatable",
     )
     result.add_argument("--replicas", type=positive, default=1)
     result.add_argument("--host", default="127.0.0.1")
@@ -55,6 +63,12 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--max-body-bytes", type=positive, default=1024 * 1024)
     result.add_argument("--max-prompt-bytes", type=positive, default=256 * 1024)
     result.add_argument("--max-new-tokens", type=positive, default=4096)
+    result.add_argument("--max-video-jobs", type=positive, default=8)
+    result.add_argument("--max-video-bytes", type=positive, default=4 * 1024**3)
+    result.add_argument("--video-ttl-seconds", type=positive_seconds, default=600)
+    result.add_argument("--max-image-pixels", type=positive, default=16_000_000)
+    result.add_argument("--max-audio-seconds", type=positive_seconds, default=30.0)
+    result.add_argument("--records", type=Path, help="append terminal request timing JSONL (no text)")
     result.add_argument("--access-log", action="store_true")
     result.add_argument("--worker-binary", type=Path, help=argparse.SUPPRESS)
     return result
@@ -136,6 +150,12 @@ def main(argv: list[str] | None = None) -> int:
                 max_body_bytes=args.max_body_bytes,
                 max_prompt_bytes=args.max_prompt_bytes,
                 max_generation_tokens=args.max_new_tokens,
+                records=args.records,
+                max_audio_seconds=args.max_audio_seconds,
+                max_image_pixels=args.max_image_pixels,
+                max_video_jobs=args.max_video_jobs,
+                max_video_bytes=args.max_video_bytes,
+                video_ttl_seconds=args.video_ttl_seconds,
             ),
         )
         uvicorn_config = uvicorn.Config(

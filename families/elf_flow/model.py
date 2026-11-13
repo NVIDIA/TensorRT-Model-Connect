@@ -441,6 +441,8 @@ _BUNDLE_FILES = (
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one ELF Flow model and its text encoder."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("ELF-Flow does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("elf_flow does not support dynamic_kv_cache")
 

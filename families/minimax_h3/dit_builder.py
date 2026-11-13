@@ -181,8 +181,11 @@ def _attention_block(
     *,
     cos=None,
     sin=None,
+    quant=None,
 ):
-    q, k, v = op.fused_qkv(network, hidden, weights, f"{prefix}.attn")
+    q, k, v = op.fused_qkv(
+        network, hidden, weights, f"{prefix}.attn", quant=quant, name=f"{prefix}.attn.qkv"
+    )
     q = _per_head_norm(network, q, weights[f"{prefix}.attn.norm_q.weight"], profile, rows)
     k = _per_head_norm(network, k, weights[f"{prefix}.attn.norm_k.weight"], profile, rows)
     if cos is not None:
@@ -297,6 +300,7 @@ def _transformer_block(
     weights,
     profile: MiniMaxH3Config,
     index: int,
+    quant=None,
 ):
     """Add one native H3 transformer block and return its residual stream."""
 
@@ -323,6 +327,7 @@ def _transformer_block(
         rows,
         cos=cos,
         sin=sin,
+        quant=quant,
     )
     hidden = op.gated_residual(network, hidden, update, gate_msa)
 
@@ -340,6 +345,8 @@ def _transformer_block(
         weights[f"{prefix}.ff.net.0.proj.weight"],
         weights[f"{prefix}.ff.net.2.weight"],
         profile.ffn_dim,
+        quant=quant,
+        prefix=prefix,
     )
     return op.gated_residual(network, hidden, update, gate_mlp)
 
@@ -490,12 +497,28 @@ def build_dit_engine(
     verbose: bool = False,
     consume_weights: bool = False,
     workspace_bytes: int | None = None,
+    quantization: str | None = None,
 ) -> bytes:
-    """Build the full-sequence single-device H3 TensorRT plan."""
+    """Build the full-sequence single-device H3 TensorRT plan.
+
+    ``quantization="fp8"`` routes the projections listed in ``quantization.QUANTIZED`` of every
+    transformer block through FP8 Q/DQ GEMMs (weights quantized here from the bf16 checkpoint).
+    """
 
     profile.validate()
     if profile.first_block_cache:
         raise ValueError("MiniMax-H3 first_block_cache profile requires the split DiT builders")
+    quant_ctx = None
+    if quantization not in (None, "none"):
+        from .quantization import calibrate_minimax
+
+        quant_ctx = calibrate_minimax(
+            weights,
+            hidden_size=profile.hidden_size,
+            num_layers=profile.num_layers,
+            ffn_dim=profile.ffn_dim,
+            quantization=quantization,
+        )
     rows = -1
     logger, builder, network, config = _native_builder(verbose, workspace_bytes)
 
@@ -546,6 +569,7 @@ def build_dit_engine(
             weights,
             profile,
             index,
+            quant_ctx,
         )
 
     hidden = _final_hidden(network, hidden, timestep_indices, final_modulation, weights, profile)

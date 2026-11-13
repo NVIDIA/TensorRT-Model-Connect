@@ -15,6 +15,7 @@ def _request(tmp_path, tensor_parallel_size: int):
         model_dir=tmp_path,
         backend="trt",
         dynamic_kv_cache=False,
+        mtp_seq_len=None,
         image_height=None,
         image_width=None,
         video_num_frames=None,

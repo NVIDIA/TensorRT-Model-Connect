@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The checkpoint's MXFP4 experts run in bf16 in Transformers (fp16 and fp32 fail with a dtype mismatch): the native
+# model runs at bf16 only, so Perf against it is perf-inconclusive (another precision than the fp16 candidate).
+reference:
+  timing_precision: bf16
+
+# gpt-oss answers in its harmony format only, which the catalog request writes out itself (use_chat_template
+# false): MMLU questions get the same frame (completions route, the same tokens on both sides), with low reasoning
+# effort. It reasons before it answers, so the answer budget is 128 tokens with no newline stop (its bundle holds
+# 256: 7,305 of the 14,042 framed problems fit), and the grade reads the final channel.
+absolute:
+  - name: mmlu
+    prompt_frame: "<|start|>system<|message|>You are a helpful assistant.\nReasoning: low<|end|><|start|>user<|message|>{prompt}<|end|><|start|>assistant"
+    answer_tokens: 128
+    grader: trtmc_final_choice

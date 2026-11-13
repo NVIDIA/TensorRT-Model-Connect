@@ -1,0 +1,49 @@
+{
+  "architectures": [
+    "ParakeetForTDT"
+  ],
+  "blank_token_id": 8192,
+  "decoder_hidden_size": 640,
+  "dtype": "float32",
+  "durations": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "encoder_config": {
+    "activation_dropout": 0.1,
+    "attention_bias": false,
+    "attention_dropout": 0.1,
+    "conv_kernel_size": 9,
+    "convolution_bias": false,
+    "dropout": 0.1,
+    "dropout_positions": 0.0,
+    "hidden_act": "silu",
+    "hidden_size": 1024,
+    "initializer_range": 0.02,
+    "intermediate_size": 4096,
+    "layerdrop": 0.1,
+    "max_position_embeddings": 5000,
+    "model_type": "parakeet_encoder",
+    "num_attention_heads": 8,
+    "num_hidden_layers": 24,
+    "num_key_value_heads": 8,
+    "num_mel_bins": 128,
+    "scale_input": false,
+    "subsampling_conv_channels": 256,
+    "subsampling_conv_kernel_size": 3,
+    "subsampling_conv_stride": 2,
+    "subsampling_factor": 8
+  },
+  "hidden_act": "relu",
+  "initializer_range": 0.02,
+  "is_encoder_decoder": true,
+  "max_symbols_per_step": 10,
+  "model_type": "parakeet_tdt",
+  "num_decoder_layers": 2,
+  "pad_token_id": 2,
+  "transformers_version": "5.6.0.dev0",
+  "vocab_size": 8193
+}

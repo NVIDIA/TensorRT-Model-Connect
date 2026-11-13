@@ -108,6 +108,7 @@ class _LTXVideoModel:
         *,
         precision: str = "fp32",
         verbose: bool = False,
+        quantization: str | None = None,
     ) -> dict:
         del model_dir
         from .t5_encoder_builder import build_t5_encoder_engine, load_t5_weights
@@ -194,6 +195,8 @@ class _LTXVideoModel:
             precision=compute_precision,
             in_channels=int(transformer_cfg.get("in_channels", self._DIT_IN_CHANNELS)),
             verbose=verbose,
+            quantization=quantization,
+            transformer_config=transformer_cfg,
         )
 
         print("[ltx-video] Compiling LTX VAE decoder ...", file=sys.stderr)
@@ -292,11 +295,31 @@ def _compile_ltx_denoiser_engine(
     precision: str,
     in_channels: int,
     verbose: bool,
+    quantization: str | None = None,
+    transformer_config: dict | None = None,
 ) -> bytes:
     del text_dim
+    from .checkpoint_mapper import _open_safetensors
     from .ltx_dit_builder import build_ltx_dit_engine, load_ltx_dit_weights
 
     weights = load_ltx_dit_weights(transformer_dir, precision=precision)
+    quant_ctx = None
+    if quantization == "fp8":
+        from .quantization import calibrate_ltx, is_quantized_checkpoint
+
+        cfg = transformer_config or {}
+        num_layers = int(cfg.get("num_layers", _LTXVideoModel._DIT_NUM_LAYERS))
+        dim = int(cfg.get("num_attention_heads", _LTXVideoModel._DIT_NUM_HEADS)) * int(
+            cfg.get("attention_head_dim", 64)
+        )
+        quant_ctx = calibrate_ltx(
+            weights,
+            dim=dim,
+            num_layers=num_layers,
+            ffn_dim=int(weights["transformer_blocks.0.ff.net.0.proj.weight"].shape[1]),
+            quantization=quantization,
+            quantized_checkpoint=is_quantized_checkpoint(_open_safetensors(Path(transformer_dir))),
+        )
     return build_ltx_dit_engine(
         weights,
         latent_frames=latent_frames,
@@ -307,6 +330,7 @@ def _compile_ltx_denoiser_engine(
         frame_rate=frame_rate,
         precision=precision,
         verbose=verbose,
+        quant_ctx=quant_ctx,
     )
 
 
@@ -336,6 +360,8 @@ def _compile_ltx_vae_decoder_engine(
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one LTX-Video image-generation bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("LTX-Video does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("ltx_video does not support dynamic_kv_cache")
 
@@ -351,8 +377,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("LTX-Video requires tensor_parallel_size=1")
     if request.max_batch_size != 1:
         raise NotImplementedError("LTX-Video requires max_batch_size=1")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("LTX-Video does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"LTX-Video does not support quantization={request.quantization!r}"
+        )
+    if request.quantization == "fp8" and str(request.precision).lower() != "fp16":
+        raise NotImplementedError("LTX-Video fp8 builds require precision fp16")
 
     model_dir = Path(request.model_dir)
     height = int(request.image_height or _LTXVideoModel._DEFAULT_HEIGHT)
@@ -381,6 +411,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         weights,
         precision=request.precision,
         verbose=request.verbose,
+        quantization=request.quantization,
     )
     text_encoders = components["text_encoders"]
     if len(text_encoders) != 1:

@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The native pipeline does not produce a valid output in fp16 (its fp16 outputs are blank): time it in bf16.
+reference:
+  requirements: families/z_image/requirements.txt  # the family's dependencies, layered on the serving interpreter
+  timing_precision: bf16
+
+# Z-Image Turbo runs without CFG on both sides (guidance_scale 0.0 stated; TRTMC ignores guidance); the
+# unused cfg_scale is stated as 0.0 too.
+request: {cfg_scale: 0.0}

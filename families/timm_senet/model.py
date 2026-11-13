@@ -276,7 +276,8 @@ def _build_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     builder_config = builder.create_builder_config()
-    builder_config.builder_optimization_level = 1
+    # Level 3 builds a faster engine than level 1, at the cost of a longer build.
+    builder_config.builder_optimization_level = 3
     builder_config.avg_timing_iterations = 8
     builder_config.max_aux_streams = 0
     builder_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
@@ -361,6 +362,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_senet does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("timm_senet does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("timm_senet does not support MTP speculative decoding")
     _positive_int(request.max_sequence_length or 1, "max_sequence_length")
     model_dir = Path(request.model_dir)
     raw = _read_config(model_dir)

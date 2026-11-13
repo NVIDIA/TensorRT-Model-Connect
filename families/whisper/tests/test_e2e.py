@@ -492,4 +492,104 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         expected = _official_reference(model_dir, manifest, case, tmp_path)
     record_evidence("reference", expected)
     with evidence_stage("compare"):
-        _assert_contract(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+        try:
+            _assert_contract(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+        except AssertionError:
+            if manifest["precision"] == "fp16" and case["reference_precision"] == "fp32":
+                try:
+                    half_reference = _official_reference(
+                        model_dir, manifest, {**case, "reference_precision": "fp16"}, tmp_path
+                    )
+                    diagnostic_manifest = {**manifest, "precision": "fp32"}
+                    diagnostic_bundle = tmp_path / "diagnostic-fp32.bundle"
+                    _build(model_dir, diagnostic_bundle, diagnostic_manifest)
+                    full_native = _native(
+                        binary, runtime_root, diagnostic_bundle, model_dir,
+                        diagnostic_manifest, case, tmp_path
+                    )
+                    diagnostic = {"native_fp16": actual["text"],
+                                  "native_fp32": full_native["text"],
+                                  "reference_fp16": half_reference["text"],
+                                  "reference_fp32": expected["text"]}
+                    record_evidence("precision_diagnostic", diagnostic)
+                    print("Whisper failed-case precision diagnostic: " + json.dumps(diagnostic))
+                except Exception as error:
+                    print(f"Whisper precision diagnostic failed: {type(error).__name__}: {error}")
+            raise
+
+
+@pytest.mark.parametrize("precision", ["fp16", "fp32"])
+def test_checkpoint_gelu_matches_pytorch(request, precision):
+    selected, enabled = _selected_cases(request.config)
+    if not enabled or not selected:
+        pytest.skip("activation numerics require an explicitly selected Whisper E2E case")
+
+    import torch
+    import tensorrt as trt
+
+    from families.whisper import graph_ops
+
+    assert torch.cuda.is_available(), "selected Whisper activation validation requires CUDA"
+    dtype = torch.float16 if precision == "fp16" else torch.float32
+    values = torch.linspace(-4, 4, 257, device="cuda", dtype=torch.float32).to(dtype)
+    expected = torch.nn.functional.gelu(values, approximate="none")
+    logger = trt.Logger(trt.Logger.ERROR)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    tensor = network.add_input("input", trt.float16 if precision == "fp16" else trt.float32,
+                               tuple(values.shape))
+    output = graph_ops.add_activation(network, tensor, "gelu",
+                                      dtype=np.float16 if precision == "fp16" else np.float32)
+    output.name = "output"
+    network.mark_output(output)
+    plan = builder.build_serialized_network(network, builder.create_builder_config())
+    assert plan is not None
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(plan)
+    context = engine.create_execution_context()
+    actual = torch.empty_like(values)
+    context.set_tensor_address("input", values.data_ptr())
+    context.set_tensor_address("output", actual.data_ptr())
+    assert context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("precision", ["fp16", "fp32"])
+def test_logits_projection_preserves_close_candidates(request, precision):
+    selected, enabled = _selected_cases(request.config)
+    if not enabled or not selected:
+        pytest.skip("logit numerics require an explicitly selected Whisper E2E case")
+
+    import torch
+    import tensorrt as trt
+
+    from families.whisper import graph_ops
+
+    assert torch.cuda.is_available(), "selected Whisper logit validation requires CUDA"
+    dtype = torch.float16 if precision == "fp16" else torch.float32
+    values = torch.ones((1, 2), device="cuda", dtype=dtype)
+    weights = np.array([[1.0, 1.0001, 0.0], [0.0, 0.0001, 1.0]], dtype=np.float32)
+    expected = values.float() @ torch.from_numpy(weights).cuda()
+    logger = trt.Logger(trt.Logger.ERROR)
+    builder = trt.Builder(logger)
+    network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    tensor = network.add_input("input", trt.float16 if precision == "fp16" else trt.float32, (1, 2))
+    output = graph_ops.add_logits_projection(network, tensor, 2, 3, weights)
+    assert output.dtype == trt.float32
+    output.name = "output"
+    network.mark_output(output)
+    config = builder.create_builder_config()
+    config.clear_flag(trt.BuilderFlag.TF32)
+    plan = builder.build_serialized_network(network, config)
+    assert plan is not None
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(plan)
+    context = engine.create_execution_context()
+    actual = torch.empty((1, 3), device="cuda", dtype=torch.float32)
+    context.set_tensor_address("input", values.data_ptr())
+    context.set_tensor_address("output", actual.data_ptr())
+    assert context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(actual, expected)
+    assert actual.argmax().item() == expected.argmax().item() == 1

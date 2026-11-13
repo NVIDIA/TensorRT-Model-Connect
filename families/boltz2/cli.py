@@ -15,6 +15,9 @@ from tensorrt_model_connect.graph_transform import GraphTransform, graph_transfo
 from tensorrt_model_connect.model_support import resolve_model
 
 
+DIFFUSION_TOKEN_PRECISIONS = frozenset({"bf16", "fp32"})
+
+
 @dataclass(frozen=True)
 class BuildRequest:
     model_dir: Path
@@ -23,6 +26,10 @@ class BuildRequest:
     backend: str = "trt"
     max_sequence_length: int | None = 117
     verbose: bool = False
+    # Compute dtype of the diffusion token-transformer projections. Upstream
+    # Boltz-2 runs the whole score model in fp32; "bf16" casts only these
+    # matmuls to bf16 (state, norms and attention stay fp32).
+    diffusion_token_precision: str = "bf16"
 
     def __post_init__(self) -> None:
         if self.backend != "trt":
@@ -33,6 +40,11 @@ class BuildRequest:
             raise ValueError("boltz2 supports only bf16 precision")
         if self.max_sequence_length not in {None, 117}:
             raise NotImplementedError("boltz2 max_sequence_length must match the 117-token profile")
+        if self.diffusion_token_precision not in DIFFUSION_TOKEN_PRECISIONS:
+            raise ValueError(
+                "boltz2 diffusion_token_precision must be one of "
+                f"{sorted(DIFFUSION_TOKEN_PRECISIONS)}"
+            )
 
 
 def coerce_request(request: object) -> BuildRequest:
@@ -41,7 +53,8 @@ def coerce_request(request: object) -> BuildRequest:
         return request
     for name, default in (("max_batch_size", 1), ("tensor_parallel_size", 1),
                           ("context_parallel_size", 1), ("dynamic_kv_cache", False),
-                          ("image_height", None), ("image_width", None), ("video_num_frames", None)):
+                          ("image_height", None), ("image_width", None), ("video_num_frames", None),
+                          ("mtp_seq_len", None)):
         if getattr(request, name, default) != default:
             raise NotImplementedError(f"boltz2 does not support {name}")
     if getattr(request, "quantization", None) not in {None, "none"} or getattr(request, "fp32_layers", ()):
@@ -49,10 +62,10 @@ def coerce_request(request: object) -> BuildRequest:
     fields = BuildRequest.__dataclass_fields__
     legacy = {"family", "output_path", "graph_transform", "max_batch_size", "tensor_parallel_size",
               "context_parallel_size", "dynamic_kv_cache", "image_height", "image_width",
-              "video_num_frames", "quantization", "fp32_layers"}
+              "video_num_frames", "quantization", "fp32_layers", "mtp_seq_len"}
     if unknown := set(vars(request)) - set(fields) - legacy:
         raise ValueError(f"unknown Boltz-2 build inputs: {sorted(unknown)}")
-    return BuildRequest(**{name: getattr(request, name) for name in fields})
+    return BuildRequest(**{name: getattr(request, name) for name in fields if hasattr(request, name)})
 
 
 def build_bundle(request: BuildRequest, output: Path, *, transform: GraphTransform | None = None) -> None:
@@ -60,6 +73,7 @@ def build_bundle(request: BuildRequest, output: Path, *, transform: GraphTransfo
     from .model import build as build_model
 
     writer = BundleWriter(output)
+    writer.record_build(request)
     try:
         with graph_transform(transform):
             build_model(request, writer)
@@ -71,9 +85,10 @@ def build_bundle(request: BuildRequest, output: Path, *, transform: GraphTransfo
 
 def build(*, model: str, output: Path, revision: str | None = None,
           task: str = "structure_prediction", precision: str = "bf16", backend: str = "trt",
-          max_sequence_length: int | None = 117, verbose: bool = False) -> int:
+          max_sequence_length: int | None = 117, verbose: bool = False,
+          diffusion_token_precision: str = "bf16") -> int:
     request = BuildRequest(resolve_model(model, revision), task, precision, backend,
-                           max_sequence_length, verbose)
+                           max_sequence_length, verbose, diffusion_token_precision)
     build_bundle(request, output)
     return 0
 

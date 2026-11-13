@@ -263,6 +263,7 @@ class Boltz2Plugin:
         *,
         precision: str = _PRECISION,
         verbose: bool = False,
+        diffusion_token_precision: str = "bf16",
         **_kwargs: Any,
     ) -> dict[str, bytes]:
         self._require_precision(precision)
@@ -356,6 +357,7 @@ class Boltz2Plugin:
                     layer_count=6,
                     token_count=token_count,
                     verbose=verbose,
+                    projection_precision=diffusion_token_precision,
                 )
             sections["boltz2_diffusion_score_output_plan"] = _plan_bytes(
                 temporary,
@@ -417,7 +419,12 @@ def build(request: BuildRequest, writer: Any) -> None:
         None, weights, 0, precision=request.precision, verbose=request.verbose
     )
     sections = family.build_extra_engines(
-        None, weights, 0, precision=request.precision, verbose=request.verbose
+        None,
+        weights,
+        0,
+        precision=request.precision,
+        verbose=request.verbose,
+        diffusion_token_precision=request.diffusion_token_precision,
     )
     writer.set_header(family="boltz2", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", primary)

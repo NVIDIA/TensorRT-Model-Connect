@@ -25,6 +25,16 @@ trtmc-bench run \
 builder and cached; pass `--no-build` when every selected bundle must already
 exist.
 
+Every bundle is read with `trtmc inspect` before use. If its
+[build provenance](../architecture/bundle-format.md#build-provenance) records a
+checkpoint other than the manifest's pinned `hf_id` and `hf_revision`, the
+bundle is rejected, whether it was just built, reused from the cache, or passed
+with `--bundle`. Bundles that record no checkpoint, and builds from
+`--model-dir`, are not compared. Each bundle-preparation record in
+`result.json` keeps the recorded provenance, and the report shows it with the
+case's reproduction details. The cache receipt next to a managed bundle only
+decides whether the bundle is rebuilt.
+
 Run a checked-in multi-model specification with:
 
 ```bash
@@ -80,58 +90,21 @@ to the task. Video frames retain their recorded order and timestamps; no frame
 rate is inferred when a timeline is absent. Missing or unsafe media references
 are shown as unavailable rather than embedded from outside the case directory.
 
-The release suite defaults to three warmups and ten measured iterations. A
-reference within five percent of candidate p50 is considered equivalent.
-Candidate or reference execution failures are operational failures, not slow
-performance results.
+## Release qualification against native models
 
-## Internal release performance matrix
-
-This repository-only workflow is CI qualification. It is separate from the
-installed `trtmc-bench` user interface above and is not included in the wheel.
-
-The matrix coordinates candidate and reference runs without introducing a
-second model registry:
-
-```bash
-export TRTMC_PERF_WORKER=/opt/trtmc/bin/trtmc_benchmark_worker
-export TRTMC_PERF_RUNTIME_ROOT=/opt/trtmc/lib
-export TRTMC_PERF_BUNDLE_CACHE=/data/trtmc-bundles
-
-python3 -m qualification_tests.benchmark_qualification.performance check \
-  qualification_tests/benchmark_qualification/performance/config/release.yaml \
-  --environment qualification_tests/benchmark_qualification/performance/config/environments/gb300.yaml
-
-python3 -m qualification_tests.benchmark_qualification.performance prepare \
-  qualification_tests/benchmark_qualification/performance/config/release.yaml \
-  --environment qualification_tests/benchmark_qualification/performance/config/environments/gb300.yaml \
-  --entry gpt2.generate \
-  --output artifacts/perf/bundle-preparation.json
-
-python3 -m qualification_tests.benchmark_qualification.performance run \
-  qualification_tests/benchmark_qualification/performance/config/release.yaml \
-  --environment qualification_tests/benchmark_qualification/performance/config/environments/gb300.yaml \
-  --entry gpt2.generate
-```
-
-Preparation is deliberately separate and untimed. Resume or regenerate a
-report from stored observations with:
-
-```bash
-python3 -m qualification_tests.benchmark_qualification.performance resume artifacts/perf/<run-directory>
-python3 -m qualification_tests.benchmark_qualification.performance report artifacts/perf/<run-directory>
-```
-
-The release YAML owns model, testcase, operation, measurement, reference, and
-comparison semantics. Machine-specific paths belong in the environment YAML.
-Reference implementations run in separate processes so their dependencies do
-not enter the candidate worker or shared runtime.
+Repository-only Accuracy and Performance qualification of every ready catalog
+model against its native Hugging Face / PyTorch model is run with the
+AIPerf-based harness in `apps/aiperf_qual` (`trtmc-aiperf-qual`). It is
+separate from the installed `trtmc-bench` user interface above and is not
+included in the wheel. See `apps/aiperf_qual/README.md` for the machine
+environment, the Task defaults, and the reports.
 
 ## Adding coverage
 
 - Add a weight or profile to the owning family's test manifest catalog.
-- Add a matrix entry that names the family, model, operation, workload, and
-  reference runner.
+- Qualification derives from the catalog entry and its Task; put a family's
+  exceptions and benchmark definitions in
+  `families/<family>/tests/aiperf/<profile>.yaml`.
 - Add benchmark code only when a genuinely new public task interface needs a
   task adapter.
 
@@ -163,7 +136,14 @@ own explicit benchmark inputs; a shared operation name does not imply support.
 | `encode` | `TextToPooledFeatures`, `TextToTokenFeatures` |
 | `embed` | `TextToEmbedding` |
 | `rerank` | `TextQueryDocumentsToRelevance` |
+| `decide` | `IStructuredDecision` |
 | `control` | `ImageStateToActionChunk` |
+
+Structured decisions accept an opaque JSON `document` or `document_path`, with
+optional `image_paths` and `video_frame_paths`. The family interprets the schema.
+Timing covers record encoding, inference, and response construction; media-file
+decoding follows the benchmark's asset-loading policy. The output retains each
+question's option logits and probabilities.
 
 For semantic Task manifests, explicitly specified generation controls retain
 their types; omitted controls use the family defaults. A testcase can supply

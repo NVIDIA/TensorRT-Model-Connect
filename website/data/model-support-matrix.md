@@ -97,7 +97,7 @@ SPDX-License-Identifier: Apache-2.0
 | `FacebookAI/roberta-large` | `roberta-large` | `FP16` | None | — | 🟢 Green |
 | `RWKV/rwkv-4-169m-pile` | `rwkv-169m` | `FP32` | None | — | 🟢 Green |
 | `facebook/sam-vit-base` | `sam-vit-base` | `FP16` | None | — | 🟢 Green |
-| `facebook/sam3` | `sam3` | `FP32` | None | — | 🟢 Green |
+| `facebook/sam3` | `sam3` | `FP16` | None | — | 🟢 Green |
 | `Efficient-Large-Model/SANA-WM_bidirectional` | `sana-wm-bidirectional` | `BF16` | None | — | 🟡 Yellow |
 | `nvidia/segformer-b0-finetuned-ade-512-512` | `segformer-b0-ade` | `FP16` | None | — | 🟢 Green |
 | `stabilityai/stablelm-2-1_6b` | `stablelm2-1.6b` | `FP16` | None | — | 🟢 Green |

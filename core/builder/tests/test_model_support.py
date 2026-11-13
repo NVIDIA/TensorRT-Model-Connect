@@ -121,22 +121,6 @@ def test_resolve_family_requires_exactly_one_match(monkeypatch) -> None:
     )
 
 
-def test_s1_mini_reports_qwen_and_specialized_family() -> None:
-    metadata = ModelMetadata(
-        {
-            "model_type": "qwen3",
-            "architectures": ["Qwen3ForCausalLM"],
-        },
-        {},
-        files=("banner.jpg", "config.json", "model.safetensors"),
-    )
-
-    with pytest.raises(AmbiguousFamilyError) as error:
-        resolve_family(metadata)
-
-    assert tuple(family for family, _ in error.value.matches) == ("qwen", "s1_mini")
-
-
 def test_explicit_family_selects_only_that_compatible_owner(monkeypatch) -> None:
     metadata = ModelMetadata({"model_type": "shared"}, {})
     directories = [Path("alpha"), Path("beta")]

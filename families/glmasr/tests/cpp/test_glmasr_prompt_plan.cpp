@@ -70,6 +70,35 @@ void test_audio_embedding_count_matches_processor() {
           "glmasr audio embedding count is zero below one merged frame");
 }
 
+void test_placeholder_count_follows_processor_feature_mask() {
+    // GlmAsrProcessor counts the feature extractor's sample mask taken every
+    // hop: ceil(71360 / 160) = 446 frames give 55 placeholders. The centered
+    // STFT framing yields 448 mel frames, which would give 56.
+    check(trtmc::glmasr::processor_frames_for_samples(71360, 160) == 446,
+          "glmasr processor frames are ceil(samples / hop)");
+    check(trtmc::glmasr::mel_frames_for_samples(71360, 160, 400, 30, 16000) == 448,
+          "glmasr centered mel framing differs from the processor frame count");
+    const auto single = trtmc::glmasr::plan_audio_windows(71360, 30, 16000, 160, 4);
+    check(single.size() == 1 && single[0].embeddings == 55 &&
+              trtmc::glmasr::audio_placeholder_count(single, 4) == 55,
+          "glmasr placeholder count matches GlmAsrProcessor for 4.46 seconds");
+}
+
+void test_long_audio_splits_into_processor_windows() {
+    // 33.9 seconds: a full 30 second window and a 3.9 second remainder, each
+    // encoded separately; the placeholders cover both (375 + 48 = 423).
+    const auto windows = trtmc::glmasr::plan_audio_windows(542400, 30, 16000, 160, 4);
+    check(windows.size() == 2, "glmasr splits audio longer than a chunk into windows");
+    check(windows.size() == 2 && windows[0].offset == 0 && windows[0].samples == 480000 &&
+              windows[0].embeddings == 375 && windows[1].offset == 480000 &&
+              windows[1].samples == 62400 && windows[1].embeddings == 48,
+          "glmasr windows follow GlmAsrProcessor chunking");
+    check(trtmc::glmasr::audio_placeholder_count(windows, 4) == 423,
+          "glmasr placeholder count spans every window");
+    check(trtmc::glmasr::plan_audio_windows(0, 30, 16000, 160, 4).empty(),
+          "glmasr empty audio has no windows");
+}
+
 void test_prompt_layout_matches_chat_template() {
     trtmc::GlmAsrConfig config;
     const auto plan = trtmc::glmasr::build_prompt_plan(config, kPromptTokens, 37);
@@ -124,6 +153,8 @@ void test_prompt_clamps_to_engine_capacity() {
 
 int main() {
     test_audio_embedding_count_matches_processor();
+    test_placeholder_count_follows_processor_feature_mask();
+    test_long_audio_splits_into_processor_windows();
     test_prompt_layout_matches_chat_template();
     test_prompt_clamps_to_engine_capacity();
 

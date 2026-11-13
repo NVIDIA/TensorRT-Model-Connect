@@ -1,0 +1,4 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# The model's forecast window: its input columns, context, and horizon (model card / config).
+absolute: [{name: etth1, window: {columns: [HUFL, HULL, MUFL, MULL, LUFL, LULL, OT], context_length: 512, prediction_length: 96, stride: 24, frequency: 0}}]

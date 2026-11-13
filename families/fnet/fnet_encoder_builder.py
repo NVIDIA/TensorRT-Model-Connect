@@ -147,9 +147,9 @@ def build_fnet_encoder_engine(
     cos_h, sin_h = _compute_dft_matrices(H)
 
     cos_s_const = graph_ops.add_constant(
-        network, (S, S), cos_s, dtype=work_np_dtype)
+        network, (S, S), cos_s, dtype=np.float32)
     sin_s_const = graph_ops.add_constant(
-        network, (S, S), sin_s, dtype=work_np_dtype)
+        network, (S, S), sin_s, dtype=np.float32)
     cos_h_const = graph_ops.add_constant(
         network, (H, H), cos_h, dtype=work_np_dtype)
     sin_h_const = graph_ops.add_constant(
@@ -159,22 +159,26 @@ def build_fnet_encoder_engine(
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
 
+        fourier_input = hidden_state
+        if fourier_input.dtype != trt.float32:
+            fourier_input = network.add_cast(fourier_input, trt.float32).get_output(0)
+
         # --- 2D DFT (replaces self-attention) ---
         # real(DFT2D(X)) = cos_S @ X @ cos_H - sin_S @ X @ sin_H
         # Term 1: cos_S @ X @ cos_H
         cx = network.add_matrix_multiply(
             cos_s_const, trt.MatrixOperation.NONE,
-            hidden_state, trt.MatrixOperation.NONE)
+            fourier_input, trt.MatrixOperation.NONE)
         cxch = network.add_matrix_multiply(
-            cx.get_output(0), trt.MatrixOperation.NONE,
+            network.add_cast(cx.get_output(0), hidden_state.dtype).get_output(0), trt.MatrixOperation.NONE,
             cos_h_const, trt.MatrixOperation.NONE)
 
         # Term 2: sin_S @ X @ sin_H
         sx = network.add_matrix_multiply(
             sin_s_const, trt.MatrixOperation.NONE,
-            hidden_state, trt.MatrixOperation.NONE)
+            fourier_input, trt.MatrixOperation.NONE)
         sxsh = network.add_matrix_multiply(
-            sx.get_output(0), trt.MatrixOperation.NONE,
+            network.add_cast(sx.get_output(0), hidden_state.dtype).get_output(0), trt.MatrixOperation.NONE,
             sin_h_const, trt.MatrixOperation.NONE)
 
         # real = term1 - term2
@@ -184,24 +188,28 @@ def build_fnet_encoder_engine(
 
         # POST-norm: residual + LayerNorm after DFT
         residual1 = network.add_elementwise(
-            hidden_state, dft_out, trt.ElementWiseOperation.SUM)
+            fourier_input, network.add_cast(dft_out, trt.float32).get_output(0), trt.ElementWiseOperation.SUM)
         normed1 = _add_seq_layer_norm(
             network, residual1.get_output(0), hidden,
             weights[f"{prefix}.post_attn_norm"],
-            weights[f"{prefix}.post_attn_norm_beta"], eps, work_np_dtype)
+            weights[f"{prefix}.post_attn_norm_beta"], eps, np.float32)
+        if normed1.dtype != hidden_state.dtype:
+            normed1 = network.add_cast(normed1, hidden_state.dtype).get_output(0)
 
         # --- FFN ---
         fc1 = graph_ops.add_matmul_rhs_constant(
-            network, normed1, hidden, intermediate,
+            network, network.add_cast(normed1, trt.float32).get_output(0), hidden, intermediate,
             weights[f"{prefix}.w_fc1"], dtype=work_np_dtype)
+        fc1 = network.add_cast(fc1, normed1.dtype).get_output(0)
         fc1 = graph_ops.add_bias_sum(
             network, fc1, intermediate, weights[f"{prefix}.fc1_bias"],
             dtype=work_np_dtype)
         activated = graph_ops.add_activation(
             network, fc1, hidden_act, dtype=work_np_dtype)
         fc2 = graph_ops.add_matmul_rhs_constant(
-            network, activated, intermediate, hidden,
+            network, network.add_cast(activated, trt.float32).get_output(0), intermediate, hidden,
             weights[f"{prefix}.w_fc2"], dtype=work_np_dtype)
+        fc2 = network.add_cast(fc2, activated.dtype).get_output(0)
         fc2 = graph_ops.add_bias_sum(
             network, fc2, hidden, weights[f"{prefix}.fc2_bias"],
             dtype=work_np_dtype)

@@ -239,241 +239,121 @@
     "input_scale": 0.03099888392857143,
     "weight_scale": 0.0007091164588928223
   },
-  "blocks.0.attn2.to_out.0": {
-    "input_scale": 0.0030116489955357146,
-    "weight_scale": 0.0014420489647558757
-  },
   "blocks.0.attn2.to_q": {
     "input_scale": 0.10189732142857144,
     "weight_scale": 0.0006170465078737054
-  },
-  "blocks.1.attn2.to_out.0": {
-    "input_scale": 0.0023978097098214285,
-    "weight_scale": 0.0005232050150100674
   },
   "blocks.1.attn2.to_q": {
     "input_scale": 0.09821428571428571,
     "weight_scale": 0.0004240336628364665
   },
-  "blocks.10.attn2.to_out.0": {
-    "input_scale": 0.005409458705357144,
-    "weight_scale": 0.0010769704489835671
-  },
   "blocks.10.attn2.to_q": {
     "input_scale": 0.06138392857142858,
     "weight_scale": 0.00043865948516343323
-  },
-  "blocks.11.attn2.to_out.0": {
-    "input_scale": 0.005447823660714286,
-    "weight_scale": 0.0012347031650798662
   },
   "blocks.11.attn2.to_q": {
     "input_scale": 0.06169084821428572,
     "weight_scale": 0.00035632697732320854
   },
-  "blocks.12.attn2.to_out.0": {
-    "input_scale": 0.0070207868303571435,
-    "weight_scale": 0.004064231046608516
-  },
   "blocks.12.attn2.to_q": {
     "input_scale": 0.07765066964285715,
     "weight_scale": 0.0004304671726588692
-  },
-  "blocks.13.attn2.to_out.0": {
-    "input_scale": 0.005255998883928572,
-    "weight_scale": 0.003377301352364676
   },
   "blocks.13.attn2.to_q": {
     "input_scale": 0.10987723214285715,
     "weight_scale": 0.00039569680978144916
   },
-  "blocks.14.attn2.to_out.0": {
-    "input_scale": 0.004143415178571429,
-    "weight_scale": 0.0014940911371793067
-  },
   "blocks.14.attn2.to_q": {
     "input_scale": 0.0666015625,
     "weight_scale": 0.00036051523472581593
-  },
-  "blocks.15.attn2.to_out.0": {
-    "input_scale": 0.004642159598214286,
-    "weight_scale": 0.0034263309623513904
   },
   "blocks.15.attn2.to_q": {
     "input_scale": 0.10680803571428572,
     "weight_scale": 0.0003741495976490634
   },
-  "blocks.16.attn2.to_out.0": {
-    "input_scale": 0.0045654296875,
-    "weight_scale": 0.0015051116102508136
-  },
   "blocks.16.attn2.to_q": {
     "input_scale": 0.07672991071428571,
     "weight_scale": 0.00041502537871045727
-  },
-  "blocks.17.attn2.to_out.0": {
-    "input_scale": 0.0033185686383928573,
-    "weight_scale": 0.004064632313592094
   },
   "blocks.17.attn2.to_q": {
     "input_scale": 0.11785714285714287,
     "weight_scale": 0.00035572441161743233
   },
-  "blocks.18.attn2.to_out.0": {
-    "input_scale": 0.003970772879464286,
-    "weight_scale": 0.002622304218155997
-  },
   "blocks.18.attn2.to_q": {
     "input_scale": 0.12215401785714286,
     "weight_scale": 0.0003478117287158966
-  },
-  "blocks.19.attn2.to_out.0": {
-    "input_scale": 0.0032418387276785714,
-    "weight_scale": 0.002165785325425012
   },
   "blocks.19.attn2.to_q": {
     "input_scale": 0.08839285714285715,
     "weight_scale": 0.00030735697198127
   },
-  "blocks.2.attn2.to_out.0": {
-    "input_scale": 0.004814801897321429,
-    "weight_scale": 0.00074632020135011
-  },
   "blocks.2.attn2.to_q": {
     "input_scale": 0.0908482142857143,
     "weight_scale": 0.0003972911675061498
-  },
-  "blocks.20.attn2.to_out.0": {
-    "input_scale": 0.00281982421875,
-    "weight_scale": 0.0026612518621342523
   },
   "blocks.20.attn2.to_q": {
     "input_scale": 0.11356026785714288,
     "weight_scale": 0.0003318736396197762
   },
-  "blocks.21.attn2.to_out.0": {
-    "input_scale": 0.0032610212053571434,
-    "weight_scale": 0.0027094350329467227
-  },
   "blocks.21.attn2.to_q": {
     "input_scale": 0.11417410714285715,
     "weight_scale": 0.000313300739175507
-  },
-  "blocks.22.attn2.to_out.0": {
-    "input_scale": 0.002589634486607143,
-    "weight_scale": 0.0029862520417996813
   },
   "blocks.22.attn2.to_q": {
     "input_scale": 0.12583705357142858,
     "weight_scale": 0.00038650894670614174
   },
-  "blocks.23.attn2.to_out.0": {
-    "input_scale": 0.0031267438616071432,
-    "weight_scale": 0.0038953380925314768
-  },
   "blocks.23.attn2.to_q": {
     "input_scale": 0.12583705357142858,
     "weight_scale": 0.00035629178663449626
-  },
-  "blocks.24.attn2.to_out.0": {
-    "input_scale": 0.002858189174107143,
-    "weight_scale": 0.0033872260579041074
   },
   "blocks.24.attn2.to_q": {
     "input_scale": 0.12890625000000003,
     "weight_scale": 0.0003398429003677198
   },
-  "blocks.25.attn2.to_out.0": {
-    "input_scale": 0.003433663504464286,
-    "weight_scale": 0.002470872497984341
-  },
   "blocks.25.attn2.to_q": {
     "input_scale": 0.12767857142857145,
     "weight_scale": 0.0002861537504941225
-  },
-  "blocks.26.attn2.to_out.0": {
-    "input_scale": 0.003740583147321429,
-    "weight_scale": 0.0020183751891766277
   },
   "blocks.26.attn2.to_q": {
     "input_scale": 0.12338169642857144,
     "weight_scale": 0.000306043607581939
   },
-  "blocks.27.attn2.to_out.0": {
-    "input_scale": 0.002762276785714286,
-    "weight_scale": 0.0022919225905622754
-  },
   "blocks.27.attn2.to_q": {
     "input_scale": 0.11417410714285715,
     "weight_scale": 0.00031824120586471897
-  },
-  "blocks.28.attn2.to_out.0": {
-    "input_scale": 0.0045270647321428575,
-    "weight_scale": 0.0009442482675824847
   },
   "blocks.28.attn2.to_q": {
     "input_scale": 0.11969866071428573,
     "weight_scale": 0.00028893248444156986
   },
-  "blocks.29.attn2.to_out.0": {
-    "input_scale": 0.004987444196428571,
-    "weight_scale": 0.0009351204415517193
-  },
   "blocks.29.attn2.to_q": {
     "input_scale": 0.10189732142857144,
     "weight_scale": 0.00027856658146317514
-  },
-  "blocks.3.attn2.to_out.0": {
-    "input_scale": 0.003433663504464286,
-    "weight_scale": 0.0009840412198432855
   },
   "blocks.3.attn2.to_q": {
     "input_scale": 0.08962053571428573,
     "weight_scale": 0.0004091928380408457
   },
-  "blocks.4.attn2.to_out.0": {
-    "input_scale": 0.004680524553571429,
-    "weight_scale": 0.002457295943583761
-  },
   "blocks.4.attn2.to_q": {
     "input_scale": 0.09821428571428571,
     "weight_scale": 0.00035647472499736717
-  },
-  "blocks.5.attn2.to_out.0": {
-    "input_scale": 0.004469517299107143,
-    "weight_scale": 0.0009308561150516782
   },
   "blocks.5.attn2.to_q": {
     "input_scale": 0.08716517857142858,
     "weight_scale": 0.0003695639648607799
   },
-  "blocks.6.attn2.to_out.0": {
-    "input_scale": 0.004949079241071429,
-    "weight_scale": 0.002448208097900663
-  },
   "blocks.6.attn2.to_q": {
     "input_scale": 0.09698660714285715,
     "weight_scale": 0.0003641283671770777
-  },
-  "blocks.7.attn2.to_out.0": {
-    "input_scale": 0.004949079241071429,
-    "weight_scale": 0.0007512438377099377
   },
   "blocks.7.attn2.to_q": {
     "input_scale": 0.07212611607142858,
     "weight_scale": 0.00043967386175479205
   },
-  "blocks.8.attn2.to_out.0": {
-    "input_scale": 0.005946568080357143,
-    "weight_scale": 0.0011146049946546555
-  },
   "blocks.8.attn2.to_q": {
     "input_scale": 0.06629464285714286,
     "weight_scale": 0.00044996790321809906
-  },
-  "blocks.9.attn2.to_out.0": {
-    "input_scale": 0.005486188616071429,
-    "weight_scale": 0.0033992837582315716
   },
   "blocks.9.attn2.to_q": {
     "input_scale": 0.09268973214285715,

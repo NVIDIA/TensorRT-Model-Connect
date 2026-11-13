@@ -3,7 +3,11 @@
 
 nemo_toolkit[asr]==2.7.3
 numpy==1.26.4
+# PyArrow 26 requires NumPy 2; NeMo's datasets import must keep NumPy 1.x.
+pyarrow==25.0.1
 scipy==1.15.3
 sentencepiece==0.2.2
 soundfile==0.14.0
 transformers==4.57.6
+# NeMo's Lightning requires packaging<25; virtualenv 21.14.6 requires >=26.3.
+virtualenv==21.14.5

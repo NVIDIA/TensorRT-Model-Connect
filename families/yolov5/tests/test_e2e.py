@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Direct build, native runtime, and ultralytics reference proof for YOLOv5."""
+"""Direct build, native runtime, and PyTorch reference proof for YOLOv5."""
 
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -26,7 +27,7 @@ def _cases() -> dict[str, tuple[dict, dict]]:
     for path in sorted(MANIFEST_ROOT.glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == FAMILY
-        assert manifest["task"] == "object_detection"
+        assert manifest["task"] == "image_to_boxes"
         for case in manifest["testcases"]:
             name = str(case["name"])
             assert name not in result
@@ -102,6 +103,67 @@ def _asset(case: dict) -> Path:
     return path
 
 
+def _assert_matches_reference(
+    actual: dict, kept: np.ndarray, scale: float, pad_x: float, pad_y: float
+) -> None:
+    """The original native-vs-PyTorch oracle, applied unchanged to every path."""
+    assert len(kept), "the reference found nothing above the threshold to compare against"
+    assert len(actual["scores"]) == len(kept), (
+        f"engine returned {len(actual['scores'])} detections, reference {len(kept)}"
+    )
+    for index, row in enumerate(kept):
+        x0, y0, x1, y1, score, label = row
+        assert int(actual["classes"][index]) == int(label)
+        assert abs(float(actual["scores"][index]) - float(score)) < 5e-3
+        # The engine reports source-image pixels, so the reference box has to
+        # come back out of the letterbox before they can be compared.
+        expected = (
+            (float(x0) - pad_x) / scale,
+            (float(y0) - pad_y) / scale,
+            (float(x1) - pad_x) / scale,
+            (float(y1) - pad_y) / scale,
+        )
+        for axis, want in enumerate(expected):
+            # Each path writes the boxes as one flat array, four per detection.
+            assert abs(float(actual["boxes"][index * 4 + axis]) - want) < 1.0
+
+
+def _sdk_detections(
+    runtime_root: Path, bundle: Path, image: Path, tmp_path: Path
+) -> list[dict]:
+    """Run the public C and C++ consumers on the reference's own decoded pixels."""
+    from PIL import Image
+
+    native_build = _required_path(
+        os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR"
+    )
+    pixels = np.asarray(Image.open(image).convert("RGB"), dtype=np.float32) / np.float32(255.0)
+    raw = tmp_path / "sdk-input.rgb.f32"
+    np.ascontiguousarray(pixels).tofile(raw)
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = os.pathsep.join(
+        value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value
+    )
+    outputs = []
+    for language in ("c", "cpp"):
+        consumer = native_build / f"test_yolov5_sdk_{language}"
+        assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
+        completed = subprocess.run(
+            [str(consumer), str(bundle), str(runtime_root), str(raw),
+             str(pixels.shape[0]), str(pixels.shape[1])],
+            check=True, capture_output=True, text=True, env=env, timeout=600,
+        )
+        payloads = [line for line in completed.stdout.splitlines() if line.startswith("{")]
+        assert len(payloads) == 1, f"the {language} consumer must print one result"
+        result = json.loads(payloads[0])
+        assert result["task"] == "image_to_boxes"
+        assert (result["image_height"], result["image_width"]) == pixels.shape[:2]
+        outputs.append(result)
+    # Same pixels, same bundle, same runtime: the two public bindings agree exactly.
+    assert outputs[0] == outputs[1], "the C and C++ SDK consumers disagree"
+    return outputs
+
+
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     manifest, case = CASES[case_name]
     binary = _required_path(os.environ.get("TRTMC_BINARY"), "TRTMC_BINARY")
@@ -139,138 +201,18 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     )
     actual = json.loads(completed.stdout)
 
-    import copy
-
-    import torch
-    from PIL import Image
-    from ultralytics.nn.tasks import parse_model
-    from families.yolov5.checkpoint import _collect, _install_placeholders
-
-    # The reference must run the archive under test, and must see the same
-    # letterboxed pixels the runtime seam produced. It is rebuilt rather than
-    # called: a YOLOv5 archive pickles classes from the standalone yolov5
-    # repository, so the restored object carries weights but cannot run.
-    #
-    # The topology comes from the yaml the archive itself stores, expanded by
-    # ultralytics' own parser, so this reference does not share the family's
-    # stage table. Only the anchor head is written out here, because
-    # ultralytics replaced it with an anchor-free one.
-    _install_placeholders()
-    blob = torch.load(str(model_dir / "yolov5n.pt"), map_location="cpu", weights_only=False)
-    archive = blob["model"]
-    spec = copy.deepcopy(archive.__dict__["yaml"])
-    # The parser has no anchor head to build, so it is dropped and the three
-    # 1x1 convolutions it holds are applied by hand below.
-    spec["head"].pop()
-    stages, _ = parse_model(spec, ch=3, verbose=False)
-
-    weights: dict = {}
-    _collect(archive, "", weights)
-    body = {
-        key[len("model.") :]: value.float()
-        for key, value in weights.items()
-        if key.startswith("model.")
-    }
-    # The head sits one past the last stage the parser built.
-    head_index = str(len(stages))
-    missing, unexpected = stages.load_state_dict(
-        {k: v for k, v in body.items() if not k.startswith(f"{head_index}.")}, strict=False
+    reference_output = tmp_path / "reference.npz"
+    subprocess.run(
+        [sys.executable, str(TEST_ROOT / "reference/e2e.py"),
+         str(model_dir), str(image), str(reference_output)],
+        check=True, timeout=600,
+        env={**os.environ, "PYTHONPATH": str(TEST_ROOT.parents[2]) + os.pathsep + os.environ.get("PYTHONPATH", "")},
     )
-    assert not missing, missing
-    assert all(key.endswith("num_batches_tracked") for key in unexpected), unexpected
-    for module in stages.modules():
-        if isinstance(module, torch.nn.BatchNorm2d):
-            # YOLOv5 resets every norm to this after construction. The value is
-            # pickled with the module but is not part of the state dict.
-            module.eps = 1e-3
-    stages.eval()
-
-    classes = len(archive.__dict__["names"])
-    per_anchor = classes + 5
-    anchors = weights[f"model.{head_index}.anchors"].float()
-    strides = archive.__dict__["stride"].float()
-    head = [body[f"{head_index}.m.{level}.weight"] for level in range(len(strides))]
-    biases = [body[f"{head_index}.m.{level}.bias"] for level in range(len(strides))]
-
-    size = 640
-    source = Image.open(image).convert("RGB")
-    scale = min(size / source.height, size / source.width)
-    resized = source.resize(
-        (round(source.width * scale), round(source.height * scale)), Image.BILINEAR
-    )
-    canvas = Image.new("RGB", (size, size), (114, 114, 114))
-    pad_x = (size - resized.width) // 2
-    pad_y = (size - resized.height) // 2
-    canvas.paste(resized, (pad_x, pad_y))
-    pixels = np.asarray(canvas, dtype=np.float32).transpose(2, 0, 1)[None] / 255.0
-
-    with torch.no_grad():
-        outputs: list = []
-        tensor = torch.from_numpy(pixels.astype(np.float32))
-        for stage in stages:
-            if stage.f != -1:
-                taken = [tensor if index == -1 else outputs[index] for index in stage.f]
-                tensor = stage(taken)
-            else:
-                tensor = stage(tensor)
-            outputs.append(tensor)
-
-        levels = []
-        for level, source_index in enumerate((17, 20, 23)):
-            raw = torch.nn.functional.conv2d(outputs[source_index], head[level], biases[level])
-            rows, columns = raw.shape[-2], raw.shape[-1]
-            values = raw.view(1, len(anchors[level]), per_anchor, rows, columns)
-            values = values.permute(0, 1, 3, 4, 2).sigmoid()
-            grid_y, grid_x = torch.meshgrid(
-                torch.arange(rows), torch.arange(columns), indexing="ij"
-            )
-            grid = torch.stack((grid_x, grid_y), dim=-1).float()
-            centre = (values[..., 0:2] * 2 - 0.5 + grid) * strides[level]
-            extent = (
-                (values[..., 2:4] * 2) ** 2 * anchors[level].view(1, -1, 1, 1, 2) * strides[level]
-            )
-            levels.append(
-                torch.cat((centre, extent, values[..., 4:]), dim=-1).reshape(1, -1, per_anchor)
-            )
-        raw = torch.cat(levels, dim=1)
-    # Suppression is done here rather than with ultralytics' helper: that one
-    # reads the anchor-free layout of the later generations, where there is no
-    # objectness and the channels come before the anchors. Handing it a YOLOv5
-    # tensor is silently misread rather than rejected.
-    import torchvision
-
-    predictions = raw[0]
-    confidence = predictions[:, 4:5] * predictions[:, 5:]
-    best, labels = confidence.max(dim=1)
-    survivors = best > 0.25
-    centre, extent = predictions[survivors, 0:2], predictions[survivors, 2:4]
-    corners = torch.cat((centre - extent / 2, centre + extent / 2), dim=1)
-    order = torchvision.ops.batched_nms(corners, best[survivors], labels[survivors], 0.7)[:300]
-    kept = torch.cat(
-        (
-            corners[order],
-            best[survivors][order, None],
-            labels[survivors][order, None].float(),
-        ),
-        dim=1,
-    ).numpy()
-
-    assert len(kept), "the reference found nothing above the threshold to compare against"
-    assert len(actual["scores"]) == len(kept), (
-        f"engine returned {len(actual['scores'])} detections, reference {len(kept)}"
-    )
-    for index, row in enumerate(kept):
-        x0, y0, x1, y1, score, label = row
-        assert int(actual["classes"][index]) == int(label)
-        assert abs(float(actual["scores"][index]) - float(score)) < 5e-3
-        # The engine reports source-image pixels, so the reference box has to
-        # come back out of the letterbox before they can be compared.
-        expected = (
-            (float(x0) - pad_x) / scale,
-            (float(y0) - pad_y) / scale,
-            (float(x1) - pad_x) / scale,
-            (float(y1) - pad_y) / scale,
-        )
-        for axis, want in enumerate(expected):
-            # The CLI writes the boxes as one flat array, four per detection.
-            assert abs(float(actual["boxes"][index * 4 + axis]) - want) < 1.0
+    with np.load(reference_output, allow_pickle=False) as result:
+        kept = result["kept"]
+        scale, pad_x, pad_y = (float(result[name]) for name in ("scale", "pad_x", "pad_y"))
+    _assert_matches_reference(actual, kept, scale, pad_x, pad_y)
+    # The public SDK reads the same pixels the reference decoded, so it is held to
+    # the same oracle; the CLI's own JPEG decoder is not claimed bitwise equal.
+    for sdk in _sdk_detections(runtime_root, bundle, image, tmp_path):
+        _assert_matches_reference(sdk, kept, scale, pad_x, pad_y)

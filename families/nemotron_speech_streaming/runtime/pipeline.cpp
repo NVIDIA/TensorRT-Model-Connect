@@ -95,8 +95,9 @@ void validate_rnnt_streaming_config(const RnntConfig& config, bool has_streaming
 
 class RnntTranscriptionStream final : public ITranscriptionStream {
   public:
-    RnntTranscriptionStream(RnntPipeline& pipeline, TranscriptionStreamConfig cfg)
-        : pipeline_(pipeline), cfg_(cfg),
+    RnntTranscriptionStream(RnntPipeline& pipeline, TranscriptionStreamConfig cfg,
+                            std::vector<float> prompt_onehot)
+        : pipeline_(pipeline), cfg_(cfg), prompt_onehot_(std::move(prompt_onehot)),
           schedule_(make_nemotron_streaming_schedule(
               cfg_.att_context_left, cfg_.att_context_right,
               cfg_.input_sample_rate > 0 ? cfg_.input_sample_rate : pipeline.config_.sample_rate,
@@ -273,7 +274,7 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
             cfg_.att_context_right, chunk, cache_last_channel_, cache_last_time_,
             cache_last_channel_len_, valid_query_frames, first_step, next_channel, next_time);
         pipeline_.decode_encoder_frames(enc, valid_query_frames, token_limit(), pred_output_,
-                                        state_h_, state_c_, emitted_);
+                                        state_h_, state_c_, emitted_, prompt_onehot_);
 
         cache_last_channel_ = std::move(next_channel);
         cache_last_time_ = std::move(next_time);
@@ -310,6 +311,7 @@ class RnntTranscriptionStream final : public ITranscriptionStream {
 
     RnntPipeline& pipeline_;
     TranscriptionStreamConfig cfg_;
+    const std::vector<float> prompt_onehot_;
     RnntStreamingSchedule schedule_;
     rnnt::IncrementalMelSpectrogram feature_state_;
     std::vector<float> cache_last_channel_;
@@ -368,16 +370,20 @@ int32_t RnntPipeline::resolve_prompt_index(const std::string& tag) const {
     return it->second;
 }
 
-std::vector<float> RnntPipeline::run_prompt_kernel(const float* encoder_frame) {
+std::vector<float> RnntPipeline::run_prompt_kernel(const float* encoder_frame,
+                                                   const std::vector<float>& prompt_onehot) {
     if (!prompt_kernel_)
         throw std::runtime_error("RnntPipeline: run_prompt_kernel called without engine");
     const int32_t enc_dim = config_.encoder_hidden_size;
     const int32_t num_p = config_.num_prompts;
+    if (prompt_onehot.size() != static_cast<std::size_t>(num_p))
+        throw std::runtime_error("RnntPipeline: language prompt state is not initialized");
 
     TensorMap inputs;
     inputs["encoder_frame"] =
         make_tensor(const_cast<float*>(encoder_frame), {1, enc_dim}, DType::kFloat32);
-    inputs["prompt_onehot"] = make_tensor(prompt_onehot_.data(), {1, num_p}, DType::kFloat32);
+    inputs["prompt_onehot"] =
+        make_tensor(const_cast<float*>(prompt_onehot.data()), {1, num_p}, DType::kFloat32);
 
     auto outputs = prompt_kernel_->forward(inputs);
     auto it = outputs.find("prompt_kernel_output");
@@ -390,16 +396,14 @@ std::vector<float> RnntPipeline::run_prompt_kernel(const float* encoder_frame) {
 
 RnntPipeline::~RnntPipeline() = default;
 
-void RnntPipeline::setup_prompt_state(const std::string& language) {
-    if (!config_.has_prompt_kernel) {
-        prompt_onehot_.clear();
-        prompt_index_ = -1;
-        return;
-    }
-    prompt_index_ = resolve_prompt_index(language);
-    prompt_onehot_.assign(static_cast<std::size_t>(config_.num_prompts), 0.0F);
-    if (prompt_index_ >= 0 && prompt_index_ < config_.num_prompts)
-        prompt_onehot_[static_cast<std::size_t>(prompt_index_)] = 1.0F;
+std::vector<float> RnntPipeline::prompt_for_language(const std::string& language) const {
+    if (!config_.has_prompt_kernel)
+        return {};
+    const auto index = resolve_prompt_index(language);
+    std::vector<float> prompt(static_cast<std::size_t>(config_.num_prompts), 0.0F);
+    if (index >= 0 && index < config_.num_prompts)
+        prompt[static_cast<std::size_t>(index)] = 1.0F;
+    return prompt;
 }
 
 std::unique_ptr<ITranscriptionStream>
@@ -408,7 +412,7 @@ RnntPipeline::create_transcription_stream(const TranscriptionStreamConfig& cfg) 
                                            cfg.input_sample_rate, config_.mel_hop_length,
                                            config_.subsampling_factor);
 
-    setup_prompt_state(cfg.language);
+    auto prompt = prompt_for_language(cfg.language);
 
     if (cfg.online_normalization)
         throw std::runtime_error("RNNT streaming transcription does not support "
@@ -432,13 +436,17 @@ RnntPipeline::create_transcription_stream(const TranscriptionStreamConfig& cfg) 
             "NeMo pad_and_drop_preencoded=false parity");
     }
     (void)streaming_encoder_for(cfg.att_context_right, !cfg.pad_and_drop_preencoded);
-    return std::make_unique<RnntTranscriptionStream>(*this, cfg);
+    return std::make_unique<RnntTranscriptionStream>(*this, cfg, std::move(prompt));
 }
 
 TextResult RnntPipeline::transcribe(const float* audio_data, int32_t num_samples,
                                     const TranscriptionConfig& request) {
     const int32_t max_new_tokens = request.max_output_tokens;
     const int32_t input_sample_rate = request.input_sample_rate;
+    auto language = request.source_language;
+    if (language == "en" && config_.prompt_dictionary.count("en-US"))
+        language = "en-US";
+    const auto prompt = prompt_for_language(language);
 
     int32_t actual_mel_frames = 0;
     auto mel = extract_padded_mel(audio_data, num_samples, input_sample_rate, actual_mel_frames);
@@ -462,7 +470,7 @@ TextResult RnntPipeline::transcribe(const float* audio_data, int32_t num_samples
     emitted.reserve(static_cast<std::size_t>(token_limit));
 
     decode_encoder_frames(encoder_output, encoder_frames, token_limit, pred_output, state_h,
-                          state_c, emitted);
+                          state_c, emitted, prompt);
 
     TextResult out;
     out.token_ids = std::move(emitted);
@@ -624,7 +632,8 @@ void RnntPipeline::decode_encoder_frames(const std::vector<float>& encoder_outpu
                                          int32_t frame_count, int32_t token_limit,
                                          std::vector<float>& pred_output,
                                          std::vector<float>& state_h, std::vector<float>& state_c,
-                                         std::vector<int32_t>& emitted) {
+                                         std::vector<int32_t>& emitted,
+                                         const std::vector<float>& prompt_onehot) {
     for (int32_t frame = 0;
          frame < frame_count && static_cast<int32_t>(emitted.size()) < token_limit; ++frame) {
         const float* enc_ptr =
@@ -634,7 +643,7 @@ void RnntPipeline::decode_encoder_frames(const std::vector<float>& encoder_outpu
         std::vector<float> projected;
         const float* enc_frame = enc_ptr;
         if (config_.has_prompt_kernel) {
-            projected = run_prompt_kernel(enc_ptr);
+            projected = run_prompt_kernel(enc_ptr, prompt_onehot);
             enc_frame = projected.data();
         }
         int32_t symbols_this_frame = 0;

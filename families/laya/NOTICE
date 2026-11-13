@@ -1,0 +1,14 @@
+Laya model checkpoints, decision architecture, record format, and Router:
+https://huggingface.co/convaiinnovations/laya
+Revision 7b928d828b7b0e022f929d9bd2e44165aa270148
+laya Python SDK version 0.3.20, by Convai Innovations.
+Licensed under Apache License 2.0.
+
+ModernBERT reference implementation in Hugging Face Transformers 5.10.2:
+Copyright the Hugging Face Inc. team and the ModernBERT authors.
+Licensed under Apache License 2.0.
+
+Canonical Unicode normalization data is packaged from unicodedata2 16.0.0
+and restricted to the normalization behavior of the released tokenizer.
+Unicode data files are covered by the Unicode Data Files and Software License:
+https://www.unicode.org/license.txt

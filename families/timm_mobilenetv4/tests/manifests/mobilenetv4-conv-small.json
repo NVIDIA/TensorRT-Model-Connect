@@ -1,6 +1,7 @@
 {
   "name": "mobilenetv4-conv-small",
   "hf_id": "timm/mobilenetv4_conv_small.e2400_r224_in1k",
+  "hf_revision": "331fb803779522b685cf942e15f914fb6741c1eb",
   "bundle": "mobilenetv4-conv-small.bundle",
   "family": "timm_mobilenetv4",
   "task": "image_to_class_scores",

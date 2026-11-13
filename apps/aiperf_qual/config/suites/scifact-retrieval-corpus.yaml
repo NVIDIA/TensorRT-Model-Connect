@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# SciFact (BEIR, mteb/scifact pinned): the 300 test queries and the whole 5,183-document corpus (title and text);
+# each query's gold is its relevant documents. Scored as nDCG@10 of the corpus ranked by embedding cosine.
+suite: scifact-retrieval-corpus
+version: 1
+source:
+  kind: scifact
+  mode: retrieval
+smoke_samples: 20  # smoke mode: the loader keeps one query, its relevant documents, and nine others
+selection: {method: first, count: 100000}
+fields: {text: prompt}

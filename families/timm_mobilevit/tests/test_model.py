@@ -23,6 +23,7 @@ except ModuleNotFoundError:
 from families.timm_mobilevit import model  # noqa: E402
 from families.timm_mobilevit.checkpoint import Checkpoint  # noqa: E402
 from families.timm_mobilevit.support import describe  # noqa: E402
+from tensorrt_model_connect import BuildRequest  # noqa: E402
 from tensorrt_model_connect.model_support import ModelMetadata  # noqa: E402
 
 
@@ -203,6 +204,113 @@ def test_preprocess_config_rejects_a_degenerate_std() -> None:
     }
     with pytest.raises(ValueError, match="preprocessing or classifier config is invalid"):
         model._preprocess_config(raw)
+
+
+class _Writer:
+    def __init__(self) -> None:
+        self.sections: dict[str, object] = {}
+
+    def set_header(self, **header) -> None:
+        self.sections["header"] = header
+
+    def add_bytes(self, name: str, value: bytes) -> None:
+        self.sections[name] = value
+
+    def add_json(self, name: str, value: object) -> None:
+        self.sections[name] = value
+
+
+def test_build_exports_semantic_task_and_complete_class_metadata(
+    tmp_path: Path, monkeypatch
+) -> None:
+    checkpoint_dir = _checkpoint(tmp_path)
+    monkeypatch.setattr(model, "_build_engine", lambda *args, **kwargs: (b"plan", {
+        "image_height": 256, "image_width": 256, "crop_pct": 0.9, "interpolation": "bicubic",
+        "mean": [0.0, 0.0, 0.0], "std": [1.0, 1.0, 1.0], "num_classes": 5,
+    }))
+    writer = _Writer()
+
+    model.build(
+        BuildRequest(
+            model_dir=checkpoint_dir,
+            output_path=tmp_path / "unused.bundle",
+            family="timm_mobilevit",
+            task="image_to_class_scores",
+            precision="fp32",
+        ),
+        writer,
+    )
+
+    assert writer.sections["header"]["task"] == "image_to_class_scores"
+    assert writer.sections["engine.plan"] == b"plan"
+    assert writer.sections["runtime.json"]["num_classes"] == 5
+    assert writer.sections["runtime.json"]["vocabulary_id"] == ""
+    assert writer.sections["runtime.json"]["labels"] == []
+
+
+def test_build_preserves_checkpoint_class_identity(tmp_path: Path, monkeypatch) -> None:
+    checkpoint_dir = _checkpoint(tmp_path)
+    config = json.loads((checkpoint_dir / "config.json").read_text(encoding="utf-8"))
+    labels = ["first", "second", "third", "fourth", "fifth"]
+    config.update(vocabulary_id="test:five-classes", label_names=labels)
+    (checkpoint_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setattr(model, "_build_engine", lambda *args, **kwargs: (b"plan", {
+        "image_height": 256, "image_width": 256, "crop_pct": 0.9, "interpolation": "bicubic",
+        "mean": [0.0, 0.0, 0.0], "std": [1.0, 1.0, 1.0], "num_classes": 5,
+    }))
+    writer = _Writer()
+
+    model.build(
+        BuildRequest(
+            model_dir=checkpoint_dir,
+            output_path=tmp_path / "unused.bundle",
+            family="timm_mobilevit",
+            task="image_to_class_scores",
+            precision="fp32",
+        ),
+        writer,
+    )
+
+    assert writer.sections["runtime.json"]["vocabulary_id"] == "test:five-classes"
+    assert writer.sections["runtime.json"]["labels"] == labels
+
+
+@pytest.mark.parametrize("labels", [["only one"], ["one", "two", "", "four", "five"], 5])
+def test_build_rejects_incomplete_class_labels(tmp_path: Path, monkeypatch, labels) -> None:
+    checkpoint_dir = _checkpoint(tmp_path)
+    config = json.loads((checkpoint_dir / "config.json").read_text(encoding="utf-8"))
+    config["label_names"] = labels
+    (checkpoint_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    monkeypatch.setattr(model, "_build_engine", lambda *args, **kwargs: (b"plan", {
+        "image_height": 256, "image_width": 256, "crop_pct": 0.9, "interpolation": "bicubic",
+        "mean": [0.0, 0.0, 0.0], "std": [1.0, 1.0, 1.0], "num_classes": 5,
+    }))
+
+    with pytest.raises(ValueError, match="label_names must name every class"):
+        model.build(
+            BuildRequest(
+                model_dir=checkpoint_dir,
+                output_path=tmp_path / "unused.bundle",
+                family="timm_mobilevit",
+                task="image_to_class_scores",
+                precision="fp32",
+            ),
+            _Writer(),
+        )
+
+
+def test_build_rejects_the_old_task_name(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="image_to_class_scores"):
+        model.build(
+            BuildRequest(
+                model_dir=_checkpoint(tmp_path),
+                output_path=tmp_path / "unused.bundle",
+                family="timm_mobilevit",
+                task="classification",
+                precision="fp32",
+            ),
+            _Writer(),
+        )
 
 
 def test_fp32_builds_switch_off_the_reduced_precision_path() -> None:

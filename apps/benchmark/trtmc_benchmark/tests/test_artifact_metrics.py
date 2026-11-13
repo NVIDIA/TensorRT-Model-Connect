@@ -70,3 +70,24 @@ def test_generated_audio_compares_complete_waveforms(tmp_path: Path) -> None:
             "max_log_spectral_distance": 3.0,
         },
     )
+
+
+def test_generated_audio_windows_cover_a_corrupted_tail(tmp_path: Path) -> None:
+    sample_rate = 24_000
+    time = np.arange(25 * sample_rate, dtype=np.float32) / sample_rate
+    speechlike = (np.sin(2.0 * np.pi * 220.0 * time) * (0.5 + 0.4 * np.sin(2.0 * np.pi * 3.0 * time))).astype(np.float32)
+    corrupted = speechlike.copy()
+    tail = slice(int(0.437 * corrupted.size), None)  # shuffle the last 56.3%: same prefix, RMS, and duration
+    corrupted[tail] = np.random.default_rng(0).permutation(corrupted[tail])
+    paths = {}
+    for name, samples in (("reference", speechlike), ("candidate", corrupted)):
+        paths[name] = tmp_path / f"{name}.wav"
+        with wave.open(str(paths[name]), "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(sample_rate)
+            output.writeframes(np.rint(samples * 32767.0).astype("<i2").tobytes())
+    metrics = generated_audio_metrics({"audio_artifact": str(paths["candidate"])},
+                                      {"audio_artifact": str(paths["reference"])})
+    assert metrics["duration_ratio"] == 1.0 and abs(metrics["rms_ratio"] - 1.0) < 1e-3
+    assert metrics["spectral_windows"] >= 3 and metrics["log_spectral_distance"] > 3.0

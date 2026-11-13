@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import sys
-from typing import Mapping
+from typing import Mapping, MutableMapping
 
 import numpy as np
 
@@ -15,6 +15,7 @@ import tensorrt as trt
 from . import trt_ops as op
 from .checkpoint_mapper import load_transformer_state_dict
 from .model_config import COSMOS3_NANO, Cosmos3NanoConfig
+from .quantization import configure_build, is_fp8_state, load_fp8_projections
 
 
 def required_transformer_tensor_names(
@@ -73,11 +74,33 @@ def validate_transformer_state_dict(
         raise KeyError("Cosmos3-Nano checkpoint is missing tensors: " + ", ".join(missing))
 
 
-def _array(state: Mapping[str, object], name: str) -> np.ndarray:
-    value = state[name]
+def _array(state: MutableMapping[str, object], name: str) -> np.ndarray:
+    # Every tensor name is read exactly once across one build; drop it from
+    # state immediately so the raw checkpoint shrinks as layers are built
+    # instead of staying fully resident through the TensorRT engine build.
+    value = state.pop(name)
     if hasattr(value, "detach"):
         value = value.detach().float().cpu().numpy()
     return np.asarray(value, dtype=np.float32)
+
+
+def _linear(network, x, state: Mapping[str, object], name: str, quant_ctx):
+    """Projection ``name`` (without ``.weight``): an FP8 GEMM when the checkpoint quantizes it."""
+
+    if quant_ctx is not None and name in quant_ctx.weights:
+        if quant_ctx.should_quantize(name):
+            return quant_ctx.matmul(network, op.cast(network, x, trt.bfloat16), name)
+        return op.linear(network, x, quant_ctx.dequantized_weight(name))
+    return op.linear(network, x, _array(state, f"{name}.weight"))
+
+
+def _swiglu_mlp(network, x, state: Mapping[str, object], prefix: str, quant_ctx):
+    """SwiGLU MLP with the projections routed through ``_linear``."""
+
+    gate = op.silu(network, _linear(network, x, state, f"{prefix}.gate_proj", quant_ctx))
+    up = _linear(network, x, state, f"{prefix}.up_proj", quant_ctx)
+    gated = network.add_elementwise(gate, up, trt.ElementWiseOperation.PROD).get_output(0)
+    return _linear(network, gated, state, f"{prefix}.down_proj", quant_ctx)
 
 
 def _validate_context_parallel_size(size: int) -> int:
@@ -93,9 +116,14 @@ def build_cosmos3_transformer_engine(
     *,
     profile: Cosmos3NanoConfig = COSMOS3_NANO,
     context_parallel_size: int = 1,
+    quantization: str | None = None,
     verbose: bool = False,
 ) -> bytes:
-    """Build one rank-dynamic SD or Ulysses CP denoiser plan."""
+    """Build one rank-dynamic SD or Ulysses CP denoiser plan.
+
+    ``quantization="fp8"`` lowers the checkpoint's ModelOpt FP8 projections to FP8 GEMMs;
+    it needs the FP8 checkpoint, and that checkpoint needs ``quantization="fp8"``.
+    """
 
     cp_size = _validate_context_parallel_size(context_parallel_size)
     text_length = profile.max_text_seq_len
@@ -105,13 +133,28 @@ def build_cosmos3_transformer_engine(
     local_text_length = text_length // cp_size
     local_vision_length = vision_length // cp_size
 
-    state = load_transformer_state_dict(transformer_dir)
+    # Copy so this function's own pop()/clear() below (used to free the
+    # checkpoint incrementally during the build) never mutates a dict the
+    # caller still holds a reference to (e.g. a test that passes its own
+    # state via a monkeypatched loader and inspects it again afterward).
+    state = dict(load_transformer_state_dict(transformer_dir))
     validate_transformer_state_dict(state, profile)
+    quant_ctx = None
+    if quantization == "fp8":
+        if cp_size != 1:
+            raise ValueError("Cosmos3-Nano fp8 builds support context_parallel_size=1 only")
+        quant_ctx = load_fp8_projections(state, profile.num_hidden_layers)
+    elif quantization not in (None, "none"):
+        raise ValueError(f"Cosmos3-Nano does not support quantization={quantization!r}")
+    elif is_fp8_state(state):
+        raise ValueError("this checkpoint stores FP8 weights; build it with --quantization fp8")
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     build_config = builder.create_builder_config()
     build_config.builder_optimization_level = 1
+    if quant_ctx is not None:
+        configure_build(build_config)
     build_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 
@@ -207,9 +250,9 @@ def build_cosmos3_transformer_engine(
                 else ("to_q", "to_k", "to_v")
             )
             q_name, k_name, v_name = projection_names
-            q = op.linear(network, stream, _array(state, f"{prefix}.self_attn.{q_name}.weight"))
-            k = op.linear(network, stream, _array(state, f"{prefix}.self_attn.{k_name}.weight"))
-            v = op.linear(network, stream, _array(state, f"{prefix}.self_attn.{v_name}.weight"))
+            q = _linear(network, stream, state, f"{prefix}.self_attn.{q_name}", quant_ctx)
+            k = _linear(network, stream, state, f"{prefix}.self_attn.{k_name}", quant_ctx)
+            v = _linear(network, stream, state, f"{prefix}.self_attn.{v_name}", quant_ctx)
             q_norm_name = "norm_added_q" if generation else "norm_q"
             k_norm_name = "norm_added_k" if generation else "norm_k"
             q = op.rms_norm_per_head(
@@ -323,20 +366,12 @@ def build_cosmos3_transformer_engine(
         text = op.residual(
             network,
             text,
-            op.linear(
-                network,
-                text_context,
-                _array(state, f"{prefix}.self_attn.to_out.weight"),
-            ),
+            _linear(network, text_context, state, f"{prefix}.self_attn.to_out", quant_ctx),
         )
         vision = op.residual(
             network,
             vision,
-            op.linear(
-                network,
-                vision_context,
-                _array(state, f"{prefix}.self_attn.to_add_out.weight"),
-            ),
+            _linear(network, vision_context, state, f"{prefix}.self_attn.to_add_out", quant_ctx),
         )
         text_ffn_input = op.rms_norm(
             network,
@@ -355,24 +390,12 @@ def build_cosmos3_transformer_engine(
         text = op.residual(
             network,
             text,
-            op.swiglu_mlp(
-                network,
-                text_ffn_input,
-                _array(state, f"{prefix}.mlp.gate_proj.weight"),
-                _array(state, f"{prefix}.mlp.up_proj.weight"),
-                _array(state, f"{prefix}.mlp.down_proj.weight"),
-            ),
+            _swiglu_mlp(network, text_ffn_input, state, f"{prefix}.mlp", quant_ctx),
         )
         vision = op.residual(
             network,
             vision,
-            op.swiglu_mlp(
-                network,
-                vision_ffn_input,
-                _array(state, f"{prefix}.mlp_moe_gen.gate_proj.weight"),
-                _array(state, f"{prefix}.mlp_moe_gen.up_proj.weight"),
-                _array(state, f"{prefix}.mlp_moe_gen.down_proj.weight"),
-            ),
+            _swiglu_mlp(network, vision_ffn_input, state, f"{prefix}.mlp_moe_gen", quant_ctx),
         )
 
     vision = op.rms_norm(
@@ -400,6 +423,10 @@ def build_cosmos3_transformer_engine(
         f"vision={vision_length}, cp={cp_size}",
         file=sys.stderr,
     )
+    # Every tensor the network needs is already embedded in it; drop any
+    # unused leftovers (e.g. unread checkpoint tensors) before the engine
+    # build, which already runs with a 64 GiB TensorRT workspace budget.
+    state.clear()
     plan = builder.build_serialized_network(network, build_config)
     if plan is None:
         raise RuntimeError("TensorRT failed to build Cosmos3-Nano denoiser")

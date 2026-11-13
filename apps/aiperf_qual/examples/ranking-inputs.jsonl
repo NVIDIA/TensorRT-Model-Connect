@@ -1,0 +1,3 @@
+{"texts":[{"name":"query","contents":["What is the capital of France?"]},{"name":"passages","contents":["Paris is the capital of France.","Bananas are yellow fruit."]}]}
+{"texts":[{"name":"query","contents":["What does a sentence embedding represent?"]},{"name":"passages","contents":["A sentence embedding is a numeric representation of text.","An oven is used to bake bread."]}]}
+{"texts":[{"name":"query","contents":["What does AIPerf measure?"]},{"name":"passages","contents":["AIPerf measures latency and throughput of inference requests.","Rain falls from clouds."]}]}

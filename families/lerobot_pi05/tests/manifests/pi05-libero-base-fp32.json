@@ -1,0 +1,48 @@
+{
+  "name": "pi05-libero-base-fp32",
+  "hf_id": "lerobot/pi05_libero_base",
+  "hf_revision": "5fcf06fc42b6717e22ab885fd381a096574b12c7",
+  "external_files": [
+    {
+      "path": "tokenizer.model",
+      "url": "https://storage.googleapis.com/big_vision/paligemma_tokenizer.model?generation=1711547605575873"
+    }
+  ],
+  "bundle": "pi05-libero-base-fp32.bundle",
+  "family": "lerobot_pi05",
+  "task": "images_state_text_to_action_chunk",
+  "precision": "fp32",
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "pi05-libero-base-fp32-ep0000-f000",
+      "premerge": false,
+      "inputs": {
+        "frame": "data/recorded_observation/ep0000_f000",
+        "noise": "data/noise_seed0.f32",
+        "reference_fp32": "data/reference/ep0000_f000.fp32.f32",
+        "reference_bf16": "data/reference/ep0000_f000.bf16.f32"
+      }
+    },
+    {
+      "name": "pi05-libero-base-fp32-ep0379-f060",
+      "premerge": false,
+      "inputs": {
+        "frame": "data/recorded_observation/ep0379_f060",
+        "noise": "data/noise_seed0.f32",
+        "reference_fp32": "data/reference/ep0379_f060.fp32.f32",
+        "reference_bf16": "data/reference/ep0379_f060.bf16.f32"
+      }
+    },
+    {
+      "name": "pi05-libero-base-fp32-ep0807-f070",
+      "premerge": false,
+      "inputs": {
+        "frame": "data/recorded_observation/ep0807_f070",
+        "noise": "data/noise_seed0.f32",
+        "reference_fp32": "data/reference/ep0807_f070.fp32.f32",
+        "reference_bf16": "data/reference/ep0807_f070.bf16.f32"
+      }
+    }
+  ]
+}

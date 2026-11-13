@@ -146,7 +146,11 @@ def build_feature_engine(
         trt, builder, network = _create_network(verbose=verbose)
         left = network.add_input("left", trt.float32, (1, 3, 704, 704))
         right = network.add_input("right", trt.float32, (1, 3, 704, 704))
-        graph = NativeGraph(network, trt, fp16=fp16)
+        # The reference runs the feature network under FP16 autocast, whose
+        # convolutions accumulate in FP32. Expressing that accumulation
+        # explicitly removes excess feature error that the disparity
+        # refinement otherwise amplifies past the parity gate.
+        graph = NativeGraph(network, trt, fp16=fp16, fp32_conv_accumulation=True)
         outputs = add_feature_graph(graph, model, left, right, fp16=fp16)
         _mark_feature_outputs(graph, network, outputs, fp16=fp16)
         return _serialize_network(

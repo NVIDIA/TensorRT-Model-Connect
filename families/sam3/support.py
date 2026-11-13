@@ -10,4 +10,5 @@ describe = family_support(
     model_types=("sam3", "sam3-video", "sam3_video"),
     tasks=("text_prompted_segmentation",),
     default_task="text_prompted_segmentation",
+    default_precision="fp16",
 )

@@ -266,20 +266,34 @@ def add_attention_block(
         else:
             mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask)
 
-        context = graph_ops.add_attention_from_rows(
-            network,
-            q,
-            all_k.get_output(0),
-            all_v.get_output(0),
-            num_heads=num_heads,
-            head_dim=head_dim,
-            num_kv_heads=num_kv_heads,
-            q_seq=1,
-            kv_seq=kv_seq,
-            causal=False,
-            mask=mask_4d,
-            scale=attention_scale,
-        )
+        if alibi_slopes_tensor is None and not dynamic_kv_cache:
+            context = graph_ops.add_masked_decode_attention_from_rows(
+                network,
+                q,
+                all_k.get_output(0),
+                all_v.get_output(0),
+                mask_4d,
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                kv_seq=attention_window,
+                scale=attention_scale if attention_scale is not None else head_dim ** -0.5,
+            )
+        else:
+            context = graph_ops.add_attention_from_rows(
+                network,
+                q,
+                all_k.get_output(0),
+                all_v.get_output(0),
+                num_heads=num_heads,
+                head_dim=head_dim,
+                num_kv_heads=num_kv_heads,
+                q_seq=1,
+                kv_seq=kv_seq,
+                causal=False,
+                mask=mask_4d,
+                scale=attention_scale,
+            )
     else:
         raise NotImplementedError(
             "glmasr does not support FFI decoder attention kernels")

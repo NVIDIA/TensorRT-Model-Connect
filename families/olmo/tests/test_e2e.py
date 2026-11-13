@@ -249,7 +249,17 @@ def _run_native(
 
 def _render_prompt(tokenizer, prompt: str, case: dict):
     if not case.get("use_chat_template", False):
-        return tokenizer(prompt, return_tensors="pt")
+        inputs = tokenizer(prompt, return_tensors="pt")
+        ids = inputs["input_ids"][0].tolist()
+        eos = tokenizer.eos_token_id
+        explicit_eos = bool(tokenizer.eos_token and prompt.endswith(tokenizer.eos_token))
+        # Native continuation prompts omit only HF's automatically appended EOS.
+        # Preserve the leading special token and any EOS supplied in the prompt.
+        if len(ids) > 1 and ids[-1] == eos and (not explicit_eos or ids[-2] == eos):
+            for name in ("input_ids", "attention_mask", "token_type_ids"):
+                if name in inputs:
+                    inputs[name] = inputs[name][:, :-1]
+        return inputs
     options = {"tokenize": False, "add_generation_prompt": True}
     if "enable_thinking" in case:
         options["enable_thinking"] = case["enable_thinking"]
@@ -365,6 +375,7 @@ def _hf_reference(
     )
     inputs = _render_prompt(tokenizer, prompt, case).to(model.device)
     prompt_ids = inputs["input_ids"][0].tolist()
+    record_evidence("inputs", {"reference_prompt_token_ids": prompt_ids})
     if "expected_prompt_token_ids" in case:
         assert prompt_ids == case["expected_prompt_token_ids"]
 

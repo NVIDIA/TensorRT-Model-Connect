@@ -1170,3 +1170,18 @@ def add_attention_from_rows(
         sequence_length=q_seq,
         tag=None if tag is None else tag + ".ctx",
     )
+
+
+_QUANTIZE_PROPAGATION_KNOB = "quantize_ppg"
+
+
+def disable_quantize_propagation(config: trt.IBuilderConfig) -> None:
+    """Turn off TensorRT quantize propagation for an FP8 DiT build.
+
+    TensorRT 11.4 moves the FP8 input quantize of a linear that follows IAttention
+    into the attention, where the softmax has no FP8 implementation, and the build
+    fails (issue #1920). The route covers the whole network and is set only when
+    this TensorRT build lists the knob.
+    """
+    if _QUANTIZE_PROPAGATION_KNOB in getattr(config, "all_build_routes", ""):
+        config.build_route = f"-{_QUANTIZE_PROPAGATION_KNOB}=off"

@@ -35,6 +35,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import graph_ops
+from .quantization import configure_quantized_build, make_matmul_fn
 
 
 def _to_np(t) -> np.ndarray:
@@ -262,8 +263,21 @@ def _rel_shift(network, x, H, S, dtype=np.float32):
 
 
 def _add_rel_pos_attention(
-    network, hs, weights, pfx, hidden, H, D, S, rel_pe_proj, eps, enc_mask=None, dtype=np.float32
+    network,
+    hs,
+    weights,
+    pfx,
+    hidden,
+    H,
+    D,
+    S,
+    rel_pe_proj,
+    eps,
+    enc_mask=None,
+    dtype=np.float32,
+    quant_ctx=None,
 ):
+    matmul = make_matmul_fn(network, dtype, quant_ctx, graph_ops)
     normed = graph_ops.add_layer_norm(
         network,
         hs,
@@ -275,27 +289,21 @@ def _add_rel_pos_attention(
     )
     q = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, hidden, weights[f"{pfx}.w_q"], dtype=dtype
-        ),
+        matmul(normed, hidden, hidden, weights[f"{pfx}.w_q"], f"{pfx}.w_q"),
         hidden,
         weights[f"{pfx}.b_q"],
         dtype=dtype,
     )
     k = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, hidden, weights[f"{pfx}.w_k"], dtype=dtype
-        ),
+        matmul(normed, hidden, hidden, weights[f"{pfx}.w_k"], f"{pfx}.w_k"),
         hidden,
         weights[f"{pfx}.b_k"],
         dtype=dtype,
     )
     v = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, hidden, weights[f"{pfx}.w_v"], dtype=dtype
-        ),
+        matmul(normed, hidden, hidden, weights[f"{pfx}.w_v"], f"{pfx}.w_v"),
         hidden,
         weights[f"{pfx}.b_v"],
         dtype=dtype,
@@ -356,9 +364,7 @@ def _add_rel_pos_attention(
     af.reshape_dims = (S, hidden)
     return graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, af.get_output(0), hidden, hidden, weights[f"{pfx}.w_o"], dtype=dtype
-        ),
+        matmul(af.get_output(0), hidden, hidden, weights[f"{pfx}.w_o"], f"{pfx}.w_o"),
         hidden,
         weights[f"{pfx}.b_o"],
         dtype=dtype,
@@ -497,15 +503,14 @@ def _add_conv_module(
     return r4.get_output(0)
 
 
-def _add_half_ffn(network, hs, weights, pfx, hidden, ffn, eps, dtype=np.float32):
+def _add_half_ffn(network, hs, weights, pfx, hidden, ffn, eps, dtype=np.float32, quant_ctx=None):
+    matmul = make_matmul_fn(network, dtype, quant_ctx, graph_ops)
     normed = graph_ops.add_layer_norm(
         network, hs, hidden, weights[f"{pfx}.norm"], weights[f"{pfx}.norm_b"], eps, dtype=dtype
     )
     fc1 = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, ffn, weights[f"{pfx}.w1"], dtype=dtype
-        ),
+        matmul(normed, hidden, ffn, weights[f"{pfx}.w1"], f"{pfx}.w1"),
         ffn,
         weights[f"{pfx}.b1"],
         dtype=dtype,
@@ -513,9 +518,7 @@ def _add_half_ffn(network, hs, weights, pfx, hidden, ffn, eps, dtype=np.float32)
     act = graph_ops.add_activation(network, fc1, "silu", dtype=dtype)
     fc2 = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, act, ffn, hidden, weights[f"{pfx}.w2"], dtype=dtype
-        ),
+        matmul(act, ffn, hidden, weights[f"{pfx}.w2"], f"{pfx}.w2"),
         hidden,
         weights[f"{pfx}.b2"],
         dtype=dtype,
@@ -541,11 +544,26 @@ def _add_conformer_block(
     conv_norm_type="batch_norm",
     conv_context_size="symmetric",
     dtype=np.float32,
+    quant_ctx=None,
 ):
-    ffn1 = _add_half_ffn(network, hs, weights, f"{pfx}.ff1", hidden, ffn, eps, dtype=dtype)
+    ffn1 = _add_half_ffn(
+        network, hs, weights, f"{pfx}.ff1", hidden, ffn, eps, dtype=dtype, quant_ctx=quant_ctx
+    )
     hs = network.add_elementwise(hs, ffn1, trt.ElementWiseOperation.SUM).get_output(0)
     attn = _add_rel_pos_attention(
-        network, hs, weights, pfx, hidden, H, D, S, rpe, eps, enc_mask, dtype=dtype
+        network,
+        hs,
+        weights,
+        pfx,
+        hidden,
+        H,
+        D,
+        S,
+        rpe,
+        eps,
+        enc_mask,
+        dtype=dtype,
+        quant_ctx=quant_ctx,
     )
     hs = network.add_elementwise(hs, attn, trt.ElementWiseOperation.SUM).get_output(0)
     conv = _add_conv_module(
@@ -562,7 +580,9 @@ def _add_conformer_block(
         dtype=dtype,
     )
     hs = network.add_elementwise(hs, conv, trt.ElementWiseOperation.SUM).get_output(0)
-    ffn2 = _add_half_ffn(network, hs, weights, f"{pfx}.ff2", hidden, ffn, eps, dtype=dtype)
+    ffn2 = _add_half_ffn(
+        network, hs, weights, f"{pfx}.ff2", hidden, ffn, eps, dtype=dtype, quant_ctx=quant_ctx
+    )
     hs = network.add_elementwise(hs, ffn2, trt.ElementWiseOperation.SUM).get_output(0)
     return graph_ops.add_layer_norm(
         network,
@@ -575,7 +595,7 @@ def _add_conformer_block(
     )
 
 
-def _build_encoder(config, weights, *, precision="fp32", verbose=False):
+def _build_encoder(config, weights, *, precision="fp32", verbose=False, quant_ctx=None):
     el = weights["_enc_layers"]
     eh = weights["_enc_heads"]
     h = weights["_hidden"]
@@ -603,6 +623,7 @@ def _build_encoder(config, weights, *, precision="fp32", verbose=False):
     tc = b.create_builder_config()
     tc.builder_optimization_level = 1
     tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
+    configure_quantized_build(tc, quant_ctx)
 
     eps = graph_ops.add_constant(
         net, (1, 1), np.array([1e-5], dtype=work_np_dtype), dtype=work_np_dtype
@@ -641,6 +662,7 @@ def _build_encoder(config, weights, *, precision="fp32", verbose=False):
             conv_norm_type=conv_norm_type,
             conv_context_size=conv_context_size,
             dtype=work_np_dtype,
+            quant_ctx=quant_ctx,
         )
 
     output = hs

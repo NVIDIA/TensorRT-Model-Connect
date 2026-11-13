@@ -61,7 +61,8 @@ def test_prepare_command_and_old_spelling_preserve_request_controls(monkeypatch,
     assert json.loads(capsys.readouterr().out.splitlines()[0]) == {"output": "prepared.request"}
 
 
-@pytest.mark.parametrize("changes", [{"tensor_parallel_size": 2}, {"fp32_layers": (0,)}, {"image_width": 8}, {"dynamic_kv_cache": True}])
+@pytest.mark.parametrize("changes", [{"tensor_parallel_size": 2}, {"fp32_layers": (0,)}, {"image_width": 8},
+                                     {"dynamic_kv_cache": True}, {"mtp_seq_len": 2}])
 def test_legacy_api_rejects_unsupported_nondefault_values(tmp_path, changes):
     legacy = LegacyRequest(tmp_path, tmp_path / "out", "boltz2", "structure_prediction", "bf16")
     assert cli.coerce_request(legacy).precision == "bf16"

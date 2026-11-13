@@ -134,7 +134,7 @@ def build(*, model, output, precision, tile_tokens=96, retained_layers=(), paged
     )))
     checked_outputs = []
 
-    def validate_output(path, _model, _runtime_root):
+    def validate_output(path, _model, _runtime_root, _checkpoint):
         # This fixture tests process execution and publication; native bundle
         # inspection has independent format/identity coverage.
         payload = json.loads(path.read_text())

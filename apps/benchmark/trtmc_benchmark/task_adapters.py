@@ -48,6 +48,7 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "image_text_action_to_video": ("generate_image", 1, 5),
     "image_to_class_scores": ("classify", 50, 500),
     "image_to_boxes": ("detect", 50, 500),
+    "image_text_to_boxes": ("detect_prompted", 50, 500),
     "molecular_document_to_structure": ("predict_structure", 1, 5),
     "image_to_token_and_pooled_features": ("extract_features", 50, 500),
     "image_to_token_features": ("extract_features", 50, 500),
@@ -116,6 +117,7 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "embedding": ("embed", 50, 500),
     "encoding": ("encode", 50, 500),
     "reranking": ("rerank", 10, 100),
+    "structured_decision": ("decide", 5, 30),
     "segmentation": ("segment", 50, 500),
     "prompted_segmentation": ("segment_prompted", 10, 100),
     "text_prompted_segmentation": ("segment_prompted", 10, 100),
@@ -139,6 +141,7 @@ _SEMANTIC_REMAINING = frozenset({
     "image_text_action_to_video", "image_to_class_scores", "image_to_token_and_pooled_features",
     "image_to_token_features", "image_to_pooled_features", "image_to_spatial_features",
     "image_to_semantic_segmentation", "image_points_to_masks", "image_text_to_instance_masks",
+    "image_text_to_boxes",
     "stereo_images_to_disparity", "text_to_pooled_features", "text_to_token_features",
     "text_to_embedding", "text_query_documents_to_relevance", "image_state_to_action_chunk",
     "text_to_head_scores",
@@ -224,6 +227,31 @@ def resolve_task_case(
 
 
 def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
+    if task == "structured_decision":
+        inputs = _inputs(case)
+        document = inputs.get("document")
+        document_path = inputs.get("document_path")
+        if document is not None and document_path is not None:
+            raise BenchmarkError("provide document or document_path, not both")
+        if document_path is not None:
+            document = _asset(str(document_path), root).read_text(encoding="utf-8")
+        if not isinstance(document, str) or not document:
+            raise BenchmarkError("structured_decision requires a JSON document string or document_path")
+        result = {"document": document, "max_state_tokens": inputs.get("max_state_tokens", -1)}
+        for name in ("image_paths", "video_frame_paths"):
+            paths = inputs.get(name, [])
+            if not isinstance(paths, list):
+                raise BenchmarkError(f"{name} must be an array")
+            if name == "image_paths":
+                if not all(isinstance(p, str) and p for p in paths):
+                    raise BenchmarkError("image_paths must contain nonempty paths")
+                result[name] = [str(_asset(p, root)) for p in paths]
+            else:
+                if not all(isinstance(frames, list) and frames and
+                           all(isinstance(p, str) and p for p in frames) for frames in paths):
+                    raise BenchmarkError("video_frame_paths must contain nonempty arrays of frame paths")
+                result[name] = [[str(_asset(p, root)) for p in frames] for frames in paths]
+        return result
     if task in _TRACKING:
         frames = _explicit(case, "frame_paths", "frames")
         if not isinstance(frames, list) or not frames or not all(isinstance(path, str) and path for path in frames):
@@ -700,7 +728,8 @@ def _semantic_remaining_request(task: str, case: Mapping[str, Any], root: Path) 
         request["image_path"] = _semantic_asset(case, root, "image_path", "image", "test_image")
         if task == "image_state_to_action_chunk":
             request["state_path"] = _semantic_asset(case, root, "state_path", "state")
-        elif task in {"image_points_to_masks", "image_text_to_instance_masks"}:
+        elif task in {"image_points_to_masks", "image_text_to_instance_masks",
+                      "image_text_to_boxes"}:
             prompt = _explicit(case, "prompt", "test_prompt", "source_text", "prompt_file", "prompt_repeat")
             if task == "image_points_to_masks":
                 if prompt is not _MISSING:

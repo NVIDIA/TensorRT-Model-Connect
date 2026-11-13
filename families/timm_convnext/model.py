@@ -26,6 +26,11 @@ import tensorrt as trt
 
 from . import graph
 from .checkpoint import Checkpoint
+from .quantization import (
+    calibrate_timm_convnext,
+    configure_fp8_build,
+    refuse_quantized_checkpoint,
+)
 
 
 if TYPE_CHECKING:
@@ -169,15 +174,19 @@ def _weights(
     return result
 
 
-def _linear_as_convolution(network, tensor, weight: np.ndarray, bias: np.ndarray, dtype):
+def _linear_as_convolution(
+    network, tensor, weight: np.ndarray, bias: np.ndarray, dtype, quant_ctx=None, module=""
+):
     """A Linear over the channel axis, emitted as a 1x1 convolution."""
+    if quant_ctx is not None and quant_ctx.should_quantize(module):
+        return quant_ctx.convolution(network, tensor, module, bias)
     out_features, in_features = int(weight.shape[0]), int(weight.shape[1])
     return graph.convolution(
         network, tensor, weight.reshape(out_features, in_features, 1, 1), bias, dtype=dtype
     )
 
 
-def _block(network, tensor, weights, prefix: str, dtype):
+def _block(network, tensor, weights, prefix: str, dtype, quant_ctx=None):
     shortcut = tensor
     depthwise = weights[f"{prefix}.conv_dw.weight"]
     tensor = graph.convolution(
@@ -190,12 +199,12 @@ def _block(network, tensor, weights, prefix: str, dtype):
     )
     tensor = _linear_as_convolution(
         network, tensor, weights[f"{prefix}.mlp.fc1.weight"],
-        weights[f"{prefix}.mlp.fc1.bias"], dtype,
+        weights[f"{prefix}.mlp.fc1.bias"], dtype, quant_ctx, f"{prefix}.mlp.fc1",
     )
     tensor = graph.gelu(network, tensor, dtype=dtype)
     tensor = _linear_as_convolution(
         network, tensor, weights[f"{prefix}.mlp.fc2.weight"],
-        weights[f"{prefix}.mlp.fc2.bias"], dtype,
+        weights[f"{prefix}.mlp.fc2.bias"], dtype, quant_ctx, f"{prefix}.mlp.fc2",
     )
     if f"{prefix}.gamma" in weights:
         # Layer scale: a learned per-channel gain on the residual branch.
@@ -208,6 +217,7 @@ def _build_engine(
     checkpoint: Checkpoint,
     precision: str,
     verbose: bool,
+    quantization: str | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     if precision == "fp16":
         numpy_dtype, tensor_dtype = np.float16, trt.float16
@@ -215,12 +225,23 @@ def _build_engine(
         numpy_dtype, tensor_dtype = np.float32, trt.float32
     else:
         raise ValueError(f"unsupported timm ConvNeXt precision: {precision}")
+    if quantization is not None and precision != "fp16":
+        raise ValueError(f"timm_convnext FP8 needs precision fp16, got {precision!r}")
     config = _preprocess_config(raw)
     depths = _layout(checkpoint)
     weights = _weights(checkpoint, depths, numpy_dtype)
     if weights["head.fc.weight"].shape[0] != config["num_classes"]:
         raise ValueError("ConvNeXt classifier dimensions do not match config.json")
 
+    quant_ctx = None
+    if quantization is not None:
+        quant_ctx = calibrate_timm_convnext(
+            depths,
+            (config["image_height"], config["image_width"]),
+            weights,
+            quantization,
+            precision=precision,
+        )
     patch = int(weights["stem.weight"].shape[2])
     total_stride = patch * 2 ** (len(depths) - 1)
     height = config["image_height"]
@@ -231,7 +252,8 @@ def _build_engine(
         print(
             "[trtmc build] timm_convnext: "
             f"image={height}x{width}, depths={depths}, patch={patch}, "
-            f"classes={config['num_classes']}, precision={precision}",
+            f"classes={config['num_classes']}, precision={precision}, "
+            f"quantization={quantization or 'none'}",
             file=sys.stderr,
         )
 
@@ -244,6 +266,7 @@ def _build_engine(
     builder_config.max_aux_streams = 0
     builder_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+    configure_fp8_build(builder_config, quant_ctx)
 
     pixels = network.add_input("pixel_values", trt.float32, (1, 3, height, width))
     if pixels is None:
@@ -273,13 +296,21 @@ def _build_engine(
                 epsilon=_LAYER_NORM_EPSILON, dtype=numpy_dtype,
             )
             reducer = weights[f"{downsample}.weight"]
-            hidden = graph.convolution(
-                network, hidden, reducer, weights[f"{downsample}.bias"],
-                stride=int(reducer.shape[2]), dtype=numpy_dtype,
-            )
+            module = f"{downsample}.1"
+            if quant_ctx is not None and quant_ctx.should_quantize(module):
+                hidden = quant_ctx.convolution(
+                    network, hidden, module, weights[f"{downsample}.bias"],
+                    stride=int(reducer.shape[2]),
+                )
+            else:
+                hidden = graph.convolution(
+                    network, hidden, reducer, weights[f"{downsample}.bias"],
+                    stride=int(reducer.shape[2]), dtype=numpy_dtype,
+                )
         for index in range(depth):
             hidden = _block(
-                network, hidden, weights, f"stages.{stage}.blocks.{index}", numpy_dtype
+                network, hidden, weights, f"stages.{stage}.blocks.{index}", numpy_dtype,
+                quant_ctx,
             )
 
     # The head pools first and normalises after, so the norm sees one value per
@@ -332,18 +363,27 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_convnext does not support context parallelism")
     if request.task != "image_to_class_scores":
         raise ValueError("timm_convnext supports only task=image_to_class_scores")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("timm_convnext does not support quantization")
+    quantization = None if request.quantization in {None, "none"} else str(request.quantization)
+    if quantization not in {None, "fp8"}:
+        raise NotImplementedError(
+            f"timm_convnext supports quantization fp8 or none, got {request.quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("timm_convnext does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("timm_convnext does not support MTP speculative decoding")
     _positive_int(request.max_sequence_length or 1, "max_sequence_length")
     model_dir = Path(request.model_dir)
     raw = _read_config(model_dir)
+    checkpoint = Checkpoint.open(model_dir)
+    if quantization is not None:
+        refuse_quantized_checkpoint(model_dir, checkpoint.names)
     plan, runtime = _build_engine(
         raw,
-        Checkpoint.open(model_dir),
+        checkpoint,
         str(request.precision).lower(),
         bool(request.verbose),
+        quantization,
     )
     writer.set_header(family="timm_convnext", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)

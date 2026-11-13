@@ -1,0 +1,14 @@
+{
+  "state": "La aplicación se cierra cada vez que abro la configuración.",
+  "questions": {
+    "department": {
+      "type": "choice",
+      "instructions": "Which department should handle this?",
+      "criteria": {
+        "billing": "invoices, payments, refunds",
+        "technical": "bugs, outages, system errors",
+        "other": "everything else"
+      }
+    }
+  }
+}

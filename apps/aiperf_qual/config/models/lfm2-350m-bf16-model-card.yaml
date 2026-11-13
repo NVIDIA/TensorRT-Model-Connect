@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A 350M model: MMLU only (GSM8K is near zero at this size).
+absolute: [mmlu, lambada]
+
+reference:
+  mode: eager  # torch.compile: generation with LFM2's hybrid cache recompiles past Dynamo's limit

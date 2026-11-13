@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Image understanding of a unified model: MMStar.
+absolute: [mmstar]
+
+candidate:
+  build: {name: lance-3b-x2t-image-benchmark}
+  tokenizer_subfolder: Lance_3B
+  # 256 image tokens, up to 16 template tokens, and the benchmark's 16 generated tokens.
+  benchmark_sequence_length: {extra_tokens: 288}
+
+reference:
+  mode: eager  # the official reference runs eager only (its adapter refuses compile)
+  adapter: families/lance/reference/adapter.py
+  prepare: families/lance/reference/prepare.py
+  requirements: families/lance/requirements.txt  # the family's dependencies, layered on the serving interpreter
+  build_isolation: false  # its requirements build native extensions against the installed torch

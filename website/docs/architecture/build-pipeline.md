@@ -41,7 +41,10 @@ explicitly reject every non-default request it receives.
 `families/<family>/model.py` exposes a plain `build(request, writer)` function.
 It reads model config and weights, constructs the TensorRT network and engines,
 and writes family-owned named sections. Builder inheritance and shared model
-topology helpers are forbidden.
+topology helpers are forbidden. A family may instead delegate a complete
+network to an installed optimized runtime through a family-owned adapter.
+Model-specific admission, builder mapping, runtime orchestration and validation
+remain in that family; shared dependency provisioning contains no model policy.
 
 The graph-transform callback, when present, receives the live TensorRT network
 immediately before serialization. This is the build-time half of the explicit

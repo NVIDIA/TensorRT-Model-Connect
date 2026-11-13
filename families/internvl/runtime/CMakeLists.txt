@@ -31,6 +31,7 @@ target_include_directories(trtmc_model_internvl SYSTEM PRIVATE
 target_link_libraries(trtmc_model_internvl PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
+  Threads::Threads
   ${TRTMC_CUDART_LIBRARY}
   ${CMAKE_DL_LIBS}
 )
@@ -46,3 +47,42 @@ set_target_properties(trtmc_model_internvl PROPERTIES
 install(TARGETS trtmc_model_internvl
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_internvl_image_normalization
+    ${PROJECT_SOURCE_DIR}/families/internvl/tests/cpp/test_image_normalization.cpp
+    image_preprocessor.cpp
+  )
+  target_include_directories(test_internvl_image_normalization PRIVATE ${PROJECT_SOURCE_DIR})
+  target_include_directories(test_internvl_image_normalization SYSTEM PRIVATE
+    ${PROJECT_SOURCE_DIR}/third_party/stb
+  )
+  target_link_libraries(test_internvl_image_normalization PRIVATE
+    nlohmann_json::nlohmann_json
+    Threads::Threads
+  )
+  target_compile_options(test_internvl_image_normalization PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME internvl_image_normalization COMMAND test_internvl_image_normalization)
+endif()
+
+include(edge_llm/Adapter.cmake)
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_internvl_tiling
+    ${PROJECT_SOURCE_DIR}/families/internvl/tests/cpp/test_internvl_tiling.cpp
+    image_preprocessor.cpp
+  )
+  set_source_files_properties(image_preprocessor.cpp TARGET_DIRECTORY test_internvl_tiling PROPERTIES
+    COMPILE_OPTIONS "-Wno-missing-field-initializers;-Wno-pedantic;-Wno-unused-function"
+  )
+  target_include_directories(test_internvl_tiling PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}
+  )
+  target_include_directories(test_internvl_tiling SYSTEM PRIVATE
+    ${PROJECT_SOURCE_DIR}/third_party/stb
+  )
+  target_link_libraries(test_internvl_tiling PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
+  add_test(NAME internvl_tiling COMMAND test_internvl_tiling)
+  set_tests_properties(internvl_tiling PROPERTIES LABELS "cpu")
+endif()

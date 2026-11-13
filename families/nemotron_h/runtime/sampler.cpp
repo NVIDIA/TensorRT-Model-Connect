@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <limits>
 #include <numeric>
+#include <stdexcept>
 #include <vector>
 
 namespace trtmc {
@@ -254,6 +255,68 @@ create_nemotron_h_sampler(const NemotronHSamplingParams& params) {
 
     const uint64_t seed = (params.seed >= 0) ? static_cast<uint64_t>(params.seed) : 42ULL;
     return std::make_unique<NemotronHTopKSampler>(seed);
+}
+
+bool nemotron_h_is_greedy(const NemotronHSamplingParams& params) {
+    const float top_p = sanitized_top_p(params.top_p);
+    return greedy_equivalent(params) || (params.top_k == 1 && !top_p_enabled(top_p)) ||
+           (params.top_k <= 1 && top_p >= 1.0F - kSamplingEpsilon &&
+            sanitized_min_p(params.min_p) <= 0.0F && params.seed < 0);
+}
+
+std::vector<float> nemotron_h_probabilities(const float* logits, int32_t vocab_size,
+                                            const NemotronHSamplingParams& params) {
+    if (!logits || vocab_size <= 0)
+        throw std::invalid_argument("Nemotron-H sampling requires a nonempty vocabulary");
+    std::vector<float> probabilities(static_cast<std::size_t>(vocab_size), 0.0F);
+    if (nemotron_h_is_greedy(params)) {
+        probabilities[argmax_over_logits(logits, vocab_size, {}).token_id] = 1.0F;
+        return probabilities;
+    }
+    const auto distribution = build_filtered_distribution(logits, vocab_size, params);
+    for (int32_t i = 0; i < distribution.keep; ++i)
+        probabilities[distribution.indices[i]] = distribution.probs[i];
+    return probabilities;
+}
+
+float nemotron_h_uniform(std::uint64_t& state) {
+    if (state == 0)
+        state = 1;
+    state ^= state << 13;
+    state ^= state >> 7;
+    state ^= state << 17;
+    return std::min(static_cast<float>(state & 0xFFFFFFFF) / 4294967296.0F,
+                    std::nextafter(1.0F, 0.0F));
+}
+
+int32_t nemotron_h_sample_probabilities(const std::vector<float>& probabilities,
+                                        std::uint64_t& state) {
+    if (probabilities.empty())
+        throw std::invalid_argument("Nemotron-H cannot sample an empty distribution");
+    double total = 0;
+    for (const float probability : probabilities) {
+        if (probability < 0 || !std::isfinite(probability))
+            throw std::runtime_error("Nemotron-H invalid speculative probability");
+        total += probability;
+    }
+    if (total <= 0 || !std::isfinite(total))
+        throw std::runtime_error("Nemotron-H speculative distribution has no finite mass");
+    const auto best = std::max_element(probabilities.begin(), probabilities.end());
+    if (*best >= total)
+        return static_cast<int32_t>(best - probabilities.begin());
+    const double uniform = nemotron_h_uniform(state) * total;
+    double cumulative = 0.0;
+    int32_t last_positive = -1;
+    for (std::size_t i = 0; i < probabilities.size(); ++i) {
+        cumulative += probabilities[i];
+        if (probabilities[i] > 0)
+            last_positive = static_cast<int32_t>(i);
+        if (uniform < cumulative)
+            return static_cast<int32_t>(i);
+    }
+    if (last_positive < 0)
+        throw std::runtime_error("Nemotron-H speculative distribution has no mass");
+    return last_positive;
 }
 
 } // namespace trtmc

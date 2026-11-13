@@ -83,12 +83,8 @@ def _swiglu_mlp(
 ) -> trt.ITensor:
     gate = matmul(inp, hidden, mlp_size, weights[f"{prefix}.w_gate"], f"{prefix}.w_gate")
     up = matmul(inp, hidden, mlp_size, weights[f"{prefix}.w_up"], f"{prefix}.w_up")
-    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-    gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
-    mlp_out = matmul(
-        gated.get_output(0), mlp_size, hidden, weights[f"{prefix}.w_down"], f"{prefix}.w_down"
-    )
+    gated = graph_blocks.add_swiglu_activation(network, gate, up)
+    mlp_out = matmul(gated, mlp_size, hidden, weights[f"{prefix}.w_down"], f"{prefix}.w_down")
     return mlp_out
 
 
@@ -290,11 +286,11 @@ def build_dual_profile_decoder_engine(
             partial_rotary_factor,
             interleaved=interleaved_rope,
         )
-        cos_half_table = _const_in_work_dtype(
-            network, cos_half_np.shape, cos_half_np, work_np_dtype, work_trt_dtype
+        cos_half_table = graph_ops.add_constant(
+            network, cos_half_np.shape, cos_half_np, dtype=np.float32
         )
-        sin_half_table = _const_in_work_dtype(
-            network, sin_half_np.shape, sin_half_np, work_np_dtype, work_trt_dtype
+        sin_half_table = graph_ops.add_constant(
+            network, sin_half_np.shape, sin_half_np, dtype=np.float32
         )
 
     # Learned position embedding (GPT-2 / OPT / GPT-Neo / XGLM).
@@ -527,12 +523,10 @@ def build_dual_profile_decoder_engine(
             else:
                 norm2 = normed
         else:
-            residual1 = network.add_elementwise(
-                hidden_state, attn_out, trt.ElementWiseOperation.SUM
-            )
+            residual1 = graph_ops.add_residual_sum(network, hidden_state, attn_out)
             norm2 = _norm_multi(
                 network,
-                residual1.get_output(0),
+                residual1,
                 hidden,
                 weights[f"{prefix}.post_attn_norm"],
                 weights.get(f"{prefix}.post_attn_norm_beta"),
@@ -567,15 +561,11 @@ def build_dual_profile_decoder_engine(
 
         # Final residual.
         if parallel_residual:
-            sum_attn = network.add_elementwise(hidden_state, attn_out, trt.ElementWiseOperation.SUM)
-            residual2 = network.add_elementwise(
-                sum_attn.get_output(0), mlp_out, trt.ElementWiseOperation.SUM
-            )
+            sum_attn = graph_ops.add_residual_sum(network, hidden_state, attn_out)
+            residual2 = graph_ops.add_residual_sum(network, sum_attn, mlp_out)
         else:
-            residual2 = network.add_elementwise(
-                residual1.get_output(0), mlp_out, trt.ElementWiseOperation.SUM
-            )
-        hidden_state = residual2.get_output(0)
+            residual2 = graph_ops.add_residual_sum(network, residual1, mlp_out)
+        hidden_state = residual2
 
     # ---- Final norm + LM head -------------------------------------------
     final_norm = weights.get("final_norm")

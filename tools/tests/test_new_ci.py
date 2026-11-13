@@ -20,7 +20,13 @@ import yaml
 from tools.ci.context import CiContext
 from tools.ci.container import CiContainer
 from tools.ci.docker_image import DockerImageManager
-from tools.ci.e2e import E2ERunner, _require_e2e_junit, _require_passing_junit
+from tools.ci.e2e import (
+    E2ERunner,
+    SDK_CONSUMER_LANGUAGES,
+    _require_e2e_junit,
+    _require_e2e_process_result,
+    _require_passing_junit,
+)
 from tools.ci.package import (
     SourceArchiveValidator,
     WheelArchiveValidator,
@@ -31,7 +37,6 @@ from tools.ci.package import (
 from tools.ci.pipeline import CiPipeline
 from tools.ci.process import CiError
 from tools.ci.quality import SourceQualityChecks, UnitTestRunner
-from qualification_tests.benchmark_qualification.performance import matrix as perf_matrix
 
 
 class RecordingContext:
@@ -41,6 +46,7 @@ class RecordingContext:
         self.calls = []
         self.runtime_snapshots = []
         self.skip_ctest = False
+        self.no_family_ctests = False
         self.no_cpu_family_tests = False
         self.missing_e2e_testcases = set()
 
@@ -51,6 +57,8 @@ class RecordingContext:
             self.runtime_snapshots.append(
                 tuple(sorted(path.name for path in Path(runtime_root).iterdir()))
             )
+        if "--show-only=json-v1" in command and self.no_family_ctests:
+            return SimpleNamespace(stdout=json.dumps({"tests": []}))
         if "--show-only=json-v1" in command:
             return SimpleNamespace(
                 stdout=json.dumps(
@@ -304,6 +312,61 @@ def test_family_cpp_skip_fails_closed(tmp_path: Path) -> None:
         E2ERunner(context)._run_family_ctests(build, ("beta",))
 
 
+def _write_sdk_consumers(repository: Path, family: str, languages: tuple[str, ...]) -> None:
+    tests = repository / "families" / family / "tests"
+    tests.mkdir(parents=True, exist_ok=True)
+    for language in languages:
+        (tests / f"sdk_consumer.{language}").write_text("int main(void) { return 0; }\n")
+
+
+def _built_targets(context: RecordingContext) -> list[list[str]]:
+    return [
+        command[command.index("--target") + 1 :]
+        for command, _ in context.calls
+        if command[:2] == ["cmake", "--build"]
+    ]
+
+
+def test_family_sdk_consumers_build_with_the_family_ctests(tmp_path: Path) -> None:
+    build = tmp_path / "native-build"
+    build.mkdir()
+    _write_sdk_consumers(tmp_path, "beta", SDK_CONSUMER_LANGUAGES)
+    context = RecordingContext(tmp_path, {"TRTMC_NATIVE_BUILD_DIR": str(build)})
+
+    E2ERunner(context)._run_family_ctests(build, ("beta",))
+
+    assert _built_targets(context) == [
+        ["test_beta_runtime", "test_beta_sdk_c", "test_beta_sdk_cpp"]
+    ]
+    assert any("--output-junit" in command for command, _ in context.calls)
+
+
+def test_family_sdk_consumers_build_without_family_ctests(tmp_path: Path) -> None:
+    """Premerge loads a prebuilt model library; nothing else builds the consumers."""
+    build = tmp_path / "native-build"
+    build.mkdir()
+    _write_sdk_consumers(tmp_path, "beta", ("c",))
+    context = RecordingContext(tmp_path, {"TRTMC_NATIVE_BUILD_DIR": str(build)})
+    context.no_family_ctests = True
+
+    E2ERunner(context)._run_family_ctests(build, ("beta",))
+
+    assert _built_targets(context) == [["test_beta_sdk_c"]]
+    assert not any("--output-junit" in command for command, _ in context.calls)
+
+
+def test_family_without_ctests_or_sdk_consumers_builds_nothing(tmp_path: Path) -> None:
+    build = tmp_path / "native-build"
+    build.mkdir()
+    (tmp_path / "families/beta/tests").mkdir(parents=True)
+    context = RecordingContext(tmp_path, {"TRTMC_NATIVE_BUILD_DIR": str(build)})
+    context.no_family_ctests = True
+
+    E2ERunner(context)._run_family_ctests(build, ("beta",))
+
+    assert _built_targets(context) == []
+
+
 def test_family_hardware_skip_fails_closed(tmp_path: Path) -> None:
     report = tmp_path / "hardware.xml"
     report.write_text(
@@ -396,6 +459,22 @@ def test_e2e_junit_fails_closed_for_invalid_result_cardinality_or_skip(
 
     with pytest.raises(CiError, match=message):
         _require_e2e_junit(report, "family", requested)
+
+
+@pytest.mark.parametrize(
+    ("returncode", "message"),
+    ((-9, "terminated by SIGKILL"), (137, r"exit code 137 \(SIGKILL\)")),
+)
+def test_e2e_process_failure_preserves_signal_when_junit_is_missing(
+    tmp_path: Path, returncode: int, message: str
+) -> None:
+    with pytest.raises(CiError, match=message):
+        _require_e2e_process_result(
+            tmp_path / "missing.xml",
+            "family",
+            ("family-case",),
+            returncode,
+        )
 
 
 def test_e2e_rejects_multiple_family_environments(tmp_path: Path) -> None:
@@ -538,7 +617,7 @@ def test_pipeline_exposes_only_active_stages(tmp_path: Path) -> None:
     )
 
 
-def test_package_build_uses_the_preinstalled_offline_toolchain() -> None:
+def test_package_build_uses_the_preinstalled_offline_toolchain(tmp_path, monkeypatch) -> None:
     source = inspect.getsource(WheelPackageManager.build)
     assert '"--no-isolation"' in source
     assert '"build>=1.2"' not in source
@@ -555,6 +634,66 @@ def test_package_build_uses_the_preinstalled_offline_toolchain() -> None:
     dockerfile = (repository / "Dockerfile").read_text()
     assert "openmpi-bin" in dockerfile
     assert "nvidia/nccl/lib" in dockerfile
+    # The final Torch reinstall must not leave CUDA Python with incompatible bindings.
+    cuda_pin = dockerfile.rindex("cuda-python==13.0.3")
+    assert dockerfile.rindex("pip install") < cuda_pin
+    assert dockerfile.index("pip install --force-reinstall") < cuda_pin
+    assert dockerfile.index("&& pip check", cuda_pin) > cuda_pin
+    repair_step = dockerfile.index("&& python3.12 /tmp/trtmc-docker-image.py repair-cusparselt-wheel")
+    assert cuda_pin < repair_step < dockerfile.index("&& pip check")
+    assert "!tools/ci/docker_image.py" in (repository / ".dockerignore").read_text()
+
+    import csv
+    import hashlib
+    from tools.ci import docker_image as repair
+
+    info = tmp_path / "nvidia_cusparselt_cu13-0.8.1.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text("Name: nvidia-cusparselt-cu13\nVersion: 0.8.1\n")
+    library = tmp_path / repair._LIBRARY
+    library.parent.mkdir(parents=True)
+    payload = bytearray(64)
+    payload[:6] = b"\x7fELF\x02\x01"
+    payload[18:20] = (183).to_bytes(2, "little")
+    library.write_bytes(payload)
+    monkeypatch.setattr(repair, "_LIBRARY_SIZE", len(payload))
+    monkeypatch.setattr(repair, "_LIBRARY_SHA256", hashlib.sha256(payload).hexdigest())
+    monkeypatch.setattr(repair.platform, "machine", lambda: "aarch64")
+    distribution = repair.metadata.PathDistribution(info)
+    monkeypatch.setattr(repair.metadata, "distribution", lambda _name: distribution)
+    original = ("Wheel-Version: 1.0\n" + repair._BAD_TAG).encode()
+    wheel = info / "WHEEL"
+    wheel.write_bytes(original)
+    original_record = f"{info.name}/WHEEL,{repair._record_hash(original)},{len(original)}\n"
+    original_record += f"{repair._LIBRARY},{repair._record_hash(payload)},{len(payload)}\n"
+    record = info / "RECORD"
+    record.write_text(original_record)
+    assert repair.repair_cusparselt_wheel()
+    corrected = original.replace(repair._BAD_TAG.encode(), repair._GOOD_TAG.encode())
+    assert wheel.read_bytes() == corrected
+    assert library.read_bytes() == payload
+    rows = list(csv.reader(io.StringIO(record.read_text())))
+    assert rows[0][1:] == [repair._record_hash(corrected), str(len(corrected))]
+    assert rows[1][1:] == [repair._record_hash(payload), str(len(payload))]
+    assert not repair.repair_cusparselt_wheel()  # Already-correct metadata is unchanged.
+
+    wheel.write_bytes(original)
+    record.write_text(original_record)
+    library.write_bytes(payload[:-1] + b"x")
+    with pytest.raises(ValueError, match="library digest"):
+        repair.repair_cusparselt_wheel()
+    assert wheel.read_bytes() == original
+    library.write_bytes(payload[:18] + b"\x3e\x00" + payload[20:])
+    with pytest.raises(ValueError, match="AArch64 ELF"):
+        repair.repair_cusparselt_wheel()
+    assert wheel.read_bytes() == original
+    library.write_bytes(payload)
+    record.write_text(original_record.replace(repair._record_hash(original), "sha256=corrupt"))
+    with pytest.raises(ValueError, match="disagrees with RECORD"):
+        repair.repair_cusparselt_wheel()
+    assert wheel.read_bytes() == original
+    monkeypatch.setattr(repair.platform, "machine", lambda: "x86_64")
+    assert not repair.repair_cusparselt_wheel()
 
 
 def test_internal_ci_image_supports_embedded_workflow_shell_regressions() -> None:
@@ -656,7 +795,17 @@ def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:
     assert "schedule" in events
     assert "workflow_dispatch" in events
     assert workflow["permissions"] == {}
-    assert "github.event.workflow_run.name == 'Community CI'" in ready["if"]
+    # Community CI sets a run-name, which becomes the run's name, so the gate must
+    # identify its pull-request runs by the title they are actually given.
+    assert "workflow_run.name" not in ready["if"]
+    gate = re.search(r"display_title, '([^']+)'", ready["if"]).group(1)
+    community_ci = yaml.safe_load(
+        (path.parent / "community-ci.yml").read_text(encoding="utf-8")
+    )
+    assert gate in community_ci["run-name"]
+    run_name_pattern = re.search(r"run_name_pattern='([^']+)'", source).group(1)
+    title = f"PR #7 \u00b7 community CI \u00b7 head {'a' * 40} \u00b7 merge {'b' * 40}"
+    assert re.match(run_name_pattern, title)
     assert "github.event.workflow_run.event == 'pull_request'" in ready["if"]
     assert "merge_revision_matches_tested" in source
     assert '[ "$current_base_sha" = "$tested_base_sha" ]' in source
@@ -749,37 +898,6 @@ def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:
     assert "--header 'Content-Type: application/json'" in script
     assert '--data "$payload"' in script
     assert '"$SLACK_WEBHOOK_URL"' in script
-
-
-def test_performance_preflight_requires_executable_native_entrypoints(tmp_path: Path) -> None:
-    trtmc_bench = tmp_path / "trtmc-bench"
-    worker = tmp_path / "trtmc-worker"
-    hf_runner = tmp_path / "hf-runner.py"
-    task_runner = tmp_path / "task-runner.py"
-    for path in (trtmc_bench, worker, hf_runner, task_runner):
-        path.write_text("#!/bin/sh\n")
-    environment = perf_matrix.Environment(
-        name="test",
-        trtmc_bench=trtmc_bench,
-        worker=worker,
-        hf_runner=hf_runner,
-        task_runner=task_runner,
-        results_root=tmp_path / "results",
-        scratch_root=tmp_path / "scratch",
-        bundle_cache=tmp_path / "bundles",
-        bundle_roots=(),
-        runtime_root=tmp_path / "runtime",
-        bundle_retention="retain",
-        local_files_only=True,
-        timeout_seconds=1,
-        references={},
-    )
-
-    with pytest.raises(perf_matrix.PerfMatrixError, match="trtmc-bench is not executable"):
-        perf_matrix.preflight([], environment, require_runtime=False)
-
-    trtmc_bench.chmod(0o755)
-    assert perf_matrix.preflight([], environment, require_runtime=False) == []
 
 
 def test_dev_images_install_the_pinned_requirements_without_deleted_docs() -> None:
@@ -1022,6 +1140,7 @@ def test_wheel_validation_requires_exact_new_payload(tmp_path: Path, executor: s
             "Name: package\n"
             "Version: 0.1\n"
             "Provides-Extra: cutedsl\n"
+            "Provides-Extra: edgellm\n"
             "Provides-Extra: serve\n"
             "Provides-Extra: test\n",
         )
@@ -1291,3 +1410,56 @@ def test_installed_sdk_builds_plain_c_and_cpp_without_cuda(
             validate_installed_sdk(prefix)
     else:
         validate_installed_sdk(prefix)
+
+
+def test_family_staging_preserves_product_files_and_excludes_references(tmp_path: Path, monkeypatch) -> None:
+    import runpy
+    import sys
+
+    # The staging function uses only pathlib/shutil. CPU CI does not install
+    # Conan, so isolate the recipe's unrelated build-tool imports here.
+    with monkeypatch.context() as patch:
+        for name, module in {
+            "conan": SimpleNamespace(ConanFile=object),
+            "conan.errors": SimpleNamespace(ConanException=RuntimeError),
+            "conan.tools.cmake": SimpleNamespace(CMake=None, CMakeToolchain=None, cmake_layout=None),
+            "conan.tools.files": SimpleNamespace(copy=None),
+        }.items():
+            patch.setitem(sys.modules, name, module)
+        recipe = runpy.run_path(str(Path(__file__).resolve().parents[2] / "conanfile.py"))
+    _package_families = recipe["_package_families"]
+
+    source, package = tmp_path / "source", tmp_path / "package"
+    files = {
+        "__init__.py": "",
+        "alpha/model.py": "def build(): pass\n",
+        "alpha/requirements.txt": "numpy\n",
+        "alpha/native_plugins/kernel.cu": "// build input\n",
+        "alpha/tests/test_model.py": "def test_shape(): pass\n",
+        "alpha/tests/reference/adapter.py": "import torch\n",
+        "alpha/tests/requirements.txt": "torch>=2.6\n",
+        "alpha/__pycache__/model.pyc": "cache",
+    }
+    for name, text in files.items():
+        path = source / "families" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    _package_families(source, package)
+    actual = {p.relative_to(package / "families").as_posix()
+              for p in (package / "families").rglob("*") if p.is_file()}
+    assert actual == {"__init__.py", "alpha/model.py", "alpha/requirements.txt",
+                      "alpha/native_plugins/kernel.cu", "alpha/tests/test_model.py"}
+    for name in actual:
+        assert (package / "families" / name).read_text() == files[name]
+
+
+def test_wheel_validation_rejects_a_leaked_test_reference(tmp_path: Path) -> None:
+    family = tmp_path / "families/alpha"
+    family.mkdir(parents=True)
+    (family / "model.py").write_text("def build(): pass\n")
+    wheel = tmp_path / "leaked.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("families/alpha/tests/reference/adapter.py", "import torch\n")
+    validator = WheelArchiveValidator(SimpleNamespace(repository=tmp_path))
+    with pytest.raises(CiError, match="isolated test references are packaged"):
+        validator.validate([wheel])

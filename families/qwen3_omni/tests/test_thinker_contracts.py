@@ -62,6 +62,7 @@ def test_build_writes_only_the_thinker_text_bundle(monkeypatch, tmp_path) -> Non
         model_dir=tmp_path,
         backend="trt",
         dynamic_kv_cache=False,
+        mtp_seq_len=None,
         task="text_generation",
         precision="bf16",
         max_sequence_length=256,
@@ -159,7 +160,8 @@ def test_thinker_load_weights_preserves_bf16_storage(monkeypatch, tmp_path) -> N
     assert weights["final_norm"].dtype == np.float32
 
 
-def test_thinker_moe_batches_only_routed_expert_multiplies(monkeypatch) -> None:
+def test_thinker_moe_reads_packed_expert_weights_without_gathers(monkeypatch) -> None:
+    """Each projection is one batched matmul over all packed experts, in bf16."""
     constants = []
     matrix_multiplies = []
     gathers = []
@@ -221,24 +223,24 @@ def test_thinker_moe_batches_only_routed_expert_multiplies(monkeypatch) -> None:
 
     monkeypatch.setattr(model_module.graph_ops, "add_constant", add_constant)
     network = Network()
-    output = model_module._add_routed_swiglu_experts(
+    expert_weights = model_module._add_expert_weights(
+        network,
+        trt.bfloat16,
+        np.ones((8, 16, 32), dtype=ml_dtypes.bfloat16),
+        np.ones((8, 16, 32), dtype=ml_dtypes.bfloat16),
+        np.ones((8, 32, 16), dtype=ml_dtypes.bfloat16),
+        np.dtype(ml_dtypes.bfloat16),
+    )
+    output = model_module._add_dense_experts(
         network,
         Tensor("input", (-1, 16)),
         Tensor("top_indices", (-1, 2), trt.int32),
         Tensor("routing_weights", (-1, 2), trt.float32),
-        hidden_size=16,
-        top_k=2,
-        w_gate=np.ones((8, 16, 32), dtype=ml_dtypes.bfloat16),
-        w_up=np.ones((8, 16, 32), dtype=ml_dtypes.bfloat16),
-        w_down=np.ones((8, 32, 16), dtype=ml_dtypes.bfloat16),
-        dtype=np.dtype(ml_dtypes.bfloat16),
+        16,
+        8,
+        *expert_weights,
     )
 
     assert output.dtype == trt.bfloat16
-    assert len(matrix_multiplies) == 3
-    assert all(rhs.startswith("gather(weight") for _lhs, rhs in matrix_multiplies)
-    assert [entry for entry in gathers if entry[0].startswith("weight")] == [
-        ("weight0", "top_indices", 0),
-        ("weight1", "top_indices", 0),
-        ("weight2", "top_indices", 0),
-    ]
+    assert [rhs for _lhs, rhs in matrix_multiplies] == ["weight0", "weight1", "weight2"]
+    assert gathers == []

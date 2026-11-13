@@ -639,6 +639,146 @@ def _runtime_rope_cache_3d(
     return shaped.get_output(0)
 
 
+def _add_dynamic_vision_rope(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    num_heads: int,
+    head_dim: int,
+    cosine: trt.ITensor,
+    sine: trt.ITensor,
+) -> trt.ITensor:
+    """Rotate FP32 vision rows with pointwise math across query-loop boundaries."""
+    if inp.dtype != trt.float32:
+        return add_apply_rope_native_sequence(
+            network, inp, num_heads, head_dim, cosine, sine,
+            rotary_embedding_dim=head_dim, sequence_length=None)
+    shaped = network.add_shuffle(inp)
+    shaped.reshape_dims = (-1, num_heads, head_dim)
+    tensor = shaped.get_output(0)
+    shape = network.add_shape(tensor).get_output(0)
+    length = network.add_slice(shape, (0,), (1,), (1,)).get_output(0)
+    rest = add_constant(
+        network, (2,), np.array([num_heads, head_dim // 2]), dtype=np.int64)
+    target = network.add_concatenation([length, rest])
+    target.axis = 0
+    halves = []
+    for offset in (0, head_dim // 2):
+        sliced = network.add_slice(
+            tensor, (0, 0, offset), (1, num_heads, head_dim // 2), (1, 1, 1))
+        sliced.set_input(2, target.get_output(0))
+        halves.append(sliced.get_output(0))
+    caches = []
+    for cache in (cosine, sine):
+        transformed = network.add_shuffle(cache)
+        transformed.first_transpose = trt.Permutation([1, 0, 2])
+        caches.append(transformed.get_output(0))
+    first, second = halves
+    cosine, sine = caches
+
+    def product(lhs, rhs):
+        return network.add_elementwise(lhs, rhs, trt.ElementWiseOperation.PROD).get_output(0)
+
+    rotated_first = network.add_elementwise(
+        product(first, cosine), product(second, sine), trt.ElementWiseOperation.SUB)
+    rotated_second = network.add_elementwise(
+        product(second, cosine), product(first, sine), trt.ElementWiseOperation.SUM)
+    combined = network.add_concatenation([rotated_first.get_output(0), rotated_second.get_output(0)])
+    combined.axis = 2
+    flattened = network.add_shuffle(combined.get_output(0))
+    flattened.reshape_dims = (-1, num_heads * head_dim)
+    return flattened.get_output(0)
+
+
+def _add_chunked_vision_attention(
+    network: trt.INetworkDefinition,
+    q: trt.ITensor,
+    k: trt.ITensor,
+    v: trt.ITensor,
+    *,
+    num_heads: int,
+    head_dim: int,
+) -> trt.ITensor:
+    """FP32 full vision attention with bounded query-key intermediates.
+
+    Each query block attends to every key. Only queries are extended, and those
+    extra output rows are discarded. A TensorRT loop keeps score storage
+    proportional to the image's patch count instead of its square.
+    """
+    block_size = 32
+    width = num_heads * head_dim
+
+    def integer(values):
+        values = np.asarray(values, dtype=np.int32)
+        return add_constant(network, values.shape, values, dtype=np.int32)
+
+    def vector(tensor):
+        shaped = network.add_shuffle(tensor)
+        shaped.reshape_dims = (1,)
+        return shaped.get_output(0)
+
+    shape = network.add_shape(q).get_output(0)
+    shape = _cast_back_to_trt_dtype(network, shape, trt.int32)
+    length = network.add_gather(shape, integer(0), 0).get_output(0)
+    rounded = network.add_elementwise(
+        length, integer(block_size - 1), trt.ElementWiseOperation.SUM).get_output(0)
+    count = network.add_elementwise(
+        rounded, integer(block_size), trt.ElementWiseOperation.FLOOR_DIV).get_output(0)
+    last_row = network.add_elementwise(
+        length, integer(1), trt.ElementWiseOperation.SUB).get_output(0)
+
+    def heads(tensor):
+        shaped = network.add_shuffle(tensor)
+        shaped.reshape_dims = (-1, num_heads, head_dim)
+        shaped.second_transpose = trt.Permutation([1, 0, 2])
+        return shaped.get_output(0)
+
+    keys, values = heads(k), heads(v)
+    loop = network.add_loop()
+    loop.add_trip_limit(count, trt.TripLimit.COUNT)
+    cursor = loop.add_recurrence(integer([0]))
+    indices = network.add_elementwise(
+        cursor.get_output(0), integer(np.arange(block_size)),
+        trt.ElementWiseOperation.SUM).get_output(0)
+    # The final block may repeat its last valid query. Query rows are
+    # independent, and those extra output rows are removed below.
+    indices = network.add_elementwise(
+        indices, vector(last_row), trt.ElementWiseOperation.MIN).get_output(0)
+    query_rows = network.add_gather(q, indices, 0).get_output(0)
+    next_cursor = network.add_elementwise(
+        cursor.get_output(0), integer([block_size]),
+        trt.ElementWiseOperation.SUM).get_output(0)
+    cursor.set_input(1, next_cursor)
+    query_heads = network.add_shuffle(query_rows)
+    query_heads.reshape_dims = (block_size, num_heads, head_dim)
+    query_heads.second_transpose = trt.Permutation([1, 0, 2])
+    query = query_heads.get_output(0)
+    scale = add_constant(
+        network, (1, 1, 1), np.array([head_dim ** -0.5], dtype=np.float32))
+    query = network.add_elementwise(
+        query, scale, trt.ElementWiseOperation.PROD).get_output(0)
+    scores = network.add_matrix_multiply(
+        query, trt.MatrixOperation.NONE, keys, trt.MatrixOperation.TRANSPOSE).get_output(0)
+    probabilities = network.add_softmax(scores)
+    probabilities.axes = 1 << 2
+    context = network.add_matrix_multiply(
+        probabilities.get_output(0), trt.MatrixOperation.NONE,
+        values, trt.MatrixOperation.NONE).get_output(0)
+    # Transpose only one query block. Whole-image query/output transposes would
+    # needlessly keep additional N x H x D buffers live around the loop.
+    rows = network.add_shuffle(context)
+    rows.first_transpose = trt.Permutation([1, 0, 2])
+    rows.reshape_dims = (block_size, width)
+    collected = loop.add_loop_output(rows.get_output(0), trt.LoopOutput.CONCATENATE, 0)
+    collected.set_input(1, count)
+    flattened = network.add_shuffle(collected.get_output(0))
+    flattened.reshape_dims = (-1, width)
+    output_shape = network.add_concatenation([vector(length), integer([width])])
+    output_shape.axis = 0
+    unpadded = network.add_slice(flattened.get_output(0), (0, 0), (1, width), (1, 1))
+    unpadded.set_input(2, output_shape.get_output(0))
+    return unpadded.get_output(0)
+
+
 def add_dynamic_self_attention_with_rope(
     network: trt.INetworkDefinition,
     hidden: trt.ITensor,
@@ -675,15 +815,15 @@ def add_dynamic_self_attention_with_rope(
         network, cos_half, head_dim // 2, q.dtype)
     sin_3d = _runtime_rope_cache_3d(
         network, sin_half, head_dim // 2, q.dtype)
-    q = add_apply_rope_native_sequence(
-        network, q, num_heads, head_dim, cos_3d, sin_3d,
-        rotary_embedding_dim=head_dim, sequence_length=None)
-    k = add_apply_rope_native_sequence(
-        network, k, num_heads, head_dim, cos_3d, sin_3d,
-        rotary_embedding_dim=head_dim, sequence_length=None)
-    context = add_attention_from_rows(
-        network, q, k, v, num_heads=num_heads, head_dim=head_dim,
-        q_seq=None, kv_seq=None)
+    q = _add_dynamic_vision_rope(network, q, num_heads, head_dim, cos_3d, sin_3d)
+    k = _add_dynamic_vision_rope(network, k, num_heads, head_dim, cos_3d, sin_3d)
+    if q.dtype == trt.float32:
+        context = _add_chunked_vision_attention(
+            network, q, k, v, num_heads=num_heads, head_dim=head_dim)
+    else:
+        context = add_attention_from_rows(
+            network, q, k, v, num_heads=num_heads, head_dim=head_dim,
+            q_seq=None, kv_seq=None)
     out = add_matmul_rhs_constant(
         network, context, hidden_size, hidden_size, w_o, dtype=dtype)
     if o_bias is not None:
@@ -733,12 +873,8 @@ def add_dynamic_windowed_self_attention_with_rope(
         network, cos_half, head_dim // 2, q.dtype)
     sin_3d = _runtime_rope_cache_3d(
         network, sin_half, head_dim // 2, q.dtype)
-    q = add_apply_rope_native_sequence(
-        network, q, num_heads, head_dim, cos_3d, sin_3d,
-        rotary_embedding_dim=head_dim, sequence_length=None)
-    k = add_apply_rope_native_sequence(
-        network, k, num_heads, head_dim, cos_3d, sin_3d,
-        rotary_embedding_dim=head_dim, sequence_length=None)
+    q = _add_dynamic_vision_rope(network, q, num_heads, head_dim, cos_3d, sin_3d)
+    k = _add_dynamic_vision_rope(network, k, num_heads, head_dim, cos_3d, sin_3d)
 
     windowed_qkv = []
     for tensor in (q, k, v):
@@ -752,9 +888,26 @@ def add_dynamic_windowed_self_attention_with_rope(
     if window_mask.dtype != windowed_qkv[0].dtype:
         window_mask = network.add_cast(
             window_mask, windowed_qkv[0].dtype).get_output(0)
-    context = add_attention_core(
-        network, *windowed_qkv, mask=window_mask,
-        scale=1.0 / np.sqrt(max(head_dim, 1)))
+    if windowed_qkv[0].dtype == trt.float32:
+        # Keep the window equation composable with the full-attention query loops.
+        scale = add_constant(
+            network, (1, 1, 1, 1), np.array([1.0 / np.sqrt(head_dim)], dtype=np.float32))
+        query = network.add_elementwise(
+            windowed_qkv[0], scale, trt.ElementWiseOperation.PROD).get_output(0)
+        scores = network.add_matrix_multiply(
+            query, trt.MatrixOperation.NONE,
+            windowed_qkv[1], trt.MatrixOperation.TRANSPOSE).get_output(0)
+        scores = network.add_elementwise(
+            scores, window_mask, trt.ElementWiseOperation.SUM).get_output(0)
+        probabilities = network.add_softmax(scores)
+        probabilities.axes = 1 << 3
+        context = network.add_matrix_multiply(
+            probabilities.get_output(0), trt.MatrixOperation.NONE,
+            windowed_qkv[2], trt.MatrixOperation.NONE).get_output(0)
+    else:
+        context = add_attention_core(
+            network, *windowed_qkv, mask=window_mask,
+            scale=1.0 / np.sqrt(max(head_dim, 1)))
     flattened = network.add_shuffle(context)
     flattened.first_transpose = trt.Permutation([0, 2, 1, 3])
     flattened.reshape_dims = (-1, hidden_size)
@@ -1484,6 +1637,11 @@ def add_attention_core(
         v_4d = network.add_cast(v_4d, trt.float32).get_output(0)
         if mask is not None and mask.dtype != trt.float32:
             mask = network.add_cast(mask, trt.float32).get_output(0)
+
+    # Causal/padding masks contain zero or a negative sentinel. Keep their
+    # addition at the attention dtype in the strongly typed graph.
+    if mask is not None and mask.dtype != q_4d.dtype:
+        mask = network.add_cast(mask, q_4d.dtype).get_output(0)
 
     # Pre-scale Q: TRT IAttention does not apply score scaling itself.
     # Match the scale constant's dtype to Q's dtype: in strongly-typed networks

@@ -18,6 +18,8 @@ if TYPE_CHECKING:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Fast Foundation Stereo bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("FastFoundationStereo does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("fast_foundation_stereo does not support dynamic_kv_cache")
 

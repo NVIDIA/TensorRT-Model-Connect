@@ -26,14 +26,37 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         throw std::invalid_argument("glmasr does not support --kv-cache-size");
     const auto runtime_data = required(context.reader, "runtime.json");
     const auto json = nlohmann::json::parse(runtime_data.begin(), runtime_data.end());
+    GlmAsrConfig config;
+    config.vocab_size = json.value("vocab_size", config.vocab_size);
+    if (!json.contains("eot_token_ids"))
+        throw std::invalid_argument("glmasr bundle requires eot_token_ids; rebuild the bundle");
+    config.eos_token_ids = json.at("eot_token_ids").get<std::vector<int32_t>>();
+    config.validate_stop_tokens();
     ModuleCreateOptions options;
     const auto decoder_plan = required(context.reader, "engine.plan");
-    auto decoder =
-        load_trt_module_from_plan(&context.backend, &decoder_plan, "engine.plan", options);
+    // Bundles built before the prefill engine have no layout field.
+    const auto layout = json.value("decoder_engine_layout", std::string("single"));
+    if (layout != "single" && layout != "split")
+        throw std::invalid_argument("glmasr runtime.json has an invalid decoder_engine_layout");
+    auto decoder_module =
+        load_trt_module_from_plan(&context.backend, &decoder_plan, "engine.plan", options).module;
+    if (!decoder_module || !decoder_module->ok())
+        throw std::runtime_error("glmasr decoder engine failed to load");
+    std::unique_ptr<ITrtModule> prefill;
+    if (layout == "split") {
+        // The prefill engine shares the decoder's stream so KV copies stay ordered.
+        ModuleCreateOptions prefill_options = options;
+        prefill_options.stream = decoder_module->stream();
+        const auto prefill_plan = required(context.reader, "prefill.plan");
+        prefill = load_trt_module_from_plan(&context.backend, &prefill_plan, "prefill.plan",
+                                            prefill_options)
+                      .module;
+        if (!prefill || !prefill->ok())
+            throw std::runtime_error("glmasr prefill engine failed to load");
+    }
     const auto encoder_plan = required(context.reader, "encoder.plan");
     auto encoder =
         load_trt_module_from_plan(&context.backend, &encoder_plan, "encoder.plan", options);
-    GlmAsrConfig config;
     config.max_cache_length = json.value("max_cache_length", 384);
     config.vocab_size = json.value("vocab_size", config.vocab_size);
     config.audio_embedding_size = json.value("hidden_size", config.audio_embedding_size);
@@ -42,17 +65,16 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     config.mel_hop_length = json.value("mel_hop_length", config.mel_hop_length);
     config.mel_sampling_rate = json.value("mel_sampling_rate", config.mel_sampling_rate);
     config.mel_chunk_length = json.value("mel_chunk_length", config.mel_chunk_length);
-    config.eos_token_id = json.value("eot_token_id", config.eos_token_id);
     config.transcription_prompt = json.value("transcription_prompt", config.transcription_prompt);
-    const auto cache_shape = decoder.module->tensor_shape("cache_k_0");
+    const auto cache_shape = decoder_module->tensor_shape("cache_k_0");
     const auto kv_dim = cache_shape.empty() ? 0 : static_cast<int32_t>(cache_shape.back());
     auto state = std::make_unique<GlmAsrKvCache>(
         json.value("num_hidden_layers", 1), config.max_cache_length, kv_dim,
-        decoder.module->stream(), decoder.module->tensor_dtype("cache_k_0"));
+        decoder_module->stream(), decoder_module->tensor_dtype("cache_k_0"));
     auto mel = load_mel_filterbank(context.reader);
     auto tokenizer = create_tokenizer_from_bundle(context.reader);
-    const cudaStream_t decoder_stream = decoder.module->stream();
-    return new GlmAsrPipeline(std::move(encoder.module), std::move(decoder.module),
+    const cudaStream_t decoder_stream = decoder_module->stream();
+    return new GlmAsrPipeline(std::move(encoder.module), std::move(decoder_module),
                               std::move(state), std::move(config), std::move(mel), decoder_stream,
-                              std::move(tokenizer), "");
+                              std::move(tokenizer), "", std::move(prefill));
 }

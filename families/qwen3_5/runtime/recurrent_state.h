@@ -39,6 +39,15 @@ class Qwen35RecurrentState final : public Qwen35InferenceState {
 
     const std::vector<TensorSpec>& specs() const { return specs_; }
 
+    // The verifier reads current recurrence and writes only the present side.
+    // Rejected drafts therefore cannot overwrite the committed target prefix.
+    void* state_ptr(std::size_t spec, int32_t layer) {
+        return state_.at(spec).at(static_cast<std::size_t>(layer)).data();
+    }
+    void* present_ptr(std::size_t spec, int32_t layer) {
+        return present_.at(spec).at(static_cast<std::size_t>(layer)).data();
+    }
+
   private:
     std::vector<TensorSpec> specs_;
     std::vector<std::vector<DeviceTensor>> state_;

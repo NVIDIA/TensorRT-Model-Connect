@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# SciFact (BEIR, mteb/scifact pinned): each of the 300 test queries with its BM25 top-20 corpus documents (a fixed
+# candidate list); gold is the relevant ones' positions. Scored as nDCG@10 of the model's reranking.
+suite: scifact-rerank-bm25-300
+version: 1
+source:
+  kind: scifact
+  mode: rerank
+selection: {method: first, count: 300}
+fields: {query: query, documents: documents}

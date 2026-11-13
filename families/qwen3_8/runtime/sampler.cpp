@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <limits>
 #include <numeric>
+#include <stdexcept>
 #include <unordered_set>
 #include <vector>
 
@@ -264,6 +265,74 @@ void qwen38_apply_repetition_penalty(std::vector<float>& logits, float penalty,
         float& score = logits[static_cast<std::size_t>(token)];
         score = score < 0.0F ? score * penalty : score / penalty;
     }
+}
+
+std::vector<float> qwen38_probabilities(const float* logits, int32_t vocab_size,
+                                        const Qwen38SamplingParams& params) {
+    if (vocab_size <= 0 || !logits)
+        throw std::invalid_argument("Invalid Qwen3.8 distribution");
+    std::vector<float> result(static_cast<std::size_t>(vocab_size), 0);
+    const bool default_greedy = params.top_k <= 1 &&
+                                sanitized_top_p(params.top_p) >= 1.0F - kSamplingEpsilon &&
+                                sanitized_min_p(params.min_p) <= 0.0F && params.seed < 0;
+    if (default_greedy || greedy_equivalent(params)) {
+        result[argmax_over_logits(logits, vocab_size, {}).token_id] = 1;
+    } else {
+        const auto dist = build_filtered_distribution(logits, vocab_size, params);
+        for (int32_t i = 0; i < dist.keep; ++i)
+            result[dist.indices[i]] = dist.probs[i];
+    }
+    return result;
+}
+
+double qwen38_uniform(uint64_t& rng) {
+    if (rng == 0)
+        rng = 1;
+    rng ^= rng << 13;
+    rng ^= rng >> 7;
+    rng ^= rng << 17;
+    return static_cast<double>(rng & 0xFFFFFFFFULL) / 4294967296.0;
+}
+int32_t qwen38_draw_probabilities(const std::vector<float>& probabilities, uint64_t& rng) {
+    double mass = 0;
+    int32_t last = -1;
+    for (std::size_t i = 0; i < probabilities.size(); ++i) {
+        const float p = probabilities[i];
+        if (!std::isfinite(p) || p < 0)
+            throw std::runtime_error("Invalid Qwen3.8 probability");
+        mass += p;
+        if (p > 0)
+            last = static_cast<int32_t>(i);
+    }
+    if (!(mass > 0))
+        throw std::runtime_error("Empty Qwen3.8 probability distribution");
+    const double u = qwen38_uniform(rng) * mass;
+    double cumulative = 0;
+    for (std::size_t i = 0; i < probabilities.size(); ++i) {
+        cumulative += probabilities[i];
+        if (u < cumulative)
+            return static_cast<int32_t>(i);
+    }
+    return last;
+}
+int32_t qwen38_verify_proposal(int32_t token, const std::vector<float>& target,
+                               const std::vector<float>& draft, uint64_t& rng, bool& accepted) {
+    if (target.size() != draft.size() || token < 0 ||
+        static_cast<std::size_t>(token) >= target.size() || !(draft[token] > 0))
+        throw std::invalid_argument("Invalid Qwen3.8 speculative proposal");
+    // Normalize both float distributions before p/q, preserving exact target mass.
+    const double p_mass = std::accumulate(target.begin(), target.end(), 0.0);
+    const double q_mass = std::accumulate(draft.begin(), draft.end(), 0.0);
+    if (!(p_mass > 0) || !(q_mass > 0))
+        throw std::runtime_error("Empty speculative distribution");
+    const double ratio = (target[token] / p_mass) / (draft[token] / q_mass);
+    accepted = ratio >= 1 || qwen38_uniform(rng) < ratio;
+    if (accepted)
+        return token;
+    std::vector<float> residual(target.size());
+    for (std::size_t i = 0; i < target.size(); ++i)
+        residual[i] = static_cast<float>(std::max(0.0, target[i] / p_mass - draft[i] / q_mass));
+    return qwen38_draw_probabilities(residual, rng);
 }
 
 std::unique_ptr<Qwen38ISampler> create_qwen38_sampler(const Qwen38SamplingParams& params) {

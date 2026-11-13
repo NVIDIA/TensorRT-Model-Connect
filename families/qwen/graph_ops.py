@@ -1117,6 +1117,29 @@ def add_attention_from_rows(
     )
 
 
+def slice_native_kv_cache_rows(
+    network: trt.INetworkDefinition,
+    cache: trt.ITensor,
+    key_positions: trt.ITensor,
+) -> trt.ITensor:
+    """Return the first ``len(key_positions)`` rows of a ``[1,Hkv,C,D]`` cache."""
+
+    cache_shape = network.add_shape(cache).get_output(0)
+    leading = network.add_slice(cache_shape, start=(0,), shape=(2,), stride=(1,))
+    trailing = network.add_slice(cache_shape, start=(3,), shape=(1,), stride=(1,))
+    rows = network.add_shape(key_positions).get_output(0)
+    size = network.add_concatenation([leading.get_output(0), rows, trailing.get_output(0)])
+    size.axis = 0
+    rows_slice = network.add_slice(
+        cache,
+        start=(0, 0, 0, 0),
+        shape=(1, 1, 1, 1),
+        stride=(1, 1, 1, 1),
+    )
+    rows_slice.set_input(2, size.get_output(0))
+    return rows_slice.get_output(0)
+
+
 def add_native_kv_cache_attention_from_rows(
     network: trt.INetworkDefinition,
     q: trt.ITensor,
@@ -1127,6 +1150,7 @@ def add_native_kv_cache_attention_from_rows(
     cache_write_indices: trt.ITensor,
     attention_masks: NativeKvMasks,
     *,
+    key_positions: trt.ITensor | None = None,
     num_heads: int,
     num_kv_heads: int,
     head_dim: int,
@@ -1145,6 +1169,10 @@ def add_native_kv_cache_attention_from_rows(
     Cache inputs and outputs have shape ``[1, Hkv, capacity, D]``. The caller
     must bind each output to the same device address as its corresponding
     input, as required by TensorRT's KV-cache aliasing contract.
+
+    With ``key_positions`` (int32 ``[R]``, ``0..R-1``) attention reads only
+    the first ``R`` cache rows; the runtime keeps ``R`` at or above the valid
+    context, so a step costs O(context) instead of O(capacity).
     """
     output_dtype = q.dtype
     attention_dtype = cache_k.dtype
@@ -1193,6 +1221,10 @@ def add_native_kv_cache_attention_from_rows(
         update_v.name = tag + ".cache_v_update"
     updated_k = update_k.get_output(0)
     updated_v = update_v.get_output(0)
+    active_k, active_v = updated_k, updated_v
+    if key_positions is not None:
+        active_k = slice_native_kv_cache_rows(network, updated_k, key_positions)
+        active_v = slice_native_kv_cache_rows(network, updated_v, key_positions)
 
     q_4d = reshape_rows_to_heads_4d(
         network,
@@ -1209,8 +1241,8 @@ def add_native_kv_cache_attention_from_rows(
     context_4d = add_explicit_masked_grouped_query_attention(
         network,
         q_4d,
-        updated_k,
-        updated_v,
+        active_k,
+        active_v,
         attention_masks,
         num_heads=num_heads,
         num_kv_heads=num_kv_heads,

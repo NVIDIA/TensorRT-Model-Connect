@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The bundle fixes this postprocessing threshold; Native must use the same value.
+absolute:
+  - name: coco
+    request: {score_threshold: 0.3}

@@ -1,9 +1,10 @@
 {
   "name": "electra-base-discriminator-tp4",
   "hf_id": "google/electra-base-discriminator",
+  "hf_revision": "1ae76a97c7e84a4e640876a07453fccd636f0667",
   "bundle": "electra-base-discriminator-tp4.bundle",
   "family": "electra",
-  "task": "encoding",
+  "task": "text_to_pooled_features",
   "testcases": [
     {
       "name": "electra-base-discriminator-tp4",

@@ -1,6 +1,7 @@
 {
   "name": "qwen-image-l0",
   "hf_id": "Qwen/Qwen-Image",
+  "hf_revision": "75e0b4be04f60ec59a75f475837eced720f823b6",
   "bundle": "qwen-image-l0.bundle",
   "family": "qwen_image",
   "task": "image_generation",

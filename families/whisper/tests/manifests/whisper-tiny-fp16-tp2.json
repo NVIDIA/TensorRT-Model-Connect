@@ -1,6 +1,7 @@
 {
   "name": "whisper-tiny-fp16-tp2",
   "hf_id": "openai/whisper-tiny",
+  "hf_revision": "169d4a4341b33bc18d8881c4b69c2e104e1cc0af",
   "bundle": "whisper-tiny-fp16-tp2.bundle",
   "family": "whisper",
   "task": "transcription",

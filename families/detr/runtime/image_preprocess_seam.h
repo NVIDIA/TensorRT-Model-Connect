@@ -16,6 +16,8 @@ struct DetrPreprocessConfig {
     int32_t input_image_w{800};
     int32_t shortest_edge{800};
     int32_t longest_edge{1333};
+    // New bundles accept the actual resized shape; old bundles require an exact canvas.
+    bool dynamic_image_shapes{false};
     std::vector<float> image_mean{0.485F, 0.456F, 0.406F};
     std::vector<float> image_std{0.229F, 0.224F, 0.225F};
 };

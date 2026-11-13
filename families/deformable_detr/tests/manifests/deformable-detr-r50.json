@@ -1,0 +1,20 @@
+{
+  "name": "deformable-detr-r50",
+  "hf_id": "SenseTime/deformable-detr",
+  "hf_revision": "83ecd26945199939cb82806f988debdb71e6f43e",
+  "bundle": "deformable-detr-r50.bundle",
+  "family": "deformable_detr",
+  "task": "object_detection",
+  "precision": "fp16",
+  "image_height": 800,
+  "image_width": 800,
+  "testcases": [
+    {
+      "name": "deformable-detr-r50",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg",
+      "score_threshold": 0.3
+    }
+  ],
+  "tensor_parallel_size": 1
+}

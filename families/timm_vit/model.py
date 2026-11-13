@@ -33,6 +33,7 @@ from .weights import (
 from .config import ModelConfig
 from .parallel import ParallelConfig
 from .parallel import normalize_parallel_config
+from .quantization import calibrate_timm_vit, configure_fp8_build
 
 
 def _as_tuple2(value, default: int) -> tuple[int, int]:
@@ -168,7 +169,7 @@ class _TimmVitModel:
                 parallel_config=parallel,
             )
 
-        del max_cache_length, quant_ctx
+        del max_cache_length
         if precision == "fp16":
             work_np_dtype, work_trt_dtype = np.float16, trt.float16
         elif precision == "fp32":
@@ -217,6 +218,7 @@ class _TimmVitModel:
         trt_config.max_aux_streams = 0
         trt_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+        configure_fp8_build(trt_config, quant_ctx)
 
         pixel_values = network.add_input("pixel_values", trt.float32, (1, 3, image_h, image_w))
         work_pixels = pixel_values
@@ -280,30 +282,21 @@ class _TimmVitModel:
             if qkv_b is not None:
                 q_b, k_b, v_b = np.split(qkv_b.astype(work_np_dtype), 3)
 
-            q = graph_ops.add_matmul_rhs_constant(
-                network,
-                norm1,
-                hidden_size,
-                hidden_size,
-                q_w,
-                dtype=work_np_dtype,
-            )
-            k = graph_ops.add_matmul_rhs_constant(
-                network,
-                norm1,
-                hidden_size,
-                hidden_size,
-                k_w,
-                dtype=work_np_dtype,
-            )
-            v = graph_ops.add_matmul_rhs_constant(
-                network,
-                norm1,
-                hidden_size,
-                hidden_size,
-                v_w,
-                dtype=work_np_dtype,
-            )
+            qkv_name = f"{prefix}.attn.qkv"
+            if quant_ctx is not None and quant_ctx.should_quantize(qkv_name):
+                # q, k and v read the same input: one Quantize/Dequantize, three FP8 weights.
+                norm1_q = quant_ctx.quantize_input(network, norm1, qkv_name)
+                q, k, v = (quant_ctx.matmul(network, norm1_q, qkv_name, part) for part in range(3))
+            else:
+                q = graph_ops.add_matmul_rhs_constant(
+                    network, norm1, hidden_size, hidden_size, q_w, dtype=work_np_dtype
+                )
+                k = graph_ops.add_matmul_rhs_constant(
+                    network, norm1, hidden_size, hidden_size, k_w, dtype=work_np_dtype
+                )
+                v = graph_ops.add_matmul_rhs_constant(
+                    network, norm1, hidden_size, hidden_size, v_w, dtype=work_np_dtype
+                )
             if q_b is not None:
                 q = graph_ops.add_bias_sum(network, q, hidden_size, q_b, dtype=work_np_dtype)
                 k = graph_ops.add_bias_sum(network, k, hidden_size, k_b, dtype=work_np_dtype)
@@ -346,14 +339,19 @@ class _TimmVitModel:
             attn_context = network.add_shuffle(context.get_output(0))
             attn_context.first_transpose = trt.Permutation([0, 2, 1, 3])
             attn_context.reshape_dims = (1, seq_len, hidden_size)
-            attn = graph_ops.add_matmul_rhs_constant(
-                network,
-                attn_context.get_output(0),
-                hidden_size,
-                hidden_size,
-                weights[f"{prefix}.attn.proj.weight"],
-                dtype=work_np_dtype,
-            )
+            proj_name = f"{prefix}.attn.proj"
+            if quant_ctx is not None and quant_ctx.should_quantize(proj_name):
+                proj_in = quant_ctx.quantize_input(network, attn_context.get_output(0), proj_name)
+                attn = quant_ctx.matmul(network, proj_in, proj_name)
+            else:
+                attn = graph_ops.add_matmul_rhs_constant(
+                    network,
+                    attn_context.get_output(0),
+                    hidden_size,
+                    hidden_size,
+                    weights[f"{prefix}.attn.proj.weight"],
+                    dtype=work_np_dtype,
+                )
             attn = graph_ops.add_bias_sum(
                 network,
                 attn,
@@ -374,26 +372,38 @@ class _TimmVitModel:
                 eps_val,
                 dtype=work_np_dtype,
             )
-            fc1 = graph_ops.add_matmul_rhs_constant(
-                network,
-                norm2,
-                hidden_size,
-                mlp_hidden,
-                weights[f"{prefix}.mlp.fc1.weight"],
-                dtype=work_np_dtype,
-            )
+            fc1_name = f"{prefix}.mlp.fc1"
+            if quant_ctx is not None and quant_ctx.should_quantize(fc1_name):
+                fc1 = quant_ctx.matmul(
+                    network, quant_ctx.quantize_input(network, norm2, fc1_name), fc1_name
+                )
+            else:
+                fc1 = graph_ops.add_matmul_rhs_constant(
+                    network,
+                    norm2,
+                    hidden_size,
+                    mlp_hidden,
+                    weights[f"{prefix}.mlp.fc1.weight"],
+                    dtype=work_np_dtype,
+                )
             fc1 = graph_ops.add_bias_sum(
                 network, fc1, mlp_hidden, weights[f"{prefix}.mlp.fc1.bias"], dtype=work_np_dtype
             )
             act = graph_ops.add_gelu_erf(network, fc1, dtype=work_np_dtype)
-            fc2 = graph_ops.add_matmul_rhs_constant(
-                network,
-                act,
-                mlp_hidden,
-                hidden_size,
-                weights[f"{prefix}.mlp.fc2.weight"],
-                dtype=work_np_dtype,
-            )
+            fc2_name = f"{prefix}.mlp.fc2"
+            if quant_ctx is not None and quant_ctx.should_quantize(fc2_name):
+                fc2 = quant_ctx.matmul(
+                    network, quant_ctx.quantize_input(network, act, fc2_name), fc2_name
+                )
+            else:
+                fc2 = graph_ops.add_matmul_rhs_constant(
+                    network,
+                    act,
+                    mlp_hidden,
+                    hidden_size,
+                    weights[f"{prefix}.mlp.fc2.weight"],
+                    dtype=work_np_dtype,
+                )
             fc2 = graph_ops.add_bias_sum(
                 network, fc2, hidden_size, weights[f"{prefix}.mlp.fc2.bias"], dtype=work_np_dtype
             )
@@ -449,7 +459,11 @@ class _TimmVitModel:
         if not isinstance(vocabulary_id, str):
             raise ValueError("timm ViT vocabulary_id must be a string")
         if not isinstance(labels, list) or (
-            labels and (len(labels) != vit_cfg["num_classes"] or any(not isinstance(label, str) or not label for label in labels))
+            labels
+            and (
+                len(labels) != vit_cfg["num_classes"]
+                or any(not isinstance(label, str) or not label for label in labels)
+            )
         ):
             raise ValueError("timm ViT label_names must name every class in order")
         mean = config.raw.get("mean", [0.5, 0.5, 0.5])
@@ -511,16 +525,31 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError(f"timm ViT does not support model_type={config.model_type!r}")
     precision = str(request.precision).lower()
     max_sequence_length = _positive_int(request.max_sequence_length or 1, "max_sequence_length")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("timm ViT does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"timm ViT supports quantization fp8 or none; got {request.quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("timm ViT does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("timm ViT does not support MTP speculative decoding")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
+    if request.quantization == "fp8" and parallel.enabled:
+        raise NotImplementedError("timm ViT FP8 does not support tensor parallelism")
     parallel.validate()
     model = _TimmVitModel()
     weights = model.load_weights(str(model_dir), config, precision=precision)
+    quant_ctx = None
+    if request.quantization == "fp8":
+        # The projections are quantized from the original checkpoint; the weights above stay
+        # fp16 and only the Q/DQ constants of quantized projections are new.
+        if "quantization_config" in config.raw:
+            raise ValueError("fp8 self-quantization needs the original, unquantized checkpoint")
+        quant_ctx = calibrate_timm_vit(
+            config.raw["_timm_vit_config"], weights, "fp8", precision=precision
+        )
     writer.set_header(family="timm_vit", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -540,7 +569,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             parallel_config=parallel,
         )

@@ -1,6 +1,7 @@
 {
   "name": "nemotron-hindi-4b",
   "hf_id": "nvidia/Nemotron-4-Mini-Hindi-4B-Base",
+  "hf_revision": "05c6ef6d2ddaad06bce914990facaf08bc4c581e",
   "bundle": "nemotron-hindi-4b.bundle",
   "family": "nemotron",
   "task": "text_generation",

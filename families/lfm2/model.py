@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import tensorrt as trt
 from .native_kv_attention_builder import (
+    EXPLICIT_ATTENTION_PREFILL_CHUNK_TOKENS,
     NativeKvMasks,
     add_active_prefix_causal_masks,
     add_explicit_masked_grouped_query_attention,
@@ -21,6 +22,12 @@ from .native_kv_attention_builder import (
 
 from .checkpoint_mapper import WeightDict, load_lfm2_weights
 from .config import DenseLfm2Config, validate_dense_lfm2_config
+from .quantization import Lfm2QuantContext, calibrate_lfm2_fp8, configure_fp8_build
+
+
+# Tactic-selection point for the active key-row count (typical chat and
+# benchmark contexts); any count from 1 to the cache capacity is valid.
+ACTIVE_KEY_ROWS_OPTIMUM = 256
 
 
 if TYPE_CHECKING:
@@ -63,6 +70,23 @@ def _constant(
     return network.add_constant(shape, trt.Weights(array)).get_output(0)
 
 
+def _i64_constant(network: trt.INetworkDefinition, values: list[int]) -> trt.ITensor:
+    return _constant(network, (len(values),), np.array(values), np_dtype=np.dtype(np.int64))
+
+
+def _row_count(network: trt.INetworkDefinition, tensor: trt.ITensor) -> trt.ITensor:
+    """Return the leading dimension of ``tensor`` as an int64 ``[1]`` shape tensor."""
+
+    shape = network.add_shape(tensor).get_output(0)
+    return network.add_slice(shape, start=(0,), shape=(1,), stride=(1,)).get_output(0)
+
+
+def _concat_shape(network: trt.INetworkDefinition, parts: list[trt.ITensor]) -> trt.ITensor:
+    layer = network.add_concatenation(parts)
+    layer.axis = 0
+    return layer.get_output(0)
+
+
 def _work_constant(
     network: trt.INetworkDefinition,
     shape: tuple[int, ...],
@@ -85,6 +109,8 @@ def _matmul(
     storage_dtype: np.dtype,
     work_dtype: trt.DataType,
     name: str,
+    quant_ctx: Lfm2QuantContext | None = None,
+    weight_name: str | None = None,
 ) -> trt.ITensor:
     array = np.asarray(rhs)
     expected = (lhs_width, rhs_width)
@@ -92,6 +118,8 @@ def _matmul(
         raise ValueError(
             f"mapped LFM2 weight {name} must have shape {expected}, got {tuple(array.shape)}"
         )
+    if quant_ctx is not None and weight_name is not None and quant_ctx.should_quantize(weight_name):
+        return quant_ctx.quantized_matmul(network, lhs, weight_name, name=name)
     rhs_tensor = _work_constant(
         network,
         expected,
@@ -217,7 +245,7 @@ def _per_head_rms_norm(
     if tuple(np.asarray(gamma).shape) != (head_dim,):
         raise ValueError(f"mapped LFM2 QK norm must have shape ({head_dim},)")
     shaped = network.add_shuffle(tensor)
-    shaped.reshape_dims = (1, num_heads, head_dim)
+    shaped.reshape_dims = (-1, num_heads, head_dim)
     normalized = _rms_norm(
         network,
         shaped.get_output(0),
@@ -227,7 +255,7 @@ def _per_head_rms_norm(
         output_dtype=output_dtype,
     )
     flattened = network.add_shuffle(normalized)
-    flattened.reshape_dims = (1, num_heads * head_dim)
+    flattened.reshape_dims = (-1, num_heads * head_dim)
     return flattened.get_output(0)
 
 
@@ -258,7 +286,7 @@ def _active_rope_cache(
     )
     position = _cast(network, position_id, trt.float32)
     position_column = network.add_shuffle(position)
-    position_column.reshape_dims = (1, 1)
+    position_column.reshape_dims = (-1, 1)
     inverse = _constant(
         network,
         (1, head_dim // 2),
@@ -272,9 +300,9 @@ def _active_rope_cache(
     cos = network.add_unary(angles, trt.UnaryOperation.COS).get_output(0)
     sin = network.add_unary(angles, trt.UnaryOperation.SIN).get_output(0)
     cos_3d = network.add_shuffle(cos)
-    cos_3d.reshape_dims = (1, 1, head_dim // 2)
+    cos_3d.reshape_dims = (1, -1, head_dim // 2)
     sin_3d = network.add_shuffle(sin)
-    sin_3d.reshape_dims = (1, 1, head_dim // 2)
+    sin_3d.reshape_dims = (1, -1, head_dim // 2)
     return (
         _cast(network, cos_3d.get_output(0), work_dtype),
         _cast(network, sin_3d.get_output(0), work_dtype),
@@ -288,8 +316,12 @@ def _reshape_rows_to_heads(
     num_heads: int,
     head_dim: int,
 ) -> trt.ITensor:
-    shaped = network.add_shuffle(tensor)
-    shaped.reshape_dims = (1, num_heads, 1, head_dim)
+    # [S, H*D] -> [H, S, D] -> [1, H, S, D]; each row holds every head of one token.
+    split = network.add_shuffle(tensor)
+    split.reshape_dims = (-1, num_heads, head_dim)
+    split.second_transpose = trt.Permutation([1, 0, 2])
+    shaped = network.add_shuffle(split.get_output(0))
+    shaped.reshape_dims = (1, num_heads, -1, head_dim)
     return shaped.get_output(0)
 
 
@@ -299,8 +331,10 @@ def _reshape_heads_to_rows(
     *,
     width: int,
 ) -> trt.ITensor:
+    # [1, H, S, D] -> [S, H*D]
     shaped = network.add_shuffle(tensor)
-    shaped.reshape_dims = (1, width)
+    shaped.first_transpose = trt.Permutation([0, 2, 1, 3])
+    shaped.reshape_dims = (-1, width)
     return shaped.get_output(0)
 
 
@@ -335,6 +369,29 @@ def _apply_rope(
     )
 
 
+def _slice_cache_rows(
+    network: trt.INetworkDefinition,
+    cache: trt.ITensor,
+    key_positions: trt.ITensor,
+) -> trt.ITensor:
+    """Return the first ``len(key_positions)`` rows of a ``[1,Hkv,C,D]`` cache."""
+
+    cache_shape = network.add_shape(cache).get_output(0)
+    leading = network.add_slice(cache_shape, start=(0,), shape=(2,), stride=(1,))
+    trailing = network.add_slice(cache_shape, start=(3,), shape=(1,), stride=(1,))
+    rows = network.add_shape(key_positions).get_output(0)
+    size = network.add_concatenation([leading.get_output(0), rows, trailing.get_output(0)])
+    size.axis = 0
+    rows_slice = network.add_slice(
+        cache,
+        start=(0, 0, 0, 0),
+        shape=(1, 1, 1, 1),
+        stride=(1, 1, 1, 1),
+    )
+    rows_slice.set_input(2, size.get_output(0))
+    return rows_slice.get_output(0)
+
+
 def add_native_kv_attention(
     network: trt.INetworkDefinition,
     q: trt.ITensor,
@@ -344,6 +401,7 @@ def add_native_kv_attention(
     cache_v: trt.ITensor,
     cache_write_indices: trt.ITensor,
     attention_masks: NativeKvMasks,
+    key_positions: trt.ITensor,
     *,
     num_heads: int,
     num_kv_heads: int,
@@ -351,7 +409,13 @@ def add_native_kv_attention(
     work_dtype: trt.DataType,
     tag: str,
 ) -> dict[str, trt.ITensor]:
-    """Use TensorRT's in-place KV update and explicit masked attention."""
+    """Use TensorRT's in-place KV update and explicit masked attention.
+
+    Attention reads only the first ``R`` cache rows, where ``R`` is the length
+    of ``key_positions``; the runtime keeps ``R`` at or above the valid
+    context, so the cost of a step follows the context instead of the cache
+    capacity.
+    """
 
     if work_dtype not in {trt.float16, trt.bfloat16}:
         raise ValueError("LFM2 native KV attention requires FP16 or BF16")
@@ -386,6 +450,8 @@ def add_native_kv_attention(
     update_v.name = f"{tag}.cache_v_update"
     present_k = update_k.get_output(0)
     present_v = update_v.get_output(0)
+    active_k = _slice_cache_rows(network, present_k, key_positions)
+    active_v = _slice_cache_rows(network, present_v, key_positions)
 
     q_4d = _reshape_rows_to_heads(
         network,
@@ -396,8 +462,8 @@ def add_native_kv_attention(
     context_4d = add_explicit_masked_grouped_query_attention(
         network,
         q_4d,
-        present_k,
-        present_v,
+        active_k,
+        active_v,
         attention_masks,
         num_heads=num_heads,
         num_kv_heads=num_kv_heads,
@@ -427,6 +493,7 @@ def _add_conv_layer(
     config: DenseLfm2Config,
     storage_dtype: np.dtype,
     work_dtype: trt.DataType,
+    quant_ctx: Lfm2QuantContext | None = None,
 ) -> tuple[trt.ITensor, trt.ITensor]:
     hidden = config.hidden_size
     projected = _matmul(
@@ -438,6 +505,8 @@ def _add_conv_layer(
         storage_dtype=storage_dtype,
         work_dtype=work_dtype,
         name=f"{prefix}.conv.in_proj",
+        quant_ctx=quant_ctx,
+        weight_name=f"{prefix}.conv_in",
     )
     projected = _bias(
         network,
@@ -448,14 +517,13 @@ def _add_conv_layer(
         work_dtype=work_dtype,
     )
 
+    # projected is [S, 3*hidden]; S is the token count of this launch.
+    rows = _row_count(network, projected)
+    part_size = _concat_shape(network, [rows, _i64_constant(network, [hidden])])
     parts: list[trt.ITensor] = []
     for index in range(3):
-        part = network.add_slice(
-            projected,
-            (0, index * hidden),
-            (1, hidden),
-            (1, 1),
-        )
+        part = network.add_slice(projected, (0, index * hidden), (1, 1), (1, 1))
+        part.set_input(2, part_size)
         parts.append(part.get_output(0))
     b_gate, c_gate, x_value = parts
     bx = network.add_elementwise(
@@ -463,8 +531,9 @@ def _add_conv_layer(
         x_value,
         trt.ElementWiseOperation.PROD,
     ).get_output(0)
-    bx_column = network.add_shuffle(bx)
-    bx_column.reshape_dims = (hidden, 1)
+    bx_columns = network.add_shuffle(bx)
+    bx_columns.first_transpose = trt.Permutation([1, 0])
+    # window is [hidden, L-1+S]: the L-1 previous inputs, then this launch's S.
     if config.conv_l_cache > 1:
         prior = network.add_slice(
             conv_state,
@@ -472,37 +541,63 @@ def _add_conv_layer(
             (hidden, config.conv_l_cache - 1),
             (1, 1),
         ).get_output(0)
-        updated = network.add_concatenation([prior, bx_column.get_output(0)])
+        updated = network.add_concatenation([prior, bx_columns.get_output(0)])
         updated.axis = 1
-        present_conv = updated.get_output(0)
+        window = updated.get_output(0)
     else:
-        present_conv = bx_column.get_output(0)
+        window = bx_columns.get_output(0)
 
-    conv_weights = _work_constant(
+    # The next state is the last L window columns, which start at column S-1.
+    last_start = network.add_elementwise(
+        rows,
+        _i64_constant(network, [1]),
+        trt.ElementWiseOperation.SUB,
+    ).get_output(0)
+    present = network.add_slice(window, (0, 0), (hidden, config.conv_l_cache), (1, 1))
+    present.set_input(1, _concat_shape(network, [_i64_constant(network, [0]), last_start]))
+    present_conv = present.get_output(0)
+
+    conv_weights = _cast(
         network,
-        (hidden, config.conv_l_cache),
-        weights[f"{prefix}.conv_weight"],
-        storage_dtype=storage_dtype,
-        work_dtype=work_dtype,
+        _work_constant(
+            network,
+            (hidden, config.conv_l_cache),
+            weights[f"{prefix}.conv_weight"],
+            storage_dtype=storage_dtype,
+            work_dtype=work_dtype,
+        ),
+        trt.float32,
     )
-    weighted = network.add_elementwise(
-        _cast(network, present_conv, trt.float32),
-        _cast(network, conv_weights, trt.float32),
-        trt.ElementWiseOperation.PROD,
-    ).get_output(0)
-    convolved = network.add_reduce(
-        weighted,
-        trt.ReduceOperation.SUM,
-        1 << 1,
-        True,
-    ).get_output(0)
-    # A depthwise convolution accumulates products before rounding the output
-    # to the model dtype; retaining half-rounded products changes the prefix.
-    conv_row = network.add_shuffle(_cast(network, convolved, work_dtype))
-    conv_row.reshape_dims = (1, hidden)
+    window_fp32 = _cast(network, window, trt.float32)
+    tap_size = _concat_shape(network, [_i64_constant(network, [hidden]), rows])
+    # Causal depthwise convolution: output token t sums tap k of window column
+    # t+k. A depthwise convolution accumulates products before rounding the
+    # output to the model dtype; retaining half-rounded products changes the prefix.
+    convolved: trt.ITensor | None = None
+    for tap in range(config.conv_l_cache):
+        inputs = network.add_slice(window_fp32, (0, tap), (1, 1), (1, 1))
+        inputs.set_input(2, tap_size)
+        tap_weight = network.add_slice(conv_weights, (0, tap), (hidden, 1), (1, 1)).get_output(0)
+        product = network.add_elementwise(
+            inputs.get_output(0),
+            tap_weight,
+            trt.ElementWiseOperation.PROD,
+        ).get_output(0)
+        convolved = (
+            product
+            if convolved is None
+            else network.add_elementwise(
+                convolved,
+                product,
+                trt.ElementWiseOperation.SUM,
+            ).get_output(0)
+        )
+    assert convolved is not None
+    conv_rows = network.add_shuffle(_cast(network, convolved, work_dtype))
+    conv_rows.first_transpose = trt.Permutation([1, 0])
     conv_row_tensor = _bias(
         network,
-        conv_row.get_output(0),
+        conv_rows.get_output(0),
         weights.get(f"{prefix}.conv_bias"),
         width=hidden,
         storage_dtype=storage_dtype,
@@ -522,6 +617,8 @@ def _add_conv_layer(
         storage_dtype=storage_dtype,
         work_dtype=work_dtype,
         name=f"{prefix}.conv.out_proj",
+        quant_ctx=quant_ctx,
+        weight_name=f"{prefix}.conv_out",
     )
     output = _bias(
         network,
@@ -543,6 +640,7 @@ def _add_swiglu(
     config: DenseLfm2Config,
     storage_dtype: np.dtype,
     work_dtype: trt.DataType,
+    quant_ctx: Lfm2QuantContext | None = None,
 ) -> trt.ITensor:
     left = _matmul(
         network,
@@ -553,6 +651,8 @@ def _add_swiglu(
         storage_dtype=storage_dtype,
         work_dtype=work_dtype,
         name=f"{prefix}.feed_forward.w1",
+        quant_ctx=quant_ctx,
+        weight_name=f"{prefix}.w1",
     )
     right = _matmul(
         network,
@@ -563,6 +663,8 @@ def _add_swiglu(
         storage_dtype=storage_dtype,
         work_dtype=work_dtype,
         name=f"{prefix}.feed_forward.w3",
+        quant_ctx=quant_ctx,
+        weight_name=f"{prefix}.w3",
     )
     gated = network.add_elementwise(
         _silu(network, left),
@@ -578,6 +680,8 @@ def _add_swiglu(
         storage_dtype=storage_dtype,
         work_dtype=work_dtype,
         name=f"{prefix}.feed_forward.w2",
+        quant_ctx=quant_ctx,
+        weight_name=f"{prefix}.w2",
     )
 
 
@@ -616,8 +720,15 @@ def build_lfm2_engine(
     precision: str = "bf16",
     verbose: bool = False,
     debug_layer_outputs: bool = False,
+    quant_ctx: Lfm2QuantContext | None = None,
 ) -> bytes:
-    """Build a static one-token LFM2 engine with native TensorRT KV updates."""
+    """Build the LFM2 engine with native TensorRT KV updates.
+
+    One engine carries two optimization profiles over a dynamic token count:
+    profile 0 prefills up to ``EXPLICIT_ATTENTION_PREFILL_CHUNK_TOKENS`` prompt
+    tokens per launch and profile 1 decodes one token. Logits are always the
+    last row, ``[1, vocab]``.
+    """
 
     cfg = validate_dense_lfm2_config(config)
     _validate_mapped_metadata(cfg, weights)
@@ -638,9 +749,10 @@ def build_lfm2_engine(
     # Match the qualified native-KV builder ceiling. This is build-time tactic
     # scratch, not an eager runtime allocation.
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
+    configure_fp8_build(builder_config, quant_ctx)
 
-    token_id = network.add_input("token_id", trt.int32, (1,))
-    position_id = network.add_input("position_id", trt.int32, (1,))
+    token_id = network.add_input("token_id", trt.int32, (-1,))
+    position_id = network.add_input("position_id", trt.int32, (-1,))
     cache_write_indices = network.add_input(
         "cache_write_indices",
         trt.int32,
@@ -651,12 +763,27 @@ def build_lfm2_engine(
         trt.int32,
         (1,),
     )
+    # 0..R-1 for the cache rows attention reads; R is bucketed by the runtime.
+    key_positions = network.add_input("key_positions", trt.int32, (-1,))
+    prefill_chunk = min(EXPLICIT_ATTENTION_PREFILL_CHUNK_TOKENS, max_cache_length)
+    for token_optimum, token_maximum in ((prefill_chunk, prefill_chunk), (1, 1)):
+        profile = builder.create_optimization_profile()
+        for name in ("token_id", "position_id"):
+            profile.set_shape(name, (1,), (token_optimum,), (token_maximum,))
+        profile.set_shape(
+            "key_positions",
+            (1,),
+            (min(ACTIVE_KEY_ROWS_OPTIMUM, max_cache_length),),
+            (max_cache_length,),
+        )
+        builder_config.add_optimization_profile(profile)
     attention_masks = add_active_prefix_causal_masks(
         network,
         token_id,
         cache_write_indices,
         key_value_lengths,
         max_cache_length,
+        key_positions=key_positions,
     )
 
     cache_shape = (
@@ -736,6 +863,7 @@ def build_lfm2_engine(
                 config=cfg,
                 storage_dtype=storage_dtype,
                 work_dtype=work_dtype,
+                quant_ctx=quant_ctx,
             )
             present_conv_outputs.append(present_conv)
             conv_index += 1
@@ -749,6 +877,8 @@ def build_lfm2_engine(
                 storage_dtype=storage_dtype,
                 work_dtype=work_dtype,
                 name=f"{prefix}.self_attn.q_proj",
+                quant_ctx=quant_ctx,
+                weight_name=f"{prefix}.w_q",
             )
             k = _matmul(
                 network,
@@ -759,6 +889,8 @@ def build_lfm2_engine(
                 storage_dtype=storage_dtype,
                 work_dtype=work_dtype,
                 name=f"{prefix}.self_attn.k_proj",
+                quant_ctx=quant_ctx,
+                weight_name=f"{prefix}.w_k",
             )
             v = _matmul(
                 network,
@@ -769,6 +901,8 @@ def build_lfm2_engine(
                 storage_dtype=storage_dtype,
                 work_dtype=work_dtype,
                 name=f"{prefix}.self_attn.v_proj",
+                quant_ctx=quant_ctx,
+                weight_name=f"{prefix}.w_v",
             )
             q = _per_head_rms_norm(
                 network,
@@ -813,6 +947,7 @@ def build_lfm2_engine(
                 cache_v_inputs[attention_index],
                 cache_write_indices,
                 attention_masks,
+                key_positions,
                 num_heads=cfg.num_attention_heads,
                 num_kv_heads=cfg.num_key_value_heads,
                 head_dim=cfg.head_dim,
@@ -854,6 +989,7 @@ def build_lfm2_engine(
             config=cfg,
             storage_dtype=storage_dtype,
             work_dtype=work_dtype,
+            quant_ctx=quant_ctx,
         )
         hidden_state = network.add_elementwise(
             hidden_state,
@@ -869,6 +1005,17 @@ def build_lfm2_engine(
 
     if attention_index != cfg.num_attention_layers or conv_index != cfg.num_conv_layers:
         raise RuntimeError("LFM2 layer/state counters did not consume every input")
+
+    # Only the last token's logits feed sampling: slice [S, hidden] to its last
+    # row before the final norm and LM head, under both profiles.
+    last_row_start = network.add_elementwise(
+        network.add_shape(hidden_state).get_output(0),
+        _i64_constant(network, [1, cfg.hidden_size]),
+        trt.ElementWiseOperation.SUB,
+    ).get_output(0)
+    last_row = network.add_slice(hidden_state, (0, 0), (1, cfg.hidden_size), (1, 1))
+    last_row.set_input(1, last_row_start)
+    hidden_state = last_row.get_output(0)
 
     hidden_state = _rms_norm(
         network,
@@ -907,7 +1054,8 @@ def build_lfm2_engine(
             "[trtmc build] Building LFM2 native hybrid engine "
             f"(layers={cfg.num_hidden_layers}, conv={cfg.num_conv_layers}, "
             f"attention={cfg.num_attention_layers}, hidden={cfg.hidden_size}, "
-            f"cache={max_cache_length}, precision={precision}) ...",
+            f"cache={max_cache_length}, prefill_chunk={prefill_chunk}, precision={precision}, "
+            f"fp8_projections={0 if quant_ctx is None else len(quant_ctx.scales)}) ...",
             file=sys.stderr,
         )
     plan = builder.build_serialized_network(network, builder_config)
@@ -1015,12 +1163,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         )
     if request.tensor_parallel_size != 1:
         raise NotImplementedError("dense LFM2 does not support tensor-parallel builds")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("dense LFM2 does not support quantized builds")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"dense LFM2 does not support quantization={request.quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("dense LFM2 does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("dense LFM2 does not support MTP speculative decoding")
 
     weights = load_lfm2_weights(str(model_dir), config, precision=precision)
+    quant_ctx = calibrate_lfm2_fp8(resolved, weights) if request.quantization == "fp8" else None
     plan = build_lfm2_engine(
         config,
         weights,
@@ -1028,6 +1181,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         precision=precision,
         verbose=bool(request.verbose),
         debug_layer_outputs=False,
+        quant_ctx=quant_ctx,
     )
 
     runtime_config = _runtime_config(
@@ -1035,7 +1189,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         resolved,
         precision=precision,
         max_cache_length=max_cache_length,
-        decoder_engine_layout="single",
+        decoder_engine_layout="dual_profile",
     )
 
     writer.set_header(family="lfm2", task=request.task, backend=request.backend)

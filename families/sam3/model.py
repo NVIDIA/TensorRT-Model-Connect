@@ -494,6 +494,10 @@ if TYPE_CHECKING:
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
+# Precision of the detector core plan for every bundle precision (see build_extra_engines).
+_CORE_PRECISION = "fp32"
+
+
 class _Sam3Model:
     def load_weights(self, model_dir: str, config: ModelConfig) -> WeightDict:
         cfg = _resolve_sam3_config(config.raw)
@@ -576,7 +580,7 @@ class _Sam3Model:
         precision: str = "fp32",
         verbose: bool = False,
     ) -> dict[str, bytes] | None:
-        del weights, max_cache_length
+        del weights, max_cache_length, precision
         from .core_builder import build_sam3_core_engine
 
         cfg = config.raw.get("_sam3_config", _resolve_sam3_config(config.raw))
@@ -603,7 +607,10 @@ class _Sam3Model:
             "mask_num_heads": cfg["mask_num_heads"],
             "mask_num_upsampling_stages": cfg["mask_num_upsampling_stages"],
             "layer_norm_eps": cfg["core_layer_norm_eps"],
-            "precision": precision,
+            # The core keeps its fp32 schedule (fp16 attention and encoder MLP
+            # islands) for both bundle precisions: an fp16 core lowers the box
+            # IoU against the reference from 0.997 to 0.988.
+            "precision": _CORE_PRECISION,
             "encoder_hidden_act": cfg["detr_encoder_hidden_act"],
             "decoder_hidden_act": cfg["detr_decoder_hidden_act"],
             "geometry_encoder_hidden_act": cfg["geometry_encoder_hidden_act"],
@@ -746,6 +753,8 @@ _RUNTIME_FIELDS = (
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one SAM3 text-prompted segmentation bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("SAM3 does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("sam3 does not support dynamic_kv_cache")
 
@@ -775,6 +784,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         or request.fp32_layers
     ):
         raise NotImplementedError("SAM3 supports only single-device non-quantized builds")
+    if request.precision not in {"fp16", "fp32"}:
+        raise NotImplementedError("SAM3 supports precision fp16 or fp32")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower().replace("-", "_") not in {"sam3", "sam3_video"}:

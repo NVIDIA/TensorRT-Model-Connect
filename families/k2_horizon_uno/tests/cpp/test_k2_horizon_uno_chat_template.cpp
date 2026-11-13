@@ -85,12 +85,20 @@ void test_eos_contract() {
           "duplicate EOS is rejected");
 }
 
-void test_tokenizer_input_scope() {
-    check(accepts(
-              [] { trtmc::k2_horizon_uno_require_ascii_tokenizer_input("IT'S an ASCII prompt"); }),
-          "ASCII tokenizer input is accepted");
-    check(rejects([] { trtmc::k2_horizon_uno_require_ascii_tokenizer_input("Cafe\xCC\x81"); }),
-          "non-ASCII prompt text fails closed before NFC-sensitive tokenization");
+void test_unicode_tokenizer_input() {
+    const auto split = trtmc::k2_horizon_uno_pre_tokenize;
+    check(split("IT'S an ASCII prompt") ==
+              std::vector<std::string>{"IT", "'S", " an", " ASCII", " prompt"},
+          "ASCII contractions retain the publisher's splits");
+    check(split("Cafe\xCC\x81 costs €5.") ==
+              std::vector<std::string>{"Café", " costs", " €", "5", "."},
+          "decomposed accents are normalized to NFC before Unicode splitting");
+    check(split("عَرَبِيّ") == std::vector<std::string>{"عَرَبِيّ"},
+          "letters and combining marks share one pre-token");
+    check(split("中文 123456") == std::vector<std::string>{"中文", " ", "123", "456"},
+          "Unicode letters and three-digit groups retain the publisher's splits");
+    check(split("hello\xE2\x80\x8Dworld") == std::vector<std::string>{"hello\xE2\x80\x8Dworld"},
+          "zero-width joiners are part of the letter branch");
 }
 
 void test_bytelevel_decode_is_valid_utf8() {
@@ -109,7 +117,7 @@ int main() {
     test_rendering_and_identity();
     test_unknown_protocols_fail_closed();
     test_eos_contract();
-    test_tokenizer_input_scope();
+    test_unicode_tokenizer_input();
     test_bytelevel_decode_is_valid_utf8();
     if (failures != 0) {
         std::cerr << failures << " K2-Horizon-Uno chat-template test(s) failed\n";

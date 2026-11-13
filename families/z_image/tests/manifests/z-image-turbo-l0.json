@@ -1,10 +1,11 @@
 {
   "name": "z-image-turbo-l0",
   "hf_id": "Tongyi-MAI/Z-Image-Turbo",
+  "hf_revision": "f332072aa78be7aecdf3ee76d5c247082da564a6",
   "bundle": "z-image-turbo-l0.bundle",
   "family": "z_image",
   "task": "image_generation",
-  "precision": "fp16",
+  "precision": "bf16",
   "testcases": [
     {
       "name": "z-image-turbo-l0",
@@ -17,13 +18,6 @@
     }
   ],
   "tensor_parallel_size": 1,
-  "fp32_layers": [
-    2,
-    3,
-    4,
-    7,
-    8
-  ],
   "image_height": 512,
   "image_width": 512
 }

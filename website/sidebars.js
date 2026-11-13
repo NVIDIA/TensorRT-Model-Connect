@@ -46,6 +46,8 @@ module.exports = {
       label: 'Models & Recipes',
       link: {type: 'doc', id: 'models-recipes/overview'},
       items: [
+        'models-recipes/cosmos3-edge-llm',
+        'models-recipes/nemotron-omni-edge-llm',
         {
           type: 'category',
           label: 'Model Recipes',
@@ -63,6 +65,14 @@ module.exports = {
         'user-guides/inspect-a-bundle',
         'user-guides/run-inference',
         'user-guides/serve-text-generation',
+        'user-guides/profile-embeddings-with-aiperf',
+        'user-guides/profile-reranking-with-aiperf',
+        'user-guides/profile-transcription-with-aiperf',
+        'user-guides/profile-detection-with-aiperf',
+        'user-guides/profile-vision-with-aiperf',
+        'user-guides/profile-images-with-aiperf',
+        'user-guides/profile-image-edits-with-aiperf',
+        'user-guides/profile-videos-with-aiperf',
         {
           type: 'category',
           label: 'Task Guides',

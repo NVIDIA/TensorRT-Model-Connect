@@ -220,6 +220,7 @@ def _add_whisper_tp_decoder_layer(
     dtype: np.dtype,
     work_trt_dtype,
     tp_size: int,
+    activation_type: str = "gelu",
 ):
     attention_window = max_cache_length + 1
 
@@ -304,7 +305,7 @@ def _add_whisper_tp_decoder_layer(
     fc1 = _add_linear_with_bias(
         network, fn, hidden_size, local_ffn_dim,
         weights[f"{prefix}.w_fc1"], weights[f"{prefix}.fc1_bias"], dtype=dtype)
-    act = graph_ops.add_activation(network, fc1, "gelu_new", dtype=dtype)
+    act = graph_ops.add_activation(network, fc1, activation_type, dtype=dtype)
     fc2 = graph_ops.add_matmul_rhs_constant(
         network, act, local_ffn_dim, hidden_size,
         weights[f"{prefix}.w_fc2"], dtype=dtype)
@@ -363,6 +364,7 @@ def build_whisper_tp_decoder_engine(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
+    trt_config.clear_flag(trt.BuilderFlag.TF32)
 
     token_id = network.add_input("token_id", trt.int32, (1,))
     position_id = network.add_input("position_id", trt.int32, (1,))
@@ -429,6 +431,7 @@ def build_whisper_tp_decoder_engine(
             dtype=work_np_dtype,
             work_trt_dtype=work_trt_dtype,
             tp_size=tp,
+            activation_type=config.hidden_act or "gelu",
         )
         hidden_state = result["hidden"]
         present_k_outputs.append(result["present_k"])
@@ -437,15 +440,8 @@ def build_whisper_tp_decoder_engine(
     hidden_state = graph_ops.add_layer_norm(
         network, hidden_state, hidden, rank_weights["final_norm"],
         rank_weights["final_norm_beta"], eps_tensor, dtype=work_np_dtype)
-    logits = graph_ops.add_matmul_rhs_constant(
-        network, hidden_state, hidden, vocab, rank_weights["w_out"],
-        dtype=work_np_dtype)
-    logits = graph_ops.add_bias_sum(
-        network, logits, vocab, np.zeros(vocab, dtype=work_np_dtype),
-        dtype=work_np_dtype)
-
-    if work_trt_dtype != trt.float32:
-        logits = network.add_cast(logits, trt.float32).get_output(0)
+    logits = graph_ops.add_logits_projection(
+        network, hidden_state, hidden, vocab, rank_weights["w_out"])
     logits.name = "logits"
     network.mark_output(logits)
 

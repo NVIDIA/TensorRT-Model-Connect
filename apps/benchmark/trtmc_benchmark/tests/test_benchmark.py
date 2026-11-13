@@ -51,6 +51,15 @@ def test_case_resolves_current_task_and_manifest_fields(tmp_path: Path) -> None:
     assert case.measurement.timing_scope == "public_task_call_wall"
 
 
+@pytest.mark.parametrize("profile", ["nemotron-omni-nvfp4-text-image", "qwen35-moe-gptq-edge"])
+def test_vision_language_catalog_case_carries_its_prompt_and_image(profile: str, tmp_path: Path) -> None:
+    # AIPerf qualification prepares these bundles from the catalog case; without a prompt and an image the case
+    # does not resolve and the build fails before it starts.
+    case = resolve_case(ManifestCatalog(REPO / "families").resolve(profile), tmp_path / "model.bundle")
+    assert case.request["prompt"]
+    assert Path(case.request["image_path"]).is_file()
+
+
 def test_forecast_case_uses_public_forecast_request(tmp_path: Path) -> None:
     model = ManifestCatalog(REPO / "families").resolve("chronos-bolt-tiny-official")
     case = resolve_case(model, tmp_path / "model.bundle")
@@ -641,6 +650,8 @@ def test_tracking_and_pose_rates_count_actual_output_units() -> None:
     ("image_points_to_masks", "segment", {"image": "image.ppm"}, {"image_path": "image.ppm"}),
     ("image_text_to_instance_masks", "segment_prompted", {"image": "image.ppm", "prompt": "cup"},
      {"image_path": "image.ppm", "prompt": "cup"}),
+    ("image_text_to_boxes", "detect_prompted", {"image": "image.ppm", "prompt": "a car."},
+     {"image_path": "image.ppm", "prompt": "a car."}),
     ("stereo_images_to_disparity", "disparity", {"inputs": {"left_image": "image.ppm", "right_image": "second.ppm"}},
      {"left_image_path": "image.ppm", "right_image_path": "second.ppm"}),
     ("text_to_pooled_features", "encode", {"prompt": "text"}, {"prompt": "text"}),
@@ -801,7 +812,7 @@ def test_catalog_detection_keeps_image_input_without_build_dimensions(tmp_path: 
     assert resolved.request == expected
     assert Path(resolved.request["image_path"]).is_file()
     assert "height" not in resolved.request and "width" not in resolved.request
-    assert model.build_settings["image_height"] == 796
+    assert model.build_settings["image_height"] == 1333
     assert model.build_settings["image_width"] == 1333
 
 
@@ -1032,7 +1043,9 @@ def test_build_command_passes_manifest_backend_and_dynamic_kv_cache(tmp_path: Pa
 
     command = _build_command(model, tmp_path / "checkpoint", tmp_path / "model.bundle", (case,))
 
-    assert command[command.index("--backend") + 1] == "trt_rtx"
+    # Declared family commands serialize scalar flags as --name=value.
+    if "--backend=trt_rtx" not in command:
+        assert command[command.index("--backend") + 1] == "trt_rtx"
     assert command.count("--dynamic-kv-cache") == 1
 
 
@@ -1242,6 +1255,35 @@ def test_prepare_only_checks_explicit_bundle_identity_without_loading_a_model(
         assert "bundle identity mismatch" in capsys.readouterr().err
     assert commands == [[sys.executable, "-m", "tensorrt_model_connect", "inspect", str(bundle)]]
     assert bundle.read_bytes() == b"user bundle"
+
+
+@pytest.mark.parametrize("matches", [True, False])
+def test_prepare_only_binds_an_explicit_bundle_to_the_manifest_checkpoint(
+    tmp_path: Path, monkeypatch, capsys, matches: bool
+) -> None:
+    model = ManifestCatalog(REPO / "families").resolve("distilgpt2")
+    bundle = tmp_path / "model.bundle"
+    bundle.write_bytes(b"user bundle")
+    revision = model.hf_revision if matches else "b" * 40
+    provenance = {"version": 1, "checkpoint": {"hf_id": model.hf_id, "revision": revision}}
+    monkeypatch.setattr(
+        benchmark_builder.subprocess, "run",
+        lambda command, **_: subprocess.CompletedProcess(command, 0, json.dumps(
+            {"family": "gpt2", "task": "text_generation", "provenance": provenance}
+        ), ""),
+    )
+    arguments = [
+        "run", "--model", "distilgpt2", "--manifest-root", str(REPO / "families"),
+        "--bundle", str(bundle), "--prepare-only", "--no-build",
+    ]
+    if matches:
+        assert main(arguments) == 0
+        assert json.loads(capsys.readouterr().out)["bundles"][0]["provenance"] == provenance
+        return
+    with pytest.raises(SystemExit) as error:
+        main(arguments)
+    assert error.value.code == 2
+    assert "bundle checkpoint mismatch" in capsys.readouterr().err
 
 
 def test_worker_request_carries_the_manifest_bundle_identity(tmp_path: Path) -> None:

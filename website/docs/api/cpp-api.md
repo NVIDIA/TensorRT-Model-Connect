@@ -143,6 +143,11 @@ this does not add a shared scheduler or promise multi-tenant execution.
 An `ImageStateActionQueue` permits a serial `ImageStateToActionChunk` call on the
 same model without consuming or replacing its buffered actions. Overlapping or
 reentrant action calls still return `TRTMC_BUSY`; other session exclusions remain.
+`ImagesStateTextToActionChunk` follows the same rule as `ImageStateToActionChunk`.
+It takes named camera images, one state vector and a UTF-8 instruction: camera
+names are keys the loaded family defines, their order carries no meaning, and the
+Core checks only that names are present, unique and paired with valid images.
+Which cameras, state size and text the model requires is the family's to validate.
 Session release must not race another call.
 
 ## Versions and extension

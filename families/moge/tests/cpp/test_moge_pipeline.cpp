@@ -31,7 +31,9 @@ bool close(float actual, float expected, float tolerance = 2.0e-3F) {
     return std::isfinite(actual) && std::abs(actual - expected) <= tolerance;
 }
 
-std::vector<float> affine_points(int32_t height, int32_t width, float focal, float shift) {
+std::vector<float> affine_points(int32_t height, int32_t width, float focal, float shift,
+                                 float depth_slope_x = 0.03F, float depth_slope_y = 0.02F,
+                                 float depth_origin = 0.8F) {
     const float aspect = static_cast<float>(width) / height;
     const float diagonal = std::sqrt(1.0F + aspect * aspect);
     const float span_x = aspect / diagonal;
@@ -41,7 +43,7 @@ std::vector<float> affine_points(int32_t height, int32_t width, float focal, flo
         const float v = span_y * (2.0F * y + 1.0F - height) / height;
         for (int32_t x = 0; x < width; ++x) {
             const float u = span_x * (2.0F * x + 1.0F - width) / width;
-            const float z = 0.8F + 0.03F * x + 0.02F * y;
+            const float z = depth_origin + depth_slope_x * x + depth_slope_y * y;
             const auto offset = (static_cast<std::size_t>(y) * width + x) * 3U;
             points[offset] = u * (z + shift) / focal;
             points[offset + 1U] = v * (z + shift) / focal;
@@ -155,6 +157,20 @@ class FakeMogeModule final : public trtmc::ITrtModule {
     void keep_alive(std::shared_ptr<void>) override {}
 
     void invalidate_all() { std::fill(valid_.begin(), valid_.end(), uint16_t{0}); }
+    // A scene whose depth barely varies: shift and focal are then nearly
+    // interchangeable, so the shift solve sits in a long, flat valley.
+    void use_narrow_depth_scene() {
+        points_ = affine_points(height_, width_, 0.8F, 1.25F, 0.002F, 0.001F, 1.0F);
+        depth_ = affine_depth(points_);
+        samples_ = focal_samples(points_, height_, width_);
+    }
+    // A fronto-parallel plane: depth is constant, so shift and focal are
+    // exactly interchangeable and the shift solve has no curvature at all.
+    void use_constant_depth_scene() {
+        points_ = affine_points(height_, width_, 0.8F, 1.25F, 0.0F, 0.0F, 1.0F);
+        depth_ = affine_depth(points_);
+        samples_ = focal_samples(points_, height_, width_);
+    }
     void set_valid(int32_t y, int32_t x, bool value) {
         valid_.at(static_cast<std::size_t>(y) * width_ + x) = value ? uint16_t{0x3C00} : 0;
     }
@@ -245,6 +261,46 @@ void test_pipeline_recovers_metric_geometry_from_hwc_input() {
               module_ptr->input_values[1] == 0.2F && module_ptr->input_values[2] == 0.3F,
           "MoGe input stays interleaved");
     check(module_ptr->valid_bits(0) == 0x3C00, "MoGe valid=true uses FP16 one bits");
+}
+
+void test_narrow_depth_scene_recovers_the_optimal_shift() {
+    constexpr int32_t height = 64;
+    constexpr int32_t width = 80;
+    auto module = std::make_unique<FakeMogeModule>(height, width);
+    module->use_narrow_depth_scene();
+    trtmc::MogePipeline pipeline(std::move(module));
+    auto image = rgb_image(height, width);
+
+    const auto result = pipeline.estimate_geometry(image.data(), height, width);
+
+    check(close(result.intrinsics[0], 0.5122499F) && close(result.intrinsics[4], 0.6403124F),
+          "MoGe recovers focal when depth barely varies");
+    const std::size_t pixel = 7U * width + 11U;
+    const float expected_depth = (1.0F + 0.002F * 11 + 0.001F * 7 + 1.25F) * 2.0F;
+    check(close(result.depth[pixel], expected_depth),
+          "MoGe recovers the optimal shift when depth barely varies");
+}
+
+void test_constant_depth_scene_still_recovers_geometry() {
+    constexpr int32_t height = 64;
+    constexpr int32_t width = 80;
+    auto module = std::make_unique<FakeMogeModule>(height, width);
+    module->use_constant_depth_scene();
+    trtmc::MogePipeline pipeline(std::move(module));
+    auto image = rgb_image(height, width);
+
+    bool recovered = true;
+    trtmc::GeometryResult result;
+    try {
+        result = pipeline.estimate_geometry(image.data(), height, width);
+    } catch (const std::exception&) {
+        recovered = false;
+    }
+
+    check(recovered, "MoGe recovers geometry for a constant-depth scene");
+    check(recovered && std::isfinite(result.intrinsics[0]) && result.intrinsics[0] > 0.0F &&
+              std::isfinite(result.depth[0]) && result.depth[0] > 0.0F,
+          "MoGe constant-depth geometry is finite and positive");
 }
 
 void test_invalid_mask_materializes_infinity() {
@@ -420,6 +476,8 @@ void test_focal_sampling_retains_complete_interior_neighborhoods() {
 
 int main() {
     test_pipeline_recovers_metric_geometry_from_hwc_input();
+    test_narrow_depth_scene_recovers_the_optimal_shift();
+    test_constant_depth_scene_still_recovers_geometry();
     test_invalid_mask_materializes_infinity();
     test_legacy_int8_valid_contract_is_rejected();
     test_focal_recovery_failure_is_reported();

@@ -33,6 +33,25 @@ contract. The backend owns TensorRT runtime objects, not model policy.
 returning or copy the lightweight `BundleReader` into the pipeline for deferred
 reads; it must not retain a reference to the temporary factory context.
 
+## Legacy audio output contract
+
+The legacy `AudioResult` carries interleaved float PCM. `num_channels` defaults to one;
+for stereo the buffer order is `L0, R0, L1, R1, ...`. `num_samples` counts total
+scalar samples, not frames per channel; zero leaves the count unspecified and
+consumers use `samples.size()`. A nonzero count must match the buffer size.
+The sample rate is in frames per second, so duration is
+`samples.size() / num_channels / sample_rate`. Buffers must contain whole frames.
+
+The CLI WAV writer preserves the channel count and writes float32 PCM. Its WAV
+reader intentionally still averages input channels to mono for existing speech
+tasks. This contract covers whole-result audio; incremental delivery is described
+in Multichannel streaming audio below.
+
+The appended field preserves existing three-field aggregate initialization and
+mono behavior at source level. It changes the C++ struct layout: rebuild clients
+and family DSOs together rather than mixing binaries compiled against different
+versions of `task.h`.
+
 ## Multichannel streaming audio
 
 Families can opt into `IMultichannelStreamingAudioGeneration` without changing
@@ -71,3 +90,17 @@ explicit extension DSO and three-part binding, not a general plugin registry.
 Applications destroy Task objects before the loaded family and backend
 libraries leave scope. Families release their streams, buffers, communicators,
 engines, and family-local state; the loader owns the dynamic-library handles.
+
+## FP8 tensor storage
+
+The native runtime represents linear TensorRT `kFP8` I/O as `DType::kFloat8E4M3`.
+Each element occupies one byte, so tensor sizes and engine buffer allocations
+use the encoded E4M3 storage size rather than the size of `float`. This dtype is
+distinct from signed INT8 and does not convert or dequantize the stored values.
+The runtime requires `kLINEAR` FP8 I/O in the selected optimization profile.
+Vectorized or otherwise non-linear FP8 formats are rejected before buffer
+allocation or external binding, because tensor views do not describe their
+padding or layout.
+Families continue to own quantization scales, graph construction, and tensor
+semantics. This storage contract alone does not imply that a GPU supports FP8
+arithmetic or that a model configuration has been qualified.

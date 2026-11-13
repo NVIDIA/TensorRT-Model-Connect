@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Second-family baseline: existing legacy server path, no token latency claim.
+aiperf:
+  version: 0.13.0
+checkpoint:
+  name: openai-community/gpt2
+  revision: 607a30d783dfa663caf39e06633721c8d4cfcd7e
+  precision: fp32
+tokenizer:
+  name: openai-community/gpt2
+  revision: 607a30d783dfa663caf39e06633721c8d4cfcd7e
+server:
+  bundle: /path/bundles/gpt2-125m.bundle
+  model_name: openai-community/gpt2
+  binary: /path/build/trtmc-server
+  runtime_root: /path/build
+  replicas: 1
+  port: 8000
+validation_profile: gpt2-125m
+validation_commands:
+  - [/path/trtmc-python, -m, pytest, families/gpt2/tests/test_e2e.py, --e2e-model, gpt2-125m, -q]
+workload:
+  endpoints: [completions]
+  input_tokens: [32]
+  output_tokens: [16]
+  concurrency: [1]
+  request_rate: [null]
+  streaming: [false]
+  requests: 20
+  warmup_requests: 3

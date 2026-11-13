@@ -1,0 +1,56 @@
+{
+  "name": "laya",
+  "hf_id": "convaiinnovations/laya",
+  "hf_revision": "7b928d828b7b0e022f929d9bd2e44165aa270148",
+  "family": "laya",
+  "task": "structured_decision",
+  "bundle": "laya.bundle",
+  "precision": "bf16",
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 512,
+  "variant": "english",
+  "testcases": [
+    {
+      "name": "laya-email",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/email.json"
+      }
+    },
+    {
+      "name": "laya-quickstart",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/quickstart.json"
+      }
+    },
+    {
+      "name": "laya-single-option",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/single-option.json"
+      }
+    },
+    {
+      "name": "laya-conversation",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/conversation.json"
+      }
+    },
+    {
+      "name": "laya-empty",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/empty.json"
+      }
+    },
+    {
+      "name": "laya-batched",
+      "premerge": true,
+      "inputs": {
+        "document_path": "fixtures/batched.json"
+      }
+    }
+  ]
+}

@@ -30,12 +30,26 @@ def test_declared_build_and_legacy_spelling_use_owner_request(monkeypatch, tmp_p
         build_cli.main([*arguments, "--max-batch-size", "2"])
 
 
-@pytest.mark.parametrize("changes", [{"image_height": 8}, {"quantization": "fp8"}, {"context_parallel_size": 2}, {"dynamic_kv_cache": True}])
+@pytest.mark.parametrize("changes", [{"image_height": 8}, {"quantization": "nvfp4"}, {"context_parallel_size": 2}, {"dynamic_kv_cache": True}])
 def test_legacy_api_rejects_unsupported_nondefault_values(tmp_path, changes):
     legacy = LegacyRequest(tmp_path, tmp_path / "model.bundle", "bert", "encoding", "fp32")
     assert cli.coerce_request(legacy) == cli.BuildRequest(tmp_path)
     with pytest.raises((ValueError, NotImplementedError)):
         cli.coerce_request(replace(legacy, **changes))
+
+
+def test_quantization_reaches_the_owner_request(monkeypatch, tmp_path):
+    (tmp_path / "config.json").write_text('{"model_type":"bert"}')
+    legacy = LegacyRequest(tmp_path, tmp_path / "model.bundle", "bert", "encoding", "fp16")
+    assert cli.coerce_request(replace(legacy, quantization="fp8")).quantization == "fp8"
+    assert cli.coerce_request(replace(legacy, quantization="none")).quantization is None
+    calls = []
+    monkeypatch.setattr(cli, "build_bundle", lambda request, output: calls.append(request))
+    arguments = ["build", str(tmp_path), "-o", str(tmp_path / "model.bundle"), "--precision", "fp16"]
+    assert family_cli.main(["bert", *arguments, "--quantization", "fp8"]) == 0
+    assert family_cli.main(["bert", *arguments, "--quantization", "none"]) == 0
+    assert family_cli.main(["bert", *arguments]) == 0
+    assert [request.quantization for request in calls] == ["fp8", None, None]
 
 
 def test_help_and_rejected_options_do_not_import_model(monkeypatch, capsys):
@@ -58,7 +72,7 @@ def test_bundle_selects_backend_before_import_and_aborts_on_owner_failure(monkey
         events.append(backend)
         monkeypatch.setitem(sys.modules, "families.bert.model", SimpleNamespace(build=lambda *args: (_ for _ in ()).throw(RuntimeError("build failed"))))
     monkeypatch.setattr(cli, "select_backend", select)
-    monkeypatch.setattr(cli, "BundleWriter", lambda output: SimpleNamespace(finish=lambda: events.append("finish"), abort=lambda: events.append("abort")))
+    monkeypatch.setattr(cli, "BundleWriter", lambda output: SimpleNamespace(record_build=lambda request: None, finish=lambda: events.append("finish"), abort=lambda: events.append("abort")))
     with pytest.raises(RuntimeError, match="build failed"):
         cli.build_bundle(cli.BuildRequest(tmp_path, backend="trt_rtx"), tmp_path / "out")
     assert events == ["trt_rtx", "abort"]

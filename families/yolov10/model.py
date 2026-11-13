@@ -628,12 +628,14 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("yolov10 does not support tensor parallelism")
     if request.context_parallel_size != 1:
         raise NotImplementedError("yolov10 does not support context parallelism")
-    if request.task != "object_detection":
-        raise ValueError("yolov10 supports only task=object_detection")
+    if request.task != "image_to_boxes":
+        raise ValueError("yolov10 supports only task=image_to_boxes")
     if request.quantization not in {None, "none"}:
         raise NotImplementedError("yolov10 does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("yolov10 does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("yolov10 does not support MTP speculative decoding")
     _positive_int(request.max_sequence_length or 1, "max_sequence_length")
     model_dir = Path(request.model_dir)
     raw = _read_config(model_dir)

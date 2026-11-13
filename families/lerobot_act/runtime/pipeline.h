@@ -5,8 +5,9 @@
 
 #pragma once
 
+#include "trtmc/internal/action.h"
+#include "trtmc/internal/model.h"
 #include "trtmc/runtime/trt_module.h"
-#include "trtmc/task.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -15,18 +16,36 @@
 
 namespace trtmc::lerobot_act {
 
-class Pipeline final : public IRobotControl {
+// One ACT policy engine serves both Tasks: the stateless chunk Task is the
+// bundle's primary Task, and the action queue plays the same chunks back one
+// step at a time.
+class Pipeline final : public internal::IModel,
+                       public internal::IImageStateToActionChunk,
+                       public internal::IImageStateActionQueue {
   public:
     Pipeline(std::unique_ptr<ITrtModule> policy, int32_t image_height, int32_t image_width,
              int32_t image_channels, int32_t state_dim, int32_t action_dim, int32_t chunk_size,
              std::vector<float> action_min, std::vector<float> action_max);
 
-    RobotActionChunk predict_action_chunk(const RobotObservation& observation) override;
-    RobotAction act(const RobotObservation& observation) override;
-    void reset() override;
+    const char* task() const noexcept override {
+        return internal::IImageStateToActionChunk::kTask.data();
+    }
+    std::vector<internal::TaskInstance> task_bindings() override;
+
+    internal::ImageStateActionChunkResult
+    run(const internal::ImageStateToActionChunkRequest& request,
+        internal::ConfigView config) override;
+    std::unique_ptr<internal::IImageStateActionSession>
+    create_action_session(internal::ConfigView config) override;
 
   private:
-    void validate_observation(const RobotObservation& observation) const;
+    class ActionQueue;
+
+    internal::ImageStateActionChunkResult
+    predict(const internal::ImageStateObservation& observation);
+    const float* image_pixels(const internal::ImageView& image);
+    void validate_shape(const internal::ImageStateObservation& observation) const;
+    void validate_state(Span<const float> state) const;
     bool action_within_bounds(const float* action) const;
 
     std::unique_ptr<ITrtModule> policy_;
@@ -38,8 +57,7 @@ class Pipeline final : public IRobotControl {
     int32_t chunk_size_{0};
     std::vector<float> action_min_;
     std::vector<float> action_max_;
-    std::vector<float> queued_actions_;
-    std::size_t next_action_{0};
+    std::vector<float> converted_pixels_; // UInt8 observations, divided by 255.
 };
 
 } // namespace trtmc::lerobot_act

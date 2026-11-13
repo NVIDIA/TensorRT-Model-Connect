@@ -1,6 +1,7 @@
 {
   "name": "internlm2-1.8b-tp4",
   "hf_id": "internlm/internlm2-math-plus-1_8b",
+  "hf_revision": "998dd540b92711b855982c0318a39064a1d3ddc1",
   "hf_dependencies": [
     {
       "repo_id": "internlm/internlm2-step-prover"

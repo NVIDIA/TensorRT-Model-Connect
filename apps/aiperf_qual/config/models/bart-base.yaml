@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# A pre-trained denoiser (not a translator): span-mask reconstruction of WikiText-103 sentences.
+absolute: [bart_denoise]

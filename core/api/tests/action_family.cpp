@@ -126,6 +126,7 @@ class OtherSession final : public ITextStream {
 };
 class ActionFixture final : public IModel,
                             public IImageStateToActionChunk,
+                            public IImagesStateTextToActionChunk,
                             public IImageStateActionQueue,
                             public IStreamingTextContinuation {
   public:
@@ -134,6 +135,8 @@ class ActionFixture final : public IModel,
     std::vector<TaskInstance> task_bindings() override {
         if (mode_ == "none" || mode_ == "example_recorded_unsupported")
             return {};
+        if (mode_ == "multi_image" || mode_ == "multi_image_bad_chunk")
+            return {bind<IImagesStateTextToActionChunk>(*this)};
         std::vector<TaskInstance> tasks{
             bind<IImageStateToActionChunk>(*this, fields_for(IImageStateToActionChunk::kTask)),
             bind<IImageStateActionQueue>(*this, fields_for(IImageStateActionQueue::kTask))};
@@ -148,6 +151,46 @@ class ActionFixture final : public IModel,
             {"tag", ConfigKind::String, ConfigValue{std::string_view{"default"}},
              "Synthetic schema tag for chunk run or queue creation; act accepts no config."}};
         return declared;
+    }
+    // Cameras are routed by name, never by position. Row 0 mixes each camera's
+    // first pixel with one state value; row 1 echoes what the Core delivered
+    // (text bytes, image count, state count) so tests can see exact pass-through.
+    ImagesStateTextActionChunkResult run(const ImagesStateTextToActionChunkRequest& input,
+                                         ConfigView config) override {
+        if (!config.empty())
+            throw ConfigError("multi-image fixture declares no config");
+        const auto& observation = input.observation;
+        if (observation.images.size() != 2 || observation.state.size() != 2 ||
+            observation.text.empty())
+            throw std::invalid_argument("fixture requires two cameras, two state values and text");
+        const ImageView* camera_a = nullptr;
+        const ImageView* camera_b = nullptr;
+        for (const auto& named : observation.images) {
+            if (named.image.height != 1 || named.image.width != 1 || named.image.channels != 3)
+                throw std::invalid_argument("fixture cameras must be one RGB pixel");
+            if (named.name == "cam_a")
+                camera_a = &named.image;
+            else if (named.name == "cam_b")
+                camera_b = &named.image;
+            else
+                throw std::invalid_argument("fixture received an unknown camera name");
+        }
+        if (camera_a == nullptr || camera_b == nullptr)
+            throw std::invalid_argument("fixture is missing a required camera");
+        ActionSequenceResult actions{
+            {{observation.state[0] + image_value(*camera_a),
+              observation.state[1] + image_value(*camera_b),
+              static_cast<float>(observation.text.size()),
+              static_cast<float>(observation.images.size() + 10 * observation.state.size())},
+             2,
+             2},
+            {"fixture.multi_image", {"first", "second"}, {}, "", "unnormalized"},
+            {},
+            {}};
+        if (mode_ == "multi_image_bad_chunk")
+            actions.values.values.pop_back();
+        const bool bounds = within({actions.values.values.data(), actions.values.values.size()});
+        return {std::move(actions), bounds, static_cast<double>(200 + (++stateless_calls_))};
     }
     ImageStateActionChunkResult run(const ImageStateToActionChunkRequest& input,
                                     ConfigView config) override {

@@ -48,6 +48,10 @@ def add_matmul_rhs_constant(
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Matrix multiply: lhs @ rhs_constant.  rhs is [lhs_width, rhs_width]."""
+    from .prepared_quantization import PreparedLinear
+
+    if isinstance(rhs_weights, PreparedLinear):
+        return rhs_weights.matmul(network, lhs, lhs_width, rhs_width)
     rank = len(tuple(lhs.shape))
     rhs_shape = (lhs_width, rhs_width) if rank <= 2 else (1,) * (rank - 2) + (lhs_width, rhs_width)
     rhs = add_constant(

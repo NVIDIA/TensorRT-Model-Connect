@@ -61,6 +61,7 @@ from . import moe_routing
 from . import graph_blocks
 from .parallel import normalize_parallel_config
 from .default_decoder import _apply_norm, _mark_debug_output
+from .quantization import configure_fp8_build, quantize_deepseek_v2_experts
 
 
 def _validate_router_score_bias(
@@ -81,6 +82,20 @@ def _use_fp32_mla_attention(dtype: np.dtype, head_dim: int) -> bool:
     production DeepSeek MLA heads are at least 16 elements wide.
     """
     return dtype == np.float16 and head_dim >= 16
+
+
+# Listed by TensorRT 11.4 and later only; TensorRT 11.1 does not have it.
+_TENSORRT_11_4_KNOB = "-mha_fusion:gemv_mha_v2"
+
+
+def _keep_fp16_attention_mask(trt_config) -> bool:
+    """Keep the FP16 attention mask FP16 next to FP32-cast Q, K and V (TensorRT 11.4).
+
+    TensorRT 11.4 fails to build the decomposable attention when its mask is cast to
+    FP32: the optimizer keeps the scores in half and adds the FP32 mask to them, and
+    its type check rejects the mixed add. TensorRT 11.1 needs the FP32 mask.
+    """
+    return _TENSORRT_11_4_KNOB in getattr(trt_config, "all_build_routes", "")
 
 
 if TYPE_CHECKING:
@@ -110,7 +125,14 @@ class _DeepSeekV2Model:
         self,
         model_dir: str,
         config: ModelConfig,
+        quant_ctx=None,
     ) -> WeightDict:
+        """Load the weights as ``[in, out]`` arrays.
+
+        The routed experts of the layers owned by ``quant_ctx`` are not loaded: the engine
+        consumes the FP8 bytes the context quantized itself, so the weight dict keeps a
+        shape-only placeholder for them.
+        """
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
 
@@ -224,8 +246,20 @@ class _DeepSeekV2Model:
                         correction_bias_key,
                     )
 
-                # Per-expert weights
-                for e in range(n_routed_experts):
+                # Per-expert weights (the quantized experts are one FP8 stack per projection
+                # owned by quant_ctx, so nothing is read here)
+                experts_quantized = quant_ctx is not None and quant_ctx.quantizes_experts(prefix)
+                if experts_quantized:
+                    stacks = quant_ctx.experts[prefix]
+                    for stem, stack in (
+                        ("w_gate", stacks.gate),
+                        ("w_up", stacks.up),
+                        ("w_down", stacks.down),
+                    ):
+                        weights[f"{prefix}.experts.{stem}"] = np.broadcast_to(
+                            np.zeros((), dtype=np.float32), stack.shape
+                        )
+                for e in range(0 if experts_quantized else n_routed_experts):
                     exp_hf = f"{hf_prefix}.mlp.experts.{e}"
                     gate_raw = _load_tensor(readers, f"{exp_hf}.gate_proj.weight")
                     up_raw = _load_tensor(readers, f"{exp_hf}.up_proj.weight")
@@ -379,6 +413,8 @@ class _DeepSeekV2Model:
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 1
+        keep_fp16_attention_mask = _keep_fp16_attention_mask(trt_config)
+        configure_fp8_build(trt_config, quant_ctx)
 
         if precision == "fp16":
             work_np_dtype = np.float16
@@ -547,6 +583,8 @@ class _DeepSeekV2Model:
                 n_group=n_group,
                 topk_group=topk_group,
                 dtype=layer_np_dtype,
+                keep_fp16_attention_mask=keep_fp16_attention_mask,
+                quant_ctx=quant_ctx,
             )
 
             hidden_state = result["hidden"]
@@ -658,6 +696,7 @@ def _add_mla_attention_block(
     attention_size: int,
     max_cache_length: int,
     dtype: np.dtype = np.float32,
+    keep_fp16_attention_mask: bool = False,
 ) -> dict[str, trt.ITensor]:
     """Multi-head Latent Attention (MLA) block with naive KV cache.
 
@@ -870,6 +909,7 @@ def _add_mla_attention_block(
         mask=mask_4d,
         scale=attn_scale,
         fp32_accumulation=_use_fp32_mla_attention(dtype, k_head_dim),
+        fp16_mask_with_fp32_accumulation=keep_fp16_attention_mask,
     )
 
     # Slice out only the v_head_dim portion (remove zero-padding)
@@ -948,7 +988,7 @@ def _stack_expert_weights(
     )
 
 
-def _add_native_routed_experts(
+def _add_routed_experts(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
     weights: WeightDict,
@@ -960,56 +1000,63 @@ def _add_native_routed_experts(
     scaled_weights: trt.ITensor,
     dtype: np.dtype,
 ) -> trt.ITensor:
-    """Routed-expert output computed by the native TensorRT MoE layer.
-
-    ``set_gated_weights`` takes one stacked tensor per projection covering every
-    expert, in the orientation this family already stores them: gate and up as
-    ``[experts, hidden, intermediate]`` and down as
-    ``[experts, intermediate, hidden]``. No transposition is required.
-
-    The layer applies the routing scores itself, so its output is the weighted
-    sum over the selected experts and only those experts are evaluated.
-    """
+    """Compute only the selected experts with portable TensorRT graph layers."""
     w_gate = _stack_expert_weights(weights, prefix, n_routed_experts, "w_gate", dtype)
     w_up = _stack_expert_weights(weights, prefix, n_routed_experts, "w_up", dtype)
     w_down = _stack_expert_weights(weights, prefix, n_routed_experts, "w_down", dtype)
 
-    # IMoELayer requires rank-3 hidden states [batch, tokens, hidden]; the
-    # decoder carries rank-2 [tokens, hidden].
-    def _with_batch_dim(tensor: trt.ITensor, last_dim: int) -> trt.ITensor:
-        shuffle = network.add_shuffle(tensor)
-        shuffle.reshape_dims = (1, -1, last_dim)
-        return shuffle.get_output(0)
-
     rank = len(tuple(inp.shape))
-    if rank == 2:
-        moe_hidden = _with_batch_dim(inp, hidden_size)
-        moe_indices = _with_batch_dim(top_indices, num_experts_per_tok)
-        moe_scores = _with_batch_dim(scaled_weights, num_experts_per_tok)
-    elif rank == 3:
-        moe_hidden, moe_indices, moe_scores = inp, top_indices, scaled_weights
-    else:
-        raise ValueError(f"DeepSeek-V2 MoE expects rank-2 or rank-3 hidden states, got rank {rank}")
+    if rank != 2:
+        raise ValueError(f"DeepSeek-V2 MoE expects rank-2 hidden states, got rank {rank}")
 
-    moe = network.add_moe(moe_hidden, moe_indices, moe_scores)
-    if moe is None:
-        raise RuntimeError(
-            "TensorRT rejected addMoE for this build; the per-expert path "
-            "should have been selected instead"
-        )
-    moe.set_gated_weights(
-        graph_ops.add_constant(network, w_gate.shape, w_gate, dtype=dtype),
-        graph_ops.add_constant(network, w_up.shape, w_up, dtype=dtype),
-        graph_ops.add_constant(network, w_down.shape, w_down, dtype=dtype),
-        trt.MoEActType.SILU,
-    )
-    routed_out = moe.get_output(0)
+    hidden = network.add_shuffle(inp)
+    hidden.reshape_dims = (-1, 1, 1, hidden_size)
 
-    if rank == 2:
-        restore = network.add_shuffle(routed_out)
-        restore.reshape_dims = (-1, hidden_size)
-        routed_out = restore.get_output(0)
-    return routed_out
+    def selected(values: np.ndarray) -> trt.ITensor:
+        packed = graph_ops.add_constant(network, values.shape, values, dtype=dtype)
+        if packed.dtype != inp.dtype:
+            packed = network.add_cast(packed, inp.dtype).get_output(0)
+        return network.add_gather(packed, top_indices, 0).get_output(0)
+
+    gate = network.add_matrix_multiply(
+        hidden.get_output(0),
+        trt.MatrixOperation.NONE,
+        selected(w_gate),
+        trt.MatrixOperation.NONE,
+    ).get_output(0)
+    up = network.add_matrix_multiply(
+        hidden.get_output(0),
+        trt.MatrixOperation.NONE,
+        selected(w_up),
+        trt.MatrixOperation.NONE,
+    ).get_output(0)
+    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID).get_output(0)
+    swish = network.add_elementwise(gate, sigmoid, trt.ElementWiseOperation.PROD).get_output(0)
+    gated = network.add_elementwise(swish, up, trt.ElementWiseOperation.PROD).get_output(0)
+    down = network.add_matrix_multiply(
+        gated,
+        trt.MatrixOperation.NONE,
+        selected(w_down),
+        trt.MatrixOperation.NONE,
+    ).get_output(0)
+    experts = network.add_shuffle(down)
+    experts.reshape_dims = (-1, num_experts_per_tok, hidden_size)
+    routing = network.add_shuffle(scaled_weights)
+    routing.reshape_dims = (-1, num_experts_per_tok, 1)
+    routing_weights = routing.get_output(0)
+    if routing_weights.dtype != experts.get_output(0).dtype:
+        routing_weights = network.add_cast(
+            routing_weights, experts.get_output(0).dtype
+        ).get_output(0)
+    weighted = network.add_elementwise(
+        experts.get_output(0), routing_weights, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    return network.add_reduce(
+        weighted,
+        trt.ReduceOperation.SUM,
+        1 << 1,
+        keep_dims=False,
+    ).get_output(0)
 
 
 def _add_moe_with_shared_experts(
@@ -1029,13 +1076,14 @@ def _add_moe_with_shared_experts(
     n_group: int = 1,
     topk_group: int = 1,
     dtype: np.dtype = np.float32,
+    quant_ctx=None,
 ) -> trt.ITensor:
     """MoE block with shared experts (DeepSeek-V2 style).
 
     1. Router logits -> softmax/sigmoid -> top-k selection
     2. Scale weights: renormalize (norm_topk_prob=True) or multiply by
        routed_scaling_factor (norm_topk_prob=False)
-    3. Native TensorRT MoE routed-expert output.
+    3. TensorRT graph layers compute the selected routed experts.
     4. Compute shared expert output (always active)
     5. Final = routed_output + shared_output
     """
@@ -1055,18 +1103,23 @@ def _add_moe_with_shared_experts(
         routed_scaling_factor=routed_scaling_factor,
     )
 
-    result = _add_native_routed_experts(
-        network,
-        inp,
-        weights,
-        prefix,
-        hidden_size,
-        n_routed_experts,
-        num_experts_per_tok,
-        top_indices,
-        scaled_weights,
-        dtype,
-    )
+    if quant_ctx is not None and quant_ctx.quantizes_experts(prefix):
+        result = quant_ctx.routed_experts(
+            network, inp, top_indices, scaled_weights, prefix, hidden_size, num_experts_per_tok
+        )
+    else:
+        result = _add_routed_experts(
+            network,
+            inp,
+            weights,
+            prefix,
+            hidden_size,
+            n_routed_experts,
+            num_experts_per_tok,
+            top_indices,
+            scaled_weights,
+            dtype,
+        )
     return _add_shared_expert_residual(
         network, inp, weights, prefix, hidden_size, shared_intermediate, result, dtype
     )
@@ -1141,6 +1194,8 @@ def _add_deepseek_v2_decoder_layer(
     n_group: int = 1,
     topk_group: int = 1,
     dtype: np.dtype = np.float32,
+    keep_fp16_attention_mask: bool = False,
+    quant_ctx=None,
 ) -> dict[str, trt.ITensor]:
     """Add one DeepSeek-V2 decoder layer: MLA attention + (dense MLP or MoE)."""
 
@@ -1180,6 +1235,7 @@ def _add_deepseek_v2_decoder_layer(
         attention_size=attention_size,
         max_cache_length=max_cache_length,
         dtype=dtype,
+        keep_fp16_attention_mask=keep_fp16_attention_mask,
     )
     attn_out = attn["attn_out"]
 
@@ -1217,6 +1273,7 @@ def _add_deepseek_v2_decoder_layer(
             n_group=n_group,
             topk_group=topk_group,
             dtype=dtype,
+            quant_ctx=quant_ctx,
         )
     else:
         mlp_out = graph_blocks.add_swiglu_mlp(
@@ -1327,10 +1384,21 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("DeepSeek-V2 max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("DeepSeek-V2 quantization requires a family-owned qualified path")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"DeepSeek-V2 does not support quantization={request.quantization!r}"
+        )
+    quantized = request.quantization == "fp8"
+    if quantized and precision != "fp16":
+        raise NotImplementedError("DeepSeek-V2 fp8 quantization requires precision fp16")
+    if quantized and _positive_int(request.tensor_parallel_size, "tensor_parallel_size") != 1:
+        raise NotImplementedError(
+            "DeepSeek-V2 fp8 quantization does not support tensor parallelism"
+        )
     if request.fp32_layers:
         raise NotImplementedError("DeepSeek-V2 does not expose mixed-precision layer selection")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("DeepSeek-V2 does not support MTP speculative decoding")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
@@ -1338,8 +1406,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_resolved_build_precision"] = precision
     config.raw["_parallel_build_enabled"] = parallel.enabled
-    config.raw["_quantized_build_requested"] = False
-    weights = model.load_weights(str(model_dir), config)
+    config.raw["_quantized_build_requested"] = quantized
+    quant_ctx = None
+    if quantized:
+        quant_ctx = quantize_deepseek_v2_experts(model_dir, request.quantization, config)
+    weights = model.load_weights(str(model_dir), config, quant_ctx=quant_ctx)
     writer.set_header(family="deepseek_v2", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -1348,7 +1419,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 weights,
                 max_sequence_length,
                 precision=precision,
-                quant_ctx=None,
+                quant_ctx=quant_ctx,
                 verbose=bool(request.verbose),
                 debug_layer_outputs=False,
                 parallel_config=parallel.for_rank(rank),
@@ -1361,7 +1432,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,

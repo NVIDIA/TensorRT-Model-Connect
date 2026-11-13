@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import time
 from pathlib import Path
 import struct
 import subprocess
+import sys
 import tempfile
 
 
@@ -32,6 +35,104 @@ def invoke(binary: Path, runtime: Path, bundle: Path, requests: list[dict]):
     return completed, records
 
 
+
+def check_python_transport(binary: Path, runtime: Path, bundle: Path) -> None:
+    # Exercise the real Python -> JSONL -> public SDK -> fixture DSO path.
+    # Importing the transport does not require optional HTTP dependencies.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
+    from trtmc_server.worker import WorkerGroup, WorkerLoadOptions, WorkerProcess
+    from trtmc_server.errors import WorkerCrashedError, WorkerProtocolError
+    write_bundle(bundle, "text_continuation", "stream_fixture")
+    worker = WorkerProcess(name="sdk-fixture", bundle=bundle, trtmc_binary=binary,
+        startup_timeout=5, request_timeout=5, load_options=WorkerLoadOptions(runtime_root=str(runtime)))
+    worker.start()
+    group = WorkerGroup("sdk-fixture", [worker])
+    try:
+        assert worker.ready_payload["protocol_version"] == 2
+        assert "streaming_text_continuation" in worker.ready_payload["capabilities"]
+        with group.acquire_session() as session:
+            stream = session.stream({"prompt": "hello", "config": {"suffix": "!"}})
+            assert stream.next() == {"text_delta": "hello!", "token_count": 1}
+            assert stream.next() is None
+            final = stream.future.result()
+            assert final["text"] == "hello!" and final["completion_tokens"] == 1
+            assert final["model_call_ms"] >= 0
+            assert final["timing_scope"] == "public_task_stream_wall_including_backpressure"
+        with group.acquire_session() as session:
+            assert session.request("generate", {"prompt": "next"})["text"] == "sync"
+            # A malformed result must make a lane unavailable before asynchronous
+            # termination, even if its native request has already completed.
+            retirement = session.retire(WorkerProtocolError("bad result"))
+            assert not worker.ready
+            retirement.result(timeout=5)
+            assert worker._process.poll() is not None
+        try:
+            group.acquire_session()
+            raise AssertionError("retired lane was reused")
+        except WorkerCrashedError:
+            pass
+    finally:
+        group.close()
+
+
+
+def check_parent_death(binary: Path, runtime: Path, bundle: Path) -> None:
+    if not sys.platform.startswith("linux"):
+        return
+    import ctypes
+    import select
+    # Adopt and reap the worker after its frontend dies; never leave a zombie
+    # behind in the validation host's PID namespace.
+    libc = ctypes.CDLL(None, use_errno=True)
+    previous = ctypes.c_int()
+    assert libc.prctl(37, ctypes.byref(previous), 0, 0, 0) == 0
+    assert libc.prctl(36, 1, 0, 0, 0) == 0
+    code = """import json,os,subprocess,sys
+worker=subprocess.Popen(sys.argv[1:],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True,start_new_session=True)
+ready=json.loads(worker.stdout.readline())
+worker.stdin.write(json.dumps({'id':'wait','op':'generate_stream','prompt':'hello','config':{'wait_for_cancel':True}})+'\\n')
+worker.stdin.flush()
+print(worker.pid,flush=True)
+sys.stdin.readline()
+os._exit(0)
+"""
+    parent = None
+    pid = None
+    try:
+        parent = subprocess.Popen([sys.executable, "-c", code, str(binary), "_serve-worker",
+            str(bundle), "--runtime-root", str(runtime)], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        assert select.select([parent.stdout], [], [], 5)[0], "frontend did not report worker readiness"
+        pid = int(parent.stdout.readline())
+        parent.stdin.write("exit\n")
+        parent.stdin.flush()
+        assert parent.wait(timeout=5) == 0
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            exited, status = os.waitpid(pid, os.WNOHANG)
+            if exited:
+                assert os.WIFSIGNALED(status) and os.WTERMSIG(status) == 15
+                pid = None
+                return
+            time.sleep(.01)
+        raise AssertionError("native generation outlived its frontend")
+    finally:
+        if parent is not None:
+            if parent.poll() is None:
+                parent.kill()
+                parent.wait(timeout=5)
+            for stream in (parent.stdin, parent.stdout, parent.stderr):
+                if stream is not None:
+                    stream.close()
+        if pid is not None:
+            try:
+                os.kill(pid, 9)
+                os.waitpid(pid, 0)
+            except ProcessLookupError:
+                pass
+        assert libc.prctl(36, previous.value, 0, 0, 0) == 0
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
@@ -50,10 +151,13 @@ def main() -> None:
         assert completed.returncode == 0, completed.stderr
         assert len(records) == 5
         assert records[0] == {
-            "event": "ready", "protocol_version": 1,
+            "event": "ready", "protocol_version": 2,
             "capabilities": ["text_generation"], "default_max_new_tokens": 4,
         }
         assert records[1]["id"] == "first" and records[1]["ok"] is True
+        timing = records[1]["result"].pop("model_call_ms")
+        assert isinstance(timing, (int, float)) and timing >= 0
+        assert records[1]["result"].pop("timing_scope") == "public_task_call_wall"
         assert records[1]["result"] == {
             "text": "hello!|eos", "completion_tokens": 2,
             "setup_ms": 7.0, "prefill_ms": 0.75, "decode_ms": 4.0,
@@ -82,6 +186,9 @@ def main() -> None:
             "type": "runtime_error", "message": "native worker operation failed",
         }
         assert "the fixture execution must not be reached" not in completed.stdout
+
+        check_python_transport(args.binary, args.runtime_root, bundle)
+        check_parent_death(args.binary, args.runtime_root, bundle)
 
         write_bundle(bundle, "disabled")
         completed, records = invoke(args.binary, args.runtime_root, bundle, requests)

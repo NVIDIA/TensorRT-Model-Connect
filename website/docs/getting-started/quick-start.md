@@ -41,29 +41,21 @@ selecting another task supported by the same family. The build then imports
 only the selected `families.gpt2.model` and calls `build(request, writer)` once.
 A prepared local snapshot can be passed in place of the model ID.
 
-For a wheel install, resolve its native runtime directory directly from the
-installed package:
+Run the bundle:
 
 ```bash
-TRTMC_RUNTIME_ROOT="$(python -c 'import pathlib, tensorrt_model_connect as m; print(pathlib.Path(m.__file__).parent / "bin")')"
 trtmc run gpt2.bundle \
-  --runtime-root "$TRTMC_RUNTIME_ROOT" \
   --prompt "Hello" \
   --max-new-tokens 32
 ```
 
-For a native CMake install, point the loader at the directory containing the matching
-`libtrtmc_core.so`, `libtrtmc_runtime.so`, `libtrtmc_backend_trt.so`, and
-`libtrtmc_model_gpt2.so`. The loader reads the bundle header, loads exactly
-those DSOs, and returns the abstract task interface declared by the bundle.
+The loader reads the bundle header and loads exactly `libtrtmc_backend_trt.so`
+and `libtrtmc_model_gpt2.so` from the directory containing the active
+`libtrtmc_runtime.so`: the package `bin` directory for a wheel install, or the
+library directory for a native CMake install. It returns the abstract task
+interface declared by the bundle.
 
-```bash
-trtmc run gpt2.bundle \
-  --runtime-root /opt/trtmc/lib \
-  --prompt "Hello" \
-  --max-new-tokens 32
-```
-
-The shell variable above is only a convenient explicit argument. The CLI never
-searches environment variables, the current directory, or an installed
-fallback runtime.
+To load from another directory, pass `--runtime-root DIR` naming a directory
+that contains the matching `libtrtmc_core.so`, `libtrtmc_runtime.so`,
+`libtrtmc_backend_trt.so`, and `libtrtmc_model_gpt2.so`. The CLI never searches
+environment variables, the current directory, or a fallback runtime.

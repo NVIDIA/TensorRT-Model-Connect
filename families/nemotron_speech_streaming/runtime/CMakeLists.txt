@@ -58,6 +58,7 @@ if(TRTMC_BUILD_TESTS)
   foreach(test_name IN ITEMS
       test_nemotron_speech_streaming_audio_helpers
       test_nemotron_speech_streaming_decode_policy
+      test_nemotron_speech_streaming_whole_clip_prompt
       test_nemotron_speech_streaming_streaming_contract)
     string(REPLACE "test_nemotron_speech_streaming_" "" test_source ${test_name})
     add_executable(${test_name}

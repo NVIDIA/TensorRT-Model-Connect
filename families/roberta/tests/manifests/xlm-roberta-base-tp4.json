@@ -1,6 +1,7 @@
 {
   "name": "xlm-roberta-base-tp4",
   "hf_id": "FacebookAI/xlm-roberta-base",
+  "hf_revision": "e73636d4f797dec63c3081bb6ed5c7b0bb3f2089",
   "bundle": "xlm-roberta-base-tp4.bundle",
   "family": "roberta",
   "task": "encoding",

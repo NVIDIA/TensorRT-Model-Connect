@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+repo: /path/ai-perf-integration
+serve_python: /path/trtmc-python
+aiperf_python: /path/aiperf-venv/bin/python
+aiperf: /path/aiperf-venv/bin/aiperf
+hf_datasets_cache: /path/cache/aiperf-datasets
+gpu_lock: /path/cache/gpu.lock
+# Native CLI used by the owning family validation, separate from trtmc-server.
+build_env:
+  TRTMC_BINARY: /path/build/trtmc
+  TRTMC_RUNTIME_ROOT: /path/build
+# Used by the optional reference service.
+ports:
+  candidate: 8000
+  reference: 8001

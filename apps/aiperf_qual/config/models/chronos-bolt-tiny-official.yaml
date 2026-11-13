@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  adapter: families/chronos_bolt/reference/adapter.py  # the chronos package's pipeline (a T5 model)
+  requirements: families/chronos_bolt/requirements.txt  # the family's dependencies, layered on the serving interpreter
+
+# The model's forecast window: its input columns, context, and horizon (model card / config).
+absolute: [{name: etth1, window: {columns: [OT], context_length: 512, prediction_length: 64, stride: 24, frequency: 0}}]

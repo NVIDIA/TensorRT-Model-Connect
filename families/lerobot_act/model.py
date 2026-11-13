@@ -105,13 +105,17 @@ def _validate_initial_policy(raw: dict[str, Any]) -> None:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build the one qualified LeRobot ACT policy contract."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("LeRobot ACT does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("lerobot_act does not support dynamic_kv_cache")
 
-    if request.task != "robot_control":
-        raise ValueError("lerobot_act supports only task=robot_control")
-    if request.precision.lower() != "fp32":
-        raise ValueError("LeRobot ACT supports only fp32")
+    if request.task != "image_state_to_action_chunk":
+        raise ValueError("lerobot_act supports only task=image_state_to_action_chunk")
+    # fp32 (the default) or fp16; the engine I/O and runtime.json are the same for both.
+    precision = request.precision.lower()
+    if precision not in {"fp32", "fp16"}:
+        raise ValueError("LeRobot ACT supports only fp32 and fp16")
     if request.max_sequence_length is not None:
         raise ValueError("LeRobot ACT does not accept max_sequence_length")
     if request.image_height not in {None, 480} or request.image_width not in {None, 640}:
@@ -134,7 +138,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     plan = build_act_engine(
         raw,
         load_checkpoint(model_dir),
-        precision="fp32",
+        precision=precision,
         verbose=request.verbose,
     )
     writer.set_header(family="lerobot_act", task=request.task, backend=request.backend)

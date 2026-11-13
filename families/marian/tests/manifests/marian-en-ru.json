@@ -1,6 +1,7 @@
 {
   "name": "marian-en-ru",
   "hf_id": "Helsinki-NLP/opus-mt-en-ru",
+  "hf_revision": "bb09c99d180016eac6819df3dae68edb1690fdee",
   "bundle": "marian-en-ru.bundle",
   "family": "marian",
   "task": "text_generation",

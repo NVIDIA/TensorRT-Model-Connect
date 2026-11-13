@@ -198,6 +198,7 @@ class _DprModel:
             weights,
             max_seq_length=max_cache_length,
             precision=precision,
+            quant_ctx=quant_ctx,
             verbose=verbose,
         )
 
@@ -279,8 +280,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task not in {"encoding", "embedding", "reranking"}:
-        raise ValueError("dpr task must be encoding, embedding, or reranking")
+    if request.task not in {"text_to_pooled_features", "text_to_embedding"}:
+        raise ValueError("dpr task must be text_to_pooled_features or text_to_embedding")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower() != "dpr":
@@ -294,16 +295,34 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("DPR max_sequence_length exceeds checkpoint capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("DPR has no family-owned quantized build")
+    quantization = None if request.quantization in {None, "none"} else request.quantization
+    if quantization is not None and quantization != "fp8":
+        raise NotImplementedError(
+            f"DPR supports quantization fp8 or none; got {request.quantization!r}"
+        )
+    if quantization is not None and precision != "fp16":
+        raise ValueError(f"DPR FP8 needs precision fp16, got {precision!r}")
     if request.fp32_layers:
         raise NotImplementedError("DPR does not expose mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("DPR does not support MTP speculative decoding")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
     parallel.validate()
+    if quantization is not None and parallel.enabled:
+        raise ValueError("DPR tensor-parallel builds do not support quantization")
+    if quantization is not None:
+        from .quantization import refuse_quantized_checkpoint
+
+        refuse_quantized_checkpoint(config, _open_torch_checkpoint(model_dir).tensor_map)
     model = _DprModel()
     weights = model.load_weights(str(model_dir), config)
+    quant_ctx = None
+    if quantization is not None:
+        from .quantization import calibrate_dpr
+
+        quant_ctx = calibrate_dpr(config, weights, quantization, precision=precision)
     writer.set_header(family="dpr", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -323,7 +342,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             parallel_config=parallel,
         )
@@ -333,6 +352,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         {
             **_tokenizer_runtime_contract(model_dir),
             "tensor_parallel_size": parallel.tp_size,
+            "vocab_size": _positive_int(config.vocab_size, "vocab_size"),
         },
     )
     for filename in _BUNDLE_FILES:

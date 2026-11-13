@@ -222,6 +222,21 @@ def _cosine(left, right) -> float:
     return float(np.dot(a, b) / denominator)
 
 
+# FP8 (quantization=fp8, FP8 convolutions on the fp16 graph) adds a cosine floor on the
+# logits to the top-1 check. Measured on the FP8 case (B200 and B300, TensorRT 11.4), a
+# correct FP8 engine reaches cosine 0.99988 to 0.99989 (fp16 0.99998); with every
+# activation scale x0.1 it falls to 0.976 and the top-1 class changes. The floor leaves
+# about 9x the measured FP8 error (1 - cosine) as headroom for other GPUs.
+_FP8_COSINE_FLOOR = 0.999
+
+
+def _gate(manifest: dict) -> str:
+    """The gate of a case: "fp8" for FP8 builds, else the build precision."""
+    if manifest.get("quantization") == "fp8":
+        return "fp8"
+    return manifest["precision"]
+
+
 def _native(
     binary: Path,
     runtime_root: Path,
@@ -252,7 +267,8 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     from timm.data import create_transform, resolve_model_data_config
 
     image = Image.open(_asset(case["test_image"])).convert("RGB")
-    model = timm.create_model("hf-hub:" + manifest["hf_id"], pretrained=True).to("cuda").eval()
+    # Load the pinned snapshot the bundle was built from, not the Hub default branch.
+    model = timm.create_model("local-dir:" + str(model_dir), pretrained=True).to("cuda").eval()
     transform = create_transform(**resolve_model_data_config(model), is_training=False)
     pixels = transform(image).unsqueeze(0).to("cuda")
     with torch.no_grad():
@@ -260,8 +276,12 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     return {"logits": logits.float().cpu().numpy()}
 
 
-def _assert_parity(actual, expected) -> None:
+def _assert_parity(actual, expected, gate: str = "fp16") -> None:
     assert int(np.argmax(actual["logits"])) == int(np.argmax(expected["logits"]))
+    if gate == "fp8":
+        cosine = _cosine(actual["logits"], expected["logits"])
+        record_evidence("fp8_logit_cosine", cosine)
+        assert cosine >= _FP8_COSINE_FLOOR, f"{FAMILY} fp8 logit cosine {cosine}"
 
 
 def _assert_class_metadata(actual: dict, config: dict) -> None:
@@ -330,7 +350,11 @@ def _assert_sdk_consumers(
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
-    record_evidence("thresholds", {"top1_match": True})
+    gate = _gate(manifest)
+    thresholds = {"top1_match": True}
+    if gate == "fp8":
+        thresholds["logit_cosine_min"] = _FP8_COSINE_FLOOR
+    record_evidence("thresholds", thresholds)
     model_dir = _model_dir(manifest)
     record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime(manifest)
@@ -344,9 +368,23 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         expected = _official_reference(model_dir, manifest, case, tmp_path)
     record_evidence("reference", {**expected, "top_class": int(np.argmax(expected["logits"]))})
     with evidence_stage("compare"):
-        _assert_parity(actual, expected)
+        _assert_parity(actual, expected, gate)
         config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
         _assert_class_metadata(actual, config)
     with evidence_stage("sdk"):
         _assert_sdk_consumers(runtime_root, bundle, case, config,
                               int(np.argmax(expected["logits"])), tmp_path)
+
+
+def test_fp8_gate_checks_logit_cosine() -> None:
+    """An fp8 case also needs the logit cosine; the same top-1 with a lower cosine fails."""
+    reference = {"logits": np.array([[4.0, 1.0, 0.5, 0.0]])}
+    close = {"logits": [4.0, 1.02, 0.49, 0.01]}
+    far = {"logits": [4.0, 3.5, -3.0, 2.5]}
+    _assert_parity(close, reference, "fp8")
+    _assert_parity(far, reference, "fp16")
+    assert _cosine(far["logits"], reference["logits"]) < _FP8_COSINE_FLOOR
+    with pytest.raises(AssertionError, match="fp8 logit cosine"):
+        _assert_parity(far, reference, "fp8")
+    assert _gate({"precision": "fp16", "quantization": "fp8"}) == "fp8"
+    assert _gate({"precision": "fp16"}) == "fp16"

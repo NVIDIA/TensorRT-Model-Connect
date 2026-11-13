@@ -1,9 +1,10 @@
 {
   "name": "modernbert-base",
   "hf_id": "answerdotai/ModernBERT-base",
+  "hf_revision": "8949b909ec900327062f0ebf497f51aef5e6f0c8",
   "bundle": "modernbert-base.bundle",
   "family": "modernbert",
-  "task": "encoding",
+  "task": "text_to_pooled_features",
   "precision": "fp32",
   "testcases": [
     {
@@ -11,6 +12,13 @@
       "premerge": true,
       "reference_precision": "fp32",
       "prompt": "A man is slicing open a fish."
+    },
+    {
+      "name": "modernbert-base-local-window",
+      "reference_precision": "fp32",
+      "exercise_local_window": true,
+      "prompt": "The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge.",
+      "premerge": true
     }
   ],
   "tensor_parallel_size": 1,

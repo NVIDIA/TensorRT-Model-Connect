@@ -139,6 +139,7 @@ def _build_engine(
     max_sequence_length: int,
     *,
     precision: str,
+    quant_ctx=None,
     verbose: bool,
     parallel: ParallelConfig,
 ) -> bytes:
@@ -160,6 +161,7 @@ def _build_engine(
         weights,
         max_sequence_length,
         precision=precision,
+        quant_ctx=quant_ctx,
         norm_type="layernorm",
         mlp_type="gelu_fc",
         position_type="learned",
@@ -242,10 +244,19 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "GPT-2 max_sequence_length exceeds learned position capacity: "
             f"{max_sequence_length} > {config.max_position_embeddings}"
         )
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("GPT-2 has no qualified family-owned quantized build")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(f"GPT-2 does not support quantization={request.quantization!r}")
+    quantized = request.quantization == "fp8"
+    if quantized and precision not in {"fp16", "bf16"}:
+        raise NotImplementedError("GPT-2 fp8 quantization requires precision fp16 or bf16")
+    if quantized and request.tensor_parallel_size != 1:
+        raise NotImplementedError("GPT-2 fp8 quantization does not support tensor parallelism")
+    if quantized and config.raw.get("quantization_config"):
+        raise ValueError("the checkpoint is already quantized; FP8 self-quantization needs BF16")
     if request.fp32_layers:
         raise NotImplementedError("GPT-2 does not expose mixed-precision layer selection")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("GPT-2 does not support MTP speculative decoding")
 
     tp_size = _positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     parallel = ParallelConfig(tp_size=tp_size)
@@ -254,6 +265,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_resolved_build_precision"] = precision
     config.raw["_parallel_build_enabled"] = parallel.enabled
     weights = load_weights(model_dir, config)
+    quant_ctx = None
+    if quantized:
+        from . import graph_ops
+        from .quantization import calibrate_gpt2_fp8
+
+        quant_ctx = calibrate_gpt2_fp8(config, weights, graph_ops)
 
     writer.set_header(family="gpt2", task=request.task, backend=request.backend)
     if parallel.enabled:
@@ -275,6 +292,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             parallel=parallel,
         )
@@ -284,6 +302,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             parallel=parallel,
         )

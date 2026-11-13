@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# RefCOCO val objects as text-prompted segmentation: one object per image, 500 images in seeded order; the prompt
+# is the referring expression, gold the object's mask.
+suite: refcoco-text-500
+version: 1
+source:
+  kind: hf_dataset
+  dataset: lmms-lab/RefCOCO
+  split: val
+  revision: a5dff0b3194715fda69b2d6a0d2aaafb41eaa407
+  data_files: {val: data/val-*.parquet}
+  image_column: image
+  polygon_label: segmentation
+  columns: [answer]
+  cluster_column: file_name
+  one_per_cluster: true
+selection: {method: seeded, count: 500}
+fields: {image: image_path, answer.0: prompt}
+request:
+  batch_size: 1

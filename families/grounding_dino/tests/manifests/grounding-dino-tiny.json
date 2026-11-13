@@ -1,0 +1,22 @@
+{
+  "name": "grounding-dino-tiny",
+  "hf_id": "IDEA-Research/grounding-dino-tiny",
+  "hf_revision": "a2bb814dd30d776dcf7e30523b00659f4f141c71",
+  "bundle": "grounding-dino-tiny.bundle",
+  "family": "grounding_dino",
+  "task": "image_text_to_boxes",
+  "precision": "fp16",
+  "image_height": 800,
+  "image_width": 800,
+  "testcases": [
+    {
+      "name": "grounding-dino-tiny",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg",
+      "prompt": "a car. a mountain. the sky. the ocean.",
+      "box_threshold": 0.3,
+      "text_threshold": 0.25
+    }
+  ],
+  "tensor_parallel_size": 1
+}

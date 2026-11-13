@@ -44,6 +44,20 @@ class ModelConfig:
     raw: dict = field(default_factory=dict, repr=False)
 
     @property
+    def eos_token_ids(self) -> list[int]:
+        """Keep every checkpoint-declared decoder stopping token."""
+        nested = self.raw.get("text_config")
+        sources = [nested, self.raw] if isinstance(nested, dict) else [self.raw]
+        for source in sources:
+            value = source.get("eos_token_id")
+            if isinstance(value, (list, tuple)):
+                if value:
+                    return [int(token) for token in value]
+            elif value is not None:
+                return [int(value)]
+        raise ValueError("glmasr checkpoint declares no eos_token_id")
+
+    @property
     def head_dim(self) -> int:
         return self._head_dim or (self.hidden_size // self.num_attention_heads)
 

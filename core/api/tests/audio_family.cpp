@@ -44,6 +44,7 @@ class AudioFixture final : public IModel,
                            public ISpeechTranscription,
                            public ISpeechTranslation,
                            public IAudioLanguageIdentification,
+                           public IAudioToClassScores,
                            public ISpeechToSpeechResponse,
                            public IBatchSpeechTranscription,
                            public IBatchSpeechTranslation,
@@ -54,7 +55,7 @@ class AudioFixture final : public IModel,
     explicit AudioFixture(std::string mode) : mode_(std::move(mode)) {}
     const char* task() const noexcept override { return mode_.c_str(); }
     std::vector<TaskInstance> task_bindings() override {
-        if (mode_ == "asr_only")
+        if (mode_ == "asr_only" || mode_ == "asr_new_tokens")
             return {bind<ISpeechTranscription>(*this, fields_for(ISpeechTranscription::kTask))};
         if (mode_ == "history_single_only")
             return {bind<ITextAudioTokenHistoryToAudio>(
@@ -77,6 +78,7 @@ class AudioFixture final : public IModel,
             bind<ISpeechTranslation>(*this, fields_for(ISpeechTranslation::kTask)),
             bind<IAudioLanguageIdentification>(*this,
                                                fields_for(IAudioLanguageIdentification::kTask)),
+            bind<IAudioToClassScores>(*this, fields_for(IAudioToClassScores::kTask)),
             bind<ISpeechToSpeechResponse>(*this, fields_for(ISpeechToSpeechResponse::kTask)),
             bind<IBatchSpeechTranscription>(*this, fields_for(IBatchSpeechTranscription::kTask)),
             bind<IBatchSpeechTranslation>(*this, fields_for(IBatchSpeechTranslation::kTask)),
@@ -85,14 +87,15 @@ class AudioFixture final : public IModel,
             bind<IBatchTextToSpeech>(*this, fields_for(IBatchTextToSpeech::kTask))};
     }
     trtmc::Span<const ConfigField> fields_for(std::string_view task) const {
-        if ((mode_ == "asr_only" && task != ISpeechTranscription::kTask) ||
+        if (((mode_ == "asr_only" || mode_ == "asr_new_tokens") &&
+             task != ISpeechTranscription::kTask) ||
             (mode_ == "history_single_only" && task != ITextAudioTokenHistoryToAudio::kTask) ||
             (mode_ == "audio_single_only" && task != ITextToAudio::kTask &&
              task != ITextToSpeech::kTask) ||
             (mode_ == "batch_audio_only" && task != IBatchTextToAudio::kTask) ||
             (mode_ == "batch_speech_only" && task != IBatchTextToSpeech::kTask))
             throw UnsupportedTask("audio fixture Task is disabled");
-        if (task == IAudioLanguageIdentification::kTask)
+        if (task == IAudioLanguageIdentification::kTask || task == IAudioToClassScores::kTask)
             return {};
         if (task == ITextAudioTokenHistoryToAudio::kTask ||
             task == IBatchTextAudioTokenHistoryToAudio::kTask) {
@@ -120,6 +123,14 @@ class AudioFixture final : public IModel,
             return declared;
         }
         if (task == ISpeechTranscription::kTask || task == ISpeechTranslation::kTask) {
+            if (mode_ == "asr_new_tokens") {
+                static const ConfigField declared[] = {
+                    {"suffix", ConfigKind::String, ConfigValue{std::string_view{"!"}},
+                     "Transcript suffix"},
+                    {"max_new_tokens", ConfigKind::I64, ConfigValue{std::int64_t{224}},
+                     "Output token limit"}};
+                return declared;
+            }
             static const ConfigField declared[] = {
                 {"suffix", ConfigKind::String, ConfigValue{std::string_view{"!"}},
                  "Transcript suffix"},
@@ -161,12 +172,14 @@ class AudioFixture final : public IModel,
         const auto options = parse(config, ISpeechTranscription::kTask);
         const auto audio = resolve_audio(input.audio);
         ++single_asr_;
-        auto result = transcript(
-            "asr:" + std::string(input.source_language.value_or("auto")) + options.suffix, audio,
-            {single_asr_, static_cast<std::int32_t>(*audio.sample_rate),
-             static_cast<std::int32_t>(audio.channels)});
+        auto text = "asr:" + std::string(input.source_language.value_or("auto")) + options.suffix;
+        if (mode_ == "asr_new_tokens")
+            text += ":" + std::to_string(options.max_output_tokens);
+        auto result = transcript(std::move(text), audio,
+                                 {single_asr_, static_cast<std::int32_t>(*audio.sample_rate),
+                                  static_cast<std::int32_t>(audio.channels)});
         for (const auto& entry : config)
-            if (entry.name == "max_output_tokens")
+            if (entry.name == "max_output_tokens" || entry.name == "max_new_tokens")
                 result.decode_ms = static_cast<double>(options.max_output_tokens);
         return result;
     }
@@ -192,6 +205,17 @@ class AudioFixture final : public IModel,
             {0.75F, 0.25F}, {"en", "fr"}, ScoreKind::Probability, "fixture_languages"};
         if (mode_ == "bad_labels")
             result.labels.clear();
+        return result;
+    }
+    LabelScoresResult run(const AudioToClassScoresRequest& input, ConfigView config) override {
+        (void)resolve_audio(input.audio);
+        (void)parse(config, IAudioToClassScores::kTask);
+        // Sound events, not languages, and multi-label: raw logits that do not
+        // sum to one, over a vocabulary the family names itself.
+        LabelScoresResult result{
+            {1.5F, -0.25F, -3.0F}, {"Speech", "Music", "Silence"}, ScoreKind::Logit, ""};
+        if (mode_ == "bad_labels")
+            result.labels[1].clear();
         return result;
     }
     AudioResult run(const SpeechToSpeechResponseRequest& input, ConfigView config) override {
@@ -461,7 +485,7 @@ class AudioFixture final : public IModel,
                 options.preset = std::get<std::string_view>(value);
             if (name == "suffix")
                 options.suffix = std::get<std::string_view>(value);
-            if (name == "max_output_tokens")
+            if (name == "max_output_tokens" || name == "max_new_tokens")
                 options.max_output_tokens = std::get<std::int64_t>(value);
         };
         for (const auto& field : fields)

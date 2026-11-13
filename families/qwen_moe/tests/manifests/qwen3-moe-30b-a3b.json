@@ -1,6 +1,7 @@
 {
   "name": "qwen3-moe-30b-a3b",
   "hf_id": "Qwen/Qwen3-30B-A3B",
+  "hf_revision": "ad44e777bcd18fa416d9da3bd8f70d33ebb85d39",
   "bundle": "qwen3-moe-30b-a3b.bundle",
   "family": "qwen_moe",
   "task": "text_generation",

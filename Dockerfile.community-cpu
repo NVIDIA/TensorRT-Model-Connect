@@ -3,9 +3,9 @@
 
 # Public, GPU-free source validation image. It contains the CUDA/TensorRT SDK
 # needed to compile the CLI, but runtime containers receive no GPU devices.
-ARG CUDA_IMAGE=nvidia/cuda:13.3.0-base-ubuntu24.04@sha256:bcf7d05f0b13b9bbb86d9a4cd039d331894b8f1145ad009d1af75023bcd1dc5c
-ARG TENSORRT_VERSION=11.1.0.106
-ARG TENSORRT_APT_VERSION=11.1.0.106-1+cuda13.3
+ARG CUDA_IMAGE=nvidia/cuda:13.4.3-base-ubuntu24.04@sha256:07adb6792c59025f2c45bfb1a3f1d1148bf6d48bf2326d604a6b2e24c4f04d6f
+ARG TENSORRT_VERSION=11.4.0.106
+ARG TENSORRT_APT_VERSION=11.4.0.106-1+cuda13.4
 FROM ${CUDA_IMAGE}
 
 ARG TENSORRT_VERSION
@@ -20,19 +20,20 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       build-essential \
       cmake \
-      cuda-cudart-dev-13-3 \
-      cuda-nvcc-13-3 \
-      cuda-nvrtc-dev-13-3 \
+      cuda-cudart-dev-13-4 \
+      cuda-nvcc-13-4 \
+      cuda-nvrtc-dev-13-4 \
       git \
       jq \
       ninja-build \
       nlohmann-json3-dev \
+      libicu-dev \
       pkg-config \
       python3.12 \
       python3.12-dev \
       python3.12-venv \
-      libcublas-dev-13-3 \
-      libcurand-dev-13-3 \
+      libcublas-dev-13-4 \
+      libcurand-dev-13-4 \
       "libnvinfer-dev=${TENSORRT_APT_VERSION}" \
       "libnvinfer-headers-dev=${TENSORRT_APT_VERSION}" \
       "libnvinfer-headers-plugin-dev=${TENSORRT_APT_VERSION}" \

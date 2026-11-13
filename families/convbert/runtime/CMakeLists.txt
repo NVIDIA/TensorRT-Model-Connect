@@ -35,3 +35,14 @@ set_target_properties(trtmc_model_convbert PROPERTIES
 install(TARGETS trtmc_model_convbert
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_convbert_sparse_token_ids
+    ${PROJECT_SOURCE_DIR}/families/convbert/tests/cpp/test_sparse_token_ids.cpp
+    wordpiece_tokenizer.cpp
+  )
+  target_include_directories(test_convbert_sparse_token_ids PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(test_convbert_sparse_token_ids PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_convbert_sparse_token_ids PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME convbert_sparse_token_ids COMMAND test_convbert_sparse_token_ids)
+endif()

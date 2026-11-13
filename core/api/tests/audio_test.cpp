@@ -42,7 +42,7 @@ void write_bundle(const std::filesystem::path& path, const std::string& mode) {
 }
 
 void test_stateless(const trtmc::Model& model, trtmc::AudioView audio) {
-    check(model.tasks().size() == 13, "all stateless audio contracts are discoverable");
+    check(model.tasks().size() == 14, "all stateless audio contracts are discoverable");
     auto generated = model.task<trtmc::TextToAudio>().run({"wind"}, {{"preset", "calm"}});
     check(generated.channels() == 2 && generated.sample_rate() == 24000 &&
               generated.frame_count() == 2,
@@ -75,6 +75,11 @@ void test_stateless(const trtmc::Model& model, trtmc::AudioView audio) {
     check(translated.text() == "translate:fr->de!", "speech translation keeps both language roles");
     check(model.task<trtmc::SpeechTranslation>().run({audio}).text() == "translate:auto->en!",
           "speech translation family defaults work when languages omitted");
+    auto events = model.task<trtmc::AudioToClassScores>().run({audio});
+    const std::vector<std::string_view> event_labels{"Speech", "Music", "Silence"};
+    check(events.labels() == event_labels && events.scores()[0] == 1.5F &&
+              events.kind() == TRTMC_SCORE_LOGIT && events.vocabulary_id().empty(),
+          "audio class scores stay raw multi-label logits over named sound events");
     auto language = model.task<trtmc::AudioLanguageIdentification>().run({audio});
     check(language.labels() == std::vector<std::string_view>{"en", "fr"} &&
               language.scores()[0] == 0.75F && language.kind() == TRTMC_SCORE_PROBABILITY &&
@@ -481,6 +486,14 @@ int main(int argc, char** argv) {
               },
               TRTMC_INTERNAL_ERROR),
           "language identification cannot return unlabeled ordinal scores");
+    check(rejects(
+              [&] {
+                  (void)trtmc::Model::load(bad_labels.string(), options)
+                      .task<trtmc::AudioToClassScores>()
+                      .run({audio});
+              },
+              TRTMC_INTERNAL_ERROR),
+          "audio class scores without a vocabulary cannot leave a class unnamed");
     auto retained = [&] {
         const auto temporary = trtmc::Model::load(full.string(), options);
         return temporary.task<trtmc::TextToAudio>().run({"wind"});

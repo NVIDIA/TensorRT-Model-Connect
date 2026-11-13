@@ -82,16 +82,21 @@ def generated_audio_metrics(
     expected_rms = float(np.sqrt(np.mean(expected * expected)))
     rms_ratio = actual_rms / max(expected_rms, 1.0e-12)
     length = min(actual.size, expected.size)
-    # Compare a bounded aligned prefix; generation duration is gated separately.
+    # Bounded aligned windows that cover the whole common length (the last one ends at it), so a
+    # corrupted tail cannot hide behind a matching opening; the worst window is reported.
     fft_size = min(length, 262144)
     window = np.hanning(fft_size)
-    left = np.log1p(np.abs(np.fft.rfft(actual[:fft_size] * window)))
-    right = np.log1p(np.abs(np.fft.rfft(expected[:fft_size] * window)))
-    log_spectral_distance = float(np.sqrt(np.mean((left - right) ** 2)))
+    starts = sorted({*range(0, length - fft_size + 1, fft_size), length - fft_size})
+    distances = []
+    for start in starts:
+        left = np.log1p(np.abs(np.fft.rfft(actual[start:start + fft_size] * window)))
+        right = np.log1p(np.abs(np.fft.rfft(expected[start:start + fft_size] * window)))
+        distances.append(float(np.sqrt(np.mean((left - right) ** 2))))
     return {
         "duration_ratio": float(duration_ratio),
         "rms_ratio": float(rms_ratio),
-        "log_spectral_distance": log_spectral_distance,
+        "log_spectral_distance": max(distances),
+        "spectral_windows": float(len(distances)),
     }
 
 

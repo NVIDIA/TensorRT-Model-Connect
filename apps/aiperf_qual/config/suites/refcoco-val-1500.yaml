@@ -1,0 +1,33 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# RefCOCO val (lmms-lab/RefCOCO, pinned): one referring expression per image (independent pairs), 1,500 images in
+# seeded order; gold is the object's box, scored as IoU >= 0.5 of the first predicted box.
+suite: refcoco-val-1500
+version: 1
+source:
+  kind: hf_dataset
+  dataset: lmms-lab/RefCOCO
+  split: val
+  revision: a5dff0b3194715fda69b2d6a0d2aaafb41eaa407
+  data_files: {val: data/val-*.parquet}
+  image_column: image
+  label_column: bbox
+  label_with_image_size: true
+  columns: [answer]
+  cluster_column: file_name
+  one_per_cluster: true
+selection: {method: seeded, count: 1500}
+fields: {answer.0: prompt, image: image_path}
+prompt_prefix: 'Locate a single instance that matches the following description: '
+prompt_suffix: .
+request:
+  max_new_tokens: 32
+  temperature: 1.0
+  top_k: 1
+  top_p: 1.0
+  min_p: 0.0
+  seed: -1
+  repetition_penalty: 1.0
+  use_chat_template: false
+  enable_thinking: true

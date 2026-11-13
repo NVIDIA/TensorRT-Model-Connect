@@ -5,14 +5,17 @@
 
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace trtmc {
 
 // Runtime shape and token contract for a GLM-ASR bundle. Every field is read
-// from the bundle's config.json; the defaults describe GLM-ASR-Nano-2512 so a
-// bundle that predates a field still loads.
+// from the bundle's runtime.json; shape defaults describe GLM-ASR-Nano-2512.
+// The complete stop-token list is required, including for an older bundle.
 struct GlmAsrConfig {
     // Mel front-end, which follows the Whisper feature extractor.
     int32_t mel_num_bins{128};
@@ -44,7 +47,21 @@ struct GlmAsrConfig {
 
     // Decoder vocabulary and stopping condition.
     int32_t vocab_size{59264};
-    int32_t eos_token_id{59246};
+    std::vector<int32_t> eos_token_ids;
+
+    void validate_stop_tokens() const {
+        if (eos_token_ids.empty())
+            throw std::invalid_argument(
+                "glmasr bundle requires nonempty eot_token_ids; rebuild the bundle");
+        for (int32_t token : eos_token_ids)
+            if (token < 0 || token >= vocab_size)
+                throw std::invalid_argument(
+                    "glmasr eot_token_ids contains a token outside the vocabulary");
+    }
+
+    bool is_eos_token(int32_t token) const {
+        return std::find(eos_token_ids.begin(), eos_token_ids.end(), token) != eos_token_ids.end();
+    }
 
     std::string transcription_prompt{"Please transcribe this audio into text"};
 };

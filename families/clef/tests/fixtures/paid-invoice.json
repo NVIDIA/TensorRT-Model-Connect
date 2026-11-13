@@ -1,0 +1,12 @@
+{
+  "model": "clef",
+  "state": {"invoice": {"vendor": "Acme", "total": 250.0, "currency": "USD", "status": "paid"}},
+  "questions": {
+    "status": {
+      "type": "choice",
+      "instructions": "What is the invoice status?",
+      "criteria": {"paid": "Invoice is paid.", "overdue": "Invoice is past due.", "draft": "Not sent."}
+    },
+    "large": {"type": "noul", "instructions": "Is the total above 1000 USD?"}
+  }
+}

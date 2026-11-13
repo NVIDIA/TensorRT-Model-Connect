@@ -273,6 +273,7 @@ def add_attention_block(
         causal=False,
         mask=mask_4d,
         scale=attention_scale,
+        fp32_scores=quant_ctx is not None,
     )
 
     # Output projection

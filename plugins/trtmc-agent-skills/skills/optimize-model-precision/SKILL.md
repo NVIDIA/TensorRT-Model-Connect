@@ -45,7 +45,7 @@ trtmc-bench run --model <model> --case <case> \
   --output <result-dir>
 ```
 
-Use `python3 -m qualification_tests.benchmark_qualification.performance` when the claim targets a checked-in release entry.
+Use `trtmc-aiperf-qual` (`apps/aiperf_qual`) when the claim targets a release comparison against the native model.
 Report every attempt in a compact table, including effective request values,
 correctness, measured objective, confounders, and unrun targets. It is valid
 for the original configuration to remain the best qualified result.

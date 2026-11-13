@@ -7,6 +7,7 @@ add_library(trtmc_model_nemotron_h SHARED
   distributed_runtime.cpp
   hybrid_state.cpp
   kv_cache.cpp
+  paired.cpp
   pipeline.cpp
   plugin.cpp
   plugin_helpers.cpp
@@ -57,3 +58,5 @@ if(TRTMC_BUILD_TESTS)
   )
   add_test(NAME ${test_name} COMMAND ${test_name})
 endif()
+
+include(edge_llm/Adapter.cmake)

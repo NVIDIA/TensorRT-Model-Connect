@@ -9,6 +9,8 @@ import json
 import re
 from pathlib import Path
 
+from tools.ci.e2e import SDK_CONSUMER_LANGUAGES
+
 
 REPO = Path(__file__).resolve().parents[2]
 FAMILIES = REPO / "families"
@@ -192,6 +194,16 @@ def _family_local_imports(
     return imports
 
 
+# A family's code that only validates it and never builds or runs it: its tests, and the unconverted model's
+# pipeline that the AIPerf qualification loads by path (reference/: adapter.py, prepare.py, inputs.py).
+VALIDATION_DIRECTORIES = ("tests", "reference")
+
+
+def _is_family_validation(family: Path, path: Path) -> bool:
+    parts = path.relative_to(family).parts
+    return "tests" in parts or (len(parts) > 1 and parts[0] in VALIDATION_DIRECTORIES)
+
+
 def _reachable_family_python(family: Path) -> set[Path]:
     modules = {
         _family_module_name(family, path): path
@@ -206,7 +218,7 @@ def _reachable_family_python(family: Path) -> set[Path]:
     root_paths = [
         family / "model.py",
         family / "support.py",
-        *(family / "tests").rglob("*.py"),
+        *(path for directory in VALIDATION_DIRECTORIES for path in (family / directory).rglob("*.py")),
     ]
     pending = [_family_module_name(family, path) for path in root_paths if path.is_file()]
     declaration = family / "cli.json"
@@ -365,6 +377,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/builder/tensorrt_model_connect/graph_transform.py",
         "core/builder/tensorrt_model_connect/family_cli.py",
         "core/builder/tensorrt_model_connect/model_support.py",
+        "core/builder/tensorrt_model_connect/provenance.py",
         "core/builder/tests/__init__.py",
         "core/builder/tests/test_build.py",
         "core/builder/tests/test_build_cli.py",
@@ -374,6 +387,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/builder/tests/test_graph_transform.py",
         "core/builder/tests/test_family_cli.py",
         "core/builder/tests/test_model_support.py",
+        "core/builder/tests/test_provenance.py",
     }
     expected_native = {
         "core/runtime/bundle/bundle_format.cpp",
@@ -410,6 +424,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "core/runtime/include/trtmc/internal/model.h",
         "core/runtime/include/trtmc/internal/numeric.h",
         "core/runtime/include/trtmc/internal/perception.h",
+        "core/runtime/include/trtmc/internal/point_cloud.h",
         "core/runtime/include/trtmc/internal/recurrent.h",
         "core/runtime/include/trtmc/internal/scores.h",
         "core/runtime/include/trtmc/internal/speech.h",
@@ -485,6 +500,7 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     for group in (
         "audio", "features", "numeric", "stream", "video", "perception",
         "language", "tracking", "speech", "action", "recurrent", "structure",
+        "point_cloud",
     ):
         expected_api.update(
             {
@@ -510,61 +526,6 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/model_benchmark.py",
         "tools/pr_metadata.py",
         "tools/test_impact.py",
-        "qualification_tests/benchmark_qualification/__init__.py",
-        "qualification_tests/benchmark_qualification/accuracy.py",
-        "qualification_tests/benchmark_qualification/benchmarks/audio_generation_model_performance.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/audio_generation_pipeline_performance.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/beans_image_feature_knn.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/embedding_performance.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/encoder_performance.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/etth1_forecast_parity.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/flores200_en_fr_seq2seq.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/flores200_en_fr_translation.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/humaneval_continuation.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/image_classification_performance.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/image_features_performance.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/imagenette_classification.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/coco2017_object_detection.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/imagenette_localization_parity.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/imagenette_prompted_segmentation_parity.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/imagenette_segmentation_parity.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/imagenette_text_prompted_instance_parity.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/imagenette_vision_language_parity.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/librispeech_transcription.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/media_generation_performance.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/metric_geometry_parity.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/metric_geometry_performance.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/mmlu_continuation.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/object_detection_performance.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/ocrbench_v2_parity.yaml",
-                    "qualification_tests/benchmark_qualification/benchmarks/reranking_performance.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/robot_action_parity.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/robot_action_performance.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/newstest2019_en_ru_translation.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/stsbenchmark_embedding_parity.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/stsbenchmark_reranking_parity.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/task_output_parity.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/speech_nemo_performance.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/speech_transformer_performance.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/stereo_disparity_parity.yaml",
-                "qualification_tests/benchmark_qualification/benchmarks/stereo_disparity_performance.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/text_generation_performance.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/text_prompted_segmentation_performance.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/vision_language_pipeline_performance.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/vision_language_performance.yaml",
-            "qualification_tests/benchmark_qualification/benchmarks/semantic_segmentation_performance.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/time_series_performance.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/wikitext103_continuation.yaml",
-        "qualification_tests/benchmark_qualification/benchmarks/wmt14_en_de_translation.yaml",
-        "qualification_tests/benchmark_qualification/catalog.py",
-        "qualification_tests/benchmark_qualification/datasets.py",
-        "qualification_tests/benchmark_qualification/performance/qualification.py",
-            "qualification_tests/benchmark_qualification/references/hf_encoder.py",
-            "qualification_tests/benchmark_qualification/references/hf_text_generation.py",
-            "qualification_tests/benchmark_qualification/references/speech_io.py",
-            "qualification_tests/benchmark_qualification/references/timm_image_classification.py",
-        "qualification_tests/benchmark_qualification/runtime.py",
-        "tools/prepare_coco_detection_dataset.py",
         "tools/ci/__init__.py",
         "tools/ci/__main__.py",
         "tools/ci/container.py",
@@ -578,10 +539,6 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/ci/quality.py",
         "tools/ci/stage.py",
     }
-    migrated_qualification = {
-        path for path in expected_tools if path.startswith("qualification_tests/")
-    }
-    expected_tools -= migrated_qualification
     expected_tool_tests = {
         "tools/tests/__init__.py",
         "tools/tests/test_architecture.py",
@@ -596,42 +553,18 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
         "tools/tests/test_new_ci.py",
         "tools/tests/test_model_benchmark.py",
         "tools/tests/test_pr_metadata.py",
+        "tools/tests/test_process_github_files.py",
         "tools/tests/test_public_source_hygiene.py",
     }
-    expected_qualification = migrated_qualification | {
-        "qualification_tests/__init__.py",
-        "qualification_tests/benchmark_qualification/__init__.py",
-        "qualification_tests/benchmark_qualification/performance/__init__.py",
-        "qualification_tests/benchmark_qualification/performance/__main__.py",
-        "qualification_tests/benchmark_qualification/performance/README.md",
-        "qualification_tests/benchmark_qualification/performance/config/environments/auto-thor.yaml",
-        "qualification_tests/benchmark_qualification/performance/config/environments/gb300.yaml",
-        "qualification_tests/benchmark_qualification/performance/config/environments/l4t-thor.yaml",
-        "qualification_tests/benchmark_qualification/performance/config/release.yaml",
-        "qualification_tests/benchmark_qualification/performance/config/requirements.txt",
-        "qualification_tests/benchmark_qualification/performance/matrix.py",
-        "qualification_tests/benchmark_qualification/performance/reference_harness.py",
-        "qualification_tests/benchmark_qualification/performance/reference_protocol.py",
-        "qualification_tests/benchmark_qualification/performance/reporting.py",
-        "qualification_tests/benchmark_qualification/performance/references/__init__.py",
-        "qualification_tests/benchmark_qualification/performance/references/audio_reference.py",
-        "qualification_tests/benchmark_qualification/performance/references/hf_transformers.py",
-        "qualification_tests/benchmark_qualification/performance/references/generic_reference.py",
-        "qualification_tests/benchmark_qualification/performance/references/timing_contracts.py",
-        "qualification_tests/benchmark_qualification/performance/runner.py",
-        "qualification_tests/benchmark_qualification/performance/stability.py",
-        "qualification_tests/benchmark_qualification/performance/types.py",
-        "qualification_tests/benchmark_qualification/performance/tests/__init__.py",
-        "qualification_tests/benchmark_qualification/performance/tests/test_diffusers_semantic_reference.py",
-        "qualification_tests/benchmark_qualification/performance/tests/test_family_performance.py",
-        "qualification_tests/benchmark_qualification/performance/tests/test_offline_speech_contract.py",
-        "qualification_tests/benchmark_qualification/performance/tests/test_perf_matrix.py",
-        "qualification_tests/benchmark_qualification/performance/tests/test_reference_protocol.py",
-        "qualification_tests/benchmark_qualification/performance/tests/test_reporting.py",
-        "qualification_tests/benchmark_qualification/performance/tests/test_structured_output_contracts.py",
-        "qualification_tests/benchmark_qualification/performance/tests/test_timing_contracts.py",
+    expected_cmake = {
+        "cmake/trtmcConfig.cmake.in",
+        "cmake/edge_llm/EdgeLLM.cmake",
+        "cmake/edge_llm/CheckNative.cmake",
+        "cmake/edge_llm/EdgeLLMConfig.cmake.in",
+        "cmake/edge_llm/Install.cmake.in",
+        "cmake/edge_llm/Prepare.cmake.in",
+        "cmake/edge_llm/README.md",
     }
-    expected_cmake = {"cmake/trtmcConfig.cmake.in"}
     expected_third_party = {
         "third_party/stb/stb_image.h",
         "third_party/stb/stb_image_resize2.h",
@@ -652,7 +585,6 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     tool_tests = {path for path in tool_files if path.startswith("tools/tests/")}
     assert tool_files - tool_tests == expected_tools
     assert tool_tests == expected_tool_tests
-    assert files("qualification_tests") == expected_qualification
     assert files("cmake") == expected_cmake
     assert files("third_party") == expected_third_party
 
@@ -703,9 +635,7 @@ def test_applications_depend_only_on_public_model_connect_surfaces() -> None:
         REPO / "apps",
         REPO / "examples",
     )
-    application_files = [path for root in application_roots for path in root.rglob("*")] + [
-        REPO / "qualification_tests/benchmark_qualification/performance/matrix.py"
-    ]
+    application_files = [path for root in application_roots for path in root.rglob("*")]
     for path in application_files:
         if not path.is_file() or "__pycache__" in path.parts:
             continue
@@ -1093,7 +1023,7 @@ def test_reachable_family_python_has_no_environment_or_profile_side_channel() ->
         if profile_requirements.is_dir() and any(profile_requirements.iterdir()):
             violations.append(f"{family.name}:python_profile_requirements")
         for path in family.rglob("*.py"):
-            if "tests" in path.relative_to(family).parts:
+            if _is_family_validation(family, path):
                 continue
             source = path.read_text(encoding="utf-8")
             for token in forbidden_source:
@@ -1121,11 +1051,15 @@ def test_dependency_declarations_are_thin_and_family_owned() -> None:
     optional = pyproject.split("[project.optional-dependencies]", 1)[1].split("\n[", 1)[0]
     assert set(re.findall(r"^([a-z][a-z0-9_-]*)\s*=", optional, re.MULTILINE)) == {
         "cutedsl",
+        "edgellm",
         "serve",
         "test",
     }
+    assert 'edgellm = ["tensorrt-edgellm==0.11.0"]' in optional
 
-    requirements = sorted(FAMILIES.glob("*/requirements.txt"))
+    requirements = sorted(FAMILIES.glob("*/requirements.txt")) + sorted(
+        FAMILIES.glob("*/tests/requirements.txt")
+    )
     assert requirements
     for path in requirements:
         lines = dependency_lines(path)
@@ -1143,7 +1077,7 @@ def test_dependency_declarations_are_thin_and_family_owned() -> None:
         path.relative_to(REPO)
         for family in family_dirs()
         for path in family.rglob("*requirements*.txt")
-        if path != family / "requirements.txt"
+        if path not in {family / "requirements.txt", family / "tests/requirements.txt"}
     ]
     assert nested == []
 
@@ -1587,17 +1521,22 @@ def test_family_tp_runtimes_load_nccl_only_for_collective_communicators() -> Non
             if 'getenv("RANK")' in source:
                 violations.append(f"{path.relative_to(REPO)}:RANK")
             loads_nccl = 'dlopen("libnccl.so.2"' in source
-            initializes_nccl = "ncclCommInitRank" in source
+            initializes_nccl = "ncclCommInitRank" in source or "ncclCommInitAll" in source
             if loads_nccl and not initializes_nccl:
                 violations.append(f"{path.relative_to(REPO)}:NCCL-without-communicator")
             if initializes_nccl:
                 communicator_implementations += 1
-                for token in (
-                    '"OMPI_COMM_WORLD_SIZE"',
-                    '"OMPI_COMM_WORLD_RANK"',
-                    '"OMPI_COMM_WORLD_LOCAL_RANK"',
-                    'dlopen("libnccl.so.2"',
-                ):
+                tokens = ['dlopen("libnccl.so.2"']
+                # Single-process ncclCommInitAll does not need MPI rank discovery.
+                if "ncclCommInitRank" in source:
+                    tokens.extend(
+                        (
+                            '"OMPI_COMM_WORLD_SIZE"',
+                            '"OMPI_COMM_WORLD_RANK"',
+                            '"OMPI_COMM_WORLD_LOCAL_RANK"',
+                        )
+                    )
+                for token in tokens:
                     if token not in source:
                         violations.append(f"{path.relative_to(REPO)}:missing:{token}")
 
@@ -1608,7 +1547,7 @@ def test_family_tp_runtimes_load_nccl_only_for_collective_communicators() -> Non
             if "tests" not in path.relative_to(family).parts
         )
         builds_collectives = "add_dist_collective" in build_source
-        initializes_nccl = "ncclCommInitRank" in runtime
+        initializes_nccl = "ncclCommInitRank" in runtime or "ncclCommInitAll" in runtime
         passes_communicator = "distributed_communicator" in runtime
         if builds_collectives != initializes_nccl or builds_collectives != passes_communicator:
             violations.append(f"{family.name}:collective-runtime-mismatch")
@@ -2086,6 +2025,25 @@ def test_every_family_owns_at_least_one_explicit_premerge_case() -> None:
     assert violations == []
 
 
+def test_remote_manifests_pin_one_exact_checkpoint_revision() -> None:
+    violations: list[str] = []
+    revisions: dict[str, set[str]] = {}
+    for path in sorted(FAMILIES.glob("*/tests/manifests/*.json")):
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        if "hf_id" not in manifest:
+            continue
+        revision = manifest.get("hf_revision")
+        if not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+            violations.append(f"{path.relative_to(REPO)}:hf_revision")
+            continue
+        revisions.setdefault(manifest["hf_id"], set()).add(revision)
+    # Variants of one checkpoint must validate the same immutable snapshot.
+    violations.extend(
+        f"{checkpoint}:{sorted(pins)}" for checkpoint, pins in revisions.items() if len(pins) > 1
+    )
+    assert violations == []
+
+
 def test_threshold_sidecars_are_optional_and_direct() -> None:
     violations: list[str] = []
     for family in family_dirs():
@@ -2179,3 +2137,19 @@ def test_builder_config_policy_guard_rejects_control_flow_gaps() -> None:
     assert all(
         _builder_config_policy_violations(source, "adversarial.py") for source in adversarial
     )
+
+
+def test_family_sdk_consumers_define_the_targets_ci_builds() -> None:
+    """CI builds ``tests/sdk_consumer.<language>`` as ``test_<family>_sdk_<language>``."""
+    violations: list[str] = []
+    for family in family_dirs():
+        cmake = family / "runtime/CMakeLists.txt"
+        text = cmake.read_text(encoding="utf-8") if cmake.is_file() else ""
+        for language in SDK_CONSUMER_LANGUAGES:
+            if not (family / "tests" / f"sdk_consumer.{language}").is_file():
+                continue
+            # Accept a literal target or the shared foreach(_language IN ITEMS c cpp) form.
+            target = rf"add_executable\(\s*test_{re.escape(family.name)}_sdk_(?:{language}\b|\$\{{)"
+            if not re.search(target, text):
+                violations.append(f"{family.name}:test_{family.name}_sdk_{language}")
+    assert violations == []

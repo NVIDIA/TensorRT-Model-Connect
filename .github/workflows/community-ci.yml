@@ -8,13 +8,14 @@ run-name: >-
 
 # Stable keeps the existing pull_request pipeline. Trusted metadata jobs pair
 # its immutable snapshot with the optional Dev execution of this same workflow.
+# PR Metadata handles ready_for_review without rerunning Community CI.
 on:
   pull_request_target:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened]
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
     inputs:
       pr_number:

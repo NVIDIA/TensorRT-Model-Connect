@@ -24,10 +24,11 @@ from .parallel import ParallelConfig
 from .parallel import normalize_parallel_config
 from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
 from .standard_decoder_builder import build_standard_decoder_engine
+from .support import LEGACY_TEXT_MODEL_TYPES as _SUPPORTED_MODEL_TYPES
 
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
+    from .build_request import BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
@@ -164,6 +165,7 @@ class _GemmaModel:
         config: ModelConfig,
         *,
         precision: str = "fp32",
+        quant_ctx=None,
     ) -> WeightDict:
         readers = _open_safetensors(Path(model_dir))
         model_prefix = _decoder_prefix(readers)
@@ -171,7 +173,11 @@ class _GemmaModel:
         if config.vocab_size <= 0:
             config.vocab_size = _embedding_vocab_size(readers, model_prefix)
         weights = load_standard_weights(
-            model_dir, config, precision=precision, model_prefix=model_prefix
+            model_dir,
+            config,
+            precision=precision,
+            model_prefix=model_prefix,
+            quant_ctx=quant_ctx,
         )
 
         # Fix 1: Gemma uses (1 + gamma) * normalized instead of gamma * normalized.
@@ -216,7 +222,7 @@ class _GemmaModel:
         quant_ctx=None,
         verbose: bool = False,
         parallel_config=None,
-    ) -> bytes:
+    ) -> memoryview | bytes:
         activation = _checkpoint_gated_activation(config)
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
@@ -293,9 +299,6 @@ _GEMMA3_MODEL_TYPES = frozenset({"gemma3", "gemma3_text"})
 _FP16_UNSAFE_MODEL_TYPES = _GEMMA3_MODEL_TYPES
 
 
-_SUPPORTED_MODEL_TYPES = frozenset({"gemma", "gemma2"}) | _GEMMA3_MODEL_TYPES
-
-
 def _positive_int(value: object, name: str) -> int:
     if isinstance(value, bool):
         raise ValueError(f"{name} must be a positive integer")
@@ -359,8 +362,75 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
     return runtime
 
 
+# The split layout stores the weights twice: a prefill engine with a dynamic
+# sequence axis plus a decode engine with a static Sq=1 graph. That duplication
+# buys decode throughput - measured with apps/benchmark at about 6% on
+# gemma-3-4b over 200 tokens - and it is worth paying while the pair fits.
+#
+# It stops being a trade when the pair cannot be loaded. The qualification
+# target is an L40S, which reports 46068 MiB, so about 45 GiB total and roughly
+# 44 GiB once the driver and CUDA context are accounted for.
+#
+# 19 GiB per engine puts a pair at 38 GiB and leaves about 6 GiB for the KV
+# cache, activations and TensorRT scratch. Measured with the estimator below:
+# gemma-2-2b 4.9 GiB, gemma-3-270m 0.5 GiB, gemma-3-1b 2.0 GiB, gemma-3-4b
+# 8.9 GiB, gemma-3-12b 25.0 GiB, gemma-3-27b 55.6 GiB. So everything up to 4b
+# keeps the split pair, while 12b and 27b build a single plan - 12b's pair is
+# 50 GiB and would not load on the target device at all.
+#
+# Erring low is safe and erring high is not: falling back unnecessarily costs
+# about 6% of decode, while staying on split when the pair does not fit cannot
+# be loaded.
+_MAX_SPLIT_ENGINE_BYTES = 19 * 1024**3
+
+# A serialized plan runs a little over the raw weights. Checked against two
+# measured points: gemma-3-4b's engines are 8.5 GiB each and this returns
+# 8.9 GiB; TensorRT asked 52.9 GiB for gemma-3-27b and this returns 55.6 GiB.
+_PLAN_OVERHEAD = 1.05
+
+
+def _decoder_engine_bytes(weights: "WeightDict", precision: str, quant_ctx=None) -> int:
+    """Roughly what one decoder engine will occupy on the device."""
+    element = 2 if str(precision).lower() in {"fp16", "bf16"} else 4
+    total = 0
+    for name, value in weights.items():
+        size = int(getattr(value, "size", 0))
+        # FP8 projections are stored at one byte per element.
+        quantized = quant_ctx is not None and quant_ctx.should_quantize(name)
+        total += size * (1 if quantized else element)
+    return int(total * _PLAN_OVERHEAD)
+
+
+def _build_quant_context(model_dir: Path, config: ModelConfig):
+    """Self-quantize the BF16 checkpoint's projections to FP8 (see quantization.py)."""
+    from . import graph_ops
+    from .quantization import calibrate_gemma_fp8
+
+    readers = _open_safetensors(model_dir)
+    model_prefix = _decoder_prefix(readers)
+    _apply_gemma3_config_defaults(config, readers, model_prefix)
+    return calibrate_gemma_fp8(model_dir, config, graph_ops, model_prefix=model_prefix)
+
+
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Gemma bundle through family-owned code only."""
+    from .build_request import coerce_request
+
+    request = coerce_request(request)
+    from .edge_llm.config import GemmaBuildRequest
+
+    if isinstance(request, GemmaBuildRequest) and request.execution is not None:
+        from .edge_llm.builder import build as build_pair
+
+        request.execution.validate_local()
+        build_pair(request, writer, request.execution)
+        return
+
+    from .edge_llm.standalone import try_build
+
+    if try_build(request, writer):
+        return
+
     if request.dynamic_kv_cache:
         raise NotImplementedError("gemma does not support dynamic_kv_cache")
 
@@ -379,11 +449,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
+    model_dir = Path(request.model_dir)
+    config = ModelConfig.from_dir(model_dir)
+    if config.model_type in {"gemma4", "gemma4_text", "gemma4_unified", "gemma4_unified_text"}:
+        from .gemma4_text import build as build_gemma4
+
+        build_gemma4(request, writer, config)
+        return
+
     if request.task != "text_generation":
         raise ValueError("gemma supports only task=text_generation")
 
-    model_dir = Path(request.model_dir)
-    config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower() not in _SUPPORTED_MODEL_TYPES:
         raise ValueError(f"Gemma does not support model_type={config.model_type!r}")
     precision = str(request.precision).lower()
@@ -412,10 +488,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("Gemma max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Gemma has no qualified family-owned quantized build")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(f"gemma does not support quantization={request.quantization!r}")
+    quantized = request.quantization == "fp8"
+    if quantized and precision not in {"fp16", "bf16"}:
+        raise NotImplementedError("gemma fp8 quantization requires precision fp16 or bf16")
+    if quantized and request.tensor_parallel_size != 1:
+        raise NotImplementedError("gemma fp8 quantization does not support tensor parallelism")
     if request.fp32_layers:
         raise NotImplementedError("Gemma does not expose mixed-precision layer selection")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Gemma does not support MTP speculative decoding")
 
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
@@ -425,8 +508,21 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_resolved_build_precision"] = precision
     config.raw["_parallel_build_enabled"] = parallel.enabled
-    weights = model.load_weights(str(model_dir), config, precision=precision)
+    quant_ctx = _build_quant_context(model_dir, config) if quantized else None
+    weights = model.load_weights(
+        str(model_dir), config, precision=precision, quant_ctx=quant_ctx
+    )
+    # A 27B checkpoint's host weights plus TensorRT's device copy exceed a 128 GB unified-memory GPU.
+    from .weight_spill import spilled
 
+    with spilled(weights, request.output_path):
+        _write_engines(request, writer, model, config, weights, model_dir, max_sequence_length, precision,
+                       quant_ctx, parallel)
+
+
+def _write_engines(request, writer, model, config, weights, model_dir, max_sequence_length, precision,
+                   quant_ctx, parallel) -> None:
+    """Build the decoder engines into the bundle (the spill, if any, stays in effect throughout)."""
     writer.set_header(family="gemma", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -435,11 +531,26 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 weights,
                 max_sequence_length,
                 precision=precision,
-                quant_ctx=None,
+                quant_ctx=quant_ctx,
                 verbose=bool(request.verbose),
                 parallel_config=parallel.for_rank(rank),
             )
             writer.add_bytes(f"engine.rank{rank}.plan", plan)
+        layout = "dual_profile"
+    elif _decoder_engine_bytes(weights, precision, quant_ctx) > _MAX_SPLIT_ENGINE_BYTES:
+        # One plan carrying both profiles, so the weights are stored once.
+        config.raw["_decoder_engine_role"] = "dual_profile"
+        plan = model.build_engine(
+            config,
+            weights,
+            max_sequence_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
+            verbose=bool(request.verbose),
+            parallel_config=parallel,
+        )
+        config.raw.pop("_decoder_engine_role", None)
+        writer.add_bytes("engine.plan", plan)
         layout = "dual_profile"
     else:
         config.raw["_decoder_engine_role"] = "prefill"
@@ -448,7 +559,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             parallel_config=parallel,
         )
@@ -458,7 +569,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             parallel_config=parallel,
         )

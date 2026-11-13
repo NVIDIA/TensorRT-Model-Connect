@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 from pathlib import Path
@@ -44,6 +45,22 @@ def _make_executable(path: Path) -> None:
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
 
+def _package_families(source: Path, package: Path) -> None:
+    """Keep test reference implementations out of the product wheel."""
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        excluded = {"__pycache__"}
+        if Path(directory).name == "tests":
+            excluded.update({"reference", "requirements.txt"})
+        return excluded.intersection(names)
+
+    shutil.copytree(
+        source / "families",
+        package / "families",
+        dirs_exist_ok=True,
+        ignore=ignore,
+    )
+
+
 class TensorRTModelConnectConan(ConanFile):
     name = "tensorrt-model-connect"
     version = "0.1.0"
@@ -78,6 +95,7 @@ class TensorRTModelConnectConan(ConanFile):
         build = Path(self.build_folder)
         package = Path(self.package_folder)
         module_bin = package / "tensorrt_model_connect" / "bin"
+        _package_families(source, package)
 
         subprocess.run(
             [
@@ -141,6 +159,7 @@ class TensorRTModelConnectConan(ConanFile):
             if (
                 not asset.is_file()
                 or asset.suffix in source_suffixes
+                or asset.name == "requirements.txt"
                 or "__pycache__" in asset.parts
             ):
                 continue

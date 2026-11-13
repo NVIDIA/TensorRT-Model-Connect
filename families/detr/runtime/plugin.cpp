@@ -29,6 +29,7 @@ DetrPreprocessConfig parse_config(const std::vector<char>& data) {
     config.input_image_w = json.at("input_image_w").get<std::int32_t>();
     config.shortest_edge = json.at("shortest_edge").get<std::int32_t>();
     config.longest_edge = json.at("longest_edge").get<std::int32_t>();
+    config.dynamic_image_shapes = json.value("dynamic_image_shapes", false);
     config.image_mean = json.at("image_mean").get<std::vector<float>>();
     config.image_std = json.at("image_std").get<std::vector<float>>();
     if (config.input_image_h <= 0 || config.input_image_w <= 0 || config.shortest_edge <= 0 ||

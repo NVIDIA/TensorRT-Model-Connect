@@ -1,6 +1,7 @@
 {
   "name": "qwen3-moe-tiny-random",
   "hf_id": "amd-quark/tiny-random-qwen3_moe",
+  "hf_revision": "ca2aaa9a82e9f86c09c2785b405932fe6c806c90",
   "bundle": "qwen3-moe-tiny-random.bundle",
   "family": "qwen_moe",
   "task": "text_generation",

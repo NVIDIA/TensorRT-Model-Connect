@@ -337,6 +337,18 @@ int main(int argc, char** argv) {
         request["request"] = audio_input;
         request["request"]["max_new_tokens"] = 0.5;
         run(false);
+        bundle(model, "asr_new_tokens");
+        request["selected_task"] = "speech_transcription";
+        request["request"] = {{"audio_path", wav.string()}, {"max_new_tokens", 17}};
+        result = run();
+        check(result.at("output_summary").at("decode_ms") == 17 &&
+                  result.at("output_summary").at("text") == "asr:auto!:17" &&
+                  result.at("output_summary").at("segments").at(0).at("text") == "asr:auto!:17",
+              "ASR wire token limit uses the Task's declared max_new_tokens field");
+        request["request"]["config"] = {{"max_new_tokens", 18}};
+        run(false); // Aliases cannot overwrite an explicit nested value.
+        request.erase("selected_task");
+        bundle(model, "speech_transcription");
         for (const Json& bad : std::vector<Json>{"", nullptr, 17, false}) {
             request["request"] = audio_input;
             request["request"]["language"] = bad;

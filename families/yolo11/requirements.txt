@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-Pillow
-opencv-python-headless==4.10.0.84
-ultralytics==8.3.0
+# Checkpoint tensor deserialization; upstream model code is not required.
+torch>=2.6

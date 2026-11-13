@@ -79,6 +79,10 @@ def _generated_media_metrics(
 
 _OPERATIONS = (
     OperationSpec(
+        name="decide",
+        rate_metrics=(RateMetric("questions", "questions_per_s"), RateMetric("options", "options_per_s")),
+    ),
+    OperationSpec(
         name="generate",
         rate_metrics=(RateMetric("output_tokens", "output_tokens_per_s"),),
         stage_timings=("prefill_ms", "decode_ms"),
@@ -145,6 +149,11 @@ _OPERATIONS = (
     ),
     OperationSpec(
         name="detect",
+        rate_metrics=(RateMetric("detected_images", "images_per_s"),
+                      RateMetric("detections", "detections_per_s")),
+    ),
+    OperationSpec(
+        name="detect_prompted",
         rate_metrics=(RateMetric("detected_images", "images_per_s"),
                       RateMetric("detections", "detections_per_s")),
     ),

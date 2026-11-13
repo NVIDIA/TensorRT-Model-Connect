@@ -23,8 +23,9 @@ runtime factory when debugging their semantics.
 
 To execute, place matching `libtrtmc_core.so`, `libtrtmc_runtime.so`,
 `libtrtmc_backend_<backend>.so`, and `libtrtmc_model_<family>.so` in one
-explicit runtime root. There is no registry, plugin directory, or fallback
-search path.
+runtime root: the installed runtime directory by default, or the directory
+passed with `--runtime-root`. There is no registry, plugin directory, or
+fallback search path.
 
 For a guided lab, use
 [Inspect Bundles](../tutorials/beginner/inspect-bundles.md).

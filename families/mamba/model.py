@@ -53,6 +53,7 @@ from .checkpoint_mapper import (
     _transpose_2d,
 )
 from . import graph_ops
+from . import scan_rows
 from .parallel import normalize_parallel_config
 
 
@@ -202,8 +203,14 @@ class _MambaModel:
         verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
+        prefill_rows: int | None = None,
     ) -> bytes:
         """Build TRT engine for Mamba SSM.
+
+        ``prefill_rows`` builds the prefill engine of a split bundle instead:
+        ``token_id`` is ``[S]`` with one profile ``1..prefill_rows``, every layer
+        runs its selective scan over the ``S`` rows, the logits come from the
+        last row and the present states are those after the last row.
 
         max_cache_length is accepted for the shared build signature but is not used
         by Mamba (SSM state is constant size regardless of sequence length).
@@ -219,6 +226,10 @@ class _MambaModel:
           present_ssm_0..N: float32 [1, d_inner * state_size]
         """
         parallel = normalize_parallel_config(parallel_config)
+        if prefill_rows is not None and (parallel.enabled or debug_layer_outputs):
+            raise NotImplementedError("Mamba prefill engines are single-GPU without debug outputs")
+        if prefill_rows is not None and not 1 <= prefill_rows <= scan_rows.MAX_ROWS:
+            raise ValueError(f"Mamba prefill_rows must be in 1..{scan_rows.MAX_ROWS}")
         if parallel.enabled:
             parallel.validate()
             from .tp_builder import build_mamba_tp_engine
@@ -257,7 +268,14 @@ class _MambaModel:
         # -----------------------------------------------------------
         # Inputs
         # -----------------------------------------------------------
-        token_id = network.add_input("token_id", trt.int32, (1,))
+        rows = 1 if prefill_rows is None else None
+        token_id = network.add_input("token_id", trt.int32, (1 if rows else -1,))
+        if prefill_rows is not None:
+            profile = builder.create_optimization_profile()
+            profile.set_shape(
+                "token_id", (1,), (min(PREFILL_OPT_TOKENS, prefill_rows),), (prefill_rows,)
+            )
+            trt_config.add_optimization_profile(profile)
 
         conv_state_inputs = []
         ssm_state_inputs = []
@@ -323,6 +341,7 @@ class _MambaModel:
                 conv_kernel=conv_kernel,
                 dt_rank=dt_rank,
                 dtype=work_np_dtype,
+                sequence_length=rows,
             )
 
             hidden_state = result["hidden"]
@@ -331,6 +350,10 @@ class _MambaModel:
 
             if debug_layer_outputs:
                 _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
+
+        if rows is None:
+            # Only the last row can affect the next token.
+            hidden_state = scan_rows.last_row(network, hidden_state, hidden)
 
         # -----------------------------------------------------------
         # Final norm
@@ -418,8 +441,9 @@ def _add_mamba_layer(
     conv_kernel: int,
     dt_rank: int,
     dtype: np.dtype = np.float32,
+    sequence_length: int | None = 1,
 ) -> dict[str, trt.ITensor]:
-    """Add one Mamba SSM layer.
+    """Add one Mamba SSM layer over one row, or ``S`` rows when ``sequence_length`` is None.
 
     Returns: {hidden, present_conv, present_ssm}
     """
@@ -437,6 +461,38 @@ def _add_mamba_layer(
     z = graph_ops.add_matmul_rhs_constant(
         network, normed, hidden_size, d_inner, weights[f"{prefix}.w_in_z"], dtype=dtype
     )
+    if sequence_length is None:
+        y, present_conv, present_ssm = _add_mamba_mixer_rows(
+            network,
+            x,
+            weights=weights,
+            prefix=prefix,
+            conv_state_in=conv_state_in,
+            ssm_state_in=ssm_state_in,
+            d_inner=d_inner,
+            state_size=state_size,
+            conv_kernel=conv_kernel,
+            dt_rank=dt_rank,
+            dtype=dtype,
+        )
+        if y.dtype != hidden.dtype:
+            y = network.add_cast(y, hidden.dtype).get_output(0)
+        z_activated = graph_ops.add_activation(network, z, "silu", dtype=dtype)
+        gated = network.add_elementwise(y, z_activated, trt.ElementWiseOperation.PROD)
+        out = graph_ops.add_matmul_rhs_constant(
+            network,
+            gated.get_output(0),
+            d_inner,
+            hidden_size,
+            weights[f"{prefix}.w_out"],
+            dtype=dtype,
+        )
+        residual = network.add_elementwise(hidden, out, trt.ElementWiseOperation.SUM)
+        return {
+            "hidden": residual.get_output(0),
+            "present_conv": present_conv,
+            "present_ssm": present_ssm,
+        }
 
     # ===== 3. Conv1d step =====
     # conv_state_in: [d_inner, conv_kernel]
@@ -632,6 +688,113 @@ def _add_mamba_layer(
     }
 
 
+def _add_mamba_mixer_rows(
+    network: trt.INetworkDefinition,
+    x: trt.ITensor,
+    *,
+    weights: WeightDict,
+    prefix: str,
+    conv_state_in: trt.ITensor,
+    ssm_state_in: trt.ITensor,
+    d_inner: int,
+    state_size: int,
+    conv_kernel: int,
+    dt_rank: int,
+    dtype: np.dtype,
+) -> tuple[trt.ITensor, trt.ITensor, trt.ITensor]:
+    """Conv and selective scan over ``x [S, d_inner]``: ``(y [S, d_inner] FP32, conv, ssm)``.
+
+    Same arithmetic as the one-row layer applied token by token; the scan
+    combines the rows as described in :mod:`.scan_rows`.
+    """
+    prod_op = trt.ElementWiseOperation.PROD
+
+    def fp32(tensor):
+        return (
+            tensor
+            if tensor.dtype == trt.float32
+            else network.add_cast(tensor, trt.float32).get_output(0)
+        )
+
+    conv_w = graph_ops.add_constant(
+        network, (d_inner, conv_kernel), weights[f"{prefix}.conv1d_weight"], dtype=dtype
+    )
+    conv_columns, present_conv = scan_rows.add_short_conv_rows(
+        network,
+        columns=scan_rows.shuffle(network, x, transpose=(1, 0)),
+        conv_state=conv_state_in,
+        weight=conv_w,
+        channels=d_inner,
+        kernel=conv_kernel,
+    )
+    conv_out = graph_ops.add_bias_sum(
+        network,
+        scan_rows.shuffle(network, conv_columns, transpose=(1, 0)),
+        d_inner,
+        weights[f"{prefix}.conv1d_bias"],
+        dtype=dtype,
+    )
+    activated = graph_ops.add_activation(network, conv_out, "silu", dtype=dtype)  # [S, d]
+
+    dt_in = graph_ops.add_matmul_rhs_constant(
+        network, activated, d_inner, dt_rank, weights[f"{prefix}.w_dt_in"], dtype=dtype
+    )
+    b = graph_ops.add_matmul_rhs_constant(
+        network, activated, d_inner, state_size, weights[f"{prefix}.w_B"], dtype=dtype
+    )
+    c = graph_ops.add_matmul_rhs_constant(
+        network, activated, d_inner, state_size, weights[f"{prefix}.w_C"], dtype=dtype
+    )
+    dt = graph_ops.add_matmul_rhs_constant(
+        network, dt_in, dt_rank, d_inner, weights[f"{prefix}.w_dt_out"], dtype=dtype
+    )
+    dt = fp32(
+        graph_ops.add_bias_sum(network, dt, d_inner, weights[f"{prefix}.dt_proj_bias"], dtype=dtype)
+    )
+    one = graph_ops.add_constant(network, (1, 1), np.array([1.0], dtype=np.float32))
+    dt = network.add_unary(
+        network.add_elementwise(
+            network.add_unary(dt, trt.UnaryOperation.EXP).get_output(0),
+            one,
+            trt.ElementWiseOperation.SUM,
+        ).get_output(0),
+        trt.UnaryOperation.LOG,
+    ).get_output(0)  # softplus, [S, d]
+
+    dt_3d = scan_rows.shuffle(network, dt, reshape=(-1, d_inner, 1))
+    a_const = graph_ops.add_constant(
+        network, (1, d_inner, state_size), weights[f"{prefix}.A"].reshape(1, d_inner, state_size)
+    )
+    decay = network.add_unary(
+        network.add_elementwise(dt_3d, a_const, prod_op).get_output(0), trt.UnaryOperation.EXP
+    ).get_output(0)  # exp(dt A): [S, d, n]
+    x_3d = scan_rows.shuffle(network, fp32(activated), reshape=(-1, d_inner, 1))
+    b_3d = scan_rows.shuffle(network, fp32(b), reshape=(-1, 1, state_size))
+    update = network.add_elementwise(
+        network.add_elementwise(dt_3d, b_3d, prod_op).get_output(0), x_3d, prod_op
+    ).get_output(0)  # dt B x: [S, d, n]
+    states, present_ssm = scan_rows.add_selective_scan_rows(
+        network, decay=decay, update=update, state=ssm_state_in, width=(d_inner, state_size)
+    )
+    c_3d = scan_rows.shuffle(network, fp32(c), reshape=(-1, 1, state_size))
+    y = network.add_reduce(
+        network.add_elementwise(states, c_3d, prod_op).get_output(0),
+        trt.ReduceOperation.SUM,
+        1 << 2,
+        keep_dims=False,
+    ).get_output(0)  # [S, d]
+    d_const = graph_ops.add_constant(network, (1, d_inner), weights[f"{prefix}.D"])
+    y = network.add_elementwise(
+        y,
+        network.add_elementwise(d_const, fp32(activated), prod_op).get_output(0),
+        trt.ElementWiseOperation.SUM,
+    ).get_output(0)
+    return y, present_conv, present_ssm
+
+
+# Optimum rows of the prefill engine.
+PREFILL_OPT_TOKENS = 32
+
 _BUNDLE_FILES = (
     "tokenizer.json",
     "tokenizer_config.json",
@@ -721,6 +884,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("Mamba has no qualified family-owned quantized build")
     if request.fp32_layers:
         raise NotImplementedError("Mamba does not expose mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Mamba does not support MTP speculative decoding")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
@@ -755,7 +920,19 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             parallel_config=parallel,
         )
         writer.add_bytes("engine.plan", plan)
-        layout = "single"
+        # A second engine prefills the prompt in chunks; decode keeps the one-row engine.
+        writer.add_bytes(
+            "prefill.plan",
+            model.build_engine(
+                config,
+                weights,
+                max_sequence_length,
+                precision=precision,
+                verbose=bool(request.verbose),
+                prefill_rows=scan_rows.MAX_ROWS,
+            ),
+        )
+        layout = "split"
     writer.add_json(
         "runtime.json",
         _runtime_config(

@@ -3,11 +3,12 @@ name: review-trtmc-pr
 description: >-
   Review a TensorRT-Model-Connect GitHub PR or local contributor branch against
   the current post-#1093 model-family isolation architecture, repository rules,
-  behavioral correctness, and exact-head validation evidence. Use for
-  contributor self-review before marking a PR ready, or when deciding whether
-  a community PR is compliant, decoupled, merge-ready, or needs maintainer
-  feedback. The review is read-only unless the user separately asks to publish
-  it or change the contribution.
+  behavioral correctness, third-party dependency and license obligations, and
+  exact-head validation evidence. Use for contributor self-review before
+  marking a PR ready, or when deciding whether a community PR is compliant,
+  decoupled, merge-ready, or needs maintainer feedback. The review is
+  read-only unless the user separately asks to publish it or change the
+  contribution.
 ---
 
 # Review TRTMC PR
@@ -263,6 +264,12 @@ Check that:
   are English except model data needed for multilingual validation;
 - SPDX headers, third-party notices, asset entries, and redistribution rights
   are complete;
+- every new or changed third-party package, native library, vendored or
+  adapted code, binary, fetched artifact, and model/data/media asset passes
+  the [dependency and license review](references/dependency-license-review.md),
+  including whether a copyleft obligation can reach a program or artifact that
+  also contains TensorRT; apply it even when the PR declares no dependency
+  changes;
 - the change remains focused and does not add compatibility paths, fallbacks,
   registries, speculative hooks, or unrelated cleanup.
 
@@ -319,7 +326,8 @@ For a maintainer review, return a concise review in this order:
    - the smallest correction or evidence that would resolve it.
 3. A short architecture summary covering family ownership, shared neutrality,
    one-way application dependencies, and validation ownership.
-4. Checks/evidence verified, followed by untested paths and residual risk.
+4. Checks/evidence verified, including the dependency and license result,
+   followed by untested paths and residual risk.
 5. A contributor-facing reply only when requested. Draft it in friendly,
    specific English; distinguish repository evolution from contributor error.
 
@@ -341,10 +349,12 @@ approval is pending.
 
 Use `BLOCK` for an evidence-backed incorrect result, validation weakening,
 public-contract defect, direct cross-family dependency, model semantics in
-shared implementation, or other merge blocker. Use `HUMAN REVIEW REQUIRED`
-when a material contract, consumer need, compatibility choice, or architecture
-exception cannot be resolved from available evidence. Use `PASS` only when no
-violation was found, and preserve its limits.
+shared implementation, third-party license obligation that propagates into
+TRTMC or a program containing TensorRT, or other merge blocker. Use
+`HUMAN REVIEW REQUIRED` when a material contract, consumer need, compatibility
+choice, architecture exception, or third-party license term cannot be resolved
+from available evidence. Use `PASS` only when no violation was found, and
+preserve its limits.
 
 Do not emit style-only Low findings. Consolidate repeated symptoms under one
 root cause, distinguish facts from risks, and never invent a test result or

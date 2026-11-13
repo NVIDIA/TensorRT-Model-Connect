@@ -257,7 +257,8 @@ class _TimmMobilenetv2Model:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
-        trt_config.builder_optimization_level = 1
+        # Level 3 builds a faster engine than level 1, at the cost of a longer build.
+        trt_config.builder_optimization_level = 3
         trt_config.avg_timing_iterations = 8
         trt_config.max_aux_streams = 0
         trt_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
@@ -442,6 +443,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_mobilenetv2 does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("timm_mobilenetv2 does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("timm_mobilenetv2 does not support MTP speculative decoding")
     if request.max_sequence_length not in {None, 1}:
         raise NotImplementedError("timm_mobilenetv2 supports only max_sequence_length=1")
 

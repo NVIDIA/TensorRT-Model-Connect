@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# OCRBench (1,000 questions over 10 text-recognition categories); gold is the list of accepted answers.
+suite: ocrbench-1000
+version: 1
+source:
+  kind: hf_dataset
+  dataset: echo840/OCRBench
+  split: test
+  revision: 92a54bd1384387c178d5a07140a2d85e0a3d12e1
+  prompt_column: question
+  image_column: image
+  label_column: answer
+  task_column: question_type
+selection: {method: first, count: 1000}
+fields: {prompt: prompt, image: image_path}
+request:
+  max_new_tokens: 128
+  temperature: 0.0
+  top_k: 1
+  top_p: 1.0
+  use_chat_template: true
+  enable_thinking: false

@@ -1,9 +1,10 @@
 {
   "name": "all-mpnet-base-v2",
   "hf_id": "sentence-transformers/all-mpnet-base-v2",
+  "hf_revision": "e8c3b32edf5434bc2275fc9bab85f82640a19130",
   "bundle": "all-mpnet-base-v2.bundle",
   "family": "mpnet",
-  "task": "encoding",
+  "task": "text_to_pooled_features",
   "precision": "fp16",
   "testcases": [
     {

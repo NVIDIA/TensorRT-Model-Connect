@@ -368,10 +368,8 @@ class WordPieceTokenizer final : public ITokenizer {
     }
 
     std::string token_for_id(int32_t id) const override {
-        if (id >= 0 && static_cast<size_t>(id) < mIdToToken.size()) {
-            return mIdToToken[id];
-        }
-        return "";
+        auto it = mIdToToken.find(id);
+        return it != mIdToToken.end() ? it->second : "";
     }
 
   private:
@@ -490,12 +488,11 @@ class WordPieceTokenizer final : public ITokenizer {
 
     void parse_vocab(const nlohmann::json& j) {
         auto& vocab_obj = j["model"]["vocab"];
-        size_t vocab_size = vocab_obj.size();
-        mIdToToken.resize(vocab_size);
+        mIdToToken.reserve(vocab_obj.size());
 
         for (auto& [token, id] : vocab_obj.items()) {
             int32_t token_id = id.get<int32_t>();
-            if (token_id >= 0 && token_id < static_cast<int32_t>(vocab_size)) {
+            if (token_id >= 0) {
                 mIdToToken[token_id] = token;
                 mTokenToId[token] = token_id;
             }
@@ -549,9 +546,6 @@ class WordPieceTokenizer final : public ITokenizer {
             std::string content = tok["content"].get<std::string>();
             int32_t id = tok["id"].get<int32_t>();
 
-            if (id >= 0 && static_cast<size_t>(id) >= mIdToToken.size()) {
-                mIdToToken.resize(static_cast<size_t>(id) + 1);
-            }
             if (id >= 0) {
                 mIdToToken[id] = content;
                 mTokenToId[content] = id;
@@ -631,7 +625,7 @@ class WordPieceTokenizer final : public ITokenizer {
 
     // ─── Data members ───
 
-    std::vector<std::string> mIdToToken;
+    std::unordered_map<int32_t, std::string> mIdToToken;
     std::unordered_map<std::string, int32_t> mTokenToId;
     std::unordered_set<int32_t> mSpecialIds;
     std::unordered_set<int32_t> mDecodeSkipIds; // tokens to filter during decode
