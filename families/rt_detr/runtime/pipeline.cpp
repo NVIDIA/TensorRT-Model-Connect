@@ -24,15 +24,15 @@ const Tensor& require_output(const std::unordered_map<std::string, Tensor>& outp
 } // namespace
 
 RtDetrObjectDetectionPipeline::RtDetrObjectDetectionPipeline(std::unique_ptr<ITrtModule> model,
-                                                                 RtDetrRuntimeConfig config)
+                                                             RtDetrRuntimeConfig config)
     : model_(std::move(model)), config_(std::move(config)) {
     if (!model_ || !model_->ok())
         throw std::runtime_error("RtDetrObjectDetectionPipeline: engine failed to load");
 }
 
 ObjectDetectionResult RtDetrObjectDetectionPipeline::detect(const float* pixels,
-                                                              std::int32_t height,
-                                                              std::int32_t width) {
+                                                            std::int32_t height,
+                                                            std::int32_t width) {
     auto prepared = preprocess_rt_detr_image(pixels, height, width, config_.preprocess);
 
     Tensor input;
