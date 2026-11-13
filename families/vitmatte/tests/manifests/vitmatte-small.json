@@ -1,0 +1,21 @@
+{
+  "name": "vitmatte-small-composition-1k",
+  "hf_id": "hustvl/vitmatte-small-composition-1k",
+  "hf_revision": "6a58ad7646403c1df626fbd746900aec7361ea1d",
+  "family": "vitmatte",
+  "bundle": "vitmatte-small.bundle",
+  "task": "image_trimap_to_alpha",
+  "precision": "fp32",
+  "image_height": 512,
+  "image_width": 512,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "vitmatte-small-alpha",
+      "premerge": true,
+      "image": "test_img.jpeg",
+      "max_abs_error": 5e-05,
+      "max_rmse": 1e-05
+    }
+  ]
+}
