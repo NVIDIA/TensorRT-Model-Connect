@@ -5,8 +5,6 @@
 
 #include "families/p_h3_image/runtime/tokenizer.h"
 
-#include <unicode/regex.h>
-#include <unicode/normalizer2.h>
 #include <algorithm>
 #include <cassert>
 #include <climits>
@@ -17,6 +15,8 @@
 #include <queue>
 #include <stdexcept>
 #include <string>
+#include <unicode/normalizer2.h>
+#include <unicode/regex.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -679,10 +679,13 @@ class BpeTokenizer final : public ITokenizer {
         UErrorCode nfc_status = U_ZERO_ERROR;
         const auto* nfc = icu::Normalizer2::getNFCInstance(nfc_status);
         icu::UnicodeString composed;
-        if (U_FAILURE(nfc_status)) throw std::runtime_error("P-H3-Image NFC initialization failed");
+        if (U_FAILURE(nfc_status))
+            throw std::runtime_error("P-H3-Image NFC initialization failed");
         nfc->normalize(icu::UnicodeString::fromUTF8(source), composed, nfc_status);
-        if (U_FAILURE(nfc_status)) throw std::runtime_error("P-H3-Image NFC normalization failed");
-        std::string text; composed.toUTF8String(text);
+        if (U_FAILURE(nfc_status))
+            throw std::runtime_error("P-H3-Image NFC normalization failed");
+        std::string text;
+        composed.toUTF8String(text);
         for (const auto& replacement : mLiteralReplacements) {
             std::size_t offset = 0;
             while ((offset = text.find(replacement.first, offset)) != std::string::npos) {
@@ -879,26 +882,32 @@ class BpeTokenizer final : public ITokenizer {
         std::vector<std::string> words;
         if (mRegex) {
             UErrorCode status = U_ZERO_ERROR;
-            const std::string prepared = mAddPrefixSpace && !text.empty() && text.front() != ' ' ? " " + text : text;
+            const std::string prepared =
+                mAddPrefixSpace && !text.empty() && text.front() != ' ' ? " " + text : text;
             const auto unicode = icu::UnicodeString::fromUTF8(prepared);
             std::unique_ptr<icu::RegexMatcher> matcher(mRegex->matcher(unicode, status));
-            if (U_FAILURE(status)) throw std::runtime_error("P-H3-Image tokenizer regex matcher failed");
+            if (U_FAILURE(status))
+                throw std::runtime_error("P-H3-Image tokenizer regex matcher failed");
             int32_t previous = 0;
             while (matcher->find(status)) {
                 const int32_t start = matcher->start(status), end = matcher->end(status);
                 if (start > previous) {
-                    std::string gap; unicode.tempSubStringBetween(previous, start).toUTF8String(gap);
+                    std::string gap;
+                    unicode.tempSubStringBetween(previous, start).toUTF8String(gap);
                     words.push_back(std::move(gap));
                 }
                 if (end > start) {
-                    std::string match; unicode.tempSubStringBetween(start, end).toUTF8String(match);
+                    std::string match;
+                    unicode.tempSubStringBetween(start, end).toUTF8String(match);
                     words.push_back(std::move(match));
                 }
                 previous = end;
             }
-            if (U_FAILURE(status)) throw std::runtime_error("P-H3-Image tokenizer regex matching failed");
+            if (U_FAILURE(status))
+                throw std::runtime_error("P-H3-Image tokenizer regex matching failed");
             if (previous < unicode.length()) {
-                std::string tail; unicode.tempSubString(previous).toUTF8String(tail);
+                std::string tail;
+                unicode.tempSubString(previous).toUTF8String(tail);
                 words.push_back(std::move(tail));
             }
         } else if (!mUsePreTokenizer) {
@@ -1439,8 +1448,10 @@ class BpeTokenizer final : public ITokenizer {
         mAddPrefixSpace = false;
         const auto pattern = split.at("pattern").at("Regex").get<std::string>();
         UErrorCode regex_status = U_ZERO_ERROR;
-        mRegex.reset(icu::RegexPattern::compile(icu::UnicodeString::fromUTF8(pattern), 0, regex_status));
-        if (U_FAILURE(regex_status)) throw std::runtime_error("P-H3-Image tokenizer regex compilation failed");
+        mRegex.reset(
+            icu::RegexPattern::compile(icu::UnicodeString::fromUTF8(pattern), 0, regex_status));
+        if (U_FAILURE(regex_status))
+            throw std::runtime_error("P-H3-Image tokenizer regex compilation failed");
         detect_decoder(j);
     }
 
@@ -1499,9 +1510,11 @@ class BpeTokenizer final : public ITokenizer {
             }
             return;
         }
-        if (type == "Replace" && normalizer.contains("pattern") && normalizer["pattern"].contains("String")) {
+        if (type == "Replace" && normalizer.contains("pattern") &&
+            normalizer["pattern"].contains("String")) {
             const auto pattern = normalizer["pattern"]["String"].get<std::string>();
-            if (pattern.empty()) throw std::runtime_error("P-H3-Image tokenizer replacement cannot be empty");
+            if (pattern.empty())
+                throw std::runtime_error("P-H3-Image tokenizer replacement cannot be empty");
             mLiteralReplacements.emplace_back(pattern, normalizer.at("content").get<std::string>());
             return;
         }
