@@ -87,19 +87,26 @@ def _const(network, trt, array, dtype=None):
     return network.add_cast(constant, dtype).get_output(0)
 
 
-def _linear(network, trt, hidden, weight, out_features, bias=None, dtype=None):
-    """``x @ W.T (+ b)`` with the weight as a constant operand of ``dtype``."""
+def _linear(network, trt, hidden, weight, out_features, bias=None, dtype=None, *,
+            quant=None, name=None):
+    """``x @ W.T (+ b)`` with the weight as a constant operand of ``dtype``.
+
+    With ``quant`` (a :class:`.quantization.BlockQuant`) the projection ``name``
+    becomes an FP8 matmul when it has a calibrated scale.
+    """
 
     import numpy as np
 
     array = np.asarray(weight, dtype=np.float32)
     if array.shape[0] != out_features:
         raise ValueError(f"weight has {array.shape[0]} rows, expected {out_features}")
-    operand = _const(network, trt, np.ascontiguousarray(array.T).reshape(
-        1, array.shape[1], out_features), dtype)
-    out = network.add_matrix_multiply(
-        hidden, trt.MatrixOperation.NONE, operand, trt.MatrixOperation.NONE
-    ).get_output(0)
+    out = None if quant is None else quant.linear(network, hidden, array, name)
+    if out is None:
+        operand = _const(network, trt, np.ascontiguousarray(array.T).reshape(
+            1, array.shape[1], out_features), dtype)
+        out = network.add_matrix_multiply(
+            hidden, trt.MatrixOperation.NONE, operand, trt.MatrixOperation.NONE
+        ).get_output(0)
     if bias is not None:
         offset = _const(network, trt, np.asarray(bias, dtype=np.float32).reshape(
             1, 1, out_features), dtype)
@@ -217,11 +224,13 @@ def add_attention(network, trt, hidden, weights, prefix, seq_len, cos, sin, dtyp
                    weights[f"{prefix}.attn.to_out.0.weight"], INNER_DIM, dtype=dtype)
 
 
-def add_gated_feed_forward(network, trt, hidden, weights, prefix, seq_len, dtype=None):
+def add_gated_feed_forward(network, trt, hidden, weights, prefix, seq_len, dtype=None,
+                           quant=None):
     """``ff_out(first * silu(second))`` over the two halves of ``ff_in``."""
 
     projected = _linear(network, trt, hidden, weights[f"{prefix}.ff_in.weight"],
-                        2 * FF_INNER_DIM, weights[f"{prefix}.ff_in.bias"], dtype)
+                        2 * FF_INNER_DIM, weights[f"{prefix}.ff_in.bias"], dtype,
+                        quant=quant, name=f"{prefix}.ff_in")
     first = network.add_slice(projected, (0, 0, 0), (1, seq_len, FF_INNER_DIM),
                               (1, 1, 1)).get_output(0)
     second = network.add_slice(projected, (0, 0, FF_INNER_DIM),
@@ -232,12 +241,13 @@ def add_gated_feed_forward(network, trt, hidden, weights, prefix, seq_len, dtype
                                     trt.ElementWiseOperation.PROD)
     return _linear(network, trt, gated.get_output(0),
                    weights[f"{prefix}.ff_out.weight"], INNER_DIM,
-                   weights[f"{prefix}.ff_out.bias"], dtype)
+                   weights[f"{prefix}.ff_out.bias"], dtype,
+                   quant=quant, name=f"{prefix}.ff_out")
 
 
 def add_dit(network: Any, trt: Any, latents: Any, condition: Any, timestep_embedding: Any,
             *, latent_length: int, weights: dict, num_layers: int = NUM_LAYERS,
-            dtype=None) -> Any:
+            dtype=None, quant: Any = None) -> Any:
     """Add the transformer and return the predicted velocity.
 
     ``timestep_embedding`` is the already-embedded ``(1, 1, INNER_DIM)`` prefix
@@ -246,6 +256,9 @@ def add_dit(network: Any, trt: Any, latents: Any, condition: Any, timestep_embed
     With ``dtype`` the blocks run in that type: the prefixed sequence is cast
     after ``proj_in`` and cast back to float32 before ``proj_out``. The inputs,
     the output and everything outside the blocks stay float32.
+
+    ``quant`` (FP8 builds only) quantizes the block feed-forward projections
+    that have a scale; the FP8 matmuls write the block type.
     """
 
     import numpy as np
@@ -298,7 +311,7 @@ def add_dit(network: Any, trt: Any, latents: Any, condition: Any, timestep_embed
                                 weights[f"{prefix}.norm2.weight"],
                                 weights[f"{prefix}.norm2.bias"], dtype)
         projected = add_gated_feed_forward(network, trt, normed, weights, prefix,
-                                           seq_len, dtype)
+                                           seq_len, dtype, quant)
         hidden = network.add_elementwise(hidden, projected,
                                          trt.ElementWiseOperation.SUM).get_output(0)
     if dtype is not None:

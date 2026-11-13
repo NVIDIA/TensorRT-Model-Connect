@@ -175,6 +175,10 @@ def build_standard_decoder_engine(
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config
+    if quant_ctx is not None:
+        from .quantization import configure_lm_fp8_build
+
+        configure_lm_fp8_build(trt_config)
 
     # Precision configuration
     if precision == "fp16":
