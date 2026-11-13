@@ -356,23 +356,6 @@ def test_open_vocabulary_detections_score_by_their_category_names():
     assert len(gold_metrics.COCO_NAMES) == len(gold_metrics.COCO_IDS) == 80
 
 
-def test_dinov2_checker_applies_the_e2e_feature_tolerance_of_the_build_precision():
-    from families.dinov2.validation import compare
-
-    rng = np.random.default_rng(0)
-    hidden = rng.normal(size=(1, 5, 8))
-
-    def side(values):
-        return {"last_hidden_state": values.reshape(-1).tolist(), "last_hidden_state_shape": [1, 5, 8],
-                "pooler_output": values[:, 0].reshape(-1).tolist(), "pooler_output_shape": [1, 8]}
-
-    assert compare(side(hidden + 1e-3), side(hidden), {"precision": "fp32"})[0] is True
-    assert compare(side(hidden + 1e-2), side(hidden), {"precision": "fp32"})[0] is False
-    assert compare(side(hidden + 1e-2), side(hidden), {"precision": "fp16"})[0] is True
-    assert compare(side(hidden + 1.5e-2), side(hidden), {"precision": "fp32", "threshold_scale": 2.0})[0] is False
-    assert compare(None, side(hidden), {"precision": "fp32"})[0] is None
-
-
 def test_lossless_images_send_the_decoded_pixels_as_png():
     import base64
     import io

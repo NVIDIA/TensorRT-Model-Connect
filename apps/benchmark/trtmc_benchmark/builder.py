@@ -450,13 +450,13 @@ def _buildable_model_dir(family: str, model_dir: Path, destination: Path) -> Pat
     ``families/<family>/convert_checkpoint.py:prepare``; the converted copy
     lives next to the bundle, and the build identity stays the pinned source.
     """
+    name = f"families.{family}.convert_checkpoint"
     try:
-        spec = importlib.util.find_spec(f"families.{family}.convert_checkpoint")
-    except ModuleNotFoundError:
-        spec = None
-    if spec is None:
+        module = importlib.import_module(name)
+    except ModuleNotFoundError as error:
+        if error.name not in {"families", f"families.{family}", name}:
+            raise
         return model_dir
-    module = importlib.import_module(spec.name)
     prepare = getattr(module, "prepare", None)
     if prepare is None:
         return model_dir
