@@ -2303,6 +2303,51 @@ Json run_control(const trtmc::Model& model, const Json& request, const Timing& t
         });
 }
 
+// Named camera images, the robot state and the instruction to one action chunk (LeRobot GR00T,
+// pi0.5). Family Config (for example the flow ``noise``) travels as flat request fields.
+Json run_control_chunk(const trtmc::Model& model, const Json& request, const Timing& timing,
+                       const std::string& task_id) {
+    const auto task = task_for_operation<trtmc::ImagesStateTextToActionChunk>(model, task_id);
+    const auto config = sdk_config(request, task.config_fields(), {"images", "state", "prompt"});
+    std::vector<std::string> names, paths;
+    for (const auto& camera : request.at("images")) {
+        names.push_back(camera.at("name").get<std::string>());
+        paths.push_back(camera.at("image_path").get<std::string>());
+    }
+    if (names.empty())
+        throw std::invalid_argument("control_chunk requires at least one named image");
+    const auto state = request.at("state").get<std::vector<float>>();
+    const auto prompt = request.value("prompt", std::string{});
+    auto read = [&]() {
+        std::vector<Image> images;
+        for (const auto& path : paths)
+            images.push_back(read_image(path));
+        return images;
+    };
+    std::optional<std::vector<Image>> cached;
+    if (!timing.asset_loading_included)
+        cached = read();
+    return measure(
+        timing,
+        [&]() {
+            std::optional<std::vector<Image>> loaded;
+            if (!cached)
+                loaded = read();
+            const auto& images = cached ? *cached : *loaded;
+            std::vector<trtmc::NamedImage> named;
+            for (std::size_t i = 0; i < images.size(); ++i)
+                named.push_back({names[i], sdk_image_view(images[i])});
+            return task.run({{{named.data(), named.size()}, {state.data(), state.size()}, prompt}},
+                            config);
+        },
+        [](const trtmc::ImagesStateTextActionChunkResult& result) {
+            auto output = action_sequence_observation(result.view().actions);
+            output["within_training_bounds"] = result.within_training_bounds();
+            output["inference_ms"] = result.inference_ms();
+            return output;
+        });
+}
+
 float input_float(const Json& request, const char* name, float default_value) {
     if (!request.contains(name))
         return default_value;
@@ -4237,6 +4282,8 @@ Json dispatch(const Session& session, const Json& operation_request, const Timin
             measured = run_rerank(model, operation_request, timing, selected);
         else if (operation == "control")
             measured = run_control(model, operation_request, timing, selected);
+        else if (operation == "control_chunk")
+            measured = run_control_chunk(model, operation_request, timing, selected);
         else if (operation == "control_queue")
             measured = run_control_queue(model, operation_request, timing, selected);
         else if (operation == "track_masks")

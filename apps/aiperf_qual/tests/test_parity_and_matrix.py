@@ -481,3 +481,11 @@ def test_s3dis_blocks_select_the_area_and_write_each_block_once(tmp_path, monkey
     assert third["request"] == {"num_points": 3, "input_dim": 9}
     assert third["label"] == {"labels": [2, 2, 2], "num_classes": 13}
     assert np.fromfile(third["points"], dtype="<f4").reshape(3, 9).tolist() == [[3.0] * 9] * 3
+
+
+def test_action_parity_takes_an_absolute_tolerance_in_robot_units():
+    native = {"actions": [0.0, 1.0, 2.0, 3.0]}
+    close = {"actions": [0.0, 1.0, 2.0, 3.02]}
+    assert gold_metrics.action_parity(close, native, {"max_error_of_range": 0.001})[0] is False
+    assert gold_metrics.action_parity(close, native, {"max_error_of_range": 0.001, "max_abs_error": 0.03})[0] is True
+    assert gold_metrics.action_parity(close, native, {"max_abs_error": 0.01})[0] is False

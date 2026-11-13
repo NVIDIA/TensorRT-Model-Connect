@@ -133,6 +133,7 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "masked_text_to_token_scores": ("token_scores", 50, 500),
     "monocular_depth": ("depth", 50, 500),
     "points_to_semantic_segmentation": ("segment_points", 50, 500),
+    "images_state_text_to_action_chunk": ("control_chunk", 2, 10),
 }
 
 _ALLOWED_OPERATIONS: dict[str, frozenset[str]] = {
@@ -337,6 +338,8 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         return {"prompt": prompt}
     if task == "monocular_depth":
         return {"image_path": _semantic_asset(case, root, "image_path", "image", "test_image")}
+    if task == "images_state_text_to_action_chunk":
+        return _recorded_frame_request(case, root)
     if task == "points_to_semantic_segmentation":
         # Row-major float32 [num_points, input_dim] points (a raw .f32 file).
         sizes = {name: _explicit(case, name) for name in ("num_points", "input_dim")}
@@ -1094,3 +1097,40 @@ def _asset(value: str, root: Path) -> Path:
     if not resolved.is_file():
         raise BenchmarkError(f"benchmark asset does not exist: {resolved}")
     return resolved
+
+
+def _recorded_frame_request(case: Mapping[str, Any], root: Path) -> dict[str, Any]:
+    """A LeRobot recorded observation (``inputs.frame``: one ``<camera>.png`` per camera, sent as
+    ``observation.images.<camera>`` unless ``inputs.cameras`` names them, and observation.json's ``state`` and
+    ``task``) with the family's fixed flow
+    noise (``inputs.noise``: float32, the Task's ``noise`` Config) so both sides draw the same chunk."""
+    from array import array
+
+    inputs = _inputs(case)
+    if not isinstance(inputs.get("frame"), str) or not inputs["frame"]:
+        raise BenchmarkError("testcase requires inputs.frame (a recorded observation directory)")
+    frame = Path(inputs["frame"]).expanduser()
+    frame = frame if frame.is_absolute() else (root / frame).resolve()
+    if not (frame / "observation.json").is_file():
+        raise BenchmarkError(f"recorded frame {frame} has no observation.json")
+    observation = json.loads((frame / "observation.json").read_text(encoding="utf-8"))
+    named = inputs.get("cameras")  # {camera name: file in the frame} when the names are not the file stems
+    if named is None:
+        named = {f"observation.images.{path.stem}": path.name for path in sorted(frame.glob("*.png"))
+                 if not path.name.endswith(".processed.png")}
+    if not isinstance(named, Mapping) or not named:
+        raise BenchmarkError(f"recorded frame {frame} has no camera image")
+    for name in named.values():
+        if not (frame / str(name)).is_file():
+            raise BenchmarkError(f"recorded frame {frame} has no camera image {name}")
+    request: dict[str, Any] = {
+        "images": [{"name": str(name), "image_path": str(frame / str(file))} for name, file in named.items()],
+        "state": [float(value) for value in observation["state"]],
+        "prompt": str(observation.get("task", "")),
+    }
+    if "noise" in inputs:
+        noise = array("f")
+        noise.frombytes(Path(_required_asset(inputs, ("noise",), root, "noise")).read_bytes())
+        request["noise"] = [float(value) for value in noise]
+    return request
+

@@ -433,7 +433,8 @@ def geometry_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, An
 def action_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
                   gate: Mapping[str, Any]) -> tuple[bool | None, str]:
     """A robot action chunk (``actions``, row-major [step, component]) against the native one: equal shape,
-    finite values, and the largest absolute error at most ``max_error_of_range`` of the native chunk's range."""
+    finite values, and the largest absolute error at most ``max_error_of_range`` of the native chunk's range, or
+    at most ``max_abs_error`` (robot units) when the gate states that instead."""
     mine = [float(value) for value in (candidate or {}).get("actions") or []]
     theirs = [float(value) for value in (native or {}).get("actions") or []]
     if not mine or not theirs:
@@ -444,7 +445,9 @@ def action_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
         return False, "non-finite actions"
     span = (max(theirs) - min(theirs)) or 1.0
     error = max(abs(a - b) for a, b in zip(mine, theirs))
-    return error <= float(gate.get("max_error_of_range", 1e-3)) * span, f"max abs error {error:.3g} (range {span:.3g})"
+    limit = (float(gate["max_abs_error"]) if "max_abs_error" in gate
+             else float(gate.get("max_error_of_range", 1e-3)) * span)
+    return error <= limit, f"max abs error {error:.3g} (limit {limit:.3g}, range {span:.3g})"
 
 
 def disparity_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,

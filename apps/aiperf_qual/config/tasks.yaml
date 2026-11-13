@@ -173,6 +173,9 @@ benchmarks:
   # ACT on 50 recorded observations of its training dataset (conversion parity, every observation).
   action_parity: {suite: action-parity, suite_definition: lerobot-act-observations-50, metric: action_parity,
                   gate: {max_error_of_range: 0.001}}
+  # LeRobot action chunks (GR00T, pi0.5) on recorded LIBERO observations with the family's fixed flow noise on
+  # both sides (each family states its suite and its precision's E2E tolerance: tests/aiperf), every observation.
+  action_chunk_parity: {suite: action-chunk-parity, metric: action_parity, gate: {max_error_of_range: 0.001}}
   # Fast-FoundationStereo on the 15 Middlebury v3 trainingQ scenes of its 700x700 profile (conversion parity).
   disparity_parity: {suite: disparity-parity, suite_definition: middlebury-q-700-15, metric: disparity_parity,
                      gate: {max_mean_epe: 0.1}}
@@ -365,6 +368,9 @@ tasks:
     # precisions (for example valid pixels), which is the Acc checks' concern.
     performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}
   image_state_to_action_chunk: *control
+  images_state_text_to_action_chunk:
+    absolute: [action_chunk_parity]
+    performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}
   stereo_disparity:
     absolute: [disparity_parity]
     performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}
