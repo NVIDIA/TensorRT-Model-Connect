@@ -451,6 +451,34 @@ def action_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
     return error <= limit, f"max abs error {error:.3g} (limit {limit:.3g}, range {span:.3g})"
 
 
+def pose_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                gate: Mapping[str, Any]) -> tuple[bool | None, str]:
+    """Refined pose hypotheses and their scores (``refined_poses`` row-major [N, 4, 4], ``scores``) against the
+    native ones from the same crops: the largest pose and score errors at most ``max_pose_abs_error`` and
+    ``max_score_abs_error``, the same score ranking, and rigid poses (the family's E2E gate)."""
+    import numpy as np
+
+    sides = [(np.asarray((side or {}).get("refined_poses") or [], dtype=np.float64),
+              np.asarray((side or {}).get("scores") or [], dtype=np.float64)) for side in (candidate, native)]
+    (poses, scores), (native_poses, native_scores) = sides
+    if not poses.size or not native_poses.size or not scores.size or not native_scores.size:
+        return None, f"no refined poses ({poses.size} vs {native_poses.size} values)"
+    if poses.shape != native_poses.shape or scores.shape != native_scores.shape:
+        return False, f"{scores.size} hypotheses vs {native_scores.size}"
+    if not (np.isfinite(poses).all() and np.isfinite(scores).all()):
+        return False, "non-finite poses or scores"
+    pose_error = float(np.max(np.abs(poses - native_poses)))
+    score_error = float(np.max(np.abs(scores - native_scores)))
+    ranked = bool(np.array_equal(np.argsort(-scores, kind="stable"), np.argsort(-native_scores, kind="stable")))
+    rotations = poses.reshape(-1, 4, 4)[:, :3, :3]
+    rigid = bool(np.all(np.abs(rotations @ rotations.transpose(0, 2, 1) - np.eye(3)) <= 2e-3)
+                 and np.all(np.abs(np.linalg.det(rotations) - 1.0) <= 6e-3))
+    ok = (pose_error <= float(gate.get("max_pose_abs_error", 0.005))
+          and score_error <= float(gate.get("max_score_abs_error", 0.05)) and ranked and rigid)
+    return ok, (f"pose max abs error {pose_error:.2g}, score max abs error {score_error:.2g}"
+                f"{'' if ranked else ', ranking differs'}{'' if rigid else ', non-rigid pose'}")
+
+
 def _mmcif_atoms(path: str) -> list[list[float]]:
     """Atom coordinates of an mmCIF ``ATOM`` loop in file order (Cartn_x/y/z: the 8th to 10th of the 13 columns the
     Boltz-2 runtime writes)."""
@@ -569,7 +597,8 @@ PARITY: dict[str, Callable[..., tuple[bool | None, str]]] = {"family_parity": fa
                                                       "vector_parity": vector_parity, "mask_parity": mask_parity,
                                                       "geometry_parity": geometry_parity,
                                                       "action_parity": action_parity, "disparity_parity": disparity_parity,
-                                                      "audio_parity": audio_parity, "structure_parity": structure_parity}
+                                                      "audio_parity": audio_parity, "structure_parity": structure_parity,
+                                                      "pose_parity": pose_parity}
 # Parity metrics that read the output files the servers write (their artifacts are kept).
 ARTIFACT_METRICS = {"geometry_parity", "disparity_parity", "structure_parity"}
 

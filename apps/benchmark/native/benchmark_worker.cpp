@@ -965,6 +965,99 @@ Json run_control(trtmc::ITask& task, const Json& request, const Timing& timing) 
         });
 }
 
+// A bundle with the existing pose_hypothesis_refinement runtime (FoundationPose): the caller's
+// crops (rendered and observed features, [N,H,W,6] float32 files) for each stage and iteration,
+// served as the runtime asks for them; the poses it asks with are reported.
+Json run_refine_pose_hypotheses(trtmc::ITask& task, const Json& request, const Timing& timing) {
+    auto& refiner =
+        require_interface<trtmc::IPoseHypothesisRefinement>(task, "IPoseHypothesisRefinement");
+    static const std::unordered_set<std::string> known = {
+        "candidate_poses_path", "hypothesis_count", "mesh_diameter_meters", "refinement_iterations",
+        "crop_batches"};
+    for (const auto& [name, value] : request.items())
+        if (!known.count(name))
+            throw std::invalid_argument("pose refinement does not accept '" + name + "'");
+    const auto count = request.at("hypothesis_count").get<std::int32_t>();
+    if (count <= 0)
+        throw std::invalid_argument("hypothesis_count must be positive");
+    struct Batch {
+        trtmc::PoseCropStage stage;
+        std::int32_t iteration;
+        trtmc::PoseCropBatch crops;
+    };
+    auto read = [&]() {
+        std::pair<std::vector<float>, std::vector<Batch>> inputs{
+            read_float32(request.at("candidate_poses_path").get<std::string>()), {}};
+        if (inputs.first.size() != static_cast<std::size_t>(count) * 16)
+            throw std::invalid_argument("candidate poses must hold hypothesis_count 4x4 matrices");
+        for (const auto& entry : request.at("crop_batches")) {
+            const auto stage = entry.at("stage").get<std::string>();
+            if (stage != "refinement" && stage != "scoring")
+                throw std::invalid_argument("unknown crop stage");
+            const auto shape = entry.at("shape").get<std::vector<std::int32_t>>();
+            if (shape.size() != 4 || shape[0] != count || shape[1] <= 0 || shape[2] <= 0 ||
+                shape[3] != 6)
+                throw std::invalid_argument("crop shape must be [hypothesis_count,H,W,6]");
+            Batch batch{stage == "refinement" ? trtmc::PoseCropStage::kRefinement
+                                              : trtmc::PoseCropStage::kScoring,
+                        entry.at("iteration").get<std::int32_t>(),
+                        {read_float32(entry.at("rendered_path").get<std::string>()),
+                         read_float32(entry.at("observed_path").get<std::string>()), shape[0],
+                         shape[1], shape[2], shape[3]}};
+            const auto values = static_cast<std::size_t>(shape[0]) * shape[1] * shape[2] * 6;
+            if (batch.crops.rendered_features.size() != values ||
+                batch.crops.observed_features.size() != values)
+                throw std::invalid_argument("crop files do not match their shape");
+            inputs.second.push_back(std::move(batch));
+        }
+        return inputs;
+    };
+    std::optional<decltype(read())> cached;
+    if (!timing.asset_loading_included)
+        cached = read();
+    Json queries;
+    return measure(
+        timing,
+        [&]() {
+            std::optional<decltype(read())> loaded;
+            if (!cached)
+                loaded = read();
+            const auto& inputs = cached ? *cached : *loaded;
+            queries = Json::array();
+            trtmc::PoseEstimationRequest input;
+            input.candidate_poses = inputs.first;
+            input.num_hypotheses = count;
+            input.mesh_diameter = request.at("mesh_diameter_meters").get<float>();
+            input.refinement_iterations = request.value("refinement_iterations", 1);
+            input.use_tracked_pose = false;
+            input.update_tracking_state = false;
+            input.crop_provider = [&](const std::vector<float>& poses, trtmc::PoseCropStage stage,
+                                      std::int32_t iteration) {
+                queries.push_back(
+                    {{"stage",
+                      stage == trtmc::PoseCropStage::kRefinement ? "refinement" : "scoring"},
+                     {"iteration", iteration},
+                     {"poses", poses}});
+                for (const auto& batch : inputs.second)
+                    if (batch.stage == stage && batch.iteration == iteration)
+                        return batch.crops;
+                throw std::invalid_argument("no crops for the requested stage and iteration");
+            };
+            refiner.reset_pose_tracking();
+            return refiner.estimate_pose_hypotheses(input);
+        },
+        [&](const trtmc::PoseEstimationResult& result) {
+            return Json{{"refined_hypotheses", result.num_hypotheses},
+                        {"refined_poses", result.refined_poses},
+                        {"scores", result.scores},
+                        {"best_index", result.best_index},
+                        {"all_poses_rigid", result.all_poses_rigid},
+                        {"refinement_ms", result.refinement_ms},
+                        {"scoring_ms", result.scoring_ms},
+                        {"crop_queries", queries}};
+        });
+}
+
 // A bundle with the existing structure_prediction runtime (Boltz-2): the document is the bundle's
 // embedded request or a family-prepared one; the structure and its metadata are written as files.
 Json run_predict_structure(trtmc::ITask& task, const Json& request, const Timing& timing) {
@@ -4408,6 +4501,7 @@ Json dispatch(const Session& session, const Json& operation_request, const Timin
             {"solve", run_solve},
             {"control", run_control},
             {"predict_structure", run_predict_structure},
+            {"refine_pose", run_refine_pose_hypotheses},
         };
         const auto runner = runners.find(operation);
         if (runner == runners.end())

@@ -528,3 +528,15 @@ def test_structure_parity_compares_the_written_structure_with_the_native_coordin
     moved = {**native, "coords": [value * 3 for value in native["coords"]]}
     assert gold_metrics.structure_parity(candidate, moved, {})[0] is False
     assert gold_metrics.structure_parity({}, native, {})[0] is None
+
+
+def test_pose_parity_compares_refined_poses_scores_and_their_ranking():
+    identity = [1.0, 0, 0, 0.1, 0, 1.0, 0, 0.2, 0, 0, 1.0, 0.3, 0, 0, 0, 1.0]
+    native = {"refined_poses": identity * 2, "scores": [0.9, 0.1]}
+    moved = identity[:3] + [identity[3] + 0.001] + identity[4:]  # a translation 1 mm off
+    close = {"refined_poses": moved + identity, "scores": [0.88, 0.1]}
+    assert gold_metrics.pose_parity(close, native, {})[0] is True
+    swapped = {**close, "scores": [0.1, 0.9]}
+    ok, message = gold_metrics.pose_parity(swapped, native, {"max_score_abs_error": 1.0})
+    assert ok is False and "ranking differs" in message
+    assert gold_metrics.pose_parity({}, native, {})[0] is None

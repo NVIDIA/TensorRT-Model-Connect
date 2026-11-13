@@ -180,6 +180,9 @@ benchmarks:
   # and confidence against the native structure, the family's E2E gate.
   structure_parity: {suite: structure-parity, metric: structure_parity,
                      gate: {min_lddt: 0.55, max_rmsd: 9.0, max_plddt_mean_abs: 0.10, max_confidence_abs: 0.10}}
+  # Pose hypothesis refinement on the same crops as the native networks (the family's suite): pose and score
+  # errors, score ranking and rigidity, the family's E2E gate.
+  pose_parity: {suite: pose-parity, metric: pose_parity, gate: {max_pose_abs_error: 0.005, max_score_abs_error: 0.05}}
   # Fast-FoundationStereo on the 15 Middlebury v3 trainingQ scenes of its 700x700 profile (conversion parity).
   disparity_parity: {suite: disparity-parity, suite_definition: middlebury-q-700-15, metric: disparity_parity,
                      gate: {max_mean_epe: 0.1}}
@@ -382,6 +385,10 @@ tasks:
   images_state_text_to_action_chunk:
     absolute: [action_chunk_parity]
     performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}
+  pose_hypothesis_refinement:  # the family prepares its model and crops (reference.prepare, family_inputs)
+    absolute: [pose_parity]
+    performance: {output_grader: parity_numeric,
+                  output_grader_params: {fields: [refined_hypotheses, refined_poses], min_cosine: 0.999}}
   structure_prediction:  # the family prepares its package and requests (reference.prepare, family_inputs)
     absolute: [structure_parity]
     performance: {output_grader: parity_numeric,

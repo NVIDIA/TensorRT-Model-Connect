@@ -17,6 +17,7 @@ from trtmc_benchmark.types import BenchmarkError
     ("images_state_text_to_action_chunk", "control_chunk", "action_values"),
     ("initial_image_text_to_video", "generate_image", "generated_images"),
     ("structure_prediction", "predict_structure", "structures"),
+    ("pose_hypothesis_refinement", "refine_pose", "refined_hypotheses"),
 ])
 def test_new_tasks_have_an_operation_and_its_rate(task, operation, observed):
     assert task in supported_tasks()
@@ -100,3 +101,10 @@ def test_structure_requests_name_the_document_and_only_stated_sampling_controls(
     resolved = resolve_task_case("structure_prediction", {"request": "protein.yaml", "sampling_steps": 50}, tmp_path)
     assert resolved.operation == "predict_structure"
     assert resolved.request == {"document_path": str(tmp_path / "protein.yaml"), "sampling_steps": 50}
+
+
+def test_pose_refinement_requests_carry_the_catalog_controls(tmp_path):
+    case = {"num_hypotheses": 3, "refinement_iterations": 2, "mesh_diameter": 0.18}
+    resolved = resolve_task_case("pose_hypothesis_refinement", case, tmp_path)
+    assert resolved.operation == "refine_pose"
+    assert resolved.request == {"hypothesis_count": 3, "refinement_iterations": 2, "mesh_diameter_meters": 0.18}

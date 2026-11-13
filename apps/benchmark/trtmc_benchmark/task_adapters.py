@@ -136,6 +136,7 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "images_state_text_to_action_chunk": ("control_chunk", 2, 10),
     "initial_image_text_to_video": ("generate_image", 1, 5),
     "structure_prediction": ("predict_structure", 1, 5),
+    "pose_hypothesis_refinement": ("refine_pose", 1, 5),
 }
 
 _ALLOWED_OPERATIONS: dict[str, frozenset[str]] = {
@@ -356,6 +357,14 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         if _explicit(case, "prompt", "test_prompt", "source_text") is not _MISSING:
             raise BenchmarkError("image-only detection has no prompt input")
         return {"image_path": _semantic_asset(case, root, "image_path", "image", "test_image")}
+    if task == "pose_hypothesis_refinement":
+        # The existing runtime: the hypothesis count, refinement iterations and mesh diameter; the candidate
+        # poses and per-stage crops come with the benchmark's inputs (the catalog testcase states none).
+        request = {"hypothesis_count": int(case.get("num_hypotheses", 1)),
+                   "refinement_iterations": int(case.get("refinement_iterations", 1)),
+                   "mesh_diameter_meters": float(case.get("mesh_diameter", 0.0))}
+        _copy_explicit(request, case, "candidate_poses_path", "crop_batches")
+        return request
     if task == "structure_prediction":  # the existing runtime: the request document and its sampling controls
         request = {"document_path": _semantic_asset(case, root, "document_path", "request")}
         _copy_explicit(request, case, "recycling_steps", "sampling_steps", "diffusion_samples", "seed")
