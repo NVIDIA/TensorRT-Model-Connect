@@ -48,6 +48,7 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "image_text_action_to_video": ("generate_image", 1, 5),
     "image_to_class_scores": ("classify", 50, 500),
     "image_to_boxes": ("detect", 50, 500),
+    "image_text_to_boxes": ("detect_prompted", 50, 500),
     "molecular_document_to_structure": ("predict_structure", 1, 5),
     "image_to_token_and_pooled_features": ("extract_features", 50, 500),
     "image_to_token_features": ("extract_features", 50, 500),
@@ -140,6 +141,7 @@ _SEMANTIC_REMAINING = frozenset({
     "image_text_action_to_video", "image_to_class_scores", "image_to_token_and_pooled_features",
     "image_to_token_features", "image_to_pooled_features", "image_to_spatial_features",
     "image_to_semantic_segmentation", "image_points_to_masks", "image_text_to_instance_masks",
+    "image_text_to_boxes",
     "stereo_images_to_disparity", "text_to_pooled_features", "text_to_token_features",
     "text_to_embedding", "text_query_documents_to_relevance", "image_state_to_action_chunk",
     "text_to_head_scores",
@@ -726,7 +728,8 @@ def _semantic_remaining_request(task: str, case: Mapping[str, Any], root: Path) 
         request["image_path"] = _semantic_asset(case, root, "image_path", "image", "test_image")
         if task == "image_state_to_action_chunk":
             request["state_path"] = _semantic_asset(case, root, "state_path", "state")
-        elif task in {"image_points_to_masks", "image_text_to_instance_masks"}:
+        elif task in {"image_points_to_masks", "image_text_to_instance_masks",
+                      "image_text_to_boxes"}:
             prompt = _explicit(case, "prompt", "test_prompt", "source_text", "prompt_file", "prompt_repeat")
             if task == "image_points_to_masks":
                 if prompt is not _MISSING:

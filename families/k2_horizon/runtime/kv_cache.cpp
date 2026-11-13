@@ -42,6 +42,15 @@ void validate_cache_pair(ITrtModule& module, const std::string& cache_name,
     }
 }
 
+// position_id carries one position per token of the step, so it is rank 1 and
+// dynamic under a multi-token prefill profile.
+void validate_int32_vector_input(ITrtModule& module, const std::string& name) {
+    if (!module.has_input(name) || module.tensor_dtype(name) != DType::kInt32 ||
+        module.tensor_shape(name).size() != 1) {
+        throw std::runtime_error("K2-Horizon native KV input '" + name + "' must be int32 [S]");
+    }
+}
+
 bool all_tensors_ok(const std::vector<DeviceTensor>& tensors) {
     for (const auto& tensor : tensors) {
         if (!tensor.ok())
@@ -117,7 +126,7 @@ K2HorizonKvCache::K2HorizonKvCache(int32_t num_layers, int32_t max_length, int32
 }
 
 void K2HorizonKvCache::validate_engine_contract(ITrtModule& module) const {
-    validate_int32_scalar_input(module, names_.position_id);
+    validate_int32_vector_input(module, names_.position_id);
     validate_int32_scalar_input(module, names_.cache_write_indices);
     validate_int32_scalar_input(module, names_.key_value_lengths);
 
@@ -155,30 +164,33 @@ void K2HorizonKvCache::bind_to(ITrtModule& module) {
 void K2HorizonKvCache::prepare_step(TensorMap& inputs, int32_t seq_len) {
     if (!bound_)
         throw std::runtime_error("K2-Horizon native KV cache must be bound before inference");
-    if (seq_len != 1)
-        throw std::invalid_argument("K2-Horizon native KV supports exactly one token per step");
-    if (position_ >= max_length_)
+    if (seq_len <= 0)
+        throw std::invalid_argument("K2-Horizon native KV step length must be positive");
+    if (seq_len > max_length_ - position_)
         throw std::runtime_error("K2-Horizon sequence exceeds the fixed KV cache capacity");
 
-    position_id_ = position_;
+    position_ids_.resize(static_cast<std::size_t>(seq_len));
+    for (int32_t index = 0; index < seq_len; ++index)
+        position_ids_[static_cast<std::size_t>(index)] = position_ + index;
     cache_write_index_ = position_;
-    key_value_length_ = position_ + 1;
-    inputs[names_.position_id] = Tensor{&position_id_, {1}, DType::kInt32};
+    key_value_length_ = position_ + seq_len;
+    inputs[names_.position_id] =
+        Tensor{position_ids_.data(), {static_cast<int64_t>(seq_len)}, DType::kInt32};
     inputs[names_.cache_write_indices] = Tensor{&cache_write_index_, {1}, DType::kInt32};
     inputs[names_.key_value_lengths] = Tensor{&key_value_length_, {1}, DType::kInt32};
 }
 
 void K2HorizonKvCache::advance(int32_t n_tokens) {
-    if (n_tokens != 1)
-        throw std::invalid_argument("K2-Horizon native KV supports exactly one-token advances");
-    if (position_ >= max_length_)
+    if (n_tokens <= 0)
+        throw std::invalid_argument("K2-Horizon native KV advance must be positive");
+    if (n_tokens > max_length_ - position_)
         throw std::runtime_error("K2-Horizon sequence exceeds the fixed KV cache capacity");
-    ++position_;
+    position_ += n_tokens;
 }
 
 void K2HorizonKvCache::reset() {
     position_ = 0;
-    position_id_ = 0;
+    position_ids_.clear();
     cache_write_index_ = 0;
     key_value_length_ = 0;
 }

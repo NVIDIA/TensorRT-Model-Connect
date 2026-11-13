@@ -32,6 +32,7 @@ struct SmolLM3KvCacheNames {
     std::vector<std::string> present_v;
     std::string cache_write_indices{"cache_write_indices"};
     std::string key_value_lengths{"key_value_lengths"};
+    std::string key_positions{"key_positions"};
     std::string position_id{"position_id"};
     std::string attention_mask{"attention_mask"};
 };
@@ -57,6 +58,10 @@ class SmolLM3KvCache : public SmolLM3InferenceState {
     std::size_t device_memory_bytes() const override;
     const char* state_type() const override { return "dense_kv_cache"; }
     bool ok() const override;
+
+    // Rows a native engine with a `key_positions` input attends over: the
+    // valid context rounded up to the 32-row bucket, capped at the capacity.
+    int32_t active_key_rows(int32_t valid_rows) const;
 
     // --- SmolLM3KvCache-specific methods (not on the interface) ---
 
@@ -115,6 +120,10 @@ class SmolLM3KvCache : public SmolLM3InferenceState {
     std::vector<int32_t> pos_buf_vec_;
     int32_t cache_write_index_{0};
     int32_t key_value_length_{0};
+    // 0..capacity-1; bound with length active_key_rows() when the native
+    // engine slices its cache to the active rows.
+    std::vector<int32_t> key_positions_;
+    bool slices_active_rows_{false};
     bool has_position_input_{false};
     bool binding_mode_initialized_{false};
     bool native_kv_update_enabled_{false};

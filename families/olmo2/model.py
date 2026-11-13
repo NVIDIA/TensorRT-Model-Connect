@@ -34,6 +34,7 @@ import tensorrt as trt
 
 from . import graph_blocks, graph_ops
 from .config import ModelConfig
+from .quantization import configure_fp8_build
 from .parallel import ParallelConfig
 from .checkpoint_mapper import (
     WeightDict,
@@ -153,6 +154,7 @@ class _Olmo2Model:
         max_cache_length: int,
         *,
         precision: str = "fp32",
+        quant_ctx=None,
         verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
@@ -175,6 +177,7 @@ class _Olmo2Model:
                 weights,
                 max_cache_length,
                 precision=precision,
+                quant_ctx=quant_ctx,
                 verbose=verbose,
                 workspace_bytes=_BUILDER_WORKSPACE_BYTES,
             )
@@ -206,6 +209,7 @@ class _Olmo2Model:
         trt_config.builder_optimization_level = 1
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, _BUILDER_WORKSPACE_BYTES)
         trt_config.clear_flag(trt.BuilderFlag.TF32)
+        configure_fp8_build(trt_config, quant_ctx)
 
         # Inputs
         token_id = network.add_input("token_id", trt.int32, (1,))
@@ -262,33 +266,19 @@ class _Olmo2Model:
         present_k_outputs = []
         present_v_outputs = []
 
+        matmul = graph_blocks.make_matmul_fn(network, work_np_dtype, quant_ctx)
         for layer_idx in range(num_layers):
             prefix = f"layer.{layer_idx}"
 
             # ---- Attention (no pre-norm, QK norm inside) ----
-            q = graph_ops.add_matmul_rhs_constant(
-                network,
-                hidden_state,
-                hidden,
-                attention_size,
-                weights[f"{prefix}.w_q"],
-                dtype=work_np_dtype,
+            q = matmul(
+                hidden_state, hidden, attention_size, weights[f"{prefix}.w_q"], f"{prefix}.w_q"
             )
-            k = graph_ops.add_matmul_rhs_constant(
-                network,
-                hidden_state,
-                hidden,
-                kv_attention_size,
-                weights[f"{prefix}.w_k"],
-                dtype=work_np_dtype,
+            k = matmul(
+                hidden_state, hidden, kv_attention_size, weights[f"{prefix}.w_k"], f"{prefix}.w_k"
             )
-            v = graph_ops.add_matmul_rhs_constant(
-                network,
-                hidden_state,
-                hidden,
-                kv_attention_size,
-                weights[f"{prefix}.w_v"],
-                dtype=work_np_dtype,
+            v = matmul(
+                hidden_state, hidden, kv_attention_size, weights[f"{prefix}.w_v"], f"{prefix}.w_v"
             )
 
             # QK RMSNorm (full-dim, NOT per-head -- OLMo-2 applies norm
@@ -376,6 +366,8 @@ class _Olmo2Model:
                 hidden_size=hidden,
                 mlp_size=mlp_size,
                 dtype=work_np_dtype,
+                quant_ctx=quant_ctx,
+                layer_prefix=prefix,
             )
 
             # ---- Post-feedforward norm ----
@@ -520,8 +512,15 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("OLMo2 max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("OLMo2 has no qualified family-owned quantized build")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"OLMo2 does not support quantization={request.quantization!r}"
+        )
+    quantized = request.quantization == "fp8"
+    if quantized and precision != "fp16":
+        raise NotImplementedError("OLMo2 fp8 quantization requires precision fp16")
+    if quantized and request.tensor_parallel_size != 1:
+        raise NotImplementedError("OLMo2 fp8 quantization does not support tensor parallelism")
     if request.fp32_layers:
         raise NotImplementedError("OLMo2 does not expose mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -533,6 +532,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     model = _Olmo2Model()
     config.raw["_model_dir"] = str(model_dir)
     weights = model.load_weights(str(model_dir), config)
+    quant_ctx = None
+    if quantized:
+        from . import graph_ops
+        from .quantization import calibrate_olmo2_fp8
+
+        quant_ctx = calibrate_olmo2_fp8(config, weights, graph_ops)
     writer.set_header(family="olmo2", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -554,6 +559,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,
@@ -564,6 +570,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,

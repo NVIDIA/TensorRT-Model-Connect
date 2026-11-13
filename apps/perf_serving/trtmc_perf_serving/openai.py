@@ -153,21 +153,35 @@ def ranking(body: Mapping[str, Any], base: Mapping[str, Any]) -> dict[str, Any]:
     return {**base, "query": query, "documents": documents}
 
 
-def image_generation(body: Mapping[str, Any], base: Mapping[str, Any]) -> dict[str, Any]:
-    _check_fields(body, {"prompt", "size", "seed", "num_inference_steps", "guidance_scale", "negative_prompt",
-                         "quality", "num_frames", "seconds", "fps"})
-    request = {**base, "prompt": str(body.get("prompt", ""))}
+def image_generation(body: Mapping[str, Any], base: Mapping[str, Any], *, video: bool = False) -> dict[str, Any]:
+    allowed = {"prompt", "size", "seed", "num_inference_steps", "guidance_scale", "negative_prompt",
+               "cfg_scale", "initial_latents_b64"}
+    if video:
+        allowed |= {"num_frames", "seconds", "fps"}
+    _check_fields(body, allowed)
+    if not isinstance(body.get("prompt"), str) or not body["prompt"].strip():
+        raise RequestError("prompt must be one nonempty string")
+    if body.get("stream"):
+        raise RequestError("streaming media generation is unsupported")
+    if body.get("response_format", "b64_json") != "b64_json":
+        raise RequestError("only response_format=b64_json is supported")
+    request = {**base, "prompt": body["prompt"]}
     if body.get("size"):
         try:
             width, height = (int(value) for value in str(body["size"]).lower().split("x"))
         except ValueError as error:
             raise RequestError("size must be WIDTHxHEIGHT") from error
+        if width <= 0 or height <= 0:
+            raise RequestError("size must contain positive dimensions")
         request.update(width=width, height=height)
     for source, target in (("num_inference_steps", "num_steps"), ("seed", "seed"),
                            ("guidance_scale", "guidance_scale"), ("negative_prompt", "negative_prompt"),
+                           ("cfg_scale", "cfg_scale"),
                            ("num_frames", "num_frames")):
         if body.get(source) is not None:
             request[target] = _number(body[source]) if target != "negative_prompt" else body[source]
+    if body.get("initial_latents_b64") is not None:
+        request["initial_latents_path"] = {FILE_KEY: {"suffix": ".f32", "b64": body["initial_latents_b64"]}}
     return request
 
 

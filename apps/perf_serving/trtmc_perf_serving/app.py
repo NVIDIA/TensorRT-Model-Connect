@@ -25,6 +25,7 @@ from . import openai
 from .backends.base import Backend, BackendError, BackendUnavailable, Invocation
 from .digests import add_media_digests
 from .files import materialize_files, server_path_fields
+from .images import generated_image
 
 # Request IDs name a per-request directory under the scratch root: one path component that is never
 # "." or ".." (leading alphanumeric, no separators).
@@ -117,11 +118,12 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
     app = FastAPI(title="TRTMC performance serving")
     lane = Lane(config.max_queue)
     records = Records(config.records)
-    state = {"available": True, "jobs": {}}
+    state = {"available": True, "reason": None, "jobs": {}}
     identity = dict(backend.describe())
     operation = backend.operation
 
-    async def execute(request_id: str, route: str, operation_request: Mapping[str, Any]) -> dict[str, Any]:
+    async def execute(request_id: str, route: str, operation_request: Mapping[str, Any], *,
+                      image_output: bool = False) -> dict[str, Any]:
         workdir = config.scratch / request_id
         try:
             # Backends write output artifacts below the request directory even without inputs.
@@ -136,6 +138,8 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
             memory: dict[str, float] = {}
 
             def call() -> Invocation:
+                if not state["available"]:  # the backend stopped serving while this call waited in the lane
+                    raise BackendUnavailable(state["reason"] or "backend is no longer available")
                 if config.memory_probe is None:
                     return backend.invoke(resolved, workdir / "output")
                 result, memory["peak_memory_mb"] = config.memory_probe.measure(
@@ -145,14 +149,17 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
             invocation, queue_ms, handler_ms = await lane.run(call)
             # Generated media leave the request as digests (the files are removed below).
             observation = add_media_digests(invocation.observation, operation, workdir)
+            image = generated_image(workdir) if image_output else None
+            if image is not None:
+                observation["output_sha256"] = image["sha256"]
             if replayed is not None:
                 observation["latent_replay"] = replayed
                 if replayed:
                     observation["initial_latents_sha256"] = hashlib.sha256(
                         Path(resolved["initial_latents_path"]).read_bytes()).hexdigest()
             invocation = Invocation(observation, invocation.model_call_ms, invocation.extra)
-        except BackendUnavailable:
-            state["available"] = False
+        except BackendUnavailable as error:
+            state["available"], state["reason"] = False, str(error)
             raise
         finally:
             if not config.keep_artifacts:
@@ -164,7 +171,7 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
                        "backend": identity.get("backend"), "time": time.time(), "timing": timing,
                        "observation": reported})
         return {"timing": timing, "observation": invocation.observation, "reported": reported,
-                "extra": invocation.extra}
+                "extra": invocation.extra, "image": image}
 
     def request_id_of(request: Request) -> str:
         value = request.headers.get("x-request-id", "")
@@ -181,7 +188,7 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
         if operation not in operations:
             return _error(404, "route_not_served", f"{route} is not served for operation {operation!r}", request_id)
         if not state["available"]:
-            return _error(503, "backend_unavailable", "backend is no longer available", request_id)
+            return _error(503, "backend_unavailable", f"backend is no longer available: {state['reason']}", request_id)
         try:
             return await handler(request_id)
         except (openai.RequestError, ValueError, json.JSONDecodeError) as error:
@@ -272,8 +279,8 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
     async def images(request: Request):
         async def handle(request_id: str):
             mapped = openai.image_generation(await request.json(), config.base_request)
-            result = await execute(request_id, "/v1/images/generations", mapped)
-            return respond({"created": int(time.time()), "data": [{"url": _artifact_url(result)}],
+            result = await execute(request_id, "/v1/images/generations", mapped, image_output=True)
+            return respond({"created": int(time.time()), "data": [{"b64_json": result["image"]["b64_json"]}],
                             **_media_stats(result["timing"])}, result, request_id)
         return await guarded(request, "/v1/images/generations", ("generate_image",), handle)
 
@@ -285,7 +292,7 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
                 body = {key: value for key, value in (await request.form()).items()}
             else:
                 body = await request.json()
-            mapped = openai.image_generation(body, {**config.base_request, "media_type": "video"})
+            mapped = openai.image_generation(body, {**config.base_request, "media_type": "video"}, video=True)
             job = {"id": request_id, "object": "video", "status": "in_progress", "created_at": int(time.time())}
             state["jobs"][request_id] = job
 
@@ -312,8 +319,8 @@ def create_app(backend: Backend, config: ServingConfig) -> FastAPI:
 
     @app.get("/health/ready")
     async def ready():
-        if not state["available"]:
-            return JSONResponse({"status": "unavailable"}, status_code=503)
+        if not state["available"]:  # the reason: why the backend stopped serving
+            return JSONResponse({"status": "unavailable", "reason": state["reason"]}, status_code=503)
         return {"status": "ready", "operation": operation}
 
     @app.get("/v1/models")

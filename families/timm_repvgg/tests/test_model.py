@@ -142,7 +142,7 @@ def test_plain_build_publishes_abstract_classification_bundle(
     monkeypatch.setattr(
         model,
         "_build_engine",
-        lambda raw, checkpoint, precision, verbose: (
+        lambda raw, checkpoint, precision, verbose, quantization=None: (
             b"plan",
             model._preprocess_config(raw),
         ),

@@ -42,4 +42,12 @@ nemotron_h_sampling_params_from_config(const TextGenerationConfig& cfg,
 
 std::unique_ptr<NemotronHISampler> create_nemotron_h_sampler(const NemotronHSamplingParams& params);
 
+// The speculative verifier needs the same filtered target/draft distribution.
+bool nemotron_h_is_greedy(const NemotronHSamplingParams& params);
+std::vector<float> nemotron_h_probabilities(const float* logits, int32_t vocab_size,
+                                            const NemotronHSamplingParams& params);
+float nemotron_h_uniform(std::uint64_t& state);
+int32_t nemotron_h_sample_probabilities(const std::vector<float>& probabilities,
+                                        std::uint64_t& state);
+
 } // namespace trtmc

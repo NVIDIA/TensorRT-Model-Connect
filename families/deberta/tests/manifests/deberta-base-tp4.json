@@ -4,7 +4,7 @@
   "hf_revision": "0d1b43ccf21b5acd9f4e5f7b077fa698f05cf195",
   "bundle": "deberta-base-tp4.bundle",
   "family": "deberta",
-  "task": "encoding",
+  "task": "text_to_pooled_features",
   "testcases": [
     {
       "name": "deberta-base-tp4",

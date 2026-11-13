@@ -3,6 +3,7 @@
 
 import base64
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,6 +25,41 @@ def test_invalid_or_nonendpoint_profile_has_a_clear_selection_error(tmp_path, mo
             profile(Environment({"repo": str(tmp_path)}), name, Path("unused"), Path("unused"),
                     tmp_path / "uncreated")
     assert not (tmp_path / "uncreated").exists()
+
+
+@pytest.mark.parametrize("name,command", [
+    ("wan21-t2v-1.3b", "video-profile"),
+    ("wan22-ti2v-5b", "video-profile"),
+    ("minimax-h3-768p", "video-profile"),
+    ("stable-diffusion-v1-5", "image-profile"),
+])
+def test_generation_profiles_select_the_supported_command_before_writing(tmp_path, name, command):
+    from trtmc_aiperf_qual.endpoint_profile import profile
+
+    repo = Path(__file__).resolve().parents[3]
+    output = tmp_path / "uncreated"
+    with pytest.raises(ConfigError, match=command):
+        profile(Environment({"repo": str(repo)}), name, Path("unused"), Path("unused"), output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("revision", ["main", "v1.0", ""])
+def test_revision_only_override_is_validated_before_starting_a_profile(tmp_path, monkeypatch, revision):
+    import trtmc_benchmark.catalog as catalog
+    from trtmc_aiperf_qual import endpoint_profile
+
+    entry = SimpleNamespace(name="vision", hf_id="organization/checkpoint",
+                            model=SimpleNamespace(task="vision_language_generation", hf_revision="a" * 40))
+    monkeypatch.setattr(catalog, "ManifestCatalog", lambda _: SimpleNamespace(entries=lambda: [entry]))
+    monkeypatch.setattr(endpoint_profile, "inventory", lambda *_: [{"profile": "vision"}])
+    monkeypatch.setattr(endpoint_profile, "gpu_exclusive", lambda _: nullcontext())
+    monkeypatch.setattr(endpoint_profile, "source_identity",
+                        lambda *_: pytest.fail("invalid tokenizer revision reached profiling"))
+    environment = Environment({"repo": str(tmp_path), "runtime_root": str(tmp_path),
+                               "aiperf_python": "unused"})
+    with pytest.raises(ConfigError, match="full commit SHA"):
+        endpoint_profile.profile(environment, "vision", Path("unused"), Path("unused"),
+                                 tmp_path / "out", tokenizer_revision=revision)
 
 
 def test_singleton_embedding_wire_forms_keep_the_same_input_identity():
@@ -87,3 +123,32 @@ def test_transcription_check_requires_the_complete_native_text():
     assert check_output("transcription", {"text": "Full transcript."}, {"text": "Full transcript."}) == 1
     with pytest.raises(ValueError):
         check_output("transcription", {"text": "Full"}, {"text": "Full transcript."})
+
+
+def test_vision_checks_complete_answers_token_counts_and_image_question_identity(tmp_path):
+    image = "data:image/png;base64," + base64.b64encode(b"original image").decode()
+    inputs = tmp_path / "inputs.jsonl"
+    inputs.write_text(json.dumps({"texts": ["Question?"], "image": image}) + "\n")
+    row, = samples("vision", inputs, "model", 10)
+    payload = row["payload"]
+    other = json.loads(json.dumps(payload))
+    other["messages"][0]["content"][0]["text"] = "Different question?"
+    assert input_key("vision", payload) != input_key("vision", other)
+    other = json.loads(json.dumps(payload))
+    other["messages"][0]["content"][1]["image_url"]["url"] = image + "AA=="
+    with pytest.raises(ValueError):
+        input_key("vision", other)
+    native = {"text": "Full answer.", "output_tokens": 3}
+    response = {"choices": [{"index": 0, "message": {"role": "assistant", "content": "Full answer."}}],
+                "usage": {"completion_tokens": 3}}
+    assert check_output("vision", response, native) == len(native["text"])
+    response["choices"][0]["message"]["content"] = "Full"
+    with pytest.raises(ValueError):
+        check_output("vision", response, native)
+    response["choices"][0]["message"]["content"] = ""
+    with pytest.raises(ValueError):
+        check_output("vision", response, {"text": "", "output_tokens": 3})
+    response["choices"][0]["message"]["content"] = "Full answer."
+    response["usage"]["completion_tokens"] = 2
+    with pytest.raises(ValueError):
+        check_output("vision", response, native)

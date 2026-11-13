@@ -71,13 +71,55 @@ class _ReaderCollection(list):
         self.tensor_map = tensor_map
 
 
-def _open_safetensors(model_dir: Path) -> _ReaderCollection:
+class _PreparedReader:
+    """One read-only mapping per shard, including exact FP8 scale bytes."""
+
+    def __init__(self, path: Path):
+        import json
+        import mmap
+        import struct
+
+        with path.open("rb") as stream:
+            length_bytes = stream.read(8)
+            if len(length_bytes) != 8:
+                raise ValueError(f"Truncated safetensors header: {path}")
+            length, = struct.unpack("<Q", length_bytes)
+            if length > path.stat().st_size - 8:
+                raise ValueError(f"Invalid safetensors header length: {path}")
+            self.header = json.loads(stream.read(length))
+            self.mapping = mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ)
+        self.offset = 8 + length
+
+    def keys(self):
+        return [key for key in self.header if key != "__metadata__"]
+
+    def get_tensor(self, name):
+        item = self.header[name]
+        types = {"F32": np.float32, "F16": np.float16, "BF16": ml_dtypes.bfloat16,
+                 "F8_E4M3": ml_dtypes.float8_e4m3fn, "U8": np.uint8, "I8": np.int8,
+                 "I32": np.int32, "I64": np.int64}
+        if item["dtype"] not in types:
+            raise ValueError(f"Unsupported prepared dtype {item['dtype']} for {name}")
+        dtype = np.dtype(types[item["dtype"]])
+        begin, end = item["data_offsets"]
+        shape = tuple(item["shape"])
+        if (any(type(n) is not int or n < 0 for n in shape)
+                or not 0 <= begin <= end <= len(self.mapping) - self.offset
+                or int(np.prod(shape, dtype=np.int64)) * dtype.itemsize != end - begin):
+            raise ValueError(f"Invalid prepared tensor extent for {name}")
+        return np.ndarray(shape, dtype=dtype, buffer=self.mapping, offset=self.offset + begin)
+
+
+def _open_safetensors(model_dir: Path, *, prepared: bool = False) -> _ReaderCollection:
     """Open the checkpoint's required NumPy safetensors readers."""
     import json
 
+    def open_reader(path):
+        return _PreparedReader(path) if prepared else safe_open(str(path), framework="numpy")
+
     single = model_dir / "model.safetensors"
     if single.is_file():
-        return _ReaderCollection([safe_open(str(single), framework="numpy")])
+        return _ReaderCollection([open_reader(single)])
 
     index_path = model_dir / "model.safetensors.index.json"
     if index_path.is_file():
@@ -87,7 +129,7 @@ def _open_safetensors(model_dir: Path) -> _ReaderCollection:
             raise ValueError("model.safetensors.index.json has no weight_map")
         shard_files = sorted(set(str(value) for value in weight_map.values()))
         readers_by_file = {
-            shard: safe_open(str(model_dir / shard), framework="numpy") for shard in shard_files
+            shard: open_reader(model_dir / shard) for shard in shard_files
         }
         return _ReaderCollection(
             [readers_by_file[shard] for shard in shard_files],
@@ -98,7 +140,7 @@ def _open_safetensors(model_dir: Path) -> _ReaderCollection:
 
     diff_single = model_dir / "diffusion_pytorch_model.safetensors"
     if diff_single.is_file():
-        return _ReaderCollection([safe_open(str(diff_single), framework="numpy")])
+        return _ReaderCollection([open_reader(diff_single)])
 
     diff_index = model_dir / "diffusion_pytorch_model.safetensors.index.json"
     if diff_index.is_file():
@@ -108,7 +150,7 @@ def _open_safetensors(model_dir: Path) -> _ReaderCollection:
             raise ValueError("diffusion safetensors index has no weight_map")
         shard_files = sorted(set(str(value) for value in weight_map.values()))
         readers_by_file = {
-            shard: safe_open(str(model_dir / shard), framework="numpy") for shard in shard_files
+            shard: open_reader(model_dir / shard) for shard in shard_files
         }
         return _ReaderCollection(
             [readers_by_file[shard] for shard in shard_files],

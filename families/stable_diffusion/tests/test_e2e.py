@@ -164,9 +164,18 @@ def _native(binary: Path, runtime_root: Path, bundle: Path, case: dict, latents:
     return np.asarray(Image.open(destination).convert("RGB"), dtype=np.float32) / 255.0
 
 
+def _is_xl(model_dir: Path) -> bool:
+    """SDXL is told apart by its second text encoder, not by the checkpoint name."""
+    return (model_dir / "text_encoder_2").is_dir()
+
+
 def _official_reference(model_dir: Path, manifest: dict, case: dict, latents):
     import numpy as np
     import torch
+
+    if _is_xl(model_dir):
+        return _official_reference_xl(model_dir, manifest, case, latents)
+
     from diffusers import DDIMScheduler, StableDiffusionPipeline
 
     pipeline = StableDiffusionPipeline.from_pretrained(
@@ -177,6 +186,26 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, latents):
     # is switched to match rather than comparing two different samplers.
     pipeline.scheduler = DDIMScheduler.from_pretrained(str(model_dir / "scheduler"))
     pipeline.set_progress_bar_config(disable=True)
+    image = pipeline(
+        str(case["prompt"]), height=manifest["image_height"], width=manifest["image_width"],
+        num_inference_steps=int(case["num_steps"]),
+        guidance_scale=float(case["guidance_scale"]), latents=latents, output_type="np",
+    ).images[0]
+    return np.asarray(image, dtype=np.float32)
+
+
+def _official_reference_xl(model_dir: Path, manifest: dict, case: dict, latents):
+    import numpy as np
+    import torch
+    from diffusers import EulerAncestralDiscreteScheduler, StableDiffusionXLPipeline
+
+    pipeline = StableDiffusionXLPipeline.from_pretrained(
+        str(model_dir), torch_dtype=torch.float32, add_watermarker=False,
+    )
+    pipeline.set_progress_bar_config(disable=True)
+    pipeline.scheduler = EulerAncestralDiscreteScheduler.from_pretrained(
+        str(model_dir / "scheduler")
+    )
     image = pipeline(
         str(case["prompt"]), height=manifest["image_height"], width=manifest["image_width"],
         num_inference_steps=int(case["num_steps"]),
@@ -224,6 +253,8 @@ def _assert_parity(native, reference, thresholds: dict) -> None:
     # reference at cosine 0.9999998; ten steps do not, and are not meant to.
     psnr = _psnr(native, reference)
     ssim = _ssim(native, reference)
+    print(f"{FAMILY} parity: PSNR {psnr:.2f} SSIM {ssim:.4f} "
+          f"mean {mean:.4f} std {float(native.std()):.4f}")
     assert psnr >= float(thresholds["psnr"]), f"PSNR {psnr:.2f} is below {thresholds['psnr']}"
     assert ssim >= float(thresholds["ssim"]), f"SSIM {ssim:.4f} is below {thresholds['ssim']}"
 

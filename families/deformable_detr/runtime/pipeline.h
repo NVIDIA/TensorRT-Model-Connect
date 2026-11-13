@@ -16,6 +16,8 @@ namespace trtmc {
 
 struct DeformableDetrRuntimeConfig {
     DeformableDetrPreprocessConfig preprocess;
+    std::int32_t resize_shortest_edge{800};
+    std::int32_t resize_longest_edge{1333};
     std::int32_t num_queries{300};
     std::int32_t num_labels{91};
     float score_threshold{0.3F};

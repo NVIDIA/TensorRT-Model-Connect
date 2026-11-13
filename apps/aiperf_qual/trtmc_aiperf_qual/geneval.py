@@ -188,8 +188,8 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
     suite = build_suite(model_suite(check["suite"], model), environment)
     if model.get("family") in check.get("latent_replay_families", ()):
         suite = with_latent_seeds(suite)
-    native, native_backend, native_precision = generate_native(environment, model, suite, python, out, "geneval",
-                                                               reuse=bool(check.get("reuse_outputs")))
+    native, native_backend, native_precision, native_mode = generate_native(
+        environment, model, suite, python, out, "geneval", reuse=bool(check.get("reuse_outputs")))
     outputs = {"candidate": generate(environment, model, "trtmc", out / "geneval-candidate", suite,
                                      reuse=bool(check.get("reuse_outputs"))), "native": native}
     metadata = [{**sample["label"], "prompt": sample["request"].get("prompt", "")} for sample in suite.samples]
@@ -213,7 +213,7 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
         item = {"suite": name, "plugin": f"GenEval-style ({check['detector']} + CLIP colors)",
                 "endpoint": "image_generation", "gate": dict(check.get("gate") or {"margin": 5.0})}
         entry = absolute.judge(item, problems, graded["candidate"], graded["native"])
-    entry["native"] = {"backend": native_backend, "precision": native_precision}
+    entry["native"] = {"backend": native_backend, "precision": native_precision, "mode": native_mode}
     entries = [entry]
     if any(row["frames"] > 1 for row in scored["native"]):  # videos: every one valid (frames, not frozen)
         entries.append(video_validity(name, problems, scored["candidate"], scored["native"]))

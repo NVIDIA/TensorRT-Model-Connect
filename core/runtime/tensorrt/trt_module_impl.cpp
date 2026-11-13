@@ -51,9 +51,19 @@ DType TrtModuleImpl::from_trt_dtype(nvinfer1::DataType dt) {
         return DType::kInt32;
     case nvinfer1::DataType::kINT8:
         return DType::kInt8;
+    case nvinfer1::DataType::kFP8:
+        return DType::kFloat8E4M3;
     default:
         return DType::kFloat32;
     }
+}
+
+void TrtModuleImpl::validate_io_tensor_format(nvinfer1::DataType dtype,
+                                              nvinfer1::TensorFormat format) {
+    // Tensor views and uploads describe packed elements, not padded/vectorized
+    // layouts. Reject those FP8 layouts rather than under-allocate their buffers.
+    if (dtype == nvinfer1::DataType::kFP8 && format != nvinfer1::TensorFormat::kLINEAR)
+        throw std::invalid_argument("FP8 engine I/O requires TensorRT kLINEAR format");
 }
 
 // --- Construction ---
@@ -70,10 +80,18 @@ TrtModuleImpl::TrtModuleImpl(nvinfer1::ICudaEngine* engine, nvinfer1::IExecution
     if (!ctx_)
         return;
     try {
+        // Validate the selected profile before either external prebinding or
+        // internally owned buffers can use logical-shape allocation sizes.
+        for (int32_t index = 0; index < engine->getNbIOTensors(); ++index) {
+            const char* name = engine->getIOTensorName(index);
+            if (name != nullptr)
+                validate_io_tensor_format(engine->getTensorDataType(name),
+                                          engine->getTensorFormat(name, profile_idx_));
+        }
         discover_tensor_aliases(engine);
         validate_initial_external_bindings(engine, external_bindings);
     } catch (const std::exception& error) {
-        std::cerr << "[trt_module] Invalid external binding: " << error.what() << '\n';
+        std::cerr << "[trt_module] Invalid I/O binding: " << error.what() << '\n';
         delete ctx_;
         ctx_ = nullptr;
         return;
@@ -257,7 +275,8 @@ void TrtModuleImpl::update_dynamic_shape(const std::string& name, BufferEntry& e
     dims.nbDims = static_cast<int32_t>(new_shape.size());
     for (int32_t d = 0; d < dims.nbDims; ++d)
         dims.d[d] = new_shape[d];
-    ctx_->setInputShape(name.c_str(), dims);
+    if (!ctx_->setInputShape(name.c_str(), dims))
+        throw std::invalid_argument("TensorRT rejected dynamic shape for tensor '" + name + "'");
     entry.shape = new_shape;
 }
 

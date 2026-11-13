@@ -97,7 +97,9 @@ class TextGeneration:
         config = transformers.AutoConfig.from_pretrained(spec.model, **spec.pretrained_kwargs())
         kwargs = spec.model_kwargs()
         if hasattr(config, "vision_config"):
-            self.processor = transformers.AutoProcessor.from_pretrained(spec.model, **spec.pretrained_kwargs())
+            # processor_kwargs (for example max_pixels) must match the candidate's declared image budget.
+            self.processor = transformers.AutoProcessor.from_pretrained(
+                spec.model, **spec.pretrained_kwargs(), **dict(spec.options.get("processor_kwargs", {})))
             self.tokenizer = self.processor.tokenizer
             model_cls = transformers.AutoModelForImageTextToText
         else:
@@ -106,7 +108,8 @@ class TextGeneration:
             model_cls = (transformers.AutoModelForSeq2SeqLM if config.is_encoder_decoder
                          else transformers.AutoModelForCausalLM)
         self.encoder_decoder = bool(config.is_encoder_decoder)
-        self.model = maybe_compile(model_cls.from_pretrained(spec.model, **kwargs).to(spec.device).eval(), spec)
+        self.model = maybe_compile(model_cls.from_pretrained(spec.model, **kwargs, device_map=spec.device_map).eval(),
+                                   spec)
         # The strong compiled baseline for causal LMs: a static KV cache (fixed shapes the compiled
         # forward reuses); models that cannot use one fall back to the dynamic cache.
         self.static_cache = spec.mode == "compile" and not self.encoder_decoder and self.processor is None
@@ -196,8 +199,9 @@ def encoder_input_limit(tokenizer: Any, config: Any) -> int | None:
 
 
 class TextEncoder:
-    """``encode`` (first-token hidden state, TRTMC ``feature_kind: token``) and ``embed``
-    (attention-mask mean pool, L2-normalized, ``feature_kind: pooled``); both report ``values``."""
+    """``encode`` (first-token hidden state, TRTMC ``feature_kind: token``; every token's with the
+    ``all_tokens`` option, as ``text_to_token_features`` returns them) and ``embed`` (attention-mask mean pool,
+    L2-normalized, ``feature_kind: pooled``); both report ``values``."""
 
     def __init__(self, spec: ReferenceSpec) -> None:
         import transformers
@@ -209,8 +213,8 @@ class TextEncoder:
         if config.model_type == "dpr" and config.architectures:
             # AutoModel maps every DPR checkpoint to the question encoder; use the declared encoder.
             model_cls = getattr(transformers, config.architectures[0])
-        model = model_cls.from_pretrained(spec.model, **spec.model_kwargs())
-        self.model = maybe_compile(model.to(spec.device).eval(), spec)
+        model = model_cls.from_pretrained(spec.model, **spec.model_kwargs(), device_map=spec.device_map)
+        self.model = maybe_compile(model.eval(), spec)
         # Remote-code embedding models may return a causal-LM output; they need hidden states requested.
         self.forward_kwargs: dict[str, Any] = {}
         # Longer inputs are cut at the model's position limit (an overflow is a device-side assert that
@@ -221,11 +225,12 @@ class TextEncoder:
         batch = self.tokenizer(str(required(request, "prompt")), return_tensors="pt", truncation=self.max_length is not None,
                                max_length=self.max_length).to(self.spec.device)
         pooled = self.spec.operation == "embed"
+        all_tokens = not pooled and bool(self.spec.options.get("all_tokens"))
 
         def run() -> torch.Tensor:
             outputs = self.model(**batch, **self.forward_kwargs)
             hidden = getattr(outputs, "last_hidden_state", None)
-            if hidden is None and getattr(outputs, "pooler_output", None) is not None:
+            if hidden is None and not all_tokens and getattr(outputs, "pooler_output", None) is not None:
                 return outputs.pooler_output  # DPR encoders return only the pooled first-token representation
             if hidden is None:
                 if getattr(outputs, "hidden_states", None) is None:
@@ -234,6 +239,8 @@ class TextEncoder:
                 if getattr(outputs, "hidden_states", None) is None:
                     raise BackendError(f"{type(outputs).__name__} exposes no hidden states to pool")
                 hidden = outputs.hidden_states[-1]
+            if all_tokens:
+                return hidden[0]
             if not pooled:
                 return hidden[:, 0]
             mask = batch["attention_mask"].unsqueeze(-1).to(hidden.dtype)
@@ -242,8 +249,9 @@ class TextEncoder:
         output, model_ms = timed(run)
         observation = tensor_observation(output, artifact_base)
         # Same fields the TRTMC worker reports for TextToEmbedding / pooled or token features.
-        observation.update(dim=int(output.shape[-1]), values=output[0].float().tolist(),
-                           feature_kind="pooled" if pooled else "token")
+        # Every token's features are row-major [tokens, dim], as TRTMC returns them.
+        values = output.float().flatten() if all_tokens else output[0].float()
+        observation.update(dim=int(output.shape[-1]), values=values.tolist(), feature_kind="pooled" if pooled else "token")
         return invocation(observation, model_ms)
 
 
@@ -258,7 +266,7 @@ class Reranker:
         self.processor = transformers.AutoProcessor.from_pretrained(
             spec.model, **kwargs, **dict(spec.options.get("processor_kwargs", {})))
         self.model = maybe_compile(transformers.AutoModelForSequenceClassification.from_pretrained(
-            spec.model, **spec.model_kwargs()).to(spec.device).eval(), spec)
+            spec.model, **spec.model_kwargs(), device_map=spec.device_map).eval(), spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
         query = str(required(request, "query"))

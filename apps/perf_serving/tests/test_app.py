@@ -14,7 +14,7 @@ pytest.importorskip("fastapi")  # the serving extra (apps/perf_serving/requireme
 from fastapi.testclient import TestClient  # noqa: E402
 
 from trtmc_perf_serving.app import Lane, Saturated, ServingConfig, create_app  # noqa: E402
-from trtmc_perf_serving.backends.base import BackendError, Invocation  # noqa: E402
+from trtmc_perf_serving.backends.base import BackendError, BackendUnavailable, Invocation  # noqa: E402
 
 
 class FakeBackend:
@@ -154,6 +154,49 @@ def test_long_arrays_are_compacted_unless_full_observations(tmp_path):
     assert full["trtmc_observation"]["mask"] == list(range(100))
 
 
+def test_a_backend_that_stops_serving_says_why_on_every_later_request(tmp_path):
+    client, _ = client_for(tmp_path, FakeBackend(fail=BackendUnavailable("torch.compile reference failed: X")))
+    first = client.post("/v1/tasks/classify", json={"request": {}})
+    assert first.status_code == 503 and "torch.compile reference failed: X" in first.json()["error"]["message"]
+    later = client.post("/v1/tasks/classify", json={"request": {}})
+    assert later.status_code == 503 and later.json()["error"]["message"].endswith("torch.compile reference failed: X")
+    ready = client.get("/health/ready")
+    assert ready.status_code == 503 and ready.json() == {"status": "unavailable",
+                                                        "reason": "torch.compile reference failed: X"}
+
+
+def test_a_call_queued_when_the_backend_stops_serving_never_reaches_it(tmp_path):
+    import asyncio
+
+    import httpx
+
+    started, release, calls = threading.Event(), threading.Event(), []
+
+    class Stopping(FakeBackend):
+        def invoke(self, request, artifact_base):
+            calls.append(request)
+            started.set()
+            release.wait(5)
+            raise BackendUnavailable("torch.compile reference failed: X")
+
+    config = ServingConfig(base_request={}, records=tmp_path / "records.jsonl", scratch=tmp_path / "scratch")
+    app = create_app(Stopping(), config)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://serving") as client:
+            first = asyncio.create_task(client.post("/v1/tasks/classify", json={"request": {}}))
+            while not started.is_set():
+                await asyncio.sleep(0.01)
+            second = asyncio.create_task(client.post("/v1/tasks/classify", json={"request": {}}))
+            await asyncio.sleep(0.2)  # the second call waits in the lane behind the first
+            release.set()
+            return await first, await second
+
+    first, second = asyncio.run(scenario())
+    assert len(calls) == 1 and first.status_code == second.status_code == 503
+    assert second.json()["error"]["message"].endswith("torch.compile reference failed: X")
+
+
 def test_unexpected_backend_failure_is_500_with_request_id(tmp_path):
     client, _ = client_for(tmp_path, FakeBackend(fail=KeyError("prompt")))
     response = client.post("/v1/tasks/classify", json={"request": {}}, headers={"X-Request-ID": "req-9"})
@@ -227,12 +270,18 @@ def test_image_and_video_responses_carry_inference_time_and_probed_peak_memory(t
             nvml.used[0] = 1600 * 1024 * 1024  # transient memory during the call
             time.sleep(0.01)
             nvml.used[0] = 1100 * 1024 * 1024
+            from PIL import Image
+            Image.new("RGB", (8, 4), color="red").save(artifact_base.with_suffix(".png"))
             return Invocation({"artifact": "/out.png"}, 250.0)
 
     client, _ = client_for(tmp_path, Generator(operation="generate_image"), memory_probe=probe)
     image = client.post("/v1/images/generations", json={"prompt": "cat", "model": "m", "response_format": "b64_json"})
     assert image.status_code == 200
     body = image.json()
+    import io
+    from PIL import Image
+    with Image.open(io.BytesIO(base64.b64decode(body["data"][0]["b64_json"]))) as png:
+        assert png.size == (8, 4) and png.getpixel((7, 3)) == (255, 0, 0)
     assert body["inference_time_s"] == 0.25 and body["peak_memory_mb"] == 600.0
     assert body["trtmc_timing"]["peak_memory_mb"] == 600.0
     with client:  # keeps the event loop (and the background video job) alive between requests

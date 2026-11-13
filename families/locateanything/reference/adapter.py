@@ -56,6 +56,7 @@ class Adapter:
         self.model = AutoModel.from_pretrained(directory, config=_load_config(directory), trust_remote_code=True,
                                                torch_dtype=torch.float32).to(spec.device).eval()
         _repair_rotary_buffers(self.model)
+        host.maybe_compile(self.model.language_model, spec)  # the remote generate loop calls it per step
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         torch, device = self.torch, self.spec.device

@@ -3,11 +3,9 @@
 
 """Sine position embeddings plus the per-level embedding.
 
-The reference builds these from the pixel mask, so in general they depend on
-the input. This family feeds a fixed-size image with no padding, exactly as
-``rt_detr_v2`` does, which makes the mask all ones and the embedding a pure
-function of the feature-map geometry. They are therefore computed once in numpy
-at build time and baked in as constants rather than rebuilt as a graph.
+The single-image path preserves aspect ratio without padding, so the mask is
+all ones. Runtime feature-map geometry determines the positions. The NumPy
+implementation is retained as an independent oracle for the dynamic graph.
 
 The formula is read from ``DeformableDetrSinePositionEmbedding.forward``:
 
@@ -24,6 +22,9 @@ The formula is read from ``DeformableDetrSinePositionEmbedding.forward``:
 from __future__ import annotations
 
 import numpy as np
+import tensorrt as trt
+
+from . import graph as g
 
 _FEATURES = 128
 _TEMPERATURE = 10000.0
@@ -67,3 +68,40 @@ def build_level_embeddings(shapes, level_embed, dtype=np.float32) -> np.ndarray:
         embedding = sine_embedding(height, width, dtype)
         pieces.append(embedding + np.asarray(level_embed[level], dtype=dtype).reshape(1, 1, -1))
     return np.concatenate(pieces, axis=1)
+
+
+def build_dynamic_level_embeddings(network, shapes, level_embed, dtype=np.float32):
+    """Compute the reference's unpadded positions at the input's actual aspect ratio."""
+    frequencies = _TEMPERATURE ** (np.arange(_FEATURES // 2, dtype=np.float32) / (_FEATURES // 2))
+    frequency = g.add_constant(network, (1, 1, _FEATURES // 2), frequencies)
+    pieces = []
+    for level, spatial_shape in enumerate(shapes):
+        axes = []
+        for axis in (0, 1):
+            grid = g.coordinate_grid(network, spatial_shape, axis)
+            extent = g.shape_indices(network, spatial_shape, [axis])
+            extent = network.add_cast(extent, trt.float32).get_output(0)
+            extent = network.add_elementwise(
+                extent, g.add_constant(network, (1,), [_EPS]),
+                trt.ElementWiseOperation.SUM).get_output(0)
+            denominator = g.reshape(network, extent, (1, 1))
+            grid = network.add_elementwise(grid, denominator, trt.ElementWiseOperation.DIV).get_output(0)
+            grid = network.add_elementwise(
+                grid, g.add_constant(network, (1, 1), [_SCALE]),
+                trt.ElementWiseOperation.PROD).get_output(0)
+            angles = network.add_elementwise(
+                g.reshape(network, grid, (1, -1, 1)), frequency,
+                trt.ElementWiseOperation.DIV).get_output(0)
+            sine = network.add_unary(angles, trt.UnaryOperation.SIN).get_output(0)
+            cosine = network.add_unary(angles, trt.UnaryOperation.COS).get_output(0)
+            pairs = g.concat(network, [g.reshape(network, sine, (1, -1, _FEATURES // 2, 1)),
+                                       g.reshape(network, cosine, (1, -1, _FEATURES // 2, 1))], axis=3)
+            axes.append(g.reshape(network, pairs, (1, -1, _FEATURES)))
+        position = g.concat(network, axes, axis=2)
+        position = network.add_elementwise(
+            position, g.add_constant(network, (1, 1, 2 * _FEATURES), level_embed[level]),
+            trt.ElementWiseOperation.SUM).get_output(0)
+        if dtype == np.float16:
+            position = network.add_cast(position, trt.float16).get_output(0)
+        pieces.append(position)
+    return g.concat(network, pieces, axis=1)

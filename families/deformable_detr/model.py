@@ -54,20 +54,19 @@ def build_detector_engine(weights, cfg, *, precision, verbose=False) -> bytes:
                          else (np.float32, trt.float32))
 
     size = cfg["image_size"]
-    shapes = cfg["shapes"]
-    pixels = network.add_input("pixel_values", trt.float32, (1, 3, size, size))
+    pixels = network.add_input("pixel_values", trt.float32, (1, 3, -1, -1))
     source = pixels if pixels.dtype == work_trt else network.add_cast(
         pixels, work_trt).get_output(0)
 
     features = backbone_builder.build_backbone(network, source, weights, work_np)
     levels = projection_builder.build_projections(network, features, weights, work_np)
+    shapes = [g.shape_of(network, level, [2, 3]) for level in levels]
     # One flat sequence, levels in order, highest resolution first.
     hidden = g.concat(
         network, [g.spatial_to_tokens(network, level) for level in levels], axis=1)
 
-    embeddings = position_builder.build_level_embeddings(
-        shapes, weights["model.level_embed"], work_np)
-    position = g.add_constant(network, embeddings.shape, embeddings, work_np)
+    position = position_builder.build_dynamic_level_embeddings(
+        network, shapes, weights["model.level_embed"], work_np)
 
     memory = encoder_builder.build_encoder(
         network, hidden, position, weights, shapes, cfg, dtype=work_np)
@@ -84,6 +83,11 @@ def build_detector_engine(weights, cfg, *, precision, verbose=False) -> bytes:
 
     config = builder.create_builder_config()
     config.builder_optimization_level = 3
+    profile = builder.create_optimization_profile()
+    maximum = cfg["resize_longest_edge"]
+    profile.set_shape("pixel_values", (1, 3, 1, 1), (1, 3, size, size),
+                      (1, 3, maximum, maximum))
+    config.add_optimization_profile(profile)
     plan = builder.build_serialized_network(network, config)
     if plan is None:
         raise RuntimeError("deformable_detr engine build failed")
@@ -122,9 +126,9 @@ def build(request, writer) -> None:
     height = int(request.image_height or 0) or _DEFAULT_IMAGE_SIZE
     width = int(request.image_width or 0) or _DEFAULT_IMAGE_SIZE
     if height != width:
-        raise NotImplementedError("deformable_detr builds a square input only")
-    if height % 32:
-        raise ValueError("deformable_detr input size must be a multiple of 32")
+        raise NotImplementedError("deformable_detr resize target needs equal height and width")
+    if height <= 0 or height % 32:
+        raise ValueError("deformable_detr resize target must be a positive multiple of 32")
 
     model_dir = Path(request.model_dir)
     cfg = config_module.resolve(model_dir, image_size=height)
@@ -138,6 +142,8 @@ def build(request, writer) -> None:
         {
             "input_image_h": height,
             "input_image_w": width,
+            "resize_shortest_edge": cfg["resize_shortest_edge"],
+            "resize_longest_edge": cfg["resize_longest_edge"],
             "num_queries": cfg["num_queries"],
             "num_labels": cfg["num_labels"],
             "score_threshold": _DEFAULT_THRESHOLD,

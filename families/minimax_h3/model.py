@@ -8,6 +8,7 @@ from __future__ import annotations
 import gc
 import json
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
@@ -103,6 +104,7 @@ class _MiniMaxH3Model:
         *,
         precision: str = "bf16",
         verbose: bool = False,
+        quantization: str | None = None,
     ) -> dict:
         del model_dir
         if precision.lower() != "bf16":
@@ -110,6 +112,10 @@ class _MiniMaxH3Model:
         raw = getattr(config, "raw", {})
         profile = _fixed_profile(raw)
         profile.validate()
+        if quantization not in (None, "none") and profile.first_block_cache:
+            raise NotImplementedError(
+                "MiniMax-H3 fp8 supports the monolithic denoiser only (no first_block_cache)"
+            )
         workspace_limits = default_workspace_limit_bytes(
             first_block_cache=profile.first_block_cache
         )
@@ -160,7 +166,7 @@ class _MiniMaxH3Model:
                 (
                     "denoiser",
                     "denoiser.plan",
-                    build_dit_engine,
+                    partial(build_dit_engine, quantization=quantization),
                     dit_checkpoint_keys(profile),
                 ),
             )
@@ -268,8 +274,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("MiniMax-H3 requires tensor_parallel_size=1")
     if request.max_batch_size != 1:
         raise NotImplementedError("MiniMax-H3 requires max_batch_size=1")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("MiniMax-H3 does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"MiniMax-H3 does not support quantization={request.quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("MiniMax-H3 does not support fp32_layers")
     if request.mtp_seq_len is not None:
@@ -289,6 +297,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         weights,
         precision=request.precision,
         verbose=request.verbose,
+        quantization=request.quantization,
     )
     profile = components["profile"]
     if profile.first_block_cache:

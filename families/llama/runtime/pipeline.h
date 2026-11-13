@@ -100,7 +100,6 @@ class LlamaTextGenerationPipeline final : public ITextGeneration {
                            const std::vector<const void*>& present_k,
                            const std::vector<const void*>& present_v, LlamaKvCache& kv,
                            std::vector<float>& logits);
-    void prime_decoder_after_batched_prefill(const std::vector<int32_t>& input_ids);
     bool should_stop_on_answer(const std::vector<int32_t>& output, int32_t prompt_token_count,
                                const TextGenerationConfig& cfg, int32_t steps,
                                int32_t stop_interval, bool is_eos) const;

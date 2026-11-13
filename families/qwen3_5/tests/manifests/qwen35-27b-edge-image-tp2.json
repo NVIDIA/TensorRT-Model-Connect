@@ -1,0 +1,39 @@
+{
+  "name": "qwen35-27b-edge-image-tp2",
+  "hf_id": "Qwen/Qwen3.5-27B",
+  "hf_revision": "fc05daec18b0a78c049392ed2e771dde82bdf654",
+  "bundle": "qwen35-27b-edge-image-tp2.bundle",
+  "family": "qwen3_5",
+  "task": "vision_language_generation",
+  "trust_remote_code": true,
+  "precision": "fp16",
+  "max_sequence_length": 8192,
+  "tensor_parallel_size": 2,
+  "require_edge_llm": true,
+  "testcases": [
+    {
+      "name": "qwen35-27b-edge-image-tp2",
+      "premerge": false,
+      "prompt": "What color is the car? Answer in one word.",
+      "image": "families/qwen3_5/tests/data/test_img.jpeg",
+      "max_new_tokens": 10,
+      "temperature": 0.0,
+      "top_k": 1,
+      "top_p": 1.0,
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "reference_precision": "fp32",
+      "expected_answers": [
+        "white"
+      ]
+    }
+  ],
+  "reference_device_map": "auto",
+  "reference_max_memory": {
+    "0": "34GiB",
+    "1": "34GiB",
+    "2": "28GiB",
+    "3": "16GiB",
+    "cpu": "0GiB"
+  }
+}

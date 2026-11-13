@@ -13,6 +13,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import graph_blocks, graph_ops
+from .quantization import configure_fp8_build
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
@@ -39,6 +40,7 @@ def build_olmo2_prefill_engine(
     max_cache_length: int,
     *,
     precision: str = "fp32",
+    quant_ctx=None,
     verbose: bool = False,
     workspace_bytes: int,
 ) -> bytes:
@@ -72,6 +74,7 @@ def build_olmo2_prefill_engine(
     trt_config.set_memory_pool_limit(
         trt.MemoryPoolType.WORKSPACE, workspace_bytes)
     trt_config.clear_flag(trt.BuilderFlag.TF32)
+    configure_fp8_build(trt_config, quant_ctx)
 
     token_id = network.add_input("token_id", trt.int32, (-1,))
     position_id = network.add_input("position_id", trt.int32, (-1,))
@@ -136,17 +139,15 @@ def build_olmo2_prefill_engine(
 
     present_k_outputs = []
     present_v_outputs = []
+    matmul = graph_blocks.make_matmul_fn(network, work_np_dtype, quant_ctx)
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
-        q = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, attention_size,
-            weights[f"{prefix}.w_q"], dtype=work_np_dtype)
-        k = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, kv_attention_size,
-            weights[f"{prefix}.w_k"], dtype=work_np_dtype)
-        v = graph_ops.add_matmul_rhs_constant(
-            network, hidden_state, hidden, kv_attention_size,
-            weights[f"{prefix}.w_v"], dtype=work_np_dtype)
+        q = matmul(
+            hidden_state, hidden, attention_size, weights[f"{prefix}.w_q"], f"{prefix}.w_q")
+        k = matmul(
+            hidden_state, hidden, kv_attention_size, weights[f"{prefix}.w_k"], f"{prefix}.w_k")
+        v = matmul(
+            hidden_state, hidden, kv_attention_size, weights[f"{prefix}.w_v"], f"{prefix}.w_v")
 
         q_norm = weights.get(f"{prefix}.q_norm")
         if q_norm is not None:
@@ -206,6 +207,8 @@ def build_olmo2_prefill_engine(
             hidden_size=hidden,
             mlp_size=mlp_size,
             dtype=work_np_dtype,
+            quant_ctx=quant_ctx,
+            layer_prefix=prefix,
         )
         normed_mlp = graph_ops.add_rms_norm(
             network, mlp_out, hidden,

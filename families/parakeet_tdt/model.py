@@ -32,8 +32,10 @@ def build(request, writer):
             raise ValueError(f"parakeet_tdt requires {name}={expected!r}")
     if request.precision not in {"fp16", "fp32"}:
         raise ValueError("parakeet_tdt supports precision=fp16 or fp32")
-    if request.quantization not in {None, "none"}:
-        raise ValueError("parakeet_tdt does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise ValueError("parakeet_tdt supports quantization none or fp8")
+    if request.quantization == "fp8" and request.precision != "fp16":
+        raise ValueError("parakeet_tdt fp8 quantization requires precision=fp16")
 
     model_dir = Path(request.model_dir)
     config = ParakeetTDTConfig.from_dir(model_dir)
@@ -44,8 +46,13 @@ def build(request, writer):
 
     from .engines import compile_engines
 
+    # ``quantization`` is passed on only for FP8 builds.
+    quant_kwargs = {"quantization": "fp8"} if request.quantization == "fp8" else {}
     plans, runtime = compile_engines(
-        model_dir, precision=request.precision, verbose=request.verbose,
+        model_dir,
+        precision=request.precision,
+        verbose=request.verbose,
+        **quant_kwargs,
     )
     writer.set_header(family="parakeet_tdt", task=request.task, backend=request.backend)
     writer.add_json("runtime.json", runtime)

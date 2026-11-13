@@ -78,10 +78,35 @@ def test_image_edit_build_passes_condition_geometry(monkeypatch, tmp_path: Path)
         _request(tmp_path, "image_edit", image_height=382, image_width=640), _Writer()
     )
 
+    # The output follows the picture's aspect at a 1024*1024 area, as diffusers renders it.
     assert observed == {
-        "raw": {},
+        "raw": {"image_height": 800, "image_width": 1312},
         "condition": (382, 640),
     }
+
+
+def test_vertical_image_edit_build_renders_vertical(monkeypatch, tmp_path: Path) -> None:
+    observed = {}
+
+    def fake_build_components(self, model_dir, config, weights, **kwargs):
+        observed["raw"] = config.raw
+        return {
+            "config_json": json.dumps({"task_mode": "edit"}).encode(),
+            "text_encoders": [("text", b"text")],
+            "denoiser": b"denoiser",
+            "vae_decoder": b"vae",
+            "preprocessor_weights": b"preprocessor",
+            "vision_engine": b"vision",
+            "vae_encoder": b"vae-encoder",
+        }
+
+    monkeypatch.setattr(qwen_image_model._QwenImageModel, "build_components", fake_build_components)
+
+    qwen_image_model.build(
+        _request(tmp_path, "image_edit", image_height=1280, image_width=704), _Writer()
+    )
+
+    assert observed["raw"] == {"image_height": 1376, "image_width": 768}
 
 
 def test_text_to_image_build_does_not_read_condition_image(monkeypatch, tmp_path: Path) -> None:

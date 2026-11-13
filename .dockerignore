@@ -7,3 +7,8 @@
 !requirements/
 requirements/*
 !requirements/base.txt
+!tools/
+tools/*
+!tools/ci/
+tools/ci/*
+!tools/ci/docker_image.py

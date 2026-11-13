@@ -24,7 +24,19 @@ GROUP_TASKS = {
     "transcription": {"transcription", "speech_transcription", "transcription_streaming",
                       "streaming_speech_transcription"},
     "detection": {"object_detection", "image_to_boxes"},
+    "vision": {"vision_language_generation", "images_text_to_text"},
+    "images": {"image_generation", "text_to_image"},
+    "videos": {"image_generation", "text_to_video"},
+    "image-edit": {"image_edit", "images_text_to_image_edit"},
 }
+
+
+def is_video_model(model: Any) -> bool:
+    """Recognize a declared video workload, including the legacy image Task."""
+    return model.task == "text_to_video" or int(model.build_settings.get("video_num_frames") or 1) > 1 or any(
+        int(case.get("num_frames") or case.get("video_num_frames") or 1) > 1 or
+        case.get("media_type") == "video" for case in model.testcases
+    )
 
 
 def group_inventory(entries: Iterable[Any], group: str) -> list[dict[str, Any]]:
@@ -35,6 +47,11 @@ def group_inventory(entries: Iterable[Any], group: str) -> list[dict[str, Any]]:
         model = entry.model
         if model is None or model.task not in tasks:
             continue
+        if group in {"images", "videos"}:
+            # Legacy video bundles share image_generation. Their declared frame
+            # geometry belongs to the video workload, regardless of family name.
+            if is_video_model(model) != (group == "videos"):
+                continue
         smoke = "-l0-" in f"-{entry.name}-" or "-regression-" in f"-{entry.name}-"
         variant = {
             "profile": entry.name, "manifest": str(model.manifest_path),

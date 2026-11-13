@@ -6,6 +6,7 @@ from __future__ import annotations
 import inspect
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -22,6 +23,7 @@ from tools.ci.container import CiContainer
 from tools.ci.docker_image import DockerImageManager
 from tools.ci.e2e import (
     E2ERunner,
+    SDK_CONSUMER_LANGUAGES,
     _require_e2e_junit,
     _require_e2e_process_result,
     _require_passing_junit,
@@ -45,6 +47,7 @@ class RecordingContext:
         self.calls = []
         self.runtime_snapshots = []
         self.skip_ctest = False
+        self.no_family_ctests = False
         self.no_cpu_family_tests = False
         self.missing_e2e_testcases = set()
 
@@ -55,6 +58,8 @@ class RecordingContext:
             self.runtime_snapshots.append(
                 tuple(sorted(path.name for path in Path(runtime_root).iterdir()))
             )
+        if "--show-only=json-v1" in command and self.no_family_ctests:
+            return SimpleNamespace(stdout=json.dumps({"tests": []}))
         if "--show-only=json-v1" in command:
             return SimpleNamespace(
                 stdout=json.dumps(
@@ -308,6 +313,61 @@ def test_family_cpp_skip_fails_closed(tmp_path: Path) -> None:
         E2ERunner(context)._run_family_ctests(build, ("beta",))
 
 
+def _write_sdk_consumers(repository: Path, family: str, languages: tuple[str, ...]) -> None:
+    tests = repository / "families" / family / "tests"
+    tests.mkdir(parents=True, exist_ok=True)
+    for language in languages:
+        (tests / f"sdk_consumer.{language}").write_text("int main(void) { return 0; }\n")
+
+
+def _built_targets(context: RecordingContext) -> list[list[str]]:
+    return [
+        command[command.index("--target") + 1 :]
+        for command, _ in context.calls
+        if command[:2] == ["cmake", "--build"]
+    ]
+
+
+def test_family_sdk_consumers_build_with_the_family_ctests(tmp_path: Path) -> None:
+    build = tmp_path / "native-build"
+    build.mkdir()
+    _write_sdk_consumers(tmp_path, "beta", SDK_CONSUMER_LANGUAGES)
+    context = RecordingContext(tmp_path, {"TRTMC_NATIVE_BUILD_DIR": str(build)})
+
+    E2ERunner(context)._run_family_ctests(build, ("beta",))
+
+    assert _built_targets(context) == [
+        ["test_beta_runtime", "test_beta_sdk_c", "test_beta_sdk_cpp"]
+    ]
+    assert any("--output-junit" in command for command, _ in context.calls)
+
+
+def test_family_sdk_consumers_build_without_family_ctests(tmp_path: Path) -> None:
+    """Premerge loads a prebuilt model library; nothing else builds the consumers."""
+    build = tmp_path / "native-build"
+    build.mkdir()
+    _write_sdk_consumers(tmp_path, "beta", ("c",))
+    context = RecordingContext(tmp_path, {"TRTMC_NATIVE_BUILD_DIR": str(build)})
+    context.no_family_ctests = True
+
+    E2ERunner(context)._run_family_ctests(build, ("beta",))
+
+    assert _built_targets(context) == [["test_beta_sdk_c"]]
+    assert not any("--output-junit" in command for command, _ in context.calls)
+
+
+def test_family_without_ctests_or_sdk_consumers_builds_nothing(tmp_path: Path) -> None:
+    build = tmp_path / "native-build"
+    build.mkdir()
+    (tmp_path / "families/beta/tests").mkdir(parents=True)
+    context = RecordingContext(tmp_path, {"TRTMC_NATIVE_BUILD_DIR": str(build)})
+    context.no_family_ctests = True
+
+    E2ERunner(context)._run_family_ctests(build, ("beta",))
+
+    assert _built_targets(context) == []
+
+
 def test_family_hardware_skip_fails_closed(tmp_path: Path) -> None:
     report = tmp_path / "hardware.xml"
     report.write_text(
@@ -558,7 +618,7 @@ def test_pipeline_exposes_only_active_stages(tmp_path: Path) -> None:
     )
 
 
-def test_package_build_uses_the_preinstalled_offline_toolchain() -> None:
+def test_package_build_uses_the_preinstalled_offline_toolchain(tmp_path, monkeypatch) -> None:
     source = inspect.getsource(WheelPackageManager.build)
     assert '"--no-isolation"' in source
     assert '"build>=1.2"' not in source
@@ -575,6 +635,66 @@ def test_package_build_uses_the_preinstalled_offline_toolchain() -> None:
     dockerfile = (repository / "Dockerfile").read_text()
     assert "openmpi-bin" in dockerfile
     assert "nvidia/nccl/lib" in dockerfile
+    # The final Torch reinstall must not leave CUDA Python with incompatible bindings.
+    cuda_pin = dockerfile.rindex("cuda-python==13.0.3")
+    assert dockerfile.rindex("pip install") < cuda_pin
+    assert dockerfile.index("pip install --force-reinstall") < cuda_pin
+    assert dockerfile.index("&& pip check", cuda_pin) > cuda_pin
+    repair_step = dockerfile.index("&& python3.12 /tmp/trtmc-docker-image.py repair-cusparselt-wheel")
+    assert cuda_pin < repair_step < dockerfile.index("&& pip check")
+    assert "!tools/ci/docker_image.py" in (repository / ".dockerignore").read_text()
+
+    import csv
+    import hashlib
+    from tools.ci import docker_image as repair
+
+    info = tmp_path / "nvidia_cusparselt_cu13-0.8.1.dist-info"
+    info.mkdir()
+    (info / "METADATA").write_text("Name: nvidia-cusparselt-cu13\nVersion: 0.8.1\n")
+    library = tmp_path / repair._LIBRARY
+    library.parent.mkdir(parents=True)
+    payload = bytearray(64)
+    payload[:6] = b"\x7fELF\x02\x01"
+    payload[18:20] = (183).to_bytes(2, "little")
+    library.write_bytes(payload)
+    monkeypatch.setattr(repair, "_LIBRARY_SIZE", len(payload))
+    monkeypatch.setattr(repair, "_LIBRARY_SHA256", hashlib.sha256(payload).hexdigest())
+    monkeypatch.setattr(repair.platform, "machine", lambda: "aarch64")
+    distribution = repair.metadata.PathDistribution(info)
+    monkeypatch.setattr(repair.metadata, "distribution", lambda _name: distribution)
+    original = ("Wheel-Version: 1.0\n" + repair._BAD_TAG).encode()
+    wheel = info / "WHEEL"
+    wheel.write_bytes(original)
+    original_record = f"{info.name}/WHEEL,{repair._record_hash(original)},{len(original)}\n"
+    original_record += f"{repair._LIBRARY},{repair._record_hash(payload)},{len(payload)}\n"
+    record = info / "RECORD"
+    record.write_text(original_record)
+    assert repair.repair_cusparselt_wheel()
+    corrected = original.replace(repair._BAD_TAG.encode(), repair._GOOD_TAG.encode())
+    assert wheel.read_bytes() == corrected
+    assert library.read_bytes() == payload
+    rows = list(csv.reader(io.StringIO(record.read_text())))
+    assert rows[0][1:] == [repair._record_hash(corrected), str(len(corrected))]
+    assert rows[1][1:] == [repair._record_hash(payload), str(len(payload))]
+    assert not repair.repair_cusparselt_wheel()  # Already-correct metadata is unchanged.
+
+    wheel.write_bytes(original)
+    record.write_text(original_record)
+    library.write_bytes(payload[:-1] + b"x")
+    with pytest.raises(ValueError, match="library digest"):
+        repair.repair_cusparselt_wheel()
+    assert wheel.read_bytes() == original
+    library.write_bytes(payload[:18] + b"\x3e\x00" + payload[20:])
+    with pytest.raises(ValueError, match="AArch64 ELF"):
+        repair.repair_cusparselt_wheel()
+    assert wheel.read_bytes() == original
+    library.write_bytes(payload)
+    record.write_text(original_record.replace(repair._record_hash(original), "sha256=corrupt"))
+    with pytest.raises(ValueError, match="disagrees with RECORD"):
+        repair.repair_cusparselt_wheel()
+    assert wheel.read_bytes() == original
+    monkeypatch.setattr(repair.platform, "machine", lambda: "x86_64")
+    assert not repair.repair_cusparselt_wheel()
 
 
 def test_internal_ci_image_supports_embedded_workflow_shell_regressions() -> None:
@@ -627,12 +747,83 @@ def test_internal_bridge_waits_for_the_exact_run_until_the_job_timeout() -> None
         "\n  publish:", 1
     )[0]
     assert "while true; do" in wait
-    assert "sleep 15" in wait
+    assert "poll_seconds=120" in wait and 'sleep "$poll_seconds"' in wait
     assert "seq " not in wait
     assert "gh run download" not in source
     assert "tools.public_failure" not in source
     assert "policy_sha" not in source
     assert "Protected failure details are not transferred to the public repository." in source
+
+
+def _run_bridge_wait(
+    tmp_path: Path, responses: list[str]
+) -> tuple[subprocess.CompletedProcess, list[str], Path]:
+    """Run the bridge wait step against a fake gh that answers the run polls with ``responses``."""
+    path = Path(__file__).resolve().parents[2] / ".github/workflows/internal-ci-bridge.yml"
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    script = next(
+        step["run"]
+        for step in workflow["jobs"]["dispatch"]["steps"]
+        if step["name"] == "Wait for the exact Internal CI result"
+    )
+    queue, calls, output = tmp_path / "responses", tmp_path / "calls", tmp_path / "output"
+    queue.write_text("".join(f"{response}\n" for response in responses), encoding="utf-8")
+    (tmp_path / "gh").write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "gh $*" >> "$CALLS"\n'
+        'if [[ "$*" == *" /rate_limit "* ]]; then echo $(( $(date +%s) + 300 )); exit 0; fi\n'
+        'next=$(head -n 1 "$RESPONSES")\n'
+        'tail -n +2 "$RESPONSES" > "$RESPONSES.rest" && mv "$RESPONSES.rest" "$RESPONSES"\n'
+        'case "$next" in\n'
+        '  rate) echo "gh: API rate limit exceeded for user ID 1." >&2; exit 1 ;;\n'
+        '  missing) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;\n'
+        '  *) echo "$next" ;;\n'
+        "esac\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "sleep").write_text(
+        '#!/usr/bin/env bash\necho "sleep $*" >> "$CALLS"\n', encoding="utf-8"
+    )
+    for fake in ("gh", "sleep"):
+        (tmp_path / fake).chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            "CALLS": str(calls),
+            "RESPONSES": str(queue),
+            "RUN_ID": "7",
+            "PRIVATE_CI_OWNER": "owner",
+            "PRIVATE_CI_REPOSITORY": "repo",
+            "GITHUB_OUTPUT": str(output),
+            "RUNNER_TEMP": str(tmp_path),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return result, calls.read_text(encoding="utf-8").splitlines(), output
+
+
+def test_internal_bridge_waits_out_a_rate_limit_instead_of_failing_the_gate(tmp_path: Path) -> None:
+    result, calls, output = _run_bridge_wait(
+        tmp_path,
+        ["rate", '{"status": "queued"}', '{"status": "completed", "conclusion": "success"}'],
+    )
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == "conclusion=success\n"
+    assert "rate limit reached" in result.stdout
+    sleeps = [int(call.split()[1]) for call in calls if call.startswith("sleep ")]
+    # The first wait lasts until the token's reset instead of failing the gate.
+    assert len(sleeps) == 2 and 290 <= sleeps[0] <= 305
+    assert sleeps[1] == 120  # an ordinary poll
+
+
+def test_internal_bridge_still_fails_on_other_api_errors(tmp_path: Path) -> None:
+    result, calls, output = _run_bridge_wait(tmp_path, ["missing"])
+    assert result.returncode != 0 and "Not Found" in result.stderr
+    assert not output.exists() and not [call for call in calls if call.startswith("sleep ")]
 
 
 def test_internal_bridge_remains_a_one_shot_maintainer_label_trigger() -> None:
@@ -676,7 +867,17 @@ def test_community_activity_alert_uses_only_trusted_external_metadata() -> None:
     assert "schedule" in events
     assert "workflow_dispatch" in events
     assert workflow["permissions"] == {}
-    assert "github.event.workflow_run.name == 'Community CI'" in ready["if"]
+    # Community CI sets a run-name, which becomes the run's name, so the gate must
+    # identify its pull-request runs by the title they are actually given.
+    assert "workflow_run.name" not in ready["if"]
+    gate = re.search(r"display_title, '([^']+)'", ready["if"]).group(1)
+    community_ci = yaml.safe_load(
+        (path.parent / "community-ci.yml").read_text(encoding="utf-8")
+    )
+    assert gate in community_ci["run-name"]
+    run_name_pattern = re.search(r"run_name_pattern='([^']+)'", source).group(1)
+    title = f"PR #7 \u00b7 community CI \u00b7 head {'a' * 40} \u00b7 merge {'b' * 40}"
+    assert re.match(run_name_pattern, title)
     assert "github.event.workflow_run.event == 'pull_request'" in ready["if"]
     assert "merge_revision_matches_tested" in source
     assert '[ "$current_base_sha" = "$tested_base_sha" ]' in source

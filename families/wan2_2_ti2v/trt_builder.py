@@ -4,9 +4,10 @@
 """Pure TensorRT component builder for Wan2.2 TI2V-5B.
 
 Python and PyTorch are build-time checkpoint readers only. Every component is
-built from the requested checkpoint. The resulting bundle contains four
-native TensorRT plans, the tokenizer and config; it contains no executable
-companion or custom plugin artifact.
+built from the requested checkpoint. The resulting bundle contains five
+native TensorRT plans (text encoder, DiT, two VAE decoder steps and the
+image-to-video first-frame VAE encoder), the tokenizer and config; it contains
+no executable companion or custom plugin artifact.
 """
 
 from __future__ import annotations
@@ -42,6 +43,18 @@ def load_vae_step_weights(*args, **kwargs):
     return implementation(*args, **kwargs)
 
 
+def build_vae_encoder_engine(*args, **kwargs):
+    from .vae_encoder_builder import build_vae_encoder_engine as implementation
+
+    return implementation(*args, **kwargs)
+
+
+def load_vae_encoder_weights(*args, **kwargs):
+    from .vae_encoder_builder import load_vae_encoder_weights as implementation
+
+    return implementation(*args, **kwargs)
+
+
 def _qualified_fp8_scale_names(profile) -> tuple[set[str], set[str]]:
     ffn = {
         name
@@ -51,14 +64,9 @@ def _qualified_fp8_scale_names(profile) -> tuple[set[str], set[str]]:
             f"blocks.{index}.ffn.net.2",
         )
     }
-    cross_qo = {
-        name
-        for index in range(profile.num_layers)
-        for name in (
-            f"blocks.{index}.attn2.to_q",
-            f"blocks.{index}.attn2.to_out.0",
-        )
-    }
+    # attn2.to_out.0 stays BF16: TensorRT 11.4 cannot compile an FP8 Quantize
+    # on the output of the fused cross-attention.
+    cross_qo = {f"blocks.{index}.attn2.to_q" for index in range(profile.num_layers)}
     return ffn, cross_qo
 
 
@@ -83,7 +91,7 @@ def _split_qualified_fp8_scales(
 
     raise ValueError(
         "Wan2.2 FP8 scales must contain either the complete FFN map or the "
-        "complete FFN+cross-Q/O map; "
+        "complete FFN+cross-Q map; "
         f"missing_ffn={sorted(expected_ffn - provided)}, "
         f"missing_cross_qo={sorted(expected_cross_qo - provided)}, "
         f"unexpected={sorted(provided - expected_ffn - expected_cross_qo)}"
@@ -100,7 +108,7 @@ def build_wan22_components(
     fp8_scales: dict | None = None,
     **_kwargs,
 ) -> dict:
-    """Build all four plans for one qualified checkpoint profile."""
+    """Build all five plans for one qualified checkpoint profile."""
 
     if precision.lower() not in {"bf16", "bfloat16"}:
         raise ValueError("Wan2.2-TI2V-5B requires BF16 DiT/T5 precision")
@@ -147,6 +155,12 @@ def build_wan22_components(
         verbose=verbose,
     )
 
+    vae_encoder = build_vae_encoder_engine(
+        load_vae_encoder_weights(weights["_vae_checkpoint"]),
+        profile=vae_profile,
+        verbose=verbose,
+    )
+
     tokenizer_path = Path(weights["_tokenizer_dir"]) / "tokenizer.json"
     tokenizer_json = tokenizer_path.read_bytes()
     return {
@@ -154,5 +168,6 @@ def build_wan22_components(
         "denoiser": bytes(denoiser),
         "vae_decoder": bytes(vae_decoder),
         "vae_decoder_first_frame": bytes(vae_decoder_first_frame),
+        "vae_encoder": bytes(vae_encoder),
         "tokenizer_json": tokenizer_json,
     }

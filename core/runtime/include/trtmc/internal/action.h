@@ -38,6 +38,33 @@ class IImageStateToActionChunk {
     // overlapping/reentrant queue/chunk execution or unrelated live session.
     virtual ImageStateActionChunkResult run(const ImageStateToActionChunkRequest&, ConfigView) = 0;
 };
+struct NamedImage {
+    std::string_view name; // Family-defined camera key, validated non-empty and unique by the Core.
+    ImageView image;
+};
+struct ImagesStateTextObservation {
+    Span<const NamedImage> images;
+    Span<const float> state; // May be empty; interpreted and validated by the family.
+    std::string_view text;   // UTF-8 instruction; may be empty; validated by the family.
+};
+struct ImagesStateTextToActionChunkRequest {
+    ImagesStateTextObservation observation;
+};
+struct ImagesStateTextActionChunkResult {
+    ActionSequenceResult actions; // [step,component], in actual unnormalized model output units.
+    bool within_training_bounds{false}; // Range metadata, not a physical safety guarantee.
+    double inference_ms{0};
+};
+class IImagesStateTextToActionChunk {
+  public:
+    using TaskInterface = IImagesStateTextToActionChunk;
+    static constexpr std::string_view kTask = "images_state_text_to_action_chunk";
+    virtual ~IImagesStateTextToActionChunk() = default;
+    // Input and config storage is borrowed only through return. Stateless: no
+    // queue, no history. The family validates cameras, shapes and text.
+    virtual ImagesStateTextActionChunkResult run(const ImagesStateTextToActionChunkRequest&,
+                                                 ConfigView) = 0;
+};
 class IImageStateActionSession {
   public:
     virtual ~IImageStateActionSession() = default;

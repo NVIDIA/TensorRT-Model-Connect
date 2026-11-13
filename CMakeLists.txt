@@ -147,6 +147,7 @@ add_library(trtmc_c SHARED
   core/api/runtime/stream.cpp
   core/api/runtime/video.cpp
   core/api/runtime/perception.cpp
+  core/api/runtime/point_cloud.cpp
   core/api/runtime/language.cpp
   core/api/runtime/tracking.cpp
   core/api/runtime/speech.cpp
@@ -404,6 +405,7 @@ if(TRTMC_BUILD_SERVER)
     PRIVATE ${PROJECT_SOURCE_DIR}/core/runtime/include
   )
   target_link_libraries(trtmc_server
+    PRIVATE trtmc_core
     PUBLIC trtmc_runtime trtmc_c
     PRIVATE
       trtmc_media_io
@@ -552,6 +554,35 @@ if(TRTMC_BUILD_TESTS)
     target_compile_options(test_server_detection_worker PRIVATE -Wall -Wextra -Wpedantic)
     add_test(NAME server_detection_worker COMMAND test_server_detection_worker)
     set_tests_properties(server_detection_worker PROPERTIES LABELS cpu)
+    add_executable(test_server_vision_worker apps/server/tests/test_vision_worker.cpp)
+    target_include_directories(test_server_vision_worker PRIVATE
+      ${PROJECT_SOURCE_DIR}/core/runtime/include ${PROJECT_SOURCE_DIR}/apps)
+    target_link_libraries(test_server_vision_worker PRIVATE trtmc_server trtmc_media_io nlohmann_json::nlohmann_json)
+    target_compile_options(test_server_vision_worker PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME server_vision_worker COMMAND test_server_vision_worker)
+    set_tests_properties(server_vision_worker PROPERTIES LABELS cpu)
+
+    add_executable(test_server_image_worker apps/server/tests/test_image_worker.cpp)
+    target_include_directories(test_server_image_worker PRIVATE
+      "${PROJECT_SOURCE_DIR}/apps" "${PROJECT_SOURCE_DIR}/apps/cli")
+    target_link_libraries(test_server_image_worker PRIVATE trtmc_server trtmc_media_io nlohmann_json::nlohmann_json)
+    target_compile_options(test_server_image_worker PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME server_image_worker COMMAND test_server_image_worker)
+    set_tests_properties(server_image_worker PROPERTIES LABELS cpu)
+    add_executable(test_server_video_worker apps/server/tests/test_video_worker.cpp)
+    target_include_directories(test_server_video_worker PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/apps" "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    target_link_libraries(test_server_video_worker PRIVATE trtmc_server trtmc_media_io nlohmann_json::nlohmann_json)
+    target_compile_options(test_server_video_worker PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME server_video_worker COMMAND test_server_video_worker)
+    set_tests_properties(server_video_worker PROPERTIES LABELS cpu)
+    add_executable(test_server_image_edit_worker apps/server/tests/test_image_edit_worker.cpp)
+    target_include_directories(test_server_image_edit_worker PRIVATE
+      ${PROJECT_SOURCE_DIR}/apps ${PROJECT_SOURCE_DIR}/core/runtime/include)
+    target_link_libraries(test_server_image_edit_worker PRIVATE trtmc_server trtmc_media_io nlohmann_json::nlohmann_json)
+    target_compile_options(test_server_image_edit_worker PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME server_image_edit_worker COMMAND test_server_image_edit_worker)
+    set_tests_properties(server_image_edit_worker PROPERTIES LABELS cpu)
   endif()
 
   add_library(trtmc_test_cli_fixture SHARED apps/cli/tests/test_family_cli.cpp)
@@ -575,6 +606,16 @@ if(TRTMC_BUILD_TESTS)
   add_dependencies(test_family_cli trtmc_test_cli_fixture)
   add_test(NAME family_cli COMMAND test_family_cli $<TARGET_FILE:trtmc_test_cli_fixture>)
   set_tests_properties(family_cli PROPERTIES LABELS cpu)
+
+  add_executable(test_audio_io apps/cli/tests/test_audio_io.cpp apps/cli/io.cpp)
+  target_include_directories(test_audio_io PRIVATE
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+    ${PROJECT_SOURCE_DIR}/apps
+    ${PROJECT_SOURCE_DIR}/third_party/stb
+  )
+  target_compile_options(test_audio_io PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME audio_io COMMAND test_audio_io)
+  set_tests_properties(audio_io PROPERTIES LABELS "cpu")
 
   set(_trtmc_test_runtime_root "${CMAKE_BINARY_DIR}/tests/runtime")
   add_library(trtmc_test_backend_fake SHARED core/runtime/tests/fake_backend.cpp)
@@ -679,7 +720,7 @@ if(TRTMC_BUILD_TESTS)
   add_test(NAME sdk_cli_e2e COMMAND test_sdk_cli "${_trtmc_api_test_runtime_root}")
   set_tests_properties(sdk_cli_e2e PROPERTIES LABELS "cpu;e2e")
 
-  foreach(_trtmc_fixture IN ITEMS text image image_boxes audio features numeric stream video perception language tracking speech action recurrent structure)
+  foreach(_trtmc_fixture IN ITEMS text image image_boxes audio features numeric stream video perception language tracking speech action recurrent structure point_cloud)
     add_library(trtmc_api_test_${_trtmc_fixture}_family SHARED
       core/api/tests/${_trtmc_fixture}_family.cpp
     )
@@ -725,6 +766,9 @@ if(TRTMC_BUILD_TESTS)
     add_dependencies(test_server_sdk_worker trtmc-server trtmc_api_test_backend
       trtmc_api_test_family trtmc_api_test_text_family trtmc_api_test_stream_family
       trtmc_api_test_audio_family trtmc_api_test_image_boxes_family)
+    add_dependencies(test_server_sdk_worker trtmc_api_test_language_family)
+    add_dependencies(test_server_sdk_worker trtmc_api_test_image_family)
+    add_dependencies(test_server_sdk_worker trtmc_api_test_video_family)
     add_test(NAME server_sdk_worker
       COMMAND test_server_sdk_worker "${_trtmc_api_test_runtime_root}")
     add_test(NAME server_sdk_worker_process
@@ -812,7 +856,7 @@ if(TRTMC_BUILD_TESTS)
   add_test(NAME sdk_language_cli_e2e COMMAND test_sdk_language_cli "${_trtmc_api_test_runtime_root}")
   set_tests_properties(sdk_language_cli_e2e PROPERTIES LABELS "cpu;e2e")
 
-  foreach(_trtmc_group IN ITEMS image_boxes audio features numeric stream video perception language tracking speech action recurrent structure)
+  foreach(_trtmc_group IN ITEMS image_boxes audio features numeric stream video perception language tracking speech action recurrent structure point_cloud)
     add_executable(test_${_trtmc_group}_c_api core/api/tests/${_trtmc_group}_c_test.c)
     add_executable(test_${_trtmc_group}_cpp_api core/api/tests/${_trtmc_group}_test.cpp)
     foreach(_trtmc_language IN ITEMS c cpp)
@@ -944,6 +988,16 @@ if(TRTMC_BUILD_TESTS)
     add_dependencies(test_voicechat_sdk_io trtmc_api_test_backend trtmc_api_test_speech_family)
     add_test(NAME voicechat_sdk_io COMMAND test_voicechat_sdk_io "${_trtmc_api_test_runtime_root}")
     set_tests_properties(voicechat_sdk_io PROPERTIES LABELS "cpu;e2e")
+
+    add_executable(test_audio_observation apps/benchmark/tests/native/test_audio_observation.cpp)
+    target_include_directories(test_audio_observation PRIVATE
+      ${PROJECT_SOURCE_DIR}/apps/benchmark/native
+      ${PROJECT_SOURCE_DIR}/core/runtime/include
+    )
+    target_link_libraries(test_audio_observation PRIVATE nlohmann_json::nlohmann_json)
+    target_compile_options(test_audio_observation PRIVATE -Wall -Wextra -Wpedantic)
+    add_test(NAME audio_observation COMMAND test_audio_observation)
+    set_tests_properties(audio_observation PROPERTIES LABELS "cpu")
 
     add_executable(test_dataset_answer apps/benchmark/tests/native/test_dataset_answer.cpp)
     target_include_directories(test_dataset_answer PRIVATE

@@ -16,7 +16,9 @@
         {"name": "max_sequence_length", "flags": ["--max-sequence-length"], "type": "int"},
         {"name": "tensor_parallel_size", "flags": ["--tensor-parallel-size"], "type": "int", "choices": [1, 2, 4, 8], "default": 1},
         {"name": "fp32_layers", "flags": ["--fp32-layer"], "type": "int", "action": "append", "default": []},
-        {"name": "verbose", "flags": ["--verbose"], "type": "bool", "action": "store_true", "default": false}
+        {"name": "verbose", "flags": ["--verbose"], "type": "bool", "action": "store_true", "default": false},
+        {"name": "quantization", "flags": ["--quantization"], "type": "string", "choices": ["none", "fp8"],
+         "help": "Self-quantize the encoder projections to FP8 (needs --precision fp16)"}
       ]
     },
     {

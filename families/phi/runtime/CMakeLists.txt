@@ -35,3 +35,17 @@ set_target_properties(trtmc_model_phi PROPERTIES
 install(TARGETS trtmc_model_phi
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_phi_eos_tokens
+    ${PROJECT_SOURCE_DIR}/families/phi/tests/cpp/test_phi_eos_tokens.cpp
+    sampler.cpp
+  )
+  target_include_directories(test_phi_eos_tokens PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_link_libraries(test_phi_eos_tokens PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_phi_eos_tokens PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME phi_eos_tokens COMMAND test_phi_eos_tokens)
+endif()

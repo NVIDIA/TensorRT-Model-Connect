@@ -51,8 +51,12 @@ def add_attention_block(
     max_cache_length: int,
     eps_tensor: trt.ITensor,
     dtype: np.dtype = np.float32,
+    quant=None,
 ) -> dict[str, trt.ITensor]:
-    """Add the pinned Nemotron-H RMSNorm/GQA attention block."""
+    """Add the pinned Nemotron-H RMSNorm/GQA attention block.
+
+    ``quant`` (optional) turns q/k/v into FP8 matmuls; the output projection stays fp32.
+    """
     normed = graph_ops.add_rms_norm(
         network,
         hidden,
@@ -61,14 +65,14 @@ def add_attention_block(
         eps_tensor,
         dtype=dtype,
     )
-    q = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, attention_size, weights[f"{prefix}.w_q"], dtype=dtype
+    q = graph_ops.add_projection(
+        network, quant, normed, hidden_size, attention_size, weights, f"{prefix}.w_q", dtype
     )
-    k = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, kv_attention_size, weights[f"{prefix}.w_k"], dtype=dtype
+    k = graph_ops.add_projection(
+        network, quant, normed, hidden_size, kv_attention_size, weights, f"{prefix}.w_k", dtype
     )
-    v = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, kv_attention_size, weights[f"{prefix}.w_v"], dtype=dtype
+    v = graph_ops.add_projection(
+        network, quant, normed, hidden_size, kv_attention_size, weights, f"{prefix}.w_v", dtype
     )
 
     k_row = network.add_shuffle(k)

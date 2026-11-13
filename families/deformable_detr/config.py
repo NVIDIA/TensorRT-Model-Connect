@@ -20,7 +20,7 @@ def feature_shapes(image_size: int, num_levels: int) -> list[tuple[int, int]]:
     100x100 leading map into a 200x200 one, so the strides are named here
     rather than derived from a loop over the backbone's stages.
     """
-    shapes = [(image_size // stride, image_size // stride) for stride in _BACKBONE_STRIDES]
+    shapes = [((image_size + stride - 1) // stride,) * 2 for stride in _BACKBONE_STRIDES]
     while len(shapes) < num_levels:
         height, width = shapes[-1]
         shapes.append(((height + 1) // 2, (width + 1) // 2))
@@ -53,14 +53,28 @@ def resolve(model_dir: str | Path, *, image_size: int) -> dict:
     processor = Path(model_dir) / "preprocessor_config.json"
     mean, std = [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
     normalize = True
+    shortest_edge, longest_edge = 800, 1333
     if processor.is_file():
         payload = json.loads(processor.read_text(encoding="utf-8"))
         mean = [float(v) for v in payload.get("image_mean", mean)]
         std = [float(v) for v in payload.get("image_std", std)]
         normalize = bool(payload.get("do_normalize", True))
+        size = payload.get("size", {})
+        if isinstance(size, int):
+            shortest_edge = size
+            longest_edge = int(payload.get("max_size", 1333))
+        else:
+            shortest_edge = int(size.get("shortest_edge", shortest_edge))
+            longest_edge = int(size.get("longest_edge", longest_edge))
+        if not payload.get("do_resize", True):
+            raise NotImplementedError("deformable_detr requires aspect-ratio-preserving resize")
+    if shortest_edge <= 0 or longest_edge < shortest_edge:
+        raise ValueError("deformable_detr checkpoint resize bounds are invalid")
 
     return {
         "image_size": int(image_size),
+        "resize_shortest_edge": int(image_size),
+        "resize_longest_edge": int(round(longest_edge * image_size / shortest_edge)),
         "num_feature_levels": levels,
         "shapes": feature_shapes(int(image_size), levels),
         "d_model": int(raw.get("d_model", 256)),

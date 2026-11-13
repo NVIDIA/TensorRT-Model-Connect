@@ -1,0 +1,1 @@
+transformers @ https://github.com/huggingface/transformers/archive/536ecc007387a50e77603bb5d92100e9b07514cc.zip

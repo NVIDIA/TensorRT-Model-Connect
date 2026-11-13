@@ -18,11 +18,10 @@ Validation remaining: build the pinned checkpoint on authorized GPU hardware
 and run `families/llama/tests/test_e2e.py` with `--e2e-model minicpm5-1b`, using
 the normal family E2E runtime environment. No large weights were downloaded locally.
 
-The Llama tokenizer's Sequence/Split classification fix is owned by upstream
-PR #1423. Its original commit is included as a dependency for combined testing;
-maintainers should review and integrate #1423 first. This checkpoint coverage
-must not be treated as complete runtime qualification until target-GPU parity
-is verified.
+The Llama tokenizer's Sequence/Split classification fix was merged upstream
+as `11ed7177`. This branch includes current main while preserving the original
+dependency history. This checkpoint coverage still requires target-GPU parity
+before runtime qualification.
 
 ## Tokenizer-sensitive premerge coverage
 
@@ -34,7 +33,7 @@ threshold is changed. A separate native prefill receipt assertion requires
 16 tokens, including BOS, so the observed 18-token baseline cannot pass merely
 by generating similar text. This assertion retains the subsequent Hugging Face
 generation comparison; it does not turn the case into a KV-contract-only test.
-It checks token count, not equality of every native input ID. Selecting `--e2e-model minicpm5-1b` selects both cases.
+It checks token count, not equality of every native input ID. Selecting `--e2e-model minicpm5-1b` selects all three cases.
 
 CPU comparison against Hugging Face Tokenizers 0.22.2 found six mismatches out
 of 28 text probes on the initial PR source (f0c70eac). Replacing only the Llama
@@ -63,3 +62,18 @@ This avoids a Hub 1.32 repository-tree lookup that otherwise raises
 `OfflineModeIsEnabled` even when the pinned snapshot is already cached. The
 regression tests use temporary local snapshots without any tree index or model
 weights. No manifest revisions, comparisons or acceptance thresholds are changed.
+
+
+## Empty raw prompt framing
+
+The pinned publisher tokenizer returns BOS `[0]` for empty raw text with special
+tokens enabled. The native tokenizer previously returned before applying its
+post-processor, producing no input IDs. The fix retains post-processing for
+empty text. CPU tests cover BOS-only, EOS-only, combined framing, disabled
+special tokens, nonempty controls and repeated calls.
+
+The third premerge case uses an empty raw prompt, requires the reference's
+single BOS token and a one-token native prefill receipt, then retains the same
+FP16/FP32 generated-output comparison. No parity threshold is changed. A CPU
+comparison against the pinned Tokenizers assets covers 28 inputs with and without
+special tokens; target-GPU generation for all three cases remains unrun.

@@ -146,6 +146,12 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     model.vocab_size = phi4_multimodal_factory::require_positive_int(config, "vocab_size");
     model.id_bos = phi4_multimodal_factory::require_int(config, "id_bos");
     model.id_eos = phi4_multimodal_factory::require_int(config, "id_eos");
+    model.eos_token_ids =
+        config.value("eos_token_ids", model.id_eos >= 0 ? std::vector<int32_t>{model.id_eos}
+                                                        : std::vector<int32_t>{});
+    for (const auto token : model.eos_token_ids)
+        if (token < 0 || token >= model.vocab_size)
+            throw std::runtime_error("Phi-4 Multimodal runtime.json has invalid EOS token");
     model.image_token_id = phi4_multimodal_factory::require_int(config, "image_token_id");
     model.vision_output_dim =
         phi4_multimodal_factory::require_positive_int(config, "vision_output_dim");
@@ -153,6 +159,9 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     model.num_layers = num_layers;
     model.prefill_max_length =
         phi4_multimodal_factory::require_positive_int(config, "prefill_max_length");
+    if (config.contains("rope_long_factor_threshold"))
+        model.rope_long_factor_threshold =
+            phi4_multimodal_factory::require_int(config, "rope_long_factor_threshold");
     const auto& io = config.at("io_map");
     model.present_k_pattern = io.at("present_k_pattern").get<std::string>();
     model.present_v_pattern = io.at("present_v_pattern").get<std::string>();

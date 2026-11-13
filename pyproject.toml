@@ -27,7 +27,7 @@ dependencies = [
     "sentencepiece>=0.1.99",
     "cuda-python>=13.0.3,<14",
     "apache-tvm-ffi==0.1.12",
-    "tensorrt==11.1.0.106",
+    "tensorrt==11.4.0.106",
     "PyYAML>=6.0",
 ]
 
@@ -40,8 +40,9 @@ trtmc-perf-serve = "trtmc_perf_serving.cli:main"
 [project.optional-dependencies]
 serve = [
     "fastapi>=0.115,<0.142",
+    "starlette>=0.44",
     "python-multipart>=0.0.20,<0.1",
-    "Pillow>=10,<13",
+    "Pillow>=10,<14",
     "pydantic>=2.11,<3",
     "uvicorn>=0.30,<0.53",
 ]
@@ -50,9 +51,10 @@ test = [
     "torch>=2.0",
     "jsonschema>=4.23,<5",
     "fastapi>=0.115,<0.142",
+    "starlette>=0.44",
     "httpx>=0.27,<0.29",
     "python-multipart>=0.0.20,<0.1",
-    "Pillow>=10,<13",
+    "Pillow>=10,<14",
     "pydantic>=2.11,<3",
     "uvicorn>=0.30,<0.53",
 ]

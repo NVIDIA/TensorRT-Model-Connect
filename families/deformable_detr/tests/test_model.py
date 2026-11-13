@@ -29,6 +29,39 @@ def test_feature_shapes_round_the_extra_level_up():
     assert config.feature_shapes(800, 4)[-1] == (13, 13)
 
 
+def test_feature_shapes_round_every_strided_convolution_up():
+    from families.deformable_detr import config
+
+    assert config.feature_shapes(1333, 4) == [(167, 167), (84, 84), (42, 42), (21, 21)]
+
+
+@pytest.mark.parametrize("size,expected", [
+    ({"shortest_edge": 800, "longest_edge": 1333}, (800, 1333)),
+    (800, (800, 1333)),
+    ({"shortest_edge": 600, "longest_edge": 1000}, (800, 1333)),
+])
+def test_resolve_preserves_checkpoint_resize_ratio(tmp_path, size, expected):
+    from families.deformable_detr import config
+
+    (tmp_path / "config.json").write_text("{}")
+    (tmp_path / "preprocessor_config.json").write_text(json.dumps({"size": size}))
+    resolved = config.resolve(tmp_path, image_size=800)
+    assert (resolved["resize_shortest_edge"], resolved["resize_longest_edge"]) == expected
+
+
+@pytest.mark.parametrize("size", [
+    {"shortest_edge": 0, "longest_edge": 1333},
+    {"shortest_edge": 800, "longest_edge": 700},
+])
+def test_resolve_rejects_invalid_resize_bounds(tmp_path, size):
+    from families.deformable_detr import config
+
+    (tmp_path / "config.json").write_text("{}")
+    (tmp_path / "preprocessor_config.json").write_text(json.dumps({"size": size}))
+    with pytest.raises(ValueError, match="resize bounds"):
+        config.resolve(tmp_path, image_size=800)
+
+
 def test_sine_embedding_matches_its_declared_shape():
     from families.deformable_detr import position_builder
 

@@ -34,6 +34,39 @@ float sample_bilinear(const float* pixels, std::int32_t height, std::int32_t wid
 
 } // namespace
 
+std::array<std::int32_t, 2> deformable_detr_resize_shape(std::int32_t height, std::int32_t width,
+                                                         std::int32_t shortest_edge,
+                                                         std::int32_t longest_edge) {
+    if (height <= 0 || width <= 0 || shortest_edge <= 0 || longest_edge < shortest_edge)
+        throw std::invalid_argument("deformable_detr resize needs positive dimensions and bounds");
+    const double shorter = std::min(height, width);
+    const double longer = std::max(height, width);
+    double raw_size = 0.0;
+    auto size = shortest_edge;
+    if (longer / shorter * size > longest_edge) {
+        raw_size = longest_edge * shorter / longer;
+        // Python round uses ties-to-even, independent of the process rounding mode.
+        const auto lower = static_cast<std::int32_t>(std::floor(raw_size));
+        const double fraction = raw_size - lower;
+        size = lower + (fraction > 0.5 || (fraction == 0.5 && lower % 2 != 0) ? 1 : 0);
+    }
+    std::array<std::int32_t, 2> result;
+    if ((height <= width && height == size) || (width <= height && width == size)) {
+        result = {height, width};
+    } else if (width < height) {
+        result = {static_cast<std::int32_t>((raw_size > 0.0 ? raw_size : size) * height / width),
+                  size};
+    } else {
+        result = {size,
+                  static_cast<std::int32_t>((raw_size > 0.0 ? raw_size : size) * width / height)};
+    }
+    if (result[0] <= 0 || result[1] <= 0)
+        throw std::invalid_argument("deformable_detr resize collapses an image dimension");
+    if (result[0] > longest_edge || result[1] > longest_edge)
+        throw std::invalid_argument("deformable_detr resized image exceeds the engine bounds");
+    return result;
+}
+
 std::vector<float> preprocess_deformable_detr_image(const float* pixels, std::int32_t image_height,
                                                     std::int32_t image_width,
                                                     const DeformableDetrPreprocessConfig& config) {

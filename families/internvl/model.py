@@ -16,6 +16,7 @@ Weight prefix: vision_tower.*, multi_modal_projector.*, language_model.*
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,20 +24,46 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from .config import ModelConfig
+from .torch_checkpoint import _open_torch_checkpoint
 from .checkpoint_mapper import (
     WeightDict,
     _open_safetensors,
     _load_tensor,
+    _load_projection,
     _has_tensor,
     _transpose_2d,
 )
+from . import graph_ops
 from .parallel import ParallelConfig, normalize_parallel_config
 from .default_decoder import build_standard_decoder_engine
+from .quantization import calibrate_internvl
 
 if TYPE_CHECKING:
     pass
 
 _DEFAULT_FIXED_IMAGE_SIZE = 448
+# GotOcr2ImageProcessor defaults, used when preprocessor_config.json omits them.
+_PROCESSOR_MIN_PATCHES = 1
+_PROCESSOR_MAX_PATCHES = 12
+
+
+def _image_tiling(model_dir: str | None) -> dict[str, object]:
+    """InternVLProcessor's crop_to_patches contract for one image.
+
+    The processor always tiles (its images_kwargs default crop_to_patches to
+    True) into min_patches..max_patches tiles plus a thumbnail.
+    """
+    processor: dict = {}
+    if model_dir is not None:
+        path = Path(model_dir) / "preprocessor_config.json"
+        if path.is_file():
+            processor = json.loads(path.read_text())
+    return {
+        "preprocessor_type": "dynamic_tiles_chw",
+        "min_image_tiles": int(processor.get("min_patches", _PROCESSOR_MIN_PATCHES)),
+        "max_image_tiles": int(processor.get("max_patches", _PROCESSOR_MAX_PATCHES)),
+        "use_thumbnail": True,
+    }
 
 
 if TYPE_CHECKING:
@@ -51,13 +78,17 @@ class _InternVLModel:
         self,
         model_dir: str,
         config: ModelConfig,
+        *,
+        quant_ctx=None,
     ) -> WeightDict:
         """Load text decoder weights (Qwen2 pattern).
 
         InternVL3-8B-hf stores text decoder weights under model.language_model.*
-        prefix. Falls back to standard model.layers.* if not found.
+        prefix. Falls back to standard model.layers.* if not found. Projections
+        owned by ``quant_ctx`` are not loaded: the engine consumes the FP8 bytes the
+        context quantized itself, so the decoder keeps a shape-only placeholder.
         """
-        return _load_internvl_text_weights(model_dir, config)
+        return _load_internvl_text_weights(model_dir, config, quant_ctx=quant_ctx)
 
     def build_engine(
         self,
@@ -129,6 +160,7 @@ class _InternVLModel:
             vision_config,
             vision_weights,
             fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,
+            precision=precision,
             verbose=verbose,
         )
 
@@ -167,14 +199,18 @@ class _InternVLModel:
             "image_mean": [0.485, 0.456, 0.406],
             "image_std": [0.229, 0.224, 0.225],
             "interpolation": "bicubic",
+            # As AutoProcessor renders the checkpoint's chat template: no
+            # default system turn, and the image tokens framed by <img></img>.
             "vl_prompt_template": (
-                "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
                 "<|im_start|>user\n"
-                "{image_pads}\n"
+                "<img>{image_pads}</img>\n"
                 "{prompt}<|im_end|>\n"
                 "<|im_start|>assistant\n"
             ),
             "image_token_str": "<IMG_CONTEXT>",
+            # InternVLProcessor always tiles; this replaces the single-tile
+            # preprocessor_type above.
+            **_image_tiling(config.raw.get("_model_dir")),
         }
 
     def get_bundle_config_overrides(self, config: ModelConfig) -> dict[str, int]:
@@ -195,9 +231,31 @@ class _InternVLModel:
 # ---------------------------------------------------------------------------
 
 
+def _open_checkpoint(model_dir: Path):
+    """Select the published disk layout; reader failures never change format."""
+    layouts = (
+        (
+            (
+                "model.safetensors",
+                "model.safetensors.index.json",
+                "diffusion_pytorch_model.safetensors",
+                "diffusion_pytorch_model.safetensors.index.json",
+            ),
+            _open_safetensors,
+        ),
+        (("pytorch_model.bin", "pytorch_model.bin.index.json"), _open_torch_checkpoint),
+    )
+    for filenames, reader in layouts:
+        if any((model_dir / filename).is_file() for filename in filenames):
+            return reader(model_dir)
+    raise FileNotFoundError(f"No supported InternVL checkpoint layout in {model_dir}")
+
+
 def _load_internvl_text_weights(
     model_dir: str,
     config: ModelConfig,
+    *,
+    quant_ctx=None,
 ) -> WeightDict:
     """Load InternVL3 text decoder weights.
 
@@ -208,7 +266,9 @@ def _load_internvl_text_weights(
     from pathlib import Path
 
     model_dir_path = Path(model_dir)
-    readers = _open_safetensors(model_dir_path)
+    readers = _open_checkpoint(model_dir_path)
+    text_config = config.raw.get("text_config") or config.raw.get("llm_config") or config.raw
+    quantization = text_config.get("quantization_config")
 
     hidden = config.hidden_size
     vocab = config.vocab_size
@@ -243,6 +303,15 @@ def _load_internvl_text_weights(
     kv_attention_size = 0
     mlp_size = 0
 
+    def _projection(prefix: str, hf_prefix: str, engine_key: str, hf_stem: str) -> np.ndarray:
+        """One projection as [in, out], or a shape-only placeholder when it is quantized."""
+        name = f"{prefix}.{engine_key}"
+        if quant_ctx is not None and quant_ctx.should_quantize(name):
+            w = quant_ctx.scales[name].weight
+            return np.broadcast_to(np.zeros((), dtype=np.float32), (w.in_features, w.out_features))
+        raw = _load_projection(readers, f"{hf_prefix}.{hf_stem}", quantization)
+        return _transpose_2d(raw, hf_stem.rsplit(".", 1)[-1])
+
     for layer_idx in range(num_layers):
         prefix = f"layer.{layer_idx}"
         hf_prefix = f"{layer_prefix}.{layer_idx}"
@@ -254,21 +323,15 @@ def _load_internvl_text_weights(
         weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
         # Q/K/V/O projections
-        q_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.q_proj.weight")
-        k_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.k_proj.weight")
-        v_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.v_proj.weight")
-        o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
+        q_t = _projection(prefix, hf_prefix, "w_q", "self_attn.q_proj")
+        k_t = _projection(prefix, hf_prefix, "w_k", "self_attn.k_proj")
+        v_t = _projection(prefix, hf_prefix, "w_v", "self_attn.v_proj")
+        o_t = _projection(prefix, hf_prefix, "w_o", "self_attn.o_proj")
 
-        q_hidden = q_raw.shape[0]
         if attention_size == 0:
-            attention_size = q_hidden
+            attention_size = q_t.shape[1]
         if kv_attention_size == 0:
-            kv_attention_size = k_raw.shape[0]
-
-        q_t = _transpose_2d(q_raw, "q_proj")
-        k_t = _transpose_2d(k_raw, "k_proj")
-        v_t = _transpose_2d(v_raw, "v_proj")
-        o_t = _transpose_2d(o_raw, "o_proj")
+            kv_attention_size = k_t.shape[1]
 
         weights[f"{prefix}.w_q"] = q_t
         weights[f"{prefix}.w_k"] = k_t
@@ -286,17 +349,23 @@ def _load_internvl_text_weights(
                 raw = _load_tensor(readers, full_key).astype(np.float32)
                 weights[f"{prefix}.{proj_name}"] = raw
 
+        # InternVL3.5 uses Qwen3 per-head Q/K RMSNorm before rotary embedding.
+        for name in ("q_norm", "k_norm"):
+            key = f"{hf_prefix}.self_attn.{name}.weight"
+            if _has_tensor(readers, key):
+                weights[f"{prefix}.{name}"] = _load_tensor(readers, key)
+
         # SwiGLU MLP
-        gate_raw = _load_tensor(readers, f"{hf_prefix}.mlp.gate_proj.weight")
-        up_raw = _load_tensor(readers, f"{hf_prefix}.mlp.up_proj.weight")
-        down_raw = _load_tensor(readers, f"{hf_prefix}.mlp.down_proj.weight")
+        gate_t = _projection(prefix, hf_prefix, "w_gate", "mlp.gate_proj")
+        up_t = _projection(prefix, hf_prefix, "w_up", "mlp.up_proj")
+        down_t = _projection(prefix, hf_prefix, "w_down", "mlp.down_proj")
 
         if mlp_size == 0:
-            mlp_size = gate_raw.shape[0]
+            mlp_size = gate_t.shape[1]
 
-        weights[f"{prefix}.w_gate"] = _transpose_2d(gate_raw, "gate")
-        weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up")
-        weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down")
+        weights[f"{prefix}.w_gate"] = gate_t
+        weights[f"{prefix}.w_up"] = up_t
+        weights[f"{prefix}.w_down"] = down_t
 
     # Final norm
     final_norm_key = f"{layer_prefix.rsplit('.layers', 1)[0]}.norm.weight"
@@ -339,7 +408,7 @@ def _load_vision_and_projector_weights(
     from pathlib import Path
 
     model_dir_path = Path(model_dir)
-    readers = _open_safetensors(model_dir_path)
+    readers = _open_checkpoint(model_dir_path)
 
     weights = WeightDict()
     for reader in readers:
@@ -349,10 +418,44 @@ def _load_vision_and_projector_weights(
                 or key.startswith("multi_modal_projector.")
                 or key.startswith("visual.")
                 or key.startswith("mlp1.")
+                or key.startswith("vision_model.")
             ):
-                weights[key] = _load_tensor(readers, key)
+                weights[_native_vision_key(key)] = _load_tensor(readers, key)
 
     return weights
+
+
+def _native_vision_key(key: str) -> str:
+    """Map original InternVL checkpoints to this family's existing ViT graph."""
+    embeddings = {
+        "vision_model.embeddings.class_embedding": "vision_tower.embeddings.cls_token",
+        "vision_model.embeddings.position_embedding": "vision_tower.embeddings.position_embeddings",
+    }
+    if key in embeddings:
+        return embeddings[key]
+    if key.startswith("vision_model.embeddings.patch_embedding."):
+        return key.replace(
+            "vision_model.embeddings.patch_embedding.",
+            "vision_tower.embeddings.patch_embeddings.projection.",
+            1,
+        )
+    if key.startswith("vision_model.encoder.layers."):
+        return (
+            key.replace("vision_model.encoder.layers.", "vision_tower.encoder.layer.", 1)
+            .replace(".norm1.", ".layernorm_before.")
+            .replace(".norm2.", ".layernorm_after.")
+            .replace(".ls1", ".lambda_1")
+            .replace(".ls2", ".lambda_2")
+        )
+    # Original mlp1 is LayerNorm -> Linear -> GELU -> Linear, not Linear -> LN.
+    for source, target in (
+        ("mlp1.0.", "layer_norm."),
+        ("mlp1.1.", "linear_1."),
+        ("mlp1.3.", "linear_2."),
+    ):
+        if key.startswith(source):
+            return key.replace(source, f"multi_modal_projector.{target}", 1)
+    return key
 
 
 def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
@@ -388,6 +491,9 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
         "tokenizer_add_special_tokens": False,
         "tokenizer_prefix_ids": prefix_ids,
         "tokenizer_suffix_ids": suffix_ids,
+        # Raw InternVL decoder configs can retain the base-model end-of-text
+        # token, while the instruction tokenizer stops at end-of-turn.
+        "id_eos": int(tokenizer.eos_token_id),
     }
 
 
@@ -422,9 +528,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
         if request.task != "vision_language_generation":
             raise ValueError("internvl supports only task=vision_language_generation")
-        if request.quantization not in {None, "none"} or request.fp32_layers:
+        if request.quantization not in {None, "none", "fp8"}:
             raise NotImplementedError(
-                "InternVL supports only non-quantized uniform-precision builds"
+                f"InternVL does not support quantization={request.quantization!r}"
+            )
+        quantized = request.quantization == "fp8"
+        if quantized and str(request.precision).lower() != "fp16":
+            raise NotImplementedError("internvl fp8 quantization requires precision fp16")
+        if quantized and int(request.tensor_parallel_size) != 1:
+            raise NotImplementedError(
+                "internvl fp8 quantization does not support tensor parallelism"
             )
         model_dir = Path(request.model_dir)
         config = ModelConfig.from_dir(model_dir)
@@ -436,7 +549,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         parallel.validate()
         config.raw["_model_dir"] = str(model_dir)
         model = _InternVLModel()
-        weights = model.load_weights(str(model_dir), config)
+        model_vl = model.get_vl_config(config) or {}
+        quant_ctx = calibrate_internvl(model_dir, graph_ops, "fp8", config) if quantized else None
+        weights = model.load_weights(str(model_dir), config, quant_ctx=quant_ctx)
         writer.set_header(family="internvl", task=request.task, backend=request.backend)
         if parallel.enabled:
             for rank in range(parallel.tp_size):
@@ -447,43 +562,46 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                         weights,
                         max_length,
                         precision=precision,
-                        quant_ctx=None,
+                        quant_ctx=quant_ctx,
                         verbose=request.verbose,
                         parallel_config=parallel.for_rank(rank),
                     ),
                 )
         else:
-            config.raw["_decoder_engine_role"] = "prefill"
-            prefill = model.build_engine(
-                config,
-                weights,
-                max_length,
-                precision=precision,
-                quant_ctx=None,
-                verbose=request.verbose,
-                parallel_config=parallel,
-            )
-            config.raw["_decoder_engine_role"] = "decode"
+            # Both contexts share one engine's weights. Separate serialized
+            # prefill/decode engines unnecessarily duplicate decoder residency.
+            config.raw["_decoder_engine_role"] = "dual_profile"
+            # Attend over the valid cache rows only (runtime.json kv_attention_window).
+            config.raw["_valid_prefix_attention"] = True
+            # Tune the prefill profile for image prompts (256 tokens per tile),
+            # not for 64-token text prompts.
+            config.raw["_opt_prefill_length"] = min(2048, max_length)
             decode = model.build_engine(
                 config,
                 weights,
                 max_length,
                 precision=precision,
-                quant_ctx=None,
+                quant_ctx=quant_ctx,
                 verbose=request.verbose,
                 parallel_config=parallel,
             )
             config.raw.pop("_decoder_engine_role", None)
+            config.raw.pop("_valid_prefix_attention", None)
+            config.raw.pop("_opt_prefill_length", None)
             writer.add_bytes("engine.plan", decode)
-            writer.add_bytes("prefill.plan", prefill)
+            del decode
         vision = model.build_vision_engine(
             str(model_dir), config, weights, precision=precision, verbose=request.verbose
         )
         if vision is None:
             raise RuntimeError("InternVL vision build returned no engine")
-        vl = model.get_vl_config(config) or {}
+        writer.add_bytes("vision.plan", vision)
+        del vision
+        vl = model_vl
         runtime = {
             "tensor_parallel_size": parallel.tp_size,
+            "decoder_engine_layout": "dual_profile",
+            "kv_attention_window": "full" if parallel.enabled else "valid_prefix",
             "num_layers": config.num_hidden_layers,
             "max_cache_length": max_length,
             "vocab_size": config.vocab_size,
@@ -500,7 +618,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             },
         }
         runtime.update(vl)
-        writer.add_bytes("vision.plan", vision)
+        if parallel.enabled:
+            # Up to max_image_tiles tiles of 256 tokens need a multi-thousand
+            # token cache; the tensor-parallel decoder keeps one tile until its
+            # single-query attention avoids masked IAttention over >512 rows.
+            runtime.update({"preprocessor_type": "simple_chw", "max_image_tiles": 1})
         runtime.update(_tokenizer_runtime_contract(model_dir))
         writer.add_json("runtime.json", runtime)
         for filename in (

@@ -307,7 +307,15 @@ def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference:
     unknown = sum(not equal and any(not known_work(row) for row in pair) for pair, equal in zip(pairs, matches))
     if pairs and matched != len(pairs):
         reasons.append(f"actual work differs or is unknown on {len(pairs) - matched} paired responses")
-    result: dict[str, Any] = {"request": name, "reference_mode": "eager", "kind": "natural_dataset", "gate": False,
+    # The native mode that answered (torch.compile, or eager in its place; eager in records written before),
+    # none when the native side recorded nothing.
+    # Only a native batch with a valid timed request names a mode (an eager floor batch that answered nothing
+    # does not).
+    answered = [batch["identity"] for batch in reference
+                if any(row.get("valid") and str(row["sample_id"]) not in excluded for row in batch["records"])]
+    modes = sorted({str(item.get("mode") or "eager") for item in answered})
+    fallbacks = sorted({str(item["compile_fallback"]) for item in answered if item.get("compile_fallback")})
+    result: dict[str, Any] = {"request": name, "reference_mode": "+".join(modes), "kind": "natural_dataset", "gate": False,
                               "timing_contract": TIMING_CONTRACT, "pairs": len(pairs), "matched_pairs": matched,
                               "different_work_pairs": len(pairs) - matched - unknown, "unknown_work_pairs": unknown,
                               "complete": bool(complete and exported),
@@ -315,8 +323,12 @@ def paired_dataset(name: str, candidate: Sequence[Mapping[str, Any]], reference:
                               "out_of_capacity": len(excluded),
                               "reasons": list(dict.fromkeys(reasons)), "notes": [
                                   "Shared quality outputs; not an additional performance gate.",
-                                  "Interval across evaluation units, not repeated-run timing stability."],
-                              "candidate": {}, "reference": {}}
+                                  "Interval across evaluation units, not repeated-run timing stability.",
+                                  *(f"Native torch.compile failed; eager answered in its place: {reason[:300]}"
+                                    for reason in fallbacks)],
+                              "candidate": {}, "reference": {},
+                              # Structured as well as noted, so a summary can name the replaced compile.
+                              **({"compile_fallback": fallbacks[0][:300]} if fallbacks else {})}
     # Report each side's entire valid workload, including unpaired responses.
     # Pair filtering is only for comparability, never for the displayed timings.
     for side, values, original, precision in zip(("candidate", "reference"), rows, all_rows, precisions):

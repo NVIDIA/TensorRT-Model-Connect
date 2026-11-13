@@ -27,6 +27,37 @@ std::vector<float> flat_image(std::int32_t height, std::int32_t width, float val
     return std::vector<float>(static_cast<std::size_t>(height) * width * 3, value);
 }
 
+void test_resize_preserves_aspect_ratio_and_the_checkpoint_bounds() {
+    // Values from the pinned processor's get_size_with_aspect_ratio.
+    const auto check_size = [](std::int32_t h, std::int32_t w, std::int32_t expected_h,
+                               std::int32_t expected_w) {
+        const auto size = trtmc::deformable_detr_resize_shape(h, w, 800, 1333);
+        check(size[0] == expected_h && size[1] == expected_w,
+              "resize matches the checkpoint's actual image geometry");
+    };
+    check_size(382, 640, 796, 1333);
+    check_size(426, 640, 800, 1201);
+    check_size(640, 426, 1201, 800);
+    check_size(800, 800, 800, 800);
+    check_size(100, 1000, 133, 1333);
+    bool threw = false;
+    try {
+        (void)trtmc::deformable_detr_resize_shape(0, 640, 800, 1333);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check(threw, "resize rejects empty dimensions");
+    // The processor's already-sized short-edge shortcut can leave an extreme
+    // aspect ratio outside the engine profile. Reject it before inference.
+    threw = false;
+    try {
+        (void)trtmc::deformable_detr_resize_shape(1, 2000, 800, 1333);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check(threw, "resize rejects a result outside the dynamic engine bounds");
+}
+
 void test_preprocess_normalises_with_the_configured_statistics() {
     trtmc::DeformableDetrPreprocessConfig config;
     config.input_image_h = 4;
@@ -114,6 +145,7 @@ void test_decode_rejects_a_non_positive_top_k() {
 } // namespace
 
 int main() {
+    test_resize_preserves_aspect_ratio_and_the_checkpoint_bounds();
     test_preprocess_normalises_with_the_configured_statistics();
     test_preprocess_can_skip_normalisation();
     test_preprocess_rejects_an_empty_image();

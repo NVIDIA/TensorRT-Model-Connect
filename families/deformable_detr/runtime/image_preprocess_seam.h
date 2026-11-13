@@ -22,7 +22,12 @@ struct DeformableDetrPreprocessConfig {
     std::array<float, 3> image_std{0.229F, 0.224F, 0.225F};
 };
 
-// Resize to the square the engine was built for, then normalise.
+// Height and width selected by the checkpoint's aspect-ratio-preserving resize.
+std::array<std::int32_t, 2> deformable_detr_resize_shape(std::int32_t height, std::int32_t width,
+                                                         std::int32_t shortest_edge,
+                                                         std::int32_t longest_edge);
+
+// Resize to the requested height and width, then normalise.
 //
 // The CLI delivers pixels already in [0, 1] (apps/cli/io.cpp divides by 255),
 // so there is no second division here. Dividing again is the mistake that

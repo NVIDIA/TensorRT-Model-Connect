@@ -34,6 +34,9 @@ struct SpeechConfig {
 
     std::vector<float> temporal_text_embedding;
     int32_t temporal_text_vocab{0};
+    // The temporal transformer runs in FP16: sum the input embeddings as the
+    // reference's Half embed_codes does (see speech_temporal_embed_plan.h).
+    bool temporal_embed_half{false};
     int32_t text_padding_id{3};
 
     std::vector<float> depth_text_embedding;
@@ -54,6 +57,11 @@ struct SpeechConfig {
     int32_t text_eos_token_id{-1};
 
     std::vector<int32_t> text_prompt_ids;
+    std::vector<float> system_prompt_embeddings;
+    std::vector<int32_t> system_prompt_cache;
+    std::vector<uint8_t> system_prompt_provided;
+    int32_t system_prompt_offset{0};
+    bool listen_before_answer{false};
 };
 
 } // namespace trtmc

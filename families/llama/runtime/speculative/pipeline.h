@@ -17,7 +17,8 @@ class Pipeline final : public ITextGeneration {
     TextResult generate(const std::string& prompt,
                         const TextGenerationConfig& config = {}) override;
     TextResult generate_ids(const std::vector<std::int32_t>& prompt, int count,
-                            bool speculative = true, bool ignore_eos = false, int draft_width = 2);
+                            bool speculative = true, bool ignore_eos = false, int draft_width = 2,
+                            const LlamaSamplingParams& sampling = {});
     int32_t default_max_new_tokens() const override { return 128; }
     const std::vector<int>& accepted_lengths() const { return accepted_lengths_; }
 

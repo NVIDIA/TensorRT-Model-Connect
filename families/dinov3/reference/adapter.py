@@ -11,12 +11,10 @@ class Adapter:
     def __init__(self, spec: Any, host: Any) -> None:
         from transformers import AutoImageProcessor, AutoModel
 
-        if spec.mode != "eager":
-            raise host.Error("DINOv3's native reference supports eager mode")
         self.spec, self.host = spec, host
         self.processor = AutoImageProcessor.from_pretrained(spec.model, **spec.pretrained_kwargs())
-        self.model = (
-            AutoModel.from_pretrained(spec.model, **spec.model_kwargs()).to(spec.device).eval()
+        self.model = host.maybe_compile(
+            AutoModel.from_pretrained(spec.model, **spec.model_kwargs()).to(spec.device).eval(), spec
         )
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:

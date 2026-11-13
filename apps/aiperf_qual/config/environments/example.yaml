@@ -22,6 +22,9 @@ ports: {reference: 8900, candidate: 8901}
 # acc_overlap: true                     # both sides answer Acc at once under one MPS daemon (default off)
 gpu_lock: /path/to/state/gpu.lock                       # optional: serializes timing with builds on this GPU
 build_env: {}                                           # optional extra environment of bundle builds
+serve_env: {}                                           # optional extra environment of servers, references and builds
+# Jetson Thor: serve_env: {LD_PRELOAD: /usr/lib/aarch64-linux-gnu/libcudnn.so.9}. torch's pip cuDNN lacks a
+# sublibrary that it then loads from the board's newer cuDNN, and every convolution fails (doctor's "cudnn" check).
 
 models:                                                 # this machine's model list (run-all, plan)
   include: all                                          # all | [profile names or glob patterns]

@@ -104,7 +104,7 @@ TextResult PhiTextGenerationPipeline::generate(const std::string& prompt,
     int32_t max_new = (cfg.max_new_tokens > 0) ? cfg.max_new_tokens : 128;
     int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
 
-    auto sp = phi_sampling_params_from_config(cfg, eos);
+    auto sp = phi_sampling_params_from_config(cfg, eos, config_.id_eos_ids);
     last_setup_ms_ = 0.0;
     auto timed = generate_from_ids(input_ids, max_new, sp, cfg);
 
@@ -125,7 +125,7 @@ PhiTextGenerationPipeline::generate_ids(const std::vector<int32_t>& input_ids,
                                         const TextGenerationConfig& cfg) {
     int32_t max_new = cfg.max_new_tokens; // honour exact value (0 = no generation)
     int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
-    auto sp = phi_sampling_params_from_config(cfg, eos);
+    auto sp = phi_sampling_params_from_config(cfg, eos, config_.id_eos_ids);
     return GenerationResult{generate_from_ids(input_ids, max_new, sp, cfg).token_ids};
 }
 

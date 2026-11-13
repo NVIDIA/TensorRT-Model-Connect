@@ -153,6 +153,11 @@ _OPERATIONS = (
                       RateMetric("detections", "detections_per_s")),
     ),
     OperationSpec(
+        name="detect_prompted",
+        rate_metrics=(RateMetric("detected_images", "images_per_s"),
+                      RateMetric("detections", "detections_per_s")),
+    ),
+    OperationSpec(
         name="predict_structure",
         rate_metrics=(RateMetric("structures", "structures_per_s"),),
     ),

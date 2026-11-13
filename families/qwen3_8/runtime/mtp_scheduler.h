@@ -7,7 +7,7 @@
 
 // Qwen38MtpScheduler: drives MTP (multi-token-prediction) speculative
 // decoding for one decode round -- draft num_draft_tokens() candidate
-// tokens via the MTP draft-chain head in one call, verify all of them in
+// tokens via isolated single-step drafts (or a legacy draft-chain engine), verify them in
 // one call to the (num_draft_tokens+1)-wide batched engine, and commit.
 // Shared across Qwen3.8-27B / -FP8 / -NVFP4: precision is fully opaque
 // here (baked into each engine's .plan at build time; this class only
@@ -45,13 +45,17 @@
 
 #include "families/qwen3_8/runtime/hybrid_state.h"
 #include "families/qwen3_8/runtime/kv_cache.h"
+#include "families/qwen3_8/runtime/sampler.h"
 #include "trtmc/runtime/trt_module.h"
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <vector>
 
 namespace trtmc {
+
+struct Qwen38MediaPrompt;
 
 class Qwen38MtpScheduler {
   public:
@@ -59,7 +63,8 @@ class Qwen38MtpScheduler {
                        std::unique_ptr<ITrtModule> draft_chain_module,
                        std::unique_ptr<ITrtModule> multi_token_module, Qwen38HybridState& state,
                        int32_t hidden_size, int32_t vocab_size, int32_t num_draft_tokens,
-                       cudaStream_t stream);
+                       cudaStream_t stream, std::unique_ptr<ITrtModule> prefill_module = nullptr,
+                       int32_t prefill_chunk_len = 0);
 
     // Bind MTP's own persistent cache to mtp_module_/draft_chain_module_,
     // and bind multi_token_module_'s per-layer state I/O directly to the
@@ -76,6 +81,13 @@ class Qwen38MtpScheduler {
     // shared main-model state -- the caller resets that separately.
     void reset();
 
+    // Borrowed only for one validated media request. Cache positions remain
+    // physical even when the prompt's MRoPE coordinates and decode delta differ.
+    void set_media_prompt(const Qwen38MediaPrompt* prompt);
+    bool has_media_inputs() const { return media_inputs_; }
+    DType media_dtype() const { return media_dtype_; }
+    void sync();
+
     // Run one MTP forward step for `token` at `position`, using a REAL
     // (never MTP's own self-chained) hidden state -- the main engine's
     // hidden_state output from the call that just produced `token`, or
@@ -88,19 +100,27 @@ class Qwen38MtpScheduler {
     // order, or MTP's attention history desyncs.
     int32_t draft(int32_t token, int32_t position, const float* hidden_state);
 
+    // True when the bundle ships the batched MTP prefill engine.
+    bool has_prefill() const { return prefill_module_ != nullptr; }
+
+    // Warm MTP's cache for m (1 <= m <= prefill chunk length) consecutive
+    // positions in one call: row r pairs tokens[r] at position first_position+r
+    // with hidden_rows[r] (the main model's hidden state of the position before
+    // it). Equivalent to m in-order draft() calls, minus the draft logits that
+    // warm-up discards. Same invariant as draft(): MTP's cache position must be
+    // first_position - 1.
+    void prefill_warmup(const int32_t* tokens, int32_t first_position, const float* hidden_rows,
+                        int32_t m);
+
     struct DraftChainResult {
         std::vector<int32_t> token_ids;   // (num_draft_tokens(),)
         std::vector<float> hidden_states; // flattened (num_draft_tokens(), hidden_size())
     };
 
-    // Draft num_draft_tokens() candidate tokens in ONE call, by repeating
-    // the MTP layer num_draft_tokens() times in-graph (in-graph argmax +
-    // self-chained hidden state between repeats -- see
-    // build_mtp_draft_chain_engine). Does NOT touch MTP's own persistent
-    // cache (mtp_cache_) -- its own present_k/v outputs are discarded;
-    // resyncing mtp_cache_ for whatever prefix verification confirms is
-    // done separately via draft() catch-up calls using REAL hidden
-    // states, never this call's self-chained approximations.
+    // Draft num_draft_tokens() self-chained candidates without committing the
+    // persistent draft cache. New bundles execute the single-step MTP engine
+    // against an isolated scratch prefix; legacy bundles retain their in-graph
+    // draft chain. Accepted real hidden states are committed only by draft().
     DraftChainResult draft_chain(int32_t token, int32_t position, const float* hidden_state);
 
     struct VerifyResult {
@@ -111,15 +131,16 @@ class Qwen38MtpScheduler {
         // comment for why these need structurally different recovery.
         int32_t accepted_length{1};
         bool full_accept{false};
+        bool stopped{false}; // EOS or the requested output budget was reached
         // Confirmed token ids [real_next, draft_0, ...], length ==
         // accepted_length. Always populated regardless of full_accept --
-        // read directly from argmax of verify's own per-row logits, valid
+        // sampled from verify's own per-row target logits, valid
         // even when the corresponding STATE isn't (causal: row i's logits
         // only depend on positions before i).
         std::vector<int32_t> accepted_tokens;
-        // Row (accepted_length-1)'s argmax: the model's own "free"
+        // Row (accepted_length-1)'s target sample: the model's own "free"
         // prediction for what comes right after the confirmed prefix.
-        // Always populated and always trustworthy as a value.
+        // Populated only if !stopped; no extra RNG draw after EOS/budget.
         int32_t next_real_candidate{0};
         // Only populated when full_accept: verify engine's own per-row
         // hidden_states for ALL accepted_length rows (== seq_len in this
@@ -133,16 +154,22 @@ class Qwen38MtpScheduler {
 
     // Verify [real_next, draft_tokens...] (draft_tokens.size() must equal
     // num_draft_tokens()) at positions [base_step+1, base_step+seq_len())
-    // against the seq_len()-wide batched verification engine (base_step is
-    // the last committed index -- the shared state's kv position must
-    // equal base_step+1 on entry). On full accept, commits all seq_len()
+    // against the seq_len()-wide batched verification engine. sample_next owns
+    // the request RNG, filters and confirmed history. Accept a deterministic
+    // draft only when a target sample equals it; the first mismatch is the
+    // next real token. Never sample beyond a mismatch, EOS, or max_tokens.
+    // Thus each emitted token follows the requested target distribution.
+    // base_step is the last committed index -- the shared state's kv position must
+    // equal base_step+1 on entry. On full accept, commits all seq_len()
     // tokens into the shared Qwen38HybridState via
     // append_prefill_kv()/advance(). On anything less, the shared state is
-    // left completely untouched -- caller must recover via accepted_length
+    // left untouched -- if continuing, caller recovers via accepted_length
     // sequential run_step() calls (see class-level comment).
-    VerifyResult verify_and_maybe_commit(int32_t real_next,
-                                         const std::vector<int32_t>& draft_tokens,
-                                         int32_t base_step);
+    VerifyResult verify_and_maybe_commit(
+        int32_t real_next, const std::vector<int32_t>& draft_tokens, int32_t base_step,
+        const std::function<Qwen38SampleResult(const float*)>& sample_next, int32_t max_tokens);
+
+    int32_t max_sequence_length() const { return state_.kv_cache()->max_length(); }
 
     int32_t hidden_size() const { return hidden_size_; }
     int32_t vocab_size() const { return vocab_size_; }
@@ -153,6 +180,8 @@ class Qwen38MtpScheduler {
     std::unique_ptr<ITrtModule> mtp_module_;
     std::unique_ptr<ITrtModule> draft_chain_module_;
     std::unique_ptr<ITrtModule> multi_token_module_;
+    std::unique_ptr<ITrtModule> prefill_module_; // optional, see prefill_warmup()
+    int32_t prefill_chunk_len_{0};
     Qwen38HybridState& state_;
     cudaStream_t stream_;
     int32_t hidden_size_;
@@ -160,6 +189,11 @@ class Qwen38MtpScheduler {
     int32_t num_draft_tokens_;
 
     std::unique_ptr<Qwen38KvCache> mtp_cache_;
+    std::unique_ptr<Qwen38KvCache> draft_scratch_cache_;
+    int32_t draft_step(Qwen38KvCache& cache, int32_t token, int32_t position,
+                       const float* hidden_state);
+    DraftChainResult draft_chain_sequential(int32_t token, int32_t position,
+                                            const float* hidden_state);
 
     // Scratch for the multi-token engine's (seq_len, kv_dim) present_k/v
     // outputs per attention layer -- committed into the shared cache via
@@ -175,6 +209,11 @@ class Qwen38MtpScheduler {
     std::vector<DeviceTensor> draft_chain_present_k_;
     std::vector<DeviceTensor> draft_chain_present_v_;
 
+    // prefill_module_'s (chunk_len, kv_dim) present_k/v outputs, appended to
+    // mtp_cache_ by prefill_warmup().
+    std::vector<DeviceTensor> prefill_present_k_;
+    std::vector<DeviceTensor> prefill_present_v_;
+
     void* mtp_logits_device_ptr_{nullptr};
     void* draft_chain_ids_device_ptr_{nullptr};
     void* draft_chain_hidden_device_ptr_{nullptr};
@@ -184,7 +223,14 @@ class Qwen38MtpScheduler {
     std::vector<float> mtp_logits_host_;
     std::vector<float> multi_logits_host_;
     std::vector<float> mask_scratch_;
+    std::vector<int32_t> prefill_tokens_;
+    std::vector<int32_t> prefill_positions_;
+    std::vector<float> prefill_hidden_;
     bool bound_{false};
+    bool media_inputs_{false};
+    DType media_dtype_{DType::kFloat16};
+    std::vector<uint8_t> zero_visual_;
+    const Qwen38MediaPrompt* media_prompt_{nullptr};
 };
 
 } // namespace trtmc

@@ -10,7 +10,6 @@ from types import ModuleType
 
 import numpy as np
 import pytest
-import yaml
 
 from .. import native_plugin_builder
 from . import official_reference
@@ -24,16 +23,6 @@ def _write_stage1_text_encoder(model_dir: Path) -> Path:
     for name in ("config.json", "tokenizer.json", "model.safetensors"):
         (stage1_text_encoder / name).write_text("{}\n", encoding="utf-8")
     return stage1_text_encoder
-
-
-def test_qualification_candidate_uses_the_prepared_family_model() -> None:
-    profile = yaml.safe_load(
-        (Path(__file__).parent / "benchmark/sana-wm-bidirectional.yaml").read_text(encoding="utf-8")
-    )
-
-    prepared_model = "trtmc-reference/SANA-model"
-    assert profile["candidate"]["model_directory"] == prepared_model
-    assert profile["reference_environment"]["paths"]["model_dir"] == prepared_model
 
 
 def test_native_plugin_uses_installed_tensorrt_library(tmp_path: Path) -> None:

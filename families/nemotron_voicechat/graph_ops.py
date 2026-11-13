@@ -53,6 +53,24 @@ def add_matmul_rhs_constant(
     ).get_output(0)
 
 
+def add_projection(
+    network: trt.INetworkDefinition,
+    quant,
+    lhs: trt.ITensor,
+    lhs_width: int,
+    rhs_width: int,
+    weights: dict,
+    name: str,
+    dtype: np.dtype = np.float32,
+) -> trt.ITensor:
+    """Thinker projection ``lhs @ weights[name]``; an FP8 matmul when ``quant`` quantized it."""
+    if quant is not None:
+        output = quant.project(network, lhs, lhs_width, rhs_width, weights[name], name, dtype)
+        if output is not None:
+            return output
+    return add_matmul_rhs_constant(network, lhs, lhs_width, rhs_width, weights[name], dtype=dtype)
+
+
 def add_bias_sum(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,

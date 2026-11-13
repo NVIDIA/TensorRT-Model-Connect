@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/magpie_tts/runtime/magpie_decode_policy.h"
 #include "families/magpie_tts/runtime/magpie_kernels.h"
 
 #include <cfloat>
@@ -32,10 +33,13 @@ __global__ void segmented_argmax_kernel(const float* __restrict__ d_logits, int3
     float best_val_audio = -FLT_MAX;
     int32_t best_idx_audio = 0;
 
-    // Full range [0, codebook_size)
+    // Full range [0, codebook_size) without the forbidden special tokens, as
+    // mask_magpie_special_tokens() does on the CPU path (EOS stays visible).
     for (int32_t i = tid; i < codebook_size; i += block_size) {
         float v = cb_logits[i];
-        if (v > best_val_full) {
+        const bool forbidden =
+            i >= kMagpieSpecialStart && i < kMagpieSpecialEnd && i != kMagpieEosToken;
+        if (!forbidden && v > best_val_full) {
             best_val_full = v;
             best_idx_full = i;
         }
@@ -337,7 +341,7 @@ void magpie_cfg_interpolate_device(const float* d_cond_logits, const float* d_un
 
 // ---------------------------------------------------------------------------
 // Kernel: Build attention mask
-// d_mask[i] = (i <= pos) ? 0.0F : -1e9F;
+// Same layout as MagpieKvCache::write_decode_mask (magpie_decode_mask_value).
 // ---------------------------------------------------------------------------
 
 __global__ void build_attention_mask_kernel(float* __restrict__ d_mask, int32_t pos,
@@ -345,7 +349,7 @@ __global__ void build_attention_mask_kernel(float* __restrict__ d_mask, int32_t 
     const int32_t i = static_cast<int32_t>(blockIdx.x * blockDim.x + threadIdx.x);
     if (i >= mask_len)
         return;
-    d_mask[i] = (i <= pos) ? 0.0F : -1e9F;
+    d_mask[i] = magpie_decode_mask_value(i, pos, mask_len);
 }
 
 void magpie_build_attention_mask_device(float* d_mask, int32_t pos, int32_t mask_len,

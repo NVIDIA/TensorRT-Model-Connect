@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "audio_observation.h"
 #include "cli/io.h"
 #include "config.h"
 #include "task_runtime.h"
@@ -64,7 +65,7 @@ struct Timing {
 };
 
 using Image = trtmc::cli::io::LoadedImage;
-using Audio = trtmc::AudioResult; // Existing mono-only interfaces.
+using Audio = trtmc::AudioResult; // Legacy task interfaces.
 using trtmc::cli::io::read_wav;
 
 Arguments parse_arguments(int argc, char** argv) {
@@ -421,15 +422,9 @@ Json run_generate_audio(trtmc::ITask& task, const Json& request, const Timing& t
     return measure(
         timing, [&]() { return interface.generate_audio(prompt, config); },
         [&](const trtmc::AudioResult& result) {
-            const double seconds =
-                result.sample_rate > 0
-                    ? static_cast<double>(result.samples.size()) / result.sample_rate
-                    : 0.0;
-            return Json{{"output_samples", result.samples.size()},
-                        {"num_samples", result.samples.size()},
-                        {"output_audio_seconds", seconds},
-                        {"sample_rate", result.sample_rate},
-                        {"audio_artifact", write_audio(result)}};
+            auto output = audio_observation(result);
+            output["audio_artifact"] = write_audio(result);
+            return output;
         });
 }
 
@@ -463,16 +458,10 @@ Json run_speak(trtmc::ITask& task, const Json& request, const Timing& timing) {
                 static_cast<double>(audio.samples.size()) / audio.sample_rate};
         },
         [&](const auto& value) {
-            const auto& result = value.first;
-            return Json{{"input_audio_seconds", value.second},
-                        {"output_audio_seconds",
-                         result.sample_rate > 0
-                             ? static_cast<double>(result.samples.size()) / result.sample_rate
-                             : 0.0},
-                        {"output_samples", result.samples.size()},
-                        {"num_samples", result.samples.size()},
-                        {"sample_rate", result.sample_rate},
-                        {"audio_artifact", write_audio(result)}};
+            auto output = audio_observation(value.first);
+            output["input_audio_seconds"] = value.second;
+            output["audio_artifact"] = write_audio(value.first);
+            return output;
         });
 }
 
@@ -3221,6 +3210,58 @@ Json run_detect(const trtmc::Model& model, const Json& request, const Timing& ti
         });
 }
 
+Json run_ground_boxes(const trtmc::Model& model, const Json& request, const Timing& timing,
+                      const std::string& task_id) {
+    check_batch_size(request, 1);
+    const auto task = task_for_operation<trtmc::ImageTextToBoxes>(model, task_id);
+    const auto config =
+        sdk_config(request, task.config_fields(), {"image_path", "prompt", "batch_size"});
+    const auto path = request.at("image_path").get<std::string>();
+    const auto prompt = request.at("prompt").get<std::string>();
+    std::optional<Image> cached;
+    if (!timing.asset_loading_included)
+        cached = read_image(path);
+    // The grounded view carries no image size, so the observation reports the
+    // size of the image whose pixels the boxes are stated in.
+    std::uint32_t height = 0, width = 0;
+    return measure(
+        timing,
+        [&]() {
+            std::optional<Image> loaded;
+            if (!cached)
+                loaded = read_image(path);
+            const Image& image = cached ? *cached : *loaded;
+            height = static_cast<std::uint32_t>(image.height);
+            width = static_cast<std::uint32_t>(image.width);
+            return task.run({sdk_image_view(image), prompt}, config);
+        },
+        [&](const auto& result) {
+            const auto& view = result.view();
+            Json boxes = Json::array(), scores = Json::array(), labels = Json::array();
+            for (std::uint64_t i = 0; i < view.count; ++i) {
+                const auto& item = view.boxes[i];
+                for (const float coordinate :
+                     {item.box.x_min, item.box.y_min, item.box.x_max, item.box.y_max})
+                    boxes.push_back(coordinate);
+                scores.push_back(item.has_confidence ? Json(item.confidence) : Json(nullptr));
+                labels.push_back(std::string(trtmc::detail::string_view(item.label)));
+            }
+            return Json{
+                {"detected_images", 1},
+                {"detections", view.count},
+                {"image_height", height},
+                {"image_width", width},
+                {"boxes", std::move(boxes)},
+                {"scores", std::move(scores)},
+                {"labels", std::move(labels)},
+                {"shape", {view.count, 4}},
+                {"coordinates", "xyxy"},
+                {"units", "pixels"},
+                {"raw_response", std::string(trtmc::detail::string_view(view.raw_response))},
+                {"parse_complete", view.parse_complete != 0}};
+        });
+}
+
 Json run_structure(const trtmc::Model& model, const Json& request, const Timing& timing,
                    const std::string& task_id) {
     const auto task = task_for_operation<trtmc::MolecularDocumentToStructure>(model, task_id);
@@ -3929,6 +3970,8 @@ Session open_session(const Json& request) {
                 selected = trtmc::ImageToMetricGeometry::kTask;
             else if (operation == "detect")
                 selected = trtmc::ImageToBoxes::kTask;
+            else if (operation == "detect_prompted")
+                selected = trtmc::ImageTextToBoxes::kTask;
             else if (operation == "predict_structure")
                 selected = trtmc::MolecularDocumentToStructure::kTask;
             else if (operation == "control_queue")
@@ -3994,6 +4037,8 @@ Json dispatch(const Session& session, const Json& operation_request, const Timin
             measured = run_classify(model, operation_request, timing, selected);
         else if (operation == "detect")
             measured = run_detect(model, operation_request, timing, selected);
+        else if (operation == "detect_prompted")
+            measured = run_ground_boxes(model, operation_request, timing, selected);
         else if (operation == "predict_structure")
             measured = run_structure(model, operation_request, timing, selected);
         else if (operation == "extract_features")

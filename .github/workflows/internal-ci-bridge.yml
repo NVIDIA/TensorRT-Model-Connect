@@ -372,12 +372,31 @@ jobs:
           [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]
           # The exact private run can queue behind GPU work. Let the job-level
           # timeout bound this wait instead of misreporting queue delay as a
-          # terminal Internal CI failure.
+          # terminal Internal CI failure. Every waiting pull request polls with
+          # the same token, so poll every two minutes and wait out a rate-limit
+          # response instead of failing the gate.
+          poll_seconds=120
+          errors="$RUNNER_TEMP/internal-ci-wait.err"
           while true; do
-            run="$(
+            if ! run="$(
               gh api --method GET \
-                "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/runs/$RUN_ID"
-            )"
+                "/repos/$PRIVATE_CI_OWNER/$PRIVATE_CI_REPOSITORY/actions/runs/$RUN_ID" \
+                2>"$errors"
+            )"; then
+              if ! grep -qi "rate limit" "$errors"; then
+                cat "$errors" >&2
+                exit 1
+              fi
+              reset="$(gh api --method GET /rate_limit --jq '.resources.core.reset' 2>/dev/null || echo 0)"
+              [[ "$reset" =~ ^[0-9]+$ ]] || reset=0
+              wait_seconds=$((reset - $(date +%s) + 5))
+              if ((wait_seconds < poll_seconds || wait_seconds > 3600)); then
+                wait_seconds=$poll_seconds
+              fi
+              echo "::warning::GitHub API rate limit reached; polling again in ${wait_seconds}s."
+              sleep "$wait_seconds"
+              continue
+            fi
             status="$(jq -er '.status' <<<"$run")"
             if [ "$status" = "completed" ]; then
               conclusion="$(jq -r '.conclusion // "unknown"' <<<"$run")"
@@ -388,7 +407,7 @@ jobs:
               echo "conclusion=$conclusion" >> "$GITHUB_OUTPUT"
               exit 0
             fi
-            sleep 15
+            sleep "$poll_seconds"
           done
 
   publish:

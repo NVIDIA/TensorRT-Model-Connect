@@ -17,7 +17,7 @@ from . import builder as edge_llm
 
 _LOG = logging.getLogger(__name__)
 
-# Family-owned complete-network profiles; packed sources require Blackwell.
+# Qualified complete-network profiles, not a native model GPU restriction.
 EDGE_DISPATCH = {
     ("linux", "x86_64", sm, weight_format): edge_llm.prepare
     for sm, weight_format in ((80, "fp16"), (120, "fp16"), (120, "fp8"), (120, "nvfp4"))
@@ -210,10 +210,17 @@ def build_paired(request, writer, execution) -> None:
         raise ValueError("Requested context exceeds Llama EAGLE3 draft capacity")
 
     def native_pair(original_request, original_writer):
-        # Never turn a failed explicit pair into an ordinary base-only bundle.
-        raise ValueError(
-            "This Edge EAGLE3 profile requires Linux x86_64 SM120 with FP16 weights; "
-            "the separate native build-speculative profile is not an automatic fallback"
+        from ..speculative.build import build_speculative
+
+        # Preserve the actual base and companion. Native EAGLE3 owns its
+        # greedy verification schedule; this is never base-only decoding.
+        capacity = original_request.max_sequence_length or min(
+            base["max_position_embeddings"], draft_capacity)
+        build_speculative(
+            model_dir=Path(original_request.model_dir), draft_dir=draft_dir,
+            output=original_request.output_path, max_sequence_length=capacity,
+            max_query=min(64, capacity), draft_depth=6,
+            verbose=bool(original_request.verbose), _writer=original_writer,
         )
 
     build(request, writer, native_pair, draft_dir=draft_dir)

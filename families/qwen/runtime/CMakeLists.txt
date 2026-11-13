@@ -51,6 +51,7 @@ if(TRTMC_BUILD_TESTS)
   foreach(test_name IN ITEMS
       test_qwen_embedding_pipeline
       test_qwen_native_kv_cache
+      test_qwen_pipeline
       test_qwen_sampler
       test_qwen_tensor_names
       test_qwen_text_stream
@@ -71,6 +72,7 @@ if(TRTMC_BUILD_TESTS)
   endforeach()
   target_link_libraries(test_qwen_text_stream PRIVATE Threads::Threads)
   set_tests_properties(test_qwen_native_kv_cache PROPERTIES SKIP_RETURN_CODE 77)
+  set_tests_properties(test_qwen_pipeline PROPERTIES SKIP_RETURN_CODE 77 LABELS gpu)
 
   add_executable(qwen_logits_trace
     ${PROJECT_SOURCE_DIR}/families/qwen/tests/cpp/logits_trace.cpp

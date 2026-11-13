@@ -40,16 +40,13 @@ def _ffn_fp8_layer_names(profile: Wan22TI2VConfig) -> tuple[str, ...]:
 
 
 def _cross_qo_fp8_layer_names(profile: Wan22TI2VConfig) -> tuple[str, ...]:
-    """Return the exact qualified cross-attention FP8 projection set."""
+    """Return the exact qualified cross-attention FP8 projection set.
 
-    return tuple(
-        name
-        for index in range(profile.num_layers)
-        for name in (
-            f"blocks.{index}.attn2.to_q",
-            f"blocks.{index}.attn2.to_out.0",
-        )
-    )
+    attn2.to_out.0 stays BF16: TensorRT 11.4 cannot compile an FP8 Quantize on
+    the output of the fused cross-attention.
+    """
+
+    return tuple(f"blocks.{index}.attn2.to_q" for index in range(profile.num_layers))
 
 
 def _validated_cross_qo_fp8_scales(
@@ -57,12 +54,12 @@ def _validated_cross_qo_fp8_scales(
     profile: Wan22TI2VConfig,
     scales: dict | None,
 ) -> dict[str, dict[str, float]] | None:
-    """Validate the complete, qualified cross-Q/O FP8 scale map."""
+    """Validate the complete, qualified cross-Q FP8 scale map."""
 
     if scales is None:
         return None
     if not isinstance(scales, dict):
-        raise TypeError("Wan2.2 cross-Q/O FP8 scales must be a dictionary")
+        raise TypeError("Wan2.2 cross-Q FP8 scales must be a dictionary")
 
     expected = set(_cross_qo_fp8_layer_names(profile))
     provided = set(scales)
@@ -70,8 +67,8 @@ def _validated_cross_qo_fp8_scales(
     unexpected = sorted(provided - expected)
     if missing or unexpected:
         raise ValueError(
-            "Wan2.2 cross-Q/O FP8 scales must cover exactly the query and "
-            "output projections in every cross-attention block; "
+            "Wan2.2 cross-Q FP8 scales must cover exactly the query "
+            "projection in every cross-attention block; "
             f"missing={missing}, unexpected={unexpected}"
         )
 
@@ -79,11 +76,11 @@ def _validated_cross_qo_fp8_scales(
     for name in sorted(expected):
         entry = scales[name]
         if not isinstance(entry, dict):
-            raise TypeError(f"Wan2.2 cross-Q/O FP8 scale entry for {name} must be a dictionary")
+            raise TypeError(f"Wan2.2 cross-Q FP8 scale entry for {name} must be a dictionary")
         input_scale = float(entry.get("input_scale", 0.0))
         if not math.isfinite(input_scale) or input_scale <= 0.0:
             raise ValueError(
-                f"Wan2.2 cross-Q/O FP8 input_scale for {name} must be positive and finite"
+                f"Wan2.2 cross-Q FP8 input_scale for {name} must be positive and finite"
             )
 
         weight = weights[f"{name}.weight"]
@@ -91,11 +88,11 @@ def _validated_cross_qo_fp8_scales(
         weight_scale = float(entry.get("weight_scale", minimum_weight_scale))
         if not math.isfinite(weight_scale) or weight_scale <= 0.0:
             raise ValueError(
-                f"Wan2.2 cross-Q/O FP8 weight_scale for {name} must be positive and finite"
+                f"Wan2.2 cross-Q FP8 weight_scale for {name} must be positive and finite"
             )
         if weight_scale < minimum_weight_scale * (1.0 - 1.0e-6):
             raise ValueError(
-                f"Wan2.2 cross-Q/O FP8 weight_scale for {name} would overflow E4M3: "
+                f"Wan2.2 cross-Q FP8 weight_scale for {name} would overflow E4M3: "
                 f"provided={weight_scale}, minimum={minimum_weight_scale}"
             )
         result[name] = {
@@ -218,6 +215,32 @@ def _slice_chunks(network, tensor, count: int, width: int):
     ]
 
 
+def _row(network, tensor, row: int, width: int):
+    return network.add_slice(tensor, (row, 0), (1, width), (1, 1)).get_output(0)
+
+
+class _TokenSelect:
+    """Give the first latent frame's tokens one value and every later token another.
+
+    Image-to-video keeps the first latent frame clean, so upstream runs its
+    tokens at timestep 0 and the rest at the sampling timestep. With 0/1 masks,
+    ``first * mask + later * (1 - mask)`` selects exactly, so text-to-video,
+    which passes one timestep for both, computes what a scalar timestep does.
+    """
+
+    def __init__(self, network, profile: Wan22TI2VConfig):
+        first = np.arange(profile.num_patches) < profile.first_frame_patches
+        self.network = network
+        self.first_mask = op.constant(network, first.astype(np.float32).reshape(-1, 1))
+        self.later_mask = op.constant(network, (~first).astype(np.float32).reshape(-1, 1))
+
+    def __call__(self, first, later):
+        product, total = trt.ElementWiseOperation.PROD, trt.ElementWiseOperation.SUM
+        first = self.network.add_elementwise(first, self.first_mask, product).get_output(0)
+        later = self.network.add_elementwise(later, self.later_mask, product).get_output(0)
+        return self.network.add_elementwise(first, later, total).get_output(0)
+
+
 def _patchify(network, latent, weight, bias, profile: Wan22TI2VConfig):
     pt, ph, pw = profile.patch_size
     patches = network.add_shuffle(latent)
@@ -282,7 +305,7 @@ def build_dit_engine(
     if profile not in SUPPORTED_GENERATION_PROFILES:
         raise ValueError("Wan2.2 DiT profile is not one of the qualified generation profiles")
     if cross_qo_fp8_scales is not None and ffn_fp8_scales is None:
-        raise ValueError("Wan2.2 cross-Q/O FP8 requires the complete FFN FP8 scale map")
+        raise ValueError("Wan2.2 cross-Q FP8 requires the complete FFN FP8 scale map")
     weights = _numpy_state(model_dir)
     ffn_fp8_scales = _validated_ffn_fp8_scales(weights, profile, ffn_fp8_scales)
     cross_qo_fp8_scales = _validated_cross_qo_fp8_scales(
@@ -311,7 +334,8 @@ def build_dit_engine(
             profile.latent_width,
         ),
     )
-    time_features = network.add_input("time_features", trt.float32, (1, profile.freq_dim))
+    # Row 0 holds the first latent frame's timestep features, row 1 the later frames'.
+    time_features = network.add_input("time_features", trt.float32, (2, profile.freq_dim))
     text = network.add_input(
         "encoder_hidden_states",
         trt.float32,
@@ -327,16 +351,13 @@ def build_dit_engine(
         weights["patch_embedding.bias"],
         profile,
     )
-    # Upstream expands the scalar timestep before the FP32 MLP. The row count
-    # influences GEMM dispatch, so materialize the same shape here.
-    expanded_time_features = network.add_elementwise(
-        time_features,
-        op.constant(
-            network,
-            np.zeros((profile.num_patches, profile.freq_dim), dtype=np.float32),
-        ),
-        trt.ElementWiseOperation.SUM,
-    ).get_output(0)
+    # Upstream gives every token its own timestep before the FP32 MLP. The row
+    # count influences GEMM dispatch, so materialize the same shape here.
+    per_token = _TokenSelect(network, profile)
+    expanded_time_features = per_token(
+        _row(network, time_features, 0, profile.freq_dim),
+        _row(network, time_features, 1, profile.freq_dim),
+    )
     time_linear1 = op.linear(
         network,
         expanded_time_features,
@@ -373,17 +394,32 @@ def build_dit_engine(
         weights["condition_embedder.text_embedder.linear_2.bias"],
     )
 
+    # Every token of a frame shares its timestep: one row stands for each group.
+    later_row = profile.first_frame_patches
+    time_proj_rows = [_row(network, time_proj, row, 6 * profile.dim) for row in (0, later_row)]
+    time_embed_rows = [_row(network, time_embed, row, profile.dim) for row in (0, later_row)]
+
+    def modulation_chunks(table, rows, count: int):
+        """Per-token chunks of table + time rows: [first-frame value, later value] per chunk."""
+
+        constant = op.constant(network, table)
+        chunks = [
+            _slice_chunks(
+                network,
+                network.add_elementwise(constant, row, trt.ElementWiseOperation.SUM).get_output(0),
+                count,
+                profile.dim,
+            )
+            for row in rows
+        ]
+        return [per_token(first, later) for first, later in zip(*chunks)]
+
     rope_cos, rope_sin = _wan_rope(profile)
     for index in range(profile.num_layers):
         prefix = f"blocks.{index}"
         table = weights[f"{prefix}.scale_shift_table"].reshape(1, 6 * profile.dim)
-        modulation = network.add_elementwise(
-            op.constant(network, table),
-            time_proj,
-            trt.ElementWiseOperation.SUM,
-        ).get_output(0)
-        shift_sa, scale_sa, gate_sa, shift_ff, scale_ff, gate_ff = _slice_chunks(
-            network, modulation, 6, profile.dim
+        shift_sa, scale_sa, gate_sa, shift_ff, scale_ff, gate_ff = modulation_chunks(
+            table, time_proj_rows, 6
         )
 
         normalized = op.layer_norm(
@@ -509,14 +545,11 @@ def build_dit_engine(
             heads=profile.num_heads,
             head_dim=profile.head_dim,
         )
-        cross_out_name = f"{prefix}.attn2.to_out.0"
-        cross = _cross_qo_linear(
+        cross = op.linear(
             network,
             cross,
-            weights,
-            cross_out_name,
-            cross_qo_fp8_scales,
-            fp8_weight_refs,
+            weights[f"{prefix}.attn2.to_out.0.weight"],
+            weights[f"{prefix}.attn2.to_out.0.bias"],
         )
         hidden = op.add_fp32_residual(network, hidden, cross)
 
@@ -562,14 +595,12 @@ def build_dit_engine(
         hidden = op.add_fp32_residual(network, hidden, ffn, gate_ff)
 
     final_table = weights["scale_shift_table"].reshape(1, 2 * profile.dim)
-    final_time = network.add_concatenation([time_embed, time_embed])
-    final_time.axis = 1
-    final_modulation = network.add_elementwise(
-        op.constant(network, final_table),
-        final_time.get_output(0),
-        trt.ElementWiseOperation.SUM,
-    ).get_output(0)
-    final_shift, final_scale = _slice_chunks(network, final_modulation, 2, profile.dim)
+    final_rows = []
+    for row in time_embed_rows:
+        doubled = network.add_concatenation([row, row])
+        doubled.axis = 1
+        final_rows.append(doubled.get_output(0))
+    final_shift, final_scale = modulation_chunks(final_table, final_rows, 2)
     hidden = op.layer_norm(network, hidden, profile.dim, profile.eps)
     hidden = op.adaptive_norm(network, hidden, final_shift, final_scale)
     rows = op.linear(

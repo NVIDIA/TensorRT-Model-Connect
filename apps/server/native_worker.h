@@ -16,8 +16,15 @@ struct LoadOptions;
 
 namespace trtmc::server {
 
+struct VideoGeometry {
+    int width{0};
+    int height{0};
+    int frames{1};
+};
+
 // Runs the private serialized protocol used by the Python serving control plane.
-int run_task_worker(ITask& task, std::istream& input, std::ostream& output);
+int run_task_worker(ITask& task, std::istream& input, std::ostream& output,
+                    VideoGeometry geometry = {});
 int run_text_worker(ITask& task, std::istream& input, std::ostream& output);
 int run_text_worker(const Model& model, std::istream& input, std::ostream& output);
 int run_bundle_worker(const std::string& bundle, const LoadOptions& options, std::istream& input,

@@ -31,10 +31,18 @@ void require_tensor_shape(const ITrtModule& module, const std::string& name,
 } // namespace
 
 GemmaKvCache::GemmaKvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim,
-                           cudaStream_t stream, DType cache_dtype, GemmaKvCacheNames names)
-    : num_layers_(num_layers), max_length_(max_length), kv_dim_(kv_dim), stream_(stream),
-      cache_dtype_(cache_dtype), cache_element_size_(dtype_size(cache_dtype)),
+                           cudaStream_t stream, DType cache_dtype, GemmaKvCacheNames names,
+                           std::vector<int32_t> kv_dimensions)
+    : num_layers_(num_layers), max_length_(max_length), kv_dimensions_(std::move(kv_dimensions)),
+      stream_(stream), cache_dtype_(cache_dtype), cache_element_size_(dtype_size(cache_dtype)),
       names_(std::move(names)) {
+
+    if (kv_dimensions_.empty())
+        kv_dimensions_.assign(static_cast<std::size_t>(num_layers), kv_dim);
+    if (kv_dimensions_.size() != static_cast<std::size_t>(num_layers) ||
+        std::any_of(kv_dimensions_.begin(), kv_dimensions_.end(),
+                    [](int32_t dim) { return dim <= 0; }))
+        throw std::invalid_argument("GemmaKvCache: invalid per-layer cache dimensions");
 
     // If names were not supplied, generate standard defaults.
     if (names_.cache_k.empty()) {
@@ -57,10 +65,11 @@ GemmaKvCache::GemmaKvCache(int32_t num_layers, int32_t max_length, int32_t kv_di
     present_v_.reserve(static_cast<std::size_t>(num_layers));
 
     for (int32_t i = 0; i < num_layers; ++i) {
-        cache_k_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype_, stream);
-        cache_v_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype_, stream);
-        present_k_.emplace_back(std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
-        present_v_.emplace_back(std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
+        const auto dim = kv_dimensions_[static_cast<std::size_t>(i)];
+        cache_k_.emplace_back(std::vector<int64_t>{max_length, dim}, cache_dtype_, stream);
+        cache_v_.emplace_back(std::vector<int64_t>{max_length, dim}, cache_dtype_, stream);
+        present_k_.emplace_back(std::vector<int64_t>{1, dim}, cache_dtype_, stream);
+        present_v_.emplace_back(std::vector<int64_t>{1, dim}, cache_dtype_, stream);
     }
 
     // Pre-allocate mask buffer: [max_length + 1] for dense causal mask.
@@ -172,13 +181,13 @@ void GemmaKvCache::bind_to(ITrtModule& module) {
     require_tensor_shape(module, names_.attention_mask, {1, max_length_ + 1}, true);
     if (has_position_input_)
         require_tensor_shape(module, names_.position_id, {1}, true);
-    const std::vector<int64_t> cache_shape{max_length_, kv_dim_};
-    const std::vector<int64_t> present_shape{1, kv_dim_};
 
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
+        const std::vector<int64_t> cache_shape{max_length_, kv_dimensions_[li]};
         require_tensor_shape(module, names_.cache_k[li], cache_shape, true);
         require_tensor_shape(module, names_.cache_v[li], cache_shape, true);
+        const std::vector<int64_t> present_shape{1, kv_dimensions_[li]};
         require_tensor_shape(module, names_.present_k[li], present_shape, false);
         require_tensor_shape(module, names_.present_v[li], present_shape, false);
         module.bind_external(names_.cache_k[li], cache_k_[li].data());
@@ -190,9 +199,9 @@ void GemmaKvCache::bind_to(ITrtModule& module) {
 
 void GemmaKvCache::bind_cache_inputs(ITrtModule& module) {
     has_position_input_ = module.has_input(names_.position_id);
-    const std::vector<int64_t> cache_shape{max_length_, kv_dim_};
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
+        const std::vector<int64_t> cache_shape{max_length_, kv_dimensions_[li]};
         require_tensor_shape(module, names_.cache_k[li], cache_shape, true);
         require_tensor_shape(module, names_.cache_v[li], cache_shape, true);
         module.bind_external(names_.cache_k[li], cache_k_[li].data());
@@ -211,10 +220,10 @@ void GemmaKvCache::write_prefill_kv(const std::vector<const void*>& prefill_k,
         throw std::runtime_error(
             "GemmaKvCache::write_prefill_kv: per-layer pointer count mismatch");
     }
-    const auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
-    const auto block_bytes = static_cast<std::size_t>(seq_len) * row_bytes;
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
+        const auto row_bytes = static_cast<std::size_t>(kv_dimensions_[li]) * cache_element_size_;
+        const auto block_bytes = static_cast<std::size_t>(seq_len) * row_bytes;
         cudaMemcpyAsync(cache_k_[li].data(), prefill_k[li], block_bytes, cudaMemcpyDeviceToDevice,
                         stream_);
         cudaMemcpyAsync(cache_v_[li].data(), prefill_v[li], block_bytes, cudaMemcpyDeviceToDevice,
@@ -234,11 +243,11 @@ void GemmaKvCache::append_prefill_kv(const std::vector<const void*>& prefill_k,
         throw std::runtime_error(
             "GemmaKvCache::append_prefill_kv: per-layer pointer count mismatch");
     }
-    const auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
-    const auto block_bytes = static_cast<std::size_t>(seq_len) * row_bytes;
-    const auto offset = static_cast<std::size_t>(position_) * row_bytes;
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
+        const auto row_bytes = static_cast<std::size_t>(kv_dimensions_[li]) * cache_element_size_;
+        const auto block_bytes = static_cast<std::size_t>(seq_len) * row_bytes;
+        const auto offset = static_cast<std::size_t>(position_) * row_bytes;
         cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset, prefill_k[li],
                         block_bytes, cudaMemcpyDeviceToDevice, stream_);
         cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset, prefill_v[li],
@@ -259,13 +268,13 @@ void GemmaKvCache::advance(int32_t n_tokens) {
 
     // Copy present K/V (single row) into cache at current position.
     // present_k_[layer] is [1, kv_dim] → copy to cache_k_[layer][position_, :]
-    auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
-
     if (position_ < max_length_) {
         // Normal append: write to position_ slot
-        auto offset = static_cast<std::size_t>(position_) * row_bytes;
         for (int32_t i = 0; i < num_layers_; ++i) {
             auto li = static_cast<std::size_t>(i);
+            const auto row_bytes =
+                static_cast<std::size_t>(kv_dimensions_[li]) * cache_element_size_;
+            const auto offset = static_cast<std::size_t>(position_) * row_bytes;
             cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset,
                             present_k_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
             cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset,
@@ -274,10 +283,12 @@ void GemmaKvCache::advance(int32_t n_tokens) {
         ++position_;
     } else {
         // Cache full: shift [1..max) → [0..max-1), then write at tail
-        auto shift_bytes = static_cast<std::size_t>(max_length_ - 1) * row_bytes;
-        auto tail_offset = shift_bytes;
         for (int32_t i = 0; i < num_layers_; ++i) {
             auto li = static_cast<std::size_t>(i);
+            const auto row_bytes =
+                static_cast<std::size_t>(kv_dimensions_[li]) * cache_element_size_;
+            const auto shift_bytes = static_cast<std::size_t>(max_length_ - 1) * row_bytes;
+            const auto tail_offset = shift_bytes;
             auto* ck = static_cast<uint8_t*>(cache_k_[li].data());
             auto* cv = static_cast<uint8_t*>(cache_v_[li].data());
             cudaMemcpyAsync(ck, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);

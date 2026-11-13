@@ -302,6 +302,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     model_dir = _model_dir(manifest)
     binary, runtime_root = _runtime()
+    from families.deformable_detr.tests.dynamic_geometry import check_dynamic_geometry
+
+    check_dynamic_geometry()
     bundle = tmp_path / manifest["bundle"]
     _build(model_dir, bundle, manifest)
     actual = _native(binary, runtime_root, bundle, case)

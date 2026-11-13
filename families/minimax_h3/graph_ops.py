@@ -274,22 +274,30 @@ def gated_residual(network, residual, update, gate):
     return network.add_elementwise(residual, update, trt.ElementWiseOperation.SUM).get_output(0)
 
 
-def swiglu(network, tensor, weight_in, weight_out, ffn_dim: int):
-    projected = linear(network, tensor, weight_in)
+def _projection(network, tensor, weight, quant, name):
+    """FP8 Q/DQ GEMM when ``name`` is quantized, else the bf16 GEMM."""
+
+    if quant is not None and quant.should_quantize(name):
+        return quant.linear(network, cast(network, tensor, trt.bfloat16), np.asarray(weight), name)
+    return linear(network, tensor, weight)
+
+
+def swiglu(network, tensor, weight_in, weight_out, ffn_dim: int, *, quant=None, prefix: str = ""):
+    projected = _projection(network, tensor, weight_in, quant, f"{prefix}.ff.net.0.proj")
     value = dynamic_slice(network, projected, (0, 0), (None, ffn_dim))
     gate = dynamic_slice(network, projected, (0, ffn_dim), (None, ffn_dim))
     activated = silu(network, gate)
     hidden = network.add_elementwise(value, activated, trt.ElementWiseOperation.PROD).get_output(0)
-    return linear(network, hidden, weight_out)
+    return _projection(network, hidden, weight_out, quant, f"{prefix}.ff.net.2")
 
 
-def fused_qkv(network, tensor, weights: dict, prefix: str):
+def fused_qkv(network, tensor, weights: dict, prefix: str, *, quant=None, name: str = ""):
     """Pack Q/K/V into one TensorRT GEMM, matching Sol-Engine's lossless path."""
 
     packed_weight = np.concatenate(
         [weights[f"{prefix}.to_{name}.weight"] for name in ("q", "k", "v")], axis=0
     )
-    packed = linear(network, tensor, packed_weight)
+    packed = _projection(network, tensor, packed_weight, quant, name)
     width = int(packed.shape[1]) // 3
     return tuple(
         dynamic_slice(network, packed, (0, index * width), (None, width)) for index in range(3)

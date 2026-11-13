@@ -7,25 +7,31 @@ from __future__ import annotations
 
 from tools.e2e_evidence import evidence_stage, record_evidence
 import json
+import math
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 import pytest
 import numpy as np
 from tensorrt_model_connect import BuildRequest, build
 
 FAMILY = "eagle_vlm"
-TASKS = frozenset({"embedding", "reranking"})
+TASKS = frozenset({"text_to_embedding", "text_query_documents_to_relevance"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
+
+
+MANIFESTS: dict[str, dict] = {}
 
 
 def _case_index() -> dict[str, tuple[Path, dict, dict]]:
     result = {}
     for path in sorted(MANIFEST_ROOT.glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
+        MANIFESTS[str(manifest["name"])] = manifest
         assert manifest["family"] == FAMILY
         assert manifest["task"] in TASKS
         for case in manifest["testcases"]:
@@ -94,10 +100,7 @@ def _required_path(value: str | None, label: str) -> Path:
     return path
 
 
-def _model_dir(manifest: dict) -> Path:
-    explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
-    if explicit:
-        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+def _cached_snapshot(manifest: dict) -> Path:
     from huggingface_hub import snapshot_download
 
     try:
@@ -109,6 +112,30 @@ def _model_dir(manifest: dict) -> Path:
             f"selected {FAMILY} E2E requires the exact cached checkpoint {manifest['hf_id']}"
         ) from error
     return Path(snapshot)
+
+
+def _model_dir(manifest: dict) -> Path:
+    explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+    if explicit:
+        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+    return _cached_snapshot(manifest)
+
+
+def _reference_model_dir(manifest: dict, model_dir: Path) -> Path:
+    """Checkpoint the official reference runs on.
+
+    A ModelOpt FP8 checkpoint keeps raw FP8 weights and separate scales, which
+    transformers does not apply (it logs "Unknown quantization type, got modelopt"),
+    so a reference loaded from it is wrong. The FP8 build is compared with the
+    unquantized checkpoint of the same model, declared by the sibling manifest
+    without the "-fp8" suffix.
+    """
+    if not manifest.get("quantization"):
+        return model_dir
+    base = MANIFESTS[str(manifest["name"]).removesuffix("-fp8")]
+    assert not base.get("quantization") and base["task"] == manifest["task"]
+    assert base["hf_id"] != manifest["hf_id"]
+    return _cached_snapshot(base)
 
 
 def _runtime(manifest: dict) -> tuple[Path, Path]:
@@ -191,7 +218,13 @@ def _run_json(
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
     record_evidence("commands", {"argv": getattr(completed, "args", None)})
-    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
+    record_evidence(
+        "native",
+        {
+            "stdout": getattr(completed, "stdout", None),
+            "stderr": getattr(completed, "stderr", None),
+        },
+    )
     payloads = []
     for line in completed.stdout.splitlines():
         start = line.find("{")
@@ -228,6 +261,15 @@ def _cosine(left, right) -> float:
     return float(np.dot(a, b) / denominator)
 
 
+def _pairwise_order(scores) -> list[int]:
+    values = np.asarray(scores, dtype=np.float64)
+    return [
+        int(values[first] > values[second]) - int(values[first] < values[second])
+        for first in range(values.size)
+        for second in range(first + 1, values.size)
+    ]
+
+
 def _torch_dtype(precision: str):
     import torch
 
@@ -249,29 +291,55 @@ def _native(
     tmp_path: Path,
 ):
     task = manifest["task"]
-    if task == "embedding":
-        return _run_json(
+    if task == "text_to_embedding":
+        payload = _run_json(
             binary, runtime_root, bundle, manifest, case, "embed", "--text", _case_text(case)
         )
-    if task == "reranking":
+        assert payload["pooling"] == "mean" and payload["normalization"] == "l2"
+        return payload
+    if task == "text_query_documents_to_relevance":
         inputs = case.get("inputs") or {}
         documents = inputs.get("documents") or [inputs.get("document") or "Paris is in France."]
-        scores = []
+        query = str(inputs.get("query") or _case_text(case))
+        payload = _run_json(
+            binary,
+            runtime_root,
+            bundle,
+            manifest,
+            case,
+            "rerank",
+            "--query",
+            query,
+            "--documents",
+            json.dumps([str(document) for document in documents]),
+        )
+        assert payload["task"] == task
+        assert payload["score_kind"] == "logit" and payload["order"] == "input_documents"
+        scores = [float(score) for score in payload["scores"]]
+        assert len(scores) == len(documents)
+        # The same bundle also serves the single-pair Task through the CLI's
+        # --task selector; it must rank the documents the way the list Task does.
+        pair_scores = []
         for document in documents:
-            payload = _run_json(
+            pair = _run_json(
                 binary,
                 runtime_root,
                 bundle,
                 manifest,
                 case,
                 "rerank",
+                "--task",
+                "text_pair_to_relevance",
                 "--query",
-                str(inputs.get("query") or _case_text(case)),
+                query,
                 "--document",
                 str(document),
             )
-            scores.append(float(payload["score"]))
-        return {"scores": scores}
+            assert pair["task"] == "text_pair_to_relevance" and pair["score_kind"] == "logit"
+            pair_scores.append(float(pair["score"]))
+        assert all(math.isfinite(value) for value in pair_scores)
+        assert _pairwise_order(pair_scores) == _pairwise_order(scores)
+        return {"scores": scores, "pair_scores": pair_scores}
     raise AssertionError(f"{FAMILY} has no direct native test for task={task}")
 
 
@@ -286,7 +354,7 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if task == "reranking":
+    if task == "text_query_documents_to_relevance":
         inputs = case.get("inputs") or {}
         documents = inputs.get("documents") or [inputs.get("document") or "Paris is in France."]
         query = str(inputs.get("query") or _case_text(case))
@@ -342,6 +410,16 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     return {"values": values.float().cpu().numpy()}
 
 
+def test_fp8_reference_uses_the_unquantized_checkpoint(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(sys.modules[__name__], "_cached_snapshot", lambda m: Path(m["hf_id"]))
+    for name in ("nemotron-embed-vl-1b-v2", "nemotron-rerank-vl-1b-v2"):
+        quantized = MANIFESTS[f"{name}-fp8"]
+        base = MANIFESTS[name]
+        assert quantized["quantization"] == "fp8"
+        assert _reference_model_dir(quantized, tmp_path / "fp8") == Path(base["hf_id"])
+        assert _reference_model_dir(base, tmp_path / "base") == tmp_path / "base"
+
+
 def test_embedding_reference_requests_hidden_states(monkeypatch, tmp_path: Path) -> None:
     import torch
     import transformers
@@ -388,7 +466,7 @@ def test_embedding_reference_requests_hidden_states(monkeypatch, tmp_path: Path)
     )
     result = _official_reference(
         tmp_path,
-        {"task": "embedding"},
+        {"task": "text_to_embedding"},
         {"prompt": "test", "reference_precision": "fp32"},
         tmp_path,
     )
@@ -436,7 +514,7 @@ def test_reranking_reference_uses_checkpoint_processor(monkeypatch, tmp_path: Pa
     )
     result = _official_reference(
         tmp_path,
-        {"task": "reranking"},
+        {"task": "text_query_documents_to_relevance"},
         {
             "inputs": {"prompt": "query", "documents": ["first", "second"]},
             "reference_precision": "fp32",
@@ -451,9 +529,11 @@ def test_reranking_bundle_uses_checkpoint_pooling(monkeypatch, tmp_path: Path) -
 
     from families.eagle_vlm import model as family_model
 
-    config = SimpleNamespace(model_type="llama_nemotron_vl_rerank", raw={"pooling": "avg"})
+    config = SimpleNamespace(
+        model_type="llama_nemotron_vl_rerank", vocab_size=100, raw={"pooling": "avg"}
+    )
     model = SimpleNamespace(
-        load_weights=lambda *args: {},
+        load_weights=lambda *args, **kwargs: {},
         build_engine=lambda *args, **kwargs: b"engine",
     )
     sections = {}
@@ -471,7 +551,7 @@ def test_reranking_bundle_uses_checkpoint_pooling(monkeypatch, tmp_path: Path) -
             video_num_frames=None,
             max_batch_size=1,
             context_parallel_size=1,
-            task="reranking",
+            task="text_query_documents_to_relevance",
             quantization=None,
             fp32_layers=(),
             tensor_parallel_size=1,
@@ -485,12 +565,16 @@ def test_reranking_bundle_uses_checkpoint_pooling(monkeypatch, tmp_path: Path) -
             add_json=lambda name, data: sections.update({name: data}),
         ),
     )
-    assert sections["runtime.json"] == {"tensor_parallel_size": 1, "pooling": "avg"}
+    assert sections["runtime.json"] == {
+        "tensor_parallel_size": 1,
+        "vocab_size": 100,
+        "pooling": "avg",
+    }
 
 
 def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dict) -> None:
     task = manifest["task"]
-    if task in {"encoding", "embedding"}:
+    if task in {"text_to_pooled_features", "text_to_embedding"}:
         actual_values = np.asarray(actual["values"]).reshape(-1)
         expected_values = np.asarray(expected["values"]).reshape(-1)
         configured = thresholds.get(
@@ -498,7 +582,7 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
         )
         assert _cosine(actual_values, expected_values) >= max(float(configured), 0.8)
         return
-    if task == "reranking":
+    if task == "text_query_documents_to_relevance":
         left = np.asarray(actual["scores"], dtype=np.float64)
         right = np.asarray(expected["scores"], dtype=np.float64)
         assert left.shape == right.shape and left.size >= 2
@@ -510,23 +594,88 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
                 pairwise.append(left_order == right_order)
         agreement = float(np.mean(pairwise))
         assert agreement >= float(thresholds.get("contract_ranking_agreement", 0.9))
+        if "contract_score_max_abs_diff" in thresholds:
+            assert np.max(np.abs(left - right)) <= float(thresholds["contract_score_max_abs_diff"])
         return
     raise AssertionError(f"{FAMILY} has no parity gate for task={task}")
 
 
 def test_reranking_gate_distinguishes_ties_from_strict_order() -> None:
-    manifest = {"task": "reranking"}
+    manifest = {"task": "text_query_documents_to_relevance"}
     thresholds = {"contract_ranking_agreement": 1.0}
     _assert_parity({"scores": [1.0, 1.0]}, {"scores": [2.0, 2.0]}, manifest, {}, thresholds)
     with pytest.raises(AssertionError):
         _assert_parity({"scores": [1.0, 1.0]}, {"scores": [1.0, 2.0]}, manifest, {}, thresholds)
 
 
+def test_reranking_gate_checks_score_distance_when_configured() -> None:
+    manifest = {"task": "text_query_documents_to_relevance"}
+    thresholds = {"contract_ranking_agreement": 1.0, "contract_score_max_abs_diff": 0.5}
+    _assert_parity({"scores": [-8.9, -10.1]}, {"scores": [-9.0, -10.3]}, manifest, {}, thresholds)
+    with pytest.raises(AssertionError):
+        _assert_parity(
+            {"scores": [-8.9, -10.1]}, {"scores": [-0.3, -0.5]}, manifest, {}, thresholds
+        )
+
+
+def _assert_sdk_consumers(
+    runtime_root: Path, bundle: Path, manifest: dict, case: dict, expected: dict
+) -> None:
+    native_build = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = ":".join(
+        value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value
+    )
+    task = manifest["task"]
+    if task == "text_to_embedding":
+        inputs = [_case_text(case)]
+    else:
+        case_inputs = case.get("inputs") or {}
+        documents = case_inputs.get("documents") or [
+            case_inputs.get("document") or "Paris is in France."
+        ]
+        inputs = [str(case_inputs.get("query") or _case_text(case)), *map(str, documents)]
+    outputs = []
+    for language in ("c", "cpp"):
+        consumer = native_build / f"test_eagle_vlm_sdk_{language}"
+        assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
+        completed = subprocess.run(
+            [str(consumer), str(bundle), str(runtime_root), task, *inputs],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=600,
+        )
+        payloads = [line for line in completed.stdout.splitlines() if line.startswith("{")]
+        assert len(payloads) == 1, f"SDK {language} consumer must return one result"
+        actual = json.loads(payloads[0])
+        record_evidence(f"sdk_{language}", actual)
+        assert actual["task"] == task
+        if task == "text_to_embedding":
+            assert actual["pooling"] == "mean" and actual["normalization"] == "l2"
+            assert actual["dim"] == len(actual["values"]) == len(expected["values"])
+            assert all(math.isfinite(value) for value in actual["values"])
+        else:
+            assert actual["score_kind"] == "logit"
+            assert len(actual["scores"]) == len(expected["scores"])
+            assert all(math.isfinite(value) for value in actual["scores"])
+        outputs.append(actual)
+    assert outputs[0] == outputs[1]
+
+
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     model_dir = _model_dir(manifest)
-    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
@@ -534,8 +683,17 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     with evidence_stage("native"):
         actual = _native(binary, runtime_root, bundle, model_dir, manifest, case, tmp_path)
     record_evidence("native", actual)
+    if int(manifest["tensor_parallel_size"]) == 1:
+        # The single-process SDK consumers cannot join the multi-process mpirun
+        # launch the tensor-parallel manifests need.
+        with evidence_stage("sdk"):
+            _assert_sdk_consumers(runtime_root, bundle, manifest, case, actual)
     with evidence_stage("reference"):
-        expected = _official_reference(model_dir, manifest, case, tmp_path)
+        expected = _official_reference(
+            _reference_model_dir(manifest, model_dir), manifest, case, tmp_path
+        )
     record_evidence("reference", expected)
     with evidence_stage("compare"):
-        _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+        _assert_parity(
+            actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name))
+        )

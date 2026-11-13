@@ -49,4 +49,17 @@ if(TRTMC_BUILD_TESTS)
   target_link_libraries(test_phi_moe_stop_tokens PRIVATE nlohmann_json::nlohmann_json)
   add_test(NAME phi_moe_stop_tokens COMMAND test_phi_moe_stop_tokens)
   set_tests_properties(phi_moe_stop_tokens PROPERTIES LABELS "cpu")
+  add_executable(test_phi_moe_pipeline
+    ${PROJECT_SOURCE_DIR}/families/phi_moe/tests/cpp/test_phi_moe_pipeline.cpp)
+  target_include_directories(test_phi_moe_pipeline PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_phi_moe_pipeline SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_phi_moe_pipeline PRIVATE
+    trtmc_model_phi_moe trtmc_core ${TRTMC_CUDART_LIBRARY}
+  )
+  target_compile_options(test_phi_moe_pipeline PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME phi_moe_pipeline COMMAND test_phi_moe_pipeline)
+  set_tests_properties(phi_moe_pipeline PROPERTIES SKIP_RETURN_CODE 77 LABELS "gpu")
 endif()

@@ -20,6 +20,8 @@ def load_precomputed_fp8_scales(config) -> dict[str, dict[str, float]]:
     if select_generation_profile(config.raw) != WAN22_TI2V_5B:
         raise ValueError("Wan2.2 FP8 supports only the 1280x704, 121-frame profile")
     scales = json.loads(_SCALE_PATH.read_text(encoding="utf-8"))
+    # attn2.to_out.0 stays BF16: TensorRT 11.4 cannot compile an FP8 Quantize
+    # on the output of the fused cross-attention.
     expected = {
         name
         for index in range(WAN22_TI2V_5B.num_layers)
@@ -27,7 +29,6 @@ def load_precomputed_fp8_scales(config) -> dict[str, dict[str, float]]:
             f"blocks.{index}.ffn.net.0.proj",
             f"blocks.{index}.ffn.net.2",
             f"blocks.{index}.attn2.to_q",
-            f"blocks.{index}.attn2.to_out.0",
         )
     }
     if set(scales) != expected:

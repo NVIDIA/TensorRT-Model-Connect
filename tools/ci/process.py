@@ -55,13 +55,23 @@ class GitHubFiles:
         self.env = dict(env or os.environ)
 
     def environment(self, name: str, value: str) -> None:
-        self._append("GITHUB_ENV", f"{name}={value}\n")
+        self._append("GITHUB_ENV", self._assignment(name, value))
 
     def output(self, name: str, value: str) -> None:
-        self._append("GITHUB_OUTPUT", f"{name}={value}\n", create_parent=True)
+        self._append("GITHUB_OUTPUT", self._assignment(name, value), create_parent=True)
 
     def summary(self, text: str = "") -> None:
         self._append("GITHUB_STEP_SUMMARY", f"{text}\n")
+
+    def _assignment(self, name: str, value: str) -> str:
+        # GitHub Actions file commands require delimiter syntax when the value
+        # spans more than one line; otherwise later lines are parsed as new commands.
+        if "\n" in value or "\r" in value:
+            delimiter = "TRTMC_EOF"
+            while delimiter in value:
+                delimiter += "_X"
+            return f"{name}<<{delimiter}\n{value}\n{delimiter}\n"
+        return f"{name}={value}\n"
 
     def _append(self, variable: str, text: str, *, create_parent: bool = False) -> None:
         destination = self.env.get(variable, "")

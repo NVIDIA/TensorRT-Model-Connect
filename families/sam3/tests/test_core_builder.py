@@ -22,6 +22,12 @@ def test_sam3_core_appends_meta_empty_geometry_prompt() -> None:
     assert "[text_features, geometry_features]" in source
     assert "prompt_seq_len = text_seq_len + 1" in source
     assert "[text_mask_in, geometry_attention_mask]" in source
+    # The caller selects the CLS per request: Transformers' image path masks it out, Meta's video
+    # predictor keeps it. A constant would force one semantics on both.
+    assert (
+        'geometry_attention_mask = network.add_input("sam3_geometry_prompt_mask", trt.int32, (1, 1))'
+        in source
+    )
     assert source.count("kv_seq=prompt_seq_len") == 3
     assert "text_seq_len=prompt_seq_len" in source
     assert 'reduced_precision="bf16"' not in source

@@ -110,6 +110,7 @@ def build_xlnet_engine(
     *,
     precision: str = "fp32",
     verbose: bool = False,
+    quant_ctx=None,
 ) -> bytes:
     """Build a TRT engine plan for XLNet encoder.
 
@@ -118,6 +119,8 @@ def build_xlnet_engine(
         weights: Loaded weight dict from XLNet plugin.
         max_seq_length: Maximum sequence length the engine is compiled for.
         verbose: Print TRT builder logs.
+        quant_ctx: Optional FP8 context (``quantization.XLNetQuantContext``); its
+            projections run through Q/DQ, every other projection stays unquantized.
 
     Returns:
         Serialized engine plan bytes.
@@ -148,6 +151,9 @@ def build_xlnet_engine(
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
     trt_config.clear_flag(trt.BuilderFlag.TF32)
+    if quant_ctx is not None and quant_ctx.has_fp8_weights:
+        # Keep layer names so the plan inspector shows the FP8 GEMMs.
+        trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
 
     # -------------------------------------------------------------------
     # Inputs
@@ -270,6 +276,7 @@ def build_xlnet_engine(
             ff_activation=ff_activation,
             eps=eps,
             dtype=work_np_dtype,
+            quant_ctx=quant_ctx,
         )
 
     # -------------------------------------------------------------------
@@ -314,6 +321,7 @@ def _add_xlnet_layer(
     ff_activation: str,
     eps: float,
     dtype: np.dtype = np.float32,
+    quant_ctx=None,
 ) -> trt.ITensor:
     """Add one XLNet encoder layer with relative positional attention.
 
@@ -329,6 +337,12 @@ def _add_xlnet_layer(
         output = LayerNorm(output + FFN(output))  # post-norm
     """
     klen = seq_length  # No mems
+
+    def quantized(name, activation):
+        # FP8 outputs when the quantization context holds the projection, else None.
+        if quant_ctx is None:
+            return None
+        return quant_ctx.project(network, activation, f"{prefix}.{name}")
 
     # --- QKV projections: [seq_len, hidden] @ [hidden, attn_size] -> [seq_len, attn_size] ---
     q = graph_ops.add_matmul_rhs_constant(
@@ -546,16 +560,20 @@ def _add_xlnet_layer(
     # Actually, the einsum "ibnd,hnd->ibh" contracts over n,d producing [i,b,h].
     # With our flattened version: context_flat @ W_o^T where W_o is [hidden, attn_size]
     # So we need to use TRANSPOSE on the rhs.
-    w_o = graph_ops.add_constant(
-        network, (hidden_size, attn_size), weights[f"{prefix}.w_o"],
-        dtype=dtype)
-    attn_out = network.add_matrix_multiply(
-        context_flat.get_output(0), trt.MatrixOperation.NONE,
-        w_o, trt.MatrixOperation.TRANSPOSE)
+    attn_out = quantized("rel_attn.o", context_flat.get_output(0))
+    if attn_out is not None:
+        (attn_out,) = attn_out
+    else:
+        w_o = graph_ops.add_constant(
+            network, (hidden_size, attn_size), weights[f"{prefix}.w_o"],
+            dtype=dtype)
+        attn_out = network.add_matrix_multiply(
+            context_flat.get_output(0), trt.MatrixOperation.NONE,
+            w_o, trt.MatrixOperation.TRANSPOSE).get_output(0)
 
     # POST-norm: LayerNorm(h + attn_out)
     residual1 = network.add_elementwise(
-        hidden, attn_out.get_output(0),
+        hidden, attn_out,
         trt.ElementWiseOperation.SUM)
     normed1 = _add_seq_layer_norm(
         network, residual1.get_output(0), hidden_size,
@@ -563,15 +581,23 @@ def _add_xlnet_layer(
         weights[f"{prefix}.attn_norm_beta"], eps, dtype=dtype)
 
     # --- FFN ---
-    fc1 = graph_ops.add_matmul_rhs_constant(
-        network, normed1, hidden_size, intermediate_size,
-        weights[f"{prefix}.w_fc1"], dtype=dtype)
+    fc1 = quantized("ff.layer_1", normed1)
+    if fc1 is not None:
+        (fc1,) = fc1
+    else:
+        fc1 = graph_ops.add_matmul_rhs_constant(
+            network, normed1, hidden_size, intermediate_size,
+            weights[f"{prefix}.w_fc1"], dtype=dtype)
     fc1 = graph_ops.add_bias_sum(network, fc1, intermediate_size,
                                   weights[f"{prefix}.fc1_bias"], dtype=dtype)
     activated = graph_ops.add_activation(network, fc1, ff_activation)
-    fc2 = graph_ops.add_matmul_rhs_constant(
-        network, activated, intermediate_size, hidden_size,
-        weights[f"{prefix}.w_fc2"], dtype=dtype)
+    fc2 = quantized("ff.layer_2", activated)
+    if fc2 is not None:
+        (fc2,) = fc2
+    else:
+        fc2 = graph_ops.add_matmul_rhs_constant(
+            network, activated, intermediate_size, hidden_size,
+            weights[f"{prefix}.w_fc2"], dtype=dtype)
     fc2 = graph_ops.add_bias_sum(network, fc2, hidden_size,
                                   weights[f"{prefix}.fc2_bias"], dtype=dtype)
 

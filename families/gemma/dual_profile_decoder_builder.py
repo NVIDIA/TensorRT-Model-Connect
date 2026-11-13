@@ -65,16 +65,18 @@ def _const_in_work_dtype(
     work_np_dtype: np.dtype,
     work_trt_dtype: trt.DataType,
 ) -> trt.ITensor:
-    """Create a constant in work_np_dtype storage and cast it to work_trt_dtype.
+    """Create a constant of work_trt_dtype from values stored as work_np_dtype.
 
-    Needed for bf16 builds: the dual-profile builder stores bf16 weights
-    on disk as fp16 (work_np_dtype = np.float16), but the runtime tensor
-    must be bfloat16 to match the rest of the graph. ``add_constant``
-    alone produces an fp16 constant — we need an explicit cast to
-    bfloat16 so layers like IRotaryEmbeddingLayer (which require all
-    inputs to share a dtype) accept it. fp16 / fp32 builds are no-ops
-    because work_np_dtype maps directly to work_trt_dtype.
+    bf16 builds store weights as fp16 (work_np_dtype = np.float16) while the
+    runtime tensor must be bfloat16 to match the rest of the graph (layers
+    like IRotaryEmbeddingLayer require all inputs to share a dtype). Those
+    constants are added as BF16 directly (graph_ops.add_bf16_constant), so
+    TensorRT does not fold a cast into a second host copy of the weights.
+    Other combinations add the constant and cast it; fp16 / fp32 builds are
+    no-ops because work_np_dtype maps directly to work_trt_dtype.
     """
+    if work_trt_dtype == trt.bfloat16 and np.dtype(work_np_dtype) == np.float16:
+        return graph_ops.add_bf16_constant(network, shape, values)
     const = graph_ops.add_constant(network, shape, values, dtype=work_np_dtype)
     if const.dtype != work_trt_dtype:
         const = network.add_cast(const, work_trt_dtype).get_output(0)
@@ -224,7 +226,7 @@ def build_dual_profile_decoder_engine(
     scale_attn_weights: bool = True,
     verbose: bool = False,
     profile_mode: str = "dual_profile",
-) -> bytes:
+) -> memoryview:
     """Build a prefill/decode-capable dynamic-Sq decoder engine.
 
     ``norm_type`` / ``mlp_type`` / ``position_type`` / ``activation`` /
@@ -273,6 +275,12 @@ def build_dual_profile_decoder_engine(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
+    if quant_ctx is not None:
+        # Keeps per-layer tactic names in the plan so FP8 lowering can be inspected.
+        trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+    if quant_ctx is not None and quant_ctx.disable_dual_gemm_fusion:
+        # Fused gate/up kernels fail to compile with scalar-scale FP8 inputs.
+        trt_config.build_route = "-peep:match_dual_gemm=off"
 
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
@@ -537,6 +545,7 @@ def build_dual_profile_decoder_engine(
             num_kv_heads=num_kv_heads,
             q_seq=None, kv_seq=None, causal=False, mask=mask_4d,
             scale=attn_scale, logit_softcap=attn_logit_softcap,
+            fp32_scores=quant_ctx is not None,
             tag=f"{prefix}.attn")
 
         attn_out = matmul(context, attention_size, hidden,
@@ -689,4 +698,4 @@ def build_dual_profile_decoder_engine(
     plan = builder.build_serialized_network(network, trt_config)
     if plan is None:
         raise RuntimeError("dual-profile decoder engine build failed")
-    return bytes(plan)
+    return memoryview(plan)

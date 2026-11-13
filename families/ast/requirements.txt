@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# ASTFeatureExtractor takes a different code path when torchaudio is absent:
+# with it, the filter bank comes from torchaudio.compliance.kaldi, and without
+# it from the library's own numpy spectrogram. This family is measured against
+# the torchaudio path, so the dependency is required rather than optional.
+torchaudio
+transformers

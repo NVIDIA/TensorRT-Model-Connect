@@ -1,7 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""SD1.5's official Native pipeline, with the family's DDIM sampler and caller noise."""
-
 import json
 from functools import lru_cache
 from pathlib import Path
@@ -26,13 +24,19 @@ class Adapter:
         return (1, channels, height // scale, width // scale)
 
     def __init__(self, spec: Any, host: Any) -> None:
-        from diffusers import DDIMScheduler, StableDiffusionPipeline
+        from diffusers import (DDIMScheduler, DiffusionPipeline, EulerAncestralDiscreteScheduler,
+                               StableDiffusionPipeline, StableDiffusionXLPipeline)
 
         self.spec, self.host = spec, host
-        self.pipe = StableDiffusionPipeline.from_pretrained(
-            spec.model, torch_dtype=spec.dtype, safety_checker=None, requires_safety_checker=False,
-            **spec.pretrained_kwargs()).to(spec.device)
-        self.pipe.scheduler = DDIMScheduler.from_pretrained(
+        config = DiffusionPipeline.load_config(spec.model, **spec.pretrained_kwargs())
+        xl = config.get("_class_name") == "StableDiffusionXLPipeline"
+        pipeline = StableDiffusionXLPipeline if xl else StableDiffusionPipeline
+        scheduler = EulerAncestralDiscreteScheduler if xl else DDIMScheduler
+        options = {"add_watermarker": False} if xl else {"safety_checker": None, "requires_safety_checker": False}
+        self.sampler = "EulerAncestralDiscrete" if xl else "DDIM"
+        self.pipe = pipeline.from_pretrained(
+            spec.model, torch_dtype=spec.dtype, **options, **spec.pretrained_kwargs()).to(spec.device)
+        self.pipe.scheduler = scheduler.from_pretrained(
             spec.model, subfolder="scheduler", **spec.pretrained_kwargs())
         self.pipe.set_progress_bar_config(disable=True)
         if spec.mode == "compile":
@@ -56,4 +60,4 @@ class Adapter:
                       negative_prompt=request.get("negative_prompt") or None, latents=latents, output_type="np")
         output, ms = self.host.timed(lambda: self.pipe(**kwargs).images)
         return self.host.invocation(self.host.tensor_observation(np.asarray(output), artifact_base), ms,
-                                    sampler="DDIM", safety_checker=False)
+                                    sampler=self.sampler, safety_checker=False)

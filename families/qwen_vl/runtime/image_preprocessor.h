@@ -35,6 +35,7 @@ struct QwenVlPreprocessConfig {
     int32_t vision_num_heads{16};
     int32_t vision_window_size{112};
     float vision_rope_theta{10000.0F};
+    int32_t vision_position_grid_size{0};
     std::string vl_prompt_template;
     std::string image_token_str;
     // Preprocessing strategy: "merge_group_chw", "simple_chw",
@@ -50,6 +51,8 @@ struct QwenVlPreprocessedImage {
     std::vector<int32_t> image_grid_hws; // [height, width] patch grid for patchified inputs
     std::vector<float> vision_cos_half;
     std::vector<float> vision_sin_half;
+    std::array<std::vector<int32_t>, 4> vision_position_indices;
+    std::array<std::vector<float>, 4> vision_position_weights;
     std::vector<int32_t> vision_window_indices;
     std::vector<int32_t> vision_padded_window_indices;
     std::vector<int32_t> vision_compact_window_indices;

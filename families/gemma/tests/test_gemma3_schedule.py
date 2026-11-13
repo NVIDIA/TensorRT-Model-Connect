@@ -201,6 +201,32 @@ def test_vocab_size_falls_back_to_the_embedding(tmp_path) -> None:
     with pytest.raises(ValueError, match="has no model.embed_tokens.weight"):
         _embedding_vocab_size(_Readers(), "model")
 
+    # Exercise the actual reader wrapper, not just the shape-only fake above.
+    import numpy as np
+    from safetensors.numpy import save_file
+    from families.gemma.checkpoint_mapper import _open_safetensors
+    from families.gemma.model import _projection_rows
+
+    embedding_key = "language_model.model.embed_tokens.weight"
+    projection_key = "language_model.model.layers.0.self_attn.q_proj.weight"
+    tensors = {
+        embedding_key: np.zeros((17, 4), dtype=np.float32),
+        projection_key: np.zeros((8, 4), dtype=np.float32),
+    }
+    for indexed in (False, True):
+        checkpoint = tmp_path / str(indexed)
+        checkpoint.mkdir()
+        filename = "model-00001-of-00001.safetensors" if indexed else "model.safetensors"
+        save_file(tensors, checkpoint / filename)
+        if indexed:
+            (checkpoint / "model.safetensors.index.json").write_text(json.dumps({
+                "weight_map": {key: filename for key in tensors},
+            }))
+        readers = _open_safetensors(checkpoint)
+        assert _embedding_vocab_size(readers, "language_model.model") == 17
+        assert _projection_rows(readers, "language_model.model", "q_proj") == 8
+        assert _projection_rows(readers, "language_model.model", "k_proj") == 0
+
 
 class _FakeSlice:
     def __init__(self, rows):

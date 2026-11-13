@@ -1,0 +1,17 @@
+{
+  "name": "vit-base-patch16-224",
+  "hf_id": "google/vit-base-patch16-224",
+  "hf_revision": "3f49326eb077187dfe1c2a2bb15fbd74e6ab91e3",
+  "bundle": "vit-base-patch16-224.bundle",
+  "family": "vit",
+  "task": "image_to_class_scores",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "vit-base-patch16-224",
+      "premerge": true,
+      "test_image": "data/test_img.png"
+    }
+  ],
+  "tensor_parallel_size": 1
+}

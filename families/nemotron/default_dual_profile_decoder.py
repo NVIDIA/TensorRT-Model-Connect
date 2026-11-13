@@ -47,6 +47,7 @@ import tensorrt as trt
 
 from . import graph_ops
 from . import graph_blocks
+from .quantization import configure_fp8_build
 from .utils import (
     const_in_work_dtype as _const_in_work_dtype,
     create_builder_context,
@@ -56,6 +57,7 @@ from .utils import (
 if TYPE_CHECKING:
     from .config import ModelConfig
     from .checkpoint_mapper import WeightDict
+    from typing import Any as QuantContext
 
 
 _make_matmul_fn = graph_blocks.make_matmul_fn
@@ -154,6 +156,7 @@ def build_dual_profile_decoder_engine(
     interleaved_rope: bool = False,
     parallel_residual: bool = False,
     scale_attn_weights: bool = True,
+    quant_ctx: "QuantContext | None" = None,
     verbose: bool = False,
     profile_mode: str = "dual_profile",
 ) -> bytes:
@@ -201,6 +204,7 @@ def build_dual_profile_decoder_engine(
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config
+    configure_fp8_build(trt_config, quant_ctx)
 
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
@@ -320,7 +324,7 @@ def build_dual_profile_decoder_engine(
     # Attention scale.
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
 
-    matmul = _make_matmul_fn(network, work_np_dtype)
+    matmul = _make_matmul_fn(network, work_np_dtype, quant_ctx)
 
     # ---- Embedding -------------------------------------------------------
     emb = network.add_gather(embedding_table, token_id, 0)

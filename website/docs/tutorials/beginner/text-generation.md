@@ -4,7 +4,7 @@ title: Beginner Tutorial - Text Generation
 
 # Text generation
 
-Complete the [Quick Start](/getting-started/quick-start) first. This tutorial
+Complete the [Quick Start](../../getting-started/quick-start.md) first. This tutorial
 reuses `./gpt2.bundle`.
 
 ## Inspect and run
@@ -40,7 +40,7 @@ requested maximum.
 The current CLI does not provide `--greedy`; configure deterministic selection
 with the supported sampling controls for the installed version. Chat-template
 and reasoning behavior use the explicit boolean options shown in the
-[CLI Reference](/api/cli-reference), such as `--use-chat-template true|false`
+[CLI Reference](../../api/cli-reference.md), such as `--use-chat-template true|false`
 and `--enable-thinking true|false`.
 
 You are done when you can explain why prefill and decode are distinct phases,
