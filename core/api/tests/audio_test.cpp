@@ -128,17 +128,21 @@ void test_codec(const std::filesystem::path& root, const trtmc::LoadOptions& opt
           "undeclared codec option rejected");
     auto bad = request;
     bad.codes.frames = 3;
-    check(rejects([&] { task.run(bad); }, TRTMC_INVALID_ARGUMENT), "codec shape/count mismatch rejected");
+    check(rejects([&] { task.run(bad); }, TRTMC_INVALID_ARGUMENT),
+          "codec shape/count mismatch rejected");
     bad.codes = {{}, 3, 0};
     check(rejects([&] { task.run(bad); }, TRTMC_INVALID_ARGUMENT), "empty codec frames rejected");
     bad.codes = {{values, 6}, UINT64_MAX, 2};
     check(rejects([&] { task.run(bad); }, TRTMC_INVALID_ARGUMENT), "codec shape overflow rejected");
     values[0] = -1;
-    check(rejects([&] { task.run(request); }, TRTMC_INVALID_ARGUMENT), "codec vocabulary remains family-owned");
+    check(rejects([&] { task.run(request); }, TRTMC_INVALID_ARGUMENT),
+          "codec vocabulary remains family-owned");
     values[0] = 11;
-    auto retained = Model::load(path.string(), options).task<AudioCodebookTokensToAudio>().run(request);
+    auto retained =
+        Model::load(path.string(), options).task<AudioCodebookTokensToAudio>().run(request);
     auto moved = std::move(retained);
-    check(moved.samples()[5] == 32 && retained.samples().empty(), "codec result owns PCM across moves");
+    check(moved.samples()[5] == 32 && retained.samples().empty(),
+          "codec result owns PCM across moves");
     std::filesystem::remove(path);
 }
 

@@ -65,7 +65,8 @@ token_history(const trtmc_semantic_acoustic_history_view_v1& input) {
 trtmc_status TRTMC_CALL codec_audio_run(
     trtmc_model* model, const trtmc_audio_codebook_tokens_to_audio_request_v1* input,
     const trtmc_config_view_v1* config, trtmc_result** output, trtmc_error** error) noexcept {
-    if (output) *output = nullptr;
+    if (output)
+        *output = nullptr;
     return guarded(error, [&] {
         require(input && output, "codec token request and output are required");
         require(input->codes.codebooks > 0 && input->codes.frames > 0,

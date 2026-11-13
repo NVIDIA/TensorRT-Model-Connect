@@ -6,6 +6,7 @@
 #include "trtmc/internal/model.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
+
 #include <cmath>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
@@ -24,12 +25,16 @@ class Pipeline final : public internal::IModel, public internal::IAudioCodebookT
                               internal::ConfigView config) override {
         internal::validate_config({}, config);
         const auto& input = request.codes;
-        const uint64_t frames = cfg_.at("frames"), books = cfg_.at("codebooks"), samples = cfg_.at("samples");
-        if (input.frames != frames || input.codebooks != books || input.tokens.size() != frames * books ||
-            !input.tokens.data()) throw std::invalid_argument("HiggsAudioV2Tokenizer input differs from its built codebook token profile");
+        const uint64_t frames = cfg_.at("frames"), books = cfg_.at("codebooks"),
+                       samples = cfg_.at("samples");
+        if (input.frames != frames || input.codebooks != books ||
+            input.tokens.size() != frames * books || !input.tokens.data())
+            throw std::invalid_argument(
+                "HiggsAudioV2Tokenizer input differs from its built codebook token profile");
         for (const auto value : input.tokens)
             if (value < 0 || value >= cfg_.at("vocabulary_size").get<int32_t>())
-                throw std::invalid_argument("HiggsAudioV2Tokenizer codec token lies outside its vocabulary");
+                throw std::invalid_argument(
+                    "HiggsAudioV2Tokenizer codec token lies outside its vocabulary");
         Tensor tensor;
         tensor.data = const_cast<int32_t*>(input.tokens.data());
         tensor.shape = {static_cast<int64_t>(books), static_cast<int64_t>(frames)};
@@ -43,32 +48,42 @@ class Pipeline final : public internal::IModel, public internal::IAudioCodebookT
         internal::AudioResult result;
         result.samples.assign(data, data + samples);
         for (const float value : result.samples)
-            if (!std::isfinite(value)) throw std::runtime_error("HiggsAudioV2Tokenizer returned a nonfinite sample");
-        result.sample_rate = cfg_.at("sample_rate"); result.channels = 1;
+            if (!std::isfinite(value))
+                throw std::runtime_error("HiggsAudioV2Tokenizer returned a nonfinite sample");
+        result.sample_rate = cfg_.at("sample_rate");
+        result.channels = 1;
         return result;
     }
+
   private:
     std::unique_ptr<ITrtModule> engine_;
     nlohmann::json cfg_;
 };
 std::vector<char> section(const BundleReader& reader, const char* name) {
     const auto* found = reader.find_section(name);
-    if (!found || !found->length) throw std::runtime_error(std::string("HiggsAudioV2Tokenizer bundle lacks ") + name);
+    if (!found || !found->length)
+        throw std::runtime_error(std::string("HiggsAudioV2Tokenizer bundle lacks ") + name);
     return reader.read_section(name);
 }
 } // namespace
 } // namespace trtmc::higgs_audio_v2_tokenizer
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     using namespace trtmc;
-    if (context.kv_cache_size_bytes || context.reader.info().task != "audio_codebook_tokens_to_audio")
-        throw std::invalid_argument("HiggsAudioV2Tokenizer requires codec token decoding without an external cache");
+    if (context.kv_cache_size_bytes ||
+        context.reader.info().task != "audio_codebook_tokens_to_audio")
+        throw std::invalid_argument(
+            "HiggsAudioV2Tokenizer requires codec token decoding without an external cache");
     const auto raw = higgs_audio_v2_tokenizer::section(context.reader, "runtime.json");
     const auto cfg = nlohmann::json::parse(raw.begin(), raw.end());
-    const int64_t frames = cfg.at("frames"), books = cfg.at("codebooks"), samples = cfg.at("samples"), rate = cfg.at("sample_rate");
-    if (frames <= 0 || frames > 250 || books <= 0 || books > 64 || cfg.at("vocabulary_size").get<int64_t>() <= 0 || samples <= 0 || rate <= 0 || rate > UINT32_MAX)
+    const int64_t frames = cfg.at("frames"), books = cfg.at("codebooks"),
+                  samples = cfg.at("samples"), rate = cfg.at("sample_rate");
+    if (frames <= 0 || frames > 250 || books <= 0 || books > 64 ||
+        cfg.at("vocabulary_size").get<int64_t>() <= 0 || samples <= 0 || rate <= 0 ||
+        rate > UINT32_MAX)
         throw std::runtime_error("Invalid HiggsAudioV2Tokenizer audio profile");
     const auto plan = higgs_audio_v2_tokenizer::section(context.reader, "model.plan");
     auto engine = context.backend.create_module(plan.data(), plan.size(), {});
-    if (!engine || !engine->ok()) throw std::runtime_error("HiggsAudioV2Tokenizer engine failed to load");
+    if (!engine || !engine->ok())
+        throw std::runtime_error("HiggsAudioV2Tokenizer engine failed to load");
     return new higgs_audio_v2_tokenizer::Pipeline(std::move(engine), cfg);
 }
