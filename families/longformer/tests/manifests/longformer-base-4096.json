@@ -1,0 +1,21 @@
+{
+  "name": "longformer-base-4096",
+  "hf_id": "allenai/longformer-base-4096",
+  "hf_revision": "301e6a42cb0d9976a6d6a26a079fef81c18aa895",
+  "bundle": "longformer-base-4096.bundle",
+  "family": "longformer",
+  "task": "text_to_token_features",
+  "precision": "fp32",
+  "max_sequence_length": 1024,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "longformer-base-4096",
+      "premerge": true,
+      "prompts": [
+        "Longformer preserves local context across a long document.",
+        "A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. A short sentence. "
+      ]
+    }
+  ]
+}
