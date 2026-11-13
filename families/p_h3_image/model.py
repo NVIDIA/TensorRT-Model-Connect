@@ -154,7 +154,7 @@ def _vae_input(g, cfg):
     latents = g.net.add_input("latents", trt.float32, (256, 24))
     hidden = g.cast(latents, trt.bfloat16)
     weight = g.weights.read("post_quant_conv.weight").reshape(24, 24)
-    hidden = g.add(
+    hidden = g.affine_bias(
         g.mm(hidden, g.const(weight), True),
         g.const(g.weights.read("post_quant_conv.bias").reshape(1, 24)),
     )
