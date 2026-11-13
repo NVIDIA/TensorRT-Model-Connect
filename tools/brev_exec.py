@@ -500,6 +500,10 @@ class ProvisionError(RuntimeError):
     """Provisioning did not establish the complete readiness contract."""
 
 
+class DeadlineExceeded(ProvisionError):
+    """A finite operation budget expired without changing ownership evidence."""
+
+
 class InventoryError(ProvisionError):
     """Inventory visibility is unknown; retry without replacing the allocation."""
 
@@ -524,7 +528,7 @@ def _captured_text(value: str | bytes | None) -> str:
 def _remaining(deadline: float) -> float:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
-        raise ProvisionError("provisioning deadline expired")
+        raise DeadlineExceeded("operation deadline expired")
     return remaining
 
 
@@ -1267,10 +1271,12 @@ def _select_instance(
     if len(matching) != 1:
         # Say whether the type was missing or listed twice; the remedy differs.
         providers = sorted(
-            item["provider"]
-            if isinstance(item.get("provider"), str)
-            and re.fullmatch(r"[a-z0-9_-]{1,32}", item["provider"])
-            else "unknown"
+            (
+                item["provider"]
+                if isinstance(item.get("provider"), str)
+                and re.fullmatch(r"[a-z0-9_-]{1,32}", item["provider"])
+                else "unknown"
+            )
             for item in matching
         )
         raise PreflightUnavailable(
@@ -1604,6 +1610,8 @@ def _cleanup(
                     delay = 2.0
             else:
                 absent = 0
+        except DeadlineExceeded:
+            raise
         except (InventoryError, OSError):
             absent = 0
             _log(start, f"{name}: cleanup remains unconfirmed; retrying the same owned allocation")
@@ -1827,10 +1835,13 @@ def cleanup(
     lease_file: Path | None = None,
     timeout: float = CLEANUP_TIMEOUT,
     until_deleted: bool = False,
+    unknown_timeout: float | None = None,
 ) -> str:
     _validate_name(instance)
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("cleanup timeout must be finite and positive")
+    if unknown_timeout is not None and (not math.isfinite(unknown_timeout) or unknown_timeout <= 0):
+        raise ValueError("unknown allocation timeout must be finite and positive")
     start = time.monotonic()
     path = Path(lease_file) if lease_file is not None else None
     while True:
@@ -1857,6 +1868,8 @@ def cleanup(
             or (lease.get("rate_limit_retry_policy") is True and "create_attempts" not in lease)
         )
     )
+    if unknown_timeout is not None and lease is not None and lease.get("instance_id") is None:
+        timeout = min(timeout, unknown_timeout)
     if lease is not None and lease.get("create_started") is False and not rate_limited:
         if (
             lease.get("instance_id") is not None
@@ -1890,6 +1903,13 @@ def cleanup(
             lease=lease,
             lease_file=path,
         )
+    except DeadlineExceeded:
+        if lease is not None and path is not None:
+            lease.update(phase="unresolved", cleanup_confirmed=False)
+            _save_lease(path, lease)
+        raise DeadlineExceeded(
+            f"cleanup budget expired for {instance}; deletion remains unconfirmed"
+        ) from None
     except (ProvisionError, OSError):
         if lease is not None and path is not None:
             lease.update(phase="cleanup_failed", cleanup_confirmed=False)
@@ -2288,6 +2308,7 @@ def cleanup_main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--instance", required=True)
     parser.add_argument("--lease-file", type=Path)
     parser.add_argument("--timeout", type=float, default=CLEANUP_TIMEOUT)
+    parser.add_argument("--unknown-timeout", type=float)
     parser.add_argument(
         "--until-deleted",
         action="store_true",
