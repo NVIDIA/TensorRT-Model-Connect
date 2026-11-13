@@ -234,6 +234,8 @@ class BundleBuilder:
         temporary.unlink()
         model_dir = _buildable_model_dir(plan.model.family, plan.model_dir,
                                          plan.bundle.parent / "checkpoint")
+        model_dir = _with_external_files(plan.model.manifest_path, model_dir,
+                                         plan.bundle.parent / "staged")
         command = _build_command(plan.model, model_dir, temporary, plan.cases)
         started = time.monotonic()
         try:
@@ -464,6 +466,48 @@ def _buildable_model_dir(family: str, model_dir: Path, destination: Path) -> Pat
         return Path(prepare(model_dir, destination))
     except Exception as error:
         raise BenchmarkError(f"cannot prepare the {family} checkpoint {model_dir}: {error}") from error
+
+
+def _with_external_files(manifest_path: Path, model_dir: Path, destination: Path) -> Path:
+    """The checkpoint with the files its manifest stages beside it (``external_files``: ``path`` and ``url``,
+    for example a gated tokenizer's identical public copy), as catalog CI stages them. Without a missing file
+    the checkpoint is used as is; otherwise ``destination`` links every checkpoint entry and holds the
+    downloaded files, kept for the next build."""
+    import shutil
+    import urllib.request
+
+    try:
+        files = json.loads(Path(manifest_path).read_text(encoding="utf-8")).get("external_files") or []
+    except (OSError, ValueError) as error:
+        raise BenchmarkError(f"cannot read {manifest_path}: {error}") from error
+    missing = []
+    for item in files:
+        relative = Path(str(item.get("path") or ""))
+        if not item.get("url") or not relative.parts or relative.is_absolute() or ".." in relative.parts:
+            raise BenchmarkError(f"{manifest_path}: external file {item!r} needs a relative path and a url")
+        if not (model_dir / relative).exists():
+            missing.append((relative, str(item["url"])))
+    if not missing:
+        return model_dir
+    destination.mkdir(parents=True, exist_ok=True)
+    for entry in model_dir.iterdir():
+        link = destination / entry.name
+        if not link.exists() and not link.is_symlink():
+            link.symlink_to(entry.resolve())
+    for relative, url in missing:
+        target = destination / relative
+        if target.is_file():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        partial = target.with_name(target.name + ".partial")
+        try:
+            with urllib.request.urlopen(url, timeout=600) as response, open(partial, "wb") as handle:
+                shutil.copyfileobj(response, handle)
+        except OSError as error:
+            partial.unlink(missing_ok=True)
+            raise BenchmarkError(f"cannot download external file {relative} from {url}: {error}") from error
+        partial.rename(target)
+    return destination
 
 
 def _build_command(
