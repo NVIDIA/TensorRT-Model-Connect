@@ -29,8 +29,10 @@ struct PillowSpan {
 
 double pillow_lanczos(double value) {
     value = std::abs(value);
-    if (value == 0) return 1;
-    if (value >= 3) return 0;
+    if (value == 0)
+        return 1;
+    if (value >= 3)
+        return 0;
     constexpr double pi = 3.14159265358979323846;
     return std::sin(pi * value) / (pi * value) * std::sin(pi * value / 3) / (pi * value / 3);
 }
@@ -90,9 +92,8 @@ std::uint8_t apply_pillow_span(const std::uint8_t* source, std::int32_t stride,
     return static_cast<std::uint8_t>(std::min<std::int64_t>(sum >> kPillowPrecisionBits, 255));
 }
 
-std::vector<float> resize_rgb(const float* source, std::int32_t input_h,
-                                         std::int32_t input_w, std::int32_t output_h,
-                                         std::int32_t output_w) {
+std::vector<float> resize_rgb(const float* source, std::int32_t input_h, std::int32_t input_w,
+                              std::int32_t output_h, std::int32_t output_w) {
     std::vector<std::uint8_t> input(static_cast<std::size_t>(input_h) * input_w * 3U);
     std::transform(source, source + input.size(), input.begin(), [](float value) {
         return static_cast<std::uint8_t>(std::lround(std::clamp(value, 0.0F, 1.0F) * 255.0F));
@@ -128,11 +129,10 @@ std::vector<float> resize_rgb(const float* source, std::int32_t input_h,
     return output;
 }
 
-
 } // namespace
 
 Idefics3Image preprocess_idefics3_image(const float* rgb, int32_t height, int32_t width,
-                                      int32_t longest_edge, int32_t view_size) {
+                                        int32_t longest_edge, int32_t view_size) {
     if (!rgb || height <= 0 || width <= 0 || longest_edge <= 0 || view_size <= 0)
         throw std::invalid_argument("Invalid Idefics3 image dimensions");
     int32_t resized_h, resized_w;
@@ -140,13 +140,16 @@ Idefics3Image preprocess_idefics3_image(const float* rgb, int32_t height, int32_
     if (width >= height) {
         resized_w = longest_edge;
         resized_h = static_cast<int32_t>(resized_w / aspect);
-        if (resized_h % 2) ++resized_h;
+        if (resized_h % 2)
+            ++resized_h;
     } else {
         resized_h = longest_edge;
         resized_w = static_cast<int32_t>(resized_h * aspect);
-        if (resized_w % 2) ++resized_w;
+        if (resized_w % 2)
+            ++resized_w;
     }
-    resized_h = std::max(resized_h, 1); resized_w = std::max(resized_w, 1);
+    resized_h = std::max(resized_h, 1);
+    resized_w = std::max(resized_w, 1);
     const auto first = resize_rgb(rgb, height, width, resized_h, resized_w);
     const double resized_aspect = double(resized_w) / resized_h;
     int32_t padded_h, padded_w;
@@ -172,27 +175,31 @@ Idefics3Image preprocess_idefics3_image(const float* rgb, int32_t height, int32_
         result.views.push_back(std::move(pixels));
     };
     if (padded_h > view_size || padded_w > view_size) {
-        result.rows = padded_h / view_size; result.columns = padded_w / view_size;
+        result.rows = padded_h / view_size;
+        result.columns = padded_w / view_size;
         for (int32_t row = 0; row < result.rows; ++row)
             for (int32_t column = 0; column < result.columns; ++column)
                 append(resized.data(), padded_w, row * view_size, column * view_size);
         const auto global = resize_rgb(resized.data(), padded_h, padded_w, view_size, view_size);
         append(global.data(), view_size, 0, 0);
-    } else append(resized.data(), padded_w, 0, 0);
+    } else
+        append(resized.data(), padded_w, 0, 0);
     return result;
 }
 
 std::string idefics3_image_prompt(int32_t rows, int32_t columns, int32_t sequence_length) {
     std::string images;
-    for (int32_t i = 0; i < sequence_length; ++i) images += "<image>";
+    for (int32_t i = 0; i < sequence_length; ++i)
+        images += "<image>";
     std::string result;
     for (int32_t row = 1; row <= rows; ++row) {
         for (int32_t column = 1; column <= columns; ++column)
             result += "<fake_token_around_image><row_" + std::to_string(row) + "_col_" +
-                std::to_string(column) + ">" + images;
+                      std::to_string(column) + ">" + images;
         result += '\n';
     }
-    if (rows) result += '\n';
+    if (rows)
+        result += '\n';
     return result + "<fake_token_around_image><global-img>" + images + "<fake_token_around_image>";
 }
 
