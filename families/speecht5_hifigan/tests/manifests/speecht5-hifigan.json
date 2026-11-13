@@ -1,0 +1,20 @@
+{
+  "name": "speecht5-hifigan",
+  "hf_id": "microsoft/speecht5_hifigan",
+  "hf_revision": "bb6f429406e86a9992357a972c0698b22043307d",
+  "family": "speecht5_hifigan",
+  "bundle": "speecht5-hifigan.bundle",
+  "task": "spectrogram_to_audio",
+  "precision": "fp32",
+  "max_sequence_length": 64,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "speecht5-hifigan",
+      "premerge": true,
+      "audio": "librispeech-test-clean-6930-75918-0003.wav",
+      "max_abs_error": 0.0001,
+      "min_snr_db": 60
+    }
+  ]
+}

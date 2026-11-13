@@ -6,6 +6,7 @@
 #pragma once
 
 #include "trtmc/internal/config.h"
+#include "trtmc/internal/matrix.h"
 #include "trtmc/internal/scores.h"
 #include "trtmc/internal/text.h"
 
@@ -30,6 +31,18 @@ struct AudioResult {
 
 struct TextToAudioRequest {
     std::string_view prompt;
+};
+struct SpectrogramToAudioRequest {
+    // [time frame, frequency bin]. The loaded family declares the spectral
+    // convention, normalization and compatible input feature space.
+    FloatMatrixView spectrogram;
+};
+class ISpectrogramToAudio {
+  public:
+    using TaskInterface = ISpectrogramToAudio;
+    static constexpr std::string_view kTask = "spectrogram_to_audio";
+    virtual ~ISpectrogramToAudio() = default;
+    virtual AudioResult run(const SpectrogramToAudioRequest&, ConfigView) = 0;
 };
 
 // Integer token history, not PCM or floating speaker embeddings. The two
