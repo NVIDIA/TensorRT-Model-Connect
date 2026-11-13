@@ -316,5 +316,8 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
         official_psnrs = _frame_psnrs(references["fp16"], exact)
         print(f"{FAMILY} {case_name} official fp16 vs official fp32: "
               f"min {min(official_psnrs):.2f} mean {np.mean(official_psnrs):.2f} dB")
+        # FP16 tactic choices move this between engine builds, even of the same source:
+        # seven healthy builds measured 0.14-1.65 dB, four builds with plain FP16 linear and
+        # convolution layers (FP16 accumulation) 2.72-3.23 dB; the bound lies between them.
         shortfall = float(np.mean(official_psnrs)) - float(np.mean(native_psnrs))
         assert shortfall <= float(thresholds["max_mean_psnr_shortfall_vs_official_fp16_db"])
