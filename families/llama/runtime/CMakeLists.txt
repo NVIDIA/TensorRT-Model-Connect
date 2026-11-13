@@ -53,7 +53,8 @@ if(TRTMC_BUILD_TESTS)
       trtmc_core nlohmann_json::nlohmann_json ${TRTMC_CUDART_LIBRARY})
   endforeach()
   add_test(NAME test_llama_speculative_contract COMMAND test_llama_speculative_contract)
-  foreach(test_name IN ITEMS test_llama_chat_template test_llama_native_kv_cache)
+  foreach(test_name IN ITEMS test_llama_chat_template test_llama_native_kv_cache
+                             test_llama_pretokenizer_variant)
     add_executable(${test_name}
       ${PROJECT_SOURCE_DIR}/families/llama/tests/cpp/${test_name}.cpp
     )
