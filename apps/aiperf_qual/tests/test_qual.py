@@ -401,6 +401,7 @@ def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():
         "image_text_to_boxes": "no generic native adapter for detect_prompted",
         "image_to_token_and_pooled_features": "no image feature benchmark outside the families that state one",
         "speech_transcription": "the generic transcribe reference loads Whisper-style speech-seq2seq models only",
+        "text_to_head_scores": "no generic native adapter or reference for per-token head scores",
     }
     tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
     assert {profile.task for profile in catalog(REPOSITORY)} - set(tasks) == set(not_qualified)

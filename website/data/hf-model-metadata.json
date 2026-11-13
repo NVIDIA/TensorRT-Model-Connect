@@ -211,6 +211,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "OpenMed/privacy-filter-nemotron-v2",
+      "revision": "a04eea90487c9fedccc6eb6ec3ad98daf480e13a",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "openai_privacy_filter",
+      "architectures": [
+        "OpenAIPrivacyFilterForTokenClassification"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "PixArt-alpha/PixArt-Sigma-XL-2-1024-MS",
       "revision": "e102b3591cc82e97071b8b4cb90d834d0c487207",
       "revision_source": "resolved",

@@ -1,0 +1,47 @@
+{
+  "name": "privacy-filter-nemotron-v2",
+  "hf_id": "OpenMed/privacy-filter-nemotron-v2",
+  "hf_revision": "a04eea90487c9fedccc6eb6ec3ad98daf480e13a",
+  "bundle": "privacy-filter-nemotron-v2.bundle",
+  "family": "openai_privacy_filter",
+  "task": "text_to_head_scores",
+  "precision": "fp32",
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 4096,
+  "testcases": [
+    {
+      "name": "privacy-filter-nemotron-v2-clinical-note",
+      "premerge": true,
+      "prompt": "Discharge summary for patient Sarah Johnson (DOB 03/15/1985, MRN 4872910). Contact her at 415-555-0123 or sarah.johnson@example.com; home address 742 Evergreen Terrace, Springfield, IL 62704. Emergency contact: her brother Michael Johnson, +1 (312) 555-0178. Card on file 4111 1111 1111 1111, expiry 09/27, CVV 123. The patient portal account sjohnson85 was last accessed from 192.168.12.34 on 2024-11-03 at 14:22."
+    },
+    {
+      "name": "privacy-filter-nemotron-v2-multilingual",
+      "premerge": true,
+      "prompt": "Sehr geehrte Frau Müller, Ihre neue IBAN lautet DE89 3704 0044 0532 0130 00; rufen Sie uns unter +49 30 1234567 an. Monsieur Jean Dupont, né le 12/04/1978, demeure au 15 rue de la Paix, 75002 Paris. La señora María García vive en la Calle Mayor 7, 28013 Madrid, teléfono +34 912 345 678. Pan Jan Kowalski mieszka przy ulicy Długiej 12 w Gdańsku, e-mail jan.kowalski@poczta.pl. Ο κύριος Γιώργος Παπαδόπουλος, τηλέφωνο +30 210 1234567, γεννήθηκε στις 5 Μαΐου 1980."
+    },
+    {
+      "name": "privacy-filter-nemotron-v2-long-records",
+      "exercise_window": true,
+      "prompt_repeat": {
+        "text": "Record for Anna Schmidt, employee ID EMP-20417, born 1984-02-29, working as a radiology technician in Hamburg. Her mobile number is +49 151 2345 6789 and her work email is a.schmidt@clinic-example.de. Badge photo taken on 2023-06-14. Next of kin: Peter Schmidt, Lindenstrasse 23, 20095 Hamburg. Payroll account DE44 5001 0517 5407 3249 31, tax ID 12 345 678 901. Notes: she prefers contact in the afternoon; the parking permit HH-AS 4421 expires in March. Record for Luis Fernández, customer 88-4410-27, phone (555) 010-2299, address 1200 Market Street, Apt 5B, San Francisco, CA 94102, driver license D1234567, vehicle VIN 1HGCM82633A004352, server login lfernandez from 10.0.4.17, API key sk-test-4f9a2c7e1b.",
+        "count": 10,
+        "separator": "\n\n",
+        "suffix": "\nEnd of export."
+      }
+    },
+    {
+      "name": "privacy-filter-nemotron-v2-near-bound",
+      "exercise_window": true,
+      "prompt_repeat": {
+        "text": "Record for Anna Schmidt, employee ID EMP-20417, born 1984-02-29, working as a radiology technician in Hamburg. Her mobile number is +49 151 2345 6789 and her work email is a.schmidt@clinic-example.de. Badge photo taken on 2023-06-14. Next of kin: Peter Schmidt, Lindenstrasse 23, 20095 Hamburg. Payroll account DE44 5001 0517 5407 3249 31, tax ID 12 345 678 901. Notes: she prefers contact in the afternoon; the parking permit HH-AS 4421 expires in March. Record for Luis Fernández, customer 88-4410-27, phone (555) 010-2299, address 1200 Market Street, Apt 5B, San Francisco, CA 94102, driver license D1234567, vehicle VIN 1HGCM82633A004352, server login lfernandez from 10.0.4.17, API key sk-test-4f9a2c7e1b.",
+        "count": 17,
+        "separator": "\n\n",
+        "suffix": "\nEnd of export."
+      }
+    },
+    {
+      "name": "privacy-filter-nemotron-v2-one-token",
+      "prompt": "Sarah"
+    }
+  ]
+}
