@@ -24,10 +24,10 @@ struct Blip2ResizeShape {
 
 // Direct resize to the checkpoint dimensions, preserving the full source image.
 Blip2ResizeShape compute_blip2_resize_shape(std::int32_t image_height, std::int32_t image_width,
-                                          const Blip2PreprocessConfig& config);
+                                            const Blip2PreprocessConfig& config);
 
 std::vector<float> preprocess_blip2_image(const float* image_pixels, std::int32_t image_height,
-                                         std::int32_t image_width,
-                                         const Blip2PreprocessConfig& config);
+                                          std::int32_t image_width,
+                                          const Blip2PreprocessConfig& config);
 
 } // namespace trtmc

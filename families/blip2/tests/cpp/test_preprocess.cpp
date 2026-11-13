@@ -4,17 +4,20 @@
  */
 #include "families/blip2/runtime/image_preprocess_seam.h"
 #include "families/blip2/runtime/tokenizer.h"
+
 #include <fstream>
 #include <iostream>
 #include <iterator>
 #include <nlohmann/json.hpp>
 int main() {
-    nlohmann::json input; std::cin >> input;
+    nlohmann::json input;
+    std::cin >> input;
     const int32_t h = input.at("height"), w = input.at("width");
     std::vector<float> rgb(static_cast<std::size_t>(h) * w * 3);
     std::ifstream source(input.at("source").get<std::string>(), std::ios::binary);
     source.read(reinterpret_cast<char*>(rgb.data()), rgb.size() * sizeof(float));
-    if (!source) return 2;
+    if (!source)
+        return 2;
     auto pixels = trtmc::preprocess_blip2_image(rgb.data(), h, w, {});
     std::ofstream output(input.at("output").get<std::string>(), std::ios::binary);
     output.write(reinterpret_cast<const char*>(pixels.data()), pixels.size() * sizeof(float));
