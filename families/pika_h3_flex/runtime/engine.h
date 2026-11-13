@@ -6,6 +6,7 @@
 #include "trtmc/internal/video.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
+
 #include <cstring>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
@@ -21,12 +22,15 @@ inline uint16_t bf16(float value) {
 }
 inline Tensor tensor(void* data, std::initializer_list<int64_t> shape, DType dtype) {
     Tensor result;
-    result.data = data; result.shape = shape; result.dtype = dtype;
+    result.data = data;
+    result.shape = shape;
+    result.dtype = dtype;
     return result;
 }
 inline Tensor output(const TensorMap& values, const char* name, std::size_t count, DType dtype) {
     const auto found = values.find(name);
-    if (found == values.end() || !found->second.data || found->second.dtype != dtype || found->second.numel() != count)
+    if (found == values.end() || !found->second.data || found->second.dtype != dtype ||
+        found->second.numel() != count)
         throw std::runtime_error(std::string("Invalid Pika H3 Flex output ") + name);
     return found->second;
 }
@@ -46,16 +50,19 @@ inline F32 copy_f32(const TensorMap& values, const char* name, std::size_t count
 struct Loader {
     BundleReader reader;
     IBackend& backend;
-    explicit Loader(const FamilyContext& context) : reader(context.reader), backend(context.backend) {}
+    explicit Loader(const FamilyContext& context)
+        : reader(context.reader), backend(context.backend) {}
     std::vector<char> section(const std::string& name) const {
         const auto* info = reader.find_section(name);
-        if (!info || !info->length) throw std::runtime_error("Pika bundle lacks " + name);
+        if (!info || !info->length)
+            throw std::runtime_error("Pika bundle lacks " + name);
         return reader.read_section(name);
     }
     std::unique_ptr<ITrtModule> load(const std::string& name) const {
         const auto plan = section(name + ".plan");
         auto result = backend.create_module(plan.data(), plan.size(), {});
-        if (!result || !result->ok()) throw std::runtime_error("Cannot load Pika engine " + name);
+        if (!result || !result->ok())
+            throw std::runtime_error("Cannot load Pika engine " + name);
         return result;
     }
 };
