@@ -348,3 +348,59 @@ def test_bf16_rope_matches_pytorch(case_name, rotary_dim, tmp_path):
         assert context.execute_async_v3(stream.cuda_stream)
     stream.synchronize()
     assert torch.equal(actual, expected)
+
+
+def test_bf16_modulation_residual_and_affine(case_name, tmp_path):
+    import numpy as np
+    import tensorrt as trt
+    import torch
+    from families.pika_h3_flex.graph import Graph
+
+    class Weights:
+        index = {"linear.weight": None, "linear.bias": None}
+        adapter = None
+
+        def read(self, name):
+            return np.array(
+                [[1.0078125]] if name.endswith("weight") else [-1.015625], dtype=np.float32
+            )
+
+    logger = trt.Logger(trt.Logger.WARNING)
+    graph = Graph(Weights(), logger)
+    generator = torch.Generator(device="cuda").manual_seed(42)
+    inputs = {
+        name: torch.randn((1, 65536), generator=generator, device="cuda").bfloat16()
+        for name in ("hidden", "scale", "shift", "residual", "gate")
+    }
+    inputs["linear_input"] = torch.tensor([[1.0078125]], device="cuda", dtype=torch.bfloat16)
+    tensors = {
+        name: graph.net.add_input(name, trt.bfloat16, tuple(value.shape))
+        for name, value in inputs.items()
+    }
+    hidden, scale, shift, residual, gate = [
+        tensors[name] for name in ("hidden", "scale", "shift", "residual", "gate")
+    ]
+    graph.output(graph.add(graph.mul(hidden, graph.add(scale, 1)), shift), "modulated")
+    graph.output(graph.add(residual, graph.mul(gate, hidden)), "residual_output")
+    graph.output(graph.linear(tensors["linear_input"], "linear"), "affine")
+    expected = {
+        "modulated": inputs["hidden"] * (1 + inputs["scale"]) + inputs["shift"],
+        "residual_output": inputs["residual"] + inputs["gate"] * inputs["hidden"],
+        "affine": torch.tensor([[2**-14]], device="cuda", dtype=torch.bfloat16),
+    }
+    path = tmp_path / "operator-boundaries.plan"
+    with path.open("wb") as stream:
+        graph.save(stream)
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(path.read_bytes())
+    assert engine is not None
+    context = engine.create_execution_context()
+    actual = {name: torch.empty_like(value) for name, value in expected.items()}
+    stream = torch.cuda.Stream()
+    torch.cuda.synchronize()
+    for name, value in {**inputs, **actual}.items():
+        context.set_tensor_address(name, value.data_ptr())
+    assert context.execute_async_v3(stream.cuda_stream)
+    stream.synchronize()
+    for name, value in actual.items():
+        assert torch.equal(value, expected[name]), name
