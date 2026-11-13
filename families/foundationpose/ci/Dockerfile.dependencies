@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG BASE_IMAGE=trtmc-community-base:local
+FROM ${BASE_IMAGE}
+
+COPY requirements.txt /opt/trtmc-ci/foundationpose/requirements.txt
+RUN python -m pip install --disable-pip-version-check --no-cache-dir \
+      --only-binary=:all: \
+      --requirement /opt/trtmc-ci/foundationpose/requirements.txt \
+      "ml-dtypes==0.5.4" && \
+    python -m pip check
+
+ENV TRTMC_FOUNDATIONPOSE_MODEL_DIR=/opt/foundationpose-model
+
+# These are the exact public files declared by this family's existing manifest.
+# Download and validate them before the coordinator starts the test entry point.
+RUN python - <<'PY'
+import hashlib
+import os
+from pathlib import Path
+import urllib.request
+
+import numpy
+import onnx
+import onnxruntime
+
+root = Path(os.environ["TRTMC_FOUNDATIONPOSE_MODEL_DIR"])
+root.mkdir(parents=True, exist_ok=True)
+base = "https://api.ngc.nvidia.com/v2/models/nvidia/isaac/foundationpose/versions/1.0.1_onnx/files/"
+files = {
+    "refine_model.onnx": "dcc695a19c4bcfe5e1d909a22d8f652d8ec8bab1e19bd1544c6b45f2d3595cf7",
+    "score_model.onnx": "0bf1026c0db7320ebf9a548ecf0d3c810c8dbd377948630bd3e5af1d49440503",
+}
+options = onnxruntime.SessionOptions()
+options.intra_op_num_threads = 1
+for name, expected in files.items():
+    destination = root / name
+    temporary = root / (name + ".download")
+    digest = hashlib.sha256()
+    with urllib.request.urlopen(base + name, timeout=60) as response, temporary.open("wb") as output:
+        while chunk := response.read(1024 * 1024):
+            digest.update(chunk)
+            output.write(chunk)
+    if digest.hexdigest() != expected:
+        raise RuntimeError(f"FoundationPose asset checksum mismatch: {name}")
+    temporary.replace(destination)
+    onnx.checker.check_model(str(destination))
+    onnxruntime.InferenceSession(
+        str(destination), sess_options=options, providers=["CPUExecutionProvider"]
+    )
+    print(f"Validated FoundationPose asset: {name} sha256={expected}", flush=True)
+print("FoundationPose dependencies and ONNX assets ready; GPU parity has not run", flush=True)
+PY
