@@ -1,0 +1,7 @@
+numpy>=2.0
+safetensors>=0.6
+torch>=2.6
+transformers>=5.20
+# Official reference used by the direct E2E tests.
+diffusers @ git+https://github.com/huggingface/diffusers.git@2c58e66a08a61ea5c58b9add560cf808e2c851de
+peft>=0.17

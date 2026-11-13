@@ -1,0 +1,30 @@
+{
+  "name": "p-h3-image",
+  "hf_id": "PrunaAI/P-H3-Image",
+  "hf_revision": "7f98acef503cf2bcfba821a78cb1cf1a9928b2df",
+  "bundle": "p-h3-image.bundle",
+  "family": "p_h3_image",
+  "task": "text_to_image",
+  "precision": "bf16",
+  "image_height": 1024,
+  "image_width": 2048,
+  "max_sequence_length": 128,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "p-h3-image-literal-prompt",
+      "premerge": true,
+      "prompts": [
+        "A watercolor painting of a small red cabin beside a quiet lake, pine trees and mountains.",
+        "A studio photograph of a blue ceramic teapot on a wooden table, soft morning light."
+      ],
+      "seed": 42,
+      "num_inference_steps": 8,
+      "prompt_upsampler": false,
+      "rmse_max": 0.025,
+      "cosine_min": 0.999,
+      "max_abs_error": 0.2,
+      "runtime_timeout_s": 7200
+    }
+  ]
+}

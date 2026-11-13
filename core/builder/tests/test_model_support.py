@@ -80,6 +80,39 @@ def test_load_model_metadata_keeps_exact_snapshot_files_without_root_json(
     assert metadata.files == ("checkpoint/manifest.ocdbt",)
 
 
+def test_load_model_metadata_discovers_a_modular_pipeline(tmp_path: Path) -> None:
+    (tmp_path / "modular_model_index.json").write_text(
+        '{"_class_name":"ExampleModularPipeline"}', encoding="utf-8"
+    )
+
+    metadata = load_model_metadata(tmp_path)
+
+    assert metadata.pipeline_class == "ExampleModularPipeline"
+    assert metadata.files == ("modular_model_index.json",)
+
+
+def test_standard_pipeline_index_takes_precedence_over_modular_index(tmp_path: Path) -> None:
+    (tmp_path / "model_index.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "modular_model_index.json").write_text(
+        '{"_class_name":"ExampleModularPipeline"}', encoding="utf-8"
+    )
+
+    assert load_model_metadata(tmp_path).model_index == {}
+
+
+@pytest.mark.parametrize("content", ["{", "[]"])
+def test_modular_index_does_not_mask_an_invalid_standard_index(
+    tmp_path: Path, content: str
+) -> None:
+    (tmp_path / "model_index.json").write_text(content, encoding="utf-8")
+    (tmp_path / "modular_model_index.json").write_text(
+        '{"_class_name":"ExampleModularPipeline"}', encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="model metadata"):
+        load_model_metadata(tmp_path)
+
+
 def test_resolve_family_requires_exactly_one_match(monkeypatch) -> None:
     metadata = ModelMetadata({"model_type": "owned"}, {})
     directories = [Path("alpha"), Path("beta")]
