@@ -275,3 +275,37 @@ def test_fp16_scalar_and_silu_match_pytorch(case_name, tmp_path):
     stream.synchronize()
     assert torch.equal(scaled, expected_scale)
     assert (activated.float() - expected_activation.float()).abs().max().item() <= 2e-4
+
+
+def test_fp16_rope_matches_pytorch(case_name, tmp_path):
+    import tensorrt as trt
+    import torch
+    from families.kolibri1.model import Graph
+
+    logger = trt.Logger(trt.Logger.WARNING)
+    graph = Graph(None, {}, logger)
+    hidden = graph.net.add_input("hidden", trt.float16, (1, 4, 128, 128))
+    cosine = graph.net.add_input("cos", trt.float16, (1, 1, 128, 128))
+    sine = graph.net.add_input("sin", trt.float16, (1, 1, 128, 128))
+    graph.output(graph.rope(hidden, cosine, sine), "result")
+    path = tmp_path / "rope.plan"
+    with path.open("wb") as stream:
+        graph.save(stream)
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(path.read_bytes())
+    assert engine is not None
+    context = engine.create_execution_context()
+    stream = torch.cuda.Stream()
+    generator = torch.Generator(device="cuda").manual_seed(42)
+    with torch.cuda.stream(stream):
+        inputs = torch.randn((1, 4, 128, 128), generator=generator, device="cuda").half()
+        angles = torch.randn((1, 1, 128, 128), generator=generator, device="cuda")
+        cosine, sine = angles.cos().half(), angles.sin().half()
+        first, second = inputs.chunk(2, dim=-1)
+        expected = inputs * cosine + torch.cat((-second, first), dim=-1) * sine
+        actual = torch.empty_like(inputs)
+        for name, value in (("hidden", inputs), ("cos", cosine), ("sin", sine), ("result", actual)):
+            context.set_tensor_address(name, value.data_ptr())
+        assert context.execute_async_v3(stream.cuda_stream)
+    stream.synchronize()
+    assert torch.equal(actual, expected)

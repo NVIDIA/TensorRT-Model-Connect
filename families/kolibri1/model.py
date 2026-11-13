@@ -117,6 +117,27 @@ class Graph:
         sigmoid = self.net.add_activation(value, trt.ActivationType.SIGMOID).get_output(0)
         return self.cast(self.mul(value, sigmoid), x.dtype)
 
+    def rope(self, x, cosine, sine):
+        shape = tuple(x.shape)
+        half_shape = (*shape[:-1], shape[-1] // 2)
+        first = self.net.add_slice(x, (0,) * len(shape), half_shape, (1,) * len(shape)).get_output(0)
+        second = self.net.add_slice(
+            x, (*((0,) * (len(shape) - 1)), shape[-1] // 2), half_shape, (1,) * len(shape)
+        ).get_output(0)
+        rotated = self.net.add_concatenation(
+            [self.net.add_unary(second, trt.UnaryOperation.NEG).get_output(0), first]
+        )
+        rotated.axis = len(shape) - 1
+        # PyTorch rounds both FP16 products before summation. Explicit FP32
+        # opmath and casts retain those boundaries through TensorRT fusion.
+        products = [
+            self.cast(self.mul(self.cast(value, trt.float32), self.cast(angle, trt.float32)), x.dtype)
+            for value, angle in ((x, cosine), (rotated.get_output(0), sine))
+        ]
+        return self.cast(
+            self.add(*(self.cast(value, trt.float32) for value in products)), x.dtype
+        )
+
     def output(self, value, name):
         value.name = name
         self.net.mark_output(value)
@@ -179,20 +200,7 @@ class Graph:
                 for t in tables
             ]
 
-            def rope(x, count):
-                first = net.add_slice(
-                    x, (0, 0, 0, 0), (1, count, 1, dim // 2), (1, 1, 1, 1)
-                ).get_output(0)
-                second = net.add_slice(
-                    x, (0, 0, 0, dim // 2), (1, count, 1, dim // 2), (1, 1, 1, 1)
-                ).get_output(0)
-                rotated = net.add_concatenation(
-                    [net.add_unary(second, trt.UnaryOperation.NEG).get_output(0), first]
-                )
-                rotated.axis = 3
-                return self.add(self.mul(x, cosine), self.mul(rotated.get_output(0), sine))
-
-            query, key = rope(query, heads), rope(key, kv)
+            query, key = self.rope(query, cosine, sine), self.rope(key, cosine, sine)
         # Global layers intentionally have no rotary position embedding.
         old_k = net.add_input("cache_k", trt.float16, (1, kv, length, dim))
         old_v = net.add_input("cache_v", trt.float16, (1, kv, length, dim))
