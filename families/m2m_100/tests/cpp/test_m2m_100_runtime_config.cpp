@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/m2m_100/runtime/request_tokens.h"
 #include "families/m2m_100/runtime/runtime_config.h"
 
 #include <iostream>
@@ -10,6 +11,31 @@
 #include <string>
 
 int main() {
+    using trtmc::m2m_100::source_language_is_prefix;
+    if (!source_language_is_prefix("") || !source_language_is_prefix("{}") ||
+        !source_language_is_prefix(R"({"tokenizer_class":"NllbTokenizer"})") ||
+        !source_language_is_prefix(
+            R"({"tokenizer_class":"NllbTokenizerFast","legacy_behaviour":false})") ||
+        source_language_is_prefix(
+            R"({"tokenizer_class":"NllbTokenizer","legacy_behaviour":true})") ||
+        !source_language_is_prefix(
+            R"({"tokenizer_class":"M2M100Tokenizer","legacy_behaviour":true})")) {
+        std::cerr << "source-language framing disagrees with checkpoint tokenizer semantics\n";
+        return 1;
+    }
+    for (const auto* bad :
+         {"[]", R"({"tokenizer_class":"NllbTokenizer","legacy_behaviour":"yes"})"}) {
+        bool rejected = false;
+        try {
+            (void)source_language_is_prefix(bad);
+        } catch (const std::exception&) {
+            rejected = true;
+        }
+        if (!rejected) {
+            std::cerr << "invalid tokenizer config accepted\n";
+            return 1;
+        }
+    }
     const std::string valid =
         R"json({"vocab_size":100,"hidden_size":64,"bos_token_id":0,"eos_token_id":2,"pad_token_id":1,"num_attention_heads":4,"num_key_value_heads":4,"encoder_layers":2,"decoder_layers":2,"max_source_length":128,"decoder_start_token_id":2,"scale_embedding":true,"has_vision_engine":true,"is_encoder_decoder":true,"precision":"fp32","max_cache_length":128,"decoder_engine_layout":"single"})json";
     try {

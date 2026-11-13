@@ -152,12 +152,14 @@ class M2M100Pipeline final : public ITextGeneration {
                    int32_t num_decoder_layers, int32_t max_source_length,
                    int32_t decoder_start_token_id, int32_t eos_token_id, int32_t bos_token_id,
                    int32_t pad_token_id, cudaStream_t stream, std::shared_ptr<ITokenizer> tokenizer,
-                   std::string model_id_str)
+                   bool source_language_is_prefix, std::string model_id_str)
         : encoder_(std::move(encoder)), decoder_(std::move(decoder)), state_(std::move(state)),
           hidden_size_(hidden_size), num_decoder_layers_(num_decoder_layers),
           max_source_length_(max_source_length), decoder_start_token_id_(decoder_start_token_id),
           eos_token_id_(eos_token_id), bos_token_id_(bos_token_id), pad_token_id_(pad_token_id),
-          stream_(stream), tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)) {
+          stream_(stream), tokenizer_(std::move(tokenizer)),
+          source_language_is_prefix_(source_language_is_prefix),
+          model_id_(std::move(model_id_str)) {
         if (!encoder_ || !encoder_->ok())
             throw std::runtime_error("M2M100Pipeline: invalid encoder");
         if (!decoder_ || !decoder_->ok())
@@ -196,15 +198,14 @@ class M2M100Pipeline final : public ITextGeneration {
     prepare_encoder_input(const std::string& prompt, int32_t source_language_token_id) {
         std::vector<int32_t> ids;
         if (tokenizer_)
-            ids = tokenizer_->encode(prompt);
-        if (ids.empty())
+            ids = source_language_token_id >= 0 ? tokenizer_->encode(prompt, false)
+                                                : tokenizer_->encode(prompt);
+        if (ids.empty() && source_language_token_id < 0)
             return {{}, 0};
 
         if (source_language_token_id >= 0) {
-            // NLLB tokenizers frame source input as: text, EOS, language.
-            // Replace an unset/unknown language suffix instead of adding a
-            // second special-token frame.
-            m2m_100_apply_source_language_token(ids, eos_token_id_, source_language_token_id);
+            m2m_100_apply_source_language_token(ids, eos_token_id_, source_language_token_id,
+                                                source_language_is_prefix_);
         } else {
             // Use M2M-100 BOS/EOS framing when no request-level language token
             // is supplied.
@@ -324,6 +325,7 @@ class M2M100Pipeline final : public ITextGeneration {
     int32_t actual_enc_len_{0};
     cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
+    bool source_language_is_prefix_;
     std::string model_id_;
     std::vector<m2m_100::DeviceBuffer> cross_k_ptrs_;
     std::vector<m2m_100::DeviceBuffer> cross_v_ptrs_;
@@ -348,12 +350,16 @@ ITask* create_m2m_100(const FamilyContext& context) {
     if (!state->ok())
         throw std::runtime_error("m2m_100 failed to create KV cache");
     auto tokenizer = m2m_100::create_tokenizer(context.reader);
+    const auto* tokenizer_config = context.reader.find_section("tokenizer_config.json");
+    const bool language_prefix = m2m_100::source_language_is_prefix(
+        tokenizer_config ? m2m_100::require_text_section(context.reader, "tokenizer_config.json")
+                         : std::string{});
 
     return new M2M100Pipeline(std::move(encoder), std::move(decoder), std::move(state),
                               config.hidden_size, config.decoder_layers, config.max_source_length,
                               config.decoder_start_token_id, config.eos_token_id,
                               config.bos_token_id, config.pad_token_id, stream,
-                              std::move(tokenizer), std::string{});
+                              std::move(tokenizer), language_prefix, std::string{});
 }
 
 } // namespace trtmc

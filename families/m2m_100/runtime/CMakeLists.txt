@@ -36,6 +36,14 @@ install(TARGETS trtmc_model_m2m_100
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_m2m_100_request_tokens
+    ../tests/cpp/test_m2m_100_request_tokens.cpp
+  )
+  target_include_directories(test_m2m_100_request_tokens PRIVATE ${PROJECT_SOURCE_DIR})
+  target_compile_options(test_m2m_100_request_tokens PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME m2m_100_request_tokens COMMAND test_m2m_100_request_tokens)
+  set_tests_properties(m2m_100_request_tokens PROPERTIES LABELS cpu)
+
   add_executable(test_m2m_100_runtime_config
     ${PROJECT_SOURCE_DIR}/families/m2m_100/tests/cpp/test_m2m_100_runtime_config.cpp
   )
