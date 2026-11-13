@@ -28,13 +28,13 @@ struct ChineseClipRuntimeConfig {
 // or asked to score a text against an image. Each task runs only the towers it
 // needs, which is why the bundle keeps the engines apart.
 class ChineseClipPipeline final : public internal::IModel,
-                           public internal::IImageToEmbedding,
-                           public internal::ITextToEmbedding,
-                           public internal::ITextImageToRelevance {
+                                  public internal::IImageToEmbedding,
+                                  public internal::ITextToEmbedding,
+                                  public internal::ITextImageToRelevance {
   public:
     ChineseClipPipeline(std::unique_ptr<ITrtModule> vision, std::unique_ptr<ITrtModule> text,
-                 std::shared_ptr<ITokenizer> tokenizer, ChineseClipRuntimeConfig config,
-                 std::string primary_task);
+                        std::shared_ptr<ITokenizer> tokenizer, ChineseClipRuntimeConfig config,
+                        std::string primary_task);
 
     const char* task() const noexcept override { return primary_task_.c_str(); }
     std::vector<internal::TaskInstance> task_bindings() override;

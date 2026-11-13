@@ -55,9 +55,10 @@ float dot(const std::vector<float>& left, const std::vector<float>& right) {
 
 } // namespace
 
-ChineseClipPipeline::ChineseClipPipeline(std::unique_ptr<ITrtModule> vision, std::unique_ptr<ITrtModule> text,
-                           std::shared_ptr<ITokenizer> tokenizer, ChineseClipRuntimeConfig config,
-                           std::string primary_task)
+ChineseClipPipeline::ChineseClipPipeline(std::unique_ptr<ITrtModule> vision,
+                                         std::unique_ptr<ITrtModule> text,
+                                         std::shared_ptr<ITokenizer> tokenizer,
+                                         ChineseClipRuntimeConfig config, std::string primary_task)
     : vision_(std::move(vision)), text_(std::move(text)), tokenizer_(std::move(tokenizer)),
       config_(std::move(config)), primary_task_(std::move(primary_task)) {
     if (!vision_ || !vision_->ok() || !text_ || !text_->ok())
@@ -108,14 +109,19 @@ std::vector<float> ChineseClipPipeline::embed_text(std::string_view text) {
     std::vector<int32_t> mask(config_.max_text_len, 0);
     std::fill(mask.begin(), mask.begin() + count, 1);
     Tensor input_ids, attention_mask;
-    input_ids.data = ids.data(); input_ids.shape = {config_.max_text_len}; input_ids.dtype = DType::kInt32;
-    attention_mask.data = mask.data(); attention_mask.shape = {config_.max_text_len}; attention_mask.dtype = DType::kInt32;
+    input_ids.data = ids.data();
+    input_ids.shape = {config_.max_text_len};
+    input_ids.dtype = DType::kInt32;
+    attention_mask.data = mask.data();
+    attention_mask.shape = {config_.max_text_len};
+    attention_mask.dtype = DType::kInt32;
     auto outputs = text_->forward({{"input_ids", input_ids}, {"attention_mask", attention_mask}});
     return l2_normalise(require_output(outputs, "text_embeds", config_.projection_dim));
 }
 
 internal::SemanticEmbeddingResult
-ChineseClipPipeline::run(const internal::ImageToEmbeddingRequest& request, internal::ConfigView config) {
+ChineseClipPipeline::run(const internal::ImageToEmbeddingRequest& request,
+                         internal::ConfigView config) {
     if (!config.empty())
         throw internal::ConfigError("chinese_clip has no runtime configuration");
     internal::SemanticEmbeddingResult result;
@@ -126,8 +132,9 @@ ChineseClipPipeline::run(const internal::ImageToEmbeddingRequest& request, inter
     return result;
 }
 
-internal::SemanticEmbeddingResult ChineseClipPipeline::run(const internal::TextToEmbeddingRequest& request,
-                                                    internal::ConfigView config) {
+internal::SemanticEmbeddingResult
+ChineseClipPipeline::run(const internal::TextToEmbeddingRequest& request,
+                         internal::ConfigView config) {
     if (!config.empty())
         throw internal::ConfigError("chinese_clip has no runtime configuration");
     if (request.role != internal::EmbeddingRole::Default) {
@@ -144,8 +151,9 @@ internal::SemanticEmbeddingResult ChineseClipPipeline::run(const internal::TextT
     return result;
 }
 
-internal::RelevanceResult ChineseClipPipeline::run(const internal::TextImageToRelevanceRequest& request,
-                                            internal::ConfigView config) {
+internal::RelevanceResult
+ChineseClipPipeline::run(const internal::TextImageToRelevanceRequest& request,
+                         internal::ConfigView config) {
     if (!config.empty())
         throw internal::ConfigError("chinese_clip has no runtime configuration");
     const auto image = embed_image(request.document);

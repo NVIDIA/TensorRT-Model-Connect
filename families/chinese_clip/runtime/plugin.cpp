@@ -75,17 +75,18 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const auto config_data = trtmc::chinese_clip::require_section(context.reader, "runtime.json");
     const auto vision_plan = trtmc::chinese_clip::require_section(context.reader, "vision.plan");
     const auto text_plan = trtmc::chinese_clip::require_section(context.reader, "text.plan");
-    const auto tokenizer_data = trtmc::chinese_clip::require_section(context.reader, "tokenizer.json");
+    const auto tokenizer_data =
+        trtmc::chinese_clip::require_section(context.reader, "tokenizer.json");
 
     auto config = trtmc::chinese_clip::parse_config(config_data);
     auto primary_task = trtmc::chinese_clip::require_task(context.reader);
     auto tokenizer = trtmc::CreateWordPieceTokenizer(tokenizer_data.data(), tokenizer_data.size(),
-                                               /*add_special_tokens=*/true);
+                                                     /*add_special_tokens=*/true);
     if (!tokenizer)
         throw std::runtime_error("chinese_clip tokenizer failed to load");
     auto vision = trtmc::chinese_clip::load_engine(context.backend, vision_plan, "vision");
     auto text = trtmc::chinese_clip::load_engine(context.backend, text_plan, "text");
     return new trtmc::ChineseClipPipeline(std::move(vision), std::move(text),
-                                   std::shared_ptr<trtmc::ITokenizer>(std::move(tokenizer)),
-                                   std::move(config), std::move(primary_task));
+                                          std::shared_ptr<trtmc::ITokenizer>(std::move(tokenizer)),
+                                          std::move(config), std::move(primary_task));
 }

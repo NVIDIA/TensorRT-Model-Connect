@@ -146,8 +146,9 @@ void validate(const ChineseClipPreprocessConfig& config) {
 
 } // namespace
 
-ChineseClipResizeShape compute_chinese_clip_resize_shape(std::int32_t image_height, std::int32_t image_width,
-                                          const ChineseClipPreprocessConfig& config) {
+ChineseClipResizeShape
+compute_chinese_clip_resize_shape(std::int32_t image_height, std::int32_t image_width,
+                                  const ChineseClipPreprocessConfig& config) {
     if (image_height <= 0 || image_width <= 0)
         throw std::invalid_argument("chinese_clip source dimensions must be positive");
     validate(config);
@@ -159,9 +160,10 @@ ChineseClipResizeShape compute_chinese_clip_resize_shape(std::int32_t image_heig
     return {config.input_image_h, config.input_image_w};
 }
 
-std::vector<float> preprocess_chinese_clip_image(const float* image_pixels, std::int32_t image_height,
-                                         std::int32_t image_width,
-                                         const ChineseClipPreprocessConfig& config) {
+std::vector<float> preprocess_chinese_clip_image(const float* image_pixels,
+                                                 std::int32_t image_height,
+                                                 std::int32_t image_width,
+                                                 const ChineseClipPreprocessConfig& config) {
     if (image_pixels == nullptr || image_height <= 0 || image_width <= 0)
         throw std::invalid_argument("chinese_clip source image must be non-empty");
     validate(config);
@@ -174,8 +176,7 @@ std::vector<float> preprocess_chinese_clip_image(const float* image_pixels, std:
     std::vector<float> pixel_values(3U * plane);
     for (std::int32_t y = 0; y < config.input_image_h; ++y) {
         for (std::int32_t x = 0; x < config.input_image_w; ++x) {
-            const auto source =
-                static_cast<std::size_t>((y * shape.width + x) * 3);
+            const auto source = static_cast<std::size_t>((y * shape.width + x) * 3);
             for (std::int32_t c = 0; c < 3; ++c) {
                 const auto channel = static_cast<std::size_t>(c);
                 pixel_values[channel * plane + static_cast<std::size_t>(y) * config.input_image_w +

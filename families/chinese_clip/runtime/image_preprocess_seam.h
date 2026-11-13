@@ -23,11 +23,13 @@ struct ChineseClipResizeShape {
 };
 
 // Direct resize to the checkpoint dimensions, preserving the full source image.
-ChineseClipResizeShape compute_chinese_clip_resize_shape(std::int32_t image_height, std::int32_t image_width,
-                                          const ChineseClipPreprocessConfig& config);
+ChineseClipResizeShape compute_chinese_clip_resize_shape(std::int32_t image_height,
+                                                         std::int32_t image_width,
+                                                         const ChineseClipPreprocessConfig& config);
 
-std::vector<float> preprocess_chinese_clip_image(const float* image_pixels, std::int32_t image_height,
-                                         std::int32_t image_width,
-                                         const ChineseClipPreprocessConfig& config);
+std::vector<float> preprocess_chinese_clip_image(const float* image_pixels,
+                                                 std::int32_t image_height,
+                                                 std::int32_t image_width,
+                                                 const ChineseClipPreprocessConfig& config);
 
 } // namespace trtmc
