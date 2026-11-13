@@ -11,6 +11,7 @@
 namespace trtmc {
 
 struct SiglipPreprocessConfig {
+    std::int32_t resample{3};
     std::int32_t input_image_h{224};
     std::int32_t input_image_w{224};
     std::vector<float> image_mean{0.5F, 0.5F, 0.5F};
