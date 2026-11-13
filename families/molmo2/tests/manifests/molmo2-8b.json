@@ -1,0 +1,50 @@
+{
+  "name": "molmo2-8b-bf16",
+  "hf_id": "allenai/Molmo2-8B",
+  "hf_revision": "e28fa28597e5ec5e0cca2201dd8ab33d48bc4a1b",
+  "family": "molmo2",
+  "task": "vision_language_generation",
+  "precision": "bf16",
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 2048,
+  "bundle": "molmo2-8b-bf16.bundle",
+  "testcases": [
+    {
+      "name": "molmo2-red",
+      "premerge": true,
+      "color": [
+        255,
+        0,
+        0
+      ],
+      "size": [
+        64,
+        64
+      ],
+      "prompt": "What color is this image? Answer with one word.",
+      "max_new_tokens": 16
+    },
+    {
+      "name": "molmo2-blue",
+      "premerge": true,
+      "color": [
+        0,
+        0,
+        255
+      ],
+      "size": [
+        512,
+        256
+      ],
+      "prompt": "What color is this image? Answer with one word.",
+      "max_new_tokens": 16
+    },
+    {
+      "name": "molmo2-car",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg",
+      "prompt": "What is the main object in this image? Answer with one word.",
+      "max_new_tokens": 16
+    }
+  ]
+}
