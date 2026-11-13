@@ -5,7 +5,6 @@
 
 #include "families/kolibri1/runtime/tokenizer.h"
 
-#include <unicode/regex.h>
 #include <algorithm>
 #include <cassert>
 #include <climits>
@@ -16,6 +15,7 @@
 #include <queue>
 #include <stdexcept>
 #include <string>
+#include <unicode/regex.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -872,26 +872,32 @@ class BpeTokenizer final : public ITokenizer {
         std::vector<std::string> words;
         if (mRegex) {
             UErrorCode status = U_ZERO_ERROR;
-            const std::string prepared = mAddPrefixSpace && !text.empty() && text.front() != ' ' ? " " + text : text;
+            const std::string prepared =
+                mAddPrefixSpace && !text.empty() && text.front() != ' ' ? " " + text : text;
             const auto unicode = icu::UnicodeString::fromUTF8(prepared);
             std::unique_ptr<icu::RegexMatcher> matcher(mRegex->matcher(unicode, status));
-            if (U_FAILURE(status)) throw std::runtime_error("Kolibri1 tokenizer regex matcher failed");
+            if (U_FAILURE(status))
+                throw std::runtime_error("Kolibri1 tokenizer regex matcher failed");
             int32_t previous = 0;
             while (matcher->find(status)) {
                 const int32_t start = matcher->start(status), end = matcher->end(status);
                 if (start > previous) {
-                    std::string gap; unicode.tempSubStringBetween(previous, start).toUTF8String(gap);
+                    std::string gap;
+                    unicode.tempSubStringBetween(previous, start).toUTF8String(gap);
                     words.push_back(std::move(gap));
                 }
                 if (end > start) {
-                    std::string match; unicode.tempSubStringBetween(start, end).toUTF8String(match);
+                    std::string match;
+                    unicode.tempSubStringBetween(start, end).toUTF8String(match);
                     words.push_back(std::move(match));
                 }
                 previous = end;
             }
-            if (U_FAILURE(status)) throw std::runtime_error("Kolibri1 tokenizer regex matching failed");
+            if (U_FAILURE(status))
+                throw std::runtime_error("Kolibri1 tokenizer regex matching failed");
             if (previous < unicode.length()) {
-                std::string tail; unicode.tempSubString(previous).toUTF8String(tail);
+                std::string tail;
+                unicode.tempSubString(previous).toUTF8String(tail);
                 words.push_back(std::move(tail));
             }
         } else if (!mUsePreTokenizer) {
@@ -1430,8 +1436,10 @@ class BpeTokenizer final : public ITokenizer {
         mAddPrefixSpace = false;
         const auto pattern = split.at("pattern").at("Regex").get<std::string>();
         UErrorCode regex_status = U_ZERO_ERROR;
-        mRegex.reset(icu::RegexPattern::compile(icu::UnicodeString::fromUTF8(pattern), 0, regex_status));
-        if (U_FAILURE(regex_status)) throw std::runtime_error("Kolibri1 tokenizer regex compilation failed");
+        mRegex.reset(
+            icu::RegexPattern::compile(icu::UnicodeString::fromUTF8(pattern), 0, regex_status));
+        if (U_FAILURE(regex_status))
+            throw std::runtime_error("Kolibri1 tokenizer regex compilation failed");
         detect_decoder(j);
     }
 
@@ -1490,9 +1498,11 @@ class BpeTokenizer final : public ITokenizer {
             }
             return;
         }
-        if (type == "Replace" && normalizer.contains("pattern") && normalizer["pattern"].contains("String")) {
+        if (type == "Replace" && normalizer.contains("pattern") &&
+            normalizer["pattern"].contains("String")) {
             const auto pattern = normalizer["pattern"]["String"].get<std::string>();
-            if (pattern.empty()) throw std::runtime_error("Kolibri1 tokenizer replacement cannot be empty");
+            if (pattern.empty())
+                throw std::runtime_error("Kolibri1 tokenizer replacement cannot be empty");
             mLiteralReplacements.emplace_back(pattern, normalizer.at("content").get<std::string>());
             return;
         }
