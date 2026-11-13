@@ -46,8 +46,13 @@ struct ImageTrimapView {
     Span<const uint8_t> states;
     uint32_t height{0}, width{0};
 };
-struct ImageTrimapToAlphaRequest { ImageView image; ImageTrimapView trimap; };
-struct AlphaMatteResult { FloatMatrix alpha; }; // Original-image [H,W] continuous opacity in [0,1].
+struct ImageTrimapToAlphaRequest {
+    ImageView image;
+    ImageTrimapView trimap;
+};
+struct AlphaMatteResult {
+    FloatMatrix alpha;
+}; // Original-image [H,W] continuous opacity in [0,1].
 class IImageTrimapToAlpha {
   public:
     using TaskInterface = IImageTrimapToAlpha;

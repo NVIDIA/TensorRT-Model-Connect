@@ -484,16 +484,23 @@ class MattingFixture final : public IModel, public IImageTrimapToAlpha {
   public:
     explicit MattingFixture(std::string mode) : mode_(std::move(mode)) {}
     const char* task() const noexcept override { return mode_.c_str(); }
-    std::vector<TaskInstance> task_bindings() override { return {bind<IImageTrimapToAlpha>(*this)}; }
+    std::vector<TaskInstance> task_bindings() override {
+        return {bind<IImageTrimapToAlpha>(*this)};
+    }
     AlphaMatteResult run(const ImageTrimapToAlphaRequest& input, ConfigView config) override {
         validate_config({}, config);
         AlphaMatteResult result;
-        result.alpha.rows = input.image.height; result.alpha.columns = input.image.width;
-        for (const auto state : input.trimap.states) result.alpha.values.push_back(state == 1 ? 0.375F : state / 2.0F);
-        if (mode_ == "matting_bad_shape") ++result.alpha.rows;
-        if (mode_ == "matting_bad_value") result.alpha.values[0] = 2;
+        result.alpha.rows = input.image.height;
+        result.alpha.columns = input.image.width;
+        for (const auto state : input.trimap.states)
+            result.alpha.values.push_back(state == 1 ? 0.375F : state / 2.0F);
+        if (mode_ == "matting_bad_shape")
+            ++result.alpha.rows;
+        if (mode_ == "matting_bad_value")
+            result.alpha.values[0] = 2;
         return result;
     }
+
   private:
     std::string mode_;
 };

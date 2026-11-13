@@ -14,10 +14,19 @@ extern "C" {
 
 enum { TRTMC_TRIMAP_BACKGROUND = 0, TRTMC_TRIMAP_UNKNOWN = 1, TRTMC_TRIMAP_FOREGROUND = 2 };
 /* Borrowed categorical [H,W] states, aligned with the original image. */
-typedef struct { const uint8_t* states; uint64_t count; uint32_t height, width; } trtmc_trimap_view_v1;
-typedef struct { trtmc_image_input_v1 image; trtmc_trimap_view_v1 trimap; } trtmc_image_trimap_request_v1;
+typedef struct {
+    const uint8_t* states;
+    uint64_t count;
+    uint32_t height, width;
+} trtmc_trimap_view_v1;
+typedef struct {
+    trtmc_image_input_v1 image;
+    trtmc_trimap_view_v1 trimap;
+} trtmc_image_trimap_request_v1;
 /* Continuous foreground opacity at original-image resolution, not mask logits. */
-typedef struct { trtmc_f32_matrix_view_v1 alpha; } trtmc_alpha_matte_view_v1;
+typedef struct {
+    trtmc_f32_matrix_view_v1 alpha;
+} trtmc_alpha_matte_view_v1;
 #define TRTMC_TASK_IMAGE_TRIMAP_TO_ALPHA "image_trimap_to_alpha"
 
 /* Original-image pixel coordinates: x right, y down. Boxes use XYXY corners. */
@@ -295,7 +304,8 @@ TRTMC_PERCEPTION_API(trtmc_pose_hypotheses_crops_to_refined_poses_api_v1,
                      trtmc_pose_refinement_request_v1, trtmc_refined_poses_view_v1)
 TRTMC_PERCEPTION_API(trtmc_rgbd_mesh_mask_to_object_pose_api_v1, trtmc_rgbd_mesh_mask_request_v1,
                      trtmc_object_pose_view_v1)
-TRTMC_PERCEPTION_API(trtmc_image_trimap_to_alpha_api_v1, trtmc_image_trimap_request_v1, trtmc_alpha_matte_view_v1)
+TRTMC_PERCEPTION_API(trtmc_image_trimap_to_alpha_api_v1, trtmc_image_trimap_request_v1,
+                     trtmc_alpha_matte_view_v1)
 #undef TRTMC_PERCEPTION_API
 
 #define TRTMC_TASK_BATCH_IMAGE_TEXT_TO_BOXES "batch_image_text_to_boxes"

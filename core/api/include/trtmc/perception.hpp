@@ -125,7 +125,10 @@ struct ImageTrimapView {
     Span<const uint8_t> states;
     uint32_t height{0}, width{0};
 };
-struct ImageTrimapToAlphaRequest { ImageInput image; ImageTrimapView trimap; };
+struct ImageTrimapToAlphaRequest {
+    ImageInput image;
+    ImageTrimapView trimap;
+};
 using AlphaMatteResult = detail::ViewResult<trtmc_alpha_matte_view_v1>;
 using DisparityResult = detail::ViewResult<trtmc_disparity_view_v1>;
 using MetricGeometryResult = detail::ViewResult<trtmc_metric_geometry_view_v1>;
@@ -148,8 +151,10 @@ struct PerceptionRequest {
     std::vector<trtmc_box_exemplar_v1> exemplars;
 };
 inline auto perception_request(const ImageTrimapToAlphaRequest& input) {
-    return PerceptionRequest<trtmc_image_trimap_request_v1>({input.image.wire,
-        {input.trimap.states.data(), input.trimap.states.size(), input.trimap.height, input.trimap.width}});
+    return PerceptionRequest<trtmc_image_trimap_request_v1>(
+        {input.image.wire,
+         {input.trimap.states.data(), input.trimap.states.size(), input.trimap.height,
+          input.trimap.width}});
 }
 inline auto perception_request(const ImageToSemanticSegmentationRequest& input) {
     return PerceptionRequest<trtmc_perception_image_request_v1>({input.image.wire});

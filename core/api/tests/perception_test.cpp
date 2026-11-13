@@ -44,33 +44,43 @@ void bundle(const std::filesystem::path& path, const std::string& mode) {
 }
 void matting(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
     using namespace trtmc;
-    const auto path = root / "matting_only.bundle"; bundle(path, "matting_only");
-    const float pixels[18]{}; uint8_t states[]{0, 1, 2, 2, 1, 0};
+    const auto path = root / "matting_only.bundle";
+    bundle(path, "matting_only");
+    const float pixels[18]{};
+    uint8_t states[]{0, 1, 2, 2, 1, 0};
     const ImageTrimapToAlphaRequest input{ImageInput({pixels}, 2, 3), {{states, 6}, 2, 3}};
     const auto model = Model::load(path.string(), options);
     const auto task = model.task<ImageTrimapToAlpha>();
     auto result = Model::load(path.string(), options).task<ImageTrimapToAlpha>().run(input);
     check(result.view().alpha.rows == 2 && result.view().alpha.columns == 3 &&
-          result.view().alpha.data[0] == 0 && result.view().alpha.data[1] == 0.375F && result.view().alpha.data[2] == 1,
+              result.view().alpha.data[0] == 0 && result.view().alpha.data[1] == 0.375F &&
+              result.view().alpha.data[2] == 1,
           "categorical trimap states reach family and continuous opacity remains unthresholded");
-    check(model.tasks().size() == 1 && !model.supports<ImageMaskToMasks>() && task.config_fields().empty(),
+    check(model.tasks().size() == 1 && !model.supports<ImageMaskToMasks>() &&
+              task.config_fields().empty(),
           "matting is a distinct discoverable contract");
-    auto bad = input; bad.trimap.height = 3;
+    auto bad = input;
+    bad.trimap.height = 3;
     rejects([&] { task.run(bad); }, TRTMC_INVALID_ARGUMENT, "misaligned trimap rejected");
-    bad = input; bad.trimap.states = {nullptr, 6};
+    bad = input;
+    bad.trimap.states = {nullptr, 6};
     rejects([&] { task.run(bad); }, TRTMC_INVALID_ARGUMENT, "null trimap rejected");
     states[0] = 3;
-    rejects([&] { task.run(input); }, TRTMC_INVALID_ARGUMENT, "unknown categorical trimap state rejected");
+    rejects([&] { task.run(input); }, TRTMC_INVALID_ARGUMENT,
+            "unknown categorical trimap state rejected");
     states[0] = 0;
-    rejects([&] { task.run(input, {{"threshold", 0.5}}); }, TRTMC_INVALID_CONFIG, "undeclared matting control rejected");
+    rejects([&] { task.run(input, {{"threshold", 0.5}}); }, TRTMC_INVALID_CONFIG,
+            "undeclared matting control rejected");
     for (const char* mode : {"matting_bad_shape", "matting_bad_value"}) {
-        const auto file = root / (std::string(mode) + ".bundle"); bundle(file, mode);
-        rejects([&] { Model::load(file.string(), options).task<ImageTrimapToAlpha>().run(input); }, TRTMC_INTERNAL_ERROR,
-                "invalid family alpha shape or opacity rejected");
+        const auto file = root / (std::string(mode) + ".bundle");
+        bundle(file, mode);
+        rejects([&] { Model::load(file.string(), options).task<ImageTrimapToAlpha>().run(input); },
+                TRTMC_INTERNAL_ERROR, "invalid family alpha shape or opacity rejected");
         std::filesystem::remove(file);
     }
     auto retained = std::move(result);
-    check(retained.view().alpha.data[1] == 0.375F, "alpha result owns output across temporary model release and moves");
+    check(retained.view().alpha.data[1] == 0.375F,
+          "alpha result owns output across temporary model release and moves");
     std::filesystem::remove(path);
 }
 void unknown_semantic_identity(const std::filesystem::path& root,

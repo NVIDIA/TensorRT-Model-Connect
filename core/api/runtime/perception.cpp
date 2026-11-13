@@ -184,9 +184,11 @@ struct MasksStorage final : ResultStorage {
 struct AlphaMatteStorage final : ResultStorage {
     explicit AlphaMatteStorage(internal::AlphaMatteResult result) : value(std::move(result)) {
         view = {matrix_result_view(value.alpha)};
-        valid_output(value.alpha.rows > 0 && value.alpha.columns > 0, "alpha matte must be nonempty");
+        valid_output(value.alpha.rows > 0 && value.alpha.columns > 0,
+                     "alpha matte must be nonempty");
         for (const float alpha : value.alpha.values)
-            valid_output(std::isfinite(alpha) && alpha >= 0 && alpha <= 1, "invalid alpha opacity value");
+            valid_output(std::isfinite(alpha) && alpha >= 0 && alpha <= 1,
+                         "invalid alpha opacity value");
     }
     internal::AlphaMatteResult value;
     trtmc_alpha_matte_view_v1 view{};
@@ -538,17 +540,20 @@ TRTMC_PERCEPTION_RUN(exemplar_masks, IImageBoxExemplarsToInstanceMasks, MasksSto
                                             string_view(in.text_hint)},
                                            options);
                      })
-TRTMC_PERCEPTION_RUN(matting, IImageTrimapToAlpha, AlphaMatteStorage, trtmc_image_trimap_request_v1, {
-    const auto image = image_input(in.image);
-    const auto states = checked_span(in.trimap.states, in.trimap.count);
-    require(in.trimap.height == image.height && in.trimap.width == image.width &&
-            states.size() == image_area(image.height, image.width), "trimap must align with original image");
-    for (const auto state : states) require(state <= TRTMC_TRIMAP_FOREGROUND, "invalid categorical trimap state");
-    auto result = family.run({image, {states, in.trimap.height, in.trimap.width}}, options);
-    valid_output(result.alpha.rows == image.height && result.alpha.columns == image.width,
-                 "alpha matte must retain original image dimensions");
-    return result;
-})
+TRTMC_PERCEPTION_RUN(
+    matting, IImageTrimapToAlpha, AlphaMatteStorage, trtmc_image_trimap_request_v1, {
+        const auto image = image_input(in.image);
+        const auto states = checked_span(in.trimap.states, in.trimap.count);
+        require(in.trimap.height == image.height && in.trimap.width == image.width &&
+                    states.size() == image_area(image.height, image.width),
+                "trimap must align with original image");
+        for (const auto state : states)
+            require(state <= TRTMC_TRIMAP_FOREGROUND, "invalid categorical trimap state");
+        auto result = family.run({image, {states, in.trimap.height, in.trimap.width}}, options);
+        valid_output(result.alpha.rows == image.height && result.alpha.columns == image.width,
+                     "alpha matte must retain original image dimensions");
+        return result;
+    })
 TRTMC_PERCEPTION_RUN(stereo, IStereoImagesToDisparity, DisparityStorage,
                      trtmc_stereo_images_request_v1, {
                          auto left = image_input(in.left);
@@ -637,8 +642,8 @@ TRTMC_PERCEPTION_TABLE(text_masks_api, trtmc_image_text_to_instance_masks_api_v1
                        MasksStorage, trtmc_masks_view_v1)
 TRTMC_PERCEPTION_TABLE(exemplars_api, trtmc_image_box_exemplars_to_instance_masks_api_v1,
                        exemplar_masks, MasksStorage, trtmc_masks_view_v1)
-TRTMC_PERCEPTION_TABLE(matting_api, trtmc_image_trimap_to_alpha_api_v1, matting,
-                       AlphaMatteStorage, trtmc_alpha_matte_view_v1)
+TRTMC_PERCEPTION_TABLE(matting_api, trtmc_image_trimap_to_alpha_api_v1, matting, AlphaMatteStorage,
+                       trtmc_alpha_matte_view_v1)
 TRTMC_PERCEPTION_TABLE(stereo_api, trtmc_stereo_images_to_disparity_api_v1, stereo,
                        DisparityStorage, trtmc_disparity_view_v1)
 TRTMC_PERCEPTION_TABLE(geometry_api, trtmc_image_to_metric_geometry_api_v1, geometry,
