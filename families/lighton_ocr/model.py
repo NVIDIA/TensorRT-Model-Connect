@@ -106,6 +106,8 @@ def build(request, writer):
     capacity = 4096 if request.max_sequence_length is None else request.max_sequence_length
     if type(capacity) is not int or not 1 < capacity <= config.text_config["max_position_embeddings"]:
         raise ValueError("lighton_ocr sequence capacity is outside the decoder's position range")
+    if not (directory / "tokenizer.json").is_file():
+        raise ValueError("lighton_ocr requires tokenizer.json in the checkpoint")
     runtime = runtime_config(directory, config, capacity)
     checkpoint = Checkpoint(directory, config)
     checkpoint.validate()

@@ -64,7 +64,11 @@ int main(int argc, char** argv) {
                               {"repeat_matches", true},
                               {"rejection_recovery", true},
                               {"result_retained_after_model_release", true}};
-        std::ofstream(argv[5]) << output.dump(2) << '\n';
+        std::ofstream output_stream(argv[5]);
+        output_stream << output.dump(2) << '\n';
+        output_stream.close();
+        if (!output_stream)
+            throw std::runtime_error("Cannot write SDK result");
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

@@ -19,6 +19,7 @@ void save(const std::filesystem::path& directory, nlohmann::json& metadata, cons
     std::ofstream stream(directory / file, std::ios::binary);
     stream.write(reinterpret_cast<const char*>(values.data()),
                  static_cast<std::streamsize>(values.size() * sizeof(float)));
+    stream.close();
     if (!stream)
         throw std::runtime_error("Cannot write diagnostic tensor");
     metadata["tensors"][name] = {{"file", file}, {"shape", shape}, {"dtype", "float32"}};
@@ -62,7 +63,11 @@ int main(int argc, char** argv) {
             save(directory, metadata, "step_" + std::to_string(step) + "_logits",
                  observed.logits[step],
                  {1, static_cast<std::int64_t>(observed.logits[step].size())});
-        std::ofstream(directory / "metadata.json") << metadata.dump(2) << '\n';
+        std::ofstream metadata_stream(directory / "metadata.json");
+        metadata_stream << metadata.dump(2) << '\n';
+        metadata_stream.close();
+        if (!metadata_stream)
+            throw std::runtime_error("Cannot write diagnostic metadata");
         std::cout << "LightOnOCR native observations written\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
