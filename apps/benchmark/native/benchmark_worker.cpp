@@ -3743,6 +3743,18 @@ Json run_latent_step(const trtmc::Model& model, const Json& request, const Timin
 
 Json run_generate(const trtmc::Model& model, const Json& request, const Timing& timing,
                   const std::string& task_id) {
+    // An image-video-text bundle (Cosmos3-Edge) asked without a video, decided per request: the
+    // same bundle's image-text Task, or its text continuation without an image (the SDK
+    // image-video Task requires every modality in one request).
+    if (task_id == trtmc::ImageVideoTextToText::kTask) {
+        const bool image = request.contains("image_path");
+        if (image && model.supports<trtmc::ImagesTextToText>())
+            return run_generate(model, request, timing,
+                                std::string(trtmc::ImagesTextToText::kTask));
+        if (!image && model.supports<trtmc::TextContinuation>())
+            return run_generate(model, request, timing,
+                                std::string(trtmc::TextContinuation::kTask));
+    }
     const auto primary = task_id;
     const bool source_task = primary == trtmc::TextContinuation::kTask ||
                              primary == trtmc::ConditionalTextGeneration::kTask;

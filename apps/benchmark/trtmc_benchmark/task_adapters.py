@@ -86,6 +86,7 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "latent_to_token_logits": ("decode_logits", 5, 50),
     "text_translation": ("translate", 5, 50),
     "images_text_to_text": ("generate", 1, 10),
+    "image_video_text_to_text": ("generate", 1, 10),
     "series_to_point_forecast": ("solve", 50, 500),
     "series_to_quantile_forecast": ("solve", 50, 500),
     "series_to_point_and_quantile_forecast": ("solve", 50, 500),
@@ -438,6 +439,14 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
             raise BenchmarkError(f"token_ids is not accepted by {task}")
         request = _text_request(case, root, include_defaults=False)
         if task == "images_text_to_text":
+            request["image_path"] = _image_path(case, root)
+        return request
+    # No video: the worker runs the same bundle's image-text Task (or text continuation without an image).
+    if task == "image_video_text_to_text":
+        if _explicit(case, "token_ids") is not _MISSING:
+            raise BenchmarkError(f"token_ids is not accepted by {task}")
+        request = _text_request(case, root, include_defaults=False)
+        if _explicit(case, "image_path", "test_image", "image") is not _MISSING:
             request["image_path"] = _image_path(case, root)
         return request
     if task == "text_generation":

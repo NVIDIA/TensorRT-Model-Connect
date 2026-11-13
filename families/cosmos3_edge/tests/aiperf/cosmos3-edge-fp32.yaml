@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  requirements: families/cosmos3_edge/requirements.txt  # Cosmos3EdgeForConditionalGeneration (Transformers 5.20)
+  adapter: families/cosmos3_edge/reference/adapter.py  # the E2E chat template, thinking off

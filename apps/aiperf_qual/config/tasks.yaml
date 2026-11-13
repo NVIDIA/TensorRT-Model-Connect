@@ -196,6 +196,11 @@ tasks:
     # 29 min against 1 min for OCRBench). MMStar stays for profiles that state it.
     absolute: [ocrbench]
     performance: {output_grader: parity_edit_distance, output_grader_params: {max_distance: 0.15}}
+  # Image, video and text to text (Cosmos3-Edge): OCRBench through the same bundle's image-text Task (the
+  # image-video Task requires a video in every request); the video input is not scored.
+  image_video_text_to_text:
+    absolute: [ocrbench]
+    performance: {output_grader: parity_edit_distance, output_grader_params: {max_distance: 0.15}}
 
   classification: &classify
     absolute: [imagenet]
