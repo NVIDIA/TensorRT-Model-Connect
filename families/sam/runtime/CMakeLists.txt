@@ -19,6 +19,7 @@ target_include_directories(trtmc_model_sam SYSTEM PRIVATE
 target_link_libraries(trtmc_model_sam PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
+  Threads::Threads
   ${TRTMC_CUDART_LIBRARY}
   ${CMAKE_DL_LIBS}
 )
@@ -45,9 +46,52 @@ if(TRTMC_BUILD_TESTS)
   )
   target_link_libraries(test_sam_prompt_seam PRIVATE
     trtmc_model_sam
+    Threads::Threads
   )
   target_compile_options(test_sam_prompt_seam PRIVATE
     -Wall -Wextra -Wpedantic
   )
   add_test(NAME sam_prompt_seam COMMAND test_sam_prompt_seam)
+
+  # SamPipeline's pixel_values staging: one reused (page-locked) buffer.
+  add_executable(test_sam_pixel_staging
+    ${PROJECT_SOURCE_DIR}/families/sam/tests/cpp/test_sam_pixel_staging.cpp
+  )
+  target_include_directories(test_sam_pixel_staging PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_sam_pixel_staging SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(test_sam_pixel_staging PRIVATE
+    trtmc_model_sam trtmc_core ${TRTMC_CUDART_LIBRARY} Threads::Threads
+  )
+  target_compile_options(test_sam_pixel_staging PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME sam_pixel_staging COMMAND test_sam_pixel_staging)
+  set_tests_properties(sam_pixel_staging PROPERTIES LABELS "cpu")
+
+  # The seam tests compare the separable resampling to the per-sample
+  # definition bit for bit. A default x86-64 build has no FMA, so it cannot see
+  # a multiply-add that would be fused differently where FMA is contracted (as
+  # on aarch64); this build contracts them. GCC fuses only when optimizing, so
+  # the target sets -O2 whatever the build type. It needs an FMA-capable CPU.
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$" AND NOT MSVC)
+    add_executable(test_sam_prompt_seam_fma
+      ${PROJECT_SOURCE_DIR}/families/sam/tests/cpp/test_sam_prompt_seam.cpp
+    )
+    target_include_directories(test_sam_prompt_seam_fma PRIVATE
+      ${PROJECT_SOURCE_DIR}
+      ${PROJECT_SOURCE_DIR}/core/runtime/include
+    )
+    target_link_libraries(test_sam_prompt_seam_fma PRIVATE
+      Threads::Threads
+    )
+    target_compile_options(test_sam_prompt_seam_fma PRIVATE
+      -Wall -Wextra -Wpedantic -O2 -mfma -ffp-contract=fast
+    )
+    add_test(NAME sam_prompt_seam_fma COMMAND test_sam_prompt_seam_fma)
+  endif()
 endif()
