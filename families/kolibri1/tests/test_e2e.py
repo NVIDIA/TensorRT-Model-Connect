@@ -236,3 +236,42 @@ def test_native_tokenizer(case_name):
         )
         assert completed.returncode == 0, completed.stderr + completed.stdout
         assert json.loads(completed.stdout) == reference.encode(text)
+
+
+def test_fp16_scalar_and_silu_match_pytorch(case_name, tmp_path):
+    import numpy as np
+    import tensorrt as trt
+    import torch
+    from families.kolibri1.model import Graph
+
+    logger = trt.Logger(trt.Logger.WARNING)
+    graph = Graph(None, {}, logger)
+    value = graph.net.add_input("value", trt.float16, (1, 65536))
+    graph.output(graph.silu(value), "silu")
+    graph.output(
+        graph.cast(
+            graph.mul(graph.cast(value, trt.float32), graph.const([[128**-0.5]], np.float32)),
+            trt.float16,
+        ),
+        "scaled",
+    )
+    path = tmp_path / "scalar-math.plan"
+    with path.open("wb") as stream:
+        graph.save(stream)
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(path.read_bytes())
+    assert engine is not None
+    context = engine.create_execution_context()
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        inputs = torch.linspace(-16, 16, 65536, device="cuda").half().reshape(1, -1)
+        activated, scaled = torch.empty_like(inputs), torch.empty_like(inputs)
+        context.set_tensor_address("value", inputs.data_ptr())
+        context.set_tensor_address("silu", activated.data_ptr())
+        context.set_tensor_address("scaled", scaled.data_ptr())
+        expected_activation = torch.nn.functional.silu(inputs)
+        expected_scale = inputs * (128**-0.5)
+        assert context.execute_async_v3(stream.cuda_stream)
+    stream.synchronize()
+    assert torch.equal(scaled, expected_scale)
+    assert (activated.float() - expected_activation.float()).abs().max().item() <= 2e-4

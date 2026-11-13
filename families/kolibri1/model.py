@@ -113,7 +113,9 @@ class Graph:
         return self.mul(value, self.const(gamma))
 
     def silu(self, x):
-        return self.mul(x, self.net.add_activation(x, trt.ActivationType.SIGMOID).get_output(0))
+        value = self.cast(x, trt.float32)
+        sigmoid = self.net.add_activation(value, trt.ActivationType.SIGMOID).get_output(0)
+        return self.cast(self.mul(value, sigmoid), x.dtype)
 
     def output(self, value, name):
         value.name = name
@@ -207,7 +209,15 @@ class Graph:
             self.reshape(key, (1, kv, 1, length, dim)),
             trt.MatrixOperation.TRANSPOSE,
         ).get_output(0)
-        scores = self.mul(scores, self.const(np.full((1, 1, 1, 1, 1), dim**-0.5)))
+        # PyTorch's scalar operation evaluates at FP32 opmath precision before
+        # rounding back to FP16. A half-stored scale changes every head's logits.
+        scores = self.cast(
+            self.mul(
+                self.cast(scores, trt.float32),
+                self.const(np.full((1, 1, 1, 1, 1), dim**-0.5), np.float32),
+            ),
+            trt.float16,
+        )
         scores = net.add_select(
             future, self.const(np.full((1, 1, 1, 1, 1), -65504)), scores
         ).get_output(0)
