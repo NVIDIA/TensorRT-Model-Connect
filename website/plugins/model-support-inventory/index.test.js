@@ -204,6 +204,20 @@ test('keeps existing detector and structure-prediction manifests supported', (co
     .cliCommands, []);
 });
 
+test('document layout recipes use the implemented layout command', (context) => {
+  const root = repository();
+  context.after(() => fs.rmSync(root, {recursive: true, force: true}));
+  addTaskManifest(root, 'document_layout');
+  const inventory = collectModelSupportInventory(root);
+  const recipe = inventory.taskRecipes.find((item) => item.task === 'document_layout');
+  assert.equal(recipe.label, 'Document layout');
+  assert.equal(recipe.category, 'Computer Vision');
+  assert.equal(recipe.hfUrl, null);
+  assert.deepEqual(recipe.families[0].cliCommands, ['layout']);
+  assert.deepEqual(inventory.modelProfiles.find((profile) => profile.task === 'document_layout')
+    .cliCommands, ['layout']);
+});
+
 test('rejects unknown Tasks including inherited object property names', (context) => {
   const root = repository();
   context.after(() => fs.rmSync(root, {recursive: true, force: true}));
