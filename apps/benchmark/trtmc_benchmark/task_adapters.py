@@ -131,6 +131,7 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "text_image_to_relevance": ("relevance", 50, 500),
     "masked_text_to_token_scores": ("token_scores", 50, 500),
     "monocular_depth": ("depth", 50, 500),
+    "points_to_semantic_segmentation": ("segment_points", 50, 500),
 }
 
 _ALLOWED_OPERATIONS: dict[str, frozenset[str]] = {
@@ -335,6 +336,14 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         return {"prompt": prompt}
     if task == "monocular_depth":
         return {"image_path": _semantic_asset(case, root, "image_path", "image", "test_image")}
+    if task == "points_to_semantic_segmentation":
+        # Row-major float32 [num_points, input_dim] points (a raw .f32 file).
+        sizes = {name: _explicit(case, name) for name in ("num_points", "input_dim")}
+        if sizes["input_dim"] is _MISSING:
+            sizes["input_dim"] = 9
+        if not all(isinstance(value, int) and value > 0 for value in sizes.values()):
+            raise BenchmarkError("point-cloud segmentation requires positive integer num_points and input_dim")
+        return {"points_path": _semantic_asset(case, root, "points_path", "points", "test_points"), **sizes}
     if task == "image_to_boxes":
         if _explicit(case, "prompt", "test_prompt", "source_text") is not _MISSING:
             raise BenchmarkError("image-only detection has no prompt input")

@@ -131,6 +131,10 @@ benchmarks:
   # Relative monocular depth (Depth Anything) against the native map on 50 COCO images: the family's E2E gate.
   depth_parity: {suite: depth-parity, suite_definition: coco-val2017-depth-50, metric: depth_parity,
                  gate: {min_correlation: 0.998, max_relative_error: 0.01}}
+  # Point-cloud semantic segmentation (PointNet): S3DIS Area 5 blocks, class mIoU of the per-point classes over the
+  # corpus against the S3DIS annotation.
+  s3dis_area5: {suite: s3dis-area5-miou, suite_definition: s3dis-area5-blocks-300, metric: point_miou,
+                gate: {margin: 1.0}}
   # A structured decision (per-option probabilities of a schema's questions) has no public gold set: every
   # catalog testcase of the profile (its family's fixtures), the same choices and the families' E2E probability
   # tolerance against the release implementation.
@@ -339,6 +343,9 @@ tasks:
   monocular_depth:
     absolute: [depth_parity]
     performance: {output_grader: parity_numeric}
+  points_to_semantic_segmentation:  # the family's reference prepares the checkpoint (reference.prepare)
+    absolute: [s3dis_area5]
+    performance: {output_grader: parity_labels}
   structured_decision:  # the family states its release implementation (reference.adapter)
     absolute: [decision_parity]
     performance: {output_grader: parity_numeric}

@@ -13,6 +13,7 @@ from trtmc_benchmark.types import BenchmarkError
     ("text_image_to_relevance", "relevance", "scored_pairs"),
     ("masked_text_to_token_scores", "token_scores", "scored_sequences"),
     ("monocular_depth", "depth", "depth_images"),
+    ("points_to_semantic_segmentation", "segment_points", "segmented_points"),
 ])
 def test_new_tasks_have_an_operation_and_its_rate(task, operation, observed):
     assert task in supported_tasks()
@@ -42,3 +43,13 @@ def test_audio_tokens_and_depth_requests_name_their_one_input(tmp_path):
     assert depth.request == {"image_path": str(tmp_path / "scene.jpeg")}
     tokens = resolve_task_case("masked_text_to_token_scores", {"prompt": "MKT<mask>V"}, tmp_path)
     assert tokens.request == {"prompt": "MKT<mask>V"}
+
+
+def test_point_cloud_requests_carry_the_points_file_and_its_shape(tmp_path):
+    (tmp_path / "block.f32").write_bytes(b"\0" * 4 * 9 * 2)
+    points = resolve_task_case("points_to_semantic_segmentation", {"test_points": "block.f32", "num_points": 2},
+                               tmp_path)
+    assert points.operation == "segment_points"
+    assert points.request == {"points_path": str(tmp_path / "block.f32"), "num_points": 2, "input_dim": 9}
+    with pytest.raises(BenchmarkError):
+        resolve_task_case("points_to_semantic_segmentation", {"test_points": "block.f32"}, tmp_path)

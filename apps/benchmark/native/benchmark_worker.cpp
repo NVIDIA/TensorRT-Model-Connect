@@ -14,6 +14,7 @@
 #include "trtmc/language.hpp"
 #include "trtmc/numeric.hpp"
 #include "trtmc/perception.hpp"
+#include "trtmc/point_cloud.hpp"
 #include "trtmc/runtime/family_loader.h"
 #include "trtmc/speech.hpp"
 #include "trtmc/structure.hpp"
@@ -1900,6 +1901,37 @@ Json run_token_scores(const trtmc::Model& model, const Json& request, const Timi
                         {"logits", json_values(logits.values)},
                         {"logits_shape", {logits.rows, logits.columns}},
                         {"vocabulary_id", std::string(result.vocabulary_id())}};
+        });
+}
+
+// One point cloud (row-major float32 [num_points, input_dim]) to one class per point.
+Json run_segment_points(const trtmc::Model& model, const Json& request, const Timing& timing,
+                        const std::string& task_id) {
+    const auto task = task_for_operation<trtmc::PointsToSemanticSegmentation>(model, task_id);
+    const auto config =
+        sdk_config(request, task.config_fields(), {"points_path", "num_points", "input_dim"});
+    const auto path = request.at("points_path").get<std::string>();
+    const auto num_points = request.at("num_points").get<std::uint32_t>();
+    const auto input_dim = request.value("input_dim", std::uint32_t{9});
+    std::optional<std::vector<float>> cached;
+    if (!timing.asset_loading_included)
+        cached = read_float32(path);
+    return measure(
+        timing,
+        [&]() {
+            std::optional<std::vector<float>> loaded;
+            if (!cached)
+                loaded = read_float32(path);
+            const auto& points = cached ? *cached : *loaded;
+            return task.run({{points.data(), points.size()}, num_points, input_dim}, config);
+        },
+        [](const trtmc::PointsToSemanticSegmentationResult& result) {
+            const auto view = result.view();
+            if (!view.labels && view.num_points)
+                throw std::runtime_error("point-cloud segmentation returned no labels");
+            return Json{{"segmented_points", view.num_points},
+                        {"num_classes", view.num_classes},
+                        {"labels", json_values(view.labels, view.num_points)}};
         });
 }
 
@@ -4173,6 +4205,8 @@ Json dispatch(const Session& session, const Json& operation_request, const Timin
             measured = run_relevance(model, operation_request, timing, selected);
         else if (operation == "token_scores")
             measured = run_token_scores(model, operation_request, timing, selected);
+        else if (operation == "segment_points")
+            measured = run_segment_points(model, operation_request, timing, selected);
         else if (operation == "detect")
             measured = run_detect(model, operation_request, timing, selected);
         else if (operation == "detect_prompted")
