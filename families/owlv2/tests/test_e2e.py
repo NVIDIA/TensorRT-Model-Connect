@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+from tools.e2e_evidence import evidence_stage, record_evidence, record_reference_comparison
+from families.owlv2.tests.reporting import record_detection_views
+
 import json
 import os
 import subprocess
@@ -323,6 +326,30 @@ def _assert_parity(actual: dict, expected: list[dict], case: dict) -> None:
     assert worst_score <= _SCORE_TOLERANCE, (
         f"worst score delta {worst_score:.4f} above {_SCORE_TOLERANCE}"
     )
+    record_evidence("thresholds", {"min_box_iou": _IOU_FLOOR, "max_score_error": _SCORE_TOLERANCE})
+    record_reference_comparison(
+        "Matched grounded detections",
+        actual,
+        {"detections": expected},
+        [
+            {
+                "name": "box_iou",
+                "scope": "independent_reference",
+                "actual": worst_iou,
+                "operator": ">=",
+                "expected": _IOU_FLOOR,
+                "passed": worst_iou >= _IOU_FLOOR,
+            },
+            {
+                "name": "score_error",
+                "scope": "independent_reference",
+                "actual": worst_score,
+                "operator": "<=",
+                "expected": _SCORE_TOLERANCE,
+                "passed": worst_score <= _SCORE_TOLERANCE,
+            },
+        ],
+    )
     print(
         f"owlv2 parity: {len(native)} detections, worst IoU {worst_iou:.4f}, "
         f"worst score delta {worst_score:.4f}"
@@ -331,12 +358,31 @@ def _assert_parity(actual: dict, expected: list[dict], case: dict) -> None:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence(
+        "inputs", {"manifest": manifest, "case": case, "image": TEST_ROOT / case["test_image"]}
+    )
+    record_evidence("thresholds", {"min_box_iou": _IOU_FLOOR, "max_score_error": _SCORE_TOLERANCE})
     binary, runtime_root = _runtime()
     model_dir = _model_dir(manifest)
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     bundle = tmp_path / str(manifest["bundle"])
-    _build(model_dir, bundle, manifest)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
     assert bundle.is_file()
 
-    actual = _native(binary, runtime_root, bundle, case)
-    expected = _official_reference(model_dir, case)
-    _assert_parity(actual, expected, case)
+    with evidence_stage("native"):
+        actual = _native(binary, runtime_root, bundle, case)
+    record_evidence("native", actual)
+    with evidence_stage("reference"):
+        expected = _official_reference(model_dir, case)
+    record_evidence("reference", {"detections": expected})
+    record_detection_views(actual, expected, _asset(case["test_image"]), tmp_path / "detection-views")
+    with evidence_stage("compare"):
+        _assert_parity(actual, expected, case)

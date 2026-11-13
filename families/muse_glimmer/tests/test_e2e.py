@@ -174,5 +174,8 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     assert inspection["task"] == manifest["task"]
     with evidence_stage("native"):
         payload = _run_native(binary, runtime_root, bundle, case)
+    record_evidence("native", payload)
+    record_evidence("reference", {"mode": "contract_only", "oracle": "declared output channel and expected terms; no independent model reference was run"})
+    record_evidence("thresholds", {"max_new_tokens": case["max_new_tokens"], "expected_terms": case["expected_terms"], "required_channel": "assistant to=user"})
     with evidence_stage("compare"):
         _assert_correctness(payload, case)

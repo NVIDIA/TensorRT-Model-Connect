@@ -32,6 +32,8 @@ measured on this case; see ``_FP16_FEATURE_TOLERANCE``.
 
 from __future__ import annotations
 
+from tools.e2e_evidence import evidence_stage, record_evidence, record_reference_comparison
+
 import json
 import math
 import os
@@ -267,25 +269,73 @@ def _check_features(native, reference, precision: str) -> tuple[float, float]:
     assert worst <= tolerance, (
         f"{FAMILY} {precision} features differ from the reference by {worst}"
     )
+    record_evidence("thresholds", {"cosine_floor": _COSINE_FLOOR, "max_abs_error": tolerance})
+    record_reference_comparison(
+        "Reference values",
+        {"values": native},
+        {"values": reference},
+        [
+            {
+                "name": "cosine",
+                "scope": "independent_reference",
+                "actual": cosine,
+                "operator": ">=",
+                "expected": _COSINE_FLOOR,
+                "passed": cosine >= _COSINE_FLOOR,
+            },
+            {
+                "name": "max_abs_error",
+                "scope": "independent_reference",
+                "actual": worst,
+                "operator": "<=",
+                "expected": tolerance,
+                "passed": worst <= tolerance,
+            },
+        ],
+    )
     return worst, cosine
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence(
+        "thresholds",
+        {
+            "cosine_floor": _COSINE_FLOOR,
+            "max_abs_error": _FP16_FEATURE_TOLERANCE
+            if manifest["precision"] == "fp16"
+            else _FEATURE_TOLERANCE,
+        },
+    )
     model_dir = _model_dir(manifest)
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
 
     prompt = str(case["prompt"])
-    payload = _run_json(binary, runtime_root, bundle, case, "encode", "--task",
-                        "text_to_token_features", "--text", prompt)
+    record_evidence("inputs", {"prompt": prompt})
+    with evidence_stage("native"):
+        payload = _run_json(binary, runtime_root, bundle, case, "encode", "--task",
+                            "text_to_token_features", "--text", prompt)
+    record_evidence("native", payload)
 
     # The tokenizer is gated before the features are. The runtime converts
     # spm.model at build time and frames the result itself, so an error in
     # either would otherwise show up only as a feature mismatch with no
     # indication of where it came from.
-    expected_ids = _reference_ids(model_dir, prompt)
+    with evidence_stage("reference"):
+        expected_ids = _reference_ids(model_dir, prompt)
+    record_evidence("reference", {"token_ids": expected_ids})
     tokens = payload["tokens"]
     assert [int(token["token_id"]) for token in tokens] == expected_ids, (
         f"{FAMILY} token ids differ from the reference tokenizer"
@@ -313,10 +363,14 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     assert len(values) == shape[0] * shape[1]
     columns = shape[1]
     native = [values[row * columns:(row + 1) * columns] for row in range(shape[0])]
-    reference = _reference_features(model_dir, expected_ids,
-                                    int(manifest["max_sequence_length"]))
+    with evidence_stage("reference"):
+        reference = _reference_features(model_dir, expected_ids,
+                                        int(manifest["max_sequence_length"]))
+    record_evidence("reference", {"values": reference})
 
-    worst, cosine = _check_features(native, reference, manifest["precision"])
+    with evidence_stage("compare"):
+        worst, cosine = _check_features(native, reference, manifest["precision"])
+    record_evidence("metrics", {"max_abs_error": worst, "cosine": cosine})
     print(
         f"{FAMILY} {manifest['precision']} parity: {shape[0]} tokens x {shape[1]} features, "
         f"feature maxabs {worst:.3e}, cosine {cosine:.8f}"

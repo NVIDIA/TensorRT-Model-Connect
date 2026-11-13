@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from tools.e2e_evidence import record_evidence
+
 import json
 import os
 import subprocess
@@ -72,6 +74,9 @@ def test_minimax_music3_native_audio_e2e(case_name, request, tmp_path: Path) -> 
     if not _selected(request.config):
         pytest.skip("direct E2E requires an explicit MiniMax-Music3 selector")
     case = next(case for case in MANIFEST["testcases"] if case["name"] == case_name)
+    record_evidence("inputs", {"manifest": MANIFEST, "case": case})
+    record_evidence("checkpoint", {"hf_id": MANIFEST["hf_id"], "hf_revision": MANIFEST.get("hf_revision")})
+    record_evidence("reference", {"mode": "contract_only", "oracle": "stereo sample rate, duration and RMS bounds; no independent model reference was run"})
     binary = _required_env("TRTMC_BINARY")
     runtime_root = _required_env("TRTMC_RUNTIME_ROOT")
     assert (runtime_root / "libtrtmc_model_minimax_music3.so").is_file()
@@ -118,6 +123,8 @@ def test_minimax_music3_native_audio_e2e(case_name, request, tmp_path: Path) -> 
     )["threshold_overrides"]
     duration = samples.shape[0] / sample_rate
     rms = float(np.sqrt(np.mean(samples**2)))
+    record_evidence("native", {"audio": output, "sample_rate": sample_rate, "channels": channels, "duration_s": duration, "rms": rms})
+    record_evidence("thresholds", thresholds)
     assert channels == 2
     assert sample_rate == int(thresholds["sampling_rate"])
     assert float(thresholds["contract_min_duration_s"]) <= duration

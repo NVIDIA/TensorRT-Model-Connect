@@ -457,6 +457,12 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
             torch,
         )
     record_evidence("reference", {"reference_ids": reference[0], "reference_text": reference[1], "actual_decoded": reference[2]})
+    if _is_sampling(case):
+        record_evidence("reference", {
+            "mode": "contract_only",
+            "oracle": "Sampling option forwarding and declared output checks; the reference sample was observed but output agreement is not asserted.",
+            "reference_ids": reference[0], "reference_text": reference[1], "actual_decoded": reference[2],
+        })
     if not _is_sampling(case):
         _record_text_diagnostics(payload["token_ids"], reference[0])
     with evidence_stage("compare"):

@@ -26,6 +26,8 @@ cosine floor separates them either. So the logits themselves are gated.
 
 from __future__ import annotations
 
+from tools.e2e_evidence import evidence_stage, record_evidence, record_reference_comparison
+
 import json
 import math
 import os
@@ -328,9 +330,40 @@ def _check_logits(scores: list[float], reference: list[float], precision: str,
     assert worst <= tolerance, (
         f"{FAMILY} {precision} logits differ from the reference by {worst}"
     )
+    record_evidence("thresholds", {"cosine_floor": floor, "max_abs_error": tolerance})
+    record_reference_comparison(
+        "Reference scores",
+        {"scores": scores},
+        {"scores": reference},
+        [
+            {
+                "name": "cosine",
+                "scope": "independent_reference",
+                "actual": cosine,
+                "operator": ">=",
+                "expected": floor,
+                "passed": cosine >= floor,
+            },
+            {
+                "name": "max_abs_error",
+                "scope": "independent_reference",
+                "actual": worst,
+                "operator": "<=",
+                "expected": tolerance,
+                "passed": worst <= tolerance,
+            },
+        ],
+    )
     if precision == "fp16":
         assert tanh_reference is not None, "the fp16 gate needs the tanh-GELU reference"
         share = _tanh_share(scores, reference, tanh_reference)
+        record_evidence("thresholds", {"max_tanh_defect_share": _TANH_SHARE_LIMIT})
+        record_evidence("diagnostics", {"counterfactual_control": {
+            "name": "Tanh approximation control", "native": {"scores": scores},
+            "reference": {"scores": reference}, "tanh_reference": tanh_reference,
+            "actual": share, "operator": "<", "expected": _TANH_SHARE_LIMIT,
+            "passed": share < _TANH_SHARE_LIMIT,
+        }})
         assert share < _TANH_SHARE_LIMIT, (
             f"{FAMILY} fp16 logits carry {share:.2f} of the tanh-GELU defect"
         )
@@ -339,22 +372,55 @@ def _check_logits(scores: list[float], reference: list[float], precision: str,
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence(
+        "inputs", {"manifest": manifest, "case": case, "image": TEST_ROOT / case["test_image"]}
+    )
+    record_evidence(
+        "thresholds",
+        {
+            "cosine_floor": _FP8_COSINE_FLOOR
+            if manifest.get("quantization") == "fp8"
+            else _COSINE_FLOOR,
+            "max_abs_error": _FP8_LOGIT_TOLERANCE
+            if manifest.get("quantization") == "fp8"
+            else _FP16_LOGIT_TOLERANCE
+            if manifest["precision"] == "fp16"
+            else _LOGIT_TOLERANCE,
+        },
+    )
     model_dir = _model_dir(manifest)
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
 
-    reference, reference_labels = _reference(model_dir, case)
+    with evidence_stage("reference"):
+        reference, reference_labels = _reference(model_dir, case)
+    record_evidence("reference", {"scores": reference, "labels": reference_labels})
     gate = _gate(manifest)
     tanh_reference = None
     if gate == "fp16":
-        tanh_reference, _ = _reference(model_dir, case, hidden_act="gelu_pytorch_tanh")
-    payload = _run_json(binary, runtime_root, bundle, case, "classify", "--task",
-                        "image_to_class_scores", "--image",
-                        str(_asset(case["test_image"])))
+        with evidence_stage("reference"):
+            tanh_reference, _ = _reference(model_dir, case, hidden_act="gelu_pytorch_tanh")
+        record_evidence("diagnostics", {"tanh_reference": tanh_reference})
+    with evidence_stage("native"):
+        payload = _run_json(binary, runtime_root, bundle, case, "classify", "--task",
+                            "image_to_class_scores", "--image",
+                            str(_asset(case["test_image"])))
+    record_evidence("native", payload)
 
     scores = [float(value) for value in payload["scores"]]
-    worst, cosine = _check_logits(scores, reference, gate, tanh_reference)
+    with evidence_stage("compare"):
+        worst, cosine = _check_logits(scores, reference, gate, tanh_reference)
+    record_evidence("metrics", {"max_abs_error": worst, "cosine": cosine})
 
     # The head emits logits; nothing in the runtime softmaxes them, and the
     # Task reports which kind they are rather than leaving it to the caller.

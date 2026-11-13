@@ -3,6 +3,9 @@
 """Clef checkpoint -> bundle -> C++ Task -> original per-option probabilities."""
 
 import json
+
+from tools.e2e_evidence import record_evidence, record_reference_comparison
+from families.clef.tests.reporting import record_decision_input, record_decisions
 import os
 from functools import cache
 from pathlib import Path
@@ -67,20 +70,23 @@ def clef_bundle(tmp_path_factory):
 
 
 @pytest.mark.parametrize(
-    ("manifest", "case"),
+    ("case_name", "manifest", "case"),
     [
-        pytest.param(manifest, case, id=case["name"])
+        pytest.param(case["name"], manifest, case, id=case["name"])
         for manifest in MANIFESTS.values()
         for case in manifest["testcases"]
     ],
 )
-def test_e2e(manifest, case, request, tmp_path):
+def test_e2e(case_name, manifest, case, request, tmp_path):
     assert manifest["precision"] == "bf16"
     selected = _selection(request.config)
     if not selected and os.environ.get("TRTMC_E2E") != "1":
         pytest.skip("real Clef E2E requires explicit selection")
     if selected and not selected.intersection({"clef", manifest["name"], case["name"]}):
         pytest.skip("Clef case was not selected")
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence("checkpoint", {"hf_id": manifest["hf_id"], "hf_revision": manifest.get("hf_revision")})
+    record_evidence("thresholds", {"logits_atol": 0.125, "logits_rtol": 0.015, "probabilities_atol": 0.015, "probabilities_rtol": 0.01, "argmax": "exact equality"})
     runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
     binary = request.getfixturevalue("clef_task_probe")
     checkpoint, bundle = request.getfixturevalue("clef_bundle")(manifest["name"])
@@ -106,7 +112,9 @@ def test_e2e(manifest, case, request, tmp_path):
             ]
         fixture = tmp_path / "record.json"
         fixture.write_text(json.dumps(document))
+    record_evidence("inputs", {"document": fixture, "images": [ROOT / path for path in inputs.get("image_paths", [])], "video_frames": [[ROOT / path for path in frames] for frames in inputs.get("video_frame_paths", [])]})
     record = reference_record(fixture)
+    record_decision_input(record)
     # Loading on CPU then moving the unchanged BF16 module avoids Transformers'
     # single 51 GiB allocator-warmup reservation. The complete reference forward
     # still runs on CUDA with the release's original operators and weights.
@@ -116,15 +124,20 @@ def test_e2e(manifest, case, request, tmp_path):
     batch = collate_records([encoded], processor.tokenizer.pad_token_id, torch.device("cuda"))
     with torch.inference_mode():
         logits = [v.float().cpu().numpy() for v in model(batch)[0]]
+    record_evidence("reference", {"logits": logits})
     del model, batch
     torch.cuda.empty_cache()
     command = [str(binary), str(bundle), str(runtime), str(fixture), "2"]
     native = json.loads(subprocess.check_output(command, text=True))
+    record_evidence("native", native)
     assert not any(
         "python" in name.lower() or "torch" in name.lower() or "c10" in name.lower()
         for name in native["loaded_libraries"]
     )
     first = native["results"][0]
+    record_evidence("native", first)
+    reference_options = {}
+    record_decisions(first, reference_options, logits, len(encoded.questions))
     assert first["scores"] == native["results"][1]["scores"]
     assert first["response"]["usage"] == {
         "input_tokens": len(encoded.input_ids),
@@ -134,6 +147,10 @@ def test_e2e(manifest, case, request, tmp_path):
         assert actual["question_id"] == question.question_id
         assert actual["option_ids"] == list(question.option_ids)
         probabilities = torch.tensor(reference).softmax(-1).numpy()
+        reference_options[question.question_id] = {
+            "option_ids": list(question.option_ids), "probabilities": probabilities,
+        }
+        record_decisions(first, reference_options, logits, len(encoded.questions))
         np.testing.assert_allclose(actual["logits"], reference, atol=0.125, rtol=0.015)
         # The BF16 reference is itself up to 0.006 from its FP32 forward (0.016 on the
         # video cases), and TensorRT can land on the other side of the FP32 result, so a
@@ -141,6 +158,13 @@ def test_e2e(manifest, case, request, tmp_path):
         # as before.
         np.testing.assert_allclose(actual["probabilities"], probabilities, atol=0.015, rtol=0.01)
         assert int(np.argmax(actual["probabilities"])) == int(np.argmax(probabilities))
+        record_reference_comparison(
+            f"Option argmax: {question.question_id}", actual,
+            {"logits": reference, "probabilities": probabilities},
+            [{"name": "option_argmax", "scope": "independent_reference",
+              "actual": int(np.argmax(actual["probabilities"])), "operator": "==",
+              "expected": int(np.argmax(probabilities)), "passed": True}],
+        )
         assert first["response"]["answers"][question.question_id] == systemone_answer(
             record["questions"][question.question_id],
             dict(zip(question.option_ids, actual["probabilities"], strict=True)),

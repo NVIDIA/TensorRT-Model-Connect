@@ -4,6 +4,8 @@
 """Direct build, native-runtime, and official-reference E2E for glmasr."""
 
 from __future__ import annotations
+
+from tools.e2e_evidence import record_evidence
 import json
 import os
 import re
@@ -354,10 +356,14 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     # masked attention from primitives because TensorRT's single-query
     # IAttention stopped honoring the mask beyond 512 cache rows.
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case, "audio": _asset(case["test_input_audio"])})
     model_dir = _model_dir(manifest)
+    record_evidence("checkpoint", {"hf_id": manifest["hf_id"], "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
     _build(model_dir, bundle, manifest)
     actual = _native(binary, runtime_root, bundle, case)
+    record_evidence("native", actual)
     expected = _official_reference(model_dir, case)
-    _assert_contract(actual, expected, _thresholds(case_name))
+    record_evidence("reference", expected)
+    _assert_contract(actual, expected, record_evidence("thresholds", _thresholds(case_name)))

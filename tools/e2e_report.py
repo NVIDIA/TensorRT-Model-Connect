@@ -336,6 +336,7 @@ _OUTPUT_NAMES = {
     "segmentation": "Segmentation masks",
     "video_segmentation": "Segmentation masks",
     "image_to_class_scores": "Class scores",
+    "audio_to_class_scores": "Class scores",
     "text_to_embedding": "Embedding vector",
     "text_to_pooled_features": "Encoded features",
     "image_to_embedding": "Embedding vector",
@@ -349,7 +350,7 @@ _OUTPUT_NAMES = {
 
 def _is_classification_task(task: str) -> bool:
     # The semantic SDK names the result type instead of the old execution mode.
-    return "classification" in task or task == "image_to_class_scores"
+    return "classification" in task or task in {"image_to_class_scores", "audio_to_class_scores"}
 
 
 def _label(key: str) -> str:
@@ -747,7 +748,7 @@ def _output_summary(value: Any, *, role: str, task: str, peer: Any = None) -> st
         return "<p class='note'>No output recorded. Check the result and failure stage below.</p>"
     if isinstance(value, dict) and value.get("mode") == "contract_only":
         return (
-            "<p><strong>Contract checks only</strong></p><p class='note'>No reference output was generated.</p>"
+            "<p><strong>Contract checks only</strong></p><p class='note'>Only the declared contract was checked; reference agreement was not asserted.</p>"
             + (_facts([("Checked contract", value["oracle"])]) if value.get("oracle") else "")
         )
     if isinstance(value, str):
@@ -895,30 +896,48 @@ def _media_role(artifact: dict[str, Any], title: str, references: dict[str, set[
 
 def _media_items(data: dict[str, Any], artifacts: list) -> list[dict[str, Any]]:
     """Prefer current view metadata while retaining explicit historical roles."""
-    observations = [row for row in data.get("observations", []) if isinstance(row, dict)]
+    # Recorder clears views at each operation boundary. An explicit empty list
+    # must not resurrect an earlier operation's output; old records without this
+    # field retain the bounded legacy fallback.
+    scoped_views = "views" in data
+    observations = [
+        row for row in data.get("observations", []) if isinstance(row, dict)
+    ]
     views, seen_views = {}, set()
-    sources = [data.get("views", [])] + [
+    history = [
         row.get("value") for row in observations if row.get("name") == "views"
     ]
+    # Several previews may belong to one operation. Only an explicit clear
+    # starts another operation; snapshot priority alone is not its identity.
+    operation, operations = 0, []
+    for source in history:
+        if isinstance(source, list) and not source:
+            operation += 1
+        operations.append(operation)
+    sources = [data.get("views", []), *history]
+    operations = [operation, *operations]
     for priority, source in enumerate(sources):
         for view in source if isinstance(source, list) else []:
             if not isinstance(view, dict):
                 continue
             for kind in ("image", "audio", "video"):
                 value = view.get(kind)
-                if not isinstance(value, dict) or not isinstance(value.get("artifact"), str):
+                if not isinstance(value, dict) or not isinstance(
+                    value.get("artifact"), str
+                ):
                     continue
                 path, title, caption = (
                     value["artifact"],
                     str(view.get("title", "Recorded view")),
                     str(view.get("caption", "")),
                 )
-                key = (path, title, caption)
+                key = (path, title, caption, operations[priority])
                 if key not in seen_views:
                     seen_views.add(key)
-                    views.setdefault(path, []).append((title, caption, priority))
+                    views.setdefault(path, []).append((title, caption, priority, operations[priority]))
     references = {
-        role: _artifact_references(data.get(role)) for role in ("inputs", "native", "reference")
+        role: _artifact_references(data.get(role))
+        for role in ("inputs", "native", "reference")
     }
     historical_inputs = set()
     for row in observations:
@@ -932,18 +951,28 @@ def _media_items(data: dict[str, Any], artifacts: list) -> list[dict[str, Any]]:
         fallback = str(artifact.get("role", "Recorded media"))
         if artifact.get("label"):
             fallback += " / " + str(artifact["label"])
-        for title, caption, priority in views.get(
-            path, [(fallback, str(artifact.get("caption", "")), len(sources))]
+        for title, caption, priority, operation_scope in views.get(
+            path, [(fallback, str(artifact.get("caption", "")), len(sources), operation)]
         ):
-            pair = _media_pair_key(title) if path in views or not artifact.get("label") else None
+            pair = (
+                _media_pair_key(title)
+                if path in views or not artifact.get("label")
+                else None
+            )
             roles = (
-                [pair[2]] if pair else [role for role, paths in references.items() if path in paths]
+                [pair[2]]
+                if pair
+                else [role for role, paths in references.items() if path in paths]
             )
             if pair and path in references["inputs"]:
                 roles.append("inputs")
             if not roles:
                 role = _media_role(artifact, title, references)
-                roles = ["inputs" if role == "additional" and path in historical_inputs else role]
+                roles = [
+                    "inputs"
+                    if role == "additional" and path in historical_inputs
+                    else role
+                ]
             for role in roles:
                 logical_input = pair is not None and role == "inputs"
                 items.append(
@@ -958,13 +987,27 @@ def _media_items(data: dict[str, Any], artifacts: list) -> list[dict[str, Any]]:
                         "pair": pair[:2] if pair and not logical_input else None,
                         "priority": priority,
                         "view": path in views and not logical_input,
+                        "media_scope": priority if scoped_views else 0,
+                        "operation_scope": operation_scope,
+                        "current_output": (
+                            not scoped_views
+                            or priority == 0
+                            or path in references.get(role, set())
+                        ),
                     }
                 )
     latest_inputs = {}
     for item in items:
         if item["role"] == "inputs":
-            latest_inputs[re.sub(r"^\d+-", "", item["path"].rsplit("/", 1)[-1])] = item["path"]
-    current_inputs = references["inputs"] or set(latest_inputs.values())
+            latest_inputs[re.sub(r"^\d+-", "", item["path"].rsplit("/", 1)[-1])] = item[
+                "path"
+            ]
+    input_values = _mapping(data.get("inputs"))
+    current_inputs = (
+        _artifact_references(input_values["media"])
+        if "media" in input_values
+        else references["inputs"] or set(latest_inputs.values())
+    )
     for item in items:
         item["current_input"] = item["path"] in current_inputs
     return sorted(
@@ -978,6 +1021,9 @@ def _media_items(data: dict[str, Any], artifacts: list) -> list[dict[str, Any]]:
             if item["role"] in {"native", "reference"}
             else 3,
             not item["current_input"] if item["role"] == "inputs" else False,
+            not item["current_output"]
+            if item["role"] in {"native", "reference"}
+            else False,
             item["pair"] or ("", -1),
             item["role"] == "reference",
             item["priority"],
@@ -988,7 +1034,7 @@ def _media_items(data: dict[str, Any], artifacts: list) -> list[dict[str, Any]]:
 
 def _media_duplicate(item: dict[str, Any], fingerprint: str, seen: set) -> bool:
     scope = item["pair"] or (item["title"] if item["view"] else None)
-    key = (item["role"], scope, fingerprint)
+    key = (item["role"], scope, item.get("operation_scope", item.get("media_scope", 0)), fingerprint)
     if key in seen:
         return True
     seen.add(key)
@@ -1007,31 +1053,48 @@ def _media_figure(item: dict[str, Any], body: str) -> str:
 def _media_layout(
     items: list[dict[str, Any]], input_limit: int = 1
 ) -> tuple[dict[str, str], list[str], str]:
-    """Keep each declared index together; only unambiguous same-index pairs compare."""
+    """Compare same-index views from one snapshot; history stays in Details."""
     groups = {}
     for item in items:
         if item["pair"] and item.get("previewable", True):
-            groups.setdefault(item["pair"], {"native": [], "reference": []})[item["role"]].append(
-                item["figure"]
-            )
+            key = (*item["pair"], item.get("media_scope", 0))
+            groups.setdefault(key, {"native": [], "reference": []})[
+                item["role"]
+            ].append(item)
+    ordered = sorted(groups, key=lambda key: (key[2], key[0], key[1]))
     paired = [
         key
-        for key, roles in sorted(groups.items())
-        if all(len(roles[role]) == 1 for role in ("native", "reference"))
+        for key in ordered
+        if all(len(groups[key][role]) == 1 for role in ("native", "reference"))
     ]
+    current = [
+        key
+        for key in ordered
+        if all(
+            item.get("current_output", True)
+            for members in groups[key].values()
+            for item in members
+        )
+    ]
+    current_pairs = [key for key in paired if key in current]
     first = (
-        paired[0]
-        if paired
-        else next((key for key, roles in sorted(groups.items()) if roles["native"]), None)
+        current_pairs[0]
+        if current_pairs
+        else next((key for key in current if groups[key]["native"]), None)
     )
     first_reference = (
-        next((key for key, roles in sorted(groups.items()) if roles["reference"]), None)
+        next((key for key in current if groups[key]["reference"]), None)
         if first is None
         else None
     )
     previews, extra, legends = {}, [], []
-    for (kind, index), roles in sorted(groups.items()):
-        complete = (kind, index) in paired
+    for key in ordered:
+        kind, index, _ = key
+        roles = groups[key]
+        figures = "".join(
+            item["figure"] for item in roles["native"] + roles["reference"]
+        )
+        complete = key in paired
         label = f"{kind.title()} {index}"
         note = (
             ""
@@ -1039,14 +1102,14 @@ def _media_layout(
             else '<p class="note">No unambiguous native/reference pair recorded for this index.</p>'
         )
         body = (
-            '<div class="pair">' + "".join(roles["native"] + roles["reference"]) + "</div>"
+            '<div class="pair">' + figures + "</div>"
             if complete
-            else "".join(roles["native"] + roles["reference"])
+            else figures
         )
         group = f'<section class="media-sample" data-media-kind="{kind}" data-media-index="{index}" data-media-paired="{str(complete).lower()}"><h4>{label}</h4>{note}{body}</section>'
-        if (kind, index) == first:
+        if key == first:
             previews["native"], previews["reference"] = group, ""
-        elif (kind, index) == first_reference:
+        elif key == first_reference:
             previews["reference"] = group
         else:
             extra.append(group)
@@ -1077,6 +1140,7 @@ def _media_layout(
             role in {"native", "reference"}
             and role not in previews
             and item.get("previewable", True)
+            and item.get("current_output", True)
         ):
             previews[role] = figure
         else:
@@ -1337,6 +1401,11 @@ def _demo_numeric_value(value: Any, task: str = "") -> tuple[str, Any] | None:
         if candidate is not None:
             return (label if task == "series_to_regression_values" and key == "values"
                     else _label(key)), candidate
+    kind = value.get("score_kind")
+    if isinstance(kind, str) and kind:
+        candidate = _demo_numeric_candidate([value.get("score")])
+        if candidate is not None:
+            return f"Score ({kind})", candidate
     return None
 
 
@@ -1363,7 +1432,9 @@ def _demo_numeric_overlap(
     return f'<p class="note overlap-note" data-overlap="{kind}">{message}</p>'
 
 
-def _demo_numeric_comparison(native: Any, reference: Any = None, task: str = "") -> str:
+def _demo_numeric_comparison(
+    native: Any, reference: Any = None, task: str = "", *, primary_role: str = "native"
+) -> str:
     """Display one shared-axis sample, never use the preview to set a verdict."""
     chosen = _demo_numeric_value(native, task)
     if chosen is None:
@@ -1377,19 +1448,26 @@ def _demo_numeric_comparison(native: Any, reference: Any = None, task: str = "")
     if not numbers:
         return f'<p class="note">{_escape(label)}: no numeric values recorded.</p>'
     paired = second is not None and second[1:] == first[1:]
-    series = [("Native", numbers, "#0b7687")]
+    first_name = "Reference" if primary_role == "reference" else "Native"
+    second_name = "Native" if first_name == "Reference" else "Reference"
+    colors = {"Native": "#0b7687", "Reference": "#b45e1c"}
+    series = [(first_name, numbers, colors[first_name])]
     if paired:
-        series.append(("Reference", second[0], "#b45e1c"))
+        series.append((second_name, second[0], colors[second_name]))
     shown = len(numbers)
-    caption = f"First {shown} of {total} values" if shown < total else f"All {total} values"
+    caption = (
+        f"First {shown} of {total} values" if shown < total else f"All {total} values"
+    )
     caption = f"{label} · {shape} · {caption}"
     if " × " in shape:
         caption += " · flattened order"
     if paired and len(second[0]) != shown:
-        caption += f"; reference: first {len(second[0])} of {total} values"
+        caption += f"; {second_name.lower()}: first {len(second[0])} of {total} values"
     if total <= 8:
         header = (
-            "<tr><th>Value</th>" + "".join(f"<th>{name}</th>" for name, _, _ in series) + "</tr>"
+            "<tr><th>Value</th>"
+            + "".join(f"<th>{name}</th>" for name, _, _ in series)
+            + "</tr>"
         )
         rows = []
         for index in range(max(len(values) for _, values, _ in series)):
@@ -1410,7 +1488,11 @@ def _demo_numeric_comparison(native: Any, reference: Any = None, task: str = "")
         points = []
         for index, number in enumerate(values):
             x = 48 + 300 * index / max(1, max_length - 1)
-            y = 63 if span == 0 else 108 - 88 * ((number / magnitude - low / magnitude) / span)
+            y = (
+                63
+                if span == 0
+                else 108 - 88 * ((number / magnitude - low / magnitude) / span)
+            )
             points.append(f"{x:.2f},{y:.2f}")
         dash = ' stroke-dasharray="6 4"' if name == "Reference" else ""
         width = 2 if name == "Reference" else 5
@@ -1421,11 +1503,10 @@ def _demo_numeric_comparison(native: Any, reference: Any = None, task: str = "")
             x, y = points[0].split(",")
             radius = 2 if name == "Reference" else 4
             lines.append(f'<circle cx="{x}" cy="{y}" r="{radius}" fill="{color}"/>')
-    legend = (
-        "<span class='series-key native-key'>Native · solid</span> / <span class='series-key reference-key'>Reference · dashed</span> · shared scale"
-        if paired
-        else "<span class='series-key native-key'>Native · solid</span>"
-    )
+    legend = " / ".join(
+        f"<span class='series-key {name.lower()}-key'>{name} · {'dashed' if name == 'Reference' else 'solid'}</span>"
+        for name, _, _ in series
+    ) + (" · shared scale" if paired else "")
     chart = (
         f'<svg viewBox="0 0 360 134" role="img" aria-label="{_escape(caption)}">'
         '<path d="M48 16V108H350" fill="none" stroke="#cad3de"/>'
@@ -1511,11 +1592,16 @@ def _demo_input(data: dict[str, Any], media: str = "") -> str:
     if "input_values" in native:
         request["input_values"] = native["input_values"]
         request.pop("past_values", None)
+    text_keys = ("prompt", "test_prompt", "text", "query", "source_text")
+    # A present current field can deliberately clear the recipe's text.
+    text_scopes = ((inputs,) if any(key in inputs for key in text_keys)
+                   else (case, _mapping(case.get("inputs"))))
     text = next(
         (
-            request[key]
-            for key in ("prompt", "test_prompt", "text", "query", "source_text")
-            if isinstance(request.get(key), str) and request[key]
+            scope[key]
+            for scope in text_scopes
+            for key in text_keys
+            if isinstance(scope.get(key), str) and scope[key]
         ),
         "",
     )
@@ -1641,20 +1727,25 @@ def _demo_nonfinite(value: Any) -> str:
     return f'<p class="note">{_escape(names)}: non-finite saved preview values; preview only, not the full tensor.</p>'
 
 
-def _demo_output(value: Any, *, role: str, task: str, media: str = "", peer: Any = None) -> str:
+def _demo_output(
+    value: Any, *, role: str, task: str, media: str = "", peer: Any = None
+) -> str:
     """Show one useful output representation instead of generic tensor metadata."""
     if (value is None or _mapping(value).get("mode") == "contract_only") and not media:
         return ""
     if _is_classification_task(task):
         chosen = value.get("top_class") if isinstance(value, dict) else value
         if isinstance(chosen, (int, float)):
-            return f'<p class="class-result">Class ID <strong>{_escape(chosen)}</strong></p>'
-        saved = classification_index(_mapping(value).get("logits", value))
+            label = _mapping(value).get("class_label")
+            named = f'<p class="readable">{_escape(label)}</p>' if isinstance(label, str) else ""
+            return f'<p class="class-result">Class ID <strong>{_escape(chosen)}</strong></p>' + named
+        recorded = _mapping(value)
+        field = "scores" if "logits" not in recorded and "scores" in recorded else "logits"
+        saved = classification_index(recorded.get(field, value))
         if saved is not None:
-            return f'<p class="class-result">Class ID <strong>{saved[0]}</strong></p><p class="note">From complete saved logits</p>'
-        return (
-            '<p class="note">Class preview unavailable; complete saved logits are unavailable.</p>'
-        )
+            label = "Class index" if field == "scores" else "Class ID"
+            return f'<p class="class-result">{label} <strong>{saved[0]}</strong></p><p class="note">From complete saved {field}</p>'
+        return f'<p class="note">Class preview unavailable; complete saved {field} are unavailable.</p>'
     notices = _demo_nonfinite(value)
     text = _demo_text_value(value, role)
     if media:
@@ -1668,27 +1759,34 @@ def _demo_output(value: Any, *, role: str, task: str, media: str = "", peer: Any
             else ("token_ids", "reference_ids")
         )
         tokens = next(
-            (_mapping(value)[key] for key in keys if isinstance(_mapping(value).get(key), list)),
+            (
+                _mapping(value)[key]
+                for key in keys
+                if isinstance(_mapping(value).get(key), list)
+            ),
             None,
         )
         if tokens is not None:
             return f'<p class="note">{len(tokens)} recorded tokens; decoded text unavailable. Token IDs are in Details.</p>'
         detail = "logits" if _demo_numeric_value(value, task) else "values"
         return f'<p class="note">Decoded text unavailable; recorded {detail} are in Details.</p>'
-    numeric = _demo_numeric_comparison(value, peer, task)
+    numeric = _demo_numeric_comparison(value, peer, task, primary_role=role)
     if numeric:
         return numeric + notices
     if notices:
         return notices
     if isinstance(value, (int, float)):
         return f'<p class="readable">{_escape(value)}</p>'
-    if isinstance(value, dict) and any(key in value for key in ("probe_returncode", "receipt")):
+    if isinstance(value, dict) and any(
+        key in value for key in ("probe_returncode", "receipt")
+    ):
         return '<p class="note">Runtime checks; response traces are in Details.</p>'
     facts = _nested_scalars(_mapping(value))
     if facts:
         return _facts(facts[:2]) + notices
     return (
-        notices or '<p class="note">Output preview unavailable; recorded values are in Details.</p>'
+        notices
+        or '<p class="note">Output preview unavailable; recorded values are in Details.</p>'
     )
 
 
@@ -1818,13 +1916,16 @@ def _assess_comparison_check(check: Any) -> bool | None:
         not isinstance(scope, str)
         or not isinstance(op, str)
         or scope not in {"contract", "independent_reference"}
-        or op not in {"==", ">=", "<="}
+        or op not in {"==", ">=", "<=", ">", "<"}
     ):
         return None
     if type(check.get("passed")) is not bool:
         return None
     actual, expected = check.get("actual"), check.get("expected")
-    if type(actual) is bool or type(expected) is bool:
+    if isinstance(actual, str) or isinstance(expected, str):
+        if op != "==" or not isinstance(actual, str) or not isinstance(expected, str):
+            return None
+    elif type(actual) is bool or type(expected) is bool:
         if scope != "contract" or op != "==" or type(actual) is not type(expected):
             return None
     else:
@@ -1840,6 +1941,10 @@ def _assess_comparison_check(check: Any) -> bool | None:
         if op == "=="
         else actual >= expected
         if op == ">="
+        else actual > expected
+        if op == ">"
+        else actual < expected
+        if op == "<"
         else actual <= expected
     )
     return check["passed"] if evaluated is check["passed"] else None

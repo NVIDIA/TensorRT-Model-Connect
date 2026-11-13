@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import ast
 import base64
+import re
 import copy
 import unittest
 import json
@@ -548,7 +550,7 @@ def test_numeric_output_shows_dimensions_without_vectors(tmp_path: Path) -> None
     assert "float32" not in visible and "float32" in report
 
 
-@pytest.mark.parametrize("task", ["image_classification", "image_to_class_scores"])
+@pytest.mark.parametrize("task", ["image_classification", "image_to_class_scores", "audio_to_class_scores"])
 def test_classification_preserves_ids_and_raw_score_meaning(tmp_path: Path, task: str) -> None:
     data = _case()
     data["inputs"]["manifest"]["task"] = task
@@ -571,7 +573,7 @@ def test_classification_preserves_ids_and_raw_score_meaning(tmp_path: Path, task
         (7, 80, "passed", False),
     ],
 )
-@pytest.mark.parametrize("task", ["classification", "image_to_class_scores"])
+@pytest.mark.parametrize("task", ["classification", "image_to_class_scores", "audio_to_class_scores"])
 def test_classification_reference_is_visible_beside_native(
     tmp_path: Path, native_class: int, reference_class: int, status: str, checked: bool, task: str
 ) -> None:
@@ -649,6 +651,70 @@ def test_classification_partial_reference_logits_do_not_invent_a_class(tmp_path:
     assert visible.count("Class ID") == 1
     assert "Class preview unavailable" in visible
     assert 'data-status="unverified"' in report
+
+
+@pytest.mark.parametrize("status", ["passed", "failed"])
+def test_complete_saved_class_scores_show_the_vit_reference_contract(
+    tmp_path: Path, status: str
+) -> None:
+    # ViT records all 1,000 scores and labels, without logits or top_class.
+    scores = [-0.25] * 1000
+    scores[777] = 9.5
+    data = _case()
+    data["inputs"]["manifest"]["task"] = "image_to_class_scores"
+    data["native"] = {"top_class": 777}
+    data["reference"] = {"scores": scores, "labels": [f"class_{i}" for i in range(1000)]}
+    data["status"] = status
+    data["checks"] = [{"status": status, "expression": "_cosine(actual, expected) >= .99",
+                       "explanation": "1.0 >= .99"}]
+    before = copy.deepcopy(data)
+    original_assessment = assessment(data)
+
+    report = render_case(data, tmp_path)
+    reference = report.split('<details class="case-details">', 1)[0].split(
+        "<h4>Reference output</h4>", 1
+    )[1]
+    assert "Class index <strong>777</strong>" in reference
+    assert "From complete saved scores" in reference
+    assert "Class preview unavailable" not in reference
+    assert "class_777" not in _visible(report)
+    assert f'data-status="{original_assessment["kind"]}"' in report
+    assert assessment(data) == original_assessment and data == before
+
+
+@pytest.mark.parametrize(
+    "logits,expected_index",
+    [([0.0, 8.0, 1.0], 1), (None, None), ([], None),
+     ({"shape": [1000], "preview": [0.0, 8.0]}, None),
+     ([0.0, float("nan")], None)],
+)
+def test_saved_class_scores_never_replace_explicit_logits(logits, expected_index) -> None:
+    from tools.e2e_report import _demo_output
+
+    value = {"logits": logits, "scores": [8.0, 0.0, 1.0]}
+    report = _demo_output(value, role="reference", task="image_to_class_scores")
+    assert "saved scores" not in report
+    if expected_index is None:
+        assert "Class preview unavailable" in report
+        assert "<strong>" not in report
+    else:
+        assert f"Class ID <strong>{expected_index}</strong>" in report
+        assert "From complete saved logits" in report
+
+
+@pytest.mark.parametrize(
+    "scores",
+    [None, [], {"shape": [1000], "preview": [0.0, 10.0]},
+     {"shape": [1000], "values": [0.0, 10.0]},
+     {"shape": [2, 2], "values": [0.0, 10.0, 1.0, 2.0]},
+     [0.0, float("nan")], [0.0, float("inf")], [False, True]],
+)
+def test_incomplete_or_nonfinite_class_scores_do_not_invent_a_class(scores) -> None:
+    from tools.e2e_report import _demo_output
+
+    report = _demo_output({"scores": scores}, role="reference", task="image_to_class_scores")
+    assert "Class preview unavailable; complete saved scores are unavailable." in report
+    assert "<strong>" not in report
 
 
 @pytest.mark.parametrize("reference", [None, {"mode": "contract_only"}])
@@ -2236,7 +2302,7 @@ def test_library_comparison_requires_complete_enforced_distinct_evidence(field, 
         ("expected", None),
         ("passed", False),
         ("passed", "true"),
-        ("operator", ">"),
+        ("operator", "!="),
         ("operator", {}),
         ("scope", {}),
         ("name", ""),
@@ -2307,3 +2373,519 @@ def test_library_comparison_uses_human_labels_without_changing_check_identity():
     assert "raw similarity key" in _assess_reference_details(data)
     data["observations"][0]["value"]["checks"].append({**check, "label": "Another label"})
     assert assessment(data)["kind"] == "unverified"
+
+
+ROOT = Path(__file__).resolve().parents[2]
+ENTRIES = sorted((ROOT / "families").glob("*/tests/test_e2e.py"))
+
+
+def _entrypoint_evidence_fields(tree, entrypoint):
+    """Follow directly named local helpers without counting sibling/orphan code.
+
+    This is a syntactic call-path guard, not proof of branch execution. Indirect
+    callbacks and imported producers cannot establish recording here; those need
+    executable recorder controls rather than a family-specific exemption.
+    """
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+
+    class Calls(ast.NodeVisitor):
+        def __init__(self):
+            self.calls = []
+
+        def visit_Call(self, node):
+            self.calls.append(node)
+            self.generic_visit(node)
+
+        def visit_FunctionDef(self, node):
+            pass
+
+        def visit_AsyncFunctionDef(self, node):
+            pass
+
+        def visit_ClassDef(self, node):
+            pass
+
+        def visit_Lambda(self, node):
+            pass
+
+    pending, visited, fields = [entrypoint], set(), set()
+    while pending:
+        name = pending.pop()
+        if name in visited:
+            continue
+        visited.add(name)
+        calls = Calls()
+        for statement in functions[name].body:
+            calls.visit(statement)
+            if isinstance(statement, (ast.Return, ast.Raise)):
+                break
+        for call in calls.calls:
+            if not isinstance(call.func, ast.Name):
+                continue
+            if call.func.id == "record_evidence" and call.args and isinstance(call.args[0], ast.Constant):
+                fields.add(call.args[0].value)
+            elif call.func.id in functions:
+                pending.append(call.func.id)
+    return fields
+
+
+@pytest.mark.parametrize("entry", ENTRIES, ids=lambda path: path.parent.parent.name)
+def test_official_family_e2e_has_an_evidence_entrypoint(entry):
+    tree = ast.parse(entry.read_text())
+    official = [node for node in tree.body if isinstance(node, ast.FunctionDef)
+                and re.fullmatch(r"test_.*e2e", node.name)]
+    assert official, f"{entry}: no official recorder-compatible E2E function"
+    for function in official:
+        assert "case_name" in {arg.arg for arg in function.args.args}, (
+            f"{entry}:{function.lineno}: pytest IDs do not replace the case_name parameter"
+        )
+        fields = _entrypoint_evidence_fields(tree, function.name)
+        assert {"inputs", "native", "reference"} <= fields, (
+            f"{entry}:{function.lineno} {function.name}: recording inputs, native and reference "
+            "could not be established through directly called local helpers. Module-wide "
+            "declarations do not qualify another entrypoint; dynamic/imported recording paths "
+            "need executable recorder controls. Contract-only tests must record that scope."
+        )
+
+
+def test_entrypoint_guard_does_not_borrow_a_sibling_or_uninvoked_helper():
+    tree = ast.parse('''
+def capture():
+    record_evidence("inputs", {})
+    record_evidence("native", {})
+    record_evidence("reference", {})
+def test_first_e2e(case_name):
+    capture()
+def test_second_e2e(case_name):
+    def unused():
+        capture()
+    callback = capture
+''')
+    assert _entrypoint_evidence_fields(tree, "test_first_e2e") == {"inputs", "native", "reference"}
+    assert _entrypoint_evidence_fields(tree, "test_second_e2e") == set()
+
+
+def test_entrypoint_guard_follows_local_helper_chains_without_recursion():
+    tree = ast.parse('''
+def capture_inputs():
+    record_evidence("inputs", {})
+    capture_outputs()
+def capture_outputs():
+    record_evidence("native", {})
+    record_evidence("reference", {})
+    capture_inputs()
+def test_model_e2e(case_name):
+    capture_inputs()
+''')
+    assert _entrypoint_evidence_fields(tree, "test_model_e2e") == {"inputs", "native", "reference"}
+
+
+def test_entrypoint_guard_does_not_count_unreachable_or_indirect_calls():
+    tree = ast.parse('''
+def test_return_e2e(case_name):
+    return
+    record_evidence("native", {})
+def test_dynamic_e2e(case_name, callback):
+    callback()
+''')
+    assert _entrypoint_evidence_fields(tree, "test_return_e2e") == set()
+    assert _entrypoint_evidence_fields(tree, "test_dynamic_e2e") == set()
+
+
+def test_library_comparison_snapshots_keep_arrays_and_strict_limits(tmp_path):
+    recorder = _recorder(tmp_path)
+    native, reference = np.arange(128, dtype=np.float32), np.arange(128, dtype=np.float32)
+    # The original library comparison determines success before recording it.
+    np.testing.assert_allclose(native, reference, atol=0, rtol=0)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        e2e_evidence.record_reference_comparison(
+            "Exact independent values", {"values": native}, {"values": reference},
+            [{"name": "max_abs", "scope": "independent_reference",
+              "actual": 0.0, "operator": "<", "expected": 0.01, "passed": True}],
+        )
+        recorder.finish("passed")
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+    comparison = recorder.data["reference_comparison"]
+    assert comparison["native"]["artifact"] != comparison["reference"]["artifact"]
+    for role in ("native", "reference"):
+        path = recorder.directory / comparison[role]["artifact"]
+        recorded = json.loads(path.read_text())
+        array = np.load(recorder.directory / recorded["values"]["artifact"], allow_pickle=False)
+        np.testing.assert_array_equal(array, native)
+    assert assessment(recorder.data)["kind"] == "reference"
+    assert "Exact independent values" in render_case(recorder.data, recorder.directory)
+
+
+@pytest.mark.parametrize("operator,actual,expected", [("<", 1, 1), (">", 1, 1)])
+def test_strict_comparison_boundary_does_not_become_a_pass(tmp_path, operator, actual, expected):
+    from tools.e2e_report import _assess_comparison_check
+
+    recorder = _recorder(tmp_path)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        e2e_evidence.record_reference_comparison(
+            "Strict boundary", {"value": actual}, {"value": expected},
+            [{"name": "strict", "scope": "independent_reference", "actual": actual,
+              "operator": operator, "expected": expected, "passed": False}],
+        )
+        recorder.finish("failed", failure="original comparison rejected the boundary")
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+    assert assessment(recorder.data)["kind"] == "failed"
+    check = recorder.data["reference_comparison"]["checks"][0]
+    assert check["passed"] is False
+    assert _assess_comparison_check(check) is False
+    assert _assess_comparison_check({**check, "passed": True}) is None
+
+
+def test_comparison_recording_errors_are_diagnostics_not_model_failures(tmp_path, monkeypatch):
+    recorder = _recorder(tmp_path)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        monkeypatch.setattr(Path, "write_bytes", lambda *args: (_ for _ in ()).throw(OSError("full disk")))
+        e2e_evidence.record_reference_comparison("Saved output", [1], [1], [])
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+    assert "reference_comparison" not in recorder.data
+    assert any("full disk" in issue for issue in recorder.data["issues"])
+
+
+def test_comparison_snapshots_obey_the_existing_size_budget(tmp_path, monkeypatch):
+    recorder = _recorder(tmp_path)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        monkeypatch.setattr(e2e_evidence, "_FILE_LIMIT", 8)
+        e2e_evidence.record_reference_comparison("Bounded", {"text": "long result"}, [1], [])
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+    assert "reference_comparison" not in recorder.data
+    assert any("size bound" in issue for issue in recorder.data["issues"])
+
+
+def test_audio_class_scores_show_supplied_labels_without_interpreting_scores(tmp_path):
+    data = _case()
+    data["inputs"]["manifest"]["task"] = "audio_to_class_scores"
+    data["native"] = {"top_class": 0, "class_label": "Speech <spoken>", "scores": [7.5, -2.0]}
+    data["reference"] = {"top_class": 0, "class_label": "Speech <spoken>", "scores": [7.4, -2.1]}
+    top = render_case(data, tmp_path).split('<details class="case-details">', 1)[0]
+    assert top.count("Speech &lt;spoken&gt;") == 2
+    assert top.count("Class ID <strong>0</strong>") == 2
+    assert "7.5" not in top and "probability" not in top.lower()
+
+
+@pytest.mark.parametrize("actual,expected,operator,passed,valid", [
+    ("Transcription", "Transcription", "==", True, True),
+    ("你好", "你好", "==", True, True),
+    ("a", "b", "==", False, True),
+    ("a", "b", "==", True, False),
+    ("1", 1, "==", True, False),
+    ("a", "b", ">=", False, False),
+])
+def test_recorded_text_comparison_is_exact_and_never_coerces_types(
+    tmp_path, actual, expected, operator, passed, valid
+):
+    from tools.e2e_report import _assess_reference_record
+
+    recorder = _recorder(tmp_path)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        e2e_evidence.record_reference_comparison(
+            "Original exact transcript check", {"text": actual}, {"text": expected},
+            [{"name": "transcript", "scope": "independent_reference", "actual": actual,
+              "operator": operator, "expected": expected, "passed": passed}],
+        )
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+    result = _assess_reference_record(recorder.data["reference_comparison"])
+    assert (result is not None) is valid
+    if valid:
+        assert result["passed"] is passed
+
+
+def test_contract_only_preserves_an_observed_reference_without_claiming_agreement(tmp_path):
+    data = _case()
+    data["status"] = "passed"
+    data["inputs"]["manifest"]["task"] = "text_generation"
+    data["native"] = {"text": "Native observed answer"}
+    data["reference"] = {
+        "mode": "contract_only", "reference_text": "Different reference sample",
+        "oracle": "Sampling option forwarding; output agreement was not asserted",
+    }
+    data["checks"] = [{"status": "passed", "expression": "len(token_ids) <= max_new_tokens"}]
+    assert assessment(data)["kind"] == "limited"
+    report = render_case(data, tmp_path)
+    visible = _visible(report)
+    assert "Native observed answer" in visible and "Different reference sample" in visible
+    assert "No reference output was generated" not in report
+    summary = _output_summary(data["reference"], role="reference", task="text_generation")
+    assert "reference agreement was not asserted" in summary
+
+
+@pytest.mark.parametrize("key", ["prompt", "test_prompt", "text", "query", "source_text"])
+def test_current_input_scope_precedes_recipe_text_key_priority(key):
+    from tools.e2e_report import _demo_input
+
+    data = {"inputs": {
+        "case": {"prompt": "RECIPE_PROMPT", "query": "RECIPE_QUERY",
+                 "inputs": {"prompt": "NESTED_RECIPE_PROMPT"}},
+        key: "CURRENT_OPERATION_INPUT",
+    }}
+    rendered = _demo_input(data)
+    assert "CURRENT_OPERATION_INPUT" in rendered
+    assert "RECIPE_PROMPT" not in rendered and "RECIPE_QUERY" not in rendered
+
+
+@pytest.mark.parametrize("key", ["prompt", "test_prompt", "text", "query", "source_text"])
+@pytest.mark.parametrize("cleared", ["", None])
+def test_explicit_current_text_clear_does_not_restore_recipe_inputs(key, cleared):
+    from tools.e2e_report import _demo_input
+
+    data = {"inputs": {key: cleared, "case": {
+        "prompt": "OLD_RECIPE_PROMPT", "query": "OLD_RECIPE_QUERY",
+        "inputs": {"text": "OLD_NESTED_TEXT"},
+    }}}
+    before = copy.deepcopy(data)
+    rendered = _demo_input(data)
+    assert "OLD_RECIPE" not in rendered and "OLD_NESTED_TEXT" not in rendered
+    assert data == before
+
+
+def test_cleared_prompt_can_coexist_with_another_current_text_field():
+    from tools.e2e_report import _demo_input
+
+    data = {"inputs": {"prompt": None, "query": "CURRENT_QUERY",
+                       "case": {"prompt": "OLD_PROMPT"}}}
+    rendered = _demo_input(data)
+    assert "CURRENT_QUERY" in rendered and "OLD_PROMPT" not in rendered
+
+
+def test_recipe_input_fallback_preserves_its_own_scope_priority():
+    from tools.e2e_report import _demo_input
+
+    data = {"inputs": {"case": {"query": "CASE_QUERY", "inputs": {"prompt": "NESTED_PROMPT"}}}}
+    assert "CASE_QUERY" in _demo_input(data)
+    assert "NESTED_PROMPT" not in _demo_input(data)
+
+
+@pytest.mark.parametrize("score", [0, -2.5, 0.75])
+def test_same_kind_scalar_scores_show_both_values_in_the_default_card(tmp_path, score):
+    data = _case()
+    data["inputs"]["manifest"]["task"] = "text_image_to_relevance"
+    data["native"] = {"score": score, "score_kind": "logit"}
+    data["reference"] = {"score": score + 0.125, "score_kind": "logit"}
+    top = render_case(data, tmp_path).split('<details class="case-details">', 1)[0]
+    assert "Score (logit)" in top
+    assert "<th>Native</th><th>Reference</th>" in top
+    assert f"{score + 0.125:.6g}" in top
+
+
+@pytest.mark.parametrize("score", [True, False, float("nan"), float("inf"), -float("inf"), 10**1000, "0.5"])
+def test_scalar_score_preview_requires_a_finite_number(score):
+    from tools.e2e_report import _demo_numeric_value
+
+    assert _demo_numeric_value({"score": score, "score_kind": "logit"}) is None
+
+
+@pytest.mark.parametrize("kind", [None, "", 7, False])
+def test_scalar_score_preview_does_not_guess_an_unspecified_kind(kind):
+    from tools.e2e_report import _demo_numeric_value
+
+    assert _demo_numeric_value({"score": 0.5, "score_kind": kind}) is None
+
+
+def test_scalar_score_kinds_are_not_normalized_or_paired(tmp_path):
+    from tools.e2e_report import _demo_numeric_comparison, _demo_numeric_value
+
+    native = {"score": 0.5, "score_kind": "probability"}
+    reference = {"score": 0.0, "score_kind": "logit"}
+    assert _demo_numeric_value(native)[0] != _demo_numeric_value(reference)[0]
+    rendered = _demo_numeric_comparison(native, reference)
+    assert "<th>Native</th><th>Reference</th>" not in rendered
+    assert _demo_numeric_value({"score": 1, "score_kind": "Logit"})[0] != _demo_numeric_value(reference)[0]
+    data = _case()
+    data["inputs"]["manifest"]["task"] = "text_image_to_relevance"
+    data["native"] = {"score": 0, "score_kind": "<raw>"}
+    data["reference"] = {"score": 1, "score_kind": "<raw>"}
+    top = render_case(data, tmp_path).split('<details class="case-details">', 1)[0]
+    assert "Score (&lt;raw&gt;)" in top and "<raw>" not in top
+
+
+def test_primary_tensor_keeps_priority_over_auxiliary_scalar_score():
+    from tools.e2e_report import _demo_numeric_value, _numeric_data
+
+    original_label, original_values = _demo_numeric_value({"values": [1, 2]})
+    label, values = _demo_numeric_value({"values": [1, 2], "score": 0.5, "score_kind": "logit"})
+    assert label == original_label
+    assert _numeric_data(values) == _numeric_data(original_values)
+
+
+def _two_recorded_media_operations(tmp_path, *, failed=False, partial=False, same_index=False, views=True):
+    data = _case()
+    data.update(status="failed" if failed else "passed", artifacts=[], observations=[])
+    urls = {}
+
+    def record(name, value):
+        snapshot = copy.deepcopy(value)
+        data["observations"].append({"name": name, "value": snapshot})
+        data[name] = {**data.get(name, {}), **snapshot} if name == "inputs" else snapshot
+
+    for operation, index in (("earlier", 0), ("current", 0 if same_index else 4)):
+        record("inputs", {"prompt": operation + " request"})
+        record("native", None)
+        record("reference", None)
+        record("views", [])
+        if operation == "current" and failed:
+            continue
+        current_views = []
+        for role in ("native", "reference"):
+            if operation == "current" and partial and role == "reference":
+                continue
+            name = f"{operation}-{role}.png"
+            color = (20 if operation == "earlier" else 180, 40 if role == "native" else 200, 80)
+            urls[operation, role] = _rgb_png(tmp_path / name, color)
+            data["artifacts"].append({"path": name, "role": role})
+            record(role, {"image": {"artifact": name}})
+            current_views.append({"title": f"Sample {index} / {role}", "image": {"artifact": name},
+                                  "caption": operation + " operation"})
+        if operation == "earlier" or views:
+            record("views", current_views)
+    return data, urls
+
+
+@pytest.mark.parametrize("same_index", [False, True])
+def test_current_media_pair_precedes_history_from_another_operation(tmp_path, same_index):
+    data, urls = _two_recorded_media_operations(tmp_path, same_index=same_index)
+    before = copy.deepcopy(data)
+    verdict = assessment(data)
+    report = render_case(data, tmp_path)
+    top = report.split('<details class="case-details">', 1)[0]
+    for role in ("native", "reference"):
+        assert urls["current", role] in top
+        assert urls["earlier", role] not in top and urls["earlier", role] in report
+    assert 'data-media-paired="true"' in top
+    assert data == before and assessment(data) == verdict
+
+
+def test_identical_media_retains_three_operation_scopes_without_duplicate_mirrors(tmp_path):
+    data, urls = _two_recorded_media_operations(tmp_path, same_index=True)
+    data["observations"].append({"name": "views", "value": []})
+    latest_views = []
+    for role in ("native", "reference"):
+        original = (tmp_path / f"earlier-{role}.png").read_bytes()
+        (tmp_path / f"current-{role}.png").write_bytes(original)
+        name = f"latest-{role}.png"
+        (tmp_path / name).write_bytes(original)
+        data["artifacts"].append({"path": name, "role": role})
+        value = {"image": {"artifact": name}}
+        data[role] = copy.deepcopy(value)
+        data["observations"].append({"name": role, "value": value})
+        latest_views.append({"title": f"Sample 0 / {role}", "image": {"artifact": name},
+                             "caption": "latest operation"})
+    data["inputs"]["prompt"] = "latest request"
+    data["views"] = copy.deepcopy(latest_views)
+    data["observations"].append({"name": "views", "value": latest_views})
+    original_data = copy.deepcopy(data)
+    report = render_case(data, tmp_path)
+    top = report.split('<details class="case-details">', 1)[0]
+    assert "latest operation" in top
+    assert "earlier operation" not in top and "current operation" not in top
+    assert "earlier operation" in report and "current operation" in report
+    for role in ("native", "reference"):
+        assert report.count(f'<figure data-media-role="{role}">') == 3
+        assert report.count(urls["earlier", role]) == 3
+    assert data == original_data
+    data["observations"].append({"name": "views", "value": copy.deepcopy(latest_views)})
+    mirrored = render_case(data, tmp_path)
+    for role in ("native", "reference"):
+        assert mirrored.count(f'<figure data-media-role="{role}">') == 3
+
+
+def test_identical_path_title_and_caption_keep_three_operation_histories(tmp_path):
+    from tools.e2e_report import _media_items
+
+    data = _case()
+    data.update(artifacts=[], observations=[])
+    views = []
+    for role in ("native", "reference"):
+        name = f"shared-{role}.png"
+        _rgb_png(tmp_path / name, (30, 60 if role == "native" else 120, 90))
+        data["artifacts"].append({"path": name, "role": role})
+        data[role] = {"image": {"artifact": name}}
+        views.append({"title": f"Sample 0 / {role}", "image": {"artifact": name},
+                      "caption": "Identical path, title and caption"})
+    for _ in range(3):
+        data["observations"].append({"name": "views", "value": []})
+        data["observations"].append({"name": "views", "value": copy.deepcopy(views)})
+    data["views"] = copy.deepcopy(views)
+    items = _media_items(data, data["artifacts"])
+    assert len(items) == 6 and {item["operation_scope"] for item in items} == {1, 2, 3}
+    report = render_case(data, tmp_path)
+    top = report.split('<details class="case-details">', 1)[0]
+    for role in ("native", "reference"):
+        assert top.count(f'<figure data-media-role="{role}">') == 1
+        assert report.count(f'<figure data-media-role="{role}">') == 3
+    data["observations"].append({"name": "views", "value": copy.deepcopy(views)})
+    assert len(_media_items(data, data["artifacts"])) == 6
+
+
+def test_current_native_view_never_borrows_a_historical_reference(tmp_path):
+    data, urls = _two_recorded_media_operations(tmp_path, partial=True, same_index=True)
+    report = render_case(data, tmp_path)
+    top = report.split('<details class="case-details">', 1)[0]
+    assert urls["current", "native"] in top and 'data-media-paired="false"' in top
+    for role in ("native", "reference"):
+        assert urls["earlier", role] not in top and urls["earlier", role] in report
+
+
+def test_explicit_output_reset_keeps_old_media_only_in_details(tmp_path):
+    data, urls = _two_recorded_media_operations(tmp_path, failed=True)
+    report = render_case(data, tmp_path)
+    top = report.split('<details class="case-details">', 1)[0]
+    assert "current request" in top
+    for url in urls.values():
+        assert url not in top and url in report
+    assert assessment(data)["kind"] == "failed"
+
+
+def test_cleared_views_can_still_show_current_direct_media(tmp_path):
+    from tools.e2e_report import _artifacts
+
+    data, urls = _two_recorded_media_operations(tmp_path, views=False)
+    previews, more = _artifacts(data, tmp_path, [256 * 1024 * 1024])
+    for role in ("native", "reference"):
+        assert urls["current", role] in previews[role]
+        assert urls["earlier", role] not in "".join(previews.values())
+        assert urls["earlier", role] in more
+
+
+def test_unscoped_media_keeps_the_legacy_first_pair_fallback(tmp_path):
+    data, urls = _two_recorded_media_operations(tmp_path)
+    del data["views"]
+    top = render_case(data, tmp_path).split('<details class="case-details">', 1)[0]
+    for role in ("native", "reference"):
+        assert urls["earlier", role] in top and urls["current", role] not in top
+
+
+def test_explicit_empty_input_media_does_not_resurrect_recipe_or_history(tmp_path):
+    data = _case()
+    url = _rgb_png(tmp_path / "old-input.png", (20, 30, 40))
+    old = {"artifact": "old-input.png"}
+    data["inputs"] = {"prompt": "Current text-only request", "media": [], "case": {"image": old}}
+    data["observations"] = [{"name": "inputs", "value": {"media": [old]}}]
+    data["artifacts"] = [{"path": "old-input.png", "role": "inputs"}]
+    top = render_case(data, tmp_path).split('<details class="case-details">', 1)[0]
+    assert "Current text-only request" in top and url not in top
+    assert url in render_case(data, tmp_path)
+
+
+@pytest.mark.parametrize("values", [[1.0, 2.0], list(range(16))])
+def test_reference_only_numeric_preview_names_its_actual_role(values):
+    from tools.e2e_report import _demo_output
+
+    page = _demo_output({"values": values}, role="reference", task="text_to_embedding")
+    assert "Reference" in page and "Native" not in page
+    if len(values) > 8:
+        assert 'aria-label="Reference"' in page and 'stroke-dasharray="6 4"' in page
+        assert "Reference · dashed" in page

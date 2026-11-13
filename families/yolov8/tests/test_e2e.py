@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+from tools.e2e_evidence import record_evidence, record_reference_comparison
+from families.yolov8.tests.reporting import record_detection_views
+
 import json
 import os
 import subprocess
@@ -107,10 +110,13 @@ def _assert_matches_reference(
     actual: dict, kept: np.ndarray, scale: float, pad_x: float, pad_y: float
 ) -> None:
     """The original native-vs-PyTorch oracle, applied unchanged to every path."""
+    record_evidence("native", actual)
     assert len(kept), "the reference found nothing above the threshold to compare against"
     assert len(actual["scores"]) == len(kept), (
         f"engine returned {len(actual['scores'])} detections, reference {len(kept)}"
     )
+    record_evidence("reference", {"detections_letterbox": kept, "scale": scale, "pad_x": pad_x, "pad_y": pad_y})
+    comparison_checks = []
     for index, row in enumerate(kept):
         x0, y0, x1, y1, score, label = row
         assert int(actual["classes"][index]) == int(label)
@@ -126,10 +132,29 @@ def _assert_matches_reference(
         for axis, want in enumerate(expected):
             # Each path writes the boxes as one flat array, four per detection.
             assert abs(float(actual["boxes"][index * 4 + axis]) - want) < 1.0
+        comparison_checks.extend([
+            {"name": f"class_{index}", "scope": "independent_reference",
+             "actual": int(actual["classes"][index]), "operator": "==", "expected": int(label), "passed": True},
+            {"name": f"score_error_{index}", "scope": "independent_reference",
+             "actual": abs(float(actual["scores"][index]) - float(score)), "operator": "<", "expected": 5e-3, "passed": True},
+            {"name": f"box_error_{index}", "scope": "independent_reference",
+             "actual": max(abs(float(actual["boxes"][index * 4 + axis]) - want) for axis, want in enumerate(expected)),
+             "operator": "<", "expected": 1.0, "passed": True},
+        ])
+    record_reference_comparison(
+        "Detections against the independent reference", actual,
+        {"detections_letterbox": kept, "scale": scale, "pad_x": pad_x, "pad_y": pad_y},
+        comparison_checks,
+    )
 
 
 def _sdk_detections(runtime_root: Path, bundle: Path, image: Path, tmp_path: Path) -> list[dict]:
     """Run the public C and C++ consumers on the reference's own decoded pixels."""
+    record_evidence("inputs", {"operation": "sdk", "sdk_language": None, "image": image})
+    record_evidence("native", None)
+    record_evidence("reference", None)
+    record_evidence("views", [])
+    record_evidence("detection_view_summary", None)
     from PIL import Image
 
     native_build = _required_path(
@@ -144,6 +169,11 @@ def _sdk_detections(runtime_root: Path, bundle: Path, image: Path, tmp_path: Pat
     )
     outputs = []
     for language in ("c", "cpp"):
+        record_evidence("inputs", {"sdk_language": language})
+        record_evidence("native", None)
+        record_evidence("reference", None)
+        record_evidence("views", [])
+        record_evidence("detection_view_summary", None)
         consumer = native_build / f"test_yolov8_sdk_{language}"
         assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
         completed = subprocess.run(
@@ -164,6 +194,7 @@ def _sdk_detections(runtime_root: Path, bundle: Path, image: Path, tmp_path: Pat
         payloads = [line for line in completed.stdout.splitlines() if line.startswith("{")]
         assert len(payloads) == 1, f"the {language} consumer must print one result"
         result = json.loads(payloads[0])
+        record_evidence("native", result)
         assert result["task"] == "image_to_boxes"
         assert (result["image_height"], result["image_width"]) == pixels.shape[:2]
         outputs.append(result)
@@ -174,6 +205,9 @@ def _sdk_detections(runtime_root: Path, bundle: Path, image: Path, tmp_path: Pat
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence("checkpoint", {"hf_id": manifest["hf_id"], "hf_revision": manifest.get("hf_revision")})
+    record_evidence("thresholds", {"class_ids": "exact equality", "score_absolute_difference_strict_max": 5e-3, "box_coordinate_difference_strict_max_px": 1.0})
     binary = _required_path(os.environ.get("TRTMC_BINARY"), "TRTMC_BINARY")
     runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
     assert (runtime_root / "libtrtmc_backend_trt.so").is_file()
@@ -192,6 +226,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         )
     )
     image = _asset(case)
+    record_evidence("inputs", {"image": image})
     completed = subprocess.run(
         [
             str(binary),
@@ -208,6 +243,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         timeout=600,
     )
     actual = json.loads(completed.stdout)
+    record_evidence("native", actual)
 
     reference_output = tmp_path / "reference.npz"
     subprocess.run(
@@ -219,8 +255,19 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     with np.load(reference_output, allow_pickle=False) as result:
         kept = result["kept"]
         scale, pad_x, pad_y = (float(result[name]) for name in ("scale", "pad_x", "pad_y"))
+    record_detection_views(actual, kept, image, tmp_path / "detection-views",
+                           scale=scale, pad_x=pad_x, pad_y=pad_y)
     _assert_matches_reference(actual, kept, scale, pad_x, pad_y)
     # The public SDK reads the same pixels the reference decoded, so it is held to
     # the same oracle; the CLI's own JPEG decoder is not claimed bitwise equal.
-    for sdk in _sdk_detections(runtime_root, bundle, image, tmp_path):
+    for sample_index, sdk in enumerate(_sdk_detections(runtime_root, bundle, image, tmp_path), start=1):
+        language = ("c", "cpp")[sample_index - 1]
+        record_evidence("inputs", {"operation": "sdk", "sdk_language": language})
+        record_evidence("native", sdk)
+        record_evidence("views", [])
+        record_evidence("detection_view_summary", None)
+        record_evidence("reference", {"detections_letterbox": kept, "scale": scale, "pad_x": pad_x, "pad_y": pad_y})
+        record_detection_views(sdk, kept, image, tmp_path / "sdk-detection-views",
+                               scale=scale, pad_x=pad_x, pad_y=pad_y, sample_index=sample_index,
+                               operation="SDK C" if language == "c" else "SDK C++")
         _assert_matches_reference(sdk, kept, scale, pad_x, pad_y)

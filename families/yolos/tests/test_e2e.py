@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+from tools.e2e_evidence import record_evidence, record_reference_comparison
+from families.yolos.tests.reporting import record_detection_views
+
 import json
 import os
 import subprocess
@@ -241,10 +244,21 @@ def _assert_parity(native: list[dict], reference: list[dict], case: dict) -> Non
             f"native detection label={detection['label']} score={detection['score']:.4f} "
             f"differs from reference {best['score']:.4f}"
         )
+        record_reference_comparison(
+            f"Detection label {detection['label']}", detection, best,
+            [{"name": "box_iou", "scope": "independent_reference", "actual": overlap,
+              "operator": ">=", "expected": minimum_iou, "passed": True},
+             {"name": "score_error", "scope": "independent_reference",
+              "actual": abs(detection["score"] - best["score"]), "operator": "<=",
+              "expected": maximum_score_difference, "passed": True}],
+        )
 
 
 def test_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case, "image": _asset(case["test_image"])})
+    record_evidence("checkpoint", {"hf_id": manifest["hf_id"], "hf_revision": manifest.get("hf_revision")})
+    record_evidence("thresholds", {"min_box_iou": case["min_box_iou"], "max_score_abs_diff": case["max_score_abs_diff"]})
     assert manifest["trust_remote_code"] is False
     binary, runtime_root = _runtime()
     model_dir = _model_dir(manifest)
@@ -252,5 +266,8 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
 
     _build(model_dir, bundle, manifest)
     native = _native(binary, runtime_root, bundle, case)
+    record_evidence("native", {"detections": native})
     reference = _official_reference(model_dir, manifest, case)
+    record_evidence("reference", {"detections": reference})
+    record_detection_views(native, reference, _asset(case["test_image"]), tmp_path / "detection-views")
     _assert_parity(native, reference, case)

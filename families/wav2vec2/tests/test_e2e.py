@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from tools.e2e_evidence import record_evidence, record_reference_comparison
+
 import json
 import os
 import shutil
@@ -277,18 +279,31 @@ def _assert_parity(native: dict, reference_text: str, reference_ids: list[int]) 
     assert token_ids == reference_ids, (
         f"token id mismatch: native has {len(token_ids)} ids, reference {len(reference_ids)}"
     )
+    record_reference_comparison(
+        "Exact CTC token IDs", native, {"text": reference_text, "token_ids": reference_ids},
+        [{"name": "token_count", "scope": "independent_reference", "actual": len(token_ids),
+          "operator": "==", "expected": len(reference_ids), "passed": True},
+         {"name": "matching_token_ids", "scope": "independent_reference",
+          "actual": sum(actual == expected for actual, expected in zip(token_ids, reference_ids)),
+          "operator": "==", "expected": len(reference_ids), "passed": True}],
+    )
     print(f"wav2vec2 parity: {len(token_ids)} CTC tokens, transcript {text!r}")
 
 
 def test_e2e(tmp_path: Path, case_name: str) -> None:
     manifest_path, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case, "audio": _asset(case["test_input_audio"])})
     assert manifest_path.is_file()
     binary, runtime_root = _runtime()
     model_dir = _model_dir(manifest)
+    record_evidence("checkpoint", {"hf_id": manifest["hf_id"], "hf_revision": manifest.get("hf_revision")})
     bundle = tmp_path / str(manifest["bundle"])
     _build(model_dir, bundle, manifest)
     assert bundle.is_file(), f"{FAMILY} bundle was not produced: {bundle}"
 
     native = _native(binary, runtime_root, bundle, case)
+    record_evidence("native", native)
     reference_text, reference_ids = _official_reference(model_dir, case)
+    record_evidence("reference", {"text": reference_text, "token_ids": reference_ids})
+    record_evidence("thresholds", {"transcript": "exact stripped text", "ctc_token_ids": "exact equality"})
     _assert_parity(native, reference_text, reference_ids)

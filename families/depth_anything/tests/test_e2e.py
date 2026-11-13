@@ -5,6 +5,10 @@
 
 from __future__ import annotations
 
+from families.depth_anything.tests.reporting import record_depth_views
+
+from tools.e2e_evidence import evidence_stage, record_evidence, record_reference_comparison
+
 import json
 import os
 import subprocess
@@ -208,16 +212,71 @@ def _assert_parity(native, reference, case: dict) -> None:
     assert relative_error <= float(case["max_depth_relative_error"]), (
         f"depth relative error {relative_error:.6f} exceeds {case['max_depth_relative_error']}"
     )
+    record_evidence(
+        "thresholds",
+        {
+            "min_depth_correlation": float(case["min_depth_correlation"]),
+            "max_depth_relative_error": float(case["max_depth_relative_error"]),
+        },
+    )
+    record_reference_comparison(
+        "Depth map agreement",
+        {"depth": native},
+        {"depth": reference},
+        [
+            {
+                "name": "depth_correlation",
+                "scope": "independent_reference",
+                "actual": correlation,
+                "operator": ">=",
+                "expected": float(case["min_depth_correlation"]),
+                "passed": correlation >= float(case["min_depth_correlation"]),
+            },
+            {
+                "name": "depth_relative_error",
+                "scope": "independent_reference",
+                "actual": relative_error,
+                "operator": "<=",
+                "expected": float(case["max_depth_relative_error"]),
+                "passed": relative_error <= float(case["max_depth_relative_error"]),
+            },
+        ],
+    )
 
 
 def test_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence(
+        "inputs", {"manifest": manifest, "case": case, "image": TEST_ROOT / "data" / case["test_image"]}
+    )
+    record_evidence(
+        "thresholds",
+        {
+            "min_depth_correlation": case.get("min_depth_correlation"),
+            "max_depth_relative_error": case.get("max_depth_relative_error"),
+        },
+    )
     assert manifest["trust_remote_code"] is False
     binary, runtime_root = _runtime()
     model_dir = _model_dir(manifest)
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     bundle = tmp_path / manifest["bundle"]
 
-    _build(model_dir, bundle, manifest)
-    native, height, width = _native(binary, runtime_root, bundle, case)
-    reference = _official_reference(model_dir, case, height, width)
-    _assert_parity(native, reference, case)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
+    with evidence_stage("native"):
+        native, height, width = _native(binary, runtime_root, bundle, case)
+    record_evidence("native", {"depth": native, "height": height, "width": width})
+    with evidence_stage("reference"):
+        reference = _official_reference(model_dir, case, height, width)
+    record_evidence("reference", {"depth": reference, "height": height, "width": width})
+    record_depth_views(native, reference, height, width, tmp_path / "depth-views")
+    with evidence_stage("compare"):
+        _assert_parity(native, reference, case)

@@ -35,6 +35,8 @@ land on the sigmoid.
 
 from __future__ import annotations
 
+from tools.e2e_evidence import evidence_stage, record_evidence, record_reference_comparison
+
 import json
 import math
 import os
@@ -312,22 +314,54 @@ def _cosine(left: list[float], right: list[float]) -> float:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence(
+        "inputs", {"manifest": manifest, "case": case, "image": TEST_ROOT / case["test_image"]}
+    )
     # A quantized case states its own tolerances in the manifest: the defaults above
     # are sized to catch structural errors in a float32 build and are far tighter than
     # FP8 rounding. A case without them keeps the defaults.
     embedding_tolerance = float(case.get("embedding_tolerance", _EMBEDDING_TOLERANCE))
     logit_tolerance = float(case.get("logit_tolerance", _LOGIT_TOLERANCE))
     cosine_floor = float(case.get("cosine_floor", _COSINE_FLOOR))
+    record_evidence(
+        "thresholds",
+        {
+            "cosine_floor": cosine_floor,
+            "max_embedding_error": embedding_tolerance,
+            "max_logit_error": logit_tolerance,
+        },
+    )
     model_dir = _model_dir(manifest)
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
 
-    reference_image, reference_texts, scale, bias = _reference(model_dir, case)
+    with evidence_stage("reference"):
+        reference_image, reference_texts, scale, bias = _reference(model_dir, case)
+    record_evidence(
+        "reference",
+        {
+            "image_embedding": reference_image,
+            "text_embeddings": reference_texts,
+            "logit_scale": scale,
+            "logit_bias": bias,
+        },
+    )
 
-    native_image = _native_embedding(binary, runtime_root, bundle, case, "--task",
-                                     "image_to_embedding", "--image",
-                                     str(_asset(case["test_image"])))
+    with evidence_stage("native"):
+        native_image = _native_embedding(binary, runtime_root, bundle, case, "--task",
+                                         "image_to_embedding", "--image",
+                                         str(_asset(case["test_image"])))
+    record_evidence("native", {"operation": "image_to_embedding", "values": native_image})
     image_delta = _max_abs(native_image, reference_image)
     image_cosine = _cosine(native_image, reference_image)
     assert image_cosine >= cosine_floor, f"image embedding cosine {image_cosine}"
@@ -335,10 +369,40 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         f"image embedding differs from the reference by {image_delta}"
     )
 
+    record_reference_comparison(
+        "Image embedding",
+        {"values": native_image},
+        {"values": reference_image},
+        [
+            {
+                "name": "cosine",
+                "scope": "independent_reference",
+                "actual": image_cosine,
+                "operator": ">=",
+                "expected": cosine_floor,
+                "passed": image_cosine >= cosine_floor,
+            },
+            {
+                "name": "max_abs_error",
+                "scope": "independent_reference",
+                "actual": image_delta,
+                "operator": "<=",
+                "expected": embedding_tolerance,
+                "passed": image_delta <= embedding_tolerance,
+            },
+        ],
+    )
+
     text_deltas = []
     for text, expected in zip((case["query"], case["negative_query"]), reference_texts):
-        native = _native_embedding(binary, runtime_root, bundle, case, "--task",
-                                   "text_to_embedding", "--text", str(text))
+        record_evidence("inputs", {"text": str(text), "query": str(text), "image": None, "media": []})
+        record_evidence("native", None)
+        record_evidence("views", [])
+        record_evidence("reference", {"operation": "text_to_embedding", "values": expected})
+        with evidence_stage("native"):
+            native = _native_embedding(binary, runtime_root, bundle, case, "--task",
+                                       "text_to_embedding", "--text", str(text))
+        record_evidence("native", {"operation": "text_to_embedding", "values": native})
         cosine = _cosine(native, expected)
         assert cosine >= cosine_floor, f"text embedding cosine {cosine} for {text!r}"
         delta = _max_abs(native, expected)
@@ -346,6 +410,29 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             f"text embedding for {text!r} differs from the reference by {delta}"
         )
         text_deltas.append(delta)
+        record_reference_comparison(
+            "Text embedding",
+            {"values": native},
+            {"values": expected},
+            [
+                {
+                    "name": "cosine",
+                    "scope": "independent_reference",
+                    "actual": cosine,
+                    "operator": ">=",
+                    "expected": cosine_floor,
+                    "passed": cosine >= cosine_floor,
+                },
+                {
+                    "name": "max_abs_error",
+                    "scope": "independent_reference",
+                    "actual": delta,
+                    "operator": "<=",
+                    "expected": embedding_tolerance,
+                    "passed": delta <= embedding_tolerance,
+                },
+            ],
+        )
 
     # SigLIP scores a pair on its own: the sigmoid is calibrated by the
     # checkpoint's own scale and bias and needs no other candidate, so the
@@ -354,18 +441,46 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     scores = []
     logit_deltas = []
     for text, expected_text in zip((case["query"], case["negative_query"]), reference_texts):
-        payload = _run_json(binary, runtime_root, bundle, case, "rerank", "--task",
-                            "text_image_to_relevance", "--query", str(text), "--image",
-                            str(_asset(case["test_image"])))
+        record_evidence("inputs", {"text": str(text), "query": str(text), "image": None, "media": [{"image": TEST_ROOT / case["test_image"]}]})
+        record_evidence("native", None)
+        record_evidence("views", [])
+        record_evidence("reference", None)
+        with evidence_stage("native"):
+            payload = _run_json(binary, runtime_root, bundle, case, "rerank", "--task",
+                                "text_image_to_relevance", "--query", str(text), "--image",
+                                str(_asset(case["test_image"])))
+        record_evidence("native", payload)
         assert payload["score_kind"] == "probability"
         score = float(payload["score"])
         assert 0.0 <= score <= 1.0, f"{FAMILY} returned a score outside [0, 1]: {score}"
         expected_logit = scale * sum(a * b for a, b in zip(reference_image, expected_text)) + bias
         delta = abs(_logit(score) - expected_logit)
+        record_evidence("native", {
+            **payload, "text": f"Native pair relevance probability: {score:.9g}",
+        })
+        record_evidence("reference", {
+            "logit": expected_logit, "score": expected_logit, "score_kind": "logit",
+            "text": f"Independent reference logit: {expected_logit:.9g}; comparison uses logit space.",
+        })
         assert delta <= logit_tolerance, (
             f"relevance logit for {text!r} differs from the reference by {delta}"
         )
         logit_deltas.append(delta)
+        record_reference_comparison(
+            "Text-image relevance logit",
+            payload,
+            {"logit": expected_logit},
+            [
+                {
+                    "name": "logit_error",
+                    "scope": "independent_reference",
+                    "actual": delta,
+                    "operator": "<=",
+                    "expected": logit_tolerance,
+                    "passed": delta <= logit_tolerance,
+                },
+            ],
+        )
         scores.append(score)
     assert scores[0] > scores[1], (
         f"{FAMILY} scored the negative text higher: {scores[0]} <= {scores[1]}"

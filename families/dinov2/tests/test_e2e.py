@@ -33,12 +33,15 @@ adds a second check; see ``_FP16_FEATURE_TOLERANCE``.
 """
 from __future__ import annotations
 
+from tools.e2e_evidence import evidence_stage, record_evidence, record_reference_comparison
+
 import json
 import math
 import os
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
@@ -324,24 +327,84 @@ def _check_features(native: list[list[float]], reference: list[list[float]], pre
         assert share < _TANH_SHARE_LIMIT, (
             f"{FAMILY} fp16 features carry {share:.2f} of the tanh-GELU defect"
         )
+    record_evidence("thresholds", {"cosine_floor": _COSINE_FLOOR, "max_abs_error": tolerance})
+    record_reference_comparison(
+        "Reference values",
+        {"values": native},
+        {"values": reference},
+        [
+            {
+                "name": "cosine",
+                "scope": "independent_reference",
+                "actual": cosine,
+                "operator": ">=",
+                "expected": _COSINE_FLOOR,
+                "passed": cosine >= _COSINE_FLOOR,
+            },
+            {
+                "name": "max_abs_error",
+                "scope": "independent_reference",
+                "actual": worst,
+                "operator": "<=",
+                "expected": tolerance,
+                "passed": worst <= tolerance,
+            },
+        ],
+    )
+    if precision == "fp16":
+        record_evidence("thresholds", {"max_tanh_defect_share": _TANH_SHARE_LIMIT})
+        record_evidence("diagnostics", {"counterfactual_control": {
+            "name": "Tanh approximation control", "native": {"values": np.asarray(native)},
+            "reference": {"values": np.asarray(reference)},
+            "tanh_reference": np.asarray(tanh_reference),
+            "actual": share, "operator": "<", "expected": _TANH_SHARE_LIMIT,
+            "passed": share < _TANH_SHARE_LIMIT,
+        }})
     return worst, cosine
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence(
+        "inputs", {"manifest": manifest, "case": case, "image": TEST_ROOT / case["test_image"]}
+    )
+    record_evidence(
+        "thresholds",
+        {
+            "cosine_floor": _COSINE_FLOOR,
+            "max_abs_error": _FP16_FEATURE_TOLERANCE
+            if manifest["precision"] == "fp16"
+            else _FEATURE_TOLERANCE,
+        },
+    )
     model_dir = _model_dir(manifest)
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
 
-    reference = _reference(model_dir, case)
+    with evidence_stage("reference"):
+        reference = _reference(model_dir, case)
+    record_evidence("reference", {"values": np.asarray(reference)})
     gate = _gate(manifest)
     tanh_reference = None
     if gate == "fp16":
-        tanh_reference = _reference(model_dir, case, hidden_act="gelu_pytorch_tanh")
-    payload = _run_json(binary, runtime_root, bundle, case, "extract-features", "--task",
-                        "image_to_token_and_pooled_features", "--image",
-                        str(_asset(case["test_image"])))
+        with evidence_stage("reference"):
+            tanh_reference = _reference(model_dir, case, hidden_act="gelu_pytorch_tanh")
+        record_evidence("diagnostics", {"tanh_reference": np.asarray(tanh_reference)})
+    with evidence_stage("native"):
+        payload = _run_json(binary, runtime_root, bundle, case, "extract-features", "--task",
+                            "image_to_token_and_pooled_features", "--image",
+                            str(_asset(case["test_image"])))
+    record_evidence("native", payload)
 
     shape = [int(value) for value in payload["last_hidden_state_shape"]]
     assert shape[0] == 1, f"{FAMILY} returned a batch of {shape[0]}"
@@ -353,8 +416,13 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     values = [float(value) for value in payload["last_hidden_state"]]
     assert len(values) == rows * columns
     native = [values[index * columns:(index + 1) * columns] for index in range(rows)]
+    # Persist the complete matrix in the same row-major shape as the reference;
+    # the native JSON fields remain available alongside this display tensor.
+    record_evidence("native", {**payload, "values": np.asarray(native)})
 
-    worst, cosine = _check_features(native, reference, gate, tanh_reference)
+    with evidence_stage("compare"):
+        worst, cosine = _check_features(native, reference, gate, tanh_reference)
+    record_evidence("metrics", {"max_abs_error": worst, "cosine": cosine})
     class_delta = max(abs(a - b) for a, b in zip(native[0], reference[0]))
 
     # The class row comes first and the patches follow it in row-major order.

@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
-from tools.e2e_evidence import evidence_stage, record_evidence
+from tools.e2e_evidence import evidence_stage, record_evidence, record_reference_comparison
 
 FAMILY = "parakeet_tdt"
 TASKS = frozenset({"speech_transcription"})
@@ -121,6 +121,7 @@ def _audio(case, generated_root):
         assert source.getsampwidth() == 2, "Parakeet fixtures must use PCM16"
         rate, channels = source.getframerate(), source.getnchannels()
         audio = np.frombuffer(source.readframes(source.getnframes()), dtype="<i2")
+    record_evidence("inputs", {"audio": path, "sample_rate": rate, "channels": channels})
     return audio.astype(np.float32) / 32768.0, rate, channels
 
 
@@ -129,6 +130,12 @@ def _assert_parity(actual, expected):
     reference = " ".join(expected["text"].split()).lower()
     assert reference, "official reference produced an empty transcript"
     assert hypothesis == reference, f"transcript mismatch: {hypothesis!r} != {reference!r}"
+    record_evidence("thresholds", {"transcript_equality": "lowercase with collapsed whitespace"})
+    record_reference_comparison(
+        "Normalized transcript equality", actual, expected,
+        [{"name": "normalized_transcript", "scope": "independent_reference",
+          "actual": hypothesis, "operator": "==", "expected": reference, "passed": True}],
+    )
 
 
 def _reference(model_dir, audio, rate, channels, max_new_tokens):
@@ -194,9 +201,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         outputs = [json.loads(line) for line in result.stdout.splitlines() if line.startswith("{")]
         assert len(outputs) == 1, "SDK consumer must return exactly one transcript"
         actual = outputs[0]
+    record_evidence("native", actual)
     with evidence_stage("reference"):
         expected = _reference(model_dir, audio, rate, channels, int(case["max_new_tokens"]))
-    record_evidence("native", actual)
     record_evidence("reference", expected)
     with evidence_stage("compare"):
         _assert_parity(actual, expected)

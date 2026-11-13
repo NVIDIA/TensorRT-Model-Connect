@@ -10,6 +10,8 @@ the scored pair. Each is compared against the reference it corresponds to.
 
 from __future__ import annotations
 
+from tools.e2e_evidence import evidence_stage, record_evidence, record_reference_comparison
+
 import json
 import math
 import os
@@ -256,44 +258,122 @@ def _cosine(left: list[float], right: list[float]) -> float:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence(
+        "inputs", {"manifest": manifest, "case": case, "image": TEST_ROOT / case["test_image"]}
+    )
     model_dir = _model_dir(manifest)
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
+    record_evidence("thresholds", {"cosine_floor": _COSINE_FLOOR, "max_score_error": _SCORE_TOLERANCE})
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
 
-    reference_image, reference_texts, scale = _reference(model_dir, case)
+    with evidence_stage("reference"):
+        reference_image, reference_texts, scale = _reference(model_dir, case)
+    record_evidence(
+        "reference",
+        {"image_embedding": reference_image, "text_embeddings": reference_texts, "logit_scale": scale},
+    )
 
-    native_image = _native_embedding(binary, runtime_root, bundle, case, "--task",
-                                     "image_to_embedding", "--image",
-                                     str(_asset(case["test_image"])))
+    with evidence_stage("native"):
+        native_image = _native_embedding(binary, runtime_root, bundle, case, "--task",
+                                         "image_to_embedding", "--image",
+                                         str(_asset(case["test_image"])))
+    record_evidence("native", {"operation": "image_to_embedding", "values": native_image})
     image_cosine = _cosine(native_image, reference_image)
     assert image_cosine >= _COSINE_FLOOR, f"image embedding cosine {image_cosine}"
+    record_reference_comparison(
+        "Image embedding",
+        {"values": native_image},
+        {"values": reference_image},
+        [
+            {
+                "name": "cosine",
+                "scope": "independent_reference",
+                "actual": image_cosine,
+                "operator": ">=",
+                "expected": _COSINE_FLOOR,
+                "passed": image_cosine >= _COSINE_FLOOR,
+            },
+        ],
+    )
 
     text_cosines = []
     native_texts = []
     for text, expected in zip((case["query"], case["negative_query"]), reference_texts):
-        native = _native_embedding(binary, runtime_root, bundle, case, "--task",
-                                   "text_to_embedding", "--text", str(text))
+        record_evidence("inputs", {"text": str(text), "query": str(text), "image": None, "media": []})
+        record_evidence("native", None)
+        record_evidence("views", [])
+        record_evidence("reference", {"operation": "text_to_embedding", "values": expected})
+        with evidence_stage("native"):
+            native = _native_embedding(binary, runtime_root, bundle, case, "--task",
+                                       "text_to_embedding", "--text", str(text))
+        record_evidence("native", {"operation": "text_to_embedding", "values": native})
         native_texts.append(native)
         cosine = _cosine(native, expected)
         assert cosine >= _COSINE_FLOOR, f"text embedding cosine {cosine} for {text!r}"
         text_cosines.append(cosine)
+        record_reference_comparison(
+            "Text embedding",
+            {"values": native},
+            {"values": expected},
+            [
+                {
+                    "name": "cosine",
+                    "scope": "independent_reference",
+                    "actual": cosine,
+                    "operator": ">=",
+                    "expected": _COSINE_FLOOR,
+                    "passed": cosine >= _COSINE_FLOOR,
+                },
+            ],
+        )
 
     # The scored pair must agree with the reference in value, and the query
     # must beat the negative one: a pair of embeddings can each be close and
     # still rank the wrong way round, so the ordering is checked separately.
     scores = []
     for text, expected_text in zip((case["query"], case["negative_query"]), reference_texts):
-        payload = _run_json(binary, runtime_root, bundle, case, "rerank", "--task",
-                            "text_image_to_relevance", "--query", str(text), "--image",
-                            str(_asset(case["test_image"])))
+        record_evidence("inputs", {"text": str(text), "query": str(text), "image": None, "media": [{"image": TEST_ROOT / case["test_image"]}]})
+        record_evidence("native", None)
+        record_evidence("views", [])
+        record_evidence("reference", None)
+        with evidence_stage("native"):
+            payload = _run_json(binary, runtime_root, bundle, case, "rerank", "--task",
+                                "text_image_to_relevance", "--query", str(text), "--image",
+                                str(_asset(case["test_image"])))
+        record_evidence("native", payload)
         assert payload["score_kind"] == "logit"
         score = float(payload["score"])
         expected_score = scale * sum(a * b for a, b in zip(reference_image, expected_text))
+        record_evidence("reference", {"score": expected_score, "score_kind": "logit"})
         assert abs(score - expected_score) <= _SCORE_TOLERANCE, (
             f"relevance {score} differs from reference {expected_score} for {text!r}"
         )
         scores.append(score)
+        record_reference_comparison(
+            "Text-image relevance",
+            payload,
+            {"score": expected_score, "score_kind": "logit"},
+            [
+                {
+                    "name": "score_error",
+                    "scope": "independent_reference",
+                    "actual": abs(score - expected_score),
+                    "operator": "<=",
+                    "expected": _SCORE_TOLERANCE,
+                    "passed": abs(score - expected_score) <= _SCORE_TOLERANCE,
+                },
+            ],
+        )
     assert scores[0] > scores[1], (
         f"{FAMILY} scored the negative text higher: {scores[0]} <= {scores[1]}"
     )

@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from tools.e2e_evidence import evidence_stage, record_evidence
-from families.dinov3.tests.reporting import record_report_views
+from families.dinov3.tests.reporting import record_report_views, record_validated_comparison
 import json
 import os
 import shutil
@@ -359,4 +359,6 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     record_evidence("reference", expected)
     record_report_views(actual, expected, tmp_path / "feature-views")
     with evidence_stage("compare"):
-        _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+        thresholds = record_evidence("thresholds", _thresholds(case_name))
+        _assert_parity(actual, expected, manifest, case, thresholds)
+    record_validated_comparison(actual, expected, thresholds)

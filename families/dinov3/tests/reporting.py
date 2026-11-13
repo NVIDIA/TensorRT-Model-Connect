@@ -10,11 +10,84 @@ from pathlib import Path
 
 import numpy as np
 
-from tools.e2e_evidence import record_evidence
+from tools.e2e_evidence import evidence_enabled, record_evidence, record_reference_comparison
 
 
 _VIRIDIS = np.asarray([[68, 1, 84], [59, 82, 139], [33, 145, 140], [94, 201, 98], [253, 231, 37]])
 _ERROR = np.asarray([[0, 0, 4], [81, 18, 124], [183, 55, 121], [252, 137, 97], [252, 253, 191]])
+
+
+def record_validated_comparison(actual: dict, expected: dict, thresholds: dict) -> None:
+    """Describe a successful original validator using its unchanged formulas.
+
+    Call only after ``validation._assert_parity`` returns. Recomputed values
+    explain that validator's checks; reporting never supplies a passing gate.
+    """
+    if not evidence_enabled():
+        return
+    try:
+        from families.dinov3.validation import _cosine
+
+        candidate = np.asarray(actual["last_hidden_state"], dtype=np.float64).reshape(
+            actual["last_hidden_state_shape"]
+        )
+        reference = np.asarray(expected["last_hidden_state"], dtype=np.float64)
+        candidate_pooler = np.asarray(actual["pooler_output"], dtype=np.float64).reshape(
+            actual["pooler_output_shape"]
+        )
+        reference_pooler = np.asarray(expected["pooler_output"], dtype=np.float64)
+        values = {
+            "full_cosine": _cosine(candidate, reference),
+            "cls_cosine": _cosine(candidate[:, 0, :], reference[:, 0, :]),
+            "pooler_cosine": _cosine(candidate_pooler, reference_pooler),
+            "relative_frobenius": float(
+                np.linalg.norm(candidate - reference)
+                / max(float(np.linalg.norm(reference)), 1e-12)
+            ),
+        }
+        register_count = int(expected["num_register_tokens"])
+        patch_start = 1 + register_count
+        if register_count:
+            values["register_cosine"] = _cosine(
+                candidate[:, 1:patch_start, :], reference[:, 1:patch_start, :]
+            )
+        candidate_patches = candidate[:, patch_start:, :].reshape(-1, candidate.shape[-1])
+        reference_patches = reference[:, patch_start:, :].reshape(-1, reference.shape[-1])
+        denominators = np.linalg.norm(candidate_patches, axis=1) * np.linalg.norm(
+            reference_patches, axis=1
+        )
+        patch_cosines = np.divide(
+            np.sum(candidate_patches * reference_patches, axis=1),
+            denominators,
+            out=np.zeros_like(denominators),
+            where=denominators != 0.0,
+        )
+        values["mean_patch_cosine"] = float(np.mean(patch_cosines))
+        values["p01_patch_cosine"] = float(np.percentile(patch_cosines, 1.0))
+        checks = [
+            {
+                "name": name,
+                "scope": "independent_reference",
+                "actual": value,
+                "operator": "<=" if name == "relative_frobenius" else ">=",
+                "expected": float(thresholds[name]),
+                "passed": value <= float(thresholds[name])
+                if name == "relative_frobenius"
+                else value >= float(thresholds[name]),
+            }
+            for name, value in values.items()
+        ]
+        record_evidence(
+            "comparison_provenance",
+            {
+                "validator": "families.dinov3.validation._assert_parity",
+                "validator_completed": True,
+                "display_values": "Recomputed with the original validator's formulas after it returned.",
+            },
+        )
+        record_reference_comparison("DINOv3 full-feature validator", actual, expected, checks)
+    except Exception as error:
+        record_evidence("comparison_unavailable", f"{type(error).__name__}: {error}")
 
 
 def query_patch_maps(actual: dict, expected: dict) -> list[dict]:

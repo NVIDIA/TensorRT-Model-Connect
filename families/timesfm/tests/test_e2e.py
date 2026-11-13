@@ -327,6 +327,10 @@ def _assert_sdk_consumers(runtime_root, bundle, manifest, case, tmp_path, expect
         value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value
     )
     for language in ("c", "cpp"):
+        record_evidence("inputs", {"operation": "sdk", "sdk_language": language, "case": case})
+        record_evidence("native", None)
+        record_evidence("reference", expected)
+        record_evidence("views", [])
         consumer = build_root / f"test_timesfm_sdk_{language}"
         assert consumer.is_file(), f"build the TimesFM {language} SDK consumer first"
         invocation = [
@@ -394,7 +398,10 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             window_root = tmp_path / f"etth1-{index:02}"
             window_root.mkdir()
             window_case = {**case, "inputs": inputs}
-            record_evidence("inputs", {"window_index": index, "case": window_case})
+            record_evidence("inputs", {"window_index": index, "variant": "etth1_window", "operation": "native_cli", "sdk_language": None, "case": window_case})
+            record_evidence("native", None)
+            record_evidence("reference", None)
+            record_evidence("views", [])
             with evidence_stage("native"):
                 actual = _native(
                     binary, runtime_root, bundle, model_dir, manifest, window_case, window_root
@@ -417,7 +424,10 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         masked_root = tmp_path / "masked-frequency-one"
         masked_root.mkdir()
         masked_case = {**case, "inputs": inputs}
-        record_evidence("inputs", {"case": masked_case})
+        record_evidence("inputs", {"window_index": 0, "variant": "masked_frequency_one", "operation": "native_cli", "sdk_language": None, "case": masked_case})
+        record_evidence("native", None)
+        record_evidence("reference", None)
+        record_evidence("views", [])
         with evidence_stage("native"):
             actual = _native(binary, runtime_root, bundle, model_dir, manifest, masked_case, masked_root)
         record_evidence("native", actual)
