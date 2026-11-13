@@ -33,8 +33,16 @@ int main(int argc, char** argv) {
             const std::string tokenizer_data{std::istreambuf_iterator<char>(stream), {}};
             auto tokenizer =
                 trtmc::blip::CreateWordPieceTokenizer(tokenizer_data.data(), tokenizer_data.size());
-            const std::vector<std::string> texts{"", "a photography of", "Hello, WORLD!",
-                                                 "Caf\xc3\xa9 isn't a dog.", "[MASK] beach"};
+            const std::vector<std::string> texts{"",
+                                                 "a photography of",
+                                                 "Hello, WORLD!",
+                                                 "Caf\xc3\xa9 isn't a dog.",
+                                                 "[MASK] beach",
+                                                 "phở",
+                                                 "가",
+                                                 "Ａ",
+                                                 "ΟΣ",
+                                                 "a\u05b0"};
             nlohmann::json tokens = nlohmann::json::array();
             for (const auto& text : texts) {
                 const auto ids = tokenizer->encode(text);
