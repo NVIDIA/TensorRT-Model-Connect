@@ -1,0 +1,313 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Pinned native video and stereo-audio parity through the public Task API."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from tensorrt_model_connect import BuildRequest, build
+
+FAMILY = "pika_h3_flex"
+TASKS = frozenset({"text_to_audio_video"})
+TEST_ROOT = Path(__file__).resolve().parent
+MANIFEST_ROOT = TEST_ROOT / "manifests"
+
+
+def _case_index() -> dict[str, tuple[Path, dict, dict]]:
+    result = {}
+    for path in sorted(MANIFEST_ROOT.glob("*.json")):
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        assert manifest["family"] == FAMILY
+        assert manifest["task"] in TASKS
+        for case in manifest["testcases"]:
+            name = str(case["name"])
+            assert name not in result
+            result[name] = (path, manifest, case)
+    return result
+
+
+CASES = _case_index()
+
+
+def _selected_cases(config) -> tuple[list[str], bool]:
+    model_filters = set()
+    for raw in config.getoption("--e2e-model") or []:
+        model_filters.update((item.strip() for item in str(raw).split(",") if item.strip()))
+    models_file = config.getoption("--e2e-models-file")
+    if models_file:
+        model_filters.update(
+            (
+                line.strip()
+                for line in Path(models_file).read_text(encoding="utf-8").splitlines()
+                if line.strip() and (not line.lstrip().startswith("#"))
+            )
+        )
+    testcase_filters = set()
+    for raw in config.getoption("--e2e-testcase") or []:
+        testcase_filters.update((item.strip() for item in str(raw).split(",") if item.strip()))
+    if not model_filters and (not testcase_filters):
+        return (sorted(CASES), False)
+    selected = []
+    for name, (_, manifest, _) in CASES.items():
+        model_match = (
+            not model_filters
+            or FAMILY in model_filters
+            or name in model_filters
+            or (manifest["name"] in model_filters)
+        )
+        testcase_match = not testcase_filters or name in testcase_filters
+        if model_match and testcase_match:
+            selected.append(name)
+    return (sorted(selected), True)
+
+
+def pytest_generate_tests(metafunc) -> None:
+    if "case_name" in metafunc.fixturenames:
+        names, enabled = _selected_cases(metafunc.config)
+        parameters = names
+        if not enabled:
+            parameters = [
+                pytest.param(
+                    name,
+                    marks=pytest.mark.skip(
+                        reason="direct E2E requires one of the three explicit E2E selectors"
+                    ),
+                )
+                for name in names
+            ]
+        metafunc.parametrize("case_name", parameters, ids=names)
+
+
+def _required_path(value: str | None, label: str) -> Path:
+    assert value, f"selected {FAMILY} E2E requires {label}"
+    path = Path(value)
+    assert path.exists(), f"selected {FAMILY} E2E {label} does not exist: {path}"
+    return path
+
+
+def _model_dir(manifest: dict) -> Path:
+    explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+    if explicit:
+        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+    from huggingface_hub import snapshot_download
+
+    try:
+        snapshot = snapshot_download(
+            repo_id=manifest["hf_id"], revision=manifest.get("hf_revision"), local_files_only=True
+        )
+    except Exception as error:
+        raise AssertionError(
+            f"selected {FAMILY} E2E requires the exact cached checkpoint {manifest['hf_id']}"
+        ) from error
+    return Path(snapshot)
+
+
+def _runtime() -> tuple[Path, Path]:
+    binary = _required_path(os.environ.get("TRTMC_BINARY"), "TRTMC_BINARY")
+    runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
+    assert (runtime_root / "libtrtmc_backend_trt.so").is_file()
+    assert (runtime_root / f"libtrtmc_model_{FAMILY}.so").is_file()
+    import torch
+
+    assert torch.cuda.is_available(), f"selected {FAMILY} E2E requires CUDA"
+    assert torch.cuda.device_count() >= 1, f"selected {FAMILY} E2E requires one GPU"
+    return (binary, runtime_root)
+
+
+def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
+    build(
+        BuildRequest(
+            model_dir=model_dir,
+            output_path=bundle,
+            family=FAMILY,
+            task=manifest["task"],
+            precision=manifest["precision"],
+            max_sequence_length=manifest.get("max_sequence_length"),
+            image_height=manifest.get("image_height"),
+            image_width=manifest.get("image_width"),
+            video_num_frames=manifest.get("video_num_frames"),
+            max_batch_size=int(manifest.get("max_batch_size", 1)),
+            tensor_parallel_size=int(manifest["tensor_parallel_size"]),
+            quantization=manifest.get("quantization"),
+            fp32_layers=tuple((int(layer) for layer in manifest.get("fp32_layers", ()))),
+        )
+    )
+
+
+def test_native_tokenizer(case_name):
+    from transformers import AutoTokenizer
+
+    _, manifest, _ = CASES[case_name]
+    directory = _model_dir(manifest)
+    reference = AutoTokenizer.from_pretrained(directory / "tokenizer")
+    root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
+    for text in (
+        "",
+        "A quiet mountain lake.",
+        "Grüße 世界 😀",
+        "café cafe\u0301",
+        "1234567890",
+        "We're ready.\t\n",
+        "<|im_start|>user\nHello<|im_end|>",
+    ):
+        result = subprocess.run(
+            [
+                str(root / "test_pika_h3_flex_tokenizer"),
+                str(directory / "tokenizer/tokenizer.json"),
+                text,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert json.loads(result.stdout) == reference.encode(text, add_special_tokens=False)
+
+
+def test_cpu_generator_stream(case_name, tmp_path):
+    import numpy as np
+    import torch
+
+    _, _, case = CASES[case_name]
+    root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
+    counts = [24 * 37 * 30 * 52, 414 * 32, 24 * 37 * 30 * 52, 414 * 32]
+    for seed in (42, 43):
+        path = tmp_path / f"noise-{seed}.f32"
+        result = subprocess.run(
+            [str(root / "test_pika_h3_flex_random"), str(path)],
+            input=json.dumps(dict(seed=seed, counts=counts)),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr + result.stdout
+        generator = torch.Generator("cpu").manual_seed(seed)
+        expected = np.concatenate(
+            [torch.randn(count, generator=generator).numpy() for count in counts]
+        )
+        actual = np.fromfile(path, dtype="<f4")
+        assert actual.shape == expected.shape and np.isfinite(actual).all()
+        assert np.max(np.abs(actual - expected)) <= case["noise_max_abs"]
+
+
+def _video_metrics(actual, expected):
+    import numpy as np
+
+    square, dot, a2, b2, maximum = 0.0, 0.0, 0.0, 0.0, 0.0
+    for a, b in zip(actual, expected):
+        assert np.isfinite(a).all() and a.min() >= 0 and a.max() <= 1
+        a, b = a.astype(np.float64).ravel(), b.astype(np.float64).ravel()
+        difference = a - b
+        square += float(difference @ difference)
+        dot += float(a @ b)
+        a2 += float(a @ a)
+        b2 += float(b @ b)
+        maximum = max(maximum, float(np.abs(difference).max()))
+    return float(np.sqrt(square / actual.size)), maximum, dot / np.sqrt(a2 * b2)
+
+
+def test_official_checkpoint_e2e(case_name, tmp_path):
+    import gc
+    import sys
+    import numpy as np
+    import torch
+
+    _, manifest, case = CASES[case_name]
+    directory = _model_dir(manifest)
+    _, runtime_root = _runtime()
+    input_path = tmp_path / "reference-input.json"
+    input_path.write_text(json.dumps([manifest, case]))
+    oracle = subprocess.run(
+        [
+            sys.executable,
+            str(TEST_ROOT / "reference.py"),
+            str(directory),
+            str(input_path),
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=case["runtime_timeout_s"],
+    )
+    assert oracle.returncode == 0, oracle.stderr + oracle.stdout
+    print(oracle.stdout, end="", flush=True)
+    bundle = tmp_path / manifest["bundle"]
+    _build(directory, bundle, manifest)
+    gc.collect()
+    torch.cuda.empty_cache()
+    requests = [
+        dict(
+            prompt=prompt,
+            seed=case["seed"] + index,
+            video=str(tmp_path / f"native-video-{index}.f32"),
+            audio=str(tmp_path / f"native-audio-{index}.f32"),
+        )
+        for index, prompt in enumerate(case["prompts"])
+    ]
+    native = subprocess.run(
+        [str(runtime_root / "test_pika_h3_flex_runtime"), str(bundle), str(runtime_root)],
+        input=json.dumps(requests),
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=case["runtime_timeout_s"],
+    )
+    assert native.returncode == 0, native.stderr + native.stdout
+    results = json.loads(native.stdout.splitlines()[-1])
+    assert len(results) == len(requests)
+    for index, result in enumerate(results):
+        assert result["frames"] == 124 and result["height"] == 480 and result["width"] == 832
+        assert (
+            result["sample_rate"] == 32000
+            and result["channels"] == 2
+            and result["audio_count"] == 165333 * 2
+        )
+        assert result["audio_start_seconds"] == 0 and result["conditioned_prefix_frames"] == 0
+        np.testing.assert_allclose(
+            result["timestamps"], np.arange(124, dtype=np.float64) / 24, atol=1e-12, rtol=0
+        )
+        expected_video = np.memmap(
+            tmp_path / f"reference-video-{index}.f32",
+            dtype="<f4",
+            mode="r",
+            shape=(124, 480, 832, 3),
+        )
+        actual_video = np.memmap(
+            requests[index]["video"], dtype="<f4", mode="r", shape=expected_video.shape
+        )
+        rmse, maximum, cosine = _video_metrics(actual_video, expected_video)
+        print(f"Pika video {index}: RMSE={rmse}, max_abs={maximum}, cosine={cosine}", flush=True)
+        assert (
+            rmse <= case["video_rmse_max"]
+            and maximum <= case["video_max_abs"]
+            and cosine >= case["video_cosine_min"]
+        )
+        expected_audio = np.fromfile(tmp_path / f"reference-audio-{index}.f32", dtype="<f4").astype(
+            np.float64
+        )
+        actual_audio = np.fromfile(requests[index]["audio"], dtype="<f4").astype(np.float64)
+        assert actual_audio.shape == expected_audio.shape and np.isfinite(actual_audio).all()
+        assert actual_audio.min() >= -1 and actual_audio.max() <= 1
+        difference = actual_audio - expected_audio
+        energy, error = float(expected_audio @ expected_audio), float(difference @ difference)
+        snr = float(10 * np.log10(energy / error)) if error else float("inf")
+        cosine = float(
+            actual_audio
+            @ expected_audio
+            / (np.linalg.norm(actual_audio) * np.linalg.norm(expected_audio))
+        )
+        maximum = float(np.abs(difference).max())
+        print(f"Pika audio {index}: SNR={snr} dB, max_abs={maximum}, cosine={cosine}", flush=True)
+        assert (
+            snr >= case["audio_snr_min_db"]
+            and cosine >= case["audio_cosine_min"]
+            and maximum <= case["audio_max_abs"]
+        )

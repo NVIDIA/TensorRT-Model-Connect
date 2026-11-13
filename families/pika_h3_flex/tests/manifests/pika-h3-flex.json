@@ -1,0 +1,33 @@
+{
+  "name": "pika-h3-flex",
+  "hf_id": "Pika-Labs/Pika-H3-Flex",
+  "hf_revision": "ca45d99f9b1d1859ffb9dc1cd6bfaaa994257f56",
+  "bundle": "pika-h3-flex.bundle",
+  "family": "pika_h3_flex",
+  "task": "text_to_audio_video",
+  "precision": "bf16",
+  "image_height": 480,
+  "image_width": 832,
+  "video_num_frames": 120,
+  "max_sequence_length": 128,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "pika-h3-flex-text-to-audio-video",
+      "premerge": true,
+      "prompts": [
+        "A slow cinematic pan across a quiet mountain lake at sunrise, wind rustling the reeds and gentle water sounds.",
+        "A red rubber ball bounces across a wooden floor in a sunlit room, with clear soft bouncing sounds."
+      ],
+      "seed": 42,
+      "video_rmse_max": 0.025,
+      "video_max_abs": 0.25,
+      "video_cosine_min": 0.998,
+      "audio_snr_min_db": 20.0,
+      "audio_cosine_min": 0.99,
+      "audio_max_abs": 0.1,
+      "noise_max_abs": 0.000001,
+      "runtime_timeout_s": 14400
+    }
+  ]
+}
