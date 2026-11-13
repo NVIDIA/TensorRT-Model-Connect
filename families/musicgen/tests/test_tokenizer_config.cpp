@@ -50,6 +50,8 @@ int main() {
            {"single_word", false}}}}};
     if (load(base)->encode(" hello\tworld<special>hello ") != std::vector<int32_t>{1, 2, 3, 1})
         throw std::runtime_error("supported tokenizer configuration changed token IDs");
+    if (load(base)->encode("▁hello") != std::vector<int32_t>{1})
+        throw std::runtime_error("existing Metaspace markers must not be duplicated");
     for (const char* type : {"Replace", "Strip", "NFKC", "Lowercase", "Prepend", "Unknown"}) {
         auto config = base;
         config["normalizer"] = {{"type", type}};

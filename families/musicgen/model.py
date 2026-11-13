@@ -173,7 +173,9 @@ def build_codec(state, config, frames, verbose):
         return x
 
     def elu(x):
-        return n.add_activation(x, trt.ActivationType.ELU).get_output(0)
+        layer = n.add_activation(x, trt.ActivationType.ELU)
+        layer.alpha = 1.0
+        return layer.get_output(0)
 
     x = conv(x, "layers.0")
     channels = x.shape[1]

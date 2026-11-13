@@ -394,7 +394,8 @@ class UnigramTokenizer final : public ITokenizer {
     void append_plain_text(const std::string& text, std::vector<int32_t>& ids) const {
         std::string normalized = mUsePrecompiled ? mNormalizer.normalize(text) : text;
         for (const auto& word : whitespace_split(normalized)) {
-            const auto word_ids = viterbi_encode(kMetaspaceChar + word, mTrie, mUnkId, mUnkScore);
+            const auto piece = word.rfind(kMetaspaceChar, 0) == 0 ? word : kMetaspaceChar + word;
+            const auto word_ids = viterbi_encode(piece, mTrie, mUnkId, mUnkScore);
             ids.insert(ids.end(), word_ids.begin(), word_ids.end());
         }
     }
