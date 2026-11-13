@@ -121,7 +121,8 @@ def add_rms_norm(
     """RMSNorm: gamma * (x / sqrt(mean(x^2) + eps)).
 
     FP32 precision boundary: when dtype != float32, casts to FP32 before
-    norm computation for numerical stability, then casts back.
+    norm computation for numerical stability. Cast the normalized activation
+    back before multiplying by gamma, matching LlamaRMSNorm's rounding boundary.
 
     TRT's native normalization API implements mean-centered LayerNorm, not
     RMSNorm, so this remains a manual shared implementation.
@@ -140,9 +141,11 @@ def add_rms_norm(
     recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
     normalized = network.add_elementwise(
         inp, recip.get_output(0), trt.ElementWiseOperation.PROD)
-    gamma_t = add_constant(network, (1, hidden_size), gamma, dtype=np.float32)
+    normalized = _cast_back_to_trt_dtype(network, normalized.get_output(0), output_dtype)
+    gamma_t = add_constant(network, (1, hidden_size), gamma, dtype=dtype)
+    gamma_t = _cast_back_to_trt_dtype(network, gamma_t, output_dtype)
     scaled = network.add_elementwise(
-        normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD)
+        normalized, gamma_t, trt.ElementWiseOperation.PROD)
     result = scaled.get_output(0)
     if need_cast:
         result = _cast_back_to_trt_dtype(network, result, output_dtype)

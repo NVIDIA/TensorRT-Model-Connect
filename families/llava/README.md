@@ -31,6 +31,13 @@ tokenizer, and `runtime.json`. Prefill and decode use separate engine weights;
 the FP16 bundle is approximately 25.7 GiB. Prompt tokens, the 576 image tokens,
 and requested answer tokens must fit the selected context length. The maximum
 checkpoint context is 4,096 tokens.
+Cache exhaustion raises an error at the selected context limit. Native cache
+unit tests cover zero initialization, allocation failures, and exhaustion:
+
+```bash
+cmake --build build --target test_llava_kv_cache
+ctest --test-dir build -R '^test_llava_kv_cache_' --output-on-failure
+```
 
 For the official E2E, provide `TRTMC_LLAVA_MODEL_DIR`, `TRTMC_BINARY`, and
 `TRTMC_RUNTIME_ROOT`. Set `TRTMC_REFERENCE_PYTHON` to an independent CUDA

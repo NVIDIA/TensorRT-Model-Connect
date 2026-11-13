@@ -46,6 +46,7 @@ class LlavaKvCache : public LlavaInferenceState {
     void reset() override;
     void bind_to(ITrtModule& module) override;
     void prepare_step(TensorMap& inputs, int32_t seq_len = 1) override;
+    // Reject exhaustion before touching cache storage.
     void advance(int32_t n_tokens = 1) override;
     int32_t position() const override { return position_; }
     int32_t max_length() const override { return max_length_; }

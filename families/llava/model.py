@@ -22,6 +22,8 @@ def build(request, writer):
     if any(value is not None for value in (request.image_height, request.image_width, request.video_num_frames)):
         raise ValueError("LLaVA uses the checkpoint's fixed image shape")
     directory = Path(request.model_dir)
+    if not (directory / "tokenizer.json").is_file():
+        raise ValueError("LLaVA bundles require tokenizer.json for the native runtime")
     config = ModelConfig.from_dir(directory)
     maximum = request.max_sequence_length or config.max_position_embeddings
     vision_cfg = config.raw["vision_config"]

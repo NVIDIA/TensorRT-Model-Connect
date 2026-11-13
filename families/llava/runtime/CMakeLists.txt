@@ -14,3 +14,7 @@ set_target_properties(trtmc_model_llava PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
   BUILD_RPATH "\$ORIGIN" INSTALL_RPATH "\$ORIGIN")
 install(TARGETS trtmc_model_llava LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+
+if(TRTMC_BUILD_TESTS)
+  add_subdirectory("${PROJECT_SOURCE_DIR}/families/llava/tests" "${CMAKE_CURRENT_BINARY_DIR}/tests")
+endif()

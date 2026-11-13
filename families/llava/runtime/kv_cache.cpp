@@ -41,8 +41,8 @@ LlavaKvCache::LlavaKvCache(int32_t num_layers, int32_t max_length, int32_t kv_di
     present_v_.reserve(static_cast<std::size_t>(num_layers));
 
     for (int32_t i = 0; i < num_layers; ++i) {
-        cache_k_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype_, stream);
-        cache_v_.emplace_back(std::vector<int64_t>{max_length, kv_dim}, cache_dtype_, stream);
+        cache_k_.push_back(DeviceTensor::zeros({max_length, kv_dim}, cache_dtype_, stream));
+        cache_v_.push_back(DeviceTensor::zeros({max_length, kv_dim}, cache_dtype_, stream));
         present_k_.emplace_back(std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
         present_v_.emplace_back(std::vector<int64_t>{1, kv_dim}, cache_dtype_, stream);
     }
@@ -294,39 +294,23 @@ void LlavaKvCache::advance(int32_t n_tokens) {
     // n_tokens > 1 reserved for future batched prefill (TASK-10).
     assert(n_tokens == 1 && "LlavaKvCache::advance: only n_tokens==1 supported");
     (void)n_tokens;
+    if (position_ >= max_length_)
+        throw std::runtime_error("LLaVA KV cache capacity is exhausted");
 
     // Copy present K/V (single row) into cache at current position.
     // present_k_[layer] is [1, kv_dim] → copy to cache_k_[layer][position_, :]
     auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
 
-    if (position_ < max_length_) {
-        // Normal append: write to position_ slot
-        auto offset = static_cast<std::size_t>(position_) * row_bytes;
-        for (int32_t i = 0; i < num_layers_; ++i) {
-            auto li = static_cast<std::size_t>(i);
-            cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset,
-                            present_k_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset,
-                            present_v_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
-        }
-        ++position_;
-    } else {
-        // Cache full: shift [1..max) → [0..max-1), then write at tail
-        auto shift_bytes = static_cast<std::size_t>(max_length_ - 1) * row_bytes;
-        auto tail_offset = shift_bytes;
-        for (int32_t i = 0; i < num_layers_; ++i) {
-            auto li = static_cast<std::size_t>(i);
-            auto* ck = static_cast<uint8_t*>(cache_k_[li].data());
-            auto* cv = static_cast<uint8_t*>(cache_v_[li].data());
-            cudaMemcpyAsync(ck, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(ck + tail_offset, present_k_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv + tail_offset, present_v_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
-        }
-        // position_ stays at max_length_ (cache is full, all slots visible)
+    // Normal append: write to position_ slot
+    auto offset = static_cast<std::size_t>(position_) * row_bytes;
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        auto li = static_cast<std::size_t>(i);
+        cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset, present_k_[li].data(),
+                        row_bytes, cudaMemcpyDeviceToDevice, stream_);
+        cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset, present_v_[li].data(),
+                        row_bytes, cudaMemcpyDeviceToDevice, stream_);
     }
+    ++position_;
 }
 
 void LlavaKvCache::reset() {
@@ -350,11 +334,13 @@ std::size_t LlavaKvCache::device_memory_bytes() const {
 }
 
 bool LlavaKvCache::ok() const {
-    if (cache_k_.size() != static_cast<std::size_t>(num_layers_))
-        return false;
-    for (const auto& t : cache_k_) {
-        if (!t.ok())
+    for (const auto* group : {&cache_k_, &cache_v_, &present_k_, &present_v_}) {
+        if (group->size() != static_cast<std::size_t>(num_layers_))
             return false;
+        for (const auto& t : *group) {
+            if (!t.ok())
+                return false;
+        }
     }
     return true;
 }
