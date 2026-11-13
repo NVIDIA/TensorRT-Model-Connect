@@ -371,6 +371,7 @@ class WordPieceTokenizer final : public ITokenizer {
 
     std::string decode(const std::vector<int32_t>& ids) const override {
         std::string result;
+        bool first_token = true;
         for (int32_t id : ids) {
             if (mDecodeSkipIds.count(id))
                 continue;
@@ -378,14 +379,15 @@ class WordPieceTokenizer final : public ITokenizer {
             if (token.empty())
                 continue;
 
-            if (token.size() >= mContinuingPrefix.size() &&
+            if (!first_token && token.size() >= mContinuingPrefix.size() &&
                 token.compare(0, mContinuingPrefix.size(), mContinuingPrefix) == 0) {
                 result += token.substr(mContinuingPrefix.size());
             } else {
-                if (!result.empty())
+                if (!first_token)
                     result += ' ';
                 result += token;
             }
+            first_token = false;
         }
         // Match this checkpoint's WordPiece punctuation cleanup. Apostrophes
         // remain separate tokens when Transformers cleanup is disabled.

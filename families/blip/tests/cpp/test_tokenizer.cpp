@@ -43,6 +43,12 @@ void expect(const trtmc::blip::ITokenizer& tokenizer, const std::string& text,
         throw std::runtime_error("BLIP tokenizer differs from the upstream fixture: " + text);
 }
 
+void expect_decoded(const trtmc::blip::ITokenizer& tokenizer, const std::vector<std::int32_t>& ids,
+                    const std::string& expected) {
+    if (tokenizer.decode(ids) != expected)
+        throw std::runtime_error("BLIP WordPiece decoding differs from the upstream fixture");
+}
+
 } // namespace
 
 int main() {
@@ -61,6 +67,14 @@ int main() {
         // Preserve earliest matches, longest ties, and overlapping-token invalidation.
         expect(*tokenizer, "[MASK][M[MASK] a", {1, 3, 13, 3, 11, 2});
         expect(*tokenizer, "abc[MASK]", {1, 14, 0, 3, 2});
+
+        // A continuation can start with a subword after special tokens are skipped.
+        expect_decoded(*tokenizer, {7, 2}, "##ᅡ");
+        expect_decoded(*tokenizer, {1, 4, 7, 2}, "##ᅡ");
+        expect_decoded(*tokenizer, {7, 7, 2}, "##ᅡᅡ");
+        expect_decoded(*tokenizer, {6, 7, 2}, "가");
+        expect_decoded(*tokenizer, {11, 5, 2}, "a pho");
+        expect_decoded(*tokenizer, {1, 2}, "");
 
         config["normalizer"]["strip_accents"] = false;
         expect(*create(config), "İ", {1, 16, 2});
