@@ -5,7 +5,6 @@
 
 #include "families/nemotron_embed/runtime/tokenizer.h"
 
-#include <unicode/regex.h>
 #include <algorithm>
 #include <cassert>
 #include <climits>
@@ -16,6 +15,7 @@
 #include <queue>
 #include <stdexcept>
 #include <string>
+#include <unicode/regex.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -874,23 +874,28 @@ class BpeTokenizer final : public ITokenizer {
             UErrorCode status = U_ZERO_ERROR;
             const auto unicode = icu::UnicodeString::fromUTF8(text);
             std::unique_ptr<icu::RegexMatcher> matcher(mRegex->matcher(unicode, status));
-            if (U_FAILURE(status)) throw std::runtime_error("embedding tokenizer regex matcher failed");
+            if (U_FAILURE(status))
+                throw std::runtime_error("embedding tokenizer regex matcher failed");
             int32_t previous = 0;
             while (matcher->find(status)) {
                 const int32_t start = matcher->start(status), end = matcher->end(status);
                 if (start > previous) {
-                    std::string gap; unicode.tempSubStringBetween(previous, start).toUTF8String(gap);
+                    std::string gap;
+                    unicode.tempSubStringBetween(previous, start).toUTF8String(gap);
                     words.push_back(std::move(gap));
                 }
                 if (end > start) {
-                    std::string match; unicode.tempSubStringBetween(start, end).toUTF8String(match);
+                    std::string match;
+                    unicode.tempSubStringBetween(start, end).toUTF8String(match);
                     words.push_back(std::move(match));
                 }
                 previous = end;
             }
-            if (U_FAILURE(status)) throw std::runtime_error("embedding tokenizer regex matching failed");
+            if (U_FAILURE(status))
+                throw std::runtime_error("embedding tokenizer regex matching failed");
             if (previous < unicode.length()) {
-                std::string tail; unicode.tempSubString(previous).toUTF8String(tail);
+                std::string tail;
+                unicode.tempSubString(previous).toUTF8String(tail);
                 words.push_back(std::move(tail));
             }
         } else if (!mUsePreTokenizer) {
@@ -1421,8 +1426,10 @@ class BpeTokenizer final : public ITokenizer {
             if (part.value("type", "") == "Split") {
                 const auto pattern = part.at("pattern").at("Regex").get<std::string>();
                 UErrorCode status = U_ZERO_ERROR;
-                mRegex.reset(icu::RegexPattern::compile(icu::UnicodeString::fromUTF8(pattern), 0, status));
-                if (U_FAILURE(status)) throw std::runtime_error("embedding tokenizer regex compilation failed");
+                mRegex.reset(
+                    icu::RegexPattern::compile(icu::UnicodeString::fromUTF8(pattern), 0, status));
+                if (U_FAILURE(status))
+                    throw std::runtime_error("embedding tokenizer regex compilation failed");
                 break;
             }
         }
@@ -1484,9 +1491,11 @@ class BpeTokenizer final : public ITokenizer {
             }
             return;
         }
-        if (type == "Replace" && normalizer.contains("pattern") && normalizer["pattern"].contains("String")) {
+        if (type == "Replace" && normalizer.contains("pattern") &&
+            normalizer["pattern"].contains("String")) {
             const auto pattern = normalizer["pattern"]["String"].get<std::string>();
-            if (pattern.empty()) throw std::runtime_error("embedding tokenizer replacement cannot be empty");
+            if (pattern.empty())
+                throw std::runtime_error("embedding tokenizer replacement cannot be empty");
             mLiteralReplacements.emplace_back(pattern, normalizer.at("content").get<std::string>());
             return;
         }
