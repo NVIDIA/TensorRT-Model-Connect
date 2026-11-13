@@ -521,16 +521,19 @@ def _square_crop(path: Path, cache: Path) -> Path:
     return target
 
 
-def _cover_crop(path: Path, cache: Path, width: int, height: int) -> Path:
-    """The image scaled to cover ``width`` x ``height`` and center-cropped to it (cached by content and size), for
-    a model that takes a conditioning image only at its built size: both sides get the same pixels."""
+def _cover_crop(image_file: Any, cache: Path, width: int, height: int) -> Path:
+    """The image (a path, or inline ``$file`` bytes as a Hugging Face image column decodes) scaled to cover
+    ``width`` x ``height`` and center-cropped to it (cached by content and size), for a model that takes a
+    conditioning image only at its built size: both sides get the same pixels."""
     from PIL import Image
 
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()[:24]
+    data = (base64.b64decode(image_file["$file"]["b64"]) if isinstance(image_file, Mapping)
+            else Path(image_file).read_bytes())
+    digest = hashlib.sha256(data).hexdigest()[:24]
     target = cache / "trtmc-derived" / f"{digest}-{width}x{height}.png"
     if not target.is_file():
         target.parent.mkdir(parents=True, exist_ok=True)
-        with Image.open(path) as image:
+        with Image.open(io.BytesIO(data)) as image:
             rgb = image.convert("RGB")
             scale = max(width / rgb.width, height / rgb.height)
             size = (max(width, round(rgb.width * scale)), max(height, round(rgb.height * scale)))
@@ -794,7 +797,7 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
         for source_field, request_field in (definition.get("fields") or {}).items():
             request[request_field] = record[source_field] if source_field in record else _field(record, source_field)
         for field in definition.get("fit_to_request", []):  # an image at the request's width x height
-            request[field] = str(_cover_crop(Path(request[field]), Path(environment["hf_datasets_cache"]),
+            request[field] = str(_cover_crop(request[field], Path(environment["hf_datasets_cache"]),
                                              int(request["width"]), int(request["height"])))
         if isinstance(request.get("prompt"), str) and (definition.get("prompt_prefix") or definition.get("prompt_suffix")):
             request["prompt"] = f"{definition.get('prompt_prefix', '')}{request['prompt']}{definition.get('prompt_suffix', '')}"

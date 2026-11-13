@@ -505,6 +505,10 @@ def test_a_fitted_image_covers_the_video_size_and_keeps_its_center(tmp_path):
         assert image.size == (16, 32)
         assert np.asarray(image)[16, 8].tolist() == [255, 255, 255]
     assert _cover_crop(source, tmp_path / "cache", 16, 32) == fitted
+    import base64
+
+    inline = {"$file": {"suffix": ".png", "b64": base64.b64encode(source.read_bytes()).decode()}}
+    assert _cover_crop(inline, tmp_path / "cache", 16, 32) == fitted  # a decoded dataset image column
 
 
 def test_structure_parity_compares_the_written_structure_with_the_native_coordinates(tmp_path):
