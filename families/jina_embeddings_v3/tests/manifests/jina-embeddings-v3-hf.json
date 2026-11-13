@@ -1,0 +1,35 @@
+{
+  "name": "jina-embeddings-v3-hf",
+  "hf_id": "jinaai/jina-embeddings-v3-hf",
+  "hf_revision": "d18862d9a48706220815554fac3ebb4dfa46fc28",
+  "bundle": "jina-embeddings-v3-hf.bundle",
+  "family": "jina_embeddings_v3",
+  "task": "text_to_embedding",
+  "precision": "fp32",
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "jina-embeddings-v3-hf",
+      "premerge": true,
+      "inputs": [
+        {
+          "text": "How do plants absorb sunlight?",
+          "role": "default"
+        },
+        {
+          "text": "How do plants absorb sunlight?",
+          "role": "query"
+        },
+        {
+          "text": "How do plants absorb sunlight?",
+          "role": "document"
+        },
+        {
+          "text": "多言語の文章と café １２３.",
+          "role": "document"
+        }
+      ]
+    }
+  ]
+}
