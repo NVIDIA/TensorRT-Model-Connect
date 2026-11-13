@@ -205,6 +205,7 @@ International license:
 - `families/hubert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/mimi/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/qwen3_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+- `families/vibevoice_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/wav2vec2_bert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/wavlm/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 - `families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav`
