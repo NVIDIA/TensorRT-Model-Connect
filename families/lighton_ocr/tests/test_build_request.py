@@ -71,6 +71,24 @@ def test_invalid_capacity_fails_before_tokenizer_or_weight_loading(tmp_path, mon
         model.build(replace(request(tmp_path), max_sequence_length=capacity), object())
 
 
+@pytest.mark.parametrize("tokenizer_kind", ["missing", "directory"])
+def test_missing_tokenizer_fails_before_runtime_assets_weights_or_bundle_output(tmp_path, monkeypatch, tokenizer_kind):
+    directory = tmp_path / "checkpoint"
+    directory.mkdir()
+    data = Path(__file__).parent / "data"
+    (directory / "config.json").write_bytes((data / "checkpoint-config.json").read_bytes())
+    if tokenizer_kind == "directory":
+        (directory / "tokenizer.json").mkdir()
+
+    def assets_must_not_be_opened(*_args):
+        raise AssertionError("A missing tokenizer must fail before runtime assets or weights are loaded")
+
+    monkeypatch.setattr(model, "runtime_config", assets_must_not_be_opened)
+    monkeypatch.setattr(model, "Checkpoint", assets_must_not_be_opened)
+    with pytest.raises(ValueError, match="^lighton_ocr requires tokenizer.json in the checkpoint$"):
+        model.build(replace(request(tmp_path), model_dir=directory), object())
+
+
 def test_runtime_metadata_retains_original_preprocessing_and_generation(tmp_path, monkeypatch):
     data = Path(__file__).parent / "data"
     config = Config.from_dict(json.loads((data / "checkpoint-config.json").read_text()))
