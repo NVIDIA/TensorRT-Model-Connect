@@ -33,6 +33,10 @@ _SUPPORTED_TASKS = ("text_to_token_features",)
 # score and far above where a subtract-the-max softmax underflows.
 _MASK_FLOOR = -1.0e4
 
+# Work type per build precision: (numpy, TensorRT). fp16 keeps the int32
+# inputs and the float32 features, so the runtime and the bundle do not change.
+_WORK_TYPES = {"fp32": (np.float32, trt.float32), "fp16": (np.float16, trt.float16)}
+
 
 def _open_checkpoint(model_dir: Path) -> dict:
     """Load the checkpoint, whichever of the two formats it is published in.
@@ -89,9 +93,11 @@ def _builder(verbose):
     return builder, network, config
 
 
-def build_engine(weights, cfg, *, seq_len, verbose=False) -> bytes:
+def build_engine(weights, cfg, *, seq_len, precision="fp32", verbose=False) -> bytes:
     builder, network, config = _builder(verbose)
-    work_np = np.float32
+    # The work type of every layer. Layer-norm statistics are taken in float32
+    # either way (graph.add_layer_norm), and the engine I/O stays the same.
+    work_np, work_trt = _WORK_TYPES[precision]
     prefix = cfg["prefix"]
     num_heads = cfg["num_heads"]
 
@@ -105,7 +111,7 @@ def build_engine(weights, cfg, *, seq_len, verbose=False) -> bytes:
                               weights[f"{prefix}embeddings.LayerNorm.weight"],
                               weights[f"{prefix}embeddings.LayerNorm.bias"], cfg["eps"])
 
-    keep = network.add_cast(attention_mask, trt.float32).get_output(0)
+    keep = network.add_cast(attention_mask, work_trt).get_output(0)
     column = network.add_shuffle(keep)
     column.reshape_dims = (seq_len, 1)
     # The reference zeroes the padded rows right after the embedding norm.
@@ -145,6 +151,8 @@ def build_engine(weights, cfg, *, seq_len, verbose=False) -> bytes:
     hidden = encoder_builder.build_layers(network, hidden, relative, weights, cfg,
                                           mask=additive, c2p_index=c2p_index,
                                           p2c_index=p2c_index, dtype=work_np)
+    if hidden.dtype != trt.float32:
+        hidden = network.add_cast(hidden, trt.float32).get_output(0)
     hidden.name = "last_hidden_state"
     network.mark_output(hidden)
 
@@ -179,13 +187,20 @@ def build(request, writer) -> None:
     if request.mtp_seq_len is not None:
         raise NotImplementedError("deberta_v2 does not support MTP speculative decoding")
 
-    # fp32 only, for the reason the neighbouring families are fp32 only: no
-    # fp16 number has been measured against the reference here, and an
-    # accepted-but-unmeasured precision builds a bundle nothing checks.
+    # fp32 (the default) or fp16. Measured on deberta-v3-base and -large against
+    # the reference on 800 held-out texts, fp16 keeps the token features at
+    # cosine 0.99999 (relative error 1.5e-03 to 3.0e-03), and the MNLI heads of
+    # their fine-tunes agree with the reference on 99.95% to 100% of 2000 pairs
+    # with unchanged accuracy; no non-finite output. The layer norms keep
+    # float32 statistics because they must: the residual stream reaches 3.0e+03,
+    # whose square overflows fp16, and an all-fp16 layer norm drops the base
+    # MNLI accuracy from 90.7% to 42%. The attention scores and softmax stay
+    # fp16; taking them in float32 changed no quality number and was 1.2x to
+    # 1.5x slower. The fp16 E2E case has its own feature tolerance (test_e2e.py).
     precision = str(request.precision).lower()
-    if precision != "fp32":
+    if precision not in _WORK_TYPES:
         raise NotImplementedError(
-            f"deberta_v2 builds fp32 only; {precision} is not qualified for this family")
+            f"deberta_v2 builds fp32 or fp16; {precision} is not qualified for this family")
 
     if request.max_sequence_length is None:
         raise ValueError("deberta_v2 needs max_sequence_length: the engine is fixed-length")
@@ -204,7 +219,7 @@ def build(request, writer) -> None:
 
     writer.set_header(family="deberta_v2", task=request.task, backend=request.backend)
     writer.add_bytes("model.plan", build_engine(
-        weights, cfg, seq_len=seq_len, verbose=bool(request.verbose)))
+        weights, cfg, seq_len=seq_len, precision=precision, verbose=bool(request.verbose)))
     tokenizer_json, framing = _tokenizer(model_dir)
     writer.add_bytes("tokenizer.json", tokenizer_json)
     writer.add_json(

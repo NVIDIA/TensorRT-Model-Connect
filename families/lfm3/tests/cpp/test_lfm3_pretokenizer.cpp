@@ -21,6 +21,15 @@ int main() {
     check(trtmc::lfm3_split_pretokens("a  b") == std::vector<std::string>({"a", " ", " b"}));
     check(trtmc::lfm3_split_pretokens("中文标点，测试123。") ==
           std::vector<std::string>({"中文标点", "，测试", "123", "。"}));
+    check(trtmc::lfm3_split_pretokens("Việt") == std::vector<std::string>({"Việt"}));
+    check(trtmc::lfm3_split_pretokens("Ελληνικά,") == std::vector<std::string>({"Ελληνικά", ","}));
+    check(trtmc::lfm3_split_pretokens("שלום,") == std::vector<std::string>({"שלום", ","}));
+    check(trtmc::lfm3_split_pretokens("ภาษาไทย!") == std::vector<std::string>({"ภาษาไทย", "!"}));
+    check(trtmc::lfm3_split_pretokens("ＡＢＣ,") == std::vector<std::string>({"ＡＢＣ", ","}));
+    check(trtmc::lfm3_split_pretokens("ｶﾀｶﾅ!") == std::vector<std::string>({"ｶﾀｶﾅ", "!"}));
+    check(trtmc::lfm3_split_pretokens("²½Ⅻ") == std::vector<std::string>({"²½Ⅻ"}));
+    check(trtmc::lfm3_split_pretokens("Հայերեն!") == std::vector<std::string>({"Հայերեն", "!"}));
+    check(trtmc::lfm3_split_pretokens("ქართული!") == std::vector<std::string>({"ქართული", "!"}));
     for (bool ignore : {false, true}) {
         const std::string json =
             R"({"model":{"type":"BPE","vocab":{"n":0,"c":1,"l":2,"u":3,"nclu":4},"merges":[],"ignore_merges":)" +

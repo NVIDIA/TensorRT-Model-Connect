@@ -185,11 +185,6 @@ def _request(tmp_path: Path, **changes) -> BuildRequest:
     return BuildRequest(**base)
 
 
-def test_fp16_is_refused(tmp_path: Path) -> None:
-    with pytest.raises(NotImplementedError, match="fp32 only"):
-        model_module.build(_request(tmp_path, precision="fp16"), writer=None)
-
-
 def test_a_sequence_length_is_required(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="max_sequence_length"):
         model_module.build(_request(tmp_path, max_sequence_length=None), writer=None)

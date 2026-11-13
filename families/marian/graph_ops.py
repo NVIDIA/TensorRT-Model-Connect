@@ -157,7 +157,7 @@ def add_activation(
             relu.get_output(0), relu.get_output(0),
             trt.ElementWiseOperation.PROD)
         return sq.get_output(0)
-    elif activation_type == "silu":
+    elif activation_type in ("silu", "swish"):
         sigmoid = network.add_activation(inp, trt.ActivationType.SIGMOID)
         swish = network.add_elementwise(
             inp, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)

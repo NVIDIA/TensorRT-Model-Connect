@@ -126,17 +126,27 @@ def test_fp8_weight_rejects_all_zero() -> None:
         quantize_fp8_weight(np.zeros((4, 4), dtype=np.float32))
 
 
-def test_every_encoder_projection_is_quantized(tiny) -> None:
-    """Attention q/k/v/o and the four feed-forward matrices of every layer get a scale."""
+def test_every_feed_forward_projection_is_quantized(tiny) -> None:
+    """The four feed-forward matrices of every layer get a scale; attention stays fp16."""
     weights, scales = tiny
     ctx = calibrate_nemotron(weights, graph_ops, "fp8")
     assert set(ctx.scales) == set(scales)
-    assert len(ctx.scales) == LAYERS * 8
-    # The relative-position attention is decomposed, so its output projection is quantized.
-    assert ctx.should_quantize("el.0.w_o") and ctx.should_quantize("el.1.ff2.w1")
+    assert len(ctx.scales) == LAYERS * 4
+    assert ctx.should_quantize("el.0.ff1.w1") and ctx.should_quantize("el.1.ff2.w2")
     assert ctx.has_fp8_weights
+    assert not any(ctx.should_quantize(f"el.1.{name}") for name in ("w_q", "w_k", "w_v", "w_o"))
     # Not projections that go through the scale table: the positional projection and the convolutions.
     assert not ctx.should_quantize("el.0.w_pos") and not ctx.should_quantize("el.0.cpw1_w")
+
+
+def test_attention_projections_stay_unquantized_with_a_scale(tiny, monkeypatch) -> None:
+    """Attention scales in an older table are ignored: FP8 q/k/v/o cost about one WER point."""
+    weights, scales = tiny
+    stale = {**scales, **{f"el.0.{name}": 0.02 for name in ("w_q", "w_k", "w_v", "w_o")}}
+    monkeypatch.setattr(quantization_module, "load_activation_scales", lambda key: stale)
+    ctx = calibrate_nemotron(weights, graph_ops, "fp8")
+    assert set(ctx.scales) == set(scales)
+    assert not ctx.should_quantize("el.0.w_q") and not ctx.should_quantize("el.0.w_o")
 
 
 def test_projection_without_scale_stays_unquantized(tiny, monkeypatch) -> None:

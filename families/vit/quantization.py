@@ -9,8 +9,8 @@ time, one projection at a time: ``scale = max(abs(weight)) / 448`` (448 is the l
 finite e4m3 value), and the FP8 bytes are fed to the engine as a constant. The activation
 scale of each projection input needs real data, so it was calibrated once offline with
 ``calibrate_fp8_scales.py`` (ModelOpt ``FP8_DEFAULT_CFG``) and is read from
-``fp8_activation_scales.json``, one table per model config. Users do not run calibration.
-FP8 weights are never stored.
+``fp8_activation_scales.json``, one table per checkpoint (model config plus a weight
+fingerprint). Users do not run calibration. FP8 weights are never stored.
 
 A model config with no table, or a table that does not cover every projection, is an error
 that names the calibration tool: there is no silent fallback. The one exception is an
@@ -20,7 +20,8 @@ work precision.
 Each quantized projection becomes ``activation -> Quantize -> Dequantize -> MatMul`` with
 ``FP8 weight -> Dequantize`` on the other input. The Dequantize layers and the matmul use
 the type of the activation, so the matmul output has the same type and no cast is added.
-The family builds float32 engines, so they run in float32.
+FP8 builds use the fp16 work type (``model.build`` refuses fp32 and bf16), so the
+Dequantize layers and the GEMM run in fp16.
 
 Quantized projections of every encoder layer: ``query``, ``key``, ``value``, the attention
 output ``attention.output.dense``, ``intermediate.dense`` and ``output.dense``. The patch
@@ -86,8 +87,9 @@ def _wrap_fp8_matmul(network, activation, scales: _LayerScales, *, keep_alive: l
 
     With an fp16 activation TensorRT's FP8 GEMM keeps the raw accumulator in fp16 and
     applies the scales after, which overflows once an output exceeds about
-    ``65504 * input_scale * weight_scale``. The float32 engines this family builds have no
-    such limit.
+    ``65504 * input_scale * weight_scale``. Measured on vit-base-patch16-224, no output of
+    2000 ImageNet validation images and 12 random-noise inputs (up to 10x the pixel range)
+    reached it: every logit was finite.
     """
     dtype = activation.dtype
     if dtype not in (trt.float16, trt.float32):
@@ -146,15 +148,25 @@ class VitQuantContext:
         return run
 
 
-def scale_key(cfg: dict) -> str:
-    """Key of this model's entry in the activation-scale file, from the resolved config.
+def _abs_sum(values) -> float:
+    return float(np.abs(np.asarray(values, dtype=np.float64)).sum())
 
-    Hidden size, layers, MLP size, patch size and input size are the values that change
-    the activation ranges.
+
+def scale_key(cfg: dict, weights: dict) -> str:
+    """Key of this checkpoint's entry in the activation-scale file.
+
+    Hidden size, layers, MLP size, patch size and input size are the model config values
+    that change the activation ranges. Fine-tuned checkpoints share all of them with their
+    base model, so the key also holds two weight sums (sum of absolute values, 5
+    significant digits): the position table and the query weight of layer 0.
     """
+    prefix = cfg["prefix"]
+    positions = weights[f"{prefix}embeddings.position_embeddings"]
+    query = weights[f"{prefix}encoder.layer.0.attention.attention.query.weight"]
     return (
         f"vit-h{cfg['hidden_size']}-l{cfg['num_layers']}-i{cfg['intermediate_size']}"
         f"-p{cfg['patch_size']}-s{cfg['image_size']}"
+        f"-w{_abs_sum(positions):.4e}-{_abs_sum(query):.4e}"
     )
 
 
@@ -173,8 +185,8 @@ def quantize_fp8_weight(weight_fp32: np.ndarray) -> tuple[np.ndarray, float]:
     return np.ascontiguousarray(packed), scale
 
 
-def load_activation_scales(cfg: dict) -> dict[str, float | None]:
-    """Return the committed activation scales for this model config, or raise when none exist."""
+def load_activation_scales(key: str) -> dict[str, float | None]:
+    """Return the committed activation scales for this checkpoint, or raise when none exist."""
     path = Path(__file__).parent / ACTIVATION_SCALES_FILENAME
     try:
         table = json.loads(path.read_text(encoding="utf-8"))
@@ -183,7 +195,6 @@ def load_activation_scales(cfg: dict) -> dict[str, float | None]:
             f"ViT FP8 build requires {path}, which was not found. "
             f"Run `{CALIBRATION_TOOL} calibrate` to create it."
         ) from error
-    key = scale_key(cfg)
     if key not in table:
         raise NotImplementedError(
             f"no calibrated FP8 activation scales for model config {key!r}; available: "
@@ -202,19 +213,32 @@ def projections(cfg: dict) -> list[str]:
     ]
 
 
+def check_not_quantized(model_dir: Path) -> None:
+    """Refuse a checkpoint that is already quantized (self-quantization needs the original)."""
+    model_dir = Path(model_dir)
+    config_path = model_dir / "config.json"
+    config = json.loads(config_path.read_text(encoding="utf-8")) if config_path.is_file() else {}
+    if config.get("quantization_config") or (model_dir / "hf_quant_config.json").is_file():
+        raise ValueError(
+            f"{model_dir} is an already quantized checkpoint; vit fp8 self-quantization needs "
+            "the original checkpoint"
+        )
+
+
 def calibrate_vit(weights: dict, cfg: dict, quantization: str) -> VitQuantContext:
     """Quantize the checkpoint one projection at a time and pair it with the stored scales."""
     if quantization not in _SUPPORTED:
         raise NotImplementedError(
             f"ViT supports quantization {list(_SUPPORTED)} or none; got {quantization!r}"
         )
-    activation_scales = load_activation_scales(cfg)
+    key = scale_key(cfg, weights)
+    activation_scales = load_activation_scales(key)
     names = projections(cfg)
     missing = [name for name in names if name not in activation_scales]
     unused = sorted(set(activation_scales) - set(names))
     if missing or unused:
         raise ValueError(
-            f"FP8 scale table {scale_key(cfg)!r} does not match the model: "
+            f"FP8 scale table {key!r} does not match the model: "
             f"{len(missing)} projections without an entry (first: {missing[:3]}), "
             f"{len(unused)} entries without a projection (first: {unused[:3]}). "
             f"Re-run `{CALIBRATION_TOOL} calibrate` for this model."

@@ -62,6 +62,10 @@ if TYPE_CHECKING:
     from .config import ModelConfig
     from .checkpoint_mapper import WeightDict
 
+# Tactic-selection point for the native-KV active key-row count (typical chat
+# and benchmark contexts); any count from 1 to the cache capacity is valid.
+NATIVE_KV_ACTIVE_KEY_ROWS_OPTIMUM = 256
+
 
 def _const_in_work_dtype(
     network: trt.INetworkDefinition,
@@ -295,9 +299,14 @@ def build_dual_profile_decoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
-    trt_config.builder_optimization_level = 1
+    trt_config.builder_optimization_level = (
+        1 if quant_ctx is None else quant_ctx.builder_optimization_level
+    )
     if quant_ctx is not None and quant_ctx.disable_dual_gemm_fusion:
         trt_config.build_route = "-peep:match_dual_gemm=off"
+    if quant_ctx is not None:
+        # Keep per-layer tactic details so the plan inspector shows the quantized GEMM kernels.
+        trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
     # Native full-context Llama builds can require substantial tactic workspace
     # while TensorRT compiles the primitive attention graph. This is build-time
     # scratch only (it is not serialized as runtime KV memory), and the limit
@@ -319,9 +328,12 @@ def build_dual_profile_decoder_engine(
     attention_mask: trt.ITensor | None = None
     cache_write_indices: trt.ITensor | None = None
     key_value_lengths: trt.ITensor | None = None
+    key_positions: trt.ITensor | None = None
     if native_kv_cache:
         cache_write_indices = network.add_input("cache_write_indices", trt.int32, (1,))
         key_value_lengths = network.add_input("key_value_lengths", trt.int32, (1,))
+        # 0..R-1 for the cache rows attention reads; R is bucketed by the runtime.
+        key_positions = network.add_input("key_positions", trt.int32, (-1,))
     else:
         attention_mask = network.add_input("attention_mask", trt.float32, (-1, -1))
 
@@ -356,6 +368,13 @@ def build_dual_profile_decoder_engine(
         opt_cache_rows = max_cache_length
         prof.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
         prof.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
+        if native_kv_cache:
+            prof.set_shape(
+                "key_positions",
+                (1,),
+                (min(NATIVE_KV_ACTIVE_KEY_ROWS_OPTIMUM, max_cache_length),),
+                (max_cache_length,),
+            )
         if not native_kv_cache:
             prof.set_shape(
                 "attention_mask",
@@ -540,6 +559,7 @@ def build_dual_profile_decoder_engine(
             cache_write_indices,
             key_value_lengths,
             max_cache_length,
+            key_positions=key_positions,
         )
 
     present_k_outs: list[trt.ITensor] = []
@@ -647,6 +667,7 @@ def build_dual_profile_decoder_engine(
                 cache_v_inputs[layer_idx],
                 cache_write_indices,
                 native_attention_masks,
+                key_positions=key_positions,
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,

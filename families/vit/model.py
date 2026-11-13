@@ -20,7 +20,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import config as config_module, encoder_builder, graph as g
-from .quantization import calibrate_vit
+from .quantization import calibrate_vit, check_not_quantized
 
 _SUPPORTED_TASKS = ("image_to_class_scores",)
 
@@ -174,20 +174,23 @@ def build(request, writer) -> None:
         # the image size and is not a free parameter.
         raise NotImplementedError("vit derives its sequence length from the image size")
 
-    # fp32 (the default) or fp16. An fp16 engine is too noisy for the fp32
+    # fp16 (the default, support.py) or fp32. An fp16 engine is too noisy for the fp32
     # logit tolerance alone to catch the weakest defect, the tanh GELU:
     # measured on the E2E image it is 5.2e-03 to 1.3e-02 off the reference,
     # and a tanh-GELU fp16 build 1.6e-02 to 2.5e-02. So the fp16 E2E case
     # adds a check that does not depend on that margin (test_e2e.py).
     precision = str(request.precision).lower()
+    if request.quantization == "fp8" and precision != "fp16":
+        # FP8 inside the fp32 graph is faster than fp32 but slower than plain fp16,
+        # so FP8 runs on the fp16 graph only (fp16 Dequantize).
+        raise ValueError("vit quantization=fp8 requires precision=fp16")
     if precision not in _WORK_DTYPES:
         raise NotImplementedError(
             f"vit builds fp32 or fp16; {precision} is not qualified for this family")
-    if request.quantization == "fp8" and precision != "fp32":
-        # The FP8 graph and its measurements are float32 (fp32 Dequantize).
-        raise NotImplementedError(f"vit fp8 builds fp32 only; got precision {precision}")
 
     model_dir = Path(request.model_dir)
+    if request.quantization == "fp8":
+        check_not_quantized(model_dir)
     weights = _open_checkpoint(model_dir)
     prefix = "vit." if any(key.startswith("vit.") for key in weights) else ""
     _require_weights(weights, prefix)
@@ -203,7 +206,7 @@ def build(request, writer) -> None:
             f"vit input size is fixed at the checkpoint's {cfg['image_size']}")
 
     # fp8: the projections are quantized from the original checkpoint, so the weights
-    # above stay float32 and only the Q/DQ constants of quantized projections are new.
+    # above are not changed and only the Q/DQ constants of quantized projections are new.
     quant_ctx = None
     if request.quantization == "fp8":
         quant_ctx = calibrate_vit(weights, cfg, "fp8")

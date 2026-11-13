@@ -1,0 +1,26 @@
+{
+  "name": "granite-embedding-small-english-r2-bf16",
+  "hf_id": "ibm-granite/granite-embedding-small-english-r2",
+  "hf_revision": "2ab6fa8ea2d674564defd37171ae19079b864b33",
+  "bundle": "granite-embedding-small-english-r2-bf16.bundle",
+  "family": "modernbert",
+  "task": "text_to_pooled_features",
+  "precision": "bf16",
+  "testcases": [
+    {
+      "name": "granite-embedding-small-english-r2-bf16",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "A man is slicing open a fish."
+    },
+    {
+      "name": "granite-embedding-small-english-r2-bf16-local-window",
+      "reference_precision": "fp32",
+      "exercise_local_window": true,
+      "prompt": "The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge.",
+      "premerge": true
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 256
+}

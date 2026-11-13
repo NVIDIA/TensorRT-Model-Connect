@@ -244,6 +244,8 @@ def build_dual_profile_decoder_engine(
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config
+    if profile_mode == "decode" and getattr(quant_ctx, "has_nvfp4_weights", False):
+        trt_config.max_aux_streams = 0
     if quant_ctx is not None:
         # Per-layer kernel names stay in the plan, so the FP8 / FP4 GEMMs can be checked.
         trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED

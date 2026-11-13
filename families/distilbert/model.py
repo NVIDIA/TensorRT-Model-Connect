@@ -170,7 +170,12 @@ class _DistilBertModel:
             )
 
         return build_encoder_engine(
-            config, weights, max_seq_length=max_cache_length, precision=precision, verbose=verbose
+            config,
+            weights,
+            max_seq_length=max_cache_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
+            verbose=verbose,
         )
 
 
@@ -268,8 +273,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("DistilBERT max_sequence_length exceeds checkpoint capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("DistilBERT has no family-owned quantized build")
+    quantization = None if request.quantization in {None, "none"} else request.quantization
+    if quantization is not None and quantization != "fp8":
+        raise NotImplementedError(
+            f"DistilBERT supports quantization fp8 or none; got {request.quantization!r}"
+        )
+    if quantization is not None and precision != "fp16":
+        raise ValueError(f"DistilBERT FP8 needs precision fp16, got {precision!r}")
     if request.fp32_layers:
         raise NotImplementedError("DistilBERT does not expose mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -278,8 +288,19 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
     parallel.validate()
+    if quantization is not None and parallel.enabled:
+        raise ValueError("DistilBERT tensor-parallel builds do not support quantization")
+    if quantization is not None:
+        from .quantization import refuse_quantized_checkpoint
+
+        refuse_quantized_checkpoint(config, _open_safetensors(model_dir).tensor_map)
     model = _DistilBertModel()
     weights = model.load_weights(str(model_dir), config)
+    quant_ctx = None
+    if quantization is not None:
+        from .quantization import calibrate_distilbert
+
+        quant_ctx = calibrate_distilbert(config, weights, quantization, precision=precision)
     writer.set_header(family="distilbert", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -299,7 +320,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             parallel_config=parallel,
         )

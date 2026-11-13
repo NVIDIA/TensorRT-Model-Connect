@@ -296,6 +296,29 @@ def test_native_kv_engine_builds_with_fp8_weights(monkeypatch, role: str) -> Non
     assert len(quantized) < len(plain)
 
 
+@pytest.mark.gpu
+@pytest.mark.trt
+@pytest.mark.parametrize("role", ["prefill", "decode"])
+def test_native_kv_engine_attends_over_a_runtime_sized_key_row_slice(role: str) -> None:
+    """Native-KV attention reads ``len(key_positions)`` cache rows, from one row to the capacity."""
+    capacity = 64
+    plan = build_dual_profile_decoder_engine(
+        _config(), _weights(), capacity, precision="bf16", profile_mode=role, native_kv_cache=True
+    )
+    engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(plan)
+    assert engine is not None
+    assert engine.get_tensor_mode("key_positions") == trt.TensorIOMode.INPUT
+    assert engine.get_tensor_dtype("key_positions") == trt.int32
+    assert tuple(engine.get_tensor_shape("key_positions")) == (-1,)
+    assert [tuple(shape) for shape in engine.get_tensor_profile_shape("key_positions", 0)] == [
+        (1,),
+        (capacity,),
+        (capacity,),
+    ]
+    # The cache itself keeps its full static capacity.
+    assert tuple(engine.get_tensor_shape("cache_k_0"))[2] == capacity
+
+
 def test_native_kv_route_accepts_fp8_but_not_prequantized_checkpoints() -> None:
     """FP8 self-quantization keeps the native KV route; a pre-quantized checkpoint does not."""
     config = ModelConfig.create_tiny(

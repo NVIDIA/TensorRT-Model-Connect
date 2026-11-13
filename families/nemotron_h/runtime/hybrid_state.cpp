@@ -32,6 +32,18 @@ void NemotronHHybridState::advance(int32_t n_tokens) {
     ssm_->advance(n_tokens);
 }
 
+void NemotronHHybridState::bind_prefill(ITrtModule& module) {
+    // The prefill context reads the shared caches and recurrent state; its
+    // present K/V rows stay in its own buffers until commit_prefill().
+    kv_->bind_cache_inputs(module);
+    ssm_->bind_to(module);
+}
+
+void NemotronHHybridState::commit_prefill(ITrtModule& module, int32_t rows) {
+    kv_->append_prefill_from(module, rows);
+    ssm_->advance(rows);
+}
+
 int32_t NemotronHHybridState::position() const {
     return kv_->position();
 }

@@ -105,6 +105,7 @@ class _Network:
     def add_matrix_multiply(self, *a): return self._add("matmul", *a)
     def add_softmax(self, *a): return self._add("softmax", *a)
     def add_activation(self, *a): return self._add("activation", *a)
+    def add_cast(self, *a): return self._add("cast", *a)
 
 
 _TRT = SimpleNamespace(
@@ -116,6 +117,7 @@ _TRT = SimpleNamespace(
     ActivationType=SimpleNamespace(SIGMOID="SIGMOID"),
     MemoryPoolType=SimpleNamespace(WORKSPACE="WORKSPACE"),
     BuilderFlag=SimpleNamespace(TF32="TF32"),
+    float32="FLOAT",
 )
 
 
@@ -153,10 +155,10 @@ def test_weight_fixture_matches_the_published_tensor_count() -> None:
     assert len(_weights()) == 47 - owned_elsewhere
 
 
-def _build(steps: int = 8):
+def _build(steps: int = 8, dtype=None):
     net = _Network()
     db.add_depth_decoder(net, _TRT, SimpleNamespace(name="in"),
-                         steps=steps, weights=_weights())
+                         steps=steps, weights=_weights(), dtype=dtype)
     return net
 
 
@@ -206,3 +208,34 @@ def test_configure_states_the_precision_choice() -> None:
 
     assert limits == [("WORKSPACE", db.WORKSPACE_BYTES)]
     assert cleared == ["TF32"]
+
+
+def test_float32_decoder_adds_no_cast() -> None:
+    assert "cast" not in [k for k, _ in _build().calls]
+
+
+def test_bf16_decoder_casts_after_the_positions_and_before_the_heads() -> None:
+    net = _build(dtype="BF16")
+    names = {f"{kind}{index}#0": kind for index, (kind, _) in enumerate(net.calls, start=1)}
+    computed = [(names.get(args[0].name), args[1]) for kind, args in net.calls
+                if kind == "cast" and names.get(args[0].name) != "constant"]
+
+    # In: the sum of the input and the position table. Out: the final norm's
+    # scale product, back to float32 for the heads.
+    assert computed == [("elementwise", "BF16"), ("elementwise", "FLOAT")]
+    assert net.calls[-1][0] == "cast"
+    # The position table itself stays float32: it is added before the cast.
+    assert ("constant", ((1, 8, dd.HIDDEN_SIZE), ("W", (1, 8, dd.HIDDEN_SIZE)))) in net.calls
+
+
+def test_bf16_decoder_holds_every_projection_in_bf16() -> None:
+    net = _build(dtype="BF16")
+    names = {f"{kind}{index}#0": kind for index, (kind, _) in enumerate(net.calls, start=1)}
+    weight_operands = [names[args[2].name] for kind, args in net.calls
+                       if kind == "matmul" and names.get(args[2].name) in ("constant", "cast")]
+
+    assert weight_operands == ["cast"] * (7 * dd.NUM_LAYERS)
+    constant_casts = {args[1] for kind, args in net.calls
+                      if kind == "cast" and names.get(args[0].name) == "constant"}
+    assert constant_casts == {"BF16"}
+

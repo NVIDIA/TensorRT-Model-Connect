@@ -26,9 +26,9 @@ Anything outside this list fails at build time with the offending field named.
 | Real-time chunking, relative actions | not supported (`rtc_config.enabled`, `use_relative_actions` must be off) |
 | Normalization | `IDENTITY`, `MEAN_STD`, `MIN_MAX`, `QUANTILES` (LeRobot's pi05 training default) and `QUANTILE10`, applied to exactly the features LeRobot's processors select |
 | Processor steps | the steps LeRobot saves for pi05; any other step, an enabled relative or absolute action step, or a state normalized after the prompt step is rejected |
-| Precision | `bf16` (default) and `fp32`; see [Vision tower precision](#vision-tower-precision) |
+| Precision | `bf16` (default) and `fp32`; see [Vision tower precision](#vision-tower-precision); `--quantization fp8` with `bf16` for checkpoints with calibrated scales (see FP8 below) |
 | Prompt | right-padded to `tokenizer_max_length`; a longer instruction plus state is rejected, not truncated |
-| Not claimed | Pi 0, Pi 0-FAST, Pi 0.7, Jetson targets, quantization, multi-GPU |
+| Not claimed | Pi 0, Pi 0-FAST, Pi 0.7, Jetson targets, NVFP4 or other quantization than FP8, multi-GPU |
 
 Statistics are read from the processor state files the checkpoint names
 (`policy_preprocessor_step_N_normalizer_processor.safetensors`,
@@ -191,6 +191,48 @@ untied `embed_tokens` table; the loader handles all three. Both enable `torch.co
 in their config, which changes LeRobot's own numerics at about 1e-3, which is why the
 oracle is always eager.
 
+## FP8
+
+```bash
+trtmc build lerobot/pi05_libero_base -o pi05-fp8.bundle --precision bf16 --quantization fp8
+```
+
+`--quantization fp8` quantizes `gate_proj`, `up_proj` and `down_proj` of the Gemma-2B prefix
+layers and of the Gemma-300M action expert (W8A8, per-tensor scales). Weights are quantized
+at build time (scale `max(abs(w)) / 448`); the static activation scales are read from
+`fp8_activation_scales.json`, which `calibrate_fp8_scales.py` wrote once per checkpoint with
+ModelOpt `FP8_DEFAULT_CFG` (max calibration) over 255 LIBERO frames and all denoising steps.
+A projection whose input scale is above 20x the median of its kind is an outlier and stays
+bf16 (prefix layer 16 `down_proj` in `pi05-libero`, prefix layers 15 and 16 `down_proj` in
+`pi05_libero_base`). The vision tower, the attention projections, the norms and the action
+and time projections stay in the build precision. Scales are keyed by the camera slots,
+prompt length, chunk size and the first values of `action_out_proj.bias`, so a fine-tuned
+checkpoint without its own entry fails with a message naming the calibration tool.
+Calibrated: `lerobot/pi05_libero_base` at `5fcf06fc42b6717e22ab885fd381a096574b12c7` and
+`lerobot/pi05-libero` at `9ba5431256f4136a01c224ab0307b0d3035cc92c`.
+
+FP8 needs `--precision bf16`: `fp32` with `fp8` and an already quantized checkpoint
+(`quantization_config` in `config.json`, `hf_quant_config.json` or quantized tensors) are
+refused before the weights load.
+
+Measured with TensorRT 11.4, batch one, the prefix and ten denoising steps on the device
+(CUDA events, median; range over five builds of each in two jobs per GPU), 200 held-out
+LIBERO frames (not used for calibration), against the eager LeRobot float32 policy:
+
+| | bf16 | bf16 + FP8 |
+| --- | --- | --- |
+| Action chunk, B200 / B300 | 17.8-18.6 / 16.8-17.4 ms | 16.1-17.2 / 15.4-17.2 ms |
+| Prefix engine, B200 / B300 | 5.9-6.1 / 5.6 ms | 4.6-4.7 / 4.4-4.6 ms |
+| Native runtime wall time per chunk, B200 / B300 (p50) | 32.1 / 30.6 ms | 30.1 / 29.6 ms |
+| Bundle | 6.7 GB | 4.8 GB |
+| Arm mean abs error, `pi05-libero` (LeRobot bf16: 0.0010) | 0.0005 | 0.0019 |
+| Arm mean abs error, `pi05_libero_base` (LeRobot bf16: 0.0014) | 0.0013 | 0.0028 |
+| Frames with a gripper sign change, `pi05-libero` (LeRobot bf16: 5) | 2 | 3-4 |
+
+No NaN or Inf on any frame. The FP8 E2E cases (`pi05-libero-base-fp8-*`) bound the error on
+the three test observations at about twice the B200 and B300 values. FP8 needs `ml_dtypes`
+(already a dependency).
+
 ## Known limits
 
 - Qualified on one NVIDIA GB300 with TensorRT 11.1 (CUDA 13.3) and 11.4 (CUDA 13.4). Other
@@ -205,6 +247,9 @@ oracle is always eager.
 - Between the two engines the prefix keys and values pass through host memory, and the
   vision tower also runs on placeholder camera slots whose tokens are masked. The latency
   above includes both; neither affects results.
+- FP8 is calibrated for `lerobot/pi05_libero_base` and `lerobot/pi05-libero` only; other
+  checkpoints need a run of `calibrate_fp8_scales.py` (needs `lerobot[pi]` and ModelOpt) and
+  a new table entry.
 - Building needs `sentencepiece`, `protobuf` and the PaliGemma tokenizer: in the
   checkpoint directory, or in the Hugging Face cache, which the first download from the
   gated repository fills.

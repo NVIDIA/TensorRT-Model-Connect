@@ -13,7 +13,6 @@ Patches arrive in the processor's order, where four consecutive patches form one
 from __future__ import annotations
 
 import numpy as np
-import tensorrt as trt
 
 from . import graph
 from .checkpoint import require
@@ -106,9 +105,8 @@ def _merger(network, h, weights, prefix, *, postshuffle, dtype):
 def build_vision(network, pixel_values, weights, *, images, grid_h, grid_w, dtype):
     """Image tokens ``[images * tokens, OUT]`` and the DeepStack features, all in ``dtype``.
 
-    Matrix products run in ``dtype`` except the query/key/value projection, which stays
-    float32: it feeds the rotary embedding and the attention logits, and keeping it float32
-    holds the bf16 bundle's actions inside the test thresholds with margin (see the README).
+    Every matrix product runs in ``dtype``; norms, softmax, gelu, the rotary embedding and
+    the residual stream stay float32, as in the rest of the graph.
 
     ``pixel_values[images * grid_h * grid_w, PATCH_VALUES]`` are the processor's normalised
     patches; ``tokens = grid_h * grid_w / 4`` per image.
@@ -130,7 +128,7 @@ def build_vision(network, pixel_values, weights, *, images, grid_h, grid_w, dtyp
     for index in range(DEPTH):
         p = f"{_ROOT}blocks.{index}."
         norm = graph.layer_norm(network, h, LN_EPS, weights[p + "norm1.weight"], weights[p + "norm1.bias"])
-        qkv = graph.linear(network, norm, weights[p + "attn.qkv.weight"], weights[p + "attn.qkv.bias"], dtype=trt.float32)
+        qkv = graph.linear(network, norm, weights[p + "attn.qkv.weight"], weights[p + "attn.qkv.bias"], dtype=dtype)
         parts = [graph.slice_static(network, qkv, (0, 0, i * WIDTH), (images, patches, WIDTH)) for i in range(3)]
         q, k = (
             graph.shuffle(network, graph.rotate(

@@ -29,6 +29,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import config as config_module, encoder_builder, graph as g
+from .quantization import calibrate_esm, configure_quantized_build
 
 _SUPPORTED_TASKS = ("masked_text_to_token_scores",)
 
@@ -40,21 +41,119 @@ _MASK_FLOOR = -1.0e4
 # training, 0.15 * 0.8. It is hard-coded in the reference for every ESM run.
 _MASK_RATIO_TRAIN = 0.15 * 0.8
 
+# Work type per build precision: (numpy, TensorRT). fp16 keeps the int32
+# inputs and the float32 logits, so the runtime and the bundle do not change.
+_WORK_TYPES = {"fp32": (np.float32, trt.float32), "fp16": (np.float16, trt.float16)}
+
 
 def _open_checkpoint(model_dir: Path) -> dict:
+    """Load an ESM-2 checkpoint into a dictionary of NumPy float32 arrays.
+
+    Supports single-file checkpoints (model.safetensors, pytorch_model.bin)
+    and sharded checkpoints indexed by model.safetensors.index.json or
+    pytorch_model.bin.index.json (used by ESM-2 3B and 15B).
+    """
     directory = Path(model_dir)
+
+    # 1. Single safetensors checkpoint
     safetensors = directory / "model.safetensors"
     if safetensors.is_file():
         from safetensors.numpy import load_file
 
         return load_file(str(safetensors))
-    binary = directory / "pytorch_model.bin"
-    if not binary.is_file():
-        raise FileNotFoundError(f"missing esm checkpoint: neither {safetensors} nor {binary}")
-    import torch
 
-    state = torch.load(str(binary), map_location="cpu", weights_only=True)
-    return {key: value.detach().to(torch.float32).numpy() for key, value in state.items()}
+    # 2. Sharded safetensors checkpoint
+    safetensors_index = directory / "model.safetensors.index.json"
+    if safetensors_index.is_file():
+        import json
+        from safetensors.numpy import load_file
+
+        try:
+            index = json.loads(safetensors_index.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as err:
+            raise ValueError(
+                f"esm checkpoint index {safetensors_index.name} is invalid JSON"
+            ) from err
+        if not isinstance(index, dict):
+            raise ValueError(
+                f"esm checkpoint index {safetensors_index.name} must be a JSON object"
+            )
+        weight_map = index.get("weight_map")
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError(
+                f"esm checkpoint index {safetensors_index.name} has no valid weight_map"
+            )
+        if any(
+            not isinstance(shard, str)
+            or not shard.strip()
+            or Path(shard).name != shard
+            for shard in weight_map.values()
+        ):
+            raise ValueError(
+                "safetensors shard names in index must be non-empty checkpoint-local filenames"
+            )
+        shards = sorted(set(weight_map.values()))
+        weights = {}
+        for shard in shards:
+            shard_path = directory / shard
+            if not shard_path.is_file():
+                raise FileNotFoundError(f"missing esm checkpoint shard: {shard_path}")
+            weights.update(load_file(str(shard_path)))
+        return weights
+
+    # 3. Single PyTorch binary checkpoint
+    binary = directory / "pytorch_model.bin"
+    if binary.is_file():
+        import torch
+
+        state = torch.load(str(binary), map_location="cpu", weights_only=True)
+        return {key: value.detach().to(torch.float32).numpy() for key, value in state.items()}
+
+    # 4. Sharded PyTorch binary checkpoint (e.g. ESM-2 3B and 15B)
+    torch_index = directory / "pytorch_model.bin.index.json"
+    if torch_index.is_file():
+        import json
+        import torch
+
+        try:
+            index = json.loads(torch_index.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as err:
+            raise ValueError(
+                f"esm checkpoint index {torch_index.name} is invalid JSON"
+            ) from err
+        if not isinstance(index, dict):
+            raise ValueError(
+                f"esm checkpoint index {torch_index.name} must be a JSON object"
+            )
+        weight_map = index.get("weight_map")
+        if not isinstance(weight_map, dict) or not weight_map:
+            raise ValueError(
+                f"esm checkpoint index {torch_index.name} has no valid weight_map"
+            )
+        if any(
+            not isinstance(shard, str)
+            or not shard.strip()
+            or Path(shard).name != shard
+            for shard in weight_map.values()
+        ):
+            raise ValueError(
+                "PyTorch shard names in index must be non-empty checkpoint-local filenames"
+            )
+        shards = sorted(set(weight_map.values()))
+        weights = {}
+        for shard in shards:
+            shard_path = directory / shard
+            if not shard_path.is_file():
+                raise FileNotFoundError(f"missing esm checkpoint shard: {shard_path}")
+            state = torch.load(str(shard_path), map_location="cpu", weights_only=True)
+            for key, value in state.items():
+                weights[key] = value.detach().to(torch.float32).numpy()
+        return weights
+
+    raise FileNotFoundError(
+        f"missing esm checkpoint: neither {safetensors}, {safetensors_index.name}, "
+        f"{binary}, nor {torch_index.name} found in {directory}"
+    )
 
 
 def _prefix(weights: dict) -> str:
@@ -152,7 +251,7 @@ def _builder(verbose):
     return builder, network, config
 
 
-def _token_dropout(network, embedded, input_ids, keep_column, cfg, work_np):
+def _token_dropout(network, embedded, input_ids, keep_column, cfg, work_np, work_trt):
     """ESM's mask-dropout compensation, computed from the ids at run time.
 
     Masked rows are zeroed, and then **every** row - masked or not - is scaled
@@ -165,7 +264,7 @@ def _token_dropout(network, embedded, input_ids, keep_column, cfg, work_np):
                              np.full((seq_len,), cfg["mask_token_id"]), dtype=np.int32)
     is_mask = network.add_elementwise(input_ids, mask_id,
                                       trt.ElementWiseOperation.EQUAL).get_output(0)
-    is_mask = network.add_cast(is_mask, trt.float32).get_output(0)
+    is_mask = network.add_cast(is_mask, work_trt).get_output(0)
 
     column = network.add_shuffle(is_mask)
     column.reshape_dims = (seq_len, 1)
@@ -190,9 +289,13 @@ def _token_dropout(network, embedded, input_ids, keep_column, cfg, work_np):
     return g.add_product(network, embedded, factor.get_output(0))
 
 
-def build_engine(weights, cfg, *, seq_len, verbose=False) -> bytes:
+def build_engine(weights, cfg, *, seq_len, precision="fp32", quant_ctx=None,
+                 verbose=False) -> bytes:
     builder, network, config = _builder(verbose)
-    work_np = np.float32
+    configure_quantized_build(config, quant_ctx)
+    # The work type of every layer. Layer-norm statistics are taken in float32
+    # either way (graph.add_layer_norm), and the engine I/O stays the same.
+    work_np, work_trt = _WORK_TYPES[precision]
     prefix = cfg["prefix"]
     head_dim = cfg["head_dim"]
 
@@ -203,13 +306,14 @@ def build_engine(weights, cfg, *, seq_len, verbose=False) -> bytes:
     embedded = network.add_gather(
         g.add_constant(network, table.shape, table, dtype=work_np), input_ids, 0).get_output(0)
 
-    keep = network.add_cast(attention_mask, trt.float32).get_output(0)
+    keep = network.add_cast(attention_mask, work_trt).get_output(0)
     column = network.add_shuffle(keep)
     column.reshape_dims = (seq_len, 1)
     keep_column = column.get_output(0)
 
     if cfg["token_dropout"]:
-        embedded = _token_dropout(network, embedded, input_ids, keep_column, cfg, work_np)
+        embedded = _token_dropout(network, embedded, input_ids, keep_column, cfg, work_np,
+                                  work_trt)
     # The reference zeroes the padded rows last, after the compensation.
     hidden = g.add_product(network, embedded, keep_column)
 
@@ -233,7 +337,7 @@ def build_engine(weights, cfg, *, seq_len, verbose=False) -> bytes:
     sin = g.add_constant(network, (1, seq_len, head_dim), sin_table, dtype=work_np)
 
     hidden = encoder_builder.build_layers(network, hidden, weights, cfg, mask=additive,
-                                          cos=cos, sin=sin, dtype=work_np)
+                                          cos=cos, sin=sin, dtype=work_np, quant_ctx=quant_ctx)
 
     head = g.add_gelu(network, g.add_linear(network, hidden, weights["lm_head.dense.weight"],
                                             weights["lm_head.dense.bias"], dtype=work_np),
@@ -242,6 +346,8 @@ def build_engine(weights, cfg, *, seq_len, verbose=False) -> bytes:
                             weights["lm_head.layer_norm.bias"], cfg["eps"])
     logits = g.add_linear(network, head, _decoder_weight(weights, prefix),
                           weights["lm_head.bias"], dtype=work_np)
+    if logits.dtype != trt.float32:
+        logits = network.add_cast(logits, trt.float32).get_output(0)
     logits.name = "logits"
     network.mark_output(logits)
 
@@ -269,20 +375,35 @@ def build(request, writer) -> None:
         raise NotImplementedError("esm does not take an image")
     if request.video_num_frames is not None:
         raise NotImplementedError("esm does not support video_num_frames")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("esm does not support quantization")
+    quantized = request.quantization not in {None, "none"}
+    if quantized and request.quantization != "fp8":
+        raise NotImplementedError(
+            f"esm supports quantization fp8 or none; got {request.quantization!r}")
     if request.fp32_layers:
         raise NotImplementedError("esm does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
         raise NotImplementedError("esm does not support MTP speculative decoding")
 
-    # fp32 only, for the reason the neighbouring encoders are fp32 only: no
-    # fp16 number has been measured against the reference here, and an
-    # accepted-but-unmeasured precision builds a bundle nothing checks.
+    # fp32 (the default) or fp16. Measured on esm2_t33_650M_UR50D against the
+    # reference on 1000 held-out UniRef50 sequences, fp16 moves the masked-token
+    # distribution by KL 1e-05 to 4e-05 (perplexity within 0.01%) with no
+    # non-finite output. The layer norms keep float32 statistics because they
+    # must: the residual stream reaches 6.1e+03, whose square overflows fp16,
+    # and an all-fp16 layer norm drops accuracy from 35% to 6%. The softmax
+    # stays fp16; taking it in float32 changed neither speed nor quality.
+    # The fp16 E2E case has its own logit tolerance (test_e2e.py).
+    # FP8: fp16 only. The rest of the graph runs in fp16 around the FP8
+    # GEMMs. fp16 alone moves the masked-token distribution by KL 1e-05 to
+    # 5e-05 and FP8 by 8e-03 to 1e-02, so the fp16 work type adds less than 1%
+    # of the FP8 error; the same FP8 projections inside an fp32 graph are 1.6x
+    # to 3.3x slower, because the attention matmuls and the elementwise work
+    # stay fp32.
     precision = str(request.precision).lower()
-    if precision != "fp32":
+    if quantized and precision != "fp16":
+        raise ValueError("esm quantization=fp8 requires precision=fp16")
+    if precision not in _WORK_TYPES:
         raise NotImplementedError(
-            f"esm builds fp32 only; {precision} is not qualified for this family")
+            f"esm builds fp32 or fp16; {precision} is not qualified for this family")
 
     if request.max_sequence_length is None:
         raise ValueError("esm needs max_sequence_length: the engine is fixed-length")
@@ -295,6 +416,7 @@ def build(request, writer) -> None:
     prefix = _prefix(weights)
     _require_weights(weights, prefix)
     cfg = config_module.resolve(model_dir, weights, prefix)
+    quant_ctx = calibrate_esm(weights, cfg, g, request.quantization) if quantized else None
     if seq_len > cfg["max_positions"]:
         raise NotImplementedError(
             f"esm was trained to {cfg['max_positions']} positions, not {seq_len}")
@@ -303,7 +425,8 @@ def build(request, writer) -> None:
 
     writer.set_header(family="esm", task=request.task, backend=request.backend)
     writer.add_bytes("model.plan", build_engine(
-        weights, cfg, seq_len=seq_len, verbose=bool(request.verbose)))
+        weights, cfg, seq_len=seq_len, precision=precision, quant_ctx=quant_ctx,
+        verbose=bool(request.verbose)))
     writer.add_bytes("vocab.txt", vocabulary)
     writer.add_json(
         "runtime.json",

@@ -22,6 +22,9 @@ post-norm blocks instead of pre-norm       -            0.86183436
 masked rows not zeroed (token_dropout off) 2.325e-01    -
 =========================================  ===========  ==========
 
+The fp16 case uses its own logit tolerance, set from the fp16 noise
+measured on this case; see ``_FP16_LOGIT_TOLERANCE``.
+
 **Two rules here are deliberately not gated, because no input can gate
 them**, and saying so is more useful than a control that proves nothing:
 
@@ -109,8 +112,12 @@ def _selected_cases(config) -> tuple[list[str], bool]:
 
 
 def pytest_generate_tests(metafunc) -> None:
-    if "case_name" in metafunc.fixturenames:
+    for fixture in ("case_name", "fp16_case_name"):
+        if fixture not in metafunc.fixturenames:
+            continue
         names, enabled = _selected_cases(metafunc.config)
+        if fixture == "fp16_case_name":
+            names = [name for name in names if CASES[name][1]["precision"] == "fp16"]
         parameters = names
         if not enabled:
             parameters = [
@@ -122,7 +129,7 @@ def pytest_generate_tests(metafunc) -> None:
                 )
                 for name in names
             ]
-        metafunc.parametrize("case_name", parameters, ids=names)
+        metafunc.parametrize(fixture, parameters, ids=names)
 
 
 def _required_path(value: str | None, label: str) -> Path:
@@ -207,6 +214,23 @@ _LOGIT_TOLERANCE = 5e-3
 # Kept only to fail early and loudly on a gross error.
 _COSINE_FLOOR = 0.999
 
+# fp16 cannot use the tolerance above. Measured on this case (B200 and B300,
+# TensorRT 11.1 and 11.4, 22 builds), a correct fp16 engine is 7.6e-03 to
+# 2.5e-02 off the reference at the masked row, and an fp16 engine that leaves
+# the masked rows (token_dropout off) 2.2e-01 to 2.4e-01. 7.5e-02 sits 3x above
+# the first and 3x below the second. The two cosine breaks of the table stay
+# below the shared floor (fp16 noise moves the cosine by under 1e-06).
+#
+# The rotary-schedule break (5.6e-03) is inside the fp16 noise and is not
+# gated here: an fp16 build with it is 1.0e-02 to 1.7e-02 off, inside the range
+# as a correct one, and the share of that defect a correct fp16 engine carries
+# ranges from -1.6 to 0.9 on this row, so no second reference separates them
+# the way the tanh-GELU one does for vit. The schedule is chosen by the same
+# code at every precision, so the fp32 case gates it for both.
+#
+# test_fp16_gate_rejects_unzeroed_masked_rows builds both and checks this.
+_FP16_LOGIT_TOLERANCE = 7.5e-2
+
 
 def _reference_ids(model_dir: Path, text: str) -> list[int]:
     from transformers import AutoTokenizer
@@ -234,6 +258,21 @@ def _cosine(left, right) -> float:
     right_norm = math.sqrt(sum(b * b for b in right))
     assert left_norm > 0.0 and right_norm > 0.0
     return dot / (left_norm * right_norm)
+
+
+def _check_logits(native, reference, precision: str) -> tuple[float, float]:
+    """Assert the gate of ``precision`` on the selected rows; return max abs and cosine."""
+    assert len(native) == len(reference)
+    worst = max(max(abs(a - b) for a, b in zip(row, want))
+                for row, want in zip(native, reference))
+    cosine = _cosine([v for row in native for v in row],
+                     [v for row in reference for v in row])
+    assert cosine >= _COSINE_FLOOR, f"{FAMILY} logit cosine {cosine}"
+    tolerance = _FP16_LOGIT_TOLERANCE if precision == "fp16" else _LOGIT_TOLERANCE
+    assert worst <= tolerance, (
+        f"{FAMILY} {precision} logits differ from the reference by {worst}"
+    )
+    return worst, cosine
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
@@ -278,15 +317,90 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     reference = [reference_rows[index] for index in masked]
     assert columns == len(reference[0])
 
-    worst = max(max(abs(a - b) for a, b in zip(row, want))
-                for row, want in zip(native, reference))
-    cosine = _cosine([v for row in native for v in row],
-                     [v for row in reference for v in row])
-    assert cosine >= _COSINE_FLOOR, f"{FAMILY} logit cosine {cosine}"
-    assert worst <= _LOGIT_TOLERANCE, (
-        f"{FAMILY} logits differ from the reference by {worst}"
-    )
+    worst, cosine = _check_logits(native, reference, manifest["precision"])
     print(
-        f"{FAMILY} parity: {shape[0]} masked positions x {shape[1]} vocabulary, "
+        f"{FAMILY} {manifest['precision']} parity: {shape[0]} masked positions x "
+        f"{shape[1]} vocabulary, "
         f"logit maxabs {worst:.3e}, cosine {cosine:.8f}"
+    )
+
+
+def _synthetic(seed: int, noise: float, rows: int = 1) -> tuple[list, list]:
+    """Reference logits on the scale of this case, and scores with random noise of size ``noise``."""
+    import random
+
+    rng = random.Random(seed)
+    reference = [[rng.gauss(0.0, 4.0) for _ in range(33)] for _ in range(rows)]
+    scores = [[value + rng.uniform(-noise, noise) for value in row] for row in reference]
+    return scores, reference
+
+
+def test_fp16_gate_takes_fp16_noise_and_fails_the_masked_row_break() -> None:
+    """fp16-sized noise passes the fp16 gate; an error of the unzeroed-mask size fails it."""
+    scores, reference = _synthetic(0, 2.5e-2)
+    _check_logits(scores, reference, "fp16")
+    scores[0][3] = reference[0][3] + 0.2
+    with pytest.raises(AssertionError, match="fp16 logits differ"):
+        _check_logits(scores, reference, "fp16")
+
+
+def test_fp32_gate_is_unchanged() -> None:
+    """fp32 keeps its own tolerance: fp16-sized noise fails it."""
+    scores, reference = _synthetic(0, 1e-5)
+    _check_logits(scores, reference, "fp32")
+    scores, reference = _synthetic(0, 2.5e-2)
+    with pytest.raises(AssertionError, match="fp32 logits differ"):
+        _check_logits(scores, reference, "fp32")
+
+
+def test_fp16_gate_rejects_unzeroed_masked_rows(fp16_case_name: str) -> None:
+    """A correct fp16 engine passes the fp16 gate; one that leaves the masked rows fails it.
+
+    Both engines are built from the case checkpoint and run in this process on
+    the case prompt, padded to the window the way the runtime pads it.
+    """
+    import tensorrt as trt
+    import torch
+
+    from .. import config as config_module, model
+
+    _, manifest, case = CASES[fp16_case_name]
+    assert manifest["precision"] == "fp16"
+    model_dir = _model_dir(manifest)
+    assert torch.cuda.is_available(), f"selected {FAMILY} E2E requires CUDA"
+    window = int(manifest["max_sequence_length"])
+    ids = _reference_ids(model_dir, str(case["prompt"]))
+    masked = [index for index, value in enumerate(ids) if value == 32]
+    reference_rows = _reference_logits(model_dir, ids, window)
+    reference = [reference_rows[index] for index in masked]
+    weights = model._open_checkpoint(model_dir)
+    cfg = config_module.resolve(model_dir, weights, model._prefix(weights))
+
+    input_ids = torch.ones(window, dtype=torch.int32, device="cuda")
+    input_ids[: len(ids)] = torch.tensor(ids, dtype=torch.int32)
+    attention_mask = torch.zeros(window, dtype=torch.int32, device="cuda")
+    attention_mask[: len(ids)] = 1
+
+    def run(build_cfg) -> list[list[float]]:
+        plan = model.build_engine(weights, build_cfg, seq_len=window, precision="fp16")
+        engine = trt.Runtime(trt.Logger(trt.Logger.ERROR)).deserialize_cuda_engine(plan)
+        context = engine.create_execution_context()
+        logits = torch.empty((window, cfg["vocab_size"]), dtype=torch.float32, device="cuda")
+        for name, tensor in (("input_ids", input_ids), ("attention_mask", attention_mask),
+                             ("logits", logits)):
+            context.set_tensor_address(name, tensor.data_ptr())
+        context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+        torch.cuda.synchronize()
+        rows = logits.cpu().tolist()
+        return [rows[index] for index in masked]
+
+    worst, _ = _check_logits(run(cfg), reference, "fp16")
+    broken = run(dict(cfg, token_dropout=False))
+    broken_worst = max(max(abs(a - b) for a, b in zip(row, want))
+                       for row, want in zip(broken, reference))
+    with pytest.raises(AssertionError, match="fp16 logits differ"):
+        _check_logits(broken, reference, "fp16")
+    print(
+        f"{FAMILY} fp16 gate: correct maxabs {worst:.3e}; masked rows not zeroed "
+        f"maxabs {broken_worst:.3e}"
     )

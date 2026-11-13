@@ -47,6 +47,7 @@ from . import graph_blocks
 from .parallel import normalize_parallel_config
 from .default_decoder import _apply_norm, _mark_debug_output
 from .default_dual_profile_decoder import build_dual_profile_decoder_engine
+from .utils import decode_builder_optimization_level
 
 
 if TYPE_CHECKING:
@@ -259,7 +260,9 @@ class _PhiMoEModel:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
-        trt_config.builder_optimization_level = 1
+        trt_config.builder_optimization_level = decode_builder_optimization_level(
+            quant_ctx is not None
+        )
         if quant_ctx is not None:
             from .quantization import configure_fp8_build
 

@@ -30,7 +30,8 @@ Tensor contract (matches the C++ runtime KvCache naming):
   Inputs (dynamic shapes — Sq varies by profile)
     token_id        int32   (-1,)
     position_id     int32   (-1,)
-    attention_mask  float32 (-1, -1)                 # (Sq, max_cache + Sq)
+    attention_mask  float32 (-1, -1)                 # (Sq, max_cache + Sq), or (Sq, past + Sq)
+                                                     # with valid_prefix_attention
     cache_k_i       fp16/f32 (max_cache, kv_size)    # static
     cache_v_i       fp16/f32 (max_cache, kv_size)    # static
   Outputs
@@ -134,6 +135,44 @@ def _supports_config(config: "ModelConfig", weights: "WeightDict") -> None:
         raise NotImplementedError("missing final_norm weight")
 
 
+def _cache_rows(
+    network: trt.INetworkDefinition,
+    cache: trt.ITensor,
+    rows_shape: trt.ITensor | None,
+) -> trt.ITensor:
+    """The whole (max_cache, kv) cache, or its first rows when ``rows_shape`` gives (past, kv)."""
+    if rows_shape is None:
+        return cache
+    rows = network.add_slice(cache, start=(0, 0), shape=(1, 1), stride=(1, 1))
+    rows.set_input(2, rows_shape)
+    return rows.get_output(0)
+
+
+def _native_gqa_attention(
+    network: trt.INetworkDefinition,
+    q: trt.ITensor,
+    k: trt.ITensor,
+    v: trt.ITensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    mask: trt.ITensor,
+    scale: float,
+    tag: str,
+) -> trt.ITensor:
+    """Masked IAttention over row-major Q [Sq, H*D] and K/V [L, Hkv*D], with the
+    K/V heads passed as they are (IAttention is grouped-query aware) instead of
+    repeated to every query head."""
+    q_4d = graph_ops.reshape_rows_to_heads_4d(network, q, num_heads, head_dim, tag=tag + ".q")
+    k_4d = graph_ops.reshape_rows_to_heads_4d(network, k, num_kv_heads, head_dim, tag=tag + ".k")
+    v_4d = graph_ops.reshape_rows_to_heads_4d(network, v, num_kv_heads, head_dim, tag=tag + ".v")
+    context = graph_ops.add_attention_core(network, q_4d, k_4d, v_4d, mask=mask, scale=scale)
+    return graph_ops.reshape_heads_4d_to_rows(
+        network, context, num_heads * head_dim, tag=tag + ".ctx"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main builder.
 # ---------------------------------------------------------------------------
@@ -159,6 +198,7 @@ def build_dual_profile_decoder_engine(
     embed_input: bool = False,
     verbose: bool = False,
     profile_mode: str = "dual_profile",
+    valid_prefix_attention: bool = False,
 ) -> bytes:
     """Build a prefill/decode-capable dynamic-Sq decoder engine.
 
@@ -177,10 +217,19 @@ def build_dual_profile_decoder_engine(
     * ``"prefill"``: one prefill profile only. This is used by split-engine
       bundles, where decode is served by a separate fixed-Sq=1 engine.
 
+    ``valid_prefix_attention`` makes the attention read only the valid cache
+    rows: the caller passes an ``attention_mask`` of shape (Sq, past + Sq), the
+    engine slices ``cache_k/v[0:past]`` and attends over those rows plus the
+    new ones with grouped-query IAttention and the boolean form of the mask
+    (K/V heads are not repeated per query head). Without it every step
+    attends over all ``max_cache_length`` rows behind the additive mask.
+
     """
     _supports_config(config, weights)
     if profile_mode not in ("dual_profile", "prefill"):
         raise ValueError(f"profile_mode must be 'dual_profile' or 'prefill', got {profile_mode!r}")
+    if valid_prefix_attention and position_type == "alibi":
+        raise ValueError("valid_prefix_attention does not support ALiBi positions")
 
     if max_prefill_length is None:
         max_prefill_length = max_cache_length
@@ -245,18 +294,46 @@ def build_dual_profile_decoder_engine(
     else:
         attention_mask_work = attention_mask
 
+    # Number of valid cache rows, read from the mask width: (Sq, past + Sq).
+    cache_rows_shape: trt.ITensor | None = None
+    if valid_prefix_attention:
+        mask_width = network.add_slice(
+            network.add_shape(attention_mask).get_output(0), start=(1,), shape=(1,), stride=(1,)
+        ).get_output(0)
+        query_rows = network.add_shape(token_id).get_output(0)
+        past_rows = network.add_elementwise(
+            mask_width, query_rows, trt.ElementWiseOperation.SUB
+        ).get_output(0)
+        kv_columns = graph_ops.add_constant(
+            network, (1,), np.array([kv_attention_size], dtype=np.int64), dtype=np.int64
+        )
+        rows_shape = network.add_concatenation([past_rows, kv_columns])
+        rows_shape.axis = 0
+        cache_rows_shape = rows_shape.get_output(0)
+
     # Prefill/decode optimization profiles — same graph, different Sq / cache.
     def _add_profile(opt_sq: int, max_sq: int, *, fixed: bool = False):
         prof = builder.create_optimization_profile()
         min_sq = opt_sq if fixed else 1
         prof.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
         prof.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
-        prof.set_shape(
-            "attention_mask",
-            (min_sq, max_cache_length + min_sq),
-            (opt_sq, max_cache_length + opt_sq),
-            (max_sq, max_cache_length + max_sq),
-        )
+        if valid_prefix_attention:
+            # A prefill usually starts from an empty cache; a decode step
+            # follows a prompt of about half the cache.
+            opt_past = max_cache_length // 2 if fixed else 0
+            prof.set_shape(
+                "attention_mask",
+                (min_sq, min_sq),
+                (opt_sq, opt_past + opt_sq),
+                (max_sq, max_cache_length + max_sq),
+            )
+        else:
+            prof.set_shape(
+                "attention_mask",
+                (min_sq, max_cache_length + min_sq),
+                (opt_sq, max_cache_length + opt_sq),
+                (max_sq, max_cache_length + max_sq),
+            )
         if embed_input:
             prof.set_shape("input_embed", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
             prof.set_shape("use_input_embed", (min_sq, 1), (opt_sq, 1), (max_sq, 1))
@@ -419,6 +496,19 @@ def build_dual_profile_decoder_engine(
         )
     else:
         mask_4d = graph_ops.add_2d_mask_to_4d(network, attention_mask_work)
+    visible_4d = None
+    if valid_prefix_attention:
+        # Every additive-mask entry is 0 (visible) or -1e4 (hidden). IAttention
+        # takes the boolean form, with which Myelin keeps prefill fused (with the
+        # additive form it does not). The mask stays: IAttention's causal flag is
+        # aligned to the first key, wrong for a step on a non-empty cache. A
+        # decode step's mask is all visible, so TensorRT 11.4 ignoring masks in
+        # its single-query kernel cannot change the result.
+        zero = graph_ops.add_constant(
+            network, (1, 1), np.zeros((1, 1), np.float32), dtype=np.float32
+        )
+        visible = network.add_elementwise(attention_mask, zero, trt.ElementWiseOperation.EQUAL)
+        visible_4d = graph_ops.add_2d_mask_to_4d(network, visible.get_output(0))
 
     present_k_outs: list[trt.ITensor] = []
     present_v_outs: list[trt.ITensor] = []
@@ -513,26 +603,42 @@ def build_dual_profile_decoder_engine(
         present_v_outs.append(v)
 
         # Concatenate cached + current K / V along the sequence dim.
-        all_k_cat = network.add_concatenation([cache_k_inputs[layer_idx], k])
+        cache_k_rows = _cache_rows(network, cache_k_inputs[layer_idx], cache_rows_shape)
+        cache_v_rows = _cache_rows(network, cache_v_inputs[layer_idx], cache_rows_shape)
+        all_k_cat = network.add_concatenation([cache_k_rows, k])
         all_k_cat.axis = 0
-        all_v_cat = network.add_concatenation([cache_v_inputs[layer_idx], v])
+        all_v_cat = network.add_concatenation([cache_v_rows, v])
         all_v_cat.axis = 0
 
-        context = graph_ops.add_attention_from_rows(
-            network,
-            q,
-            all_k_cat.get_output(0),
-            all_v_cat.get_output(0),
-            num_heads=num_heads,
-            head_dim=head_dim,
-            num_kv_heads=num_kv_heads,
-            q_seq=None,
-            kv_seq=None,
-            causal=False,
-            mask=mask_4d,
-            scale=attn_scale,
-            tag=f"{prefix}.attn",
-        )
+        if visible_4d is not None:
+            context = _native_gqa_attention(
+                network,
+                q,
+                all_k_cat.get_output(0),
+                all_v_cat.get_output(0),
+                num_heads=num_heads,
+                num_kv_heads=num_kv_heads,
+                head_dim=head_dim,
+                mask=visible_4d,
+                scale=attn_scale,
+                tag=f"{prefix}.attn",
+            )
+        else:
+            context = graph_ops.add_attention_from_rows(
+                network,
+                q,
+                all_k_cat.get_output(0),
+                all_v_cat.get_output(0),
+                num_heads=num_heads,
+                head_dim=head_dim,
+                num_kv_heads=num_kv_heads,
+                q_seq=None,
+                kv_seq=None,
+                causal=False,
+                mask=mask_4d,
+                scale=attn_scale,
+                tag=f"{prefix}.attn",
+            )
 
         attn_out = matmul(
             context, attention_size, hidden, weights[f"{prefix}.w_o"], f"{prefix}.w_o"

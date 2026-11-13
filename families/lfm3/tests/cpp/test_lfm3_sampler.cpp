@@ -6,6 +6,7 @@
 #include "families/lfm3/runtime/sampler.h"
 #include "trtmc/task.h"
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <vector>
@@ -72,16 +73,24 @@ void test_lfm3_top_k_default_resolution() {
 
 void test_eos_and_seeded_sampling() {
     trtmc::Lfm3SamplingParams params;
-    params.temperature = 0.3F;
-    params.min_p = 0.15F;
+    params.temperature = 1.0F;
+    params.top_k = 0;
+    params.min_p = 0.0F;
     params.seed = 123;
     params.eos_token_ids = {2, 7};
-    const float logits[] = {1.0F, 0.5F, 3.0F, -2.0F};
+    const float logits[] = {1.0F, 0.5F, 1.5F, -0.5F};
     auto first = trtmc::create_lfm3_sampler(params);
     auto second = trtmc::create_lfm3_sampler(params);
-    const auto a = first->sample(logits, 4, params, {});
-    const auto b = second->sample(logits, 4, params, {});
-    check(a.token_id == b.token_id, "seeded sampling is reproducible");
+    std::vector<int32_t> sequence;
+    for (int index = 0; index < 64; ++index) {
+        const auto a = first->sample(logits, 4, params, {});
+        const auto b = second->sample(logits, 4, params, {});
+        check(a.token_id == b.token_id, "same seeds reproduce the complete sequence");
+        sequence.push_back(a.token_id);
+    }
+    check(std::any_of(sequence.begin(), sequence.end(),
+                      [&](int32_t token) { return token != sequence.front(); }),
+          "seeded sampling exercises multiple candidates");
     check(trtmc::lfm3_is_eos_token(params, 2) && trtmc::lfm3_is_eos_token(params, 7),
           "all configured EOS ids stop generation");
 }

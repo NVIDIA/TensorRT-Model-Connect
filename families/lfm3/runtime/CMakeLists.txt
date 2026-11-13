@@ -40,6 +40,9 @@ set_target_properties(trtmc_model_lfm3 PROPERTIES
 install(TARGETS trtmc_model_lfm3
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../UNICODE_LICENSE.txt
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/trtmc/families/lfm3
+)
 
 if(TRTMC_BUILD_TESTS)
   foreach(test_name IN ITEMS

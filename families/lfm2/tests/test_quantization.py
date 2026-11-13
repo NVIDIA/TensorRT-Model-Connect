@@ -17,6 +17,7 @@ import pytest
 trt = pytest.importorskip("tensorrt")
 
 from .. import calibrate_fp8_scales, quantization  # noqa: E402
+from .. import model as lfm2_model  # noqa: E402
 from ..checkpoint_mapper import WeightDict  # noqa: E402
 from ..config import validate_dense_lfm2_config  # noqa: E402
 from ..model import build_lfm2_engine  # noqa: E402
@@ -282,6 +283,28 @@ def test_engine_builds_with_fp8_weights(monkeypatch, precision: str) -> None:
     assert len(quantized) < len(plain)
 
 
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_engine_attends_over_a_runtime_sized_key_row_slice(monkeypatch) -> None:
+    """Attention reads ``len(key_positions)`` cache rows, from one row to the capacity."""
+    capacity, optimum = 64, 32
+    monkeypatch.setattr(lfm2_model, "ACTIVE_KEY_ROWS_OPTIMUM", optimum)
+    plan = build_lfm2_engine(_config(), _weights(), capacity, precision="bf16")
+
+    engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(plan)
+    assert engine is not None
+    assert engine.get_tensor_mode("key_positions") == trt.TensorIOMode.INPUT
+    assert engine.get_tensor_dtype("key_positions") == trt.int32
+    assert tuple(engine.get_tensor_shape("key_positions")) == (-1,)
+    assert [tuple(shape) for shape in engine.get_tensor_profile_shape("key_positions", 0)] == [
+        (1,),
+        (optimum,),
+        (capacity,),
+    ]
+    # The cache itself keeps its full static capacity.
+    assert tuple(engine.get_tensor_shape("cache_k_0")) == (1, KV_HEADS, capacity, HIDDEN // HEADS)
+
+
 def test_build_requires_calibrated_scales_for_fp8(monkeypatch) -> None:
     """quantization=fp8 on a model shape without committed scales fails before any engine build."""
     from ..model import build
@@ -381,3 +404,89 @@ def test_render_prompt_falls_back_to_plain_text() -> None:
         _NoTemplate(), [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]
     )
     assert text == "a\n\nb"
+
+
+class _EngineStepper:
+    """Run the hybrid engine in one optimization profile over shared device state."""
+
+    def __init__(self, engine, profile: int, state: dict, torch) -> None:
+        self.torch = torch
+        self.state = state
+        self.context = engine.create_execution_context()
+        stream = torch.cuda.current_stream().cuda_stream
+        assert self.context.set_optimization_profile_async(profile, stream)
+        self.logits = torch.empty((1, VOCAB), dtype=torch.float32, device="cuda")
+
+    def step(self, tokens: list[int], position: int):
+        """Launch ``tokens`` at ``position``; commit the convolution state; return logits."""
+        torch = self.torch
+        length = position + len(tokens)
+        inputs = {
+            "token_id": torch.tensor(tokens, dtype=torch.int32, device="cuda"),
+            "position_id": torch.arange(position, length, dtype=torch.int32, device="cuda"),
+            "cache_write_indices": torch.tensor([position], dtype=torch.int32, device="cuda"),
+            "key_value_lengths": torch.tensor([length], dtype=torch.int32, device="cuda"),
+            "key_positions": torch.arange(length, dtype=torch.int32, device="cuda"),
+        }
+        for name, value in inputs.items():
+            if name in ("token_id", "position_id", "key_positions"):
+                assert self.context.set_input_shape(name, tuple(value.shape))
+            self.context.set_tensor_address(name, value.data_ptr())
+        for name, value in self.state.items():
+            self.context.set_tensor_address(name, value.data_ptr())
+        self.context.set_tensor_address("logits", self.logits.data_ptr())
+        assert self.context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+        torch.cuda.synchronize()
+        for name in [name for name in self.state if name.startswith("conv_state_")]:
+            self.state[name].copy_(self.state[name.replace("conv_state_", "present_conv_")])
+        return self.logits.clone()
+
+
+def _engine_state(engine, torch) -> dict:
+    """Allocate zeroed KV and convolution buffers; present KV aliases the cache."""
+    state = {}
+    for index in range(engine.num_io_tensors):
+        name = engine.get_tensor_name(index)
+        if name.startswith(("cache_k_", "cache_v_", "conv_state_", "present_conv_")):
+            shape = tuple(engine.get_tensor_shape(name))
+            state[name] = torch.zeros(shape, dtype=torch.float16, device="cuda")
+    for name in [name for name in state if name.startswith(("cache_k_", "cache_v_"))]:
+        state[name.replace("cache_", "present_")] = state[name]
+    return state
+
+
+@pytest.mark.gpu
+@pytest.mark.trt
+def test_chunked_prefill_matches_token_by_token_prefill() -> None:
+    """A multi-token prefill launch leaves the same logits and state as one token per launch."""
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("requires CUDA")
+    plan = build_lfm2_engine(_config(), _weights(), 64, precision="fp16")
+    engine = trt.Runtime(trt.Logger(trt.Logger.WARNING)).deserialize_cuda_engine(plan)
+    assert engine is not None and engine.num_optimization_profiles == 2
+    assert [tuple(shape) for shape in engine.get_tensor_profile_shape("token_id", 0)] == [
+        (1,),
+        (64,),
+        (64,),
+    ]
+    assert [tuple(shape) for shape in engine.get_tensor_profile_shape("token_id", 1)] == [(1,)] * 3
+
+    prompt, next_token = [5, 17, 3, 42, 9, 21, 33], 11
+    chunked_state = _engine_state(engine, torch)
+    prefill = _EngineStepper(engine, 0, chunked_state, torch)
+    decode = _EngineStepper(engine, 1, chunked_state, torch)
+    chunked = [prefill.step(prompt[:4], 0), prefill.step(prompt[4:], 4)]
+    chunked.append(decode.step([next_token], len(prompt)))
+
+    stepped_state = _engine_state(engine, torch)
+    single = _EngineStepper(engine, 1, stepped_state, torch)
+    stepped = [single.step([token], position) for position, token in enumerate(prompt)]
+    stepped.append(single.step([next_token], len(prompt)))
+
+    for chunk_logits, step_logits in ((chunked[0], stepped[3]), (chunked[1], stepped[6])):
+        torch.testing.assert_close(chunk_logits, step_logits, atol=2e-2, rtol=2e-2)
+    torch.testing.assert_close(chunked[2], stepped[7], atol=2e-2, rtol=2e-2)
+    for name, value in chunked_state.items():
+        if name.startswith("conv_state_"):
+            torch.testing.assert_close(value, stepped_state[name], atol=2e-2, rtol=2e-2)

@@ -725,8 +725,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     architectures = raw.get("architectures") or []
     if not isinstance(chronos, dict) or "ChronosBoltModelForForecasting" not in architectures:
         raise ValueError("Chronos-Bolt requires a ChronosBoltModelForForecasting checkpoint")
-    if request.precision != "fp32":
-        raise ValueError("Chronos-Bolt currently requires precision='fp32'")
+    precision = str(request.precision).lower()
+    if precision not in {"fp32", "fp16"}:
+        raise ValueError(
+            f"Chronos-Bolt supports precision 'fp32' or 'fp16'; got {request.precision!r}"
+        )
     if request.max_sequence_length is not None:
         raise ValueError("Chronos-Bolt derives context_length from its checkpoint")
     if request.quantization is not None:
@@ -736,6 +739,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     raw["_fp32_layers"] = sorted(set(request.fp32_layers))
     encoder_layers = int(raw.get("num_layers", 4))
+    # Weights load in fp32 for every precision; the graph casts them to the work type.
     weights = _load_all_tensors(
         model_dir,
         precision="fp32",
@@ -746,7 +750,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     plan = _build_chronos_network(
         config,
         weights,
-        precision="fp32",
+        precision=precision,
         verbose=request.verbose,
     )
     context_length = _first_positive_int(

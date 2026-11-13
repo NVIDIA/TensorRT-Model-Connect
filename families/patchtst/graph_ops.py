@@ -52,59 +52,6 @@ def add_constant(
     return layer.get_output(0)
 
 
-def add_matmul_rhs_constant(
-    network: trt.INetworkDefinition,
-    lhs: trt.ITensor,
-    lhs_width: int,
-    rhs_width: int,
-    rhs_weights: np.ndarray,
-    dtype: np.dtype = np.float32,
-    fp32_accumulation: bool = True,
-) -> trt.ITensor:
-    """Matrix multiply: lhs @ rhs_constant.  rhs is [lhs_width, rhs_width]."""
-    rank = len(tuple(lhs.shape))
-    rhs_shape = (
-        (lhs_width, rhs_width)
-        if rank <= 2
-        else (1,) * (rank - 2) + (lhs_width, rhs_width)
-    )
-    rhs = add_constant(
-        network,
-        rhs_shape,
-        np.asarray(rhs_weights).reshape(rhs_shape),
-        dtype=dtype,
-    )
-    rhs = _cast_back_to_trt_dtype(network, rhs, lhs.dtype)
-    if fp32_accumulation:
-        return _add_matrix_multiply_with_fp32_accumulation(
-            network,
-            lhs, trt.MatrixOperation.NONE,
-            rhs, trt.MatrixOperation.NONE,
-        )
-    mm = network.add_matrix_multiply(
-        lhs, trt.MatrixOperation.NONE,
-        rhs, trt.MatrixOperation.NONE,
-    )
-    return _cast_back_to_trt_dtype(network, mm.get_output(0), lhs.dtype)
-
-
-def add_bias_sum(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    width: int,
-    bias: np.ndarray,
-    dtype: np.dtype = np.float32,
-) -> trt.ITensor:
-    """Element-wise add a bias broadcast over all non-feature axes."""
-    rank = len(tuple(inp.shape))
-    bias_shape = (width,) if rank <= 1 else (1,) * (rank - 1) + (width,)
-    bias_t = add_constant(
-        network, bias_shape, np.asarray(bias).reshape(bias_shape), dtype=dtype)
-    bias_t = _cast_back_to_trt_dtype(network, bias_t, inp.dtype)
-    s = network.add_elementwise(inp, bias_t, trt.ElementWiseOperation.SUM)
-    return _cast_back_to_trt_dtype(network, s.get_output(0), inp.dtype)
-
-
 def add_gelu_new(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,

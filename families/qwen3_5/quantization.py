@@ -197,6 +197,11 @@ class Qwen35QuantContext:
     keep_alive: list = None  # type: ignore[assignment]
 
     @property
+    def has_nvfp4_weights(self) -> bool:
+        """Whether this graph contains NVFP4 projections."""
+        return any(isinstance(entry.weight, _NVFP4Weight) for entry in self.scales.values())
+
+    @property
     def has_fp8_weights(self) -> bool:
         """True when any projection is FP8 (TensorRT's fused gate/up kernel then fails to compile)."""
         return any(isinstance(entry.weight, _FP8Weight) for entry in self.scales.values())

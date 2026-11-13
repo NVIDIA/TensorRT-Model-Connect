@@ -38,6 +38,20 @@ install(TARGETS trtmc_model_roberta
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_roberta_input_capacity
+    ${PROJECT_SOURCE_DIR}/families/roberta/tests/cpp/test_roberta_input_capacity.cpp
+    pipeline.cpp
+  )
+  target_include_directories(test_roberta_input_capacity PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_roberta_input_capacity SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_roberta_input_capacity PRIVATE trtmc_core)
+  target_compile_options(test_roberta_input_capacity PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME roberta_input_capacity COMMAND test_roberta_input_capacity)
+  set_tests_properties(roberta_input_capacity PROPERTIES LABELS "cpu")
+
   add_executable(test_roberta_added_token_whitespace
     ${PROJECT_SOURCE_DIR}/families/roberta/tests/cpp/test_roberta_added_token_whitespace.cpp
     bpe_tokenizer.cpp

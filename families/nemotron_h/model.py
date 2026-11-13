@@ -68,8 +68,14 @@ from .checkpoint_mapper import (
 )
 from . import graph_ops
 from . import graph_blocks
+from . import ssd_rows
 from .parallel import normalize_parallel_config
 from .prepared_quantization import PreparedPolicy, PreparedQuantContext, checkpoint_policy
+
+
+# Prefill engine rows, bounded by the SSD chunk masks.
+PREFILL_MAX_TOKENS = ssd_rows.MAX_ROWS
+PREFILL_OPT_TOKENS = 64
 
 
 def _parse_layer_types(pattern: str) -> list[str]:
@@ -191,6 +197,7 @@ class _NemotronHModel:
         # Attention dimensions
         q_dim = num_heads * head_dim
         weights = WeightDict()
+        weights["_nvfp4_weights"] = prepared_policy is not None and prepared_policy.request_format == "nvfp4"
         # Exported scale tensors, not broad checkpoint metadata, enable FP8 KV.
         fp8_kv_cache = any(
             _has_tensor(readers, f"backbone.layers.{i}.mixer.k_proj.k_scale")
@@ -422,8 +429,27 @@ class _NemotronHModel:
         debug_layer_outputs: bool = False,
         parallel_config=None,
         target_feature_layers: tuple[int, ...] = (),
+        prefill_rows: int | None = None,
+        release_weights: bool = True,
     ) -> bytes:
-        """Build hybrid TRT engine, optionally exporting paired-draft features."""
+        """Build hybrid TRT engine, optionally exporting paired-draft features.
+
+        ``prefill_rows`` builds the prefill engine of a split bundle instead:
+        ``S`` token rows with one profile ``1..prefill_rows``, Mamba-2 as one SSD
+        chunk and attention over the cache plus the chunk. Its logits come from
+        the last row; present K/V cover all rows and the recurrent outputs hold
+        the state after the last row. Decoding stays on the one-token engine.
+
+        ``release_weights`` drops the loaded checkpoint before the TensorRT
+        build; pass False to build another engine from the same weights.
+        """
+        if prefill_rows is not None and (target_feature_layers or parallel_config is not None
+                                         and normalize_parallel_config(parallel_config).enabled):
+            raise NotImplementedError(
+                "Nemotron-H prefill engines are single-GPU without paired-draft features"
+            )
+        if prefill_rows is not None and not 1 <= prefill_rows <= PREFILL_MAX_TOKENS:
+            raise ValueError(f"Nemotron-H prefill_rows must be in 1..{PREFILL_MAX_TOKENS}")
         if (
             len(set(target_feature_layers)) != len(target_feature_layers)
             or any(type(index) is not int or not 0 <= index < config.num_hidden_layers
@@ -499,14 +525,36 @@ class _NemotronHModel:
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 3
+        if "moe" not in layer_types and (
+            getattr(quant_ctx, "has_nvfp4_weights", False)
+            or weights.get("_nvfp4_weights", False)
+        ):
+            trt_config.max_aux_streams = 0
         if quant_ctx is not None:
             # The plan inspector reads kernel names from the engine.
             trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
 
         # --- Inputs ---
-        token_id = network.add_input("token_id", trt.int32, (1,))
-        position_id = network.add_input("position_id", trt.int32, (1,))
-        attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
+        rows = None if prefill_rows else 1
+        row_dim = -1 if prefill_rows else 1
+        token_id = network.add_input("token_id", trt.int32, (row_dim,))
+        position_id = network.add_input("position_id", trt.int32, (row_dim,))
+        attention_mask = network.add_input(
+            "attention_mask", trt.float32, (row_dim, -1 if prefill_rows else attention_window)
+        )
+        if prefill_rows:
+            max_rows = min(prefill_rows, max_cache_length)
+            opt_rows = min(PREFILL_OPT_TOKENS, max_rows)
+            profile = builder.create_optimization_profile()
+            for name in ("token_id", "position_id"):
+                profile.set_shape(name, (1,), (opt_rows,), (max_rows,))
+            profile.set_shape(
+                "attention_mask",
+                (1, max_cache_length + 1),
+                (opt_rows, max_cache_length + opt_rows),
+                (max_rows, max_cache_length + max_rows),
+            )
+            trt_config.add_optimization_profile(profile)
 
         conv_state_inputs = []
         ssm_state_inputs = []
@@ -609,6 +657,7 @@ class _NemotronHModel:
                     n_groups=n_groups,
                     dtype=layer_np_dtype,
                     quant_ctx=quant_ctx,
+                    sequence_length=rows,
                 )
                 hidden_state = result["hidden"]
                 present_conv_outputs.append(result["present_conv"])
@@ -668,6 +717,7 @@ class _NemotronHModel:
                     eps_tensor=layer_eps,
                     dtype=layer_np_dtype,
                     quant_ctx=quant_ctx,
+                    sequence_length=rows,
                 )
                 # add_attention_block does NOT apply residual
                 residual = network.add_elementwise(
@@ -682,6 +732,10 @@ class _NemotronHModel:
                 _mark_debug_output(network, hidden_state, f"debug_hidden_{layer_idx}")
             if layer_idx in target_feature_layers and layer_idx != num_layers - 1:
                 target_features[layer_idx] = hidden_state
+
+        if prefill_rows:
+            # Only the last row can affect the next token.
+            hidden_state = ssd_rows.last_row(network, hidden_state, hidden)
 
         # --- Final norm ---
         if hidden_state.dtype != io_trt_dtype:
@@ -765,7 +819,8 @@ class _NemotronHModel:
         # Every tensor the network needs is already embedded in it; drop the
         # resident checkpoint before the engine build, which runs its own
         # TensorRT workspace allocation on top of whatever weights hold.
-        weights.clear()
+        if release_weights:
+            weights.clear()
         plan = builder.build_serialized_network(network, trt_config)
         if plan is None:
             raise RuntimeError("TensorRT engine build failed")
@@ -834,8 +889,9 @@ def _add_mamba2_layer(
     n_groups: int,
     dtype: np.dtype = np.float32,
     quant_ctx: NemotronHQuantContext | PreparedQuantContext | None = None,
+    sequence_length: int | None = 1,
 ) -> dict[str, trt.ITensor]:
-    """Add one Mamba-2 SSD layer (single-step decode).
+    """Add one Mamba-2 SSD layer over one row, or ``S`` rows when ``sequence_length`` is None.
 
     Mamba-2 in_proj splits: [gate(d_inner), hidden_B_C(conv_dim), dt(nheads)]
     Conv1d operates on hidden_B_C (d_inner + 2*n_groups*d_state channels).
@@ -844,8 +900,6 @@ def _add_mamba2_layer(
 
     Returns: {hidden, present_conv, present_ssm}
     """
-    groups_state_size = n_groups * d_state
-
     # ===== 1. RMSNorm =====
     normed = graph_ops.add_rms_norm(
         network, hidden, hidden_size, weights[f"{prefix}.input_norm"], eps_tensor, dtype=dtype
@@ -862,7 +916,66 @@ def _add_mamba2_layer(
         f"{prefix}.mamba_in_proj",
         dtype=dtype,
         quant_ctx=quant_ctx,
-    )  # [1, proj_dim]
+    )  # [rows, proj_dim]
+
+    mixer = _add_mamba2_mixer_rows if sequence_length is None else _add_mamba2_mixer_step
+    gated_tensor, present_conv, present_ssm = mixer(
+        network,
+        projected=projected,
+        conv_state_in=conv_state_in,
+        ssm_state_in=ssm_state_in,
+        weights=weights,
+        prefix=prefix,
+        d_inner=d_inner,
+        d_state=d_state,
+        d_conv=d_conv,
+        conv_dim=conv_dim,
+        mamba_num_heads=mamba_num_heads,
+        mamba_head_dim=mamba_head_dim,
+        n_groups=n_groups,
+        dtype=dtype,
+    )
+
+    # ===== 8. Output projection + residual =====
+    out = _projection(
+        network,
+        gated_tensor,
+        d_inner,
+        hidden_size,
+        weights,
+        f"{prefix}.mamba_out_proj",
+        dtype=dtype,
+        quant_ctx=quant_ctx,
+    )
+
+    residual = network.add_elementwise(hidden, out, trt.ElementWiseOperation.SUM)
+
+    return {
+        "hidden": residual.get_output(0),
+        "present_conv": present_conv,
+        "present_ssm": present_ssm,
+    }
+
+
+def _add_mamba2_mixer_step(
+    network: trt.INetworkDefinition,
+    *,
+    projected: trt.ITensor,
+    conv_state_in: trt.ITensor,
+    ssm_state_in: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    d_inner: int,
+    d_state: int,
+    d_conv: int,
+    conv_dim: int,
+    mamba_num_heads: int,
+    mamba_head_dim: int,
+    n_groups: int,
+    dtype: np.dtype,
+) -> tuple[trt.ITensor, trt.ITensor, trt.ITensor]:
+    """Conv step, SSM update and gated norm for one token: ``(gated [1, d_inner], conv, ssm)``."""
+    groups_state_size = n_groups * d_state
 
     # Split: gate [d_inner], hidden_B_C [conv_dim], dt [nheads]
     offset = 0
@@ -1114,25 +1227,145 @@ def _add_mamba2_layer(
     if gated_tensor.dtype != norm_output_dtype:
         gated_tensor = network.add_cast(gated_tensor, norm_output_dtype).get_output(0)
 
-    # ===== 8. Output projection + residual =====
-    out = _projection(
-        network,
-        gated_tensor,
-        d_inner,
-        hidden_size,
-        weights,
-        f"{prefix}.mamba_out_proj",
-        dtype=dtype,
-        quant_ctx=quant_ctx,
+    return gated_tensor, present_conv, present_ssm
+
+
+def _add_mamba2_mixer_rows(
+    network: trt.INetworkDefinition,
+    *,
+    projected: trt.ITensor,
+    conv_state_in: trt.ITensor,
+    ssm_state_in: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    d_inner: int,
+    d_state: int,
+    d_conv: int,
+    conv_dim: int,
+    mamba_num_heads: int,
+    mamba_head_dim: int,
+    n_groups: int,
+    dtype: np.dtype,
+) -> tuple[trt.ITensor, trt.ITensor, trt.ITensor]:
+    """Conv, SSD and gated norm over ``S`` rows in one launch: ``(gated [S, d_inner], conv, ssm)``.
+
+    Same arithmetic as :func:`_add_mamba2_mixer_step` applied token by token;
+    the SSM runs as one chunk (see :mod:`.ssd_rows`).
+    """
+    groups_state_size = n_groups * d_state
+    rows = ssd_rows.row_count(network, projected)
+
+    def columns(tensor, offset, width):
+        return ssd_rows.dynamic_slice(network, tensor, (0, offset), (rows, width))
+
+    def fp32(tensor):
+        if tensor.dtype == trt.float32:
+            return tensor
+        return network.add_cast(tensor, trt.float32).get_output(0)
+
+    gate = columns(projected, 0, d_inner)
+    hidden_b_c = columns(projected, d_inner, conv_dim)
+    dt_raw = columns(projected, d_inner + conv_dim, mamba_num_heads)
+
+    conv_w = graph_ops.add_constant(
+        network, (conv_dim, d_conv), weights[f"{prefix}.conv1d_weight"], dtype=dtype
     )
+    conv_columns, present_conv = ssd_rows.add_short_conv_rows(
+        network,
+        columns=ssd_rows.shuffle(network, hidden_b_c, transpose=(1, 0)),
+        conv_state=conv_state_in,
+        weight=conv_w,
+        channels=conv_dim,
+        kernel=d_conv,
+    )
+    conv_out = graph_ops.add_bias_sum(
+        network,
+        ssd_rows.shuffle(network, conv_columns, transpose=(1, 0)),
+        conv_dim,
+        weights[f"{prefix}.conv1d_bias"],
+        dtype=dtype,
+        rank=2,
+    )
+    activated = graph_ops.add_activation(network, conv_out, "silu", dtype=dtype)
+    hidden_x = columns(activated, 0, d_inner)
+    heads_per_group = mamba_num_heads // n_groups
 
-    residual = network.add_elementwise(hidden, out, trt.ElementWiseOperation.SUM)
+    def heads_from_groups(tensor):
+        # [S, groups * N] -> head-major [H, S, N], head = group * heads_per_group + j.
+        grouped = ssd_rows.shuffle(network, tensor, reshape=(-1, n_groups, 1, d_state))
+        if heads_per_group > 1:
+            tile = graph_ops.add_constant(
+                network, (1, 1, heads_per_group, 1),
+                np.ones((1, 1, heads_per_group, 1), dtype=dtype), dtype=dtype,
+            )
+            grouped = network.add_elementwise(grouped, tile, trt.ElementWiseOperation.PROD).get_output(0)
+        heads = ssd_rows.shuffle(network, grouped, reshape=(-1, mamba_num_heads, d_state))
+        return ssd_rows.shuffle(network, fp32(heads), transpose=(1, 0, 2))
 
-    return {
-        "hidden": residual.get_output(0),
-        "present_conv": present_conv,
-        "present_ssm": present_ssm,
-    }
+    b_heads = heads_from_groups(columns(activated, d_inner, groups_state_size))
+    c_heads = heads_from_groups(columns(activated, d_inner + groups_state_size, groups_state_size))
+    x_heads = ssd_rows.shuffle(
+        network,
+        fp32(ssd_rows.shuffle(network, hidden_x, reshape=(-1, mamba_num_heads, mamba_head_dim))),
+        transpose=(1, 0, 2),
+    )  # [H, S, P]
+
+    # dt = softplus(dt_raw + dt_bias), FP32 (dt_bias reaches 33.5).
+    dt_bias = graph_ops.add_constant(
+        network, (1, mamba_num_heads), weights[f"{prefix}.dt_bias"], dtype=dtype
+    )
+    dt_biased = fp32(network.add_elementwise(dt_raw, dt_bias, trt.ElementWiseOperation.SUM).get_output(0))
+    one = graph_ops.add_constant(network, (1, 1), np.array([1.0], dtype=np.float32), dtype=np.float32)
+    dt = network.add_unary(
+        network.add_elementwise(
+            network.add_unary(dt_biased, trt.UnaryOperation.EXP).get_output(0), one,
+            trt.ElementWiseOperation.SUM,
+        ).get_output(0),
+        trt.UnaryOperation.LOG,
+    ).get_output(0)  # [S, H]
+
+    y_heads, present_ssm = ssd_rows.add_chunked_ssd(
+        network,
+        x=x_heads,
+        b=b_heads,
+        c=c_heads,
+        dt=ssd_rows.shuffle(network, dt, transpose=(1, 0)),
+        a=weights[f"{prefix}.A"],
+        d=weights[f"{prefix}.D"],
+        state=fp32(ssm_state_in),
+        num_heads=mamba_num_heads,
+    )
+    y = ssd_rows.shuffle(network, y_heads, transpose=(1, 0, 2), reshape=(-1, d_inner))
+    if y.dtype != gate.dtype:
+        y = network.add_cast(y, gate.dtype).get_output(0)
+
+    # Gated group RMSNorm (norm_before_gate=False), as in the one-token mixer.
+    gate_activated = graph_ops.add_activation(network, gate, "silu", dtype=dtype)
+    y_gated = network.add_elementwise(y, gate_activated, trt.ElementWiseOperation.PROD).get_output(0)
+    group_size = d_inner // n_groups
+    norm_input = ssd_rows.shuffle(network, y_gated, reshape=(-1, n_groups, group_size))
+    norm_output_dtype = norm_input.dtype
+    if dtype != np.float32:
+        norm_input = network.add_cast(norm_input, trt.float32).get_output(0)
+    eps_small = graph_ops.add_constant(
+        network, (1, 1, 1), np.array([[[1e-5]]], dtype=np.float32), dtype=np.float32
+    )
+    square = network.add_elementwise(norm_input, norm_input, trt.ElementWiseOperation.PROD)
+    mean = network.add_reduce(square.get_output(0), trt.ReduceOperation.AVG, 1 << 2, keep_dims=True)
+    denom = network.add_elementwise(mean.get_output(0), eps_small, trt.ElementWiseOperation.SUM)
+    recip = network.add_unary(
+        network.add_unary(denom.get_output(0), trt.UnaryOperation.SQRT).get_output(0),
+        trt.UnaryOperation.RECIP,
+    )
+    normalized = network.add_elementwise(norm_input, recip.get_output(0), trt.ElementWiseOperation.PROD)
+    gamma_t = graph_ops.add_constant(network, (1, d_inner), weights[f"{prefix}.mamba_norm"], dtype=np.float32)
+    gated = network.add_elementwise(
+        ssd_rows.shuffle(network, normalized.get_output(0), reshape=(-1, d_inner)), gamma_t,
+        trt.ElementWiseOperation.PROD,
+    ).get_output(0)
+    if gated.dtype != norm_output_dtype:
+        gated = network.add_cast(gated, norm_output_dtype).get_output(0)
+    return gated, present_conv, present_ssm
 
 
 def _add_mlp_layer(
@@ -1364,6 +1597,27 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 writer.add_bytes(f"engine.rank{rank}.plan", plan)
             layout = "dual_profile"
         else:
+            # Single-GPU bundles without MoE layers add an engine that prefills
+            # the prompt in multi-token chunks; it is built first because the
+            # decoder build releases the weights. TensorRT 11.4 cannot lower
+            # NVFP4 dynamic activation quantization over a runtime row count,
+            # so NVFP4 bundles keep the token loop.
+            nvfp4 = (policy is not None and policy.request_format == "nvfp4") or getattr(
+                quant_ctx, "has_nvfp4_weights", False)
+            split = not nvfp4 and "moe" not in _config_layer_types(config.raw, config.num_hidden_layers)
+            prefill_plan = None
+            if split:
+                prefill_plan = model.build_engine(
+                    config,
+                    weights,
+                    max_sequence_length,
+                    precision=precision,
+                    quant_ctx=quant_ctx,
+                    verbose=bool(request.verbose),
+                    parallel_config=parallel,
+                    prefill_rows=PREFILL_MAX_TOKENS,
+                    release_weights=False,
+                )
             plan = model.build_engine(
                 config,
                 weights,
@@ -1375,7 +1629,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 parallel_config=parallel,
             )
             writer.add_bytes("engine.plan", plan)
-            layout = "single"
+            if prefill_plan is not None:
+                writer.add_bytes("prefill.plan", prefill_plan)
+            layout = "split" if split else "single"
         writer.add_json(
             "runtime.json",
             _runtime_config(

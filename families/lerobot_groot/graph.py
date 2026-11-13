@@ -97,12 +97,19 @@ def _bias(network, out, bias, rank, dtype):
     return add(network, out, const(network, np.asarray(bias, dtype=np.float32).reshape((1,) * (rank - 1) + (-1,)), dtype))
 
 
-def linear(network, x, weight, bias=None, *, dtype):
-    """``x @ W^T + b`` in ``dtype`` for torch.nn.Linear's ``[out, in]`` weight; returns ``dtype``."""
+def linear(network, x, weight, bias=None, *, dtype, fp8=None):
+    """``x @ W^T + b`` in ``dtype`` for torch.nn.Linear's ``[out, in]`` weight; returns ``dtype``.
+
+    With ``fp8`` (a ``quantization.FP8Projection``) the activation and the weight enter the
+    matmul through FP8 Quantize/Dequantize instead, and ``weight`` is not used.
+    """
     x = cast(network, x, dtype)
     rank = len(x.shape)
-    out = network.add_matrix_multiply(
-        x, trt.MatrixOperation.NONE, _kernel(network, weight, rank, dtype), trt.MatrixOperation.TRANSPOSE).get_output(0)
+    if fp8 is None:
+        kernel = _kernel(network, weight, rank, dtype)
+    else:
+        x, kernel = fp8.operands(network, x, rank, dtype)
+    out = network.add_matrix_multiply(x, trt.MatrixOperation.NONE, kernel, trt.MatrixOperation.TRANSPOSE).get_output(0)
     return _bias(network, out, bias, rank, dtype)
 
 

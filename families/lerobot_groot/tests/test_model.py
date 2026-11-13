@@ -320,7 +320,8 @@ def test_build_writes_the_bundle_contract(tmp_path, stubbed_build) -> None:
         ({"dynamic_kv_cache": True}, NotImplementedError, "does not support dynamic_kv_cache"),
         ({"video_num_frames": 4}, NotImplementedError, "video_num_frames"),
         ({"mtp_seq_len": 2}, NotImplementedError, "MTP"),
-        ({"quantization": "fp8"}, NotImplementedError, "quantization"),
+        ({"quantization": "nvfp4"}, NotImplementedError, "quantization"),
+        ({"quantization": "fp8", "precision": "fp32"}, NotImplementedError, "needs precision bf16"),
         ({"fp32_layers": (3,)}, NotImplementedError, "mixed-precision"),
         ({"max_sequence_length": 100}, NotImplementedError, "instruction tokens"),
         ({"image_height": 224}, NotImplementedError, "height"),
@@ -332,6 +333,19 @@ def test_build_rejects_unsupported_requests_before_any_heavy_work(
 ) -> None:
     with pytest.raises(error, match=message):
         build(_request(_model_dir(tmp_path / "ckpt"), **overrides), _Writer())
+    assert stubbed_build == []
+
+
+@pytest.mark.parametrize("marker", ["config", "hf_quant_config.json"])
+def test_build_refuses_a_quantized_checkpoint_before_any_heavy_work(tmp_path, stubbed_build, marker) -> None:
+    config = _config()
+    if marker == "config":
+        config["quantization_config"] = {"quant_method": "modelopt"}
+    model_dir = _model_dir(tmp_path / "ckpt", config=config)
+    if marker != "config":
+        (model_dir / marker).write_text("{}")
+    with pytest.raises(ValueError, match="already quantized"):
+        build(_request(model_dir, quantization="fp8"), _Writer())
     assert stubbed_build == []
 
 
@@ -361,7 +375,7 @@ def test_condition_vision_tower_runs_in_the_build_precision(tmp_path, monkeypatc
         dtypes["action_head"] = dtype
         return None, "state_features", "cross_k", "cross_v"
 
-    monkeypatch.setattr(model_module, "_builder", lambda verbose: (None, _Network(), None))
+    monkeypatch.setattr(model_module, "_builder", lambda *a, **k: (None, _Network(), None))
     monkeypatch.setattr(model_module, "_profile", lambda *a: None)
     monkeypatch.setattr(model_module, "_serialize", lambda *a: b"C")
     monkeypatch.setattr(vision, "build_vision", vision_stub)
@@ -371,6 +385,39 @@ def test_condition_vision_tower_runs_in_the_build_precision(tmp_path, monkeypatc
     cfg = config_module.load_config(_model_dir(tmp_path / "ckpt"))
     assert model_module._build_condition_plan(cfg, {}, precision=precision) == b"C"
     assert dtypes == dict.fromkeys(("vision", "backbone", "action_head"), getattr(trt, expected))
+
+
+@pytest.mark.parametrize("precision", ["bfloat16", "float32"])
+def test_every_vision_tower_matrix_product_runs_in_the_tower_dtype(monkeypatch, precision) -> None:
+    """No projection, attention or merger of the tower is pinned to another dtype."""
+    import tensorrt as trt
+
+    dtype = getattr(trt, precision)
+    used: list[tuple[str, object]] = []
+
+    def linear(network, x, weight, bias=None, *, dtype):
+        used.append(("linear", dtype))
+        return "t"
+
+    def attention(network, q, k, v, *, heads, head_dim, dtype):
+        used.append(("attention", dtype))
+        return "t"
+
+    monkeypatch.setattr(vision, "require", lambda weights, name, shape: np.zeros(shape, np.float32))
+    monkeypatch.setattr(graph, "linear", linear)
+    monkeypatch.setattr(graph, "batched_attention", attention)
+    for name in ("shuffle", "f32", "add", "const", "layer_norm", "slice_static", "rotate", "gelu_tanh", "gelu_erf"):
+        monkeypatch.setattr(graph, name, lambda *a, **k: "t")
+    tokens, deepstack = vision.build_vision(None, "pixels", _AnyWeights(), images=2, grid_h=16, grid_w=16, dtype=dtype)
+    assert (tokens, len(deepstack)) == ("t", len(vision.DEEPSTACK_LAYERS))
+    # Four projections and one attention per block, two products per patch merger, plus the patch embedding.
+    assert len(used) == 1 + vision.DEPTH * 5 + 2 * (len(vision.DEEPSTACK_LAYERS) + 1)
+    assert {d for _, d in used} == {dtype}
+
+
+class _AnyWeights(dict):
+    def __missing__(self, key):
+        return None
 
 
 def test_checkpoint_loading_and_shape_checks(tmp_path) -> None:

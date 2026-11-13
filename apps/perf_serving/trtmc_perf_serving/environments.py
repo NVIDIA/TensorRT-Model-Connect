@@ -82,6 +82,9 @@ def reference_python(requirements: Path, root: Path, *, build_isolation: bool = 
     install = [str(python), "-m", "pip", "install", "--disable-pip-version-check"]
     if not build_isolation:
         install.append("--no-build-isolation")
+        # A non-isolated source build imports its build backend from this environment, so it must be there
+        # first (copies inherited from the serving interpreter already satisfy this).
+        _run([*install, "setuptools", "wheel"], log, timeout=PIP_TIMEOUT_S)
     _run([*install, "-r", str(requirements)], log, timeout=PIP_TIMEOUT_S)
     if prepare is not None:
         _run([str(python), str(prepare.resolve()), str(environment)], log, timeout=PIP_TIMEOUT_S)

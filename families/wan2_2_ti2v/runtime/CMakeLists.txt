@@ -4,6 +4,7 @@
 add_library(trtmc_model_wan2_2_ti2v SHARED
   unigram_tokenizer.cpp
   easycache.cpp
+  image_conditioning.cpp
   options.cpp
   pipeline.cpp
   plugin.cpp
@@ -47,7 +48,8 @@ install(TARGETS trtmc_model_wan2_2_ti2v
 )
 
 if(TRTMC_BUILD_TESTS)
-  foreach(test_name IN ITEMS test_wan2_2_easycache test_wan2_2_prompt_cleaner)
+  foreach(test_name IN ITEMS test_wan2_2_easycache test_wan2_2_image_conditioning
+                           test_wan2_2_prompt_cleaner)
     add_executable(${test_name}
       ${PROJECT_SOURCE_DIR}/families/wan2_2_ti2v/tests/cpp/${test_name}.cpp
     )

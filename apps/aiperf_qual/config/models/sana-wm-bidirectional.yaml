@@ -7,6 +7,7 @@ candidate:
   model_directory: trtmc-reference/SANA-model
 
 reference:
+  mode: eager  # torch.compile: Inductor fails to compile the stage-1 DiT
   adapter: families/sana_wm/reference/adapter.py  # the pinned official SANA source (no generic adapter)
   prepare: families/sana_wm/reference/prepare.py
   requirements: families/sana_wm/requirements.txt

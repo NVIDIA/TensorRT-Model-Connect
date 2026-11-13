@@ -33,6 +33,7 @@ class Adapter:
                                                    local_files_only=True)
         pipeline.load_components(dtype=spec.dtype, pretrained_model_name_or_path=directory, local_files_only=True)
         self.pipeline = pipeline if manager is not None else pipeline.to(spec.device)
+        host.maybe_compile(self.pipeline.transformer, spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         kwargs: dict[str, Any] = {

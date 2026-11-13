@@ -160,6 +160,7 @@ class _InternVLModel:
             vision_config,
             vision_weights,
             fixed_image_size=_DEFAULT_FIXED_IMAGE_SIZE,
+            precision=precision,
             verbose=verbose,
         )
 
@@ -570,6 +571,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             # Both contexts share one engine's weights. Separate serialized
             # prefill/decode engines unnecessarily duplicate decoder residency.
             config.raw["_decoder_engine_role"] = "dual_profile"
+            # Attend over the valid cache rows only (runtime.json kv_attention_window).
+            config.raw["_valid_prefix_attention"] = True
+            # Tune the prefill profile for image prompts (256 tokens per tile),
+            # not for 64-token text prompts.
+            config.raw["_opt_prefill_length"] = min(2048, max_length)
             decode = model.build_engine(
                 config,
                 weights,
@@ -580,6 +586,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 parallel_config=parallel,
             )
             config.raw.pop("_decoder_engine_role", None)
+            config.raw.pop("_valid_prefix_attention", None)
+            config.raw.pop("_opt_prefill_length", None)
             writer.add_bytes("engine.plan", decode)
             del decode
         vision = model.build_vision_engine(
@@ -593,6 +601,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         runtime = {
             "tensor_parallel_size": parallel.tp_size,
             "decoder_engine_layout": "dual_profile",
+            "kv_attention_window": "full" if parallel.enabled else "valid_prefix",
             "num_layers": config.num_hidden_layers,
             "max_cache_length": max_length,
             "vocab_size": config.vocab_size,

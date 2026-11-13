@@ -246,8 +246,9 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
     for item in absolute:  # gold suites: the suite definition, with the benchmark's request settings
         if item.get("metric"):
             suite = _suite(item["suite_definition"], profile, config.get("request"))
-            if item.get("request"):
-                suite = {**suite, "request": {**suite.get("request", {}), **item.pop("request")}}
+            if item.get("request"):  # a null removes the suite's field (a Task that declares no such config)
+                request = {**suite.get("request", {}), **item.pop("request")}
+                suite = {**suite, "request": {key: value for key, value in request.items() if value is not None}}
             item["suite_definition"] = suite
     supplementary = [dict(item) for item in config.get("supplementary", [])]
     if config.get("accuracy_source") not in (None, "none"):
@@ -262,6 +263,8 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         accuracy_source = "missing"
 
     policy = dict(config["performance"])
+    # The fixed request is timed in the native mode the quality runs use, unless the profile names its own.
+    policy.setdefault("reference_modes", [reference.get("mode", "eager")])
     if isinstance(policy["suite"], Mapping) and policy["suite"].get("from_benchmark"):
         # The first problem of one of the model's benchmarks (a catalog testcase that is no workload,
         # for example a 28-value time series against a 512-step model).

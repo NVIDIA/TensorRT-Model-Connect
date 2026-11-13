@@ -6,3 +6,6 @@
 candidate:
   build: {name: rwkv-169m-qual, max_sequence_length: 256}
 absolute: [lambada]
+
+reference:
+  mode: eager  # torch.compile: the recurrent scan recompiles for every prompt length, past Dynamo's limit

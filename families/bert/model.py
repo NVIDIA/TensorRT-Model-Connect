@@ -415,10 +415,15 @@ def build_encoder_engine(
     max_seq_length: int,
     *,
     precision: str = "fp32",
+    quant_ctx=None,
     verbose: bool = False,
     parallel_config=None,
 ) -> bytes:
-    """Build a single-device or rank-local tensor-parallel BERT engine."""
+    """Build a single-device or rank-local tensor-parallel BERT engine.
+
+    ``quant_ctx`` (``quantization.BertQuantContext``) routes the quantized projections
+    through FP8 Q/DQ; it needs fp16 precision, one device and no fp32 layers.
+    """
     parallel = parallel_config or ParallelConfig()
     parallel.validate()
     if parallel.enabled:
@@ -441,12 +446,17 @@ def build_encoder_engine(
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
     elif precision == "bf16":
-        work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
+        work_np_dtype, work_trt_dtype = np.float32, trt.bfloat16
     elif precision == "fp32":
         work_np_dtype, work_trt_dtype = np.float32, trt.float32
         requested_fp32_layers = frozenset()
     else:
         raise ValueError(f"Unsupported BERT precision: {precision}")
+    if quant_ctx is not None:
+        if precision != "fp16":
+            raise ValueError(f"BERT FP8 needs precision fp16, got {precision!r}")
+        if tp_size > 1 or requested_fp32_layers:
+            raise ValueError("BERT FP8 builds support neither tensor parallel nor fp32_layers")
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -456,6 +466,12 @@ def build_encoder_engine(
     # Disable TF32 to ensure full FP32 precision. TF32 uses 10-bit mantissa
     # which causes significant accuracy loss across 12+ encoder layers.
     trt_config.clear_flag(trt.BuilderFlag.TF32)
+    if quant_ctx is not None:
+        quant_ctx.configure_build(trt_config)
+
+    def work_constant(shape, values):
+        tensor = add_constant(network, shape, values, dtype=work_np_dtype)
+        return _cast_back_to_trt_dtype(network, tensor, work_trt_dtype)
 
     # Resolve GELU variant from config
     hidden_act = config.hidden_act or config.raw.get("activation", "") or "gelu"
@@ -476,30 +492,19 @@ def build_encoder_engine(
     # -------------------------------------------------------------------
     # Shared constants
     # -------------------------------------------------------------------
-    embedding_table = add_constant(
-        network, weights["embedding"].shape, weights["embedding"], dtype=work_np_dtype
+    embedding_table = work_constant(weights["embedding"].shape, weights["embedding"])
+    position_embed_table = work_constant(
+        weights["position_embedding"].shape, weights["position_embedding"]
     )
-    position_embed_table = add_constant(
-        network,
-        weights["position_embedding"].shape,
-        weights["position_embedding"],
-        dtype=work_np_dtype,
-    )
-    token_type_table = add_constant(
-        network, (type_vocab_size, hidden), weights["token_type_embedding"], dtype=work_np_dtype
-    )
+    token_type_table = work_constant((type_vocab_size, hidden), weights["token_type_embedding"])
 
     # Build additive attention mask from attention_mask input:
     # attention_mask is [seq_len] with 1=real, 0=padding.
     # Convert to [1, 1, seq_len] additive mask: 0.0 for real, -1e10 for padding.
     mask_float = network.add_cast(attention_mask_input, work_trt_dtype)
-    ones_mask = add_constant(
-        network, (1,), np.array([1.0], dtype=work_np_dtype), dtype=work_np_dtype
-    )
+    ones_mask = work_constant((1,), np.array([1.0], dtype=work_np_dtype))
     mask_penalty = -1e4 if precision in {"fp16", "bf16"} else -1e10
-    neg_large = add_constant(
-        network, (1,), np.array([mask_penalty], dtype=work_np_dtype), dtype=work_np_dtype
-    )
+    neg_large = work_constant((1,), np.array([mask_penalty], dtype=work_np_dtype))
     inv_mask = network.add_elementwise(
         ones_mask, mask_float.get_output(0), trt.ElementWiseOperation.SUB
     )  # 0 for real, 1 for pad
@@ -570,6 +575,7 @@ def build_encoder_engine(
             eps=eps,
             tp_size=tp_size,
             dtype=layer_np_dtype,
+            quant_ctx=quant_ctx,
         )
         if hidden_state.dtype != work_trt_dtype:
             hidden_state = network.add_cast(hidden_state, work_trt_dtype).get_output(0)
@@ -636,6 +642,24 @@ def _add_seq_layer_norm(
     return add_layer_norm_native(network, inp, hidden_size, gamma, beta, eps, dtype=dtype)
 
 
+def _quantized_input(network, activation, quant_ctx, modules):
+    """Shared Quantize/Dequantize of the input of ``modules``, or None when all stay 16-bit."""
+    if quant_ctx is None:
+        return None
+    return quant_ctx.quantize_input(network, activation, modules)
+
+
+def _projection(
+    network, activation, dequantized, in_width, out_width, weight, *, dtype, quant_ctx, module
+):
+    """``activation @ weight``; FP8 when ``module`` is quantized and has a Q/DQ input."""
+    if dequantized is None or not quant_ctx.should_quantize(module):
+        return add_matmul_rhs_constant(
+            network, activation, in_width, out_width, weight, dtype=dtype
+        )
+    return quant_ctx.matmul(network, dequantized, module)
+
+
 def _add_encoder_layer(
     *,
     network: trt.INetworkDefinition,
@@ -652,6 +676,7 @@ def _add_encoder_layer(
     eps: float,
     tp_size: int = 1,
     dtype: np.dtype = np.float32,
+    quant_ctx=None,
 ) -> trt.ITensor:
     """Add one BERT encoder layer with POST-norm.
 
@@ -664,15 +689,22 @@ def _add_encoder_layer(
     attention_size = num_heads * head_dim
 
     # --- Self-attention (no causal mask, bidirectional) ---
-    # QKV projections
-    q = add_matmul_rhs_constant(
-        network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_q"], dtype=dtype
-    )
-    k = add_matmul_rhs_constant(
-        network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_k"], dtype=dtype
-    )
-    v = add_matmul_rhs_constant(
-        network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_v"], dtype=dtype
+    # QKV projections (FP8 when quant_ctx quantizes them; one shared input Q/DQ)
+    qkv_modules = tuple(f"{prefix}.attention.self.{name}" for name in ("query", "key", "value"))
+    qkv_input = _quantized_input(network, hidden, quant_ctx, qkv_modules)
+    q, k, v = (
+        _projection(
+            network,
+            hidden,
+            qkv_input,
+            hidden_size,
+            attention_size,
+            weights[f"{prefix}.w_{part}"],
+            dtype=dtype,
+            quant_ctx=quant_ctx,
+            module=module,
+        )
+        for part, module in zip("qkv", qkv_modules)
     )
 
     # QKV biases
@@ -718,13 +750,31 @@ def _add_encoder_layer(
     )
 
     # --- FFN: fc1 -> GELU -> fc2 ---
-    fc1 = add_matmul_rhs_constant(
-        network, normed1, hidden_size, intermediate_size, weights[f"{prefix}.w_fc1"], dtype=dtype
+    fc1_module = f"{prefix}.intermediate.dense"
+    fc1 = _projection(
+        network,
+        normed1,
+        _quantized_input(network, normed1, quant_ctx, (fc1_module,)),
+        hidden_size,
+        intermediate_size,
+        weights[f"{prefix}.w_fc1"],
+        dtype=dtype,
+        quant_ctx=quant_ctx,
+        module=fc1_module,
     )
     fc1 = add_bias_sum(network, fc1, intermediate_size, weights[f"{prefix}.fc1_bias"], dtype=dtype)
     activated = add_activation(network, fc1, hidden_act, dtype=dtype)
-    fc2 = add_matmul_rhs_constant(
-        network, activated, intermediate_size, hidden_size, weights[f"{prefix}.w_fc2"], dtype=dtype
+    fc2_module = f"{prefix}.output.dense"
+    fc2 = _projection(
+        network,
+        activated,
+        _quantized_input(network, activated, quant_ctx, (fc2_module,)),
+        intermediate_size,
+        hidden_size,
+        weights[f"{prefix}.w_fc2"],
+        dtype=dtype,
+        quant_ctx=quant_ctx,
+        module=fc2_module,
     )
     if tp_size > 1:
         fc2 = add_all_reduce_sum(network, fc2, tp_size)
@@ -766,13 +816,12 @@ def build_engine(
     parallel_config=None,
 ) -> bytes:
     """Build one single-device or rank-local BERT encoder engine."""
-    if quant_ctx is not None:
-        raise ValueError("BERT builds do not support quantization")
-
     parallel = parallel_config or ParallelConfig()
     parallel.validate()
     if parallel.enabled:
         parallel.validate()
+        if quant_ctx is not None:
+            raise ValueError("BERT tensor-parallel builds do not support quantization")
         if precision != "fp32":
             raise ValueError("BERT tensor-parallel builds currently support only fp32")
         return build_tp_encoder_engine(
@@ -788,6 +837,7 @@ def build_engine(
         weights,
         max_seq_length=max_cache_length,
         precision=precision,
+        quant_ctx=quant_ctx,
         verbose=verbose,
     )
 
@@ -892,8 +942,25 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "BERT max_sequence_length exceeds checkpoint capacity: "
             f"{sequence_length} > {config.max_position_embeddings}"
         )
+    quantization = request.quantization  # None or "fp8", checked by BuildRequest
+    if quantization is not None:
+        if precision != "fp16":
+            raise ValueError(f"BERT FP8 needs precision fp16, got {precision!r}")
+        if request.tensor_parallel_size > 1:
+            raise ValueError("BERT tensor-parallel builds do not support quantization")
+        if request.fp32_layers:
+            raise ValueError("BERT FP8 builds do not support fp32_layers")
+        from .quantization import refuse_quantized_checkpoint
+        from .weights import _open_safetensors
+
+        refuse_quantized_checkpoint(config, _open_safetensors(model_path).tensor_map)
     config.raw["_fp32_layers"] = sorted(set(request.fp32_layers))
     weights = load_weights(str(model_path), config)
+    quant_ctx = None
+    if quantization is not None:
+        from .quantization import calibrate_bert
+
+        quant_ctx = calibrate_bert(config, weights, quantization, precision=precision)
     parallel = ParallelConfig(tp_size=request.tensor_parallel_size)
     parallel.validate()
 
@@ -919,6 +986,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             sequence_length,
             precision=precision,
+            quant_ctx=quant_ctx,
             verbose=request.verbose,
             parallel_config=parallel,
         )
