@@ -1504,6 +1504,17 @@
         "DeepseekV3ForCausalLM"
       ],
       "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
+      "revision": "7b375e1b73b11138ff12fe22c8f2822d8fe03467",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "smolvlm",
+      "architectures": [
+        "SmolVLMForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
     }
   ]
 }

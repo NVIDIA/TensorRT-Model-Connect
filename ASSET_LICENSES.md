@@ -24,6 +24,7 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 - `families/sam/tests/data/test_img.jpeg`
 - `families/sam3/tests/data/test_img.jpeg`
 - `families/segformer/tests/data/test_img.jpeg`
+- `families/smolvlm/tests/data/test_img.jpeg`
 - `families/timm_densenet/tests/data/test_img.jpeg`
 - `families/timm_efficientnet/tests/data/test_img.jpeg`
 - `families/timm_inception/tests/data/test_img.jpeg`
