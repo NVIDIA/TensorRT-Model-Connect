@@ -56,6 +56,11 @@ distributed under the Apache License 2.0 with the rest of the project:
 - `families/timm_inception_v4/tests/data/orc_test_img.jpeg` — byte-identical copy of
   `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the input of the FP8
   E2E case, chosen for its clear top-1 margin
+- `families/trocr/tests/data/printed_total.png`, `printed_thanks.png`,
+  `printed_receipt.png`, `printed_small.png`, `printed_tight.png` and
+  `printed_tall.png` — printed text lines written by the checked-in
+  `families/trocr/tests/data/generate.py` with Pillow's built-in default font,
+  Aileron Regular (https://dotcolon.net/fonts/aileron, CC0 1.0 Universal)
 
 ## Project overview media
 

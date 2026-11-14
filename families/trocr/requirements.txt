@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The builder reads the checkpoint; torch, numpy and TensorRT come from the base image.
+safetensors==0.8.0
+# Reference implementation the family tests are measured against.
+transformers==5.2.0
+tokenizers==0.22.2
+Pillow==13.0.0
+# Keeps the base image's numpy: resolved on their own, the packages above would take
+# numpy 2.5, outside the repository's <2.5 constraint.
+numpy<2.5

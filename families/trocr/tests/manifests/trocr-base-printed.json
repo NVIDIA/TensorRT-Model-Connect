@@ -1,0 +1,33 @@
+{
+  "name": "trocr-base-printed",
+  "hf_id": "microsoft/trocr-base-printed",
+  "hf_revision": "93450be3f1ed40a930690d951ef3932687cc1892",
+  "bundle": "trocr-base-printed.bundle",
+  "family": "trocr",
+  "task": "images_text_to_text",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "trocr-base-printed",
+      "premerge": true,
+      "test_images": [
+        "data/printed_total.png",
+        "data/printed_thanks.png",
+        "data/printed_receipt.png",
+        "data/printed_small.png",
+        "data/printed_tight.png",
+        "data/printed_tall.png"
+      ],
+      "expected_text": {
+        "data/printed_total.png": "TOTAL AMOUNT: RM 25.80",
+        "data/printed_receipt.png": "2X ICED LATTE 12.50 SST 6% 0.75 CASH 20.00 CHANGE 6.75",
+        "data/printed_tall.png": "RM 12.50"
+      },
+      "limited": {
+        "test_image": "data/printed_receipt.png",
+        "max_new_tokens": 5
+      }
+    }
+  ],
+  "tensor_parallel_size": 1
+}
