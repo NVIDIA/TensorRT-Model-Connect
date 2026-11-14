@@ -1,0 +1,4 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Independent test oracle; production build/runtime does not import Transformers.
+transformers==5.2.0
