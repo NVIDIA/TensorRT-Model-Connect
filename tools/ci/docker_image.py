@@ -12,7 +12,52 @@ import hashlib
 import importlib.metadata as metadata
 import io
 import platform
+import re
 from pathlib import Path
+
+
+_TENSORRT_PIN = re.compile(r'"tensorrt==(\d+(?:\.\d+)+)"')
+_DOCKERFILE_TENSORRT = (
+    re.compile(r"\btensorrt==(\d+(?:\.\d+)+)"),
+    re.compile(r"\blibnv(?:infer|onnxparsers)[\w-]*=(\d+(?:\.\d+)+)-"),
+    re.compile(r"tensorrt\.__version__ == '(\d+(?:\.\d+)+)'"),
+)
+_DOCKERFILE_CUDA = re.compile(r"\blibnv(?:infer|onnxparsers)[\w-]*=[\d.]+-\d+\+cuda(\d+\.\d+)")
+_DOCKERFILE_BASE = re.compile(r"^FROM\s+(?:--platform=\S+\s+)?(\S+)", re.MULTILINE)
+
+
+def toolchain_identity(repository: Path) -> dict[str, object]:
+    """TensorRT and CUDA versions of the gating image, read from source.
+
+    ``tensorrt`` is the ``pyproject.toml`` pin; ``dockerfile_tensorrt`` and
+    ``cuda`` are every TensorRT and TensorRT-CUDA version the root ``Dockerfile``
+    installs or asserts, and ``base_images`` its ``FROM`` references, which carry
+    the CUDA toolkit. Comparing this identity between two revisions tells whether
+    the TensorRT or CUDA toolchain changed. ``image`` is the default CI image tag.
+    """
+    from .process import CiError
+
+    try:
+        pyproject = (repository / "pyproject.toml").read_text(encoding="utf-8")
+        dockerfile = (repository / "Dockerfile").read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise CiError(f"cannot read the toolchain files: {error}") from error
+    pinned = _TENSORRT_PIN.search(pyproject)
+    if pinned is None:
+        raise CiError("pyproject.toml does not pin tensorrt==<version>")
+    tensorrt = sorted(
+        {match.group(1) for pattern in _DOCKERFILE_TENSORRT for match in pattern.finditer(dockerfile)}
+    )
+    cuda = sorted({match.group(1) for match in _DOCKERFILE_CUDA.finditer(dockerfile)})
+    base_images = sorted({match.group(1) for match in _DOCKERFILE_BASE.finditer(dockerfile)})
+    major_minor = ".".join(pinned.group(1).split(".")[:2])
+    return {
+        "tensorrt": pinned.group(1),
+        "dockerfile_tensorrt": tensorrt,
+        "cuda": cuda,
+        "base_images": base_images,
+        "image": f"trtmc-ci:trt{major_minor}",
+    }
 
 
 class DockerImageManager:
@@ -25,7 +70,9 @@ class DockerImageManager:
         self.github = GitHubFiles(env)
 
     def ensure(self) -> str:
-        image = self.env.get("TRTMC_CI_IMAGE", "trtmc-ci:trt11.4")
+        image = self.env.get("TRTMC_CI_IMAGE") or str(
+            toolchain_identity(self.repository)["image"]
+        )
         self.commands.run(
             [
                 "docker",

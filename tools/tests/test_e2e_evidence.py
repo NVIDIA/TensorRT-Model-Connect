@@ -2307,3 +2307,59 @@ def test_library_comparison_uses_human_labels_without_changing_check_identity():
     assert "raw similarity key" in _assess_reference_details(data)
     data["observations"][0]["value"]["checks"].append({**check, "label": "Another label"})
     assert assessment(data)["kind"] == "unverified"
+
+
+
+def test_mark_loaded_stops_the_testcase_in_a_loaded_sweep(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(e2e_evidence.STOP_AFTER_ENV, "loaded")
+    recorder = _recorder(tmp_path)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        with evidence_stage("build"):
+            pass
+        with evidence_stage("native"):
+            pass
+        with pytest.raises(pytest.skip.Exception, match="trtmc-e2e-stopped-after:loaded"):
+            e2e_evidence.mark_loaded()
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+
+    assert [(item["stage"], item["status"]) for item in recorder.data["timing"]] == [
+        ("build", "passed"),
+        ("native", "passed"),
+        ("loaded", "passed"),
+    ]
+    assert recorder.data["failure_stage"] is None
+
+
+@pytest.mark.parametrize("stop_after", [None, "", "native"])
+def test_mark_loaded_only_records_the_stage_otherwise(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stop_after: str | None
+) -> None:
+    if stop_after is None:
+        monkeypatch.delenv(e2e_evidence.STOP_AFTER_ENV, raising=False)
+    else:
+        monkeypatch.setenv(e2e_evidence.STOP_AFTER_ENV, stop_after)
+    recorder = _recorder(tmp_path)
+    token = e2e_evidence._ACTIVE.set(recorder)
+    try:
+        e2e_evidence.mark_loaded()
+        with evidence_stage("compare"):
+            pass
+    finally:
+        e2e_evidence._ACTIVE.reset(token)
+
+    assert [item["stage"] for item in recorder.data["timing"]] == ["loaded", "compare"]
+
+
+def test_evidence_stages_never_stop_a_testcase_by_themselves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(e2e_evidence.STOP_AFTER_ENV, "loaded")
+    ran = []
+    for stage in ("build", "native", "compare", "native", "reference"):
+        with evidence_stage(stage):
+            ran.append(stage)
+    assert ran == ["build", "native", "compare", "native", "reference"]

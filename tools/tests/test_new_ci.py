@@ -20,7 +20,7 @@ import yaml
 
 from tools.ci.context import CiContext
 from tools.ci.container import CiContainer
-from tools.ci.docker_image import DockerImageManager
+from tools.ci.docker_image import DockerImageManager, toolchain_identity
 from tools.ci.e2e import (
     E2ERunner,
     SDK_CONSUMER_LANGUAGES,
@@ -50,6 +50,8 @@ class RecordingContext:
         self.no_family_ctests = False
         self.no_cpu_family_tests = False
         self.missing_e2e_testcases = set()
+        self.failing_hardware = False
+        self.hardware_exit_code = 0
 
     def run(self, command, **kwargs):
         self.calls.append((list(command), kwargs))
@@ -92,7 +94,10 @@ class RecordingContext:
         if "--junitxml" in command:
             report = Path(command[command.index("--junitxml") + 1])
             empty = self.no_cpu_family_tests and "-unit-junit.xml" in report.name
+            failing = self.failing_hardware and "-hardware-junit.xml" in report.name
             testcases = "" if empty else '<testcase name="hardware" />'
+            if failing:
+                testcases = '<testcase name="hardware"><failure /></testcase>'
             if any(str(item).endswith("/test_e2e.py") for item in command):
                 family = str(command[3]).split("/")[1]
                 if "--e2e-testcase" in command:
@@ -115,6 +120,10 @@ class RecordingContext:
             )
             if empty:
                 return SimpleNamespace(stdout="", returncode=5)
+            if failing:
+                return SimpleNamespace(stdout="", returncode=1)
+            if "-hardware-junit.xml" in report.name and self.hardware_exit_code:
+                return SimpleNamespace(stdout="", returncode=self.hardware_exit_code)
         return SimpleNamespace(stdout="", returncode=0)
 
 
@@ -298,6 +307,98 @@ def test_family_with_only_hardware_tests_accepts_exact_empty_cpu_result(
     ]
 
 
+def _hardware_family(tmp_path: Path, env: dict[str, str]) -> RecordingContext:
+    family = tmp_path / "families/beta"
+    (family / "tests/manifests").mkdir(parents=True)
+    (family / "model.py").write_text("def build(request, writer): pass\n")
+    (family / "tests/test_e2e.py").write_text("def test_e2e(): pass\n")
+    (family / "tests/manifests/case.json").write_text(
+        json.dumps({"testcases": [{"name": "beta-case"}]}), encoding="utf-8"
+    )
+    (family / "tests/test_gpu.py").write_text(
+        "import pytest\n\n@pytest.mark.gpu\ndef test_gpu(): pass\n", encoding="utf-8"
+    )
+    binary = tmp_path / "trtmc"
+    binary.write_text("")
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    for name in (
+        "libtrtmc_core.so",
+        "libtrtmc_runtime.so",
+        "libtrtmc_c.so",
+        "libtrtmc_c.so.1",
+        "libtrtmc_backend_trt.so",
+        "libtrtmc_model_beta.so",
+    ):
+        (runtime / name).write_text("")
+    native_build = tmp_path / "native-build"
+    native_build.mkdir()
+    (native_build / "CTestTestfile.cmake").write_text("")
+    context = RecordingContext(
+        tmp_path,
+        {
+            "TRTMC_BINARY": str(binary),
+            "TRTMC_RUNTIME_ROOT": str(runtime),
+            "TRTMC_NATIVE_BUILD_DIR": str(native_build),
+            **env,
+        },
+    )
+    context.failing_hardware = True
+    return context
+
+
+def _pytest_calls(context: RecordingContext, marker: str) -> list[list]:
+    return [
+        command
+        for command, _ in context.calls
+        if command[:3] == ["python", "-m", "pytest"] and any(marker in str(item) for item in command)
+    ]
+
+
+def test_hardware_failure_stops_the_family_by_default(tmp_path: Path) -> None:
+    context = _hardware_family(tmp_path, {})
+
+    with pytest.raises(CiError, match="family hardware tests"):
+        E2ERunner(context)._run(("beta",))
+
+    assert _pytest_calls(context, "test_e2e.py") == []
+    assert "-x" in _pytest_calls(context, "test_gpu.py")[-1]
+
+
+def test_stop_after_sweep_reports_a_hardware_exit_code_behind_passing_junit(
+    tmp_path: Path,
+) -> None:
+    context = _hardware_family(tmp_path, {"TRTMC_E2E_STOP_AFTER": "loaded"})
+    context.failing_hardware = False
+    context.hardware_exit_code = 2
+
+    with pytest.raises(CiError, match="exited with code 2 after a passing JUnit report"):
+        E2ERunner(context)._run(("beta",))
+
+    assert len(_pytest_calls(context, "test_e2e.py")) == 1
+
+
+def test_stop_after_sweep_runs_every_case_and_still_reports_hardware_failure(
+    tmp_path: Path,
+) -> None:
+    context = _hardware_family(tmp_path, {"TRTMC_E2E_STOP_AFTER": "loaded"})
+
+    with pytest.raises(CiError, match="family hardware tests"):
+        E2ERunner(context)._run(("beta",))
+
+    hardware = [
+        (command, options)
+        for command, options in context.calls
+        if "-hardware-junit.xml" in str(command[-1])
+    ]
+    assert len(hardware) == 1
+    assert "-x" not in hardware[0][0]
+    assert hardware[0][1]["check"] is False
+    e2e = _pytest_calls(context, "test_e2e.py")
+    assert len(e2e) == 1
+    assert "-x" not in e2e[0]
+
+
 def test_family_cpp_skip_fails_closed(tmp_path: Path) -> None:
     family = tmp_path / "families/beta"
     family.mkdir(parents=True)
@@ -460,6 +561,47 @@ def test_e2e_junit_fails_closed_for_invalid_result_cardinality_or_skip(
 
     with pytest.raises(CiError, match=message):
         _require_e2e_junit(report, "family", requested)
+
+
+def test_e2e_junit_accepts_a_testcase_stopped_after_the_requested_stage(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    report = tmp_path / "e2e.xml"
+    report.write_text(
+        '<testsuites><testsuite><testcase name="test_e2e[alpha]">'
+        '<skipped message="trtmc-e2e-stopped-after:loaded" />'
+        '</testcase><testcase name="test_e2e[beta]" /></testsuite></testsuites>',
+        encoding="utf-8",
+    )
+
+    _require_e2e_junit(report, "family", ("alpha", "beta"), stop_after="loaded")
+
+    assert (
+        "family E2E results: requested=2 executed=1 passed=1 failed=0 skipped=0 "
+        "stopped_after_loaded=1" in capsys.readouterr().out
+    )
+
+
+@pytest.mark.parametrize(
+    ("message", "stop_after"),
+    (
+        ("trtmc-e2e-stopped-after:loaded", ""),
+        ("trtmc-e2e-stopped-after:native", "loaded"),
+        ("real family E2E requires TRTMC_E2E=1", "loaded"),
+    ),
+)
+def test_e2e_junit_rejects_other_skips_in_a_stopped_run(
+    tmp_path: Path, message: str, stop_after: str
+) -> None:
+    report = tmp_path / "e2e.xml"
+    report.write_text(
+        '<testsuites><testsuite><testcase name="test_e2e[alpha]">'
+        f'<skipped message="{message}" /></testcase></testsuite></testsuites>',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(CiError, match="requested E2E testcase skipped: alpha"):
+        _require_e2e_junit(report, "family", ("alpha",), stop_after=stop_after)
 
 
 @pytest.mark.parametrize(
@@ -1081,6 +1223,68 @@ def test_docker_ensure_builds_the_current_dockerfile(
     assert manager.ensure() == "trtmc:test"
     assert commands == [["docker", "build", "--file", "Dockerfile", "--tag", "trtmc:test", "."]]
     assert github_env.read_text() == "TRTMC_CI_IMAGE=trtmc:test\n"
+
+
+def test_docker_ensure_defaults_to_the_tag_of_the_pinned_tensorrt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "pyproject.toml").write_text('dependencies = ["tensorrt==12.0.1.5"]\n')
+    (tmp_path / "Dockerfile").write_text('RUN pip install "tensorrt==12.0.1.5"\n')
+    manager = DockerImageManager(tmp_path, {"GITHUB_ENV": str(tmp_path / "github-env")})
+    commands = []
+    monkeypatch.setattr(
+        manager.commands,
+        "run",
+        lambda command, **_kwargs: commands.append(command) or SimpleNamespace(returncode=0),
+    )
+
+    assert manager.ensure() == "trtmc-ci:trt12.0"
+    assert commands[0][-2] == "trtmc-ci:trt12.0"
+
+
+def test_toolchain_identity_reads_the_pin_and_the_gating_dockerfile(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text('dependencies = ["tensorrt==11.4.0.106"]\n')
+    dockerfile = (
+        "FROM nvidia/cuda:13.4.3-devel-ubuntu24.04@sha256:abc AS base\n"
+        'RUN apt-get install "libnvinfer11=11.4.0.106-1+cuda13.4" '
+        '"libnvinfer-dev=11.4.0.106-1+cuda13.4" "libnvonnxparsers-dev=11.4.0.106-1+cuda13.4"\n'
+        'RUN pip install "tensorrt==11.4.0.106"\n'
+        "RUN python -c \"import tensorrt; assert tensorrt.__version__ == '11.4.0.106'\"\n"
+    )
+    (tmp_path / "Dockerfile").write_text(dockerfile)
+
+    assert toolchain_identity(tmp_path) == {
+        "tensorrt": "11.4.0.106",
+        "dockerfile_tensorrt": ["11.4.0.106"],
+        "cuda": ["13.4"],
+        "base_images": ["nvidia/cuda:13.4.3-devel-ubuntu24.04@sha256:abc"],
+        "image": "trtmc-ci:trt11.4",
+    }
+    for old, new in (
+        ("13.4.3-devel", "13.4.4-devel"),
+        ('"libnvinfer-dev=11.4.0.106', '"libnvinfer-dev=11.4.1.1'),
+    ):
+        (tmp_path / "Dockerfile").write_text(dockerfile.replace(old, new))
+        assert toolchain_identity(tmp_path) != {
+            "tensorrt": "11.4.0.106",
+            "dockerfile_tensorrt": ["11.4.0.106"],
+            "cuda": ["13.4"],
+            "base_images": ["nvidia/cuda:13.4.3-devel-ubuntu24.04@sha256:abc"],
+            "image": "trtmc-ci:trt11.4",
+        }
+
+
+def test_toolchain_identity_requires_a_tensorrt_pin(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("dependencies = []\n")
+    (tmp_path / "Dockerfile").write_text("FROM scratch\n")
+
+    with pytest.raises(CiError, match="does not pin tensorrt"):
+        toolchain_identity(tmp_path)
+
+
+def test_toolchain_identity_reports_missing_files_as_ci_errors(tmp_path: Path) -> None:
+    with pytest.raises(CiError, match="cannot read the toolchain files"):
+        toolchain_identity(tmp_path)
 
 
 def test_container_does_not_chmod_the_shared_workspace() -> None:
