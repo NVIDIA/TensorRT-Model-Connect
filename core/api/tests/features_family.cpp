@@ -32,6 +32,7 @@ class FeaturesFixture final : public IModel,
                               public IImageToPooledFeatures,
                               public IImageToEmbedding,
                               public IImageTextToEmbedding,
+                              public IPointsToEmbedding,
                               public ITextPairToRelevance,
                               public ITextImageToRelevance,
                               public ITextImageTextToRelevance,
@@ -80,6 +81,7 @@ class FeaturesFixture final : public IModel,
             bind<IImageToPooledFeatures>(*this, fields_for(IImageToPooledFeatures::kTask)),
             bind<IImageToEmbedding>(*this, fields_for(IImageToEmbedding::kTask)),
             bind<IImageTextToEmbedding>(*this, fields_for(IImageTextToEmbedding::kTask)),
+            bind<IPointsToEmbedding>(*this, fields_for(IPointsToEmbedding::kTask)),
             bind<ITextPairToRelevance>(*this, fields_for(ITextPairToRelevance::kTask)),
             bind<ITextImageToRelevance>(*this, fields_for(ITextImageToRelevance::kTask)),
             bind<ITextImageTextToRelevance>(*this, fields_for(ITextImageTextToRelevance::kTask)),
@@ -298,6 +300,20 @@ class FeaturesFixture final : public IModel,
                                 ConfigView config) override {
         auto result = embedding(float(14 * scale(config)), pixel(request.image));
         result.values.push_back(float(request.text.size()));
+        return result;
+    }
+    // Returns the last point's first value plus both extents so tests can see
+    // exactly which floats Core handed to the family and how they were split.
+    SemanticEmbeddingResult run(const PointsToEmbeddingRequest& request,
+                                ConfigView config) override {
+        if (request.points.size() != static_cast<size_t>(request.num_points) * request.input_dim)
+            throw std::runtime_error("Core handed the family a mis-sized point span");
+        if (request.num_points == 0)
+            throw std::invalid_argument("fixture requires at least one point");
+        const auto last_point = static_cast<size_t>(request.num_points - 1) * request.input_dim;
+        auto result = embedding(float(19 * scale(config)), request.points[last_point]);
+        result.values.push_back(float(request.num_points));
+        result.values.push_back(float(request.input_dim));
         return result;
     }
     RelevanceResult run(const TextPairToRelevanceRequest& request, ConfigView config) override {

@@ -230,6 +230,13 @@ typedef struct {
     trtmc_string_view text;
 } trtmc_image_text_to_embedding_request_v1;
 typedef struct {
+    /* Row-major [num_points, input_dim] float32. The family defines the column
+     * meaning and validates the point counts and input_dim it supports. */
+    const float* points;
+    uint64_t num_points;
+    uint32_t input_dim;
+} trtmc_points_to_embedding_request_v1;
+typedef struct {
     trtmc_string_view query;
     trtmc_string_view document;
 } trtmc_text_pair_to_relevance_request_v1;
@@ -395,6 +402,15 @@ typedef struct {
     trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_semantic_embedding_view_v1*,
                                           trtmc_error**);
 } trtmc_image_text_to_embedding_api_v1;
+
+#define TRTMC_TASK_POINTS_TO_EMBEDDING "points_to_embedding"
+typedef struct {
+    trtmc_api_header header;
+    trtmc_status(TRTMC_CALL* run)(trtmc_model*, const trtmc_points_to_embedding_request_v1*,
+                                  const trtmc_config_view_v1*, trtmc_result**, trtmc_error**);
+    trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_semantic_embedding_view_v1*,
+                                          trtmc_error**);
+} trtmc_points_to_embedding_api_v1;
 
 #define TRTMC_TASK_TEXT_PAIR_TO_RELEVANCE "text_pair_to_relevance"
 typedef struct {
