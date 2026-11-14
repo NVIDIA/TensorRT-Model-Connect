@@ -260,8 +260,38 @@ def box_iou50(gold: Any, observation: Mapping[str, Any] | None, task: str | None
     return _iou(predicted, target) >= 0.5, match.group(0)
 
 
+def _best(observation: Mapping[str, Any]) -> int | None:
+    if observation.get("top_class") is not None:
+        return int(observation["top_class"])
+    scores = observation.get("scores") or []
+    return max(range(len(scores)), key=lambda index: float(scores[index])) if scores else None
+
+
+def label_hit(gold: Any, observation: Mapping[str, Any] | None, task: str | None = None) -> tuple[bool, str]:
+    """Multi-label audio tagging (AudioSet): the top-scoring class's name (``labels[top_class]``) is one of the
+    clip's gold labels, compared case-insensitively."""
+    observation = observation or {}
+    best, labels = _best(observation), observation.get("labels") or []
+    if best is None or best >= len(labels):
+        return False, ""
+    name = str(labels[best])
+    return name.strip().lower() in {str(label).strip().lower() for label in gold or []}, name
+
+
+def query_hit(gold: Any, observation: Mapping[str, Any] | None, task: str | None = None) -> tuple[bool, str]:
+    """Zero-shot classification by text-image relevance: the best-scoring query (``queries[top_class]``, one
+    prompt per class) names the gold class."""
+    observation = observation or {}
+    best, queries = _best(observation), observation.get("queries") or []
+    if best is None or best >= len(queries):
+        return False, ""
+    query = str(queries[best]).lower()
+    return query.endswith(f" {str(gold).strip().lower()}") or query == str(gold).strip().lower(), query
+
+
 BINARY: dict[str, Callable[..., tuple[bool, str]]] = {"choice": choice, "spoken_choice": spoken_choice, "contains": contains, "code_pass": code_pass,
-                                                      "top1": top1, "box_iou50": box_iou50}
+                                                      "top1": top1, "box_iou50": box_iou50, "label_hit": label_hit,
+                                                      "query_hit": query_hit}
 
 
 # ---------------- conversion parity: (TRTMC observation, native observation, gate) -> (match, reason) -------
@@ -271,8 +301,9 @@ def vector_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
                   gate: Mapping[str, Any]) -> tuple[bool | None, str]:
     """An encoder output vector (``values``) against the native one: equal length, finite values, cosine
     at least ``min_cosine`` and relative L2 error at most ``max_relative_l2`` (magnitude, not only direction)."""
-    mine = [float(value) for value in (candidate or {}).get("values") or []]
-    theirs = [float(value) for value in (native or {}).get("values") or []]
+    field = str(gate.get("field", "values"))  # the output vector (``logits`` for token scores)
+    mine = [float(value) for value in (candidate or {}).get(field) or []]
+    theirs = [float(value) for value in (native or {}).get(field) or []]
     if not mine or not theirs:
         return None, f"no output vector ({len(mine)} vs {len(theirs)} values)"
     if len(mine) != len(theirs):
@@ -284,6 +315,32 @@ def vector_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
     relative = math.sqrt(sum((a - b) ** 2 for a, b in zip(mine, theirs))) / norm
     ok = cosine >= float(gate.get("min_cosine", 0.999)) and relative <= float(gate.get("max_relative_l2", 0.02))
     return ok, f"cosine {cosine:.5f}, relative L2 {relative:.4f}"
+
+
+def depth_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                 gate: Mapping[str, Any]) -> tuple[bool | None, str]:
+    """A relative depth map against the native one at the image's size: Pearson correlation at least
+    ``min_correlation`` and mean absolute error over the native maximum at most ``max_relative_error`` (the
+    family's E2E gate)."""
+    import numpy as np
+
+    sides = []
+    for side in (candidate, native):
+        depth, height, width = (side or {}).get("depth"), int((side or {}).get("height") or 0), int((side or {}).get("width") or 0)
+        values = np.asarray(depth if depth is not None else [], dtype=np.float64)
+        if height <= 0 or width <= 0 or values.size != height * width:
+            return None, "missing depth map or inconsistent dimensions"
+        sides.append((values, (height, width)))
+    (mine, shape), (theirs, expected) = sides
+    if shape != expected:
+        return False, f"depth map {shape} vs {expected}"
+    if not np.isfinite(mine).all():
+        return False, "non-finite depth"
+    correlation = float(np.corrcoef(mine, theirs)[0, 1])
+    scale = float(theirs.max()) if float(theirs.max()) > 0.0 else 1.0
+    relative = float(np.abs(mine - theirs).mean() / scale)
+    ok = correlation >= float(gate.get("min_correlation", 0.998)) and relative <= float(gate.get("max_relative_error", 0.01))
+    return ok, f"correlation {correlation:.5f}, relative error {relative:.5f}"
 
 
 def decision_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
@@ -445,6 +502,7 @@ def family_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
 
 PARITY: dict[str, Callable[..., tuple[bool | None, str]]] = {"family_parity": family_parity,
                                                       "decision_parity": decision_parity,
+                                                      "depth_parity": depth_parity,
                                                       "vector_parity": vector_parity, "mask_parity": mask_parity,
                                                       "geometry_parity": geometry_parity,
                                                       "action_parity": action_parity, "disparity_parity": disparity_parity,

@@ -127,6 +127,10 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "stereo_disparity": ("disparity", 3, 100),
     "time_series_forecast": ("solve", 50, 500),
     "robot_control": ("control", 2, 10),
+    "audio_to_class_scores": ("classify_audio", 50, 500),
+    "text_image_to_relevance": ("relevance", 50, 500),
+    "masked_text_to_token_scores": ("token_scores", 50, 500),
+    "monocular_depth": ("depth", 50, 500),
 }
 
 _ALLOWED_OPERATIONS: dict[str, frozenset[str]] = {
@@ -312,6 +316,25 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         elif any(_explicit(case, name) is not _MISSING for name in tool_fields):
             raise BenchmarkError("tool definitions and preset replies require tool_speech_dialogue")
         return request
+    if task == "audio_to_class_scores":
+        return {"audio_path": _semantic_asset(case, root, "audio_path", "audio", "test_input_audio")}
+    if task == "text_image_to_relevance":
+        # Every query of the case against the one image: a zero-shot choice scores one image against each class.
+        queries = _explicit(case, "queries")
+        if queries is _MISSING:
+            queries = [value for value in (_explicit(case, "query"), _explicit(case, "negative_query"))
+                       if value is not _MISSING]
+        if not isinstance(queries, list) or not queries or not all(isinstance(q, str) and q for q in queries):
+            raise BenchmarkError("relevance requires a query (and optional negative_query) or a queries array")
+        return {"image_path": _semantic_asset(case, root, "image_path", "image", "test_image"),
+                "queries": list(queries)}
+    if task == "masked_text_to_token_scores":
+        prompt = _explicit(case, "prompt")
+        if not isinstance(prompt, str) or not prompt:
+            raise BenchmarkError("masked token scores require a prompt")
+        return {"prompt": prompt}
+    if task == "monocular_depth":
+        return {"image_path": _semantic_asset(case, root, "image_path", "image", "test_image")}
     if task == "image_to_boxes":
         if _explicit(case, "prompt", "test_prompt", "source_text") is not _MISSING:
             raise BenchmarkError("image-only detection has no prompt input")

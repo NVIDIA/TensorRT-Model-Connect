@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# AudioSet evaluation clips (agkphysics/AudioSet, pinned; CC-BY-4.0): 500 seeded clips of the first two eval shards
+# (about 1,300 clips), resampled to 16 kHz once for both sides. Gold is the clip's human-readable labels.
+suite: audioset-eval-500
+version: 1
+source:
+  kind: hf_dataset
+  dataset: agkphysics/AudioSet
+  split: test
+  revision: 0c609e8302cf139307f639c57652032af0a88041
+  data_files: {test: [data/eval/00.parquet, data/eval/01.parquet]}
+  audio_column: audio
+  audio_sample_rate: 16000
+  label_column: human_labels
+selection: {method: seeded, count: 500}
+fields: {audio: audio_path}

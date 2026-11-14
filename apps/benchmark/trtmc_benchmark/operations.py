@@ -78,6 +78,11 @@ def _generated_media_metrics(
 
 
 _OPERATIONS = (
+    OperationSpec(name="classify_audio", rate_metrics=(RateMetric("classified_clips", "clips_per_s"),)),
+    OperationSpec(name="relevance", rate_metrics=(RateMetric("scored_pairs", "pairs_per_s"),)),
+    OperationSpec(name="token_scores", rate_metrics=(RateMetric("scored_sequences", "sequences_per_s"),)),
+    OperationSpec(name="depth", rate_metrics=(RateMetric("depth_images", "images_per_s"),
+                                               RateMetric("depth_pixels", "depth_pixels_per_s"))),
     OperationSpec(
         name="decide",
         rate_metrics=(RateMetric("questions", "questions_per_s"), RateMetric("options", "options_per_s")),

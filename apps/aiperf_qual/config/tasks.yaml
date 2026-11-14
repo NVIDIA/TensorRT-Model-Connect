@@ -117,6 +117,20 @@ benchmarks:
         microwave. oven. toaster. sink. refrigerator. book. clock. vase. scissors. teddy bear. hair drier.
         toothbrush.
     gate: {margin: 1.0}
+  # Zero-shot classification by text-image relevance (CLIP, SigLIP): each Imagenette image against its 10 class
+  # prompts; right when the best-scoring prompt names the gold class.
+  imagenette_zero_shot: {suite: imagenette-zero-shot, suite_definition: imagenette-zero-shot-500, metric: query_hit,
+                         gate: {margin: 1.0}, quantized_gate: {margin: 2.0}}
+  # Audio tagging (AST): right when the top class is one of the AudioSet clip's labels.
+  audioset: {suite: audioset-eval, suite_definition: audioset-eval-500, metric: label_hit,
+             gate: {margin: 1.0}, quantized_gate: {margin: 2.0}}
+  # Masked-LM token scores (ESM-2) have no gold set here: every logit of UniRef50 test sequences cut to the
+  # bundle's window, against the native model's (cosine and relative L2, as the encoders).
+  token_score_parity: {suite: token-score-parity, suite_definition: uniref50-test-200, metric: vector_parity,
+                       truncate_tokens: 254, gate: {field: logits, min_cosine: 0.999, max_relative_l2: 0.02}}
+  # Relative monocular depth (Depth Anything) against the native map on 50 COCO images: the family's E2E gate.
+  depth_parity: {suite: depth-parity, suite_definition: coco-val2017-depth-50, metric: depth_parity,
+                 gate: {min_correlation: 0.998, max_relative_error: 0.01}}
   # A structured decision (per-option probabilities of a schema's questions) has no public gold set: every
   # catalog testcase of the profile (its family's fixtures), the same choices and the families' E2E probability
   # tolerance against the release implementation.
@@ -312,6 +326,19 @@ tasks:
     # The catalog testcases are a few values, not the models' context: Perf times the first ETTh1 window.
     performance: {suite: {from_benchmark: etth1-mse}, output_grader: parity_numeric}
   series_to_point_forecast: *forecast
+  # Tasks whose native reference is the family's own Transformers model (tests/aiperf: reference.adapter).
+  audio_to_class_scores:
+    absolute: [audioset]
+    performance: {output_grader: parity_top1}
+  text_image_to_relevance:
+    absolute: [imagenette_zero_shot]
+    performance: {output_grader: parity_numeric}
+  masked_text_to_token_scores:
+    absolute: [token_score_parity]
+    performance: {output_grader: parity_numeric}
+  monocular_depth:
+    absolute: [depth_parity]
+    performance: {output_grader: parity_numeric}
   structured_decision:  # the family states its release implementation (reference.adapter)
     absolute: [decision_parity]
     performance: {output_grader: parity_numeric}

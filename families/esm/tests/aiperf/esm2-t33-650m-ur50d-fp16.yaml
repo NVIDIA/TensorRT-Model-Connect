@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  adapter: families/esm/reference/adapter.py  # padded to the bundle's fixed window
+  options: {max_sequence_length: 256}  # the manifest's window
