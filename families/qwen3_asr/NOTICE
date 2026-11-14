@@ -1,0 +1,28 @@
+Qwen3-ASR checkpoint, processor behaviour and model configuration:
+https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf
+Revision 7f1569a48a89f3e3f4dc3a5c9d28bddd903bc76c.
+The checkpoint is distributed under its own license (Apache License 2.0) and is
+not part of this repository.
+
+Qwen3ASRForConditionalGeneration, Qwen3ASREncoder, Qwen3ASRFeatureExtractor and
+Qwen3ASRProcessor reference implementation in Hugging Face Transformers 5.22.2.
+The family transcribes its sinusoid position table, chunk geometry, prompt
+layout, repetition fix (_detect_and_fix_repetitions) and transcript parsing
+(_parse_single_output):
+Copyright 2026 The HuggingFace Inc. team.
+Licensed under Apache License 2.0.
+
+Slaney mel filterbank (transformers.audio_utils.mel_filter_bank), transcribed
+by the family builder:
+Copyright 2023 The HuggingFace Inc. team and the librosa & torchaudio authors.
+Licensed under Apache License 2.0.
+
+The repetition fix and transcript parsing follow the original Qwen3-ASR
+inference code, https://github.com/QwenLM/Qwen3-ASR at revision
+c17a131fe028b2e428b6e80a33d30bb4fa57b8df (qwen_asr/inference/utils.py):
+Copyright 2026 The Alibaba Qwen team.
+Licensed under Apache License 2.0.
+
+Qwen3 decoder reference implementation in Hugging Face Transformers 5.22.2:
+Copyright 2025 The Qwen team, Alibaba Group and the HuggingFace Inc. team.
+Licensed under Apache License 2.0.

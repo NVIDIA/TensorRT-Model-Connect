@@ -142,6 +142,9 @@ audiobooks.
 - Source and attribution: https://www.openslr.org/12/
 - License: https://creativecommons.org/licenses/by/4.0/
 
+A byte-identical copy is stored at
+`families/qwen3_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`.
+
 ## SANA world-model fixtures
 
 The following files are unmodified copies from NVlabs/Sana revision

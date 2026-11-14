@@ -299,6 +299,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "Qwen/Qwen3-ASR-0.6B-hf",
+      "revision": "7f1569a48a89f3e3f4dc3a5c9d28bddd903bc76c",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "qwen3_asr",
+      "architectures": [
+        "Qwen3ASRForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
       "revision": "26291f793822fb6be9555850f06dfe95f2d7e695",
       "revision_source": "declared",
