@@ -944,8 +944,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task != "text_generation":
-        raise ValueError("bart supports only task=text_generation")
+    if request.task not in ("conditional_text_generation", "text_generation"):
+        raise ValueError("bart supports only task=conditional_text_generation or text_generation")
 
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
