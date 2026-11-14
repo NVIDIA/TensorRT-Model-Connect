@@ -1308,6 +1308,15 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "stabilityai/stable-audio-3-medium",
+      "revision": "d4d3579395a8ac0df4ab13b5b1d7138ce7290f81",
+      "revision_source": "declared",
+      "metadata_file": null,
+      "model_type": null,
+      "architectures": [],
+      "architecture_source": null
+    },
+    {
       "hf_id": "stabilityai/stablelm-2-1_6b",
       "revision": "f499ead74c53749bd93cebc6ce8bc0d7bdf1eaef",
       "revision_source": "resolved",
