@@ -1,0 +1,22 @@
+{
+  "name": "phonon-31m-en-fp32",
+  "hf_id": "gradium/phonon-31m-en",
+  "hf_revision": "92741c5b07d085ff840e26fea8ce43110b87852f",
+  "bundle": "phonon-31m-en-fp32.bundle",
+  "family": "phonon",
+  "task": "text_to_speech",
+  "precision": "fp32",
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 256,
+  "testcases": [
+    {
+      "name": "phonon-31m-en-fp32",
+      "premerge": true,
+      "inputs": {"text": "Hello from Phonon."}
+    },
+    {
+      "name": "phonon-31m-en-fp32-long",
+      "inputs": {"text": "The quick brown fox jumps over the lazy dog."}
+    }
+  ]
+}

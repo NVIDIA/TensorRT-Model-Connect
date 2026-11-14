@@ -180,6 +180,17 @@
       "architecture_source": "model_index._class_name"
     },
     {
+      "hf_id": "gradium/phonon-31m-en",
+      "revision": "92741c5b07d085ff840e26fea8ce43110b87852f",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "gradium_phonon_tts",
+      "architectures": [
+        "GradiumPhononTTSForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "nvidia/gr00t17-lerobot-libero_spatial-640",
       "revision": "32a6ec786d6509df31b40392b4e4dcdda78c0f11",
       "revision_source": "resolved",
