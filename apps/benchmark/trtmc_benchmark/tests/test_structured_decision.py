@@ -52,3 +52,32 @@ def test_document_and_media_order_are_preserved(tmp_path):
 def test_invalid_decision_request_fails_before_execution(tmp_path, inputs):
     with pytest.raises(BenchmarkError):
         resolve_task_case("structured_decision", {"inputs": inputs}, tmp_path)
+
+
+def test_independent_batch_requests(tmp_path):
+    items = [{"document": '{"state":"first"}'}, {"document": '{"state":"second"}'}]
+    result = resolve_task_case("structured_decision", {"inputs": {"requests": items}}, tmp_path)
+    assert [item["document"] for item in result.request["requests"]] == [item["document"] for item in items]
+    assert result.operation == "decide"
+
+
+@pytest.mark.parametrize("inputs", [
+    {"requests": []}, {"requests": ["{}"]},
+    {"requests": [{"requests": [{"document": "{}"}]}]},
+    {"requests": [{"document": "{}"}], "document": "{}"},
+])
+def test_reject_invalid_batch(tmp_path, inputs):
+    with pytest.raises(BenchmarkError):
+        resolve_task_case("structured_decision", {"inputs": inputs}, tmp_path)
+
+
+def test_batch_request_throughput_counts_requests():
+    from trtmc_benchmark.metrics import reduce_metrics
+    observations = [
+        {"runtime_e2e_wall_ms": 20.0, "requests": 3, "questions": 5, "options": 10},
+        {"runtime_e2e_wall_ms": 30.0, "requests": 2, "questions": 4, "options": 8},
+    ]
+    metrics = reduce_metrics("decide", observations)
+    assert metrics["sample_count"] == 2
+    assert metrics["request_throughput_per_s"] == pytest.approx(100)
+    assert metrics["requests_per_s"] == pytest.approx(100)

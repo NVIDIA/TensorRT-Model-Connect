@@ -136,7 +136,7 @@ own explicit benchmark inputs; a shared operation name does not imply support.
 | `encode` | `TextToPooledFeatures`, `TextToTokenFeatures` |
 | `embed` | `TextToEmbedding` |
 | `rerank` | `TextQueryDocumentsToRelevance` |
-| `decide` | `IStructuredDecision` |
+| `decide` | `IStructuredDecision`, optional `IBatchStructuredDecision` |
 | `control` | `ImageStateToActionChunk` |
 
 Structured decisions accept an opaque JSON `document` or `document_path`, with
@@ -144,6 +144,16 @@ optional `image_paths` and `video_frame_paths`. The family interprets the schema
 Timing covers record encoding, inference, and response construction; media-file
 decoding follows the benchmark's asset-loading policy. The output retains each
 question's option logits and probabilities.
+
+For families exposing `IBatchStructuredDecision`, provide `inputs.requests` as
+a nonempty array of independent structured-decision inputs. Each item accepts
+the same document and media fields. Batch inputs cannot be mixed with
+single-request fields or nested. The worker invokes `decide_batch` once per
+observation and retains results in request order. Rates include requests,
+questions and options per second; batch wall time covers the complete call.
+`request_throughput_per_s` counts individual requests in the measured batches,
+while `sample_count` and latency describe calls to the batch interface.
+Family-owned validation must establish batch correctness before timing.
 
 For semantic Task manifests, explicitly specified generation controls retain
 their types; omitted controls use the family defaults. A testcase can supply

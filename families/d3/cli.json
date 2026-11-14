@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "decide",
+      "help": "Run a native D3 decision record",
+      "executor": "native",
+      "handler": "decide",
+      "arguments": [
+        {
+          "name": "bundle",
+          "type": "path"
+        },
+        {
+          "name": "record",
+          "flags": [
+            "--record"
+          ],
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "image_rgb",
+          "flags": [
+            "--image-rgb"
+          ],
+          "type": "path"
+        },
+        {
+          "name": "runtime_root",
+          "flags": [
+            "--runtime-root"
+          ],
+          "type": "path"
+        }
+      ]
+    }
+  ]
+}

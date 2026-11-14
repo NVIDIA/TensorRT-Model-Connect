@@ -1,0 +1,28 @@
+{
+  "name": "d3-edge",
+  "hf_id": "vllm-sr/d3-edge",
+  "hf_revision": "bee5e872f75b9c5d1405767bf244a6948b95c0af",
+  "bundle": "d3-edge.bundle",
+  "family": "d3",
+  "task": "structured_decision",
+  "precision": "bf16",
+  "max_sequence_length": 2048,
+  "max_batch_size": 8,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "d3-edge-text-image",
+      "premerge": true,
+      "inputs": {
+        "requests": [
+          {
+            "document_path": "fixtures/record.json",
+            "image_paths": [
+              "fixtures/red.png"
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

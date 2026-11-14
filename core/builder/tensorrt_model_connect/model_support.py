@@ -51,11 +51,16 @@ class ModelMetadata:
 
 @dataclass(frozen=True)
 class FamilySupport:
-    """Task capabilities returned by one matching family."""
+    """Task capabilities and family-declared match priority.
+
+    Equal-priority matches remain ambiguous. A more specific family may use a
+    higher priority when it verifies an identity beyond a common architecture.
+    """
 
     tasks: tuple[str, ...]
     default_task: str
     default_precision: str = "fp32"
+    match_priority: int = 0
 
     def __post_init__(self) -> None:
         if not self.tasks or len(set(self.tasks)) != len(self.tasks):
@@ -66,6 +71,9 @@ class FamilySupport:
             raise ValueError("default_task must be one of the supported tasks")
         if self.default_precision not in {"fp16", "bf16", "fp32"}:
             raise ValueError("default_precision must be fp16, bf16, or fp32")
+        if (not isinstance(self.match_priority, int) or isinstance(self.match_priority, bool)
+                or self.match_priority < 0):
+            raise ValueError("match_priority must be a non-negative integer")
 
 
 DescribeSupport = Callable[[ModelMetadata], FamilySupport | None]
@@ -97,6 +105,7 @@ def family_support(
     tasks: tuple[str, ...],
     default_task: str,
     default_precision: str = "fp32",
+    match_priority: int = 0,
 ) -> DescribeSupport:
     """Create one exact, family-owned support function."""
 
@@ -110,6 +119,7 @@ def family_support(
         tasks=tasks,
         default_task=default_task,
         default_precision=default_precision,
+        match_priority=match_priority,
     )
 
     def describe(metadata: ModelMetadata) -> FamilySupport | None:
@@ -194,7 +204,7 @@ def _describe_family(family: Path, metadata: ModelMetadata) -> FamilySupport | N
 def resolve_family(
     metadata: ModelMetadata, requested_family: str | None = None
 ) -> tuple[str, FamilySupport]:
-    """Select one compatible family automatically or by an explicit family ID."""
+    """Select the unique highest-priority match, or an explicit compatible family."""
 
     directories = _family_directories()
     if requested_family is not None:
@@ -227,6 +237,8 @@ def resolve_family(
     if not matches:
         identity = metadata.model_type or metadata.pipeline_class or "unknown"
         raise FamilyResolutionError(f"no family supports model {identity!r}")
+    highest = max(support.match_priority for _, support in matches)
+    matches = [(family, support) for family, support in matches if support.match_priority == highest]
     if len(matches) > 1:
         raise AmbiguousFamilyError(tuple(matches))
     return matches[0]

@@ -236,6 +236,15 @@ def resolve_task_case(
 def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
     if task == "structured_decision":
         inputs = _inputs(case)
+        if "requests" in inputs:
+            items = inputs["requests"]
+            if set(inputs) != {"requests"}:
+                raise BenchmarkError("batch requests cannot be mixed with single-request inputs")
+            if not isinstance(items, list) or not items or not all(
+                isinstance(item, Mapping) and "requests" not in item for item in items
+            ):
+                raise BenchmarkError("requests must be a nonempty array of request objects")
+            return {"requests": [_request(task, {"inputs": item}, root) for item in items]}
         document = inputs.get("document")
         document_path = inputs.get("document_path")
         if document is not None and document_path is not None:

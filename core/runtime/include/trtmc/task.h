@@ -553,6 +553,17 @@ class IStructuredDecision : public virtual ITask {
     virtual StructuredDecisionResult decide(const StructuredDecisionRequest& request) = 0;
 };
 
+// Optional capability for independent structured-decision requests. A successful
+// call returns exactly one result per request, in input order. Validate the
+// complete input before execution; an invalid item fails the whole call. Empty
+// input returns no results. Families own packing, batch limits and execution.
+class IBatchStructuredDecision {
+  public:
+    virtual ~IBatchStructuredDecision() = default;
+    virtual std::vector<StructuredDecisionResult>
+    decide_batch(const std::vector<StructuredDecisionRequest>& requests) = 0;
+};
+
 class IVisionLanguageGeneration : public virtual ITask {
   public:
     static constexpr const char* kTask = "vision_language_generation";
