@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# Trivial no-op: forces Community GPU CI selection to validate host-RAM headroom after #1992.
 
 """Native dual-stream TensorRT denoiser for Cosmos3-Nano T2V."""
 
