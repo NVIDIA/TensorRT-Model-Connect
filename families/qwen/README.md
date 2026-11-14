@@ -60,8 +60,9 @@ build/test_qwen_sdk_c model.bundle build text "Hello" max_new_tokens=20
 build/test_qwen_sdk_cpp model.bundle build text "Hello" max_new_tokens=20
 ```
 
-The family and Config CTest targets also build both SDK consumers. Existing E2Es use
-`TRTMC_NATIVE_BUILD_DIR` to locate them. The server consumer must support semantic
+The family and Config CTest targets also build both SDK consumers. Set
+`TRTMC_NATIVE_BUILD_DIR="$PWD/build"` for the [family E2E commands](../../website/docs/extend/model-validation.md#4-run-the-declared-family-e2e)
+to locate them. The server consumer must support semantic
 Tasks before serving a migrated family; legacy-interface inheritance is not kept
 in this family to work around an unmigrated application.
 
