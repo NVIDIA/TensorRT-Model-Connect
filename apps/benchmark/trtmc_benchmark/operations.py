@@ -81,6 +81,8 @@ _OPERATIONS = (
     OperationSpec(name="classify_audio", rate_metrics=(RateMetric("classified_clips", "clips_per_s"),)),
     OperationSpec(name="relevance", rate_metrics=(RateMetric("scored_pairs", "pairs_per_s"),)),
     OperationSpec(name="token_scores", rate_metrics=(RateMetric("scored_sequences", "sequences_per_s"),)),
+    OperationSpec(name="control_chunk", rate_metrics=(RateMetric("action_values", "action_values_per_s"),)),
+    OperationSpec(name="segment_points", rate_metrics=(RateMetric("segmented_points", "points_per_s"),)),
     OperationSpec(name="depth", rate_metrics=(RateMetric("depth_images", "images_per_s"),
                                                RateMetric("depth_pixels", "depth_pixels_per_s"))),
     OperationSpec(

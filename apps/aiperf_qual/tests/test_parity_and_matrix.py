@@ -425,3 +425,67 @@ def test_vector_parity_reads_the_gate_field():
     logits = {"logits": [1.0, 2.0, 3.0]}
     assert gold_metrics.vector_parity(logits, {"logits": [1.0, 2.0, 3.001]}, {"field": "logits"})[0] is True
     assert gold_metrics.vector_parity(logits, {"logits": [3.0, 2.0, 1.0]}, {"field": "logits"})[0] is False
+
+
+def test_point_miou_scores_per_point_classes_over_the_corpus():
+    problems = [{"gold": {"labels": [0, 0, 1, 2], "num_classes": 3}},
+                {"gold": {"labels": [1, 1, 2, 2], "num_classes": 3}}]
+    exact = {0: {"labels": [0, 0, 1, 2]}, 1: {"labels": [1, 1, 2, 2]}}
+    assert gold_metrics.miou(gold_metrics.point_miou_units(problems, exact)) == 100.0
+    swapped = {0: {"labels": [0, 0, 1, 2]}, 1: {"labels": [1, 1, 1, 2]}}
+    # class 1: 3 of 4 in the union; class 2: 2 of 3; class 0: exact
+    expected = 100.0 * (1.0 + 3 / 4 + 2 / 3) / 3
+    assert abs(gold_metrics.miou(gold_metrics.point_miou_units(problems, swapped)) - expected) < 1e-9
+    short = {0: {"labels": [0]}, 1: {"labels": [1, 1, 2, 2]}}
+    assert gold_metrics.answered("point_miou", problems, short) == {1: short[1]}
+
+
+def test_point_label_parity_is_the_share_of_identical_labels():
+    from trtmc_aiperf_plugins.accuracy import COMPARATORS
+
+    compare = COMPARATORS["parity_labels"]
+    assert compare({"labels": [1] * 100}, {"labels": [1] * 98 + [2, 2]})[0] is True
+    assert compare({"labels": [1] * 100}, {"labels": [1] * 97 + [2] * 3})[0] is False
+    assert compare({"labels": [1]}, {"labels": [1, 1]})[0] is False
+
+
+def test_s3dis_blocks_select_the_area_and_write_each_block_once(tmp_path, monkeypatch):
+    import zipfile
+
+    import h5py
+    import huggingface_hub
+
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.suites import _s3dis_block_records
+
+    rooms = ["Area_1_office_1", "Area_5_office_2", "Area_5_office_2", "Area_5_hallway_1"]
+    staging = tmp_path / "staging" / "indoor3d_sem_seg_hdf5_data"
+    staging.mkdir(parents=True)
+    for index, (start, stop) in enumerate([(0, 2), (2, 4)]):
+        with h5py.File(staging / f"ply_data_all_{index}.h5", "w") as handle:
+            handle["data"] = np.arange(start, stop, dtype="<f4")[:, None, None] * np.ones((1, 3, 9), "<f4")
+            handle["label"] = np.full((stop - start, 3), start, dtype=np.uint8)
+    (staging / "all_files.txt").write_text("".join(f"{staging.name}/ply_data_all_{i}.h5\n" for i in range(2)))
+    (staging / "room_filelist.txt").write_text("\n".join(rooms) + "\n")
+    archive = tmp_path / "s3dis.zip"
+    with zipfile.ZipFile(archive, "w") as handle:
+        for path in staging.iterdir():
+            handle.write(path, f"{staging.name}/{path.name}")
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda *args, **kwargs: str(archive))
+    source = {"repo": "r", "revision": "0123456789abcdef", "filename": "s3dis.zip", "area": "Area_5"}
+    environment = Environment({"hf_datasets_cache": str(tmp_path / "cache")})
+    records = _s3dis_block_records(source, {"method": "first", "count": 10}, environment)
+    assert [record["id"] for record in records] == ["Area_5_office_2/1", "Area_5_office_2/2", "Area_5_hallway_1/3"]
+    assert [record["cluster"] for record in records] == ["Area_5_office_2", "Area_5_office_2", "Area_5_hallway_1"]
+    third = records[2]
+    assert third["request"] == {"num_points": 3, "input_dim": 9}
+    assert third["label"] == {"labels": [2, 2, 2], "num_classes": 13}
+    assert np.fromfile(third["points"], dtype="<f4").reshape(3, 9).tolist() == [[3.0] * 9] * 3
+
+
+def test_action_parity_takes_an_absolute_tolerance_in_robot_units():
+    native = {"actions": [0.0, 1.0, 2.0, 3.0]}
+    close = {"actions": [0.0, 1.0, 2.0, 3.02]}
+    assert gold_metrics.action_parity(close, native, {"max_error_of_range": 0.001})[0] is False
+    assert gold_metrics.action_parity(close, native, {"max_error_of_range": 0.001, "max_abs_error": 0.03})[0] is True
+    assert gold_metrics.action_parity(close, native, {"max_abs_error": 0.01})[0] is False

@@ -131,6 +131,10 @@ benchmarks:
   # Relative monocular depth (Depth Anything) against the native map on 50 COCO images: the family's E2E gate.
   depth_parity: {suite: depth-parity, suite_definition: coco-val2017-depth-50, metric: depth_parity,
                  gate: {min_correlation: 0.998, max_relative_error: 0.01}}
+  # Point-cloud semantic segmentation (PointNet): S3DIS Area 5 blocks, class mIoU of the per-point classes over the
+  # corpus against the S3DIS annotation.
+  s3dis_area5: {suite: s3dis-area5-miou, suite_definition: s3dis-area5-blocks-300, metric: point_miou,
+                gate: {margin: 1.0}}
   # A structured decision (per-option probabilities of a schema's questions) has no public gold set: every
   # catalog testcase of the profile (its family's fixtures), the same choices and the families' E2E probability
   # tolerance against the release implementation.
@@ -169,6 +173,9 @@ benchmarks:
   # ACT on 50 recorded observations of its training dataset (conversion parity, every observation).
   action_parity: {suite: action-parity, suite_definition: lerobot-act-observations-50, metric: action_parity,
                   gate: {max_error_of_range: 0.001}}
+  # LeRobot action chunks (GR00T, pi0.5) on recorded LIBERO observations with the family's fixed flow noise on
+  # both sides (each family states its suite and its precision's E2E tolerance: tests/aiperf), every observation.
+  action_chunk_parity: {suite: action-chunk-parity, metric: action_parity, gate: {max_error_of_range: 0.001}}
   # Fast-FoundationStereo on the 15 Middlebury v3 trainingQ scenes of its 700x700 profile (conversion parity).
   disparity_parity: {suite: disparity-parity, suite_definition: middlebury-q-700-15, metric: disparity_parity,
                      gate: {max_mean_epe: 0.1}}
@@ -190,6 +197,11 @@ tasks:
     # OCRBench alone (the owner's choice, October 2026): it caught both VLM conversion defects MMStar caught
     # (qwen3-vl-2b -26 vs -11 points, phi4-multimodal -19 vs -32) and TRTMC answers MMStar slowly (phi4-multimodal:
     # 29 min against 1 min for OCRBench). MMStar stays for profiles that state it.
+    absolute: [ocrbench]
+    performance: {output_grader: parity_edit_distance, output_grader_params: {max_distance: 0.15}}
+  # Image, video and text to text (Cosmos3-Edge): OCRBench through the same bundle's image-text Task (the
+  # image-video Task requires a video in every request); the video input is not scored.
+  image_video_text_to_text:
     absolute: [ocrbench]
     performance: {output_grader: parity_edit_distance, output_grader_params: {max_distance: 0.15}}
 
@@ -339,6 +351,9 @@ tasks:
   monocular_depth:
     absolute: [depth_parity]
     performance: {output_grader: parity_numeric}
+  points_to_semantic_segmentation:  # the family's reference prepares the checkpoint (reference.prepare)
+    absolute: [s3dis_area5]
+    performance: {output_grader: parity_labels}
   structured_decision:  # the family states its release implementation (reference.adapter)
     absolute: [decision_parity]
     performance: {output_grader: parity_numeric}
@@ -353,6 +368,9 @@ tasks:
     # precisions (for example valid pixels), which is the Acc checks' concern.
     performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}
   image_state_to_action_chunk: *control
+  images_state_text_to_action_chunk:
+    absolute: [action_chunk_parity]
+    performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}
   stereo_disparity:
     absolute: [disparity_parity]
     performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}

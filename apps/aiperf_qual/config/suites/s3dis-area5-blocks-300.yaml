@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# S3DIS Area 5 (the standard held-out area), as the PointNet authors released it for semantic segmentation:
+# 300 seeded 1 m x 1 m blocks of 4096 points (centered XYZ, RGB in [0, 1], room-normalized XYZ) with one of the
+# 13 S3DIS classes per point. Pinned copy of the PointNet release archive (indoor3d_sem_seg_hdf5_data.zip).
+# Dataset terms: http://buildingparser.stanford.edu/dataset.html (cite Armeni et al., CVPR 2016).
+suite: s3dis-area5-blocks-300
+version: 1
+source:
+  kind: s3dis_blocks
+  repo: cminst/S3DIS
+  revision: 13c9e6c1ba5508228fe4329d3adfa1cbbc90f731
+  filename: indoor3d_sem_seg_hdf5_data.zip
+  area: Area_5
+  num_classes: 13
+selection: {method: seeded, count: 300}
+fields: {points: points_path}

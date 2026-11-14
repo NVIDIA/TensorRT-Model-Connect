@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+candidate:
+  model_directory: trtmc-reference/pointnet-s3dis  # the upstream checkpoint and its ONNX export
+reference:
+  requirements: families/pointnet/requirements.txt
+  prepare: families/pointnet/reference/prepare.py
+  adapter: families/pointnet/reference/adapter.py
+  precision: fp32
+  mode: eager  # one small graph per request

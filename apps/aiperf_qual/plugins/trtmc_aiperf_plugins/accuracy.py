@@ -366,9 +366,19 @@ def compare_audio(candidate: dict, reference: dict, min_duration_ratio: float = 
         f"{left['seconds']:.2f}s", f"{right['seconds']:.2f}s"
 
 
+def compare_labels(candidate: dict, reference: dict, min_agreement: float = 0.98,
+                   **_: Any) -> tuple[bool, str, str, str]:
+    """Per-element class label parity (a point cloud's per-point classes): the share of identical labels."""
+    left, right = candidate.get("labels"), reference.get("labels")
+    if not isinstance(left, list) or not isinstance(right, list) or not right or len(left) != len(right):
+        return False, "label arrays missing or of different length", str(len(left or [])), str(len(right or []))
+    agreement = sum(a == b for a, b in zip(left, right)) / len(right)
+    return agreement >= min_agreement, f"label agreement {agreement:.4f}", str(len(left)), str(len(right))
+
+
 COMPARATORS = {"parity_scores": compare_scores, "parity_numeric": compare_numeric,
                "parity_image": compare_image, "parity_audio": compare_audio, "parity_token_exact": compare_token_exact, "parity_text": compare_text,
                "parity_answer_line": compare_answer_line, "parity_wer": compare_wer,
                "parity_edit_distance": compare_edit_distance, "parity_boxes": compare_boxes,
                "parity_mask": compare_mask,
-               "parity_top1": compare_top1, "parity_vector": compare_vector}
+               "parity_top1": compare_top1, "parity_labels": compare_labels, "parity_vector": compare_vector}

@@ -38,7 +38,7 @@ def counted(item: Mapping[str, Any], limit: int = 3) -> str:
 
 
 # What a gold-scored entry's score is, by its metric (right/wrong benchmarks score the percent answered right).
-SCORE_NAMES = {"wer": "WER %", "cer": "CER %", "chrf": "chrF++", "coco_map": "COCO mAP", "miou": "mIoU %", "mask_iou": "mask IoU %",
+SCORE_NAMES = {"wer": "WER %", "cer": "CER %", "chrf": "chrF++", "coco_map": "COCO mAP", "miou": "mIoU %", "point_miou": "mIoU %", "mask_iou": "mask IoU %",
                "sts_spearman": "Spearman x100", "rerank_ndcg": "nDCG", "retrieval_ndcg": "nDCG",
                "retrieval_ndcg10": "nDCG@10", "forecast_mse": "MSE", "precomputed_mean": "mean score"}
 

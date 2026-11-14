@@ -22,7 +22,7 @@ from . import noninferiority
 
 BOOTSTRAP_SAMPLES = 2000
 # Corpus statistics that cost seconds per evaluation resample less.
-BOOTSTRAP_SAMPLES_BY_METRIC = {"coco_map": 200, "miou": 200}
+BOOTSTRAP_SAMPLES_BY_METRIC = {"coco_map": 200, "miou": 200, "point_miou": 200}
 
 
 def _text(observation: Mapping[str, Any] | None) -> str:
@@ -433,7 +433,8 @@ def geometry_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, An
 def action_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
                   gate: Mapping[str, Any]) -> tuple[bool | None, str]:
     """A robot action chunk (``actions``, row-major [step, component]) against the native one: equal shape,
-    finite values, and the largest absolute error at most ``max_error_of_range`` of the native chunk's range."""
+    finite values, and the largest absolute error at most ``max_error_of_range`` of the native chunk's range, or
+    at most ``max_abs_error`` (robot units) when the gate states that instead."""
     mine = [float(value) for value in (candidate or {}).get("actions") or []]
     theirs = [float(value) for value in (native or {}).get("actions") or []]
     if not mine or not theirs:
@@ -444,7 +445,9 @@ def action_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
         return False, "non-finite actions"
     span = (max(theirs) - min(theirs)) or 1.0
     error = max(abs(a - b) for a, b in zip(mine, theirs))
-    return error <= float(gate.get("max_error_of_range", 1e-3)) * span, f"max abs error {error:.3g} (range {span:.3g})"
+    limit = (float(gate["max_abs_error"]) if "max_abs_error" in gate
+             else float(gate.get("max_error_of_range", 1e-3)) * span)
+    return error <= limit, f"max abs error {error:.3g} (limit {limit:.3g}, range {span:.3g})"
 
 
 def disparity_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
@@ -793,6 +796,26 @@ def miou(units: Sequence[tuple[Any, Any]]) -> float:
     return float(100.0 * np.mean(intersection[present] / union[present])) if present.any() else 0.0
 
 
+def point_miou_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int, Any]) -> list[tuple[Any, Any]]:
+    """Per point cloud: (intersection, union) per class of the predicted per-point classes (``labels``) against
+    the gold ones (``labels``, ``num_classes``), scored by ``miou`` over the corpus (S3DIS: 13 classes)."""
+    import numpy as np
+
+    units = []
+    for index, problem in enumerate(problems):
+        gold = np.asarray(problem["gold"]["labels"], dtype=np.int64)
+        classes = int(problem["gold"]["num_classes"])
+        predicted = np.asarray((observations.get(index) or {}).get("labels") or [], dtype=np.int64)
+        if predicted.shape != gold.shape:
+            predicted = np.full(gold.shape, -1, dtype=np.int64)
+        known = (predicted >= 0) & (predicted < classes)
+        intersection = np.bincount(gold[predicted == gold], minlength=classes)[:classes]
+        area_gold = np.bincount(gold, minlength=classes)[:classes]
+        area_predicted = np.bincount(predicted[known], minlength=classes)[:classes]
+        units.append((intersection, area_gold + area_predicted - intersection))
+    return units
+
+
 # COCO category ids of the 80 contiguous class indices.
 COCO_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 31, 32,
             33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59,
@@ -947,6 +970,11 @@ def _label_map_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]
     return planes is not None and planes[0].size == planes[1]
 
 
+def _point_labels_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) -> bool:
+    labels = observation.get("labels")  # one class per gold point
+    return isinstance(labels, list) and len(labels) == len(problem["gold"]["labels"])
+
+
 def _value_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) -> bool:
     return _finite([observation.get("value")])
 
@@ -955,7 +983,7 @@ def _value_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) ->
 # output that does not is a missing answer (an error), never scored as zeros or an empty prediction.
 ANSWERS: dict[str, Callable[[Mapping[str, Any], Mapping[str, Any]], bool]] = {
     "chrf": _text_answer, "wer": _text_answer, "cer": _text_answer, "coco_map": _detections_answer, "forecast_mse": _forecast_answer,
-    "miou": _label_map_answer, "mask_iou": _masks_answer, "precomputed_mean": _value_answer,
+    "miou": _label_map_answer, "point_miou": _point_labels_answer, "mask_iou": _masks_answer, "precomputed_mean": _value_answer,
     "sts_spearman": _vector_answer, "rerank_ndcg": _scores_answer, "retrieval_ndcg": _vector_answer,
     "retrieval_ndcg10": _vector_answer}
 
@@ -972,6 +1000,7 @@ CORPUS: dict[str, tuple[Callable, Callable, bool]] = {"chrf": (translation_units
                                                       "coco_map": (coco_units, coco_map, True),
                                                       "forecast_mse": (forecast_units, mse, False),
                                                       "miou": (miou_units, miou, True),
+                                                      "point_miou": (point_miou_units, miou, True),
                                                       "mask_iou": (mask_iou_units, mean_percent, True),
                                                       "precomputed_mean": (precomputed_units, mean, True),
                                                       "wer": (wer_units, wer, False),
