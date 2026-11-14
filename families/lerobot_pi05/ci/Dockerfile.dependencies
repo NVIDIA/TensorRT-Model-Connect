@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+COPY requirements.txt /opt/trtmc-ci/family-requirements.txt
+RUN python -m pip install --disable-pip-version-check --no-cache-dir \
+        --no-build-isolation -r /opt/trtmc-ci/family-requirements.txt \
+    && python -m pip check
+
+# LeRobot uses the gated PaliGemma tokenizer. CI uses the documented public copy of
+# the same file, pinned to this Cloud Storage object generation and checked by SHA-256.
+RUN python -c 'from hashlib import sha256; from pathlib import Path; from urllib.request import urlopen; data = urlopen("https://storage.googleapis.com/big_vision/paligemma_tokenizer.model?generation=1711547605575873", timeout=60).read(); assert sha256(data).hexdigest() == "8986bb4f423f07f8c7f70d0dbe3526fb2316056c17bae71b1ea975e77a168fc6"; Path("/opt/trtmc-ci/tokenizer.model").write_bytes(data)'

@@ -7,7 +7,12 @@ add_library(trtmc_model_qwen3_8 SHARED
   hybrid_state.cpp
   kv_cache.cpp
   mtp_scheduler.cpp
+  dspark.cpp
+  dflash2.cpp
   pipeline.cpp
+  native_visual.cpp
+  native_media.cpp
+  tensor_parallel.cpp
   plugin.cpp
   plugin_helpers.cpp
   prefill_runner.cpp
@@ -22,6 +27,7 @@ target_link_libraries(trtmc_model_qwen3_8 PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
 )
 target_compile_options(trtmc_model_qwen3_8 PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
@@ -61,8 +67,11 @@ if(TRTMC_BUILD_TESTS)
     hybrid_state.cpp
     kv_cache.cpp
     mtp_scheduler.cpp
+    dspark.cpp
+    dflash2.cpp
     pipeline.cpp
     prefill_runner.cpp
+    native_visual.cpp
     recurrent_state.cpp
     sampler.cpp
   )

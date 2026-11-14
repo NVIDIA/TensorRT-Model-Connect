@@ -1,0 +1,4 @@
+sentencepiece>=0.2.0
+protobuf>=4.25
+safetensors>=0.4.0
+ml_dtypes>=0.4.0

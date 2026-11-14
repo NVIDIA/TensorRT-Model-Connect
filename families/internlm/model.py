@@ -303,8 +303,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("InternLM max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("InternLM has no qualified family-owned quantized build")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"InternLM does not support quantization={request.quantization!r}"
+        )
+    quantized = request.quantization == "fp8"
+    if quantized and precision not in {"fp16", "bf16"}:
+        raise NotImplementedError("InternLM fp8 quantization requires precision fp16 or bf16")
+    if quantized and request.tensor_parallel_size != 1:
+        raise NotImplementedError("InternLM fp8 quantization does not support tensor parallelism")
+    if quantized and config.raw.get("quantization_config"):
+        raise ValueError("the checkpoint is already quantized; FP8 self-quantization needs BF16")
     if request.fp32_layers:
         raise NotImplementedError("InternLM does not expose mixed-precision layer selection")
     if request.mtp_seq_len is not None:
@@ -320,6 +329,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_parallel_build_enabled"] = parallel.enabled
     tokenizer_json = model.ensure_tokenizer_json(model_dir)
     weights = model.load_weights(str(model_dir), config)
+    quant_ctx = None
+    if quantized:
+        from . import graph_ops
+        from .quantization import calibrate_internlm_fp8
+
+        quant_ctx = calibrate_internlm_fp8(config, weights, graph_ops)
 
     writer.set_header(family="internlm", task=request.task, backend=request.backend)
     if parallel.enabled:
@@ -343,7 +358,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,
@@ -354,7 +369,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,

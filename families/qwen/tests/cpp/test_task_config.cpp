@@ -37,7 +37,7 @@ int main() {
         tokens[0] = 9;
         require(copied[0] == 3);
         const auto capacity = static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max());
-        // Null storage avoids allocating or reading huge arrays if the guard regresses.
+        // Note (Jiaxin Deng): Null storage keeps a failed size guard from reading a huge array.
         for (const auto count :
              {std::size_t{1}, capacity, capacity + 1, std::numeric_limits<std::size_t>::max()}) {
             bool rejected = false;

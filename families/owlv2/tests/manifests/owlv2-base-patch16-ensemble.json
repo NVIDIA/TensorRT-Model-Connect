@@ -1,0 +1,19 @@
+{
+  "name": "owlv2-base-patch16-ensemble",
+  "hf_id": "google/owlv2-base-patch16-ensemble",
+  "hf_revision": "cfd3195ba4ea9592eec887ded089f4c08eff231d",
+  "bundle": "owlv2-base-patch16-ensemble.bundle",
+  "family": "owlv2",
+  "task": "image_text_to_boxes",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "owlv2-base-patch16-ensemble",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg",
+      "prompt": "a car. a mountain. the sky. the ocean.",
+      "score_threshold": 0.08
+    }
+  ],
+  "tensor_parallel_size": 1
+}

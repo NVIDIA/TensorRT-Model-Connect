@@ -48,6 +48,7 @@ import tensorrt as trt
 from . import graph_ops
 from .checkpoint_mapper import WeightDict, _open_safetensors, _load_tensor
 from .parallel import add_dynamic_batch_profile
+from .quantization import ZImageQuantContext, configure_build
 
 
 def load_z_image_dit_weights(
@@ -168,6 +169,13 @@ def _load_dit_block(
 _SANDWICH_PRESCALE = 1.0 / 64.0
 
 
+def _project(network, x, in_dim, out_dim, weight, dtype, quant_ctx, name):
+    """``x @ weight`` as an FP8 matmul when ``name`` is quantized, else the regular constant matmul."""
+    if quant_ctx is not None and dtype != np.float32 and quant_ctx.should_quantize(name):
+        return quant_ctx.matmul(network, x, weight, name)
+    return graph_ops.add_matmul_rhs_constant(network, x, in_dim, out_dim, weight, dtype=dtype)
+
+
 def build_z_image_dit_engine(
     weights: WeightDict,
     *,
@@ -186,8 +194,13 @@ def build_z_image_dit_engine(
     verbose: bool = False,
     max_batch_size: int = 1,
     opt_batch_size: int | None = None,
+    quant_ctx: ZImageQuantContext | None = None,
 ) -> bytes:
     """Build Z-Image DiT TRT engine.
+
+    ``quant_ctx`` (FP8 self-quantization, see ``quantization.py``) routes the projections
+    that have an activation scale through FP8 Q/DQ matmuls; blocks built in fp32 stay
+    unquantized. It needs ``precision="fp16"`` and ``max_batch_size=1``.
 
     When ``max_batch_size == 1`` (default), engine inputs keep their original
     static shapes (no leading batch dim) — byte-for-byte identical to today's
@@ -205,10 +218,15 @@ def build_z_image_dit_engine(
         raise ValueError(f"max_batch_size must be >= 1 (got {max_batch_size})")
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "bf16":
+        # numpy has no bf16: weights are stored as fp16 constants and cast to bf16 in the graph.
+        work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
     elif precision == "fp32":
         work_np_dtype, work_trt_dtype = np.float32, trt.float32
     else:
-        raise ValueError(f"Unsupported Z-Image DiT precision {precision!r}; expected fp32 or fp16")
+        raise ValueError(
+            f"Unsupported Z-Image DiT precision {precision!r}; expected fp32, fp16 or bf16"
+        )
     selected_fp32_layers = frozenset(int(layer) for layer in fp32_layers)
     final_layer_selector = 2 * num_refiner_layers + num_layers
     invalid_fp32_layers = sorted(
@@ -221,9 +239,13 @@ def build_z_image_dit_engine(
         )
     if selected_fp32_layers and precision != "fp16":
         raise ValueError("Z-Image DiT fp32_layers requires an FP16 base precision")
+    if quant_ctx is not None and (precision != "fp16" or max_batch_size != 1):
+        raise NotImplementedError("Z-Image FP8 requires precision=fp16 and max_batch_size=1")
     if max_batch_size > 1:
         if precision != "fp32":
-            raise NotImplementedError("FP16 Z-Image DiT currently supports max_batch_size=1")
+            raise NotImplementedError(
+                f"{precision.upper()} Z-Image DiT currently supports max_batch_size=1"
+            )
         return _build_z_image_dit_engine_batched(
             weights,
             dim=dim,
@@ -250,6 +272,8 @@ def build_z_image_dit_engine(
     config = builder.create_builder_config()
     config.builder_optimization_level = 1
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
+    if quant_ctx is not None:
+        configure_build(config)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
 
     # Single-batch path (max_batch_size == 1).
@@ -274,8 +298,14 @@ def build_z_image_dit_engine(
     # this as a Python scalar so the explicit FP32 attention path does not try
     # to materialize an ITensor as a numpy constant.
     scale_t = attn_scale
-    ones_t = graph_ops.add_constant(
-        network, (1, 1), np.array([1.0], dtype=work_np_dtype), dtype=work_np_dtype
+    # The AdaLN "1 + scale" adds this straight to block tensors, so it takes their dtype; eps_t
+    # only reaches RMSNorms, which compute in fp32.
+    ones_t = graph_ops._cast_back_to_trt_dtype(
+        network,
+        graph_ops.add_constant(
+            network, (1, 1), np.array([1.0], dtype=work_np_dtype), dtype=work_np_dtype
+        ),
+        work_trt_dtype,
     )
     fp32_eps_t = None
     fp32_ones_t = None
@@ -368,6 +398,7 @@ def build_z_image_dit_engine(
             layer_ones,
             dtype=layer_dtype,
             sandwich_eps_t=sandwich_eps_t,
+            quant_ctx=quant_ctx,
         )
         noise = _cast_back_from_fp32(selector, noise)
 
@@ -398,6 +429,7 @@ def build_z_image_dit_engine(
             attention_mask=cap_attention_mask,
             dtype=layer_dtype,
             sandwich_eps_t=sandwich_eps_t,
+            quant_ctx=quant_ctx,
         )
         caption = _cast_back_from_fp32(selector, caption)
 
@@ -432,6 +464,7 @@ def build_z_image_dit_engine(
             attention_mask=full_attention_mask,
             dtype=layer_dtype,
             sandwich_eps_t=sandwich_eps_t,
+            quant_ctx=quant_ctx,
         )
         unified_t = _cast_back_from_fp32(selector, unified_t)
 
@@ -632,6 +665,7 @@ def _add_plain_dit_block(
     attention_mask=None,
     dtype=np.float32,
     sandwich_eps_t=None,
+    quant_ctx=None,
 ):
     """Plain DiT block (no AdaLN): pre-norm attention + post-norm + SwiGLU FFN.
 
@@ -699,11 +733,18 @@ def _add_plain_dit_block(
     )
 
     # SwiGLU FFN
-    gate_proj = graph_ops.add_matmul_rhs_constant(
-        network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w1"], dtype=dtype
+    gate_proj = _project(
+        network,
+        ffn_normed,
+        dim,
+        ffn_dim,
+        weights[f"{prefix}.ff_w1"],
+        dtype,
+        quant_ctx,
+        f"{prefix}.ff_w1",
     )
-    up_proj = graph_ops.add_matmul_rhs_constant(
-        network, ffn_normed, dim, ffn_dim, w_ff3, dtype=dtype
+    up_proj = _project(
+        network, ffn_normed, dim, ffn_dim, w_ff3, dtype, quant_ctx, f"{prefix}.ff_w3"
     )
     gate_sigmoid = network.add_activation(gate_proj, trt.ActivationType.SIGMOID)
     gate_silu = network.add_elementwise(
@@ -743,6 +784,7 @@ def _add_adaln_dit_block(
     attention_mask=None,
     dtype=np.float32,
     sandwich_eps_t=None,
+    quant_ctx=None,
 ):
     """AdaLN DiT block (noise_refiner): 4-chunk modulation + tanh gating + attention + SwiGLU.
 
@@ -846,11 +888,18 @@ def _add_adaln_dit_block(
         ffn_normed, scale_mlp_p1, trt.ElementWiseOperation.PROD
     ).get_output(0)
 
-    gate_proj = graph_ops.add_matmul_rhs_constant(
-        network, ffn_normed, dim, ffn_dim, weights[f"{prefix}.ff_w1"], dtype=dtype
+    gate_proj = _project(
+        network,
+        ffn_normed,
+        dim,
+        ffn_dim,
+        weights[f"{prefix}.ff_w1"],
+        dtype,
+        quant_ctx,
+        f"{prefix}.ff_w1",
     )
-    up_proj = graph_ops.add_matmul_rhs_constant(
-        network, ffn_normed, dim, ffn_dim, w_ff3, dtype=dtype
+    up_proj = _project(
+        network, ffn_normed, dim, ffn_dim, w_ff3, dtype, quant_ctx, f"{prefix}.ff_w3"
     )
     gate_sigmoid = network.add_activation(gate_proj, trt.ActivationType.SIGMOID)
     gate_silu = network.add_elementwise(

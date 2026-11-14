@@ -24,6 +24,40 @@ oracle is retained; the two SDK consumers use the same decoded RGB pixels and
 compare every score after releasing the model. Different JPEG decoders are not
 claimed bitwise equivalent. The existing TP4 implementation and manifest remain; the added direct SDK E2E checks select only TP1.
 
+## Quantization
+
+`quantization=fp8` (fp16 precision, tensor parallel size 1) quantizes
+`timm/vit_base_patch16_224.augreg_in21k_ft_in1k` at build time: `qkv`,
+`attn.proj`, `mlp.fc1` and `mlp.fc2` of every block run as FP8 GEMMs
+(per-tensor weight scale amax / 448, static activation scales from
+`fp8_activation_scales.json`, calibrated with ModelOpt `FP8_DEFAULT_CFG` on 500
+ImageNet images). Patch embedding, norms, attention matmuls and the head stay
+fp16. At batch 1 FP8 is 1.03x to 1.11x faster than fp16 (B200 and B300,
+TensorRT 11.1 and 11.4), the plan is 49% smaller and top-1 stays at the fp16
+level. Another model config raises and names the calibration tool.
+
+### NVFP4
+
+NVFP4 was measured in a separate experiment and is not shipped (no NVFP4 code
+is in the family). The experiment built engines with `mlp.fc1` and `mlp.fc2`
+in NVFP4 (self-quantized) and `qkv` and `attn.proj` in FP8. B200, TensorRT 11.1
+and 11.4; quality on the 1500 held-out ImageNet images.
+
+| Build | Plan MiB | Batch 1 ms | Batch 32 ms | Top-1 | KL to PyTorch (x FP8) |
+|---|---|---|---|---|---|
+| fp16 | 166.7 | 0.419 | 2.13 | 85.33% | 0.000006 |
+| FP8 (shipped) | 85.8 | 0.397 | 1.78 | 85.47% | 0.0032 (1.0x) |
+| NVFP4 `fc1` + `fc2`, rest FP8 | 62.5 | 0.454 | 2.18 | 84.53% | 0.0199 (6.2x) |
+
+Non-finite outputs were not recorded for the NVFP4 engine.
+
+Reasons:
+
+- Speed: NVFP4 is slower than FP8 and than fp16 at batch 1, and gives no gain
+  at batch 32. ViT-B at batch 1 is launch bound, not weight-bandwidth bound:
+  the weights are read in about 0.02 ms of a 0.4 ms call.
+- Quality: KL is 6.2x the FP8 KL and top-1 drops by 0.8 point against fp16.
+
 ## Benchmark scope
 
 The existing family-owned reference protocol retains the original entry ID,

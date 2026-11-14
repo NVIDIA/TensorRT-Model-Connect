@@ -1,0 +1,20 @@
+{
+  "name": "convbert-base-fp8",
+  "hf_id": "YituTech/conv-bert-base",
+  "hf_revision": "5cb451936b5c4a96562d8b146de85f64f9cf2c22",
+  "bundle": "convbert-base-fp8.bundle",
+  "family": "convbert",
+  "task": "encoding",
+  "precision": "fp16",
+  "quantization": "fp8",
+  "testcases": [
+    {
+      "name": "convbert-base-fp8",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is Paris."
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 256
+}

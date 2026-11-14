@@ -52,6 +52,10 @@ cmake --build build --target trtmc_model_<family>
 ctest --test-dir build --output-on-failure
 ```
 
+A family with `tests/sdk_consumer.c` or `tests/sdk_consumer.cpp` also builds
+`test_<family>_sdk_c` and `test_<family>_sdk_cpp`; its E2E runs them from the
+build directory.
+
 Passing shared architecture tests does not replace family-specific proof.
 
 ## 3. Build and inspect a representative bundle

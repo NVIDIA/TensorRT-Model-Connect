@@ -7,6 +7,7 @@
 
 #include "families/glmasr/runtime/glmasr_mel_spectrogram.h"
 #include "families/glmasr/runtime/glmasr_prompt_plan.h"
+#include "families/glmasr/runtime/kv_cache.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -65,10 +66,22 @@ GlmAsrPipeline::GlmAsrPipeline(std::unique_ptr<ITrtModule> encoder,
                                std::unique_ptr<ITrtModule> decoder,
                                std::unique_ptr<GlmAsrInferenceState> state, GlmAsrConfig config,
                                MelFilterbank mel_filterbank, cudaStream_t stream,
-                               std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
+                               std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
+                               std::unique_ptr<ITrtModule> prefill)
     : encoder_(std::move(encoder)), decoder_(std::move(decoder)), state_(std::move(state)),
       config_(std::move(config)), mel_filterbank_(std::move(mel_filterbank)), stream_(stream),
-      tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)) {}
+      tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
+      prefill_(std::move(prefill)) {
+    if (prefill_) {
+        if (!prefill_->ok() || dynamic_cast<GlmAsrKvCache*>(state_.get()) == nullptr)
+            throw std::runtime_error("glmasr batched prefill needs a prefill context and KV cache");
+        const auto rows = prefill_->input_profile_shape("token_id", prefill_->profile_idx(),
+                                                        ProfileShapeSelector::kMax);
+        if (rows.size() != 1 || rows[0] < 1)
+            throw std::runtime_error("glmasr prefill context has an invalid token profile");
+        prefill_rows_ = static_cast<int32_t>(std::min<int64_t>(rows[0], state_->max_length()));
+    }
+}
 
 GlmAsrPipeline::~GlmAsrPipeline() = default;
 
@@ -176,6 +189,47 @@ int32_t GlmAsrPipeline::run_decode_step(int32_t token_id, const float* audio_emb
     return host_argmax_logits(outputs, config_.vocab_size);
 }
 
+int32_t GlmAsrPipeline::run_prefill(const std::vector<int32_t>& input_ids,
+                                    const std::vector<float>& audio_embeds, int32_t audio_offset,
+                                    int32_t num_audio_embeddings) {
+    const auto rows = static_cast<int32_t>(input_ids.size());
+    const auto hidden = static_cast<std::size_t>(config_.audio_embedding_size);
+    // Text rows keep their token embedding; placeholder rows take their frame.
+    std::vector<float> embeds(static_cast<std::size_t>(rows) * hidden, 0.0F);
+    std::vector<float> use_embed(static_cast<std::size_t>(rows), 0.0F);
+    for (int32_t index = 0; index < rows; ++index) {
+        const int64_t audio_index = static_cast<int64_t>(index) - audio_offset;
+        if (audio_index < 0 || audio_index >= num_audio_embeddings)
+            continue;
+        std::copy_n(audio_embeds.data() + static_cast<std::size_t>(audio_index) * hidden, hidden,
+                    embeds.data() + static_cast<std::size_t>(index) * hidden);
+        use_embed[static_cast<std::size_t>(index)] = 1.0F;
+    }
+    std::vector<int32_t> tokens = input_ids;
+    TensorMap inputs;
+    inputs["token_id"] = Tensor{tokens.data(), {rows}, DType::kInt32};
+    inputs["input_embed"] =
+        Tensor{embeds.data(), {rows, static_cast<int64_t>(hidden)}, DType::kFloat32};
+    inputs["use_input_embed"] = Tensor{use_embed.data(), {rows}, DType::kFloat32};
+    auto* kv = static_cast<GlmAsrKvCache*>(state_.get());
+    kv->bind_cache_inputs(*prefill_);
+    state_->prepare_step(inputs, rows);
+
+    ++stats_.decode_launches;
+    TensorMap outputs = prefill_->forward(inputs);
+    std::vector<const void*> keys(static_cast<std::size_t>(kv->num_layers()));
+    std::vector<const void*> values(keys.size());
+    for (std::size_t layer = 0; layer < keys.size(); ++layer) {
+        const auto suffix = "_" + std::to_string(layer);
+        keys[layer] = prefill_->device_ptr("present_k" + suffix);
+        values[layer] = prefill_->device_ptr("present_v" + suffix);
+        if (keys[layer] == nullptr || values[layer] == nullptr)
+            throw std::runtime_error("glmasr prefill context has no present K/V output");
+    }
+    kv->append_prefill_kv(keys, values, rows);
+    return host_argmax_logits(outputs, config_.vocab_size);
+}
+
 std::vector<int32_t> GlmAsrPipeline::run_decoder(const std::vector<int32_t>& input_ids,
                                                  const std::vector<float>& audio_embeds,
                                                  int32_t audio_offset, int32_t num_audio_embeddings,
@@ -187,17 +241,21 @@ std::vector<int32_t> GlmAsrPipeline::run_decoder(const std::vector<int32_t>& inp
     state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
     state_->bind_to(*decoder_);
 
-    // Replay the prompt one token at a time, feeding each placeholder position
-    // its projected audio frame through the decoder's embed-input contract.
     int32_t next_token = -1;
     const auto hidden = static_cast<std::size_t>(config_.audio_embedding_size);
-    for (std::size_t index = 0; index < input_ids.size(); ++index) {
-        const auto audio_index = static_cast<int64_t>(index) - audio_offset;
-        const bool is_audio = audio_index >= 0 && audio_index < num_audio_embeddings;
-        const float* embed =
-            is_audio ? audio_embeds.data() + static_cast<std::size_t>(audio_index) * hidden
-                     : nullptr;
-        next_token = run_decode_step(input_ids[index], embed);
+    if (prefill_ && static_cast<int64_t>(input_ids.size()) <= prefill_rows_) {
+        next_token = run_prefill(input_ids, audio_embeds, audio_offset, num_audio_embeddings);
+    } else {
+        // Replay the prompt one token at a time, feeding each placeholder position
+        // its projected audio frame through the decoder's embed-input contract.
+        for (std::size_t index = 0; index < input_ids.size(); ++index) {
+            const auto audio_index = static_cast<int64_t>(index) - audio_offset;
+            const bool is_audio = audio_index >= 0 && audio_index < num_audio_embeddings;
+            const float* embed =
+                is_audio ? audio_embeds.data() + static_cast<std::size_t>(audio_index) * hidden
+                         : nullptr;
+            next_token = run_decode_step(input_ids[index], embed);
+        }
     }
     state_->mark_prefill_complete();
 

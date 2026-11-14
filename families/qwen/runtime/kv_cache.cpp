@@ -10,9 +10,14 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <numeric>
 #include <stdexcept>
 
 namespace trtmc {
+
+// Native engines with `key_positions` attend over the valid context rounded up
+// to this many rows, so the input shape changes once every 32 tokens.
+constexpr int32_t kNativeKeyRowBucket = 32;
 
 namespace {
 
@@ -106,8 +111,19 @@ QwenKvCache::QwenKvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim,
 
     // Pre-allocate mask buffer: [max_length + 1] for dense causal mask.
     mask_buf_.resize(static_cast<std::size_t>(max_length) + 1);
+    key_positions_.resize(static_cast<std::size_t>(max_length));
+    std::iota(key_positions_.begin(), key_positions_.end(), 0);
 
     reset();
+}
+
+// The optional active-row `key_positions` input must be a rank-1 int32 tensor.
+static bool has_key_positions_input(ITrtModule& module, const std::string& name) {
+    if (!module.has_input(name))
+        return false;
+    if (module.tensor_dtype(name) != DType::kInt32 || module.tensor_shape(name).size() != 1)
+        throw std::runtime_error("native KV input '" + name + "' must be int32 [R]");
+    return true;
 }
 
 bool QwenKvCache::configure_binding_mode(ITrtModule& module) {
@@ -125,6 +141,7 @@ bool QwenKvCache::configure_binding_mode(ITrtModule& module) {
     }
     binding_mode_initialized_ = true;
     native_kv_update_enabled_ = native_mode;
+    slices_active_rows_ = native_mode && has_key_positions_input(module, names_.key_positions);
     if (native_mode)
         validate_native_kv_contract(module);
     return native_mode;
@@ -192,6 +209,18 @@ void QwenKvCache::write_native_kv_inputs(TensorMap& inputs, int32_t seq_len) {
     key_value_length_ = position_ + seq_len;
     inputs[names_.cache_write_indices] = Tensor{&cache_write_index_, {1}, DType::kInt32};
     inputs[names_.key_value_lengths] = Tensor{&key_value_length_, {1}, DType::kInt32};
+    if (slices_active_rows_) {
+        inputs[names_.key_positions] =
+            Tensor{key_positions_.data(), {active_key_rows(key_value_length_)}, DType::kInt32};
+    }
+}
+
+int32_t QwenKvCache::active_key_rows(int32_t valid_rows) const {
+    if (valid_rows <= 0 || valid_rows > max_length_)
+        throw std::invalid_argument("native KV active key rows must be within the cache capacity");
+    const auto bucket = static_cast<int64_t>(kNativeKeyRowBucket);
+    const auto rounded = (static_cast<int64_t>(valid_rows) + bucket - 1) / bucket * bucket;
+    return static_cast<int32_t>(std::min<int64_t>(rounded, max_length_));
 }
 
 // Masked score constant is model-local.

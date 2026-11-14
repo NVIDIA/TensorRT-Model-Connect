@@ -10,7 +10,11 @@
 #include "families/nemotron_h/runtime/sampler.h"
 
 #include <array>
+#include <cmath>
 #include <iostream>
+#include <limits>
+#include <numeric>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -120,6 +124,57 @@ void test_every_declared_eos_token_stops_generation() {
     logits[7] = 1.0F;
     check(!sampler->sample(logits.data(), static_cast<int32_t>(logits.size()), params).is_eos,
           "nemotron-h continues on a non-EOS token");
+
+    // The paired verifier must use the same owning filter semantics and a
+    // request-local reproducible RNG, including every declared stop token.
+    params.temperature = 0.7F;
+    params.top_k = 4;
+    params.top_p = 0.9F;
+    params.seed = 19;
+    const auto probabilities = trtmc::nemotron_h_probabilities(logits.data(), 16, params);
+    check(std::abs(std::accumulate(probabilities.begin(), probabilities.end(), 0.0F) - 1) < 1e-6F,
+          "paired distribution is normalized");
+    check(probabilities[7] > probabilities[0], "paired distribution preserves logit preference");
+    std::uint64_t first = 19, second = 19;
+    for (int i = 0; i < 20; ++i)
+        check(trtmc::nemotron_h_sample_probabilities(probabilities, first) ==
+                  trtmc::nemotron_h_sample_probabilities(probabilities, second),
+              "paired RNG reproduces an explicit seed");
+    params.top_k = 1;
+    check(!trtmc::nemotron_h_is_greedy(params),
+          "top-k one with an active nucleus filter is not greedy");
+    const auto nucleus = trtmc::nemotron_h_probabilities(logits.data(), 16, params);
+    check(nucleus[7] > 0.0F && nucleus[7] < 1.0F,
+          "paired nucleus distribution retains more than the argmax token");
+    auto ordinary = trtmc::create_nemotron_h_sampler(params);
+    for (int i = 0; i < 8; ++i) {
+        const auto sampled = ordinary->sample(logits.data(), 16, params);
+        check(nucleus[sampled.token_id] > 0.0F &&
+                  std::abs(std::log(nucleus[sampled.token_id]) - sampled.logprob) < 1e-6F,
+              "paired nucleus probabilities match the ordinary sampler");
+    }
+    params.top_p = 1.0F;
+    check(trtmc::nemotron_h_is_greedy(params),
+          "top-k one remains greedy without a nucleus filter and with an explicit seed");
+    const auto top_one = trtmc::nemotron_h_probabilities(logits.data(), 16, params);
+    check(top_one[7] == 1.0F, "top-k one without nucleus filtering remains exact argmax");
+    check(trtmc::nemotron_h_is_greedy(trtmc::NemotronHSamplingParams{}),
+          "the default paired request remains greedy");
+    params.top_p = 0.9F;
+    params.temperature = 0;
+    const auto greedy = trtmc::nemotron_h_probabilities(logits.data(), 16, params);
+    check(greedy[7] == 1 && trtmc::nemotron_h_sample_probabilities(greedy, first) == 7,
+          "paired greedy path is exact argmax");
+    for (const auto invalid : {std::vector<float>{0, 0}, std::vector<float>{1, -1},
+                               std::vector<float>{1, std::numeric_limits<float>::quiet_NaN()}}) {
+        bool rejected = false;
+        try {
+            trtmc::nemotron_h_sample_probabilities(invalid, first);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        check(rejected, "paired sampler rejects invalid distributions even with a unit entry");
+    }
 }
 
 } // namespace

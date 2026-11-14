@@ -6,6 +6,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -67,12 +68,14 @@ inline DelayCacheState make_delay_cache_state(const std::vector<int32_t>& config
 inline void write_user_tokens_to_delay_cache(DelayCacheState& delay_state,
                                              const std::vector<int32_t>& codec_tokens,
                                              int32_t offset, int32_t stream_cb, int32_t num_frames,
-                                             int32_t encode_codebooks, int32_t audio_bos) {
+                                             int32_t encode_codebooks, int32_t audio_bos,
+                                             int32_t input_frame = -1) {
+    const int32_t frame = input_frame >= 0 ? input_frame : offset;
     for (int32_t cb = 0; cb < stream_cb; ++cb) {
         const int32_t k = stream_cb + 1 + cb;
         int32_t user_tok = audio_bos;
-        if (offset < num_frames) {
-            const auto tok_idx = static_cast<std::size_t>(offset) * encode_codebooks + cb;
+        if (frame < num_frames) {
+            const auto tok_idx = static_cast<std::size_t>(frame) * encode_codebooks + cb;
             if (tok_idx < codec_tokens.size()) {
                 user_tok = codec_tokens[tok_idx];
             }
@@ -94,6 +97,17 @@ inline void fill_initial_delay_tokens(DelayCacheState& delay_state, int32_t offs
         const auto idx = delay_cache_index(delay_state, k, offset);
         delay_state.cache[idx] = init_tok;
         delay_state.provided[idx] = 1;
+    }
+}
+
+inline void write_listening_tokens_to_delay_cache(DelayCacheState& state, int32_t offset,
+                                                  int32_t text_padding_id) {
+    // The same forced agent-silence codes used by official LMGen system prompts.
+    constexpr std::array<int32_t, 8> silence{948, 243, 1178, 546, 1736, 1030, 1978, 2008};
+    for (int32_t k = 0; k <= 8; ++k) {
+        const auto index = delay_cache_index(state, k, offset + state.delays[k]);
+        state.cache[index] = k == 0 ? text_padding_id : silence[k - 1];
+        state.provided[index] = 1;
     }
 }
 

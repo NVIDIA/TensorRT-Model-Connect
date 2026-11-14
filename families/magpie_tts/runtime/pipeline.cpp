@@ -124,6 +124,18 @@ MagpiePipeline::MagpiePipeline(
 
 MagpiePipeline::~MagpiePipeline() = default;
 
+void MagpiePipeline::set_context_prefill_decoder(std::unique_ptr<ITrtModule> prefill_decoder) {
+    if (prefill_decoder && !prefill_decoder->ok())
+        throw std::runtime_error("MagpiePipeline: invalid context prefill decoder module");
+    prefill_decoder_ = std::move(prefill_decoder);
+}
+
+void MagpiePipeline::set_cross_kv_projector(std::unique_ptr<ITrtModule> cross_kv_projector) {
+    if (cross_kv_projector && !cross_kv_projector->ok())
+        throw std::runtime_error("MagpiePipeline: invalid cross-attention K/V module");
+    cross_kv_projector_ = std::move(cross_kv_projector);
+}
+
 // The rest of the MagpiePipeline methods (lines 1421-2633 of original audio_pipeline.cpp)
 // are included verbatim below.
 
@@ -275,22 +287,52 @@ void MagpiePipeline::run_encoder(const std::vector<int32_t>& text_ids) {
 // ---------------------------------------------------------------------------
 
 void MagpiePipeline::compute_cross_kv() {
-    // All decoder layers receive the SAME encoder output as cross_k and cross_v
-    // (the per-layer K/V projections are baked into the TRT decoder graph).
-    // Instead of copying encoder output into N separate buffers (2*N D2D copies),
-    // we now bind all layers directly to the encoder output buffer in bind_cross_kv().
-    // No copies needed.
+    // With a projector plan, run the per-layer K/V projections of the encoder
+    // output once for this request. Otherwise all decoder layers receive the
+    // SAME encoder output as cross_k and cross_v (the per-layer K/V projections
+    // are baked into the TRT decoder graph) and bind_cross_kv() binds it
+    // directly. No copies needed.
+    if (cross_kv_projector_)
+        project_cross_kv(encoder_output_.data(), cross_k_, cross_v_);
+}
+
+void MagpiePipeline::project_cross_kv(void* memory, std::vector<MagpieCudaBuffer>& cross_k,
+                                      std::vector<MagpieCudaBuffer>& cross_v) {
+    cross_kv_projector_->bind_external("encoder_output", memory);
+    for (std::size_t i = 0; i < cross_k.size(); ++i) {
+        const auto layer = static_cast<int32_t>(i);
+        cross_kv_projector_->bind_external(magpie_layer_tensor_name("cross_k", layer),
+                                           cross_k[i].data());
+        cross_kv_projector_->bind_external(magpie_layer_tensor_name("cross_v", layer),
+                                           cross_v[i].data());
+    }
+    // Same stream as the decoder, so later decoder steps see the results.
+    cross_kv_projector_->forward_device_async({});
+}
+
+void MagpiePipeline::bind_cross_inputs(ITrtModule& module, bool unconditional) {
+    auto& cross_k = unconditional ? cross_k_uncond_ : cross_k_;
+    auto& cross_v = unconditional ? cross_v_uncond_ : cross_v_;
+    if (cross_kv_projector_) {
+        // Per-layer projected K/V rows from project_cross_kv().
+        for (std::size_t i = 0; i < cross_k.size(); ++i) {
+            const auto layer = static_cast<int32_t>(i);
+            module.bind_external(magpie_layer_tensor_name("cross_k", layer), cross_k[i].data());
+            module.bind_external(magpie_layer_tensor_name("cross_v", layer), cross_v[i].data());
+        }
+        return;
+    }
+    // Bind all layers to the SAME encoder output buffer (shared cross-KV).
+    void* memory = unconditional ? encoder_output_uncond_.data() : encoder_output_.data();
+    const int32_t dec_layers = static_cast<int32_t>(cross_k.size());
+    for (int32_t i = 0; i < dec_layers; ++i) {
+        module.bind_external(magpie_layer_tensor_name("cross_k", i), memory);
+        module.bind_external(magpie_layer_tensor_name("cross_v", i), memory);
+    }
 }
 
 void MagpiePipeline::bind_cross_kv() {
-    // Bind all layers to the SAME encoder output buffer (shared cross-KV).
-    const int32_t dec_layers = static_cast<int32_t>(cross_k_.size());
-    for (int32_t i = 0; i < dec_layers; ++i) {
-        const std::string cross_k_name = magpie_layer_tensor_name("cross_k", i);
-        const std::string cross_v_name = magpie_layer_tensor_name("cross_v", i);
-        decoder_->bind_external(cross_k_name, encoder_output_.data());
-        decoder_->bind_external(cross_v_name, encoder_output_.data());
-    }
+    bind_cross_inputs(*decoder_, false);
 
     if (has_cross_attn_output_ && cross_attn_weights_.ok())
         decoder_->bind_external("cross_attn_weights", cross_attn_weights_.data());
@@ -303,19 +345,14 @@ void MagpiePipeline::bind_cross_kv() {
 }
 
 void MagpiePipeline::compute_cross_kv_uncond() {
-    // Same optimization as compute_cross_kv(): no copies needed.
-    // bind_cross_kv_uncond() will bind directly to encoder_output_uncond_.
+    // Same as compute_cross_kv() for the null-text encoder output.
+    if (cross_kv_projector_)
+        project_cross_kv(encoder_output_uncond_.data(), cross_k_uncond_, cross_v_uncond_);
 }
 
 void MagpiePipeline::bind_cross_kv_uncond() {
     // Bind all layers to the shared unconditional encoder output buffer.
-    const int32_t dec_layers = static_cast<int32_t>(cross_k_uncond_.size());
-    for (int32_t i = 0; i < dec_layers; ++i) {
-        const std::string cross_k_name = magpie_layer_tensor_name("cross_k", i);
-        const std::string cross_v_name = magpie_layer_tensor_name("cross_v", i);
-        decoder_->bind_external(cross_k_name, encoder_output_uncond_.data());
-        decoder_->bind_external(cross_v_name, encoder_output_uncond_.data());
-    }
+    bind_cross_inputs(*decoder_, true);
 
     // Redirect cross_attn_weights to scratch buffer so uncond pass
     // doesn't overwrite the conditioned weights we need for tracking
@@ -464,15 +501,78 @@ int32_t MagpiePipeline::prefill_context(DecoderLoopState& state) {
         return 0;
 
     const int32_t ctx_frames = context_lengths_[0];
-    std::cerr << "[magpie-tts] Prefilling " << ctx_frames << " context frames ..." << std::endl;
     const auto start = SteadyClock::now();
-    if (!prefill_context_sequential(state, ctx_frames))
+    // All context frames but the last go through the prefill decoder in one
+    // call. The last frame runs through the step decoder, so its dynamic input
+    // buffers and shapes are set up exactly as after a sequential prefill (the
+    // device-side decode loops write those buffers directly).
+    int32_t first_sequential = 0;
+    if (prefill_context_batched(state, ctx_frames - 1)) {
+        first_sequential = ctx_frames - 1;
+        std::cerr << "[magpie-tts] Prefilled " << first_sequential << " context frames in one batch"
+                  << std::endl;
+    }
+    std::cerr << "[magpie-tts] Prefilling " << ctx_frames - first_sequential
+              << " context frames ..." << std::endl;
+    if (!prefill_context_sequential(state, first_sequential, ctx_frames))
         return -1;
     state.prof_prefill_ms = elapsed_ms(start, SteadyClock::now());
     return ctx_frames;
 }
 
-bool MagpiePipeline::prefill_context_sequential(DecoderLoopState& state, int32_t ctx_frames) {
+bool MagpiePipeline::prefill_context_batched(DecoderLoopState& state, int32_t ctx_frames) {
+    if (!prefill_decoder_ || ctx_frames <= 1)
+        return false;
+    const auto max_rows = prefill_decoder_->input_profile_shape(
+        "input_embed", prefill_decoder_->profile_idx(), ProfileShapeSelector::kMax);
+    if (max_rows.empty() || max_rows[0] < ctx_frames)
+        return false;
+    auto* cond_cache = dynamic_cast<MagpieKvCache*>(decoder_state_.get());
+    auto* uncond_cache = dynamic_cast<MagpieKvCache*>(decoder_state_uncond_.get());
+    const bool uncond = state.use_cfg && decoder_state_uncond_;
+    if (cond_cache == nullptr || (uncond && uncond_cache == nullptr))
+        return false;
+
+    // One call writes the K/V rows of all context frames. The causal mask
+    // gives row i the same view as sequential step i: context frames 0..i,
+    // no earlier cache rows. The attention prior is all ones at this point.
+    Tensor embed;
+    embed.data = context_embed_.data();
+    embed.shape = {static_cast<int64_t>(ctx_frames), static_cast<int64_t>(state.hidden)};
+    embed.dtype = DType::kFloat32;
+    const auto run = [&](MagpieKvCache& cache, bool unconditional) {
+        cache.bind_cache_inputs(*prefill_decoder_);
+        bind_cross_inputs(*prefill_decoder_, unconditional);
+        if (has_attn_prior_ && attn_prior_device_.ok())
+            prefill_decoder_->bind_external("cross_attn_prior", attn_prior_device_.data());
+        TensorMap inputs;
+        inputs["input_embed"] = embed;
+        cache.prepare_step(inputs, ctx_frames);
+        // The plan's mask input is rank 3: [1, frames, cache + frames].
+        auto& mask = inputs.at("attention_mask");
+        mask.shape.insert(mask.shape.begin(), 1);
+        prefill_decoder_->forward_async(inputs);
+        std::vector<const void*> present_k, present_v;
+        for (int32_t i = 0; i < cache.num_layers(); ++i) {
+            present_k.push_back(
+                prefill_decoder_->device_ptr(magpie_layer_tensor_name("present_k", i)));
+            present_v.push_back(
+                prefill_decoder_->device_ptr(magpie_layer_tensor_name("present_v", i)));
+        }
+        cache.write_prefill_kv(present_k, present_v, ctx_frames);
+    };
+    run(*cond_cache, false);
+    if (uncond) {
+        std::cerr << "[magpie-tts] CFG: prefilling unconditional cache (" << ctx_frames
+                  << " frames) in one batch" << std::endl;
+        run(*uncond_cache, true);
+    }
+    prefill_decoder_->sync();
+    return true;
+}
+
+bool MagpiePipeline::prefill_context_sequential(DecoderLoopState& state, int32_t first_frame,
+                                                int32_t ctx_frames) {
     const int32_t hidden = state.hidden;
 
     // Conditioned cache prefill
@@ -480,20 +580,20 @@ bool MagpiePipeline::prefill_context_sequential(DecoderLoopState& state, int32_t
     bind_cross_kv();
 
     const float* ctx_ptr = context_embed_.data();
-    for (int32_t pos = 0; pos < ctx_frames; ++pos) {
+    for (int32_t pos = first_frame; pos < ctx_frames; ++pos) {
         const float* frame_embed = ctx_ptr + static_cast<std::size_t>(pos) * hidden;
         run_decoder_step(frame_embed, hidden, state.logits);
     }
 
     // CFG: prefill unconditional cache with same speaker context but uncond cross-KV
     if (state.use_cfg && decoder_state_uncond_) {
-        std::cerr << "[magpie-tts] CFG: prefilling unconditional cache (" << ctx_frames
-                  << " frames) ..." << std::endl;
+        std::cerr << "[magpie-tts] CFG: prefilling unconditional cache ("
+                  << ctx_frames - first_frame << " frames) ..." << std::endl;
 
         decoder_state_uncond_->bind_to(*decoder_);
         bind_cross_kv_uncond();
 
-        for (int32_t pos = 0; pos < ctx_frames; ++pos) {
+        for (int32_t pos = first_frame; pos < ctx_frames; ++pos) {
             const float* frame_embed = ctx_ptr + static_cast<std::size_t>(pos) * hidden;
 
             int32_t dummy_token = 0;
@@ -708,8 +808,8 @@ bool MagpiePipeline::gpu_greedy_frame_step(DecoderLoopState& state, int32_t fram
     if (pos_ptr)
         cudaMemcpyAsync(pos_ptr, &pos, sizeof(int32_t), cudaMemcpyHostToDevice, stream_);
 
-    // Mask: [1, 1, W+1] — zeros for cached entries + current, -inf for rest
-    // For autoregressive (seq_len=1): allow positions 0..pos (inclusive)
+    // Mask: [1, 1, W+1], same layout as MagpieKvCache::write_decode_mask():
+    // cache rows [0, pos) and the current token (last column) are visible.
     void* mask_ptr = decoder_->device_ptr("attention_mask");
     if (mask_ptr) {
         const int32_t W = decoder_state_->max_length();
@@ -747,65 +847,49 @@ bool MagpiePipeline::gpu_greedy_frame_step(DecoderLoopState& state, int32_t fram
     return true;
 }
 
-void MagpiePipeline::gpu_greedy_update_text_consumed(DecoderLoopState& state, int32_t frame) {
-    if (state.text_consumed)
-        return;
-    if (state.use_cross_attn_tracking) {
-        std::vector<float> xattn(static_cast<std::size_t>(state.max_source_positions));
-        cudaMemcpyAsync(xattn.data(), cross_attn_weights_.data(),
-                        static_cast<std::size_t>(state.max_source_positions) * sizeof(float),
-                        cudaMemcpyDeviceToHost, stream_);
-        cudaStreamSynchronize(stream_);
-
-        if (update_magpie_text_consumed_from_cross_attn(xattn.data(), state.max_source_positions,
-                                                        state.text_consumed_threshold,
-                                                        state.max_peak_pos, state.text_consumed)) {
-            std::cerr << "[magpie-tts] Text consumed at frame " << frame
-                      << " (max_peak_pos=" << state.max_peak_pos
-                      << ", threshold=" << state.text_consumed_threshold
-                      << ", text_len=" << text_length_ << ")" << std::endl;
-        }
-        return;
-    }
-    update_magpie_text_consumed_from_heuristic(state.estimated_frames, frame, state.text_consumed);
-}
-
 std::vector<int32_t> MagpiePipeline::run_gpu_greedy_loop(DecoderLoopState& state,
                                                          int32_t max_frames) {
-    constexpr int32_t EOS_CHECK_INTERVAL = 16;
+    // Same per-frame stop rules as run_cpu_sampling_loop(): EOS gating from the
+    // attention prior, EOS checked every frame, the EOS frame is dropped, and the
+    // prior follows the alignment of every kept frame.
     constexpr int32_t MIN_FRAMES = 4;
 
     const int32_t num_cb = state.num_cb;
 
     MagpieCudaBuffer d_eos_flag(sizeof(int32_t));
-    int32_t h_eos_flag = 0;
-    cudaMemsetAsync(d_eos_flag.data(), 0, sizeof(int32_t), stream_);
-
     int32_t gen_frames_actual = 0;
 
     for (int32_t frame = 0; frame < max_frames; ++frame) {
+        const MagpieEosGate gate = magpie_eos_gate(has_attn_prior_, last_attended_pos_,
+                                                   text_length_, state.frames_past_text_consumed);
+        if (should_stop_magpie_on_eos(gate.force, frame, MIN_FRAMES)) {
+            std::cerr << "[magpie-tts] EOS forced at frame " << frame << std::endl;
+            break;
+        }
+
+        cudaMemsetAsync(d_eos_flag.data(), 0, sizeof(int32_t), stream_);
         if (!gpu_greedy_frame_step(state, frame, d_eos_flag))
             break;
+        int32_t h_eos_flag = 0;
+        cudaMemcpyAsync(&h_eos_flag, d_eos_flag.data(), sizeof(int32_t), cudaMemcpyDeviceToHost,
+                        stream_);
+        cudaStreamSynchronize(stream_);
 
+        if (should_stop_magpie_on_eos(!gate.forbid && h_eos_flag != 0, frame, MIN_FRAMES)) {
+            std::cerr << "[magpie-tts] EOS detected at frame " << frame
+                      << ", dropping terminal frame" << std::endl;
+            break;
+        }
         gen_frames_actual = frame + 1;
 
-        // Periodic checks (EOS, repetition, text-completion) every N frames
-        const bool periodic =
-            should_run_magpie_periodic_check(frame, MIN_FRAMES, EOS_CHECK_INTERVAL);
-        if (periodic &&
-            gpu_check_stop_conditions(state, frame, d_eos_flag, h_eos_flag, gen_frames_actual)) {
+        update_text_completion(state, frame);
+        update_attention_prior(frame);
+
+        if (check_finished_limit(state, frame))
             break;
-        }
-        if (periodic && !state.text_consumed) {
-            gpu_update_text_completion(state, frame);
-        }
-        if (check_finished_limit(state, frame)) {
-            gen_frames_actual = frame + 1;
-            break;
-        }
     }
 
-    // Final sync and bulk D2H of all accumulated codes
+    // Bulk D2H of the kept frames
     cudaStreamSynchronize(stream_);
     const std::size_t total_codes_bytes =
         static_cast<std::size_t>(gen_frames_actual) * num_cb * sizeof(int32_t);
@@ -1077,46 +1161,6 @@ std::vector<int32_t> MagpiePipeline::run_gpu_sampling_loop(DecoderLoopState& sta
 }
 
 // ---------------------------------------------------------------------------
-// GPU stop conditions / text completion helpers
-// ---------------------------------------------------------------------------
-
-bool MagpiePipeline::gpu_check_stop_conditions(DecoderLoopState& state, int32_t frame,
-                                               MagpieCudaBuffer& d_eos_flag, int32_t& h_eos_flag,
-                                               int32_t& gen_frames_actual) {
-    (void)state;
-    (void)frame;
-    (void)gen_frames_actual;
-
-    cudaMemcpyAsync(&h_eos_flag, d_eos_flag.data(), sizeof(int32_t), cudaMemcpyDeviceToHost,
-                    stream_);
-    cudaStreamSynchronize(stream_);
-    return h_eos_flag != 0;
-}
-
-void MagpiePipeline::gpu_update_text_completion(DecoderLoopState& state, int32_t frame) {
-    if (state.text_consumed)
-        return;
-    if (state.use_cross_attn_tracking) {
-        std::vector<float> xattn(static_cast<std::size_t>(state.max_source_positions));
-        cudaMemcpyAsync(xattn.data(), cross_attn_weights_.data(),
-                        static_cast<std::size_t>(state.max_source_positions) * sizeof(float),
-                        cudaMemcpyDeviceToHost, stream_);
-        cudaStreamSynchronize(stream_);
-
-        if (update_magpie_text_consumed_from_cross_attn(xattn.data(), state.max_source_positions,
-                                                        state.text_consumed_threshold,
-                                                        state.max_peak_pos, state.text_consumed)) {
-            std::cerr << "[magpie-tts] Text consumed at frame " << frame
-                      << " (max_peak_pos=" << state.max_peak_pos
-                      << ", threshold=" << state.text_consumed_threshold
-                      << ", text_len=" << text_length_ << ")" << std::endl;
-        }
-        return;
-    }
-    update_magpie_text_consumed_from_heuristic(state.estimated_frames, frame, state.text_consumed);
-}
-
-// ---------------------------------------------------------------------------
 // CPU step decomposition helpers
 // ---------------------------------------------------------------------------
 
@@ -1131,13 +1175,8 @@ bool MagpiePipeline::cpu_run_conditioned_step(DecoderLoopState& state, int32_t f
 
 bool MagpiePipeline::cpu_sample_frame_codes(DecoderLoopState& state,
                                             std::vector<int32_t>& frame_codes, bool& eos) {
-    // NeMo-aligned EOS gating based on attention prior's position tracking:
-    // - unfinished (forbid EOS): attended_pos < text_len - 3
-    // - finished (allow/force EOS): attended_pos >= text_len - 2 for >5 frames
-    const bool text_near_end = has_attn_prior_ && last_attended_pos_ >= text_length_ - 2;
-    const bool text_unfinished = has_attn_prior_ && last_attended_pos_ < text_length_ - 3;
-    const bool forbid_eos = text_unfinished;
-    const bool force_eos = text_near_end && state.frames_past_text_consumed > 5;
+    const MagpieEosGate gate = magpie_eos_gate(has_attn_prior_, last_attended_pos_, text_length_,
+                                               state.frames_past_text_consumed);
 
     const auto decoded = decode_magpie_frame_codes(
         state.logits, state.num_cb, state.cb_size, config_.greedy, config_.temperature,
@@ -1145,7 +1184,7 @@ bool MagpiePipeline::cpu_sample_frame_codes(DecoderLoopState& state,
         [this](const float* cb_logits, int32_t vocab_size, float temperature, int32_t top_k) {
             return sample_top_k(cb_logits, vocab_size, temperature, top_k);
         },
-        forbid_eos, force_eos);
+        gate.forbid, gate.force);
     frame_codes = decoded.frame_codes;
     eos = decoded.eos;
     return true;
@@ -1537,7 +1576,9 @@ void MagpiePipeline::log_pipeline_profiling(int32_t num_frames, int32_t num_samp
 
     std::cerr << "\n[magpie-tts] ===== PROFILING REPORT =====\n"
               << "[magpie-tts]   Encoder:        " << ms_encoder << " ms\n"
-              << "[magpie-tts]   Cross-KV:       D2D copies (per-layer buffers)\n"
+              << "[magpie-tts]   Cross-KV:       "
+              << (cross_kv_projector_ ? "projected once per request" : "projected in every step")
+              << "\n"
               << "[magpie-tts]   Decoder:        " << ms_decoder << " ms (" << num_frames
               << " frames, " << ms_per_frame << " ms/frame)\n"
               << "[magpie-tts]   Codec:          " << ms_codec << " ms\n"

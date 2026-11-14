@@ -7,6 +7,7 @@ add_library(trtmc_model_nemotron_h SHARED
   distributed_runtime.cpp
   hybrid_state.cpp
   kv_cache.cpp
+  paired.cpp
   pipeline.cpp
   plugin.cpp
   plugin_helpers.cpp

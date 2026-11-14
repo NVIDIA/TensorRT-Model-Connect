@@ -10,8 +10,6 @@ from tools.e2e_evidence import evidence_stage, record_evidence
 import gc
 import json
 import os
-import re
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -22,7 +20,6 @@ from tensorrt_model_connect import BuildRequest, build
 
 _TEST_DIR = Path(__file__).resolve().parent
 _FAMILY = _TEST_DIR.parent.name
-_MPI_RANK_ZERO = re.compile(r"^\[[^,]+,0\]<stdout>:(.*)$")
 
 
 def _load_cases() -> dict[str, tuple[dict, dict]]:
@@ -30,7 +27,7 @@ def _load_cases() -> dict[str, tuple[dict, dict]]:
     for path in sorted((_TEST_DIR / "manifests").glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == _FAMILY, path
-        assert manifest["task"] == "text_generation", path
+        assert manifest["task"] in {"text_generation", "vision_language_generation"}, path
         assert isinstance(manifest["precision"], str), path
         assert isinstance(manifest["max_sequence_length"], int), path
         assert isinstance(manifest["tensor_parallel_size"], int), path
@@ -92,8 +89,6 @@ def _required_environment(tp_size: int):
     assert torch.cuda.device_count() >= tp_size, (
         f"{_FAMILY} TP{tp_size} requires {tp_size} visible GPUs; found {torch.cuda.device_count()}"
     )
-    if tp_size > 1:
-        assert shutil.which("mpirun"), "selected TP E2E requires mpirun"
     return binary, runtime_root, torch
 
 
@@ -142,7 +137,7 @@ def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
             model_dir=model_dir,
             output_path=bundle,
             family=_FAMILY,
-            task="text_generation",
+            task=manifest["task"],
             precision=manifest["precision"],
             max_sequence_length=manifest["max_sequence_length"],
             tensor_parallel_size=manifest["tensor_parallel_size"],
@@ -153,7 +148,8 @@ def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
     assert bundle.is_file() and bundle.stat().st_size > 0, bundle
 
 
-def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int) -> None:
+def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int,
+                          task: str = "text_generation", *, require_edge: bool = False) -> bool:
     inspected = subprocess.run(
         [str(binary), "inspect", str(bundle)],
         check=True,
@@ -165,14 +161,29 @@ def _assert_rank_sections(binary: Path, bundle: Path, tp_size: int) -> None:
     record_evidence("native", {"stdout": getattr(inspected, "stdout", None), "stderr": getattr(inspected, "stderr", None)})
     payload = json.loads(inspected.stdout)
     assert payload["family"] == _FAMILY
-    assert payload["task"] == "text_generation"
-    if tp_size > 1:
+    edge = "edge_llm.json" in payload["sections"]
+    assert edge or not require_edge, "This provisioned case requires Edge-LLM, not native fallback"
+    expected_task = "images_text_to_text" if task == "vision_language_generation" else task
+    # Previously published single-image bundles retain the legacy task ID.
+    assert payload["task"] in {task, expected_task}
+    if edge:
+        if tp_size == 2:
+            for rank in range(tp_size):
+                assert f"edge_llm/engine/llm_world2_rank{rank}.engine" in payload["sections"]
+        if task == "vision_language_generation":
+            assert "edge_llm/engine/visual/visual.engine" in payload["sections"]
+    elif tp_size > 1:
         rank_sections = {
             name
             for name in payload["sections"]
             if name.startswith("engine.rank") and name.endswith(".plan")
         }
         assert rank_sections == {f"engine.rank{rank}.plan" for rank in range(tp_size)}
+    if not edge and task == "vision_language_generation":
+        visual_plans = ({"native_visual.plan"} if tp_size == 1 else
+                        {f"native_visual.rank{rank}.plan" for rank in range(tp_size)})
+        assert visual_plans | {"native_visual.json"} <= set(payload["sections"])
+    return edge
 
 
 def _native_arguments(bundle: Path, runtime_root: Path, prompt: str, case: dict) -> list[str]:
@@ -186,6 +197,14 @@ def _native_arguments(bundle: Path, runtime_root: Path, prompt: str, case: dict)
         "--max-new-tokens",
         str(case["max_new_tokens"]),
     ]
+    if "image" in case and "images" in case:
+        raise ValueError("Specify image or ordered images, not both")
+    if "images" in case:
+        if not case["images"]:
+            raise ValueError("Ordered images cannot be empty")
+        arguments.extend(["--images", json.dumps(case["images"])])
+    elif "image" in case:
+        arguments.extend(["--image", str(case["image"])])
     options = {
         "temperature": "--temperature",
         "top_k": "--top-k",
@@ -214,40 +233,39 @@ def _run_native(
     case: dict,
     tp_size: int,
     tmp_path: Path,
+    *, edge: bool = False,
 ) -> dict:
     command = [str(binary), *_native_arguments(bundle, runtime_root, prompt, case)]
     environment = dict(os.environ)
-    if tp_size > 1:
-        environment["TRTMC_NCCL_RENDEZVOUS"] = str(tmp_path / "nccl.rendezvous")
-        prefix = ["mpirun", "--tag-output", "-np", str(tp_size)]
-        for name in ("LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "TRTMC_NCCL_RENDEZVOUS"):
-            if name in environment:
-                prefix.extend(["-x", name])
-        command = [*prefix, *command]
+    # Native TP owns both rank tasks and communicator lifetime in one process.
+    # An MPI wrapper would start two independent TP2 models, not one two-rank task.
 
-    completed = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=600,
-        env=environment,
-    )
-    record_evidence("commands", {"argv": getattr(completed, "args", None)})
+    record_evidence("commands", {"argv": command})
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=600,
+            env=environment,
+        )
+    except subprocess.TimeoutExpired as error:
+        # TimeoutExpired stores partial output as bytes even with text=True.
+        partial = {}
+        for name in ("stdout", "stderr"):
+            value = getattr(error, name) or ""
+            if isinstance(value, bytes):
+                value = value.decode("utf-8", errors="replace")
+            (tmp_path / f"native.{name}.log").write_text(value, encoding="utf-8")
+            partial[name] = value
+        record_evidence("native", partial)
+        raise
     record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
     (tmp_path / "native.stdout.log").write_text(completed.stdout, encoding="utf-8")
     (tmp_path / "native.stderr.log").write_text(completed.stderr, encoding="utf-8")
     completed.check_returncode()
-    if tp_size == 1:
-        return json.loads(completed.stdout)
-
-    rank_zero_payloads = []
-    for line in completed.stdout.splitlines():
-        match = _MPI_RANK_ZERO.fullmatch(line)
-        if match and match.group(1).lstrip().startswith("{"):
-            rank_zero_payloads.append(match.group(1))
-    assert len(rank_zero_payloads) == 1, completed.stdout
-    return json.loads(rank_zero_payloads[0])
+    return json.loads(completed.stdout)
 
 
 def _render_prompt(tokenizer, prompt: str, case: dict):
@@ -330,6 +348,96 @@ def _record_text_diagnostics(native_ids: list[int], reference_ids: list[int]) ->
     })
 
 
+def _reference_inputs(model_dir: Path, manifest: dict, tokenizer, prompt: str, case: dict):
+    """Validate every supplied modality before loading large source weights."""
+    has_images = "image" in case or "images" in case
+    has_video = "video_frames" in case
+    if not has_images and not has_video:
+        return _render_prompt(tokenizer, prompt, case)
+
+    import math
+    import numpy as np
+    from PIL import Image
+    from transformers import AutoProcessor
+    from transformers.video_utils import VideoMetadata
+
+    assert case.get("use_chat_template", True), "Media requires the source chat template"
+    if "image" in case and "images" in case:
+        raise ValueError("Specify image or ordered images, not both")
+    processor = AutoProcessor.from_pretrained(
+        model_dir, local_files_only=True, trust_remote_code=bool(manifest.get("trust_remote_code", False)),
+    )
+    content, images, arguments = [], [], {}
+    try:
+        if has_images:
+            factor = processor.image_processor.patch_size * processor.image_processor.merge_size
+            processor.image_processor.size = {
+                "shortest_edge": 128 * factor * factor,
+                "longest_edge": 1280 * factor * factor,
+            }
+            image_paths = case["images"] if "images" in case else [case["image"]]
+            if not image_paths:
+                raise ValueError("Ordered images cannot be empty")
+            for path in image_paths:
+                with Image.open(path) as image:
+                    images.append(image.convert("RGB"))
+                content.append({"type": "image"})
+            arguments["images"] = images
+            arguments["images_kwargs"] = {
+                "min_pixels": processor.image_processor.size["shortest_edge"],
+                "max_pixels": processor.image_processor.size["longest_edge"],
+            }
+        if has_video:
+            paths = case["video_frames"]
+            fps = float(case["video_fps"])
+            assert paths and math.isfinite(fps) and fps > 0
+            video_processor = processor.video_processor
+            factor = video_processor.patch_size * video_processor.merge_size
+            temporal = video_processor.temporal_patch_size
+            # Preserve the existing per-media temporal pixel budget.
+            video_processor.size = {
+                "shortest_edge": 128 * temporal * factor * factor,
+                "longest_edge": 1280 * temporal * factor * factor,
+            }
+            frames = []
+            for path in paths:
+                with Image.open(path) as image:
+                    frames.append(np.asarray(image.convert("RGB")))
+            frames = np.stack(frames)
+            arguments.update(
+                videos=[frames],
+                video_metadata=[VideoMetadata(
+                    total_num_frames=len(frames), fps=fps,
+                    height=frames.shape[1], width=frames.shape[2],
+                    duration=len(frames) / fps, frames_indices=list(range(len(frames))),
+                )],
+                do_sample_frames=False,
+            )
+            content.append({"type": "video"})
+        content.append({"type": "text", "text": prompt})
+        template_options = {}
+        if "enable_thinking" in case:
+            template_options["enable_thinking"] = case["enable_thinking"]
+        rendered = processor.apply_chat_template(
+            [{"role": "user", "content": content}], tokenize=False, add_generation_prompt=True,
+            chat_template=processor.chat_template or tokenizer.chat_template,
+            **template_options,
+        )
+        inputs = processor(text=[rendered], return_tensors="pt", **arguments)
+    finally:
+        for image in images:
+            image.close()
+    if has_images:
+        record_evidence("inputs", {"images": list(map(str, image_paths)),
+                                  "image_grid_thw": inputs["image_grid_thw"].tolist()})
+    if has_video:
+        record_evidence("inputs", {
+            "video_frames": list(map(str, paths)), "video_fps": fps,
+            "video_grid_thw": inputs["video_grid_thw"].tolist(),
+        })
+    return inputs
+
+
 def _hf_reference(
     model_dir: Path,
     manifest: dict,
@@ -337,6 +445,8 @@ def _hf_reference(
     prompt: str,
     actual_ids: list[int],
     torch,
+    *,
+    reference_model=None,
 ) -> tuple[list[int], str, float | None, str]:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -356,17 +466,34 @@ def _hf_reference(
         "bf16": torch.bfloat16,
     }
     assert reference_precision in dtypes, reference_precision
-    model = (
-        AutoModelForCausalLM.from_pretrained(
+    # Large-model references may distribute FP32 weights without relaxing the oracle.
+    device_map = manifest.get("reference_device_map")
+    reference_options = {} if device_map is None else {"device_map": device_map}
+    if "reference_max_memory" in manifest:
+        assert device_map is not None, "reference_max_memory requires reference_device_map"
+        reference_options["max_memory"] = {
+            int(device) if str(device).isdigit() else device: budget
+            for device, budget in manifest["reference_max_memory"].items()
+        }
+    inputs = _reference_inputs(model_dir, manifest, tokenizer, prompt, case)
+    model = reference_model
+    if model is None:
+        model_class = AutoModelForCausalLM
+        if "image" in case or "images" in case or "video_frames" in case:
+            from transformers import AutoModelForImageTextToText
+            model_class = AutoModelForImageTextToText
+        model = model_class.from_pretrained(
             model_dir,
             local_files_only=True,
             trust_remote_code=trust_remote_code,
             dtype=dtypes[reference_precision],
-        )
-        .eval()
-        .to("cuda")
-    )
-    inputs = _render_prompt(tokenizer, prompt, case).to(model.device)
+            **reference_options,
+        ).eval()
+        if device_map is None:
+            model = model.to("cuda")
+    else:
+        assert next(model.parameters()).dtype == dtypes[reference_precision]
+    inputs = inputs.to(model.device)
     prompt_ids = inputs["input_ids"][0].tolist()
     if "expected_prompt_token_ids" in case:
         assert prompt_ids == case["expected_prompt_token_ids"]
@@ -484,6 +611,20 @@ def _assert_correctness(
     assert _normalized_edit_distance(actual_text, reference_text) <= _text_threshold(thresholds)
 
 
+def _assert_reference_free(payload: dict, case: dict) -> None:
+    """Check a generation that has no reference model: shape, length and expected answer."""
+    expected_answers = case.get("expected_answers")
+    assert expected_answers, "a case with reference=none must set expected_answers"
+    token_ids = payload["token_ids"]
+    assert isinstance(token_ids, list) and token_ids
+    assert all(isinstance(token_id, int) for token_id in token_ids)
+    assert len(token_ids) <= int(case["max_new_tokens"])
+    text = str(payload["text"]).strip()
+    if case.get("enable_thinking") is False:
+        assert "<think>" not in text.casefold()
+    assert any(answer.casefold() in text.casefold() for answer in expected_answers), text
+
+
 @pytest.mark.parametrize("case_name", sorted(_CASES))
 def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     manifest, case = _CASES[case_name]
@@ -500,7 +641,10 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
     with evidence_stage("build"):
         _build_bundle(manifest, model_dir, bundle)
     with evidence_stage("compare"):
-        _assert_rank_sections(binary, bundle, tp_size)
+        edge = _assert_rank_sections(
+            binary, bundle, tp_size, manifest["task"],
+            require_edge=bool(manifest.get("require_edge_llm", False)),
+        )
     with evidence_stage("native"):
         payload = _run_native(
             binary,
@@ -510,6 +654,7 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
             case,
             tp_size,
             tmp_path,
+            edge=edge,
         )
     record_evidence("native", payload)
     reruns = int(case.get("determinism_reruns", 0))
@@ -523,12 +668,21 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
                 case,
                 tp_size,
                 tmp_path,
+                edge=edge,
             )
         record_evidence("native", repeated)
         with evidence_stage("compare"):
             assert repeated["token_ids"] == payload["token_ids"]
         with evidence_stage("compare"):
             assert repeated["text"] == payload["text"]
+
+    if case.get("reference") == "none":
+        # ModelOpt NVFP4 checkpoints cannot be run by transformers, so there is no
+        # reference model; the engine output is checked against the expected answer.
+        record_evidence("reference", {"mode": "none", "oracle": "expected_answers"})
+        with evidence_stage("compare"):
+            _assert_reference_free(payload, case)
+        return
 
     with evidence_stage("reference"):
         reference = _hf_reference(

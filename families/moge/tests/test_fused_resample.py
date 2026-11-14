@@ -95,7 +95,7 @@ def test_fast_path_keeps_the_exact_dynamic_profile_and_native_boundaries() -> No
         "_FAST_MAX_IMAGE_HEIGHT = 2160",
         "_FAST_MAX_IMAGE_WIDTH = 3840",
         "attention.decomposable = not self.fast_path",
-        "config.builder_optimization_level = 3 if fast_path else 0",
+        "config.builder_optimization_level = 3",
         '"output.affine_depth_fp32"',
         '"output.valid_fp16"',
         '"output.focal_samples_fp32"',

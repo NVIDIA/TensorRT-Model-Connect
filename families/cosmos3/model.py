@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .checkpoint_mapper import read_json, transformer_safetensor_paths
+from .quantization import is_fp8_checkpoint
 from .model_config import (
     COSMOS3_NANO,
     COSMOS3_NANO_NEGATIVE_PROMPT,
@@ -54,12 +55,19 @@ def _require_checkpoint(model_dir: Path) -> tuple[Path, Path, Path]:
     return transformer_dir, vae_dir, tokenizer_dir
 
 
-def _build_denoiser(transformer_dir: Path, *, context_parallel_size: int, verbose: bool) -> bytes:
+def _build_denoiser(
+    transformer_dir: Path,
+    *,
+    context_parallel_size: int,
+    quantization: str | None,
+    verbose: bool,
+) -> bytes:
     from .transformer_builder import build_cosmos3_transformer_engine
 
     return build_cosmos3_transformer_engine(
         str(transformer_dir),
         context_parallel_size=context_parallel_size,
+        quantization=quantization,
         verbose=verbose,
     )
 
@@ -98,8 +106,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError("Cosmos3-Nano does not use tensor parallelism")
     if request.context_parallel_size not in (1, 2):
         raise ValueError("Cosmos3-Nano context_parallel_size must be 1 or 2")
-    if request.quantization is not None:
-        raise ValueError("Cosmos3-Nano does not support quantization")
+    if request.quantization not in (None, "none", "fp8"):
+        raise ValueError(f"Cosmos3-Nano does not support quantization={request.quantization!r}")
+    quantization = None if request.quantization in (None, "none") else request.quantization
+    if quantization == "fp8" and request.context_parallel_size != 1:
+        raise ValueError("Cosmos3-Nano fp8 builds support context_parallel_size=1 only")
     if request.fp32_layers:
         raise ValueError("Cosmos3-Nano does not support fp32_layers")
 
@@ -120,11 +131,19 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     model_dir = Path(request.model_dir)
     transformer_dir, vae_dir, tokenizer_dir = _require_checkpoint(model_dir)
+    stores_fp8 = is_fp8_checkpoint(transformer_dir)
+    if stores_fp8 and quantization != "fp8":
+        raise ValueError("this checkpoint stores FP8 weights; build it with --quantization fp8")
+    if quantization == "fp8" and not stores_fp8:
+        raise ValueError(
+            "fp8 builds need the ModelOpt FP8 checkpoint (nvidia/Cosmos3-Nano, revision fp8)"
+        )
 
     writer.set_header(family="cosmos3", task=request.task, backend=request.backend)
     denoiser = _build_denoiser(
         transformer_dir,
         context_parallel_size=request.context_parallel_size,
+        quantization=quantization,
         verbose=request.verbose,
     )
     writer.add_bytes("denoiser.plan", denoiser)

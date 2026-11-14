@@ -38,7 +38,7 @@ def test_each_plan_is_staged_and_released_before_the_next_build(tmp_path, monkey
 
     class Model:
         @staticmethod
-        def load_weights(*_args):
+        def load_weights(*_args, **_kwargs):
             return {}
 
         @staticmethod
@@ -86,8 +86,7 @@ def test_each_plan_is_staged_and_released_before_the_next_build(tmp_path, monkey
     finally:
         writer.abort()
     gc.collect()
-    assert built == (["prefill", "decode", "vision"] if tiles == 1 else ["prefill", "vision"])
-    if tiles > 1:
-        assert staged["engine.plan"] == staged["prefill.plan"]
+    assert built == ["dual_profile", "vision"]
+    assert staged == {"engine.plan": b"dual_profile", "vision.plan": b"vision"}
     assert not live
     assert (tmp_path / "model.bundle").is_file()

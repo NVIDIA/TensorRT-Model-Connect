@@ -5,8 +5,11 @@
 
 from tensorrt_model_connect.model_support import family_support
 
+LEGACY_TEXT_MODEL_TYPES = frozenset({"gemma", "gemma2", "gemma3", "gemma3_text"})
+
+
 _native = family_support(
-    model_types=("gemma", "gemma2", "gemma3", "gemma3_text"),
+    model_types=("gemma", "gemma2", "gemma3", "gemma3_text", "gemma4_text", "gemma4_unified_text"),
     tasks=("text_generation",),
     default_task="text_generation",
 )

@@ -286,6 +286,103 @@ def test_edge_pair_requires_draft_and_rechecks_local_inputs(tmp_path):
             build_paired(request, None, execution)
 
 
+@pytest.mark.parametrize("weight_format", ["FP8", "NVFP4"])
+def test_prepared_linear_retains_source_bytes_and_activation_scales(tmp_path, weight_format):
+    import json
+    import numpy as np
+    import torch
+    from safetensors.torch import save_file
+    from families.llama import checkpoint_mapper as mapper
+    from families.llama.prepared_quantization import PreparedLinear, checkpoint_format
+
+    (tmp_path / "hf_quant_config.json").write_text(json.dumps(
+        {"producer": {"name": "modelopt"},
+         "quantization": {"quant_algo": weight_format, "group_size": 16}}))
+    prefix = "model.layers.0.self_attn.k_proj"
+    if weight_format == "FP8":
+        raw = torch.ones(8, 16).to(torch.float8_e4m3fn)
+        scales = torch.tensor([0.25])
+    else:
+        raw = torch.full((8, 8), 0x32, dtype=torch.uint8)
+        scales = torch.ones(8, 1).to(torch.float8_e4m3fn)
+    tensors = {prefix + ".weight": raw, prefix + ".weight_scale": scales,
+               prefix + ".input_scale": torch.tensor([0.125])}
+    if weight_format == "NVFP4":
+        tensors[prefix + ".weight_scale_2"] = torch.tensor([0.5])
+    save_file(tensors, str(tmp_path / "model.safetensors"))
+    readers = mapper._open_safetensors(tmp_path)
+    value = mapper._load_tensor(readers, prefix + ".weight")
+    assert isinstance(value, PreparedLinear) and value.shape == (8, 16)
+    np.testing.assert_array_equal(value.packed, raw.view(torch.uint8).numpy())
+    np.testing.assert_array_equal(value.input_scale, [0.125])
+    transposed = mapper._transpose_2d(value, prefix, precision="fp16")
+    assert transposed.shape == (16, 8) and transposed.packed is value.packed
+    assert checkpoint_format(tmp_path) == weight_format.lower()
+    with pytest.raises(ValueError, match="already transposed"):
+        transposed.transpose()
+    # Installed builders do not require Torch merely to read prepared sources.
+    import subprocess
+    import sys
+    code = """
+import builtins
+import sys
+from pathlib import Path
+original_import = builtins.__import__
+def no_torch(name, *args, **kwargs):
+    if name == "torch" or name.startswith("torch."):
+        raise AssertionError("Prepared native source reading imported Torch")
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = no_torch
+from families.llama import checkpoint_mapper as mapper
+readers = mapper._open_safetensors(Path(sys.argv[1]))
+weight = mapper._load_tensor(readers, "model.layers.0.self_attn.k_proj.weight")
+assert weight.shape == (8, 16)
+assert "torch" not in sys.modules
+"""
+    from pathlib import Path
+    subprocess.run([sys.executable, "-c", code, str(tmp_path)], check=True,
+                   cwd=Path(__file__).resolve().parents[3])
+    del tensors[prefix + ".input_scale"]
+    with pytest.raises(KeyError):
+        PreparedLinear.from_tensor(value.packed, prefix + ".weight", tensors.__getitem__)
+
+
+def test_edge_eagle3_falls_back_to_native_with_original_pair(tmp_path, monkeypatch):
+    import json
+    from unittest.mock import Mock
+    from families.llama.build_request import BuildRequest
+    from families.llama.edge_llm import dispatch
+    from families.llama.edge_llm.config import BuildExecutionInputs, NamedCheckpoint
+    from families.llama.speculative import build as speculative
+
+    source, draft = _edge_cli_source(tmp_path)
+    base = dict(model_type="llama", architectures=["LlamaForCausalLM"],
+                num_hidden_layers=32, hidden_size=4096, intermediate_size=14336,
+                num_attention_heads=32, num_key_value_heads=8, vocab_size=128256,
+                max_position_embeddings=131072, torch_dtype="bfloat16")
+    (source / "config.json").write_text(json.dumps(base))
+    (draft / "config.json").write_text(json.dumps(
+        dict(base, num_hidden_layers=1, draft_vocab_size=32000, max_position_embeddings=2048)))
+    request = BuildRequest(source, tmp_path / "out", "llama", "text_generation",
+                           "fp16", max_sequence_length=256)
+    writer, build_native = Mock(), Mock()
+    monkeypatch.setattr(speculative, "build_speculative", build_native)
+
+    def unavailable(original, output, native, *, draft_dir):
+        assert draft_dir == draft
+        native(original, output)
+
+    monkeypatch.setattr(dispatch, "build", unavailable)
+    dispatch.build_paired(request, writer,
+                          BuildExecutionInputs("eagle3", (NamedCheckpoint("draft", draft),)))
+    build_native.assert_called_once_with(
+        model_dir=source, draft_dir=draft, output=request.output_path,
+        max_sequence_length=256, max_query=64, draft_depth=6, verbose=False,
+        _writer=writer)
+    writer.finish.assert_not_called()
+    writer.abort.assert_not_called()
+
+
 @pytest.mark.parametrize("weight_format", ["fp16", "fp8", "nvfp4"])
 @pytest.mark.parametrize("mode", ["absent", "success", "corrupt", "failure", "cancel", "device_failure"])
 def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, caplog, mode, weight_format):

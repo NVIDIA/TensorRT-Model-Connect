@@ -20,7 +20,8 @@ from families.gemma.model import (
 
 
 def _weights(parameters: int) -> dict:
-    return {"w": np.zeros(parameters, dtype=np.float32)}
+    # The estimator reads the logical element count, not dense storage.
+    return {"w": np.broadcast_to(np.zeros((), dtype=np.float32), (parameters,))}
 
 
 def test_bytes_follow_the_build_precision():

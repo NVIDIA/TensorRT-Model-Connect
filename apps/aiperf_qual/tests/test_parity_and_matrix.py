@@ -231,6 +231,54 @@ def test_an_order_check_whose_native_timing_fails_is_unresolved_and_replaces_the
     assert '"unresolved"' in (tmp_path / "order.json").read_text()
 
 
+@pytest.mark.parametrize("failure, reason", [("start", "Inductor lowering failed"),
+                                             ("incomplete", "incomplete under torch.compile")])
+def test_a_fixed_request_whose_torch_compile_fails_is_timed_eager_in_its_place(tmp_path, monkeypatch, failure, reason):
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from trtmc_aiperf_qual import judge, runner
+
+    started = []
+
+    @contextmanager
+    def serving(environment, model, backend, out, *, mode="eager", compile_fallback=None, **kwargs):
+        started.append((backend, mode, compile_fallback))
+        if backend == "reference" and mode == "compile" and failure == "start":
+            raise RuntimeError("Inductor lowering failed")
+        yield {"url": "u", "info": {"backend": backend, "timing_scope": "task-call-wall"}}
+
+    run = SimpleNamespace(raw_records=lambda: [])
+    monkeypatch.setattr(runner, "serving", serving)
+    monkeypatch.setattr(runner, "probe", lambda *args: None)
+
+    def perf_run(*args):  # args[5]: the run's directory, perf-reference-<mode>-<precision>-<request> or perf-candidate-*
+        p50 = 10.0 if "reference" in args[5].name else 2.0
+        stats = timing(p50, per_run_p50_ms=[p50, p50 * 1.01, p50 * 0.99])
+        if args[5].name.startswith("perf-reference-compile"):  # a request timed out while the server compiled
+            stats["incomplete"] = "11 of 12 requests succeeded"
+        return run, stats
+
+    monkeypatch.setattr(runner, "_perf_run", perf_run)
+    monkeypatch.setattr(runner, "output_check", lambda *args: (True, ""))
+    suite = SimpleNamespace(name="catalog", samples=[{"request": {"prompt": "p"}}])
+    model = {"model": "m", "operation": "generate",
+             "reference": {"mode": "compile", "perf_precision": "fp16", "precision": "fp32"}}
+    policy = {"reference_modes": ["compile"], "measurement": {}, "aggregation": {"compile": "mean", "eager": "mean"},
+              "margin_percent": 5, "max_ci_percent": 5, "guard_percent": 0}
+    timed = runner._reference_perf(Environment({}), model, policy, [suite], "python", runner._Phases(tmp_path), tmp_path)
+    stats = timed["compile"]["catalog"][1]
+    assert stats["mode"] == "eager" and reason in stats["compile_fallback"]
+    assert "precision_fallback" not in stats  # the same precision: no fallback baseline
+    assert started == [("reference", "compile", None), ("reference", "eager", stats["compile_fallback"])]
+    performance = []
+    runner._candidate(Environment({}), {**model, "absolute": []}, policy, [suite], timed, [], performance, tmp_path)
+    item, = performance
+    assert (item["reference_mode"], item["configured_mode"], item["qualifying"]) == ("eager", "compile", True)
+    assert judge.qualifying(item) and item["light"] == "green"
+    assert any(note.startswith("native torch.compile failed; timed in eager mode") for note in item["notes"])
+
+
 def test_an_order_check_that_cannot_start_is_unresolved(tmp_path, monkeypatch):
     from trtmc_aiperf_qual import runner
 
@@ -264,3 +312,85 @@ def test_the_order_check_command_builds_a_missing_bundle_and_skips_a_failed_buil
     assert code == 0 and built == ["broken", "ok"] and checked == ["ok"]
     assert lines[0]["status"] == "build-failed" and lines[1]["status"] == "within-limit"
     assert json.loads((tmp_path / "order" / "ok" / "build.json").read_text())["status"] == "built"
+
+
+def test_cer_counts_characters_without_spaces_or_punctuation():
+    """Japanese has no word boundaries: the error rate is over NFKC characters, spaces and punctuation dropped."""
+    problems = [{"gold": "インターネットで 敵対的環境コース について"}, {"gold": "ＡＢ、C"}]
+    units = gold_metrics.cer_units(problems, {0: {"text": "インターネットで敵対的環境コースについて。"},
+                                              1: {"text": "abd"}})
+    assert units == [(0.0, 20.0), (1.0, 3.0)]  # full-width letters fold to ASCII; one substitution
+    assert gold_metrics.wer(units) == pytest.approx(100.0 / 23.0)
+    assert gold_metrics.CORPUS["cer"][2] is False  # lower is better
+
+
+def test_decision_parity_needs_the_same_choices_within_the_family_tolerance():
+    native = {"scores": [{"question_id": "status", "option_ids": ["paid", "overdue"], "probabilities": [0.2, 0.8]},
+                         {"question_id": "large", "probabilities": [0.6, 0.4]}]}
+
+    def candidate(status, large):
+        return {"scores": [{"question_id": "status", "option_ids": ["paid", "overdue"], "probabilities": status},
+                           {"question_id": "large", "option_ids": ["false", "true"], "probabilities": large}]}
+
+    gate = {"atol": 0.015, "rtol": 0.01}
+    assert gold_metrics.decision_parity(candidate([0.21, 0.79], [0.59, 0.41]), native, gate)[0] is True
+    assert gold_metrics.decision_parity(candidate([0.25, 0.75], [0.6, 0.4]), native, gate)[0] is False
+    assert gold_metrics.decision_parity(candidate([0.2, 0.8], [0.49, 0.51]), native, gate)[0] is False
+    assert gold_metrics.decision_parity({"scores": []}, native, gate)[0] is None
+    missing = {"scores": native["scores"][:1]}
+    assert gold_metrics.decision_parity(missing, native, gate)[0] is False
+    assert gold_metrics.decision_parity({"scores": []}, {"scores": []}, gate)[0] is True  # no questions
+    assert gold_metrics.decision_parity({}, {"scores": []}, gate)[0] is None
+
+
+def test_open_vocabulary_detections_score_by_their_category_names():
+    """coco-names-80: text labels map to contiguous COCO classes; a phrase naming no category drops its box."""
+    output = {"boxes": [0, 0, 10, 10, 5, 5, 20, 20, 1, 1, 2, 2], "scores": [0.9, 0.8, 0.7],
+              "labels": ["Dining Table", "car truck", "person."]}
+    named = gold_metrics._named_detections(output)
+    assert named["class_ids"] == [60, 0] and named["scores"] == [0.9, 0.7]
+    assert named["boxes"] == [[0, 0, 10, 10], [1, 1, 2, 2]]
+    problems = [{"gold": {"bbox": [[0, 0, 10, 10]], "category": [60], "area": [100.0]}}]
+    units = gold_metrics.coco_units(problems, {0: output}, {"label_space": "coco-names-80"})
+    assert units[0][1]["class_ids"] == [60, 0] and units[0][2] == "category_index"
+    assert len(gold_metrics.COCO_NAMES) == len(gold_metrics.COCO_IDS) == 80
+
+
+def test_lossless_images_send_the_decoded_pixels_as_png():
+    import base64
+    import io
+
+    from PIL import Image
+
+    from trtmc_aiperf_qual.suites import _encoded_media
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 6), (200, 30, 90)).save(buffer, format="JPEG")
+    jpeg = {"bytes": buffer.getvalue()}
+    assert _encoded_media(jpeg, ".png")["$file"]["suffix"] == ".jpg"
+    media = _encoded_media(jpeg, ".png", lossless=True)["$file"]
+    assert media["suffix"] == ".png"
+    with Image.open(io.BytesIO(base64.b64decode(media["b64"]))) as decoded, \
+            Image.open(io.BytesIO(jpeg["bytes"])) as original:
+        assert decoded.format == "PNG" and decoded.tobytes() == original.convert("RGB").tobytes()
+
+
+def test_max_audio_seconds_drops_longer_clips_for_both_sides(tmp_path):
+    import base64
+    import io
+
+    import numpy as np
+    import soundfile
+
+    from trtmc_aiperf_qual.absolute import _audio_fitted
+    from trtmc_aiperf_qual.config import Environment
+
+    def clip(seconds):
+        buffer = io.BytesIO()
+        soundfile.write(buffer, np.zeros(int(16000 * seconds), dtype=np.float32), 16000, format="WAV")
+        return {"$file": {"suffix": ".wav", "b64": base64.b64encode(buffer.getvalue()).decode()}}
+
+    samples = [{"sample_id": name, "request": {"audio_path": clip(seconds)}}
+               for name, seconds in (("short", 12.0), ("limit", 30.0), ("long", 33.9))]
+    kept = _audio_fitted(Environment({}), samples, 30.0)
+    assert [sample["sample_id"] for sample in kept] == ["short", "limit"]

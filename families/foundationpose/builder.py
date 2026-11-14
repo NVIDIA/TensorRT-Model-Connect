@@ -48,6 +48,7 @@ class _OnnxWeightArchive:
                 f"FoundationPose {kind} weight artifact contract mismatch: "
                 f"inputs={sorted(inputs)}, outputs={sorted(outputs)}"
             )
+        self.node_list = list(model.graph.node)
         self.nodes = {node.name: node for node in model.graph.node}
         if len(self.nodes) != len(model.graph.node):
             raise ValueError(f"FoundationPose {kind} weight artifact has duplicate node names")
@@ -105,12 +106,14 @@ class _FoundationPoseGraph:
         archive: _OnnxWeightArchive,
         kind: str,
         work_np_dtype: type[np.float16] | type[np.float32],
+        quant: Any = None,
     ) -> None:
         self.trt = trt
         self.network = network
         self.archive = archive
         self.kind = kind
         self.work_np_dtype = work_np_dtype
+        self.quant = quant
         self._host_weights: list[np.ndarray] = []
 
     def layer(self, value: Any, kind: str, name: str) -> Any:
@@ -192,6 +195,23 @@ class _FoundationPoseGraph:
             node_name, 1, self._conv_shape(node_name), operation="Conv"
         )
         bias = self.archive.node_parameter(node_name, 2, (int(weight.shape[0]),), operation="Conv")
+        stride = (
+            2
+            if node_name.endswith((".0/net/net.0/Conv", ".1/net/net.0/Conv", ".2/net/net.0/Conv"))
+            else 1
+        )
+        kernel = int(weight.shape[2])
+        if self.quant is not None and self.quant.has(node_name):
+            return self.quant.convolution(
+                self.network,
+                tensor,
+                weight,
+                bias,
+                node_name,
+                name,
+                stride=stride,
+                padding=kernel // 2,
+            )
         dtype = self.numpy_dtype(tensor)
         weight = np.ascontiguousarray(weight, dtype=dtype)
         bias = np.ascontiguousarray(bias, dtype=dtype)
@@ -207,12 +227,6 @@ class _FoundationPoseGraph:
             "convolution",
             name,
         )
-        stride = (
-            2
-            if node_name.endswith((".0/net/net.0/Conv", ".1/net/net.0/Conv", ".2/net/net.0/Conv"))
-            else 1
-        )
-        kernel = int(weight.shape[2])
         convolution.stride_nd = (stride, stride)
         convolution.padding_nd = (kernel // 2, kernel // 2)
         return convolution.get_output(0)
@@ -529,11 +543,16 @@ def build_foundationpose_engine(
     kind: str,
     max_batch: int,
     precision: str,
+    quantization: str | None = None,
     verbose: bool = False,
 ) -> bytes:
     """Build a FoundationPose engine from family-owned TensorRT layers."""
     if precision not in {"fp16", "fp32"}:
         raise ValueError("FoundationPose engines support fp16 or fp32 builds")
+    if quantization not in {None, "fp8"}:
+        raise ValueError(f"Unsupported FoundationPose quantization: {quantization!r}")
+    if quantization == "fp8" and precision != "fp16":
+        raise ValueError("FoundationPose FP8 quantization requires precision='fp16'")
     if kind not in {"refiner", "scorer"}:
         raise ValueError(f"Unsupported FoundationPose engine kind: {kind!r}")
     if max_batch <= 0:
@@ -545,7 +564,12 @@ def build_foundationpose_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     archive = _OnnxWeightArchive(path, kind)
-    graph = _FoundationPoseGraph(trt, network, archive, kind, work_np_dtype)
+    quant = None
+    if quantization == "fp8":
+        from .quantization import quant_context
+
+        quant = quant_context(archive.node_list, archive.arrays, kind)
+    graph = _FoundationPoseGraph(trt, network, archive, kind, work_np_dtype, quant)
     input_shape = (-1, _INPUT_HEIGHT, _INPUT_WIDTH, _INPUT_CHANNELS)
     input1 = network.add_input("input1", trt.float32, input_shape)
     input2 = network.add_input("input2", trt.float32, input_shape)
@@ -581,10 +605,15 @@ def build_foundationpose_engine(
     config.add_optimization_profile(profile)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 8 << 30)
     config.max_aux_streams = 0
+    if quant is not None:
+        from .quantization import configure_build
+
+        configure_build(config)
     if verbose:
         print(
             f"[trtmc build] Building native FoundationPose {kind} graph "
-            f"(batch=1..{max_batch}, input=160x160x6, precision={precision}) ...",
+            f"(batch=1..{max_batch}, input=160x160x6, precision={precision}, "
+            f"quantization={quantization or 'none'}) ...",
             file=sys.stderr,
         )
     plan = builder.build_serialized_network(network, config)

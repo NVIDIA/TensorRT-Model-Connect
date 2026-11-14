@@ -25,6 +25,13 @@ def test_eagle_vlm_default_task_is_checkpoint_owned() -> None:
     )
 
     assert embedding_family == "eagle_vlm"
-    assert embedding.default_task == "embedding"
+    assert embedding.default_task == "text_to_embedding"
     assert reranking_family == "eagle_vlm"
-    assert reranking.default_task == "reranking"
+    assert reranking.default_task == "text_query_documents_to_relevance"
+
+
+def test_eagle_vlm_generic_checkpoint_defaults_to_pooled_features() -> None:
+    family, support = resolve_family(ModelMetadata({"model_type": "eagle_vlm"}, {}))
+
+    assert family == "eagle_vlm"
+    assert support.default_task == "text_to_pooled_features"

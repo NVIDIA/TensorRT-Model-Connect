@@ -75,3 +75,32 @@ def test_prefers_materialized_attention_layout() -> None:
 def test_rejects_non_positive_global_attention_interval() -> None:
     with pytest.raises(ValueError, match="global_attn_every_n_layers must be positive"):
         resolve_attention_contract(_config(global_attn_every_n_layers=0, layer_types=None))
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ({}, 64),
+        ({"local_attention": 128}, 64),
+        ({"local_attention": 5}, 2),
+        ({"local_attention": 8, "sliding_window": 1}, 1),
+        ({"sliding_window": 0}, 0),
+        ({"sliding_window": 2147483646}, 2147483646),
+        ({"local_attention": 4294967293}, 2147483646),
+    ],
+)
+def test_resolves_inclusive_local_half_window(raw, expected):
+    assert resolve_attention_contract(_config(**raw)).sliding_window == expected
+
+
+@pytest.mark.parametrize("key", ["local_attention", "sliding_window"])
+@pytest.mark.parametrize("value", [-1, True, 1.5, "4"])
+def test_rejects_invalid_local_window(key, value):
+    with pytest.raises(ValueError, match="non-negative integer"):
+        resolve_attention_contract(_config(**{key: value}))
+
+
+@pytest.mark.parametrize("raw", [{"sliding_window": 2147483647}, {"local_attention": 4294967294}])
+def test_rejects_local_window_outside_graph_int32_range(raw):
+    with pytest.raises(ValueError, match="half-window must be at most 2147483646"):
+        resolve_attention_contract(_config(**raw))

@@ -27,9 +27,8 @@ def check_consumers(bundle: Path, runtime_root: Path, prompt: str, case: dict,
     environment["LD_LIBRARY_PATH"] = ":".join(
         value for value in (str(runtime_root), environment.get("LD_LIBRARY_PATH", "")) if value
     )
-    # Token input is an independent public input representation. Do not decode
-    # and re-tokenize it in the family or require tokenizer implementations to
-    # produce bitwise-identical input IDs across frameworks.
+    # Note (Jiaxin Deng): Token-ID input bypasses tokenization, so validate its SDK
+    # agreement independently of the text-input oracle.
     tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
     ids = tokenizer.encode(prompt)
     token_file = tmp_path / "sdk-prefix.i32"

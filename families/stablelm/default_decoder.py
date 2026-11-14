@@ -28,6 +28,7 @@ from . import graph_ops
 from . import graph_blocks
 from .config import ModelConfig
 from .default_dual_profile_decoder import build_dual_profile_decoder_engine
+from .quantization import configure_fp8_build
 from .utils import const_in_work_dtype, create_builder_context
 
 
@@ -47,6 +48,20 @@ def _mark_debug_output(
     out = cast.get_output(0)
     out.name = name
     network.mark_output(out)
+
+
+# Listed by TensorRT 11.4 and later only; TensorRT 11.1 does not have it.
+_TENSORRT_11_4_KNOB = "-mha_fusion:gemv_mha_v2"
+
+
+def _keep_fp16_attention_mask(trt_config) -> bool:
+    """Keep the FP16 attention mask FP16 next to FP32-cast Q, K and V (TensorRT 11.4).
+
+    TensorRT 11.4 fails to build the decomposable attention when its mask is cast to
+    FP32: the optimizer keeps the scores in half and adds the FP32 mask to them, and
+    its type check rejects the mixed add. TensorRT 11.1 needs the FP32 mask.
+    """
+    return _TENSORRT_11_4_KNOB in getattr(trt_config, "all_build_routes", "")
 
 
 def _use_fp32_lm_head_accumulation(
@@ -234,8 +249,13 @@ def build_standard_decoder_engine(
             f"fp32_layers contains out-of-range indices: {invalid_fp32_layers}")
     if precision == "fp32":
         fp32_layers = frozenset()
-    if fp32_layers and quant_ctx is not None:
-        raise ValueError("fp32_layers is not supported with quantized builds")
+    if quant_ctx is not None:
+        quantized_fp32 = sorted(layer for layer in fp32_layers if quant_ctx.quantizes_layer(layer))
+        if quantized_fp32:
+            raise ValueError(
+                f"fp32_layers {quantized_fp32} have FP8 projections; leave them out of the "
+                "quantization (build() does this for the layers of fp32_layers)"
+            )
     head_dim = attention_size // num_heads
     kv_attention_size = graph_blocks.infer_kv_attention_size(
         weights, num_kv_heads=num_kv_heads, head_dim=head_dim)
@@ -247,6 +267,8 @@ def build_standard_decoder_engine(
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config
+    configure_fp8_build(trt_config, quant_ctx)
+    keep_fp16_attention_mask = _keep_fp16_attention_mask(trt_config)
 
     # Precision configuration
     if precision == "fp16":
@@ -476,6 +498,7 @@ def build_standard_decoder_engine(
             rotary_embedding_dim=rotary_embedding_dim,
             interleaved_rope=interleaved_rope,
             fp32_attention_accumulation=fp32_attention_accumulation,
+            keep_fp16_attention_mask=keep_fp16_attention_mask,
         )
 
         hidden_state = _cast_work_dtype(result["hidden"])
@@ -597,6 +620,7 @@ def _add_decoder_layer(
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
     fp32_attention_accumulation: bool = False,
+    keep_fp16_attention_mask: bool = False,
     eps: float | None = None,
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
@@ -622,6 +646,7 @@ def _add_decoder_layer(
         rotary_embedding_dim=rotary_embedding_dim,
         interleaved_rope=interleaved_rope,
         fp32_attention_accumulation=fp32_attention_accumulation,
+        keep_fp16_attention_mask=keep_fp16_attention_mask,
     )
     attn_out = attn["attn_out"]
     present_k = attn["present_k"]

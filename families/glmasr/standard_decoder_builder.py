@@ -28,6 +28,7 @@ from . import graph_ops
 from . import graph_blocks
 from .config import ModelConfig
 from .dual_profile_decoder_builder import build_dual_profile_decoder_engine
+from .quantization import configure_fp8_build
 from .utils import const_in_work_dtype
 
 
@@ -117,7 +118,8 @@ def build_standard_decoder_engine(
     # The legacy single-profile graph below stays in place for paths the
     # dual-profile builder does not yet cover:
     #
-    #   - embed_input=True             (VL prefill replacement, Bark sub-engines)
+    #   - embed_input=True             (decode engines with projected audio
+    #                                   frames; a split prefill engine takes them)
     #   - debug_layer_outputs=True     (per-layer hidden-state dumps)
     #   - hidden_state_output=True     (speech / Bark hidden output)
     requested_fp32_layers = tuple(config.raw.get("_fp32_layers", ()))
@@ -130,7 +132,7 @@ def build_standard_decoder_engine(
     if dynamic_kv_cache and not dynamic_kv_profile_rows:
         dynamic_kv_profile_rows = [max_cache_length]
     _dual_profile_disabled_for = (
-        embed_input
+        (embed_input and decoder_engine_role != "prefill")
         or debug_layer_outputs
         or hidden_state_output
         or bool(requested_fp32_layers)
@@ -156,6 +158,7 @@ def build_standard_decoder_engine(
             verbose=verbose,
             dynamic_kv_profile_rows=dynamic_kv_profile_rows,
             profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
+            embed_input=embed_input,
         )
 
     attention_size: int = weights.get("_attention_size", config.attention_size)
@@ -197,6 +200,7 @@ def build_standard_decoder_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
+    configure_fp8_build(trt_config, quant_ctx)
 
     # Precision configuration
     if precision == "fp16":

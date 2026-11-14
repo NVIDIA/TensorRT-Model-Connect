@@ -6,7 +6,9 @@
 from tensorrt_model_connect.model_support import FamilySupport, ModelMetadata
 
 
-_SUPPORT = FamilySupport(tasks=("robot_control",), default_task="robot_control")
+_SUPPORT = FamilySupport(
+    tasks=("image_state_to_action_chunk",), default_task="image_state_to_action_chunk"
+)
 
 
 def describe(metadata: ModelMetadata) -> FamilySupport | None:

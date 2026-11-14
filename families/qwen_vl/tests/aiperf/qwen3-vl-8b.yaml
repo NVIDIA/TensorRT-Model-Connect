@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Default TRTMC builds smart-resize images within the 448-square budget (200704 pixels); give the
+# reference the same documented processor limit so both sides receive the same image geometry.
+reference:
+  mode: eager  # torch.compile: generation recompiles past Dynamo's limit
+  requirements: families/qwen_vl/requirements.txt  # the family's dependencies, layered on the serving interpreter
+  options: {processor_kwargs: {max_pixels: 200704}}
+
+# The catalog bundle's 256-token KV cache holds an OCRBench prompt but not the prompt plus its 128-token answer;
+# a full cache slides and drops the image, and the answer degenerates into repetition. Reserve up to 196 image
+# tokens (the 200704-pixel budget in 32-pixel merged patches), 10 chat-template tokens, and 128 generated tokens.
+candidate:
+  build: {name: qwen3-vl-8b-benchmark}
+  benchmark_sequence_length: {extra_tokens: 334}

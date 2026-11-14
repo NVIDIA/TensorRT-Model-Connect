@@ -13,7 +13,9 @@
 #include "families/qwen_image/runtime/pipeline.h"
 
 #include "families/qwen_image/runtime/qwen_image_batch_utils.h"
+#include "families/qwen_image/runtime/qwen_image_resample.h"
 #include "families/qwen_image/runtime/qwen_image_scheduler.h"
+#include "families/qwen_image/runtime/qwen_image_vision_layout.h"
 
 #include <algorithm>
 #include <cmath>
@@ -812,13 +814,6 @@ void validate_resize_target(int height, int width) {
     }
 }
 
-std::size_t hwc_index(int y, int x, int c, int width) {
-    return (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
-            static_cast<std::size_t>(x)) *
-               3UL +
-           static_cast<std::size_t>(c);
-}
-
 float clamp_unit_image_value(float value) {
     if (!std::isfinite(value)) {
         throw std::runtime_error(
@@ -827,65 +822,35 @@ float clamp_unit_image_value(float value) {
     return std::max(0.0F, std::min(1.0F, value));
 }
 
-float sample_hwc_bilinear_unit(const float* pixels, int src_h, int src_w, int dst_y, int dst_x,
-                               int dst_h, int dst_w, int channel) {
-    const double src_y = (static_cast<double>(dst_y) + 0.5) * static_cast<double>(src_h) /
-                             static_cast<double>(dst_h) -
-                         0.5;
-    const double src_x = (static_cast<double>(dst_x) + 0.5) * static_cast<double>(src_w) /
-                             static_cast<double>(dst_w) -
-                         0.5;
-    const double y = std::max(0.0, std::min(src_y, static_cast<double>(src_h - 1)));
-    const double x = std::max(0.0, std::min(src_x, static_cast<double>(src_w - 1)));
-    const int y0 = static_cast<int>(std::floor(y));
-    const int x0 = static_cast<int>(std::floor(x));
-    const int y1 = std::min(y0 + 1, src_h - 1);
-    const int x1 = std::min(x0 + 1, src_w - 1);
-    const double wy = y - static_cast<double>(y0);
-    const double wx = x - static_cast<double>(x0);
-
-    const float p00 = clamp_unit_image_value(pixels[hwc_index(y0, x0, channel, src_w)]);
-    const float p01 = clamp_unit_image_value(pixels[hwc_index(y0, x1, channel, src_w)]);
-    const float p10 = clamp_unit_image_value(pixels[hwc_index(y1, x0, channel, src_w)]);
-    const float p11 = clamp_unit_image_value(pixels[hwc_index(y1, x1, channel, src_w)]);
-
-    const double top = static_cast<double>(p00) * (1.0 - wx) + static_cast<double>(p01) * wx;
-    const double bottom = static_cast<double>(p10) * (1.0 - wx) + static_cast<double>(p11) * wx;
-    return static_cast<float>(top * (1.0 - wy) + bottom * wy);
-}
-
-std::vector<float> resize_hwc_unit(const float* pixels, int src_h, int src_w, int dst_h,
-                                   int dst_w) {
-    validate_resize_target(dst_h, dst_w);
-    std::vector<float> out(static_cast<std::size_t>(dst_h) * static_cast<std::size_t>(dst_w) * 3UL);
-    for (int y = 0; y < dst_h; ++y) {
-        for (int x = 0; x < dst_w; ++x) {
-            for (int c = 0; c < 3; ++c) {
-                out[hwc_index(y, x, c, dst_w)] =
-                    sample_hwc_bilinear_unit(pixels, src_h, src_w, y, x, dst_h, dst_w, c);
-            }
-        }
-    }
+// The worker decodes 8-bit images into [0, 1] floats; recover the bytes the
+// reference pipeline resizes.
+std::vector<uint8_t> unit_hwc_to_u8(const float* pixels, int height, int width) {
+    std::vector<uint8_t> out(static_cast<std::size_t>(height) * static_cast<std::size_t>(width) *
+                             3UL);
+    for (std::size_t index = 0; index < out.size(); ++index)
+        out[index] =
+            static_cast<uint8_t>(std::lround(clamp_unit_image_value(pixels[index]) * 255.0F));
     return out;
 }
 
-std::vector<float> resize_hwc_unit_to_ncthw_minus1_1(const float* pixels, int src_h, int src_w,
-                                                     int dst_h, int dst_w) {
-    validate_resize_target(dst_h, dst_w);
-    const std::size_t plane = static_cast<std::size_t>(dst_h) * static_cast<std::size_t>(dst_w);
+std::vector<float> u8_to_unit(const std::vector<uint8_t>& pixels) {
+    std::vector<float> out(pixels.size());
+    for (std::size_t index = 0; index < pixels.size(); ++index)
+        out[index] = static_cast<float>(pixels[index]) / 255.0F;
+    return out;
+}
+
+// VaeImageProcessor.preprocess: [0, 1] -> [-1, 1], channel planes.
+std::vector<float> u8_hwc_to_chw_minus1_1(const std::vector<uint8_t>& pixels, int height,
+                                          int width) {
+    const std::size_t plane = static_cast<std::size_t>(height) * static_cast<std::size_t>(width);
     std::vector<float> out(3UL * plane);
-    for (int y = 0; y < dst_h; ++y) {
-        for (int x = 0; x < dst_w; ++x) {
-            const std::size_t pixel_index =
-                static_cast<std::size_t>(y) * static_cast<std::size_t>(dst_w) +
-                static_cast<std::size_t>(x);
-            for (int c = 0; c < 3; ++c) {
-                const float unit =
-                    sample_hwc_bilinear_unit(pixels, src_h, src_w, y, x, dst_h, dst_w, c);
-                out[static_cast<std::size_t>(c) * plane + pixel_index] = unit * 2.0F - 1.0F;
-            }
-        }
-    }
+    for (std::size_t pixel = 0; pixel < plane; ++pixel)
+        for (int c = 0; c < 3; ++c)
+            out[static_cast<std::size_t>(c) * plane + pixel] =
+                static_cast<float>(pixels[pixel * 3UL + static_cast<std::size_t>(c)]) / 255.0F *
+                    2.0F -
+                1.0F;
     return out;
 }
 
@@ -899,10 +864,17 @@ QwenImagePipeline::preprocess_edit_input_image(const float* image_pixels, int32_
 
     EditInputTensors out;
     out.plan = compute_edit_image_plan(image_height, image_width, cfg);
-    out.condition_pixels_hwc = resize_hwc_unit(image_pixels, image_height, image_width,
-                                               out.plan.condition_height, out.plan.condition_width);
-    out.vae_pixels_ncthw = resize_hwc_unit_to_ncthw_minus1_1(
-        image_pixels, image_height, image_width, out.plan.vae_height, out.plan.vae_width);
+    // QwenImageEditPlusPipeline resizes the PIL image with Pillow's Lanczos
+    // filter for both the vision-language condition and the VAE input.
+    validate_resize_target(out.plan.condition_height, out.plan.condition_width);
+    validate_resize_target(out.plan.vae_height, out.plan.vae_width);
+    const auto source = unit_hwc_to_u8(image_pixels, image_height, image_width);
+    out.condition_pixels_hwc = u8_to_unit(qwen_image::pillow_lanczos_resize_rgb(
+        source, image_height, image_width, out.plan.condition_height, out.plan.condition_width));
+    out.vae_pixels_ncthw = u8_hwc_to_chw_minus1_1(
+        qwen_image::pillow_lanczos_resize_rgb(source, image_height, image_width,
+                                              out.plan.vae_height, out.plan.vae_width),
+        out.plan.vae_height, out.plan.vae_width);
     return out;
 }
 
@@ -1180,6 +1152,10 @@ std::vector<float> resize_hwc_unit_to_qwen_vl_pixel_values(const std::vector<flo
     }
     constexpr float kMean[3] = {0.48145466F, 0.4578275F, 0.40821073F};
     constexpr float kStd[3] = {0.26862954F, 0.26130258F, 0.27577711F};
+    // The Qwen2-VL fast image processor resizes the uint8 condition image with
+    // PyTorch's antialiased bicubic interpolation before rescaling.
+    const auto resized = qwen_image::torch_aa_bicubic_resize_rgb(
+        unit_hwc_to_u8(pixels.data(), src_h, src_w), src_h, src_w, dst_h, dst_w);
     const std::size_t plane = static_cast<std::size_t>(dst_h) * static_cast<std::size_t>(dst_w);
     std::vector<float> out(6UL * plane);
     for (int y = 0; y < dst_h; ++y) {
@@ -1189,7 +1165,8 @@ std::vector<float> resize_hwc_unit_to_qwen_vl_pixel_values(const std::vector<flo
                 static_cast<std::size_t>(x);
             for (int c = 0; c < 3; ++c) {
                 const float unit =
-                    sample_hwc_bilinear_unit(pixels.data(), src_h, src_w, y, x, dst_h, dst_w, c);
+                    static_cast<float>(resized[pixel_index * 3UL + static_cast<std::size_t>(c)]) /
+                    255.0F;
                 const float normalized = (unit - kMean[c]) / kStd[c];
                 const std::size_t base = static_cast<std::size_t>(c) * 2UL * plane;
                 out[base + pixel_index] = normalized;
@@ -1264,9 +1241,13 @@ QwenImagePipeline::vision_encode_edit_condition(const EditInputTensors& edit_inp
     const auto dims = resolve_vision_encode_dims(config_);
     validate_vision_encode_dims(dims);
 
-    auto pixel_values = resize_hwc_unit_to_qwen_vl_pixel_values(
-        edit_inputs.condition_pixels_hwc, edit_inputs.plan.condition_height,
-        edit_inputs.plan.condition_width, dims.height, dims.width);
+    // The engine groups consecutive raster patches into merge groups, so the
+    // pixels follow Qwen2VLImageProcessor's merge-group patch order.
+    auto pixel_values = qwen_image::to_merge_group_patch_order(
+        resize_hwc_unit_to_qwen_vl_pixel_values(
+            edit_inputs.condition_pixels_hwc, edit_inputs.plan.condition_height,
+            edit_inputs.plan.condition_width, dims.height, dims.width),
+        6, dims.height, dims.width, dims.patch, dims.merge);
 
     TensorMap inputs;
     inputs["pixel_values"] =

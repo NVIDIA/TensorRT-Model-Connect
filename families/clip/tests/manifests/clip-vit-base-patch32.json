@@ -1,0 +1,19 @@
+{
+  "name": "clip-vit-base-patch32",
+  "hf_id": "openai/clip-vit-base-patch32",
+  "hf_revision": "3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268",
+  "bundle": "clip-vit-base-patch32.bundle",
+  "family": "clip",
+  "task": "text_image_to_relevance",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "clip-vit-base-patch32",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg",
+      "query": "a photo of a car",
+      "negative_query": "a photo of a cat"
+    }
+  ],
+  "tensor_parallel_size": 1
+}

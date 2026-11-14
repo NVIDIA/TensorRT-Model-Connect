@@ -21,6 +21,7 @@ import tensorrt as trt
 from safetensors import safe_open
 
 from . import config as config_module
+from . import quantization as quantization_module
 from . import text_encoder_builder, unet_builder, vae_builder
 
 _DEFAULT_LATENT = 64  # 512x512, the resolution SD 1.5 was trained at
@@ -43,13 +44,15 @@ def _load_component(model_dir: Path, component: str, filename: str) -> dict:
     return weights
 
 
-def _compile(populate, *, precision: str, verbose: bool) -> bytes:
+def _compile(populate, *, precision: str, verbose: bool, configure=None) -> bytes:
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     builder_config = builder.create_builder_config()
     builder_config.builder_optimization_level = 3
+    if configure is not None:
+        configure(builder_config)
     work_np = np.float16 if precision == "fp16" else np.float32
     work_trt = trt.float16 if precision == "fp16" else trt.float32
     populate(network, work_np, work_trt)
@@ -79,11 +82,14 @@ def build_text_encoder_engine(weights, cfg, *, precision, verbose=False,
     return _compile(populate, precision=precision, verbose=verbose)
 
 
-def build_unet_engine(weights, cfg, *, precision, verbose=False) -> bytes:
+def build_unet_engine(weights, cfg, *, precision, verbose=False, quant=None) -> bytes:
+    if quant is not None and precision != "fp16":
+        raise NotImplementedError("stable_diffusion FP8 quantization requires precision=fp16")
     return _compile(
         lambda network, work_np, work_trt: unet_builder.build_unet(
-            network, weights, cfg, work_np, work_trt),
-        precision=precision, verbose=verbose)
+            network, weights, cfg, work_np, work_trt, quant=quant),
+        precision=precision, verbose=verbose,
+        configure=quantization_module.configure_build if quant is not None else None)
 
 
 def build_vae_engine(weights, cfg, latent_size, *, precision, verbose=False) -> bytes:
@@ -153,8 +159,10 @@ def build(request, writer) -> None:
     if request.max_sequence_length is not None:
         # CLIP's context length is fixed by the checkpoint, so it cannot be overridden.
         raise NotImplementedError("stable_diffusion does not support max_sequence_length")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("stable_diffusion does not support quantization")
+    quantization = request.quantization or "none"
+    if quantization not in {"none", "fp8"}:
+        raise NotImplementedError(
+            f"stable_diffusion supports quantization none or fp8, got {quantization!r}")
     if request.fp32_layers:
         raise NotImplementedError("stable_diffusion does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -163,6 +171,8 @@ def build(request, writer) -> None:
     precision = str(request.precision).lower()
     if precision not in {"fp16", "fp32"}:
         raise ValueError(f"Unsupported stable_diffusion precision: {precision}")
+    if quantization == "fp8" and precision != "fp16":
+        raise NotImplementedError("stable_diffusion FP8 quantization requires precision=fp16")
 
     height = int(request.image_height or 0) or _DEFAULT_LATENT * 8
     width = int(request.image_width or 0) or _DEFAULT_LATENT * 8
@@ -175,6 +185,9 @@ def build(request, writer) -> None:
     model_dir = Path(request.model_dir)
     cfg = config_module.resolve(model_dir, latent_size=latent)
     verbose = bool(request.verbose)
+    if quantization == "fp8":
+        # Refuse an uncalibrated model or image size before any weights are read.
+        quantization_module.load_activation_scales(quantization_module.scale_key(cfg))
 
     text_weights = _load_component(model_dir, "text_encoder", "model.safetensors")
     unet_weights = _load_component(model_dir, "unet", "diffusion_pytorch_model.safetensors")
@@ -196,8 +209,12 @@ def build(request, writer) -> None:
         writer.add_bytes("text_encoder_2.plan", build_text_encoder_engine(
             second_weights, cfg["text_encoder_2"], precision=precision, verbose=verbose,
             penultimate=True, pooled=True))
+    quant = None
+    if quantization == "fp8":
+        quant = quantization_module.unet_quant_context(
+            unet_weights, cfg, quantization=quantization)
     writer.add_bytes("unet.plan", build_unet_engine(
-        unet_weights, cfg["unet"], precision=precision, verbose=verbose))
+        unet_weights, cfg["unet"], precision=precision, verbose=verbose, quant=quant))
     writer.add_bytes("vae.plan", build_vae_engine(
         vae_weights, cfg["vae"], latent, precision=vae_precision, verbose=verbose))
     writer.add_bytes("tokenizer.json", _tokenizer_bytes(model_dir))

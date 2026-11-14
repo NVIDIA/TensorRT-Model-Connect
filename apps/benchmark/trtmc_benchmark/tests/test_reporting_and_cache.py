@@ -867,3 +867,36 @@ def test_report_image_artifacts_obey_case_boundary_and_do_not_invent_time(tmp_pa
     assert "outside.png" not in document and "link.png" not in document
     assert "Output images: 4 artifact(s) unavailable" in document
     assert "Frame 0</figcaption>" in document and "Frame 0 ·" not in document
+
+
+def test_build_reads_a_family_prepared_checkpoint(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    from trtmc_benchmark import builder
+
+    module = types.ModuleType("families.fake_family.convert_checkpoint")
+    module.prepare = lambda model_dir, destination: destination
+    monkeypatch.setitem(sys.modules, "families.fake_family.convert_checkpoint", module)
+    monkeypatch.setattr(builder.importlib.util, "find_spec",
+                        lambda name: types.SimpleNamespace(name=name) if "fake_family" in name else None)
+    assert builder._buildable_model_dir("fake_family", tmp_path, tmp_path / "out") == tmp_path / "out"
+    assert builder._buildable_model_dir("plain_family", tmp_path, tmp_path / "out") == tmp_path
+
+
+def test_build_reports_a_failed_checkpoint_preparation(tmp_path, monkeypatch):
+    import sys
+    import types
+
+    from trtmc_benchmark import builder
+    from trtmc_benchmark.types import BenchmarkError
+
+    def prepare(model_dir, destination):
+        raise FileNotFoundError("pytorch_model.bin")
+
+    module = types.ModuleType("families.fake_family.convert_checkpoint")
+    module.prepare = prepare
+    monkeypatch.setitem(sys.modules, "families.fake_family.convert_checkpoint", module)
+    monkeypatch.setattr(builder.importlib.util, "find_spec", lambda name: types.SimpleNamespace(name=name))
+    with pytest.raises(BenchmarkError, match="cannot prepare the fake_family checkpoint"):
+        builder._buildable_model_dir("fake_family", tmp_path, tmp_path / "out")

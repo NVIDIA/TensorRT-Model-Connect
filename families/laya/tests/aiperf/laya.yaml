@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  adapter: families/laya/reference/adapter.py  # the released laya package
+  requirements: families/laya/requirements.txt
+  mode: eager  # the package runs its own modules; torch.compile has no graph to compile
+  options: {variant: english, max_sequence_length: 512}  # the manifest's variant and capacity

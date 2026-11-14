@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  adapter: families/owlv2/reference/adapter.py  # no generic open-vocabulary detection adapter
+
+benchmarks:
+  coco_prompted: {request: {score_threshold: 0.1}}  # COCO mAP over the boxes above 0.1 (the AP sweep)

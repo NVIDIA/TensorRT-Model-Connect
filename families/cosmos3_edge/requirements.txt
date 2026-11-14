@@ -1,0 +1,7 @@
+numpy>=1.26
+safetensors>=0.4
+torch>=2.6
+transformers>=5.20.2,<6
+Pillow>=13,<14
+av>=16
+accelerate>=1.1

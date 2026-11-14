@@ -142,8 +142,10 @@ execution does not mark those tests as passing.
 The original InternVL3.5-14B FP16/context384 profile has a recorded ONNX build
 allocation failure with TensorRT 11.1.0.106. The family rejects that exact
 profile when the device has less total memory than the observed single
-49,913,047,296-byte allocation, before launching a known-failing build or its
-also-failing native fallback. This is a necessary lower bound, not a sufficient
+49,913,047,296-byte allocation, before launching a known-failing Edge build.
+The unchanged request then attempts the native Model Connect builder. The
+Edge allocation bound is not applied to that different native graph. This is
+a necessary lower bound for Edge, not a sufficient
 memory estimate. Larger devices are not rejected simply because a smaller
 device of the same architecture failed. The completed SM86 retry also failed,
 as recorded below; it is not a qualified profile.
@@ -151,7 +153,7 @@ as recorded below; it is not a qualified profile.
 Other unexpected preparation failures retain the existing warned native
 fallback. Missing interfaces are not implemented by silently dropping inputs.
 
-The native SM86 48 GiB retry also failed: TensorRT requested a single
+The native-target Edge SM86 48 GiB retry also failed: TensorRT requested a single
 52,849,060,096-byte allocation after successful ONNX export. The recorded
 FP16/context384 profile is rejected on devices below its observed
 SM-specific allocation bound; larger devices are not declared qualified.
@@ -166,9 +168,54 @@ These controls failed the unchanged image-quality gate, not build/inference.
 Selecting a backend never waives that gate or qualifies a new profile.
 The option is not silently discarded into a native/non-AWQ fallback.
 
-The same original 3.5-14B FP16/context384 request is not retried natively on
-the available 40/48 GiB SM80/SM86 targets when the SDK is absent. Its native
-TP1 factory keeps separate roughly 29.5 GB prefill/decode plans resident;
-the recorded 40 GiB run failed loading the second engine. 48 GiB is still below
-this pair's estimated footprint, not a claimed native 48 GiB execution result.
-Larger devices remain unqualified, not blacklisted.
+### Native decoder fallback
+
+Native TP1 builds use the family's TensorRT Python graph builder to emit one
+decoder engine with prefill and decode optimization profiles. The family C++
+runtime creates both contexts from the same engine, instead of loading two
+independent copies of the decoder weights. Older split-engine bundles remain
+readable. Neither graph construction nor execution uses ONNX or Edge-LLM.
+
+The former native SM/TRT-specific capacity blacklist is removed. A previous
+14B failure while loading the second decoder engine does not establish the
+memory requirement of this new layout. Actual available memory still matters;
+the change does not qualify 14B or guarantee it fits a particular device.
+InternVL3-2B FP16/context384 passed the existing native image-health and HF
+output-parity test with the single-engine layout on SM80.
+
+Published group128 GEMM AWQ checkpoints now have a native checkpoint-loading
+path, including their original tensor-only PyTorch shards and vision/projector
+names. Install the owning `families/internvl/requirements.txt` dependencies;
+PyTorch 2.10.0 or newer is required for the restricted `weights_only=True`
+checkpoint loader and memory mapping. Older versions are affected by
+[GHSA-63cw-57p8-fm3p](https://github.com/pytorch/pytorch/security/advisories/GHSA-63cw-57p8-fm3p). It reconstructs the same quantized weight values for ordinary TensorRT
+matmuls; it does not replace the checkpoint with unquantized source weights.
+This representation requires more memory than packed INT4 and does not promise
+Edge INT4-kernel performance. No AWQ CUDA kernel or ONNX conversion is introduced.
+
+The InternVL3-2B-AWQ FP16/context384 native image case on SM80 matched the official
+source model in FP32 with upstream AutoAWQ dequantization: all 196 packed decoder
+projections matched exactly, output token IDs matched, text NED was zero, and
+visual feature cosine was 0.99995. Existing owning comparison gates were unchanged.
+This result does not qualify every AWQ checkpoint, context length, or device.
+InternVL3_5-1B-HF FP16/context384 also passed native image-health and the existing
+single-image workload against HF FP32 on SM80, with exact output-token equality
+and NED zero. This is an exact-checkpoint result, not catalog-wide qualification.
+
+The native loader also preserves InternVL3.5 Q/K normalization weights, merges
+original nested decoder metadata even when the root has a hidden size, and maps
+the original projector as LayerNorm before its first linear layer. Native image
+normalization now matches the published ImageNet statistics. Instruction-tokenizer
+EOS takes precedence over a stale base-decoder end-of-text token.
+
+
+### Publication scope
+
+The native follow-up preserves current image tiling, prompt framing, and
+serialized-plan lifetime fixes. TP1 uses one dual-profile decoder plan; both
+contexts share its engine weights. Historical split bundles are still readable.
+The retained checkpoint results above predate the current main revision and its
+tiling changes; fresh exact-head CI is required. A smaller decoder representation
+does not by itself qualify the previously capacity-blocked 14B configuration.
+The numerical gates, quality-only failure admission and explicit Edge plugin
+selection policy are unchanged.

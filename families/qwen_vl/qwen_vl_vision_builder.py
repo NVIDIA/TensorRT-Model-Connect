@@ -328,6 +328,7 @@ def build_qwen_vl_vision_engine(
     builder_context = create_builder_context(
         verbose=verbose,
         workspace_bytes=workspace_bytes,
+        disable_tf32=dynamic_image_resolution and precision == "fp32",
     )
     builder = builder_context.builder
     network = builder_context.network
@@ -848,7 +849,7 @@ def _add_deepstack_merger(
         network, fc1, fc1_hidden, fc1_b, dtype=dtype)
 
     # GELU activation
-    activated = graph_ops.add_gelu_new(network, fc1, dtype=dtype)
+    activated = network.add_activation(fc1, trt.ActivationType.GELU_ERF).get_output(0)
 
     # fc2: [num_merged, fc1_hidden] -> [num_merged, text_hidden_size]
     fc2_w = weights[f"{merger_prefix}.linear_fc2.weight"].astype(np.float32)
@@ -980,7 +981,8 @@ def build_qwen3_vl_vision_engine(
 
     builder_context = create_builder_context(
         verbose=verbose,
-        workspace_bytes=2 << 30,
+        workspace_bytes=(8 if dynamic_image_resolution else 2) << 30,
+        disable_tf32=dynamic_image_resolution and precision == "fp32",
     )
     builder = builder_context.builder
     network = builder_context.network
@@ -1106,54 +1108,56 @@ def build_qwen3_vl_vision_engine(
     head_dim = embed_dim // num_heads
     rope_dim = head_dim // 2  # dim parameter to RotaryEmbedding
 
-    # inv_freq: 1.0 / (theta ** (arange(0, rope_dim, 2) / rope_dim))
-    inv_freq = 1.0 / (rope_theta ** (
-        np.arange(0, rope_dim, 2, dtype=np.float64) / rope_dim))
-
-    # Build frequency table: freq_table[pos] = outer(pos, inv_freq)
-    max_hw = max(grid_h, grid_w)
-    freq_table = np.outer(np.arange(max_hw, dtype=np.float64), inv_freq)
-
-    # Compute 2D position IDs in the SAME order as patches arrive at attention.
-    # HF's rot_pos_emb uses merge-group ordering: for each merged block (bh, bw),
-    # iterate over intra-block offsets (ih, iw). The patches from our conv are in
-    # raster order, so we must match: the RoPE table is applied element-wise to
-    # the sequence, meaning position[i] describes the spatial location of patch[i].
-    # Our conv outputs patches in raster order: (0,0),(0,1),...,(0,W-1),(1,0),...
-    # HF's unfold+linear also produces raster order patches.
-    # The RoPE positions must be in raster order too.
-    merged_h = grid_h // merge_size
-    merged_w = grid_w // merge_size
-
-    # Merge-group-ordered 2D position IDs (matches HF rot_pos_emb)
-    row_idx = np.zeros(num_patches, dtype=np.int64)
-    col_idx = np.zeros(num_patches, dtype=np.int64)
-    idx = 0
-    for bh in range(merged_h):
-        for bw in range(merged_w):
-            for ih in range(merge_size):
-                for iw in range(merge_size):
-                    row_idx[idx] = bh * merge_size + ih
-                    col_idx[idx] = bw * merge_size + iw
-                    idx += 1
-
-    # Lookup freqs and concatenate: [h_freqs, w_freqs] -> [num_patches, rope_dim]
-    h_freqs = freq_table[row_idx]  # [num_patches, rope_dim//2]
-    w_freqs = freq_table[col_idx]  # [num_patches, rope_dim//2]
-    pos_emb = np.concatenate([h_freqs, w_freqs], axis=1)  # [num_patches, rope_dim]
-
-    # Duplicate to full head_dim: cat(emb, emb) -> [num_patches, head_dim]
-    pos_emb_full = np.concatenate([pos_emb, pos_emb], axis=1)
-
-    # cos/sin tables, tile across all heads -> [num_patches, embed_dim]
-    cos_table = np.tile(np.cos(pos_emb_full).astype(np.float32), (1, num_heads))
-    sin_table = np.tile(np.sin(pos_emb_full).astype(np.float32), (1, num_heads))
-
-    # Reverse indices for merger output reordering (identity — no window reorder)
-    reverse_indices = None if dynamic_image_resolution else np.arange(num_merged, dtype=np.int32)
     if dynamic_image_resolution:
         cos_half = network.add_input("vision_cos_half", trt.float32, (-1, head_dim // 2))
         sin_half = network.add_input("vision_sin_half", trt.float32, (-1, head_dim // 2))
+        reverse_indices = None
+    else:
+        # inv_freq: 1.0 / (theta ** (arange(0, rope_dim, 2) / rope_dim))
+        inv_freq = 1.0 / (rope_theta ** (
+            np.arange(0, rope_dim, 2, dtype=np.float64) / rope_dim))
+
+        # Build frequency table: freq_table[pos] = outer(pos, inv_freq)
+        max_hw = max(grid_h, grid_w)
+        freq_table = np.outer(np.arange(max_hw, dtype=np.float64), inv_freq)
+
+        # Compute 2D position IDs in the SAME order as patches arrive at attention.
+        # HF's rot_pos_emb uses merge-group ordering: for each merged block (bh, bw),
+        # iterate over intra-block offsets (ih, iw). The patches from our conv are in
+        # raster order, so we must match: the RoPE table is applied element-wise to
+        # the sequence, meaning position[i] describes the spatial location of patch[i].
+        # Our conv outputs patches in raster order: (0,0),(0,1),...,(0,W-1),(1,0),...
+        # HF's unfold+linear also produces raster order patches.
+        # The RoPE positions must be in raster order too.
+        merged_h = grid_h // merge_size
+        merged_w = grid_w // merge_size
+
+        # Merge-group-ordered 2D position IDs (matches HF rot_pos_emb)
+        row_idx = np.zeros(num_patches, dtype=np.int64)
+        col_idx = np.zeros(num_patches, dtype=np.int64)
+        idx = 0
+        for bh in range(merged_h):
+            for bw in range(merged_w):
+                for ih in range(merge_size):
+                    for iw in range(merge_size):
+                        row_idx[idx] = bh * merge_size + ih
+                        col_idx[idx] = bw * merge_size + iw
+                        idx += 1
+
+        # Lookup freqs and concatenate: [h_freqs, w_freqs] -> [num_patches, rope_dim]
+        h_freqs = freq_table[row_idx]  # [num_patches, rope_dim//2]
+        w_freqs = freq_table[col_idx]  # [num_patches, rope_dim//2]
+        pos_emb = np.concatenate([h_freqs, w_freqs], axis=1)  # [num_patches, rope_dim]
+
+        # Duplicate to full head_dim: cat(emb, emb) -> [num_patches, head_dim]
+        pos_emb_full = np.concatenate([pos_emb, pos_emb], axis=1)
+
+        # cos/sin tables, tile across all heads -> [num_patches, embed_dim]
+        cos_table = np.tile(np.cos(pos_emb_full).astype(np.float32), (1, num_heads))
+        sin_table = np.tile(np.sin(pos_emb_full).astype(np.float32), (1, num_heads))
+
+        # Reverse indices for merger output reordering (identity — no window reorder)
+        reverse_indices = np.arange(num_merged, dtype=np.int32)
 
     # ---------------------------------------------------------------
     # Stage 3: ViT Transformer blocks (full attention, LayerNorm, GELU FC MLP)
@@ -1281,8 +1285,8 @@ def build_qwen3_vl_vision_engine(
         merger_fc1_w.T.copy(), dtype=work_np_dtype)
     fc1_out = graph_ops.add_bias_sum(
         network, fc1_out, fc1_hidden, merger_fc1_b, dtype=work_np_dtype)
-    activated = graph_ops.add_gelu_new(
-        network, fc1_out, dtype=work_np_dtype)
+    activated = network.add_activation(
+        fc1_out, trt.ActivationType.GELU_ERF).get_output(0)
     fc2_out = graph_ops.add_matmul_rhs_constant(
         network, activated, fc1_hidden, text_hidden_size,
         merger_fc2_w.T.copy(), dtype=work_np_dtype)

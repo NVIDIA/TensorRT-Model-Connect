@@ -29,5 +29,7 @@ pyopenjtalk-plus==0.4.1.post9
 soundfile==0.13.1
 torchmetrics==1.9.0
 transformers==4.57.6
+# NeMo's Lightning requires packaging<25; virtualenv 21.14.6 requires >=26.3.
+virtualenv==21.14.5
 wandb==0.29.0
 webdataset==1.0.2

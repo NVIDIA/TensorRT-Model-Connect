@@ -34,6 +34,10 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 - `families/timm_vgg/tests/data/test_img.jpeg`
 - `families/timm_vit/tests/data/test_img.jpeg`
 
+`families/timm_resnet/tests/data/test_img_car.jpeg` is a crop of the same
+photograph (columns 260 to 639, rows 60 to 381, saved again as JPEG) and is
+distributed under the same terms.
+
 ## Project-created image fixtures
 
 The following images were created for TensorRT Model Connect testing and are
@@ -41,6 +45,17 @@ distributed under the Apache License 2.0 with the rest of the project:
 
 - `families/deepseek_ocr/tests/data/orc_test_img.jpeg` — screenshot of
   project source text created for OCR regression testing
+- `families/phi4_multimodal/tests/data/dynamic-hd/synthetic-*.png` (7 images) —
+  synthetic test patterns written by the checked-in
+  `families/phi4_multimodal/tests/data/dynamic-hd/generate.py` for Dynamic-HD
+  preprocessing goldens
+- `families/timm_inception/tests/data/orc_test_img.jpeg` — byte-identical copy of
+  `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the input of the FP8
+  E2E case (its top-1 class has a clear margin; the shared vehicle photograph
+  is a near-tie for this model)
+- `families/timm_inception_v4/tests/data/orc_test_img.jpeg` — byte-identical copy of
+  `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the input of the FP8
+  E2E case, chosen for its clear top-1 margin
 
 ## Project overview media
 
@@ -169,6 +184,51 @@ revision, episode, frame, and tensor shapes.
 - `observation.state.f32`: little-endian float32 joint state
 - `recorded_observation.json`: source and shape metadata
 
+## LeRobot Pi 0.5 recorded-observation fixtures
+
+The files below `families/lerobot_pi05/tests/data/` are three recorded LIBERO
+observations from three different tasks, the outputs of the pinned LeRobot `pi05`
+policy for them, and LeRobot's prompt token ids for a set of test instructions.
+`recorded_observation/ep*_f*/` hold a lossless PNG re-encoding of the `image` and
+`wrist_image` columns and the exact `state` row and task text of episode 0 frame 0,
+episode 379 frame 60 and episode 807 frame 70 in `physical-intelligence/libero`
+revision `a4336d589d589045d1c56423ffdf3b88a0e19b1f`. That dataset is distributed
+under CC-BY-4.0. Each `observation.json` records the source. `noise_seed0.f32` is a
+`torch.randn` draw, `reference/*.f32` are LeRobot `lerobot[pi]==0.6.1` outputs, and
+`tokenizer_golden.json` holds instructions written for this test with the token ids
+LeRobot's preprocessor produced for them; none of these contains third-party content.
+
+- Dataset: https://huggingface.co/datasets/physical-intelligence/libero/tree/a4336d589d589045d1c56423ffdf3b88a0e19b1f
+- `recorded_observation/ep*_f*/image.png`, `wrist_image.png`: decoded RGB frames
+- `recorded_observation/ep*_f*/observation.json`: state, task and source
+- `noise_seed0.f32`: little-endian float32 flow noise, 50 x 32
+- `reference/ep*_f*.{fp32,bf16}.f32`: little-endian float32 actions, 50 x 7
+- `tokenizer_golden.json`: test instructions, states and expected token ids
+
+## LeRobot GR00T N1.7 recorded-observation fixtures
+
+The files below `families/lerobot_groot/tests/data/` are three recorded LIBERO-spatial
+observations from three different tasks, the outputs of the pinned LeRobot `groot`
+policy for them, and LeRobot's prompt token ids for a set of test instructions.
+`recorded_observation/ep*_f*/` hold a lossless PNG re-encoding of the `image` and
+`wrist_image` columns and the exact `state` row and task text of episode 1272 frame 0,
+episode 1262 frame 40 and episode 1267 frame 80 in `physical-intelligence/libero`
+revision `a4336d589d589045d1c56423ffdf3b88a0e19b1f`. That dataset is distributed
+under CC-BY-4.0. Each `observation.json` records the source. The `*.processed.png`
+files are those same frames after LeRobot's evaluation crop and resize.
+`noise_seed0.f32` is a `torch.randn` draw, `reference/*.f32` are LeRobot
+`lerobot[groot]==0.6.1` outputs, and `tokenizer_golden.json` holds instructions
+written for this test with the token ids LeRobot's preprocessor produced for them;
+none of these contains third-party content beyond the frames above.
+
+- Dataset: https://huggingface.co/datasets/physical-intelligence/libero/tree/a4336d589d589045d1c56423ffdf3b88a0e19b1f
+- `recorded_observation/ep*_f*/image.png`, `wrist_image.png`: decoded RGB frames
+- `recorded_observation/ep*_f*/image.processed.png`, `wrist_image.processed.png`: the frames cropped and resized as LeRobot does
+- `recorded_observation/ep*_f*/observation.json`: state, task and source
+- `noise_seed0.f32`: little-endian float32 flow noise, 40 x 132
+- `reference/ep*_f*.{fp32,bf16}.f32`, `reference/ep1272_f000.alternate.{fp32,bf16}.f32`: little-endian float32 actions, 16 x 7
+- `tokenizer_golden.json`: test instructions and expected prompt token ids
+
 ## FoundationPose external model artifacts
 
 FoundationPose qualification downloads no model artifact into this repository.
@@ -192,5 +252,22 @@ with the rest of the project:
 
 - `families/openfold3/tests/data/openfold3_features.npz`
 - `families/openfold3/tests/data/openfold3_structure.json`
+
+## Llama INT4-AWQ smoothing scales
+
+`families/llama/awq_scales/nemotron-nano-4b-v1.1-d552708a.npz` holds the
+INT4-AWQ activation smoothing scales (`pre_quant_scale`, one fp16 vector per
+decoder projection) for `nvidia/Llama-3.1-Nemotron-Nano-4B-v1.1` at revision
+`d552708a9d575fa8d4a690b988fd870d65279f98`, together with checkpoint identity
+metadata: the raw bytes of `model.norm.weight`,
+`model.layers.0.input_layernorm.weight` and the first 64 values of the first row
+of every decoder projection weight. It is generated by
+`python -m families.llama.calibrate_awq_scales`, which runs ModelOpt
+`INT4_AWQ_CFG` on that checkpoint over chat prompts from
+`nvidia/Nemotron-Post-Training-Dataset-v1` (CC-BY-4.0). The file contains no
+dataset text. Because it contains excerpts of the checkpoint weights, it is
+distributed under the
+[NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license)
+of the source checkpoint.
 
 <!-- Collaborative review anchor: batch 2. -->

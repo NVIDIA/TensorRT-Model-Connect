@@ -136,7 +136,8 @@ def _aiperf_public_records(source: Mapping[str, Any], selection: Mapping[str, An
 def _hf_dataset_records(source: Mapping[str, Any], selection: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Selected rows of a Hugging Face dataset at a pinned revision (``hf_dataset``): ``dataset``,
     ``subset``, ``split``, ``revision``, and the ``prompt_column`` / ``image_column`` /
-    ``audio_column`` / ``label_column`` it reads; ``columns`` copies further fields."""
+    ``audio_column`` / ``label_column`` it reads; ``columns`` copies further fields;
+    ``audio_sample_rate`` resamples the audio once for both sides."""
     from types import SimpleNamespace
 
     meta = SimpleNamespace(hf_dataset_name=require(source, "dataset", "source"), hf_subset=source.get("subset"),
@@ -254,12 +255,15 @@ def _interior_point(polygon: Any, size: Sequence[int]) -> tuple[float, float]:
 
 def _hf_rows(name: str, meta: Any, revision: str, source: Mapping[str, Any],
              selection: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Only selected rows are decoded. Audio becomes WAV (the TRTMC worker reads WAV); images keep
-    their original encoded bytes."""
+    """Only selected rows are decoded. Audio becomes WAV (the TRTMC worker reads WAV), at the source's
+    ``audio_sample_rate`` when it sets one; images keep their original encoded bytes."""
+    sample_rate = source.get("audio_sample_rate")
+    if sample_rate is not None and (isinstance(sample_rate, bool) or not isinstance(sample_rate, int)
+                                    or sample_rate <= 0):
+        raise ConfigError(f"audio_sample_rate must be a positive integer, not {sample_rate!r}")
     import io
 
     import datasets
-    import soundfile
     # Streaming datasets (for example LibriSpeech, whose config spans ~30 GB of train splits) are read
     # from the requested split only; media stay encoded until a row is selected.
     # ``data_files`` limits the download to the split's shards (for example ImageNet's validation parquet).
@@ -307,14 +311,13 @@ def _hf_rows(name: str, meta: Any, revision: str, source: Mapping[str, Any],
         if "prompt" in roles:
             record["prompt"] = row[roles["prompt"]]
         if "image" in roles:
-            record["image"] = _encoded_media(row[roles["image"]], ".png")
+            record["image"] = _encoded_media(row[roles["image"]], ".png", bool(source.get("lossless_images")))
         if "audio" in roles:
-            audio, rate = soundfile.read(io.BytesIO(row[roles["audio"]]["bytes"]), dtype="float32")
-            buffer = io.BytesIO()
-            soundfile.write(buffer, audio, rate, format="WAV", subtype="PCM_16")
-            record["audio"] = {"$file": {"suffix": ".wav", "b64": base64.b64encode(buffer.getvalue()).decode()}}
+            record["audio"] = _wav_media(row[roles["audio"]]["bytes"], sample_rate)
         if label_column:
             record["label"] = row[label_column]
+        if source.get("label_fields"):
+            record["label"] = {name: row[column] for name, column in source["label_fields"].items()}
         if source.get("label_image"):
             record["label"] = {"png_b64": base64.b64encode(row[label_column]["bytes"]).decode()}
         if source.get("polygon_label") and "image" in roles:  # an object mask as a polygon, with a point inside it
@@ -338,13 +341,38 @@ def _hf_rows(name: str, meta: Any, revision: str, source: Mapping[str, Any],
     return records
 
 
-def _encoded_media(value: Mapping[str, Any], default_suffix: str) -> dict[str, Any]:
+def _encoded_media(value: Mapping[str, Any], default_suffix: str, lossless: bool = False) -> dict[str, Any]:
+    """The image as stored, or with ``lossless`` its RGB pixels decoded once and stored as PNG: both sides
+    then read the same pixels instead of decoding a JPEG with different decoders (Pillow and stb_image
+    differ by a few levels per pixel, which a strict feature-parity gate reads as conversion error)."""
     from PIL import Image
 
     data = value["bytes"]
     with Image.open(io.BytesIO(data)) as image:
         suffix = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}.get(image.format or "", default_suffix)
+        if lossless and suffix != ".png":
+            buffer = io.BytesIO()
+            image.convert("RGB").save(buffer, format="PNG")
+            data, suffix = buffer.getvalue(), ".png"
     return {"$file": {"suffix": suffix, "b64": base64.b64encode(data).decode()}}
+
+
+def _wav_media(data: bytes, sample_rate: int | None) -> dict[str, Any]:
+    """Encoded audio as a PCM16 WAV file, polyphase-resampled once to ``sample_rate`` when given: both the
+    native and the TRTMC side then read the same samples instead of resampling them differently."""
+    import numpy as np
+    import soundfile
+
+    audio, rate = soundfile.read(io.BytesIO(data), dtype="float32")
+    if sample_rate and rate != sample_rate:
+        from scipy.signal import resample_poly
+
+        divisor = math.gcd(rate, sample_rate)
+        audio = np.clip(resample_poly(audio, sample_rate // divisor, rate // divisor, axis=0), -1.0, 1.0)
+        rate = sample_rate
+    buffer = io.BytesIO()
+    soundfile.write(buffer, audio, rate, format="WAV", subtype="PCM_16")
+    return {"$file": {"suffix": ".wav", "b64": base64.b64encode(buffer.getvalue()).decode()}}
 
 
 def _field(record: Mapping[str, Any], name: str) -> Any:
@@ -504,8 +532,16 @@ def unstated_defaults(request: Mapping[str, Any], operation: str | None = None) 
 
 def _catalog_testcase_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
     """The catalog testcase request (``profile`` is a catalog name or a model descriptor file),
-    resolved by trtmc-perf-serve exactly as trtmc-bench does."""
+    resolved by trtmc-perf-serve exactly as trtmc-bench does; ``all_testcases`` takes every testcase of a
+    catalog profile, one record each (the family's own inputs, for a Task with no public data set)."""
     repo = environment.path("repo")
+    if source.get("all_testcases"):
+        from trtmc_benchmark.catalog import ManifestCatalog  # importable wherever the catalog resolves profiles
+
+        model = ManifestCatalog(repo / "families").resolve(require(source, "profile", "source"))
+        names = [str(case["name"]) for case in model.testcases]
+        return [record for name in names for record in _catalog_testcase_records(
+            {"profile": source["profile"], "testcase": name}, environment)]
     env = {**os.environ, "HF_HUB_OFFLINE": "1",
            "PYTHONPATH": f"{repo}/apps/perf_serving:{repo}/apps/benchmark:{repo}/core/builder:{repo}"}
     with tempfile.TemporaryDirectory() as scratch:

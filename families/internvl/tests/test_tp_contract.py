@@ -15,6 +15,117 @@ from families.internvl.parallel import ParallelConfig, shard_standard_decoder_we
 from families.internvl.tests.test_e2e import CASES, _official_prompt
 
 
+@pytest.mark.parametrize("format_name", ["safetensors", "torch_sharded"])
+def test_source_awq_weights_preserve_packed_values(tmp_path, format_name) -> None:
+    import json
+    from families.internvl.checkpoint_mapper import _load_projection
+
+    # Independent forward packing includes high-bit INT32 values and two groups.
+    # Changing either the column permutation or AWQ zero offset breaks equality.
+    values = (np.arange(256 * 16).reshape(256, 16) % 16).astype(np.uint32)
+    zeros = np.array([[8] * 16, [3] * 16], dtype=np.uint32)
+    scales = np.array([[0.125] * 16, [0.0625] * 16], dtype=np.float16)
+
+    def pack(array):
+        reordered = array.reshape(array.shape[0], -1, 8)[:, :, [0, 2, 4, 6, 1, 3, 5, 7]]
+        return np.bitwise_or.reduce(reordered << np.arange(0, 32, 4, dtype=np.uint32), axis=2).view(np.int32)
+
+    tensors = {"proj.qweight": pack(values), "proj.qzeros": pack(zeros), "proj.scales": scales}
+    if format_name == "safetensors":
+        from safetensors.numpy import save_file
+        save_file(tensors, tmp_path / "model.safetensors")
+    else:
+        import torch
+        shard = "pytorch_model-00001-of-00001.bin"
+        torch.save({name: torch.from_numpy(value) for name, value in tensors.items()}, tmp_path / shard)
+        (tmp_path / "pytorch_model.bin.index.json").write_text(
+            json.dumps({"weight_map": {name: shard for name in tensors}}))
+    readers = model._open_checkpoint(tmp_path)
+    config = {"quant_method": "awq", "bits": 4, "group_size": 128, "version": "GEMM", "zero_point": True}
+    actual = _load_projection(readers, "proj", config)
+    expected = ((values.astype(np.float32) - np.repeat(zeros, 128, axis=0))
+                * np.repeat(scales, 128, axis=0)).astype(np.float16).T
+    np.testing.assert_array_equal(actual, expected)
+    assert actual.flags.c_contiguous
+    assert actual.dtype == np.float32
+    for bad in ({**config, "version": "gemv"}, {**config, "group_size": 64},
+                {**config, "zero_point": False}, None):
+        with pytest.raises(ValueError, match="group128 GEMM AWQ"):
+            _load_projection(readers, "proj", bad)
+
+
+def test_original_vision_layout_maps_norm_before_projector() -> None:
+    mapping = {
+        "vision_model.embeddings.class_embedding": "vision_tower.embeddings.cls_token",
+        "vision_model.embeddings.patch_embedding.weight": "vision_tower.embeddings.patch_embeddings.projection.weight",
+        "vision_model.encoder.layers.0.norm1.weight": "vision_tower.encoder.layer.0.layernorm_before.weight",
+        "vision_model.encoder.layers.0.ls1": "vision_tower.encoder.layer.0.lambda_1",
+        "vision_model.encoder.layers.0.attn.qkv.weight": "vision_tower.encoder.layer.0.attn.qkv.weight",
+        "mlp1.0.weight": "multi_modal_projector.layer_norm.weight",
+        "mlp1.1.weight": "multi_modal_projector.linear_1.weight",
+        "mlp1.3.bias": "multi_modal_projector.linear_2.bias",
+        "multi_modal_projector.linear_1.weight": "multi_modal_projector.linear_1.weight",
+    }
+    assert {name: model._native_vision_key(name) for name in mapping} == mapping
+
+
+def test_native_pixels_use_published_internvl_normalization() -> None:
+    config = SimpleNamespace(raw={"vision_config": {"patch_size": 14}}, hidden_size=1536)
+    runtime = model._InternVLModel().get_vl_config(config)
+    assert runtime["image_mean"] == [0.485, 0.456, 0.406]
+    assert runtime["image_std"] == [0.229, 0.224, 0.225]
+
+
+def test_original_nested_decoder_config_survives_root_hidden_size() -> None:
+    import json
+
+    config = model.ModelConfig.from_json(json.dumps({
+        "model_type": "internvl_chat", "hidden_size": 16,
+        "vision_config": {"hidden_size": 32},
+        "llm_config": {"model_type": "qwen2", "hidden_size": 16, "vocab_size": 128,
+                       "rope_theta": 1000000, "num_hidden_layers": 2, "num_attention_heads": 4},
+    }))
+    assert config.model_type == "internvl_chat"
+    assert config.hidden_size == 16
+    assert config.vocab_size == 128
+    assert config.rope_theta == 1000000
+    assert config.num_hidden_layers == 2
+    assert config.raw["vision_config"]["hidden_size"] == 32
+
+
+def test_text_loader_preserves_qwen3_per_head_norms(tmp_path) -> None:
+    from safetensors.numpy import save_file
+
+    config = model.ModelConfig.create_tiny("internvl", num_hidden_layers=1)
+    tensors = {
+        "model.embed_tokens.weight": np.ones((32, 16), dtype=np.float32),
+        "model.layers.0.input_layernorm.weight": np.ones(16, dtype=np.float32),
+        "model.layers.0.post_attention_layernorm.weight": np.ones(16, dtype=np.float32),
+        "model.layers.0.self_attn.q_norm.weight": np.arange(4, dtype=np.float32),
+        "model.layers.0.self_attn.k_norm.weight": np.arange(4, dtype=np.float32) + 1,
+    }
+    for name in ("q", "k", "v", "o"):
+        tensors[f"model.layers.0.self_attn.{name}_proj.weight"] = np.ones((16, 16), dtype=np.float32)
+    for name in ("gate", "up", "down"):
+        shape = (16, 32) if name == "down" else (32, 16)
+        tensors[f"model.layers.0.mlp.{name}_proj.weight"] = np.ones(shape, dtype=np.float32)
+    save_file(tensors, tmp_path / "model.safetensors")
+    weights = model._load_internvl_text_weights(str(tmp_path), config)
+    np.testing.assert_array_equal(weights["layer.0.q_norm"], np.arange(4))
+    np.testing.assert_array_equal(weights["layer.0.k_norm"], np.arange(4) + 1)
+
+
+def test_tokenizer_contract_uses_instruction_end_of_turn(monkeypatch, tmp_path) -> None:
+    import transformers
+
+    tokenizer = SimpleNamespace(eos_token_id=151645, encode=lambda *_args, **_kwargs: [42])
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: tokenizer)
+    contract = model._tokenizer_runtime_contract(tmp_path)
+    assert contract["id_eos"] == 151645
+    assert contract["tokenizer_prefix_ids"] == []
+    assert contract["tokenizer_suffix_ids"] == []
+
+
 def test_swiglu_weights_are_sharded_for_each_rank() -> None:
     config = SimpleNamespace(
         num_attention_heads=4,
@@ -55,17 +166,21 @@ def test_build_emits_one_dual_profile_plan_per_rank(monkeypatch, tmp_path) -> No
         hidden_size=8,
         raw={},
     )
-    ranks = []
+    ranks, roles, attention = [], [], []
 
     class FakeModel:
         @staticmethod
-        def load_weights(_model_dir, _config):
+        def load_weights(_model_dir, _config, **_kwargs):
             return WeightDict()
 
         @staticmethod
         def build_engine(_config, _weights, _length, **kwargs):
             parallel = kwargs["parallel_config"]
             ranks.append(parallel.rank)
+            roles.append(_config.raw.get("_decoder_engine_role"))
+            attention.append(
+                (_config.raw.get("_valid_prefix_attention"), _config.raw.get("_opt_prefill_length"))
+            )
             return f"rank-{parallel.rank}".encode()
 
         @staticmethod
@@ -124,17 +239,29 @@ def test_build_emits_one_dual_profile_plan_per_rank(monkeypatch, tmp_path) -> No
     assert writer.sections["runtime.json"]["tensor_parallel_size"] == 2
     assert writer.sections["runtime.json"]["preprocessor_type"] == "simple_chw"
     assert writer.sections["runtime.json"]["max_image_tiles"] == 1
+    assert writer.sections["runtime.json"]["decoder_engine_layout"] == "dual_profile"
+    assert writer.sections["runtime.json"]["kv_attention_window"] == "full"
+    assert attention == [(None, None), (None, None)]
     assert writer.sections["vision.plan"] == b"vision"
 
     ranks.clear()
+    roles.clear()
+    attention.clear()
     request.tensor_parallel_size = 1
     writer = Writer()
     model.build(request, writer)
-    assert ranks == [-1, -1]
+    assert ranks == [-1]
+    assert roles == ["dual_profile"]
     assert writer.sections["engine.plan"] == b"rank--1"
-    assert writer.sections["prefill.plan"] == b"rank--1"
+    assert "prefill.plan" not in writer.sections
     assert not any(name.startswith("engine.rank") for name in writer.sections)
     assert writer.sections["runtime.json"]["tensor_parallel_size"] == 1
+    assert writer.sections["runtime.json"]["decoder_engine_layout"] == "dual_profile"
+    assert writer.sections["runtime.json"]["kv_attention_window"] == "valid_prefix"
+    assert attention == [(True, 16)]  # min(2048, max_sequence_length)
+    assert "_decoder_engine_role" not in config.raw
+    assert "_valid_prefix_attention" not in config.raw
+    assert "_opt_prefill_length" not in config.raw
 
 
 def test_tp_manifests_remain_active() -> None:
@@ -275,19 +402,7 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
     monkeypatch.setattr(builder, "publish", lambda *args: publications.append(args))
     def native(*args):
         native_calls.append(args)
-    if mode == "capacity_failure":
-        with pytest.raises(dispatch.UnavailableEdgeConfiguration, match="49,913,047,296"):
-            dispatch.build(request, writer, native)
-        assert not stages
-    elif mode == "native_capacity_failure":
-        with pytest.raises(dispatch.UnavailableEdgeConfiguration, match="native FP16"):
-            dispatch.build(request, writer, native)
-        assert not stages
-    elif mode.startswith("awq_unmapped"):
-        with pytest.raises(dispatch.UnavailableEdgeConfiguration, match="No Edge INT4 route"):
-            dispatch.build(request, writer, native)
-        assert not stages
-    elif mode == "cancel":
+    if mode == "cancel":
         with pytest.raises(KeyboardInterrupt):
             dispatch.build(request, writer, native)
     else:
@@ -295,15 +410,21 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
     assert all(not path.exists() for path in stages)
     assert native_calls == ([(request, writer)] if mode in {
         "absent", "corrupt", "failure", "device_failure", "native_larger_device",
+        "capacity_failure", "native_capacity_failure", "awq_unmapped_qwen2", "awq_unmapped_qwen3",
     } else [])
     assert len(publications) == (1 if mode in {"success", "larger_device", "quality_failure", "quality_failure_sm120"} else 0)
-    assert len(target_calls) == (0 if mode == "absent" else 1)
+    assert len(target_calls) == (0 if mode in {
+        "absent", "native_capacity_failure", "native_larger_device",
+    } else 1)
     logs = list(tmp_path.glob(".out.edge-*.log"))
-    if mode in {"corrupt", "failure", "device_failure"}:
+    if mode in {"corrupt", "failure", "device_failure", "capacity_failure",
+                "awq_unmapped_qwen2", "awq_unmapped_qwen3"}:
         assert len(logs) == 1 and "Traceback" in logs[0].read_text()
         assert "Retrying native once" in caplog.text
     else:
         assert not logs and "Edge build failed" not in caplog.text
+    if mode in {"capacity_failure", "native_capacity_failure"} or mode.startswith("awq_unmapped"):
+        assert not stages  # Do not execute a known unavailable Edge configuration.
 
 
 @pytest.mark.parametrize("options", [[], ["--precision", "fp16", "--max-sequence-length", "64"]])
@@ -381,3 +502,18 @@ assert "huggingface_hub" not in sys.modules
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert "trtmc internvl build" in result.stdout
     assert "--int4-gemm-plugin-version" in result.stdout
+
+
+@pytest.mark.parametrize("kind", ["safetensors", "pytorch"])
+def test_checkpoint_layout_does_not_retry_a_failed_reader(tmp_path, monkeypatch, kind):
+    filenames = ("model.safetensors", "pytorch_model.bin") if kind == "safetensors" else ("pytorch_model.bin",)
+    for name in filenames:
+        (tmp_path / name).touch()
+    selected = "_open_safetensors" if kind == "safetensors" else "_open_torch_checkpoint"
+    other = "_open_torch_checkpoint" if kind == "safetensors" else "_open_safetensors"
+    def fail(_directory):
+        raise ValueError("malformed selected checkpoint")
+    monkeypatch.setattr(model, selected, fail)
+    monkeypatch.setattr(model, other, lambda _directory: pytest.fail("must not retry another format"))
+    with pytest.raises(ValueError, match="malformed selected checkpoint"):
+        model._open_checkpoint(tmp_path)

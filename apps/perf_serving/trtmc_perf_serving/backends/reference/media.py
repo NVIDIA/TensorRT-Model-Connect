@@ -16,8 +16,7 @@ import torch
 
 from ..base import BackendError, Invocation
 from .common import (
-    ReferenceSpec, invocation, load_audio, load_image, maybe_compile, reject_compile, required,
-    tensor_observation, timed,
+    ReferenceSpec, invocation, load_audio, load_image, maybe_compile, required, tensor_observation, timed,
 )
 
 
@@ -53,7 +52,9 @@ class Vision:
             # processor_kwargs (for example use_fast=False) must match the family's accepted reference.
             self.processor = processor_cls.from_pretrained(spec.model, **spec.pretrained_kwargs(),
                                                            **dict(spec.options.get("processor_kwargs", {})))
-            model = loaders[spec.operation].from_pretrained(spec.model, **spec.pretrained_kwargs())
+            model = loaders[spec.operation].from_pretrained(spec.model, **spec.model_kwargs(),
+                                                            device_map=spec.device_map)
+        # The whole model in the reference precision, including modules Transformers keeps in FP32.
         self.model = maybe_compile(model.to(spec.device, spec.dtype).eval(), spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
@@ -115,19 +116,34 @@ class Vision:
 
 
 class SpeechRecognition:
-    """``transcribe`` from ``audio_path`` with a Whisper-style speech-seq2seq model."""
+    """``transcribe`` from ``audio_path``: a Whisper-style speech-seq2seq model, a CTC model (greedy: the
+    argmax path, repeats and blanks removed) or a TDT transducer (its own greedy ``generate``), by the
+    checkpoint's architecture."""
+
+    kind = "seq2seq"
 
     def __init__(self, spec: ReferenceSpec) -> None:
         import transformers
 
         self.spec = spec
         self.processor = transformers.AutoProcessor.from_pretrained(spec.model, **spec.pretrained_kwargs())
-        self.model = maybe_compile(transformers.AutoModelForSpeechSeq2Seq.from_pretrained(
-            spec.model, **spec.model_kwargs()).to(spec.device).eval(), spec)
+        config = transformers.AutoConfig.from_pretrained(spec.model, **spec.pretrained_kwargs())
+        architectures = tuple(getattr(config, "architectures", None) or ())
+        self.kind = ("ctc" if any(name.endswith("ForCTC") for name in architectures) else
+                     "tdt" if any(name.endswith("ForTDT") for name in architectures) else "seq2seq")
+        loader = {"ctc": transformers.AutoModelForCTC, "seq2seq": transformers.AutoModelForSpeechSeq2Seq,
+                  "tdt": getattr(transformers, "AutoModelForTDT", None)}[self.kind]
+        if loader is None:
+            raise RuntimeError(f"Transformers {transformers.__version__} has no TDT models: state the family's "
+                               "requirements as reference.requirements")
+        self.model = maybe_compile(loader.from_pretrained(
+            spec.model, **spec.model_kwargs(), device_map=spec.device_map).eval(), spec)
         self.sample_rate = int(self.processor.feature_extractor.sampling_rate)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
         audio = load_audio(str(required(request, "audio_path")), self.sample_rate)
+        if self.kind != "seq2seq":
+            return self._invoke_transducer(audio, request)
         features = self.processor(audio, sampling_rate=self.sample_rate, return_tensors="pt").input_features
         features = features.to(self.spec.device, self.spec.dtype)
         kwargs: dict[str, Any] = {"max_new_tokens": int(request.get("max_new_tokens", 128))}
@@ -148,6 +164,29 @@ class SpeechRecognition:
         return invocation({"text": text, "output_tokens": steps.count, "input_audio_seconds": seconds}, model_ms,
                           realtime_factor=seconds / (model_ms / 1000.0))
 
+    def _invoke_transducer(self, audio: Any, request: Mapping[str, Any]) -> Invocation:
+        inputs = self.processor(audio, sampling_rate=self.sample_rate, return_tensors="pt")
+        inputs = {key: value.to(self.spec.device, self.spec.dtype) if value.is_floating_point()
+                  else value.to(self.spec.device) for key, value in inputs.items()}
+        if self.kind == "ctc":
+            logits, model_ms = timed(lambda: self.model(**inputs).logits[0])
+            predicted = logits.argmax(dim=-1).tolist()
+            blank, previous, tokens = self.model.config.pad_token_id, None, 0
+            for token in predicted:
+                tokens += int(token != previous and token != blank)
+                previous = token
+            text = self.processor.decode(predicted)
+        else:
+            # The request's token budget, as the TRTMC transducer applies it (else the model's default).
+            budget = {"max_new_tokens": int(request["max_new_tokens"])} if request.get("max_new_tokens") else {}
+            output, model_ms = timed(lambda: self.model.generate(**inputs, **budget, return_dict_in_generate=True))
+            decoded = self.processor.decode(output.sequences, skip_special_tokens=True)
+            text = decoded[0] if isinstance(decoded, (list, tuple)) else str(decoded)
+            tokens = int(output.sequences.shape[-1])
+        seconds = len(audio) / self.sample_rate
+        return invocation({"text": text, "output_tokens": tokens, "input_audio_seconds": seconds}, model_ms,
+                          realtime_factor=seconds / (model_ms / 1000.0))
+
 
 class DecodeSteps:
     """A logits processor counting decoding steps: generation calls its processors once per generated token (the
@@ -162,16 +201,19 @@ class DecodeSteps:
 
 
 class SpeechSynthesis:
-    """``generate_audio`` from ``prompt`` (Bark-style text-to-speech)."""
+    """``generate_audio`` from ``prompt`` (Bark-style text-to-speech). ``BarkModel.generate`` runs its three
+    token models in turn, never ``BarkModel.forward``: compile mode compiles those three."""
 
     def __init__(self, spec: ReferenceSpec) -> None:
         import transformers
 
-        reject_compile(spec, "text-to-speech")
         self.spec = spec
         self.processor = transformers.AutoProcessor.from_pretrained(spec.model, **spec.pretrained_kwargs())
         self.model = transformers.BarkModel.from_pretrained(
-            spec.model, **spec.model_kwargs()).to(spec.device).eval()
+            spec.model, **spec.model_kwargs(), device_map=spec.device_map).eval()
+        if spec.mode == "compile":
+            for stage in (self.model.semantic, self.model.coarse_acoustics, self.model.fine_acoustics):
+                maybe_compile(stage, spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
         # Same generation as the accepted Bark reference: Bark's own (sampled) generation configs, a
@@ -309,7 +351,8 @@ class TimeSeries:
             raise BackendError(f"no time-series reference for model type {config.model_type!r}")
         suffix = "ForRegression" if spec.operation == "regress" else "ForPrediction"
         model_cls = _with_post_init(getattr(transformers, prefix + suffix))
-        self.model = maybe_compile(model_cls.from_pretrained(spec.model, **spec.pretrained_kwargs())
+        self.model = maybe_compile(model_cls.from_pretrained(spec.model, **spec.model_kwargs(),
+                                                             device_map=spec.device_map)
                                    .to(spec.device, spec.dtype).eval(), spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:

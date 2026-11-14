@@ -1032,6 +1032,21 @@ int main(int argc, char** argv) {
                   summary.at("object_ids") == Json::array({100, 101}),
               "instance confidence is not relabeled as IoU and object identities survive");
 
+        select("image_text_to_boxes", "perception_fixture", "detect_prompted",
+               {{"image_path", left.string()}, {"prompt", "object"}});
+        summary = run().at("output_summary");
+        check(summary.at("detections") == 1 &&
+                  summary.at("boxes") == Json::array({0.25, 0.5, 2.75, 1.75}) &&
+                  summary.at("labels") == Json::array({"object"}) &&
+                  summary.at("scores") == Json::array({nullptr}) &&
+                  summary.at("raw_response") == "raw grounding text" &&
+                  summary.at("parse_complete") == true,
+              "grounded boxes keep the prompt label, the raw response and an absent confidence");
+        request["request"]["prompt"] = "malformed";
+        summary = run().at("output_summary");
+        check(summary.at("detections") == 0 && summary.at("parse_complete") == false,
+              "an incomplete parse is reported, not silently emptied");
+
         const auto one = runtime / "benchmark_remaining_one.ppm";
         const auto zero = runtime / "benchmark_remaining_zero.ppm";
         image(one, 1, 255);

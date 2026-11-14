@@ -178,6 +178,16 @@ __device__ float load_hidden<__nv_bfloat16>(const __nv_bfloat16* hidden, int32_t
     return __bfloat162float(hidden[index]);
 }
 
+// The reference depth input is F.linear(temporal_hidden) + embedding(previous_token) in the depth
+// transformer's dtype: operands, the projection output and the sum are each rounded to that dtype.
+__device__ float round_to_depth_dtype(float value, DType depth_dtype) {
+    if (depth_dtype == DType::kFloat16)
+        return __half2float(__float2half_rn(value));
+    if (depth_dtype == DType::kBFloat16)
+        return __bfloat162float(__float2bfloat16_rn(value));
+    return value;
+}
+
 __device__ float text_seed(const float* embedding, int64_t elements, const int32_t* selected_tokens,
                            int32_t forced_token, bool token_is_forced, int32_t vocab_size,
                            int32_t hidden_size, int32_t row) {
@@ -210,7 +220,8 @@ __global__ void prepare_depth_embedding_kernel(
     int64_t depth_audio_embedding_elements, const int32_t* selected_tokens, int32_t codebook,
     int32_t forced_text_token, bool text_token_is_forced, int32_t forced_previous_token,
     bool previous_token_is_forced, int32_t depth_hidden, int32_t temporal_hidden_dim,
-    int32_t depth_text_vocab, int32_t audio_vocab_size, int32_t num_depformer_embeddings) {
+    int32_t depth_text_vocab, int32_t audio_vocab_size, int32_t num_depformer_embeddings,
+    DType depth_dtype) {
     __shared__ float partial_sums[kProjectionThreads];
     const int32_t row = blockIdx.x;
     if (row >= depth_hidden)
@@ -224,8 +235,8 @@ __global__ void prepare_depth_embedding_kernel(
     if (projection_is_valid) {
         for (int32_t column = threadIdx.x; column < temporal_hidden_dim;
              column += kProjectionThreads) {
-            projected +=
-                depth_projection[row_offset + column] * load_hidden(temporal_hidden, column);
+            projected += round_to_depth_dtype(depth_projection[row_offset + column], depth_dtype) *
+                         round_to_depth_dtype(load_hidden(temporal_hidden, column), depth_dtype);
         }
     }
     partial_sums[threadIdx.x] = projected;
@@ -244,7 +255,9 @@ __global__ void prepare_depth_embedding_kernel(
                                             selected_tokens, codebook, forced_previous_token,
                                             previous_token_is_forced, audio_vocab_size,
                                             depth_hidden, num_depformer_embeddings, row);
-        output[row] = seed + partial_sums[0];
+        const float projection = round_to_depth_dtype(partial_sums[0], depth_dtype);
+        output[row] =
+            round_to_depth_dtype(round_to_depth_dtype(seed, depth_dtype) + projection, depth_dtype);
     }
 }
 
@@ -282,7 +295,8 @@ void personaplex_prepare_depth_embedding(
     const int32_t* selected_tokens, int32_t codebook, int32_t forced_text_token,
     bool text_token_is_forced, int32_t forced_previous_token, bool previous_token_is_forced,
     int32_t depth_hidden, int32_t temporal_hidden_dim, int32_t depth_text_vocab,
-    int32_t audio_vocab_size, int32_t num_depformer_embeddings, cudaStream_t stream) {
+    int32_t audio_vocab_size, int32_t num_depformer_embeddings, DType depth_dtype,
+    cudaStream_t stream) {
     if (!output || !selected_tokens || depth_hidden <= 0)
         return;
     const auto launch = personaplex_depth_projection_launch_plan(depth_hidden);
@@ -293,7 +307,7 @@ void personaplex_prepare_depth_embedding(
         depth_audio_embeddings, depth_audio_embedding_elements, selected_tokens, codebook,         \
         forced_text_token, text_token_is_forced, forced_previous_token, previous_token_is_forced,  \
         depth_hidden, temporal_hidden_dim, depth_text_vocab, audio_vocab_size,                     \
-        num_depformer_embeddings)
+        num_depformer_embeddings, depth_dtype)
     switch (temporal_hidden_dtype) {
     case DType::kFloat16:
         TRTMC_LAUNCH_DEPTH_EMBED(__half);

@@ -212,6 +212,11 @@ def build_tp_modernbert_engine(
     pos_indices = graph_ops.add_constant(
         network, (max_seq,), np.arange(max_seq, dtype=np.int32), dtype=np.int32
     )
+    sliding_mask = None
+    if any(layer in {"sliding_attention", "local_attention"} for layer in layer_types):
+        sliding_mask = graph_ops.add_bidirectional_window_mask(
+            network, pos_indices, pad_mask_4d.get_output(0), attention_contract.sliding_window
+        )
 
     embed_table = graph_ops.add_constant(network, (vocab, hidden), weights["embedding"])
     word_embed = network.add_gather(embed_table, input_ids, 0)
@@ -224,6 +229,11 @@ def build_tp_modernbert_engine(
 
         lt = layer_types[layer_idx]
         theta = full_theta if lt in ("full_attention", "global_attention") else sliding_theta
+        layer_mask = (
+            pad_mask_4d.get_output(0)
+            if lt in {"full_attention", "global_attention"}
+            else sliding_mask
+        )
         cos_table, sin_table = rope_tables[theta]
 
         if f"{prefix}.attn_norm" in weights:
@@ -275,7 +285,7 @@ def build_tp_modernbert_engine(
             head_dim=head_dim,
             q_seq=max_seq,
             kv_seq=max_seq,
-            mask=pad_mask_4d.get_output(0),
+            mask=layer_mask,
         )
 
         attn_out = graph_ops.add_matmul_rhs_constant(

@@ -198,6 +198,37 @@ def test_verdict_categories(accuracy, lights, category):
     assert judge.verdict(result, expected_suites=["s"], expected_modes=1)["category"] == category
 
 
+@pytest.mark.parametrize("performance, perf", [
+    ([{"reference_mode": "compile", "qualifying": True, "light": "green"}], "green"),
+    # eager timed in place of a failed torch.compile decides Perf as the configured mode would have
+    ([{"reference_mode": "eager", "configured_mode": "compile", "qualifying": True, "light": "red"}], "red"),
+    ([{"reference_mode": "eager", "qualifying": True, "light": "green"},
+      {"reference_mode": "compile", "qualifying": False, "light": "red"}], "green"),  # a second mode: reported only
+    ([{"reference_mode": "compile", "qualifying": True, "light": "n/a"}], "error"),
+])
+def test_the_first_configured_native_mode_decides_perf(performance, perf):
+    result = {"accuracy": [{"suite": "s", "status": "pass"}], "performance": performance}
+    assert judge.verdict(result, expected_suites=["s"], expected_modes=1)["perf"] == perf
+
+
+def test_a_profile_pins_its_native_model_to_eager(tmp_path):
+    import shutil
+
+    import yaml
+
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.models import CONFIG_ROOT, resolve_model
+
+    root = tmp_path / "config"
+    shutil.copytree(CONFIG_ROOT, root)
+    override = root / "models" / "gpt2-125m.yaml"
+    config = yaml.safe_load(override.read_text()) or {}
+    config["reference"] = {**(config.get("reference") or {}), "mode": "eager"}
+    override.write_text(yaml.safe_dump(config))
+    gpt2 = resolve_model("gpt2-125m", Environment({"repo": str(REPOSITORY)}), root)
+    assert gpt2["reference"]["mode"] == "eager" and gpt2["performance"]["reference_modes"] == ["eager"]
+
+
 def test_numeric_parity_matches_shapes_exactly_and_vectors_by_cosine():
     from trtmc_aiperf_plugins.accuracy import compare_numeric
 
@@ -239,13 +270,14 @@ def test_models_are_derived_from_the_catalog_and_task_defaults():
     assert [(item["suite"], item["endpoint"]) for item in qwen["absolute"]] == [("mmlu-0shot", "chat")]
     assert qwen["candidate"]["bundle"] == "qwen3-0.6b-fp16/qwen3-0.6b-fp16.bundle" and not qwen["candidate"]["build"]
     assert qwen["performance"]["suite"]["source"] == {"kind": "catalog_testcase", "profile": "qwen3-0.6b-fp16"}
-    assert qwen["performance"]["reference_modes"] == ["eager"] and "service_metrics" not in qwen["performance"]
+    assert qwen["reference"]["mode"] == "compile" and qwen["performance"]["reference_modes"] == ["compile"]
+    assert "service_metrics" not in qwen["performance"]
     small = resolve_model("falcon-rw-1b", environment)  # MMLU is near chance: LAMBADA
     assert [item["suite"] for item in small["absolute"]] == ["lambada"] and small["candidate"]["max_sequence_length"] == 256
     detr = resolve_model("detr-resnet-50", environment)
-    coco, = detr["absolute"]  # COCO mAP in DETR's own class numbering at its score threshold
+    coco, = detr["absolute"]  # COCO mAP in DETR's own class numbering at the threshold its bundle fixes
     assert coco["metric_params"] == {"label_space": "coco-category-id"}
-    assert coco["suite_definition"]["request"] == {"score_threshold": 0.5}
+    assert coco["suite_definition"]["request"] == {}
     assert detr["reference"]["backend"] == "reference" and detr["reference"]["requirements"] == "families/detr/requirements.txt"
     stories = resolve_model("mixtral-stories-15m", environment)
     assert [item["suite"] for item in stories["absolute"]] == ["tinystories"]
@@ -278,6 +310,95 @@ def test_models_are_derived_from_the_catalog_and_task_defaults():
         shutil.copytree(CONFIG_ROOT, root)
         (root / "models/sana-wm-bidirectional.yaml").unlink()
         assert resolve_model("sana-wm-bidirectional", environment, root=root)["reference"]["backend"] == "unsupported"
+
+
+def test_a_family_definition_is_merged_over_config_models(tmp_path):
+    """sana-wm-bidirectional: its native adapter in config/models, its reference build policy in the family's own
+    definition (families/sana_wm/tests/aiperf). The resolved reference has both."""
+    import shutil
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+    from trtmc_aiperf_qual.models import resolve_model
+
+    reference = resolve_model("sana-wm-bidirectional", _environment())["reference"]
+    assert reference["adapter"] == "families/sana_wm/reference/adapter.py" and reference["build_isolation"] is False
+    root = tmp_path / "config"
+    shutil.copytree(CONFIG_ROOT, root)
+    (root / "models/sana-wm-bidirectional.yaml").unlink()
+    alone = resolve_model("sana-wm-bidirectional", _environment(), root=root)["reference"]
+    assert "adapter" not in alone and alone["build_isolation"] is False
+
+
+def test_task_sdk_migrations_keep_their_tasks_qualification():
+    """Encoders migrated to text_to_pooled_features, Bark to text_to_audio and the eagle_vlm reranker to
+    text_query_documents_to_relevance keep their old benchmarks, and a profile's own suites still replace them
+    (dpr-ctx-encoder)."""
+    from trtmc_aiperf_qual.models import resolve_model
+
+    for profile in ("fnet-base", "deberta-base", "distilbert-base-uncased"):
+        model = resolve_model(profile, _environment())
+        assert (model["task"], model["operation"]) == ("text_to_pooled_features", "encode")
+        assert [item["suite"] for item in model["absolute"]] == ["encoder-parity"]
+    dpr = resolve_model("dpr-ctx-encoder", _environment())
+    assert [item["suite"] for item in dpr["absolute"]] == ["scifact-retrieval", "stsb"]
+    bark = resolve_model("bark-small", _environment())
+    assert (bark["task"], bark["operation"]) == ("text_to_audio", "generate_audio")
+    assert [item["check"] for item in bark["supplementary"]] == ["tts_intelligibility"]
+    assert bark["performance"]["output_grader"] == "parity_audio"
+    rerank = resolve_model("nemotron-rerank-vl-1b-v2", _environment())
+    assert (rerank["task"], rerank["operation"]) == ("text_query_documents_to_relevance", "rerank")
+    assert [item["suite"] for item in rerank["absolute"]] == ["scifact-rerank"]
+    assert rerank["performance"]["output_grader"] == "parity_scores"
+
+
+def test_image_to_boxes_keeps_coco_without_the_threshold_its_tasks_do_not_declare():
+    """The Task SDK detection families fix their score threshold in the bundle and reject a score_threshold config
+    (422): image_to_boxes keeps COCO mAP and the box parity, and no longer sends the suite's threshold."""
+    from trtmc_aiperf_qual.models import resolve_model
+
+    environment = _environment()
+    for profile in ("yolov8n", "yolov10n", "yolov5n"):
+        model = resolve_model(profile, environment)
+        coco, = model["absolute"]
+        assert (coco["suite"], coco["metric"], model["performance"]["output_grader"]) == (
+            "coco-map", "coco_map", "parity_boxes")
+        assert "score_threshold" not in coco["suite_definition"].get("request", {})
+    yolo11, = resolve_model("yolo11n", environment)["absolute"]  # object_detection still takes it
+    assert yolo11["suite_definition"]["request"] == {"score_threshold": 0.25}
+
+
+def test_migrated_text_encoders_keep_their_benchmarks():
+    """text_to_embedding keeps embedding's benchmarks; text_to_token_features keeps encode's on every token."""
+    import yaml
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+
+    tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
+    assert tasks["text_to_embedding"] == tasks["embedding"]
+    assert tasks["text_to_token_features"] == {**tasks["encoding"], "reference": {"options": {"all_tokens": True}}}
+
+
+def test_text_encoders_the_generic_references_cannot_serve_are_excluded_with_a_reason():
+    from trtmc_aiperf_qual.selection import catalog
+
+    excluded = {profile.name: profile.excluded for profile in catalog(REPOSITORY)}
+    assert all(excluded[name] for name in ("gte-base-en-v1_5", "gte-base-en-v1_5-fp16", "gte-base-en-v1_5-fp8",
+                                           "nomic-embed-text-v1_5", "nomic-embed-text-v1_5-fp16",
+                                           "deberta-v3-base", "deberta-v3-base-fp16"))
+    assert not any(excluded[name] for name in ("nemotron-embed-vl-1b-v2", "albert-base-token-features"))
+
+
+def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():
+    """A ready profile whose Task has no defaults is a configuration error that reports leave out, so a Task SDK
+    rename drops its profiles without a trace: alias the old entry in config/tasks.yaml, or state the gap here."""
+    import yaml
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+    from trtmc_aiperf_qual.selection import catalog
+
+    not_qualified: dict[str, str] = {}  # Task -> why no generic native reference or benchmark serves it yet
+    tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
+    assert {profile.task for profile in catalog(REPOSITORY)} - set(tasks) == set(not_qualified)
 
 
 def test_top1_near_tie_tolerance_is_opt_in():
@@ -509,6 +630,71 @@ def test_quantized_candidates_get_the_benchmarks_quantization_gate():
         ("mmlu-0shot", {"margin": 2.0})]
 
 
+def test_a_quantized_profile_is_qualified_as_its_models_highest_precision_profile(tmp_path):
+    from types import SimpleNamespace
+
+    from trtmc_aiperf_qual.models import qualified_as
+
+    def entry(name, family="f", task="t", **manifest):
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps({"name": name, **manifest}))
+        return SimpleNamespace(model=SimpleNamespace(family=family, task=task, manifest_path=path))
+
+    entries = {"m-nvfp4": entry("m-nvfp4", precision="fp16", quantization="nvfp4"),
+               "m-fp8": entry("m-fp8", precision="fp16", quantization="fp8"),
+               "m": entry("m", precision="fp16"), "m-bf16": entry("m-bf16", precision="bf16"),
+               "m-topp": entry("m-topp", precision="fp32"),  # another model: its name differs beyond precision
+               "m-fp32": entry("m-fp32", task="other", precision="fp32"),  # another Task
+               "x-fp8": entry("x-fp8", precision="fp16", quantization="fp8"),
+               "y-nvfp4": entry("y-nvfp4", precision="fp16", quantization="nvfp4"),
+               "y-fp8": entry("y-fp8", precision="fp16", quantization="fp8")}
+    assert qualified_as("m-nvfp4", entries) == qualified_as("m-fp8", entries) == "m-bf16"
+    assert qualified_as("m", entries) == "m"  # not quantized: its own configuration
+    assert qualified_as("x-fp8", entries) == "x-fp8"  # nothing ranks higher
+    assert qualified_as("y-nvfp4", entries) == "y-fp8"  # the highest precision there is, quantized too
+
+
+def test_quantized_profiles_take_their_bases_native_reference_and_benchmarks():
+    from trtmc_aiperf_qual.models import resolve_model
+
+    environment = _environment()
+    # A pre-quantized checkpoint: the native reference loads the base's checkpoint, in the base's environment.
+    fp8, base = resolve_model("nemotron-h-nano-9b-fp8", environment), resolve_model("nemotron-h-nano-9b", environment)
+    manifest = json.loads((REPOSITORY / "families/nemotron_h/tests/manifests/nemotron-h-nano-9b.json").read_text())
+    assert fp8["qualified_as"] == "nemotron-h-nano-9b" and "qualified_as" not in base
+    assert (fp8["reference"]["model"], fp8["reference"]["revision"]) == (manifest["hf_id"], manifest["hf_revision"])
+    assert fp8["reference"]["requirements"] == base["reference"]["requirements"] and fp8["reference"]["trust_remote_code"]
+    assert fp8["candidate"]["checkpoint"] == "nvidia/NVIDIA-Nemotron-Nano-9B-v2-FP8"
+    assert [(item["suite"], item["endpoint"]) for item in fp8["absolute"]] == [
+        (item["suite"], item["endpoint"]) for item in base["absolute"]]
+    assert [item["gate"] for item in fp8["absolute"]] == [{"margin": 2.0}]  # the quantization gate
+    # Its own catalog request is a completion: it still answers the benchmarks on its base's chat route.
+    qwen = resolve_model("qwen3-0.6b-fp8", environment)
+    assert [item["endpoint"] for item in qwen["absolute"]] == [
+        item["endpoint"] for item in resolve_model("qwen3-0.6b-fp16", environment)["absolute"]] == ["chat"]
+    # The same checkpoint quantized by TRTMC: the base's own native pipeline on the profile's pinned checkpoint.
+    canary = resolve_model("canary-1b-v2-fp8", environment)
+    assert canary["qualified_as"] == "canary-1b-v2" and "model" not in canary["reference"]
+    assert canary["reference"]["adapter"] == "families/canary/reference/adapter.py"
+    assert canary["reference"]["revision"] == canary["candidate"]["revision"]
+    # The base's candidate settings stay its own. PersonaPlex FP8 quantizes its base's checkpoint at build time and
+    # names the base's prepared model directory itself, so both bundles hold the benchmark's system prompt.
+    personaplex, base = resolve_model("personaplex-7b-fp8", environment), resolve_model("personaplex-7b", environment)
+    assert personaplex["reference"]["adapter"] == base["reference"]["adapter"]
+    assert personaplex["candidate"]["bundle"] == "personaplex-7b-fp8/personaplex-7b-fp8.bundle"
+    assert personaplex["candidate"]["model_directory"] == base["candidate"]["model_directory"]
+    assert personaplex["candidate"]["quantization"] == "fp8"
+    # Without an unquantized profile, the highest precision there is.
+    nvfp4 = resolve_model("llama-3.1-8b-nvfp4", environment)
+    assert (nvfp4["qualified_as"], nvfp4["reference"]["model"]) == ("llama-3.1-8b-fp8", "nvidia/Llama-3.1-8B-Instruct-FP8")
+    assert "qualified_as" not in resolve_model("llama-3.1-8b-fp8", environment)
+    # The only profile of its model: its definition names the BF16 original and an environment that loads it.
+    muse = resolve_model("muse-glimmer-nvfp4", environment)
+    assert "qualified_as" not in muse and muse["reference"]["model"] == "meta-models/Muse-Glimmer-30B"
+    assert muse["reference"]["revision"] == "cec94fcfd6512f2cfe708138c32533b346ea4f69"
+    assert muse["reference"]["requirements"] == "families/muse_glimmer/tests/requirements.txt"
+
+
 def test_stable_diffusion_uses_explicit_controls_on_its_actual_request(tmp_path):
     import sys
 
@@ -522,6 +708,18 @@ def test_stable_diffusion_uses_explicit_controls_on_its_actual_request(tmp_path)
     request = suite.samples[0]["request"]
     assert request["num_steps"] == 10 and request["cfg_scale"] == request["guidance_scale"] == 7.5
     assert not unstated_defaults(request)
+
+
+def test_wan22_states_the_negative_prompt_its_runtime_would_substitute():
+    """TRTMC's Wan 2.2 runtime replaces an empty negative prompt with the official one; Diffusers encodes "".
+    Every suite built on the catalog request must state it so both sides denoise with the same guidance."""
+    from trtmc_aiperf_qual.models import model_suite, resolve_model
+
+    model = resolve_model("wan22-ti2v-5b", _environment())
+    stated = model["catalog_request"]["negative_prompt"]
+    assert stated.strip()  # left empty, each side would apply its own default
+    assert model_suite("vbench-objects-20", model)["request"]["negative_prompt"] == stated
+    assert model["performance"]["suite"]["request"]["negative_prompt"] == stated
 
 
 def test_rwkv_qualification_build_and_selection_use_the_same_capacity():
@@ -823,19 +1021,30 @@ def test_sampled_speech_is_valid_by_its_median_duration_not_each_utterance():
     assert validity([], [], [])["status"] == "error"
 
 
-def test_silent_speech_failure_reports_the_paired_native_baseline():
+def test_silence_the_native_model_shares_is_reported_not_failed():
     from trtmc_aiperf_qual.intelligibility import validity
 
-    problem = [{"sample_id": "same-request"}]
+    problems = [{"sample_id": "same-request"}, {"sample_id": "voiced"}]
     quiet = {"finite": True, "dbfs": -56.58, "seconds": 6.69}
-    native = {"finite": True, "dbfs": -56.52, "seconds": 6.69}
-    result = validity(problem, [quiet], [native])
-    assert result["status"] == "fail" and result["passed"] == 0
-    assert "native also silent (-56.5 dBFS)" in result["failures"][0]["explanation"]
-    assert result["failures"][0]["native_audio"] == native
-    # Native validity is evidence, not an additional absolute-quality floor.
+    native_quiet = {"finite": True, "dbfs": -56.52, "seconds": 6.69}
     good = {"finite": True, "dbfs": -20.0, "seconds": 6.69}
-    assert validity(problem, [good], [native])["status"] == "pass"
+    shared = validity(problems, [quiet, good], [native_quiet, good])
+    assert shared["status"] == "pass" and shared["passed"] == 2 and not shared["failures"]
+    assert "1 of 2 sentences silent on both sides (the model's own output): same-request" in shared["notes"]
+    # TRTMC silent where the native model speaks is still a failure, reported with the native baseline.
+    alone = validity(problems, [quiet, good], [good, good])
+    assert alone["status"] == "fail" and alone["passed"] == 1
+    assert alone["failures"][0]["explanation"] == "silent (-56.6 dBFS)" and alone["failures"][0]["native_audio"] == good
+    # Native silence never excuses missing or non-finite TRTMC audio.
+    broken = validity(problems, [{"finite": False, "dbfs": None, "seconds": 6.69}, good], [native_quiet, good])
+    assert broken["status"] == "fail" and broken["failures"][0]["explanation"] == "non-finite samples"
+    assert validity(problems, [None, good], [native_quiet, good])["status"] == "fail"
+    # Empty audio is not silence: it fails even where the native model is quiet.
+    empty = validity(problems, [{"finite": True, "dbfs": -1000.0, "seconds": 0.0}, good], [native_quiet, good])
+    assert empty["status"] == "fail" and empty["failures"][0]["explanation"] == "empty audio"
+    assert not any("silent on both sides" in note for note in empty["notes"])
+    # Native validity is evidence, not an additional absolute-quality floor.
+    assert validity(problems[:1], [good], [native_quiet])["status"] == "pass"
 
 
 def test_reports_label_a_timing_normalized_per_audio_second(tmp_path):
@@ -850,6 +1059,34 @@ def test_reports_label_a_timing_normalized_per_audio_second(tmp_path):
     assert "40.000 per audio second</td><td>90.000 per audio second" in report_html._performance([item])
 
 
+def test_a_family_file_adds_an_outlier_allowance_to_a_shared_benchmark_gate(tmp_path):
+    from trtmc_aiperf_qual.models import deep_merge, profile_override
+
+    family_file = tmp_path / "families" / "fam" / "tests" / "aiperf" / "enc.yaml"
+    family_file.parent.mkdir(parents=True)
+    family_file.write_text("benchmarks:\n  encoder_parity:\n"
+                           "    gate: {outliers: {max_fraction: 0.01, gate: {max_relative_l2: 0.04}}}\n")
+    shared = {"encoder_parity": {"metric": "vector_parity", "gate": {"min_cosine": 0.999, "max_relative_l2": 0.02}}}
+    override = profile_override("enc", "fam", tmp_path, root=tmp_path / "config")
+    gate = deep_merge(shared, override["benchmarks"])["encoder_parity"]["gate"]
+    assert gate == {"min_cosine": 0.999, "max_relative_l2": 0.02,
+                    "outliers": {"max_fraction": 0.01, "gate": {"max_relative_l2": 0.04}}}
+
+
+def test_reports_name_the_tolerated_outliers(tmp_path):
+    from trtmc_aiperf_qual import report_html
+    from trtmc_aiperf_qual.report import write_report
+
+    item = {"suite": "encoder-parity", "source": "absolute", "benchmark": "vector_parity", "status": "pass",
+            "samples": 400, "expected_samples": 400, "passed": 399, "required_passes": 396,
+            "notes": ["1 of 400 outputs outside the tolerance but within the outlier gate (at most 4 allowed)"],
+            "outliers": [{"sample_id": "136:sentence1", "explanation": "cosine 0.99940, relative L2 0.0346"}]}
+    write_report(tmp_path, {"model": "m", "provenance": {}, "accuracy": [item]})
+    assert "| tolerated outlier 136:sentence1: cosine 0.99940, relative L2 0.0346 |" in (tmp_path / "report.md").read_text()
+    page = report_html._accuracy([item])
+    assert "tolerated outlier" in page and "136:sentence1" in page and "relative L2 0.0346" in page
+
+
 def test_lance_qualification_has_a_native_path_and_sizes_the_multimodal_benchmark():
     from trtmc_aiperf_qual.config import Environment
     from trtmc_aiperf_qual.models import resolve_model
@@ -860,3 +1097,15 @@ def test_lance_qualification_has_a_native_path_and_sizes_the_multimodal_benchmar
     assert (repository / model["reference"]["adapter"]).is_file()
     assert model["candidate"]["benchmark_sequence_length"]["extra_tokens"] == 288
     assert model["candidate"]["tokenizer_subfolder"] == "Lance_3B"
+
+
+def test_internlm2_counts_prompts_with_the_bundles_tokenizer_json():
+    from trtmc_aiperf_qual.config import Environment
+    from trtmc_aiperf_qual.models import resolve_model
+
+    repository = Path(__file__).resolve().parents[3]
+    model = resolve_model("internlm2-1.8b", Environment({"repo": str(repository)}))
+    assert model["reference"]["trust_remote_code"]
+    # The repository families/internlm/tokenizer_json.py builds the bundle's tokenizer from.
+    assert model["candidate"]["tokenizer_json"] == {
+        "repo": "internlm/internlm2-step-prover", "revision": "9e24972976836edf59be9eb14050437c60f50a6c"}

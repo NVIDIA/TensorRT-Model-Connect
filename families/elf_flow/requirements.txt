@@ -4,6 +4,7 @@
 flax==0.10.2
 jax==0.4.38
 jaxlib==0.4.38
-ml-dtypes==0.5.1
+# ml-dtypes 0.6 requires NumPy 2; the base image's onnx 1.23 requires >=0.5.4.
+ml-dtypes==0.5.4
 numpy==1.26.4
 orbax-checkpoint==0.5.23

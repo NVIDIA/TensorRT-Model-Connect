@@ -58,6 +58,34 @@ def test_environments_are_keyed_by_requirements_and_reused(tmp_path, monkeypatch
     assert created.parent.parent.name.endswith("-r1") and (stale / "keep.txt").read_text() == "x"  # never overlaid
 
 
+def test_a_non_isolated_install_provides_the_build_backend_first(tmp_path, monkeypatch):
+    requirements = tmp_path / "fam" / "requirements.txt"
+    requirements.parent.mkdir()
+    requirements.write_text("flash-attn\n")
+    commands = []
+
+    def run(command, log, timeout):
+        commands.append(command)
+        if command[1:3] == ["-m", "venv"]:
+            environment = Path(command[-1])
+            (environment / "bin").mkdir(parents=True)
+            (environment / "bin/python").write_text("")
+            (environment / "lib/python3/site-packages").mkdir(parents=True)
+
+    monkeypatch.setattr(environments, "_run", run)
+    monkeypatch.setattr(environments, "_freeze", lambda python: "torch==2\n")
+    environments.reference_python(requirements, tmp_path / "envs", build_isolation=False)
+    pip = [command for command in commands if command[1:4] == ["-m", "pip", "install"]]
+    assert [command[-2:] for command in pip] == [["setuptools", "wheel"], ["-r", str(requirements.resolve())]]
+    assert all("--no-build-isolation" in command for command in pip)
+
+    commands.clear()
+    environments.reference_python(requirements, tmp_path / "isolated", build_isolation=True)
+    pip = [command for command in commands if command[1:4] == ["-m", "pip", "install"]]
+    assert [command[-2:] for command in pip] == [["-r", str(requirements.resolve())]]
+    assert "--no-build-isolation" not in pip[0]  # an isolated install keeps pip's build isolation
+
+
 def test_the_serving_cli_has_no_script_backend():
     parser = cli.build_parser()
     with pytest.raises(SystemExit):

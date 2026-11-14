@@ -17,6 +17,7 @@ class AttentionContract:
     layer_types: tuple[str, ...]
     full_rope_theta: float
     sliding_rope_theta: float
+    sliding_window: int
 
 
 @dataclass
@@ -320,8 +321,18 @@ def resolve_attention_contract(config: ModelConfig) -> AttentionContract:
             + ", ".join(invalid_layer_types)
         )
 
+    sliding_window = raw.get("sliding_window")
+    local_window = raw.get("local_attention", 128) if sliding_window is None else sliding_window
+    if isinstance(local_window, bool) or not isinstance(local_window, int) or local_window < 0:
+        raise ValueError("ModernBERT local attention window must be a non-negative integer")
+    if sliding_window is None:
+        sliding_window = local_window // 2
+    if sliding_window > 2147483646:
+        raise ValueError("ModernBERT local attention half-window must be at most 2147483646")
+
     return AttentionContract(
         layer_types=layer_types,
         full_rope_theta=full_rope_theta,
         sliding_rope_theta=sliding_rope_theta,
+        sliding_window=sliding_window,
     )

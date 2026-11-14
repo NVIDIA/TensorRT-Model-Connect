@@ -32,9 +32,12 @@ import numpy as np
 import tensorrt as trt
 
 from . import graph_ops
+from .graph_blocks import make_matmul_fn
+from .quantization import configure_build
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
+    from .quantization import WanQuantContext
 
 
 def build_standard_dit_engine(
@@ -51,6 +54,7 @@ def build_standard_dit_engine(
     eps: float = 1e-06,
     precision: str = "fp32",
     verbose: bool = False,
+    quant_ctx: "WanQuantContext | None" = None,
 ) -> bytes:
     """Build DiT denoiser TRT engine plan.
 
@@ -88,6 +92,7 @@ def build_standard_dit_engine(
             fixed position embeddings, e.g. PixArt).
         eps: LayerNorm epsilon.
         verbose: Enable TRT builder verbose logging.
+        quant_ctx: FP8 Q/DQ context for the block projections (None builds them unquantized).
 
     Returns:
         Serialized TRT engine plan bytes.
@@ -105,6 +110,11 @@ def build_standard_dit_engine(
     config.builder_optimization_level = 1
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 64 << 30)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
+    if quant_ctx is not None:
+        if work_trt_dtype != trt.float16:
+            raise ValueError("Wan DiT FP8 builds require precision fp16")
+        configure_build(config)
+    matmul = make_matmul_fn(network, work_np_dtype, quant_ctx)
     hidden_inp = network.add_input("hidden_states", trt.float32, (num_patches, dim))
     temb_inp = network.add_input("timestep_embedding", trt.float32, (1, 6 * dim))
     time_embed_inp = network.add_input("time_embed", trt.float32, (1, dim))
@@ -151,15 +161,9 @@ def build_standard_dit_engine(
         normed = graph_ops.add_adaptive_layernorm(
             network, hidden, scale_sa, shift_sa, dim, eps, dtype=work_np_dtype
         )
-        q = graph_ops.add_matmul_rhs_constant(
-            network, normed, dim, dim, weights[f"{prefix}.attn1.to_q.weight"], dtype=work_np_dtype
-        )
-        k = graph_ops.add_matmul_rhs_constant(
-            network, normed, dim, dim, weights[f"{prefix}.attn1.to_k.weight"], dtype=work_np_dtype
-        )
-        v = graph_ops.add_matmul_rhs_constant(
-            network, normed, dim, dim, weights[f"{prefix}.attn1.to_v.weight"], dtype=work_np_dtype
-        )
+        q = matmul(normed, dim, dim, weights[f"{prefix}.attn1.to_q.weight"], f"{prefix}.attn1.to_q")
+        k = matmul(normed, dim, dim, weights[f"{prefix}.attn1.to_k.weight"], f"{prefix}.attn1.to_k")
+        v = matmul(normed, dim, dim, weights[f"{prefix}.attn1.to_v.weight"], f"{prefix}.attn1.to_v")
         q_bias = weights.get(f"{prefix}.attn1.to_q.bias")
         if q_bias is not None:
             q = graph_ops.add_bias_sum(network, q, dim, q_bias, dtype=work_np_dtype)
@@ -207,13 +211,12 @@ def build_standard_dit_engine(
             kv_seq=num_patches,
             tag=f"{prefix}.attn1",
         )
-        attn_out = graph_ops.add_matmul_rhs_constant(
-            network,
+        attn_out = matmul(
             context_flat,
             dim,
             dim,
             weights[f"{prefix}.attn1.to_out.0.weight"],
-            dtype=work_np_dtype,
+            f"{prefix}.attn1.to_out.0",
         )
         o_bias = weights.get(f"{prefix}.attn1.to_out.0.bias")
         if o_bias is not None:
@@ -236,34 +239,28 @@ def build_standard_dit_engine(
             )
         else:
             cross_normed = hidden
-        cross_q = graph_ops.add_matmul_rhs_constant(
-            network,
-            cross_normed,
-            dim,
-            dim,
-            weights[f"{prefix}.attn2.to_q.weight"],
-            dtype=work_np_dtype,
+        cross_q = matmul(
+            cross_normed, dim, dim, weights[f"{prefix}.attn2.to_q.weight"], f"{prefix}.attn2.to_q"
         )
         cq_bias = weights.get(f"{prefix}.attn2.to_q.bias")
         if cq_bias is not None:
             cross_q = graph_ops.add_bias_sum(network, cross_q, dim, cq_bias, dtype=work_np_dtype)
         add_k_proj_w = weights.get(f"{prefix}.attn2.add_k_proj.weight")
         if add_k_proj_w is not None:
-            cross_k = graph_ops.add_matmul_rhs_constant(
-                network, encoder_hidden, context_dim, dim, add_k_proj_w, dtype=work_np_dtype
+            cross_k = matmul(
+                encoder_hidden, context_dim, dim, add_k_proj_w, f"{prefix}.attn2.add_k_proj"
             )
             add_k_bias = weights.get(f"{prefix}.attn2.add_k_proj.bias")
             if add_k_bias is not None:
                 cross_k = graph_ops.add_bias_sum(
                     network, cross_k, dim, add_k_bias, dtype=work_np_dtype
                 )
-            cross_v = graph_ops.add_matmul_rhs_constant(
-                network,
+            cross_v = matmul(
                 encoder_hidden,
                 context_dim,
                 dim,
                 weights[f"{prefix}.attn2.add_v_proj.weight"],
-                dtype=work_np_dtype,
+                f"{prefix}.attn2.add_v_proj",
             )
             add_v_bias = weights.get(f"{prefix}.attn2.add_v_proj.bias")
             if add_v_bias is not None:
@@ -271,26 +268,24 @@ def build_standard_dit_engine(
                     network, cross_v, dim, add_v_bias, dtype=work_np_dtype
                 )
         else:
-            cross_k = graph_ops.add_matmul_rhs_constant(
-                network,
+            cross_k = matmul(
                 encoder_hidden,
                 context_dim,
                 dim,
                 weights[f"{prefix}.attn2.to_k.weight"],
-                dtype=work_np_dtype,
+                f"{prefix}.attn2.to_k",
             )
             ck_bias = weights.get(f"{prefix}.attn2.to_k.bias")
             if ck_bias is not None:
                 cross_k = graph_ops.add_bias_sum(
                     network, cross_k, dim, ck_bias, dtype=work_np_dtype
                 )
-            cross_v = graph_ops.add_matmul_rhs_constant(
-                network,
+            cross_v = matmul(
                 encoder_hidden,
                 context_dim,
                 dim,
                 weights[f"{prefix}.attn2.to_v.weight"],
-                dtype=work_np_dtype,
+                f"{prefix}.attn2.to_v",
             )
             cv_bias = weights.get(f"{prefix}.attn2.to_v.bias")
             if cv_bias is not None:
@@ -329,13 +324,12 @@ def build_standard_dit_engine(
             mask=cross_mask_4d,
             tag=f"{prefix}.attn2",
         )
-        cross_out = graph_ops.add_matmul_rhs_constant(
-            network,
+        cross_out = matmul(
             c_context_flat,
             dim,
             dim,
             weights[f"{prefix}.attn2.to_out.0.weight"],
-            dtype=work_np_dtype,
+            f"{prefix}.attn2.to_out.0",
         )
         co_bias = weights.get(f"{prefix}.attn2.to_out.0.bias")
         if co_bias is not None:
@@ -348,13 +342,12 @@ def build_standard_dit_engine(
         ffn_normed = graph_ops.add_adaptive_layernorm(
             network, hidden, scale_ff, shift_ff, dim, eps, dtype=work_np_dtype
         )
-        ffn_fc1 = graph_ops.add_matmul_rhs_constant(
-            network,
+        ffn_fc1 = matmul(
             ffn_normed,
             dim,
             ffn_dim,
             weights[f"{prefix}.ffn.net.0.proj.weight"],
-            dtype=work_np_dtype,
+            f"{prefix}.ffn.net.0.proj",
         )
         fc1_bias = weights.get(f"{prefix}.ffn.net.0.proj.bias")
         if fc1_bias is not None:
@@ -362,13 +355,8 @@ def build_standard_dit_engine(
                 network, ffn_fc1, ffn_dim, fc1_bias, dtype=work_np_dtype
             )
         ffn_act = graph_ops.add_gelu_new(network, ffn_fc1, dtype=work_np_dtype)
-        ffn_fc2 = graph_ops.add_matmul_rhs_constant(
-            network,
-            ffn_act,
-            ffn_dim,
-            dim,
-            weights[f"{prefix}.ffn.net.2.weight"],
-            dtype=work_np_dtype,
+        ffn_fc2 = matmul(
+            ffn_act, ffn_dim, dim, weights[f"{prefix}.ffn.net.2.weight"], f"{prefix}.ffn.net.2"
         )
         fc2_bias = weights.get(f"{prefix}.ffn.net.2.bias")
         if fc2_bias is not None:

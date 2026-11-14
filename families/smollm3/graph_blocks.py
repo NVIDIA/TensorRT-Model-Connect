@@ -16,6 +16,8 @@ import tensorrt as trt
 from . import graph_ops
 
 if TYPE_CHECKING:
+    from typing import Any as QuantContext
+
     from .checkpoint_mapper import WeightDict
 
 
@@ -24,13 +26,23 @@ if TYPE_CHECKING:
 # blocks themselves).
 # ---------------------------------------------------------------------------
 
-def make_matmul_fn(network, dtype):
-    """Create the SmolLM3 projection matmul callable."""
+def make_matmul_fn(network, dtype, quant_ctx=None):
+    """Create a projection matmul callable that routes through quant_ctx if present.
+
+    Returns a function: (lhs, lhs_w, rhs_w, rhs_weights, weight_name) -> ITensor
+    """
+    if quant_ctx is None:
+
+        def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
+            del weight_name
+            return graph_ops.add_matmul_rhs_constant(
+                network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype)
+
+        return matmul
 
     def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
-        del weight_name
-        return graph_ops.add_matmul_rhs_constant(
-            network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype)
+        return quant_ctx.maybe_quantized_matmul(
+            network, lhs, lhs_w, rhs_w, rhs_weights, weight_name, dtype=dtype)
 
     return matmul
 
@@ -111,6 +123,7 @@ def add_attention_block(
     alibi_slopes_tensor: trt.ITensor | None = None,
     alibi_indices_tensor: trt.ITensor | None = None,
     dtype: np.dtype = np.float32,
+    quant_ctx: QuantContext | None = None,
     layer_prefix: str = "",
     # TRT 10 native API tensors.
     cos_half_tensor: trt.ITensor | None = None,
@@ -129,7 +142,7 @@ def add_attention_block(
     ALiBi is represented as a per-head additive attention mask and still uses
     native IAttention.
     """
-    matmul = make_matmul_fn(network, dtype)
+    matmul = make_matmul_fn(network, dtype, quant_ctx)
     attention_window = max_cache_length + 1
     if num_kv_heads is None:
         num_kv_heads = num_heads
@@ -276,10 +289,11 @@ def add_swiglu_mlp(
     hidden_size: int,
     mlp_size: int,
     dtype: np.dtype = np.float32,
+    quant_ctx: QuantContext | None = None,
     layer_prefix: str = "",
 ) -> trt.ITensor:
     """Gate/up/down SwiGLU MLP. Returns output tensor."""
-    matmul = make_matmul_fn(network, dtype)
+    matmul = make_matmul_fn(network, dtype, quant_ctx)
     _lp = layer_prefix or prefix
 
     gate = matmul(inp, hidden_size, mlp_size,
@@ -308,10 +322,11 @@ def add_gelu_fc_mlp(
     mlp_size: int,
     activation: str = "gelu_new",
     dtype: np.dtype = np.float32,
+    quant_ctx: QuantContext | None = None,
     layer_prefix: str = "",
 ) -> trt.ITensor:
     """fc1 -> activation -> fc2 MLP. Returns output tensor."""
-    matmul = make_matmul_fn(network, dtype)
+    matmul = make_matmul_fn(network, dtype, quant_ctx)
     _lp = layer_prefix or prefix
 
     fc1 = matmul(inp, hidden_size, mlp_size,

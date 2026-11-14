@@ -75,6 +75,29 @@ int main() {
         result.selection.clear();
         expect_invalid([&] { result.token(); });
 
+        result.ranks = 1;
+        result.selection = {2, 1};
+        result.logits = {0.1F, 0.2F, 0.8F, -0.4F};
+        trtmc::LlamaSamplingParams params;
+        params.top_k = 4;
+        params.seed = 19;
+        auto sampled = trtmc::create_llama_sampler(params);
+        auto reference = trtmc::create_llama_sampler(params);
+        bool non_greedy = false;
+        for (int i = 0; i < 32; ++i) {
+            const auto actual = result.sample(*sampled, params);
+            if (actual != reference->sample(result.logits.data(), 4, params).token_id)
+                throw std::runtime_error("sampled step changes native sampler draws");
+            non_greedy |= actual != 2;
+        }
+        if (!non_greedy)
+            throw std::runtime_error("sampled step test never leaves argmax");
+        result.selection[1] = 0;
+        expect_invalid([&] { result.sample(*sampled, params); });
+        result.selection[1] = 1;
+        result.logits.clear();
+        expect_invalid([&] { result.sample(*sampled, params); });
+
         std::uint16_t feature_data[12]{};
         FeatureView features{feature_data, 3, 4};
         const auto last = features.slice(2, 1);

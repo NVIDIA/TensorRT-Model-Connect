@@ -91,8 +91,8 @@ Pipeline::Pipeline(const FamilyContext& context) {
 }
 
 TextResult Pipeline::generate(const std::string& prompt, const TextGenerationConfig& config) {
-    if ((config.temperature > 0 && config.top_k != 1) || config.repetition_penalty != 1.0F)
-        throw std::invalid_argument("EAGLE3 prototype supports greedy unpenalized decoding only");
+    if (config.repetition_penalty != 1.0F)
+        throw std::invalid_argument("EAGLE3 does not implement repetition penalties");
     const auto& mode = config.text_generation_mode;
     if (mode != "auto" && mode != "eagle3" && mode != "autoregressive")
         throw std::invalid_argument("expected auto, eagle3, or autoregressive generation mode");
@@ -104,11 +104,21 @@ TextResult Pipeline::generate(const std::string& prompt, const TextGenerationCon
     const int bos = manifest_.at("target_config").at("bos_token_id");
     if (ids.size() > 1 && ids[0] == bos && ids[1] == bos)
         ids.erase(ids.begin());
-    return generate_ids(ids, config.max_new_tokens, mode != "autoregressive");
+    return generate_ids(ids, config.max_new_tokens, mode != "autoregressive", false, 2,
+                        llama_sampling_params_from_config(config, eos_));
 }
 
 TextResult Pipeline::generate_ids(const std::vector<std::int32_t>& prompt, int count,
-                                  bool speculative, bool ignore_eos, int draft_width) {
+                                  bool speculative, bool ignore_eos, int draft_width,
+                                  const LlamaSamplingParams& sampling) {
+    auto params = sampling;
+    if (params.eos_token_id < 0 && params.eos_token_ids.empty())
+        params.eos_token_ids = eos_;
+    const bool sampled =
+        params.temperature > 0 && params.top_p > 0 &&
+        (params.top_k != 1 || params.top_p < 1 || params.min_p > 0 || params.seed >= 0);
+    auto sampler = create_llama_sampler(params);
+    sampler->reset();
     const auto& tc = target_->contract();
     if (draft_width < 1 || draft_width > 2 ||
         depth_ * draft_width + 1 > tc.query_limit(Phase::kDecode))
@@ -132,8 +142,9 @@ TextResult Pipeline::generate_ids(const std::vector<std::int32_t>& prompt, int c
     for (int start = 0; start < static_cast<int>(prompt.size());) {
         const int rows =
             std::min(tc.query_limit(Phase::kPrefill), static_cast<int>(prompt.size()) - start);
-        target_result = target_->run(Phase::kPrefill, slice(prompt, start, start + rows), start,
-                                     chain(rows), false);
+        target_result =
+            target_->run(Phase::kPrefill, slice(prompt, start, start + rows), start, chain(rows),
+                         false, {}, {}, sampled && start + rows == static_cast<int>(prompt.size()));
         if (speculative)
             checked(cudaMemcpyAsync(static_cast<std::uint16_t*>(prompt_features_.data()) +
                                         std::size_t(start) * tc.feature_width,
@@ -142,13 +153,13 @@ TextResult Pipeline::generate_ids(const std::vector<std::int32_t>& prompt, int c
                                     cudaMemcpyDeviceToDevice, target_->stream()));
         start += rows;
     }
-    int root = target_result.token();
+    int root = sampled ? target_result.sample(*sampler, params) : target_result.token();
     auto emit = [&](int token) {
         if (static_cast<int>(result.token_ids.size()) >= count)
             return false;
         result.token_ids.push_back(token);
         return static_cast<int>(result.token_ids.size()) < count &&
-               (ignore_eos || std::find(eos_.begin(), eos_.end(), token) == eos_.end());
+               (ignore_eos || !llama_is_eos_token(params, token));
     };
     bool more = emit(root);
     if (speculative) {
@@ -165,14 +176,21 @@ TextResult Pipeline::generate_ids(const std::vector<std::int32_t>& prompt, int c
     int committed = static_cast<int>(prompt.size());
     while (more) {
         if (!speculative) {
-            target_result = target_->run(Phase::kDecode, {root}, committed++, {-1}, false);
-            root = target_result.token();
+            target_result =
+                target_->run(Phase::kDecode, {root}, committed++, {-1}, false, {}, {}, sampled);
+            root = sampled ? target_result.sample(*sampler, params) : target_result.token();
             more = emit(root);
             continue;
         }
         const auto remaining = count - static_cast<int>(result.token_ids.size());
-        eagle3_->propose_and_verify(root, committed, remaining, draft_width, ignore_eos);
-        const auto accepted = eagle3_->accept(committed);
+        Acceptance accepted;
+        if (sampled) {
+            accepted = eagle3_->sample(root, committed, remaining, draft_width, ignore_eos,
+                                       *sampler, params);
+        } else {
+            eagle3_->propose_and_verify(root, committed, remaining, draft_width, ignore_eos);
+            accepted = eagle3_->accept(committed);
+        }
         accepted_lengths_.push_back(accepted.length - 1);
         result.token_ids.insert(result.token_ids.end(), accepted.emitted.begin(),
                                 accepted.emitted.end());
@@ -180,7 +198,8 @@ TextResult Pipeline::generate_ids(const std::vector<std::int32_t>& prompt, int c
         if (!more)
             break;
         root = accepted.emitted.back();
-        eagle3_->feedback(accepted.length);
+        if (!sampled)
+            eagle3_->feedback(accepted.length);
         committed += accepted.length;
     }
     if (speculative)

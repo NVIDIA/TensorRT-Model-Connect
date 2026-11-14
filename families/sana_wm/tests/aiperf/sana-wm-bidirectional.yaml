@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# mmcv 1.7.2 (the family's requirements.txt) is a source package whose setup.py imports pkg_resources, which
+# setuptools removed in 82.0; an isolated build takes the newest setuptools. This reference environment alone builds
+# its packages with the serving interpreter's setuptools.
+reference:
+  build_isolation: false

@@ -17,6 +17,8 @@ description: >-
 - Publish only the change the user placed in scope.
 - Open a draft PR by default; omit `--draft` only when the user explicitly asks
   for a ready-for-review PR and the evidence supports that state.
+- Maintainers do not review drafts or trigger protected CI for them. Mark the
+  PR ready (step 7) before anyone asks for review or protected CI.
 - Do not add labels, reviewers, milestones, projects, or auto-merge unless the
   user explicitly requests them. The authorized Internal CI trigger is the
   exception described below.
@@ -141,7 +143,20 @@ gh pr checks <number-or-url> \
 
 Queued, missing, skipped, or failed checks are not green.
 
-## 7. Start Exact-Head Premerge When Authorized
+## 7. Mark Ready, Then Start Exact-Head Premerge When Authorized
+
+Maintainers review PRs and trigger protected CI only after the PR is marked
+ready. Once `$review-trtmc-pr` reports `READY TO MARK READY` for the exact head
+and `Community CPU / Required` passes, mark the PR ready when the user
+authorizes it, before any request for review or protected CI:
+
+```bash
+gh pr ready <number-or-url> \
+  --repo NVIDIA/TensorRT-Model-Connect
+```
+
+Never ask a maintainer to trigger protected CI for a draft. If the user keeps
+the PR in draft, report that it is not in the review queue.
 
 Creating or pushing the PR does not start premerge. When CI execution is
 authorized, resolve the current PR API head before adding the one-shot trigger:
@@ -182,7 +197,8 @@ details, and URLs stay private and must not be copied to the Source PR.
 ## 8. Report And Hand Off
 
 Report the PR URL and number, draft state, pushed head SHA, validation evidence,
-initial exact-head CI state, and any dependency or unrun gate. Hand monitoring
-and any merge work to `$pr-babysitter`; this skill never merges.
+initial exact-head CI state, and any dependency or unrun gate. A PR still in
+draft is not reviewed and is skipped by `$pr-babysitter`; say so in the report.
+Hand monitoring and any merge work to `$pr-babysitter`; this skill never merges.
 
 <!-- Collaborative review anchor: batch 2. -->

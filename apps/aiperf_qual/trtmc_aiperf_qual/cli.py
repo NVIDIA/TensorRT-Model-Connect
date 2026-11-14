@@ -242,7 +242,8 @@ def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: 
             for entry in result.get("accuracy", []):
                 removed_floor = (entry.get("gate") or {}).pop("min_native", None) is not None
                 changed |= removed_floor
-                if ((entry.get("source") == "absolute" or removed_floor)
+                # Task checks (the TTS ASR round trip) carry the same non-inferiority test.
+                if ((entry.get("source") in ("absolute", "task") or removed_floor)
                         and (entry.get("metrics") or {}).get("test") and entry.get("status") != "error"):
                     status, reasons = absolute.status(entry)
                     changed |= status != entry.get("status")
@@ -289,17 +290,20 @@ def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: 
                                               not_equivalent=policy.get("not_equivalent"),
                                               candidate_precision=(model.get("reference") or {}).get("perf_precision"))
             result["performance"][index] = {key: item[key] for key in item
-                                               if key in ("reference_mode", "request", "candidate_timing_scope",
-                                                          "reference_timing_scope", "reference_backend")} | verdict
+                                               if key in ("reference_mode", "configured_mode", "qualifying", "request",
+                                                          "candidate_timing_scope", "reference_timing_scope",
+                                                          "reference_backend")} | verdict
         requests = sorted({item.get("request") for item in result.get("performance", []) if item.get("gate", True)}, key=str) or [None]
         if any(item.get("gate", True) for item in result.get("performance", [])):
             from .runner import unavailable_mode
 
-            measured = {(item["reference_mode"], item.get("request")) for item in result["performance"]
-                        if item.get("gate", True)}
+            measured = {(item.get("configured_mode", item["reference_mode"]), item.get("request"))
+                        for item in result["performance"] if item.get("gate", True)}
+            configured = list(policy.get("reference_modes", []))
             result["performance"] += [
-                unavailable_mode(mode, result.get("errors", {}).get(f"reference_perf_{mode}", "not measured"), request)
-                for mode in policy.get("reference_modes", []) for request in requests if (mode, request) not in measured]
+                {**unavailable_mode(mode, result.get("errors", {}).get(f"reference_perf_{mode}", "not measured"),
+                                    request), "qualifying": mode == configured[0]}
+                for mode in configured for request in requests if (mode, request) not in measured]
         for item in result["accuracy"]:
             if item.get("source") == "absolute":  # both sides' scores are kept: re-apply today's gate
                 declared = next((entry for entry in model.get("absolute", []) if entry["suite"] == item["suite"]), {})
@@ -314,6 +318,9 @@ def rejudge_reports(outs: Sequence[Path], environment=None, *, selection_cache: 
                     elif item["gate"] != judged:  # a corpus bootstrap needs the outputs: rerun the model
                         item["metrics"]["test"] = {"outcome": None}
                     item["status"], item["reasons"] = absolute.status(item)
+            elif (item.get("source") == "task" and (item.get("metrics") or {}).get("test")
+                  and item.get("status") != "error"):  # a task check's test (the TTS ASR round trip)
+                item["status"], item["reasons"] = absolute.status(item)
         result["accuracy"] = [item for item in result.get("accuracy", []) if item.get("source") != "missing"]
         if model.get("accuracy_source") == "none":  # re-derived from today's output checks
             result["accuracy"] = [item for item in result["accuracy"] if item.get("suite") != CONVERSION_PARITY]
@@ -565,8 +572,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             return [profile.name for profile in selected], excluded
 
         if arguments.command == "run-all":
-            from .campaign import exit_code, parse_shard, run_all, shard, write_exclusions, write_plan
+            from . import preflight
+            from .campaign import exit_code, parse_shard, run_all, set_aside, shard, write_exclusions, write_plan
 
+            serve_python = environment.values.get("serve_python")
+            if serve_python and Path(str(serve_python)).is_file():
+                missing = preflight.missing_serve_packages(environment)
+                if missing:  # stop before the campaign: every native reference that needs one would fail
+                    print(f"trtmc-aiperf-qual: serve_python cannot import the serving packages: {missing}; install "
+                          "apps/perf_serving/requirements.txt into it (apps/aiperf_qual/setup.sh)", file=sys.stderr)
+                    return 2
             names, excluded = machine_list()
             if arguments.smoke and arguments.out_root.name != "smoke":  # never mixed with formal results
                 arguments.out_root = arguments.out_root / "smoke"
@@ -580,6 +595,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 except ConfigError as error:
                     config_errors.append({"profile": name, "reason": str(error)})
                     print(json.dumps({"profile": name, "category": "config-error", "reason": str(error)}), flush=True)
+                    # An older result must not stand in for a profile that no longer configures: the summary
+                    # takes a result directory over the plan's configuration error.
+                    set_aside(arguments.out_root / name)
             if arguments.shard:
                 models = shard(models, *parse_shard(arguments.shard))
             extra = None
@@ -638,7 +656,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             names, _ = machine_list()
             return write_matrix(environment, names, arguments.output)
         if arguments.command == "plan":
-            from .runner import applies, quality_only
+            from .runner import applies, native_modes, quality_only
 
             names, excluded = machine_list()
             for item in excluded:
@@ -655,7 +673,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                                       "perf_request": "quality" if quality_only(model) else
                                                       model["performance"]["suite"]["source"]["kind"],
                                       "bundle": model["candidate"]["bundle"],
-                                      "modes": ["eager"] if quality_only(model) else model["performance"]["reference_modes"]}))
+                                      "modes": native_modes(model["reference"]) if quality_only(model) else
+                                               model["performance"]["reference_modes"]}))
                 except ConfigError as error:
                     print(json.dumps({"profile": name, "error": str(error)}))
             return 0
@@ -665,7 +684,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.out = arguments.out.parent / "smoke" / arguments.out.name
         record = run_one(environment, resolve_model(arguments.profile, environment), arguments.out)
         print(json.dumps({"report": str(arguments.out / "report.md"), **record}))
-        return 0 if record["category"] in ("pass", "smoke-pass") else 1
+        complete_measurement = (record["category"] == "measured" and record.get("acc") == "pass"
+                                and record.get("perf") == "measured")
+        return 0 if record["category"] in ("pass", "smoke-pass") or complete_measurement else 1
     except ConfigError as error:
         print(f"trtmc-aiperf-qual: {error}", file=sys.stderr)
         return 2

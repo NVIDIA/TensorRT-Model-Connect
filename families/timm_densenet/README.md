@@ -53,6 +53,33 @@ Each prints all scores as JSON and reads the result after releasing its model
 handle. These commands perform real inference and require the matching runtime
 and checkpoint bundle; the CPU contract test alone does not qualify a checkpoint.
 
+## FP8 quantization
+
+`quantization=fp8` (precision fp16 only) self-quantizes the original checkpoint at
+build time; no FP8 checkpoint exists for these classifiers. The 1x1 and 3x3
+convolutions of every dense layer and the 1x1 convolution of every transition
+run as FP8 convolutions: weights are quantized per output channel
+(`max(abs(weight)) / 448`), and each convolution input has a static per-tensor
+scale read from `fp8_activation_scales.json`. The stem convolution, batch norms,
+pooling and the classifier stay fp16. TensorRT fuses each batch norm and ReLU
+into the Quantize, or into the epilogue of the FP8 convolution before it.
+
+```sh
+trtmc build timm/densenet121.ra_in1k -o timm_densenet_fp8.bundle --quantization fp8
+```
+
+Scales are committed for `densenet121.ra_in1k`, `densenet121.tv_in1k`,
+`densenet161.tv_in1k`, `densenet169.tv_in1k` and `densenet201.tv_in1k` at
+224x224. Another checkpoint or input size raises and names the developer tool
+`calibrate_fp8_scales.py` (ModelOpt `FP8_DEFAULT_CFG`, max calibration on 500
+ImageNet validation images). A checkpoint that is already quantized is refused.
+
+### NVFP4
+
+NVFP4 is not used. TensorRT has no FP4 convolution (block-scaled FP4 needs a
+2-D GEMM input), and every layer that FP8 quantizes is a convolution. The only
+GEMM in the model is the classifier, under 1% of the time. NVFP4 was not built.
+
 ## Benchmark timing
 
 `tests/performance.yaml` takes over the existing `timm_densenet.classify`

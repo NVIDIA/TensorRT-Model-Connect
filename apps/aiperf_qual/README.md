@@ -5,8 +5,8 @@ Accuracy and performance qualification of every ready catalog model against its 
 
 - **Acc**: TRTMC must be as accurate as the native model on the Task's workloads. Both sides answer the
   Task's gold-labelled benchmarks (`absolute`) and each benchmark is a paired non-inferiority decision
-  (`noninferiority.py`): `pass` when TRTMC's regression is shown to be below the benchmark's margin, `fail`
-  when it is shown to exceed it, `inconclusive` otherwise. Tasks without a gold set compare outputs with
+  (`noninferiority.py`): `fail` when TRTMC's measured regression exceeds the benchmark's margin, `pass`
+  otherwise (there is no inconclusive outcome; the confidence statistics are reported for information). Tasks without a gold set compare outputs with
   the native model (conversion parity). Random-weight test models are Perf only (`accuracy_source: none`).
 - **Perf**: report Native and TRTMC task-call p50 from the same benchmark responses used for Acc,
   at the recorded effective precision. Timing is a measurement, not an additional acceptance gate.
@@ -43,6 +43,16 @@ ADE20K mIoU, mask IoU, ETTh1 MSE, WMT / FLORES chrF++). Selections are seeded an
 filtered to the shipped bundle's length (rendered through the chat template on the chat route). A model
 whose catalog request samples answers once per seed on each side and is judged on per-problem seed means.
 Each benchmark's `margin`, `relative_margin`, and size are set in `config/tasks.yaml`.
+
+HumanEval and MBPP grading requires a host that can apply the configured `setpriv` UID/GID and
+capability boundary. Before model preparation, code profiles verify that `nobody` cannot write the
+result, bundle, cache, data, reference-environment and runtime roots or read the protected home.
+An unavailable boundary produces an `environment-blocked` result in `error.json`, a White
+"environment blocked" summary label, and a nonzero exit status, with no model qualification claim.
+Blocked profiles are retained on resume while the boundary remains unavailable; a repaired host
+retries with the normal execution key.
+The same verification still runs before every generated program. There is no unsandboxed fallback;
+ordinary non-root hosts that cannot apply the boundary cannot execute these code benchmarks.
 Native absolute scores do not decide conversion acceptance: the paired difference does.
 A low score limits what this benchmark establishes about model capability, but does not
 prevent comparing conversion results. Historical `min_native` fields are ignored.
@@ -57,14 +67,19 @@ A family configuration can declare a complete local `benchmarks` entry (`suite`,
 `suite_definition`, `metric`, and `gate`) and select it through `absolute`, without adding
 family policy to the shared Task defaults. `family_parity` delegates
 to `gate.checker`, a `families.<family>.<module>:<function>` taking the two observations and gate;
-the ordinary parity decision still requires every selected sample to pass.
+the ordinary parity decision still requires every selected sample to pass, unless the gate declares
+`outliers` (`max_fraction` of the samples, each within `outliers.gate` merged over the gate): then that many
+single-sample outliers pass and are listed in every report, while a missing answer or a larger error still
+fails. A profile's family file declares it (DINOv3; camembert-base, roberta-large and fnet-base for
+encoder-parity); the shared Task defaults do not.
 DINOv3 uses 50 seeded COCO val2017 images, complete hidden and pooled features, and its existing
 family E2E criteria. Accuracy and task-call P50 come from the same extraction requests.
 
 Checks for every model of a Task (`supplementary`): text-to-speech round-trip WER (corpus, bootstrap) and
-audio validity (every output finite and not silent; the median per-sentence duration ratio to the native model
+audio validity (every output finite and not silent, unless the native model is silent for the same
+request; the median per-sentence duration ratio to the native model
 within 0.5-2, as a sampling model's single utterance may run to its length limit on either side; an error
-when no sentence has audio on both sides); GenEval-style pass rate for text-to-image families that take caller latents (the same
+when no sentence is voiced on both sides, so no duration can be compared); GenEval-style pass rate for text-to-image families that take caller latents (the same
 initial noise on both sides); CLIP-T and video validity for videos; MagicBrush CLIP-I and DINO for edits;
 world-model video parity. The pixel parity under latent replay is reported only (`informational`).
 
@@ -72,10 +87,14 @@ A suite with `base: catalog` overrides the profile's catalog request with its da
 For a profile with `candidate.benchmark_sequence_length`, the build counts the prepared
 gold-suite prompts with its pinned tokenizer and uses their maximum length plus the configured
 `extra_tokens`. Qwen3-Embedding reserves one token for EOS and four for runtime tokenizer count differences.
+EmbeddingGemma2 reserves none: its runtime tokenizer counts every benchmark prompt as Transformers does, BOS and
+EOS included.
 The evidence is written to
 `artifacts/build/benchmark-capacity.json`; request truncation and accuracy tolerances do not change.
 Dataset or tokenizer failures stop capacity planning rather than falling back to the catalog size.
 Lance uses the `Lance_3B` tokenizer subfolder and reserves its image, template, and generation tokens.
+The Qwen-VL profiles reserve theirs too: once a Qwen-VL KV cache is full it slides, dropping the image while
+the OCRBench answer is still being generated.
 Its Native adapter loads the pinned upstream model once and serves the same MMStar requests at the
 public Task's 448x448 image size, with image decode before timing and preparation/generation inside it.
 
@@ -156,13 +175,21 @@ matched subset. Models explicitly lacking a quality benchmark retain one configu
 workload and conversion-parity evidence. The explicit `order-check` diagnostic and historical
 fixed-workload reports keep their original statistics. Timing and generation phases hold `gpu_lock`.
 
+The native model runs under `torch.compile` with PyTorch's defaults (`reference.mode: compile` in
+`config/tasks.yaml`); family pipelines compile their main network through `host.maybe_compile`. One run
+supplies both its quality answers and its task-call timings, so Acc and Perf share one native mode. A
+compile run that fails (an error, a function recompiling past Dynamo's limit, or no compiled graph running)
+stops serving and runs again in eager mode in its place; the failed attempt's evidence is superseded, never
+mixed in. Reports name the mode that answered (`reference_mode`, each Acc entry's native `mode`, the AIPerf
+tables' `Native mode`) and keep why compile was replaced (`compile_fallback`). A profile whose native model
+cannot compile sets `reference.mode: eager`. The order check and the opt-in service sweeps time eager.
+
 Configuration now uses a flat `performance` policy and opt-in `service_metrics`; reports use `performance`
 and `service_metrics` under schema `trtmc.qualification/v2`. Earlier tiered configurations and reports
 are normalized on read, including rejudge, without maintaining another execution path. Rejudge without an
 environment refreshes benchmark timings from saved execution records while
 preserving the recorded Acc entries and gates. It never promotes descriptive dataset results to
-an acceptance gate. `torch.compile` remains an optional labelled
-reference. Service metrics (client latency, throughput, load sweeps) are opt-in and do not affect the
+an acceptance gate. Service metrics (client latency, throughput, load sweeps) are opt-in and do not affect the
 verdict; the prototype's single execution lane and buffered SSE do not measure token TTFT/ITL.
 
 Every recorded workload also includes AIPerf's native client statistics in `aiperf_metrics`: request
@@ -186,6 +213,20 @@ performance:
 service_metrics: {isl: 96, osl: 32, concurrency: [1, 4], requests: 32}
 ```
 
+### Quantized profiles
+
+A quantized profile (the catalog's `quantization`) is qualified as its model's highest-precision ready profile:
+of the profiles of its family and Task whose names differ only in precision and quantization tokens, the one
+ranked first by fp32, bf16, fp16, then a quantized checkpoint (`qwen35-9b` for `qwen35-9b-nvfp4`;
+`llama-3.1-8b-fp8` for `llama-3.1-8b-nvfp4`, as the catalog has no unquantized Llama 3.1 8B). The profile takes
+that configuration except `candidate` (benchmarks, requests, native adapter, requirements, `trust_remote_code`)
+under its own and answers the benchmarks on that profile's route (chat or completions; the sampling stays its own
+catalog request's), and when its checkpoint is a separate pre-quantized repository, its native reference loads that
+profile's checkpoint. Its candidate stays its own bundle, held to the benchmarks' quantization gates;
+`qualified_as` in the plan names the profile it follows. When the base builds from a prepared
+`candidate.model_directory` that the benchmark depends on, a profile that quantizes the same checkpoint at build
+time names that directory in its own definition (`personaplex-7b-fp8`: the bundle holds the VoiceBench system prompt).
+
 ### Reference environments
 
 A model whose native reference needs more than the serving interpreter declares
@@ -208,6 +249,11 @@ cp config/environments/example.yaml config/environments/<machine>.yaml         #
 trtmc-aiperf-qual doctor --environment config/environments/<machine>.yaml       # paths, packages, GPU, model list
 ```
 
+`setup.sh` installs `apps/perf_serving/requirements.txt` into the serving interpreter, including timm and
+Diffusers for the generic `timm/` classifier and image-generation references. `doctor` reports a serving package
+that the serving interpreter cannot import (missing, or failing on a missing or mismatched dependency), and
+`run-all` does not start until all of them import.
+
 ## Commands
 
 ```bash
@@ -225,7 +271,7 @@ python tools/model_benchmark.py aiperf --environment $E --aiperf-python <venv>/b
 `run` builds the candidate bundle when `bundle_root` does not hold it yet (trtmc-bench, in the
 reference environment, under the GPU lock), qualifies, and applies the bundle retention policy.
 `report.md` / `report.json` in the output directory hold the verdict: `pass`, `acc-issue`,
-`not-covered` (no native path), `acc-inconclusive`, `not-comparable`, `perf-issue` (red/yellow),
+`not-covered` (no native path), `not-comparable`, `perf-issue` (red/yellow),
 `perf-inconclusive` (white), or `error` (a phase failed; see "Phase errors" and `phase-errors.log`);
 `build.json` records the build (`build-failed` when it failed); `report.json` carries a reproduction
 command. `--smoke` runs one problem per benchmark and one timed request (`smoke-pass` / `smoke-fail`,
@@ -244,6 +290,10 @@ and execution records. It verifies the complete ordered inputs and both sides' g
 uses the recorded graders and gates, and retains the original response exports and report.
 Corrected evidence is written to `accuracy_export.aligned.jsonl` and `execution.aligned.jsonl`.
 Missing or conflicting evidence fails recovery instead of producing an inferred score.
+
+`run` exits 0 for `pass`, `smoke-pass`, or `measured` with Acc `pass` and Perf `measured`; other
+verdicts exit 1. A complete benchmark measurement keeps its `measured` report category, without
+claiming repeated-run performance acceptance.
 
 `run-all` runs profiles one after another (profiles sharing a checkpoint back to back), appends one
 line per profile to `<out-root>/campaign.jsonl`, and skips profiles whose finished result has the same
@@ -289,7 +339,7 @@ batch advances (all default to `retain`):
 | `hf_cache` | `retain`, `delete_unused` | `run-all` deletes a checkpoint repository from `hf_hub_cache` once no remaining profile of the batch uses it |
 
 `delete_on_pass` also accepts a benchmark result with passing Acc and complete Perf (`measured`).
-Partial timings, inconclusive Acc, and failed Acc keep their bundles under that policy.
+Partial timings and failed Acc keep their bundles under that policy.
 Failed Native precision attempts remain in the execution evidence; their timings and client
 statistics are excluded when a fallback succeeds.
 
@@ -377,12 +427,23 @@ A suite with media and neither `media_root` nor `hf_datasets_cache` configured i
 - New Task: one entry in `config/tasks.yaml`: its gold-labelled benchmarks (`absolute`, defined under
   `benchmarks`, scored by `gold_metrics.py` or an AIPerf grader) and the Perf output check
   (`output_grader`, a comparator in `plugins/trtmc_aiperf_plugins/accuracy.py`).
+- Task renamed by a Task SDK migration (same operation and output): an alias of its old entry in
+  `config/tasks.yaml` (`text_to_pooled_features: *encode`). A ready profile whose Task has no entry is a
+  configuration error that only `plan.json` lists: reports leave it out.
 - Model needing a different input or reference option: `config/models/<profile>.yaml`.
+- Model that cannot be qualified as cataloged (for example a catalog testcase without a prompt):
+  `exclude: <reason>` in `families/<family>/tests/aiperf/<profile>.yaml`. Every machine's model list then
+  excludes it, and the run's `excluded.json` keeps the reason; `run-all --profile` still runs it.
 - Model whose native pipeline the generic adapters cannot run: `families/<family>/reference/adapter.py`
   (an `Adapter(spec, host)` with `invoke(request, artifact_base)`; it imports nothing from the applications and
   reaches the serving mechanics through `host`), named by `reference.adapter`.
 - Model needing a differently built bundle: `candidate.build` (or `candidate.model_directory`) in
   `config/models/<profile>.yaml`; the report names the bundle it qualified.
+- Model whose remote-code tokenizer counts differently from its bundle's tokenizer: `candidate.tokenizer_json`
+  (`{repo, revision}` of the `tokenizer.json` the bundle carries) in `config/models/<profile>.yaml`. The problem
+  selection, the fit helpers and AIPerf then count with it, loaded as a plain fast tokenizer with the
+  checkpoint's special tokens and chat template (InternLM2: its remote-code tokenizer splits text into characters
+  on transformers 5.x).
 - New machine: a new file under `config/environments/` (paths, Python interpreters, ports, lock, model list,
   retention); Docker or bare metal only differ in these paths. A run's own inputs (its ledger and multi-host
   assignment) stay with that run's results and are passed by path (`run-all --ledger`, `--assignment`).

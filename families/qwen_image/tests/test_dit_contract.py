@@ -326,3 +326,54 @@ def test_max_batch_size_four_uses_dynamic_dim_and_calls_profile(monkeypatch, tmp
     assert shapes["txt_hidden"] == (-1, n_text, config.text_embed_dim)
     assert shapes["timestep"] == (-1,)
     assert shapes["attention_mask"] == (-1, 1, 1, n_img + n_text)
+
+
+def _diffusers_timestep_embedding(timesteps: np.ndarray, dim: int) -> np.ndarray:
+    """diffusers.get_timestep_embedding with Qwen-Image's settings (flip, shift 0, scale 1000)."""
+    half = dim // 2
+    exponent = -np.log(10000.0) * np.arange(half, dtype=np.float64) / half
+    emb = 1000.0 * timesteps[:, None] * np.exp(exponent)[None, :]
+    return np.concatenate([np.cos(emb), np.sin(emb)], axis=-1)
+
+
+def test_zero_cond_t_modulation_is_the_timestep_zero_embedding() -> None:
+    rng = np.random.default_rng(0)
+    in_dim, hidden = 8, 6
+    weights = {
+        "time_text_embed.timestep_embedder.linear_1.weight": rng.standard_normal((hidden, in_dim)),
+        "time_text_embed.timestep_embedder.linear_1.bias": rng.standard_normal(hidden),
+        "time_text_embed.timestep_embedder.linear_2.weight": rng.standard_normal((hidden, hidden)),
+        "time_text_embed.timestep_embedder.linear_2.bias": rng.standard_normal(hidden),
+        "transformer_blocks.3.img_mod.1.weight": rng.standard_normal((6 * hidden, hidden)),
+        "transformer_blocks.3.img_mod.1.bias": rng.standard_normal(6 * hidden),
+    }
+
+    def silu(x):
+        return x / (1.0 + np.exp(-x))
+
+    sample = _diffusers_timestep_embedding(np.zeros(1), in_dim)[0]
+    h = weights["time_text_embed.timestep_embedder.linear_1.weight"] @ sample
+    h = silu(h + weights["time_text_embed.timestep_embedder.linear_1.bias"])
+    temb = weights["time_text_embed.timestep_embedder.linear_2.weight"] @ h
+    temb = temb + weights["time_text_embed.timestep_embedder.linear_2.bias"]
+    expected = weights["transformer_blocks.3.img_mod.1.weight"] @ silu(temb)
+    expected = expected + weights["transformer_blocks.3.img_mod.1.bias"]
+
+    zero_temb = dit._zero_timestep_embedding(weights, in_dim)
+    np.testing.assert_allclose(zero_temb, temb, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(
+        dit._zero_timestep_img_mod(weights, "transformer_blocks.3.", zero_temb),
+        expected,
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+
+def test_zero_cond_t_is_read_from_the_transformer_config(tmp_path) -> None:
+    from safetensors.numpy import save_file
+
+    (tmp_path / "config.json").write_text('{"zero_cond_t": true}')
+    save_file({"img_in.bias": np.zeros(2, dtype=np.float32)}, str(tmp_path / "model.safetensors"))
+    cfg, _ = dit.load_qwen_image_dit_weights(tmp_path)
+    assert cfg.zero_cond_t is True
+    assert dit.QwenImageDiTConfig().zero_cond_t is False

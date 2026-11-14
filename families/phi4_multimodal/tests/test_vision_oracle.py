@@ -15,7 +15,7 @@ from families.phi4_multimodal.tests.test_e2e import CASES
 from families.phi4_multimodal.tests.vision_oracle import (
     VISION_FEATURE_COSINE,
     _bundle_section,
-    _native_pixels,
+    _native_dynamic_hd_inputs,
     assert_vision_parity,
 )
 
@@ -61,20 +61,43 @@ def test_bundle_reader_selects_the_family_vision_plan(tmp_path) -> None:
     assert _bundle_section(bundle, "vision.plan") == b"VISION"
 
 
-def test_native_pixels_follow_the_family_dynamic_hd_contract() -> None:
-    image = Image.fromarray(np.full((382, 640, 3), 255, dtype=np.uint8))
-    pixels = _native_pixels(
-        image,
-        {
-            "fixed_image_size": 448,
-            "preprocessor_type": "phi4_hd_chw",
-            "interpolation": "bilinear",
-            "image_mean": [0.5, 0.5, 0.5],
-            "image_std": [0.5, 0.5, 0.5],
-        },
-    )
-    assert pixels.shape == (9, 448, 448)
-    assert np.allclose(pixels, 1.0)
+_DYNAMIC_HD = Path(__file__).resolve().parent / "data/dynamic-hd"
+_DYNAMIC_HD_CASES = json.loads((_DYNAMIC_HD / "hf-dynamic-hd.json").read_text(encoding="utf-8"))[
+    "cases"
+]
+
+
+@pytest.mark.parametrize("case", _DYNAMIC_HD_CASES, ids=lambda case: case["image"])
+def test_native_inputs_match_the_checkpoint_dynamic_hd(case) -> None:
+    with Image.open(_DYNAMIC_HD / case["image"]) as image:
+        inputs = _native_dynamic_hd_inputs(
+            image,
+            {
+                "fixed_image_size": 448,
+                "preprocessor_type": "phi4_hd_chw",
+                "interpolation": "bilinear",
+                "image_mean": [0.5, 0.5, 0.5],
+                "image_std": [0.5, 0.5, 0.5],
+            },
+        )
+    cols, rows = case["grid"]
+    entries = 1 + cols * rows
+    pixels = inputs["pixel_values"]
+    assert pixels.shape == (entries, 3, 448, 448) and pixels.dtype == np.float32
+    assert inputs["crop_valid"].dtype == np.int32
+    assert inputs["crop_valid"].tolist() == case["crop_valid"]
+    for entry, channel, y, x, expected in case["pixel_samples"]:
+        # The crops are 8-bit resizes: exact. The global view is a float bicubic resize.
+        tolerance = 1e-4 if entry == 0 else 0.0
+        assert abs(float(pixels[entry, channel, y, x]) - expected) <= tolerance
+
+    token_rows = inputs["image_token_rows"]
+    assert token_rows.dtype == np.int32
+    assert token_rows.shape == (case["num_image_tokens"],)
+    features = token_rows[token_rows >= 2]
+    assert len(np.unique(features)) == len(features)
+    assert features.max() < 2 + entries * 16 * 16
+    assert np.count_nonzero(token_rows == 1) == 1
 
 
 def test_vision_gate_is_the_active_half_cosine_contract() -> None:

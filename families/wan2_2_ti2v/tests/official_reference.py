@@ -87,8 +87,13 @@ def generate(
     seed: int,
     timeout_s: int,
     negative_prompt: str = DEFAULT_NEGATIVE_PROMPT,
+    image: Path | None = None,
 ) -> dict:
-    """Run the pinned official implementation against the materialized checkpoint."""
+    """Run the pinned official implementation against the materialized checkpoint.
+
+    With ``image`` (exactly ``width`` x ``height``) the official image-to-video path runs;
+    its resize and center crop are then identities.
+    """
 
     if num_frames < 1 or (num_frames - 1) % 4:
         raise ValueError("Wan2.2 TI2V frame count must be 4n+1")
@@ -111,6 +116,7 @@ from PIL import Image
 model_ref = {str(model_dir)!r}
 official_source = {str(source)!r}
 frames_dir = {str(frames_dir)!r}
+image_path = {str(image) if image is not None else None!r}
 
 torch.cuda.set_device(0)
 
@@ -150,9 +156,13 @@ for role, (token, token_id) in {EXPECTED_UMT5_SPECIAL_TOKENS!r}.items():
             f"expected=({{token!r}}, {{token_id}})"
         )
 
+initial_image = Image.open(image_path).convert("RGB") if image_path else None
+if initial_image is not None and initial_image.size != ({width}, {height}):
+    raise RuntimeError(f"Official Wan initial image {{initial_image.size}} is not {width}x{height}")
+
 video = pipeline.generate(
     {prompt!r},
-    img=None,
+    img=initial_image,
     size=({width}, {height}),
     max_area={width} * {height},
     frame_num={num_frames},

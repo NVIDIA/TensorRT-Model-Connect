@@ -144,6 +144,7 @@ class TrtModuleImpl final : public ITrtModule {
     static std::size_t compute_alloc_bytes(const nvinfer1::Dims& dims, DType dtype,
                                            std::vector<int64_t>& shape_out);
     static DType from_trt_dtype(nvinfer1::DataType dt);
+    static void validate_io_tensor_format(nvinfer1::DataType dtype, nvinfer1::TensorFormat format);
 };
 
 } // namespace trtmc

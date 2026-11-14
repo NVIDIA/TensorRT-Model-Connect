@@ -1,0 +1,14 @@
+{
+  "source": "physical-intelligence/libero@a4336d589d589045d1c56423ffdf3b88a0e19b1f episode 1267 frame 80",
+  "state": [
+    -0.06846743822097778,
+    0.11558181792497635,
+    1.1281719207763672,
+    3.0066468715667725,
+    -0.3198007345199585,
+    0.0783933699131012,
+    0.005393915344029665,
+    -0.006534436717629433
+  ],
+  "task": "pick up the black bowl on the stove and place it on the plate"
+}

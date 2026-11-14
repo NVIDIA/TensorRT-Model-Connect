@@ -63,6 +63,21 @@ if TYPE_CHECKING:
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
+# Prefill chunk bounds for the dual-profile engine. Every chunk evaluates all
+# routed experts on each of its rows, so the transient expert activations grow
+# with the chunk: about 1 MiB per row for Qwen3-30B-A3B in fp16.
+PREFILL_OPT_TOKENS = 64
+PREFILL_MAX_TOKENS = 128
+
+
+def _shape_only(rows: int, cols: int, dtype) -> np.ndarray:
+    """A read-only ``[rows, cols]`` view with no backing memory.
+
+    Stands in for a weight whose real bytes come from the quantization context.
+    """
+    return np.broadcast_to(np.zeros((), dtype=dtype), (rows, cols))
+
+
 class _QwenMoeModel:
     def load_weights(
         self,
@@ -70,6 +85,7 @@ class _QwenMoeModel:
         config: ModelConfig,
         *,
         precision: str = "fp32",
+        quant_ctx=None,
     ) -> WeightDict:
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
@@ -122,24 +138,25 @@ class _QwenMoeModel:
             weights[f"{prefix}.post_attn_norm"] = post_norm.astype(np.float32)
 
             # Q/K/V/O projections (separate, no biases)
-            q_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.q_proj.weight")
-            k_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.k_proj.weight")
-            v_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.v_proj.weight")
-            o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
+            for stem, hf_stem in (
+                ("w_q", "q_proj"),
+                ("w_k", "k_proj"),
+                ("w_v", "v_proj"),
+                ("w_o", "o_proj"),
+            ):
+                name = f"{prefix}.{stem}"
+                if quant_ctx is not None and quant_ctx.should_quantize(name):
+                    # The engine reads the packed bytes from quant_ctx; only the
+                    # [in, out] shape is needed here.
+                    entry = quant_ctx.scales[name]
+                    weights[name] = _shape_only(entry.in_features, entry.out_features, weight_dtype)
+                else:
+                    raw_weight = _load_tensor(readers, f"{hf_prefix}.self_attn.{hf_stem}.weight")
+                    weights[name] = _transpose_2d(raw_weight, hf_stem, precision=precision)
+                    del raw_weight
 
             if attention_size == 0:
-                attention_size = q_raw.shape[0]
-
-            q_t = _transpose_2d(q_raw, "q_proj", precision=precision)
-            k_t = _transpose_2d(k_raw, "k_proj", precision=precision)
-            v_t = _transpose_2d(v_raw, "v_proj", precision=precision)
-            o_t = _transpose_2d(o_raw, "o_proj", precision=precision)
-            del q_raw, k_raw, v_raw, o_raw
-
-            weights[f"{prefix}.w_q"] = q_t
-            weights[f"{prefix}.w_k"] = k_t
-            weights[f"{prefix}.w_v"] = v_t
-            weights[f"{prefix}.w_o"] = o_t
+                attention_size = weights[f"{prefix}.w_q"].shape[1]
 
             # Per-head Q/K RMSNorm (Qwen3 MoE)
             # HF stores [head_dim] weights shared across all heads;
@@ -181,37 +198,43 @@ class _QwenMoeModel:
 
                 # Pack expert weights per layer so the TRT graph can use a
                 # handful of batched matmuls instead of one branch per expert.
-                expert_w_gate = np.empty(
-                    (num_experts, hidden, moe_intermediate_size),
-                    dtype=weight_dtype,
-                )
-                expert_w_up = np.empty(
-                    (num_experts, hidden, moe_intermediate_size),
-                    dtype=weight_dtype,
-                )
-                expert_w_down = np.empty(
-                    (num_experts, moe_intermediate_size, hidden),
-                    dtype=weight_dtype,
-                )
-
-                for e in range(num_experts):
-                    exp_hf = f"{hf_prefix}.mlp.experts.{e}"
-                    gate_raw = _load_tensor(readers, f"{exp_hf}.gate_proj.weight")
-                    up_raw = _load_tensor(readers, f"{exp_hf}.up_proj.weight")
-                    down_raw = _load_tensor(readers, f"{exp_hf}.down_proj.weight")
-
-                    expert_w_gate[e] = _transpose_2d(
-                        gate_raw, f"expert_{e}_gate", precision=precision
+                # Quantized experts are stacked in quant_ctx instead.
+                if quant_ctx is None or not quant_ctx.should_quantize(
+                    f"{prefix}.experts.w_gate"
+                ):
+                    expert_w_gate = np.empty(
+                        (num_experts, hidden, moe_intermediate_size),
+                        dtype=weight_dtype,
                     )
-                    expert_w_up[e] = _transpose_2d(up_raw, f"expert_{e}_up", precision=precision)
-                    expert_w_down[e] = _transpose_2d(
-                        down_raw, f"expert_{e}_down", precision=precision
+                    expert_w_up = np.empty(
+                        (num_experts, hidden, moe_intermediate_size),
+                        dtype=weight_dtype,
                     )
-                    del gate_raw, up_raw, down_raw
+                    expert_w_down = np.empty(
+                        (num_experts, moe_intermediate_size, hidden),
+                        dtype=weight_dtype,
+                    )
 
-                weights[f"{prefix}.experts.w_gate"] = expert_w_gate
-                weights[f"{prefix}.experts.w_up"] = expert_w_up
-                weights[f"{prefix}.experts.w_down"] = expert_w_down
+                    for e in range(num_experts):
+                        exp_hf = f"{hf_prefix}.mlp.experts.{e}"
+                        gate_raw = _load_tensor(readers, f"{exp_hf}.gate_proj.weight")
+                        up_raw = _load_tensor(readers, f"{exp_hf}.up_proj.weight")
+                        down_raw = _load_tensor(readers, f"{exp_hf}.down_proj.weight")
+
+                        expert_w_gate[e] = _transpose_2d(
+                            gate_raw, f"expert_{e}_gate", precision=precision
+                        )
+                        expert_w_up[e] = _transpose_2d(
+                            up_raw, f"expert_{e}_up", precision=precision
+                        )
+                        expert_w_down[e] = _transpose_2d(
+                            down_raw, f"expert_{e}_down", precision=precision
+                        )
+                        del gate_raw, up_raw, down_raw
+
+                    weights[f"{prefix}.experts.w_gate"] = expert_w_gate
+                    weights[f"{prefix}.experts.w_up"] = expert_w_up
+                    weights[f"{prefix}.experts.w_down"] = expert_w_down
 
                 # Shared expert weights (Qwen2.5-MoE only)
                 if has_shared_expert:
@@ -279,9 +302,18 @@ class _QwenMoeModel:
         verbose: bool = False,
         debug_layer_outputs: bool = False,
         parallel_config=None,
+        dual_profile: bool = False,
     ) -> bytes:
+        """Build the decoder engine.
+
+        ``dual_profile`` builds one engine with a prefill profile (``1..chunk``
+        query rows) and a single-row decode profile; otherwise every launch
+        takes exactly one token.
+        """
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
+            if dual_profile:
+                raise NotImplementedError("dual_profile is for single-GPU Qwen-MoE builds")
             parallel.validate()
             from .tp_builder import build_qwen_moe_tp_engine
 
@@ -316,12 +348,20 @@ class _QwenMoeModel:
             weights, num_kv_heads=num_kv_heads, head_dim=head_dim
         )
         attention_window = max_cache_length + 1
+        if dual_profile and quant_ctx is not None:
+            raise NotImplementedError("dual_profile does not support quantized Qwen-MoE builds")
+        rows = None if dual_profile else 1
+        max_prefill = min(PREFILL_MAX_TOKENS, max_cache_length)
+        opt_prefill = min(PREFILL_OPT_TOKENS, max_prefill)
 
         logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 1
+        if quant_ctx is not None:
+            # Lets the engine inspector show which kernels the quantized matmuls use.
+            trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
 
         if precision == "fp16":
             work_np_dtype = np.float16
@@ -336,9 +376,31 @@ class _QwenMoeModel:
         # -----------------------------------------------------------
         # Inputs
         # -----------------------------------------------------------
-        token_id = network.add_input("token_id", trt.int32, (1,))
-        position_id = network.add_input("position_id", trt.int32, (1,))
-        attention_mask = network.add_input("attention_mask", trt.float32, (1, attention_window))
+        if dual_profile:
+            token_id = network.add_input("token_id", trt.int32, (-1,))
+            position_id = network.add_input("position_id", trt.int32, (-1,))
+            attention_mask = network.add_input("attention_mask", trt.float32, (-1, -1))
+            # Profile 0 prefills 1..max_prefill rows; profile 1 decodes one row.
+            for opt_rows, max_rows, min_rows in (
+                (opt_prefill, max_prefill, 1),
+                (1, 1, 1),
+            ):
+                profile = builder.create_optimization_profile()
+                for name in ("token_id", "position_id"):
+                    profile.set_shape(name, (min_rows,), (opt_rows,), (max_rows,))
+                profile.set_shape(
+                    "attention_mask",
+                    (min_rows, max_cache_length + min_rows),
+                    (opt_rows, max_cache_length + opt_rows),
+                    (max_rows, max_cache_length + max_rows),
+                )
+                trt_config.add_optimization_profile(profile)
+        else:
+            token_id = network.add_input("token_id", trt.int32, (1,))
+            position_id = network.add_input("position_id", trt.int32, (1,))
+            attention_mask = network.add_input(
+                "attention_mask", trt.float32, (1, attention_window)
+            )
 
         cache_k_inputs = []
         cache_v_inputs = []
@@ -432,6 +494,8 @@ class _QwenMoeModel:
                 top_k=top_k,
                 has_shared_expert=has_shared_expert,
                 dtype=work_np_dtype,
+                quant_ctx=quant_ctx,
+                sequence_length=rows,
             )
 
             hidden_state = result["hidden"]
@@ -461,6 +525,9 @@ class _QwenMoeModel:
         # -----------------------------------------------------------
         # LM head (logits)
         # -----------------------------------------------------------
+        if dual_profile:
+            # Only the last row's logits are sampled.
+            hidden_state = _add_last_row(network, hidden_state, hidden)
         logits = graph_ops.add_matmul_rhs_constant(
             network, hidden_state, hidden, vocab, weights["w_out"], dtype=work_np_dtype
         )
@@ -497,7 +564,8 @@ class _QwenMoeModel:
                 f"shared_inter={shared_expert_intermediate}, "
                 f"dense_inter={dense_intermediate}, "
                 f"dense_layers={sorted(mlp_only_set)}, "
-                f"cache={max_cache_length}, precision={precision}) ...",
+                f"cache={max_cache_length}, precision={precision}, "
+                f"prefill_rows={max_prefill if dual_profile else 1}) ...",
                 file=sys.stderr,
             )
 
@@ -603,8 +671,14 @@ def _add_qwen3_moe_block(
     top_k: int,
     has_shared_expert: bool = True,
     dtype: np.dtype = np.float32,
+    quant_ctx=None,
+    weight_name: str = "",
+    sequence_length: int | None = 1,
 ) -> trt.ITensor:
     """Add Qwen MoE block with top-k softmax routing and optional shared expert.
+
+    ``sequence_length`` is the static row count of ``inp`` (``[rows, hidden]``),
+    or ``None`` for a runtime-dynamic row count.
 
     Steps:
       1. Router logits -> softmax -> top-k -> renormalize
@@ -632,6 +706,38 @@ def _add_qwen3_moe_block(
     norm_weights = network.add_elementwise(
         top_values, sum_val.get_output(0), trt.ElementWiseOperation.DIV
     )  # [1, top_k]
+
+    if sequence_length != 1:
+        if quant_ctx is not None:
+            raise NotImplementedError("multi-row Qwen-MoE blocks do not support quantization")
+        routed_result = _add_routed_experts_rows(
+            network,
+            inp,
+            top_indices,
+            norm_weights.get_output(0),
+            weights,
+            prefix,
+            hidden_size,
+            num_experts,
+            dtype=dtype,
+        )
+        return _add_shared_expert(
+            network,
+            inp,
+            routed_result,
+            weights,
+            prefix,
+            hidden_size,
+            shared_expert_intermediate,
+            has_shared_expert=has_shared_expert,
+            dtype=dtype,
+        )
+
+    if quant_ctx is not None and quant_ctx.should_quantize(f"{weight_name}.experts.w_gate"):
+        # Gathered FP4 experts: only the selected experts are read and evaluated.
+        return quant_ctx.gathered_moe(
+            network, inp, top_indices, norm_weights.get_output(0), weight_name, hidden_size
+        )
 
     # 5. Compute all expert outputs with three packed batched matmuls.
     expert_outputs = _add_packed_swiglu_experts(
@@ -673,6 +779,32 @@ def _add_qwen3_moe_block(
             )
             routed_result = sum_layer.get_output(0)
 
+    return _add_shared_expert(
+        network,
+        inp,
+        routed_result,
+        weights,
+        prefix,
+        hidden_size,
+        shared_expert_intermediate,
+        has_shared_expert=has_shared_expert,
+        dtype=dtype,
+    )
+
+
+def _add_shared_expert(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    routed_result: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    hidden_size: int,
+    shared_expert_intermediate: int,
+    *,
+    has_shared_expert: bool,
+    dtype: np.dtype,
+) -> trt.ITensor:
+    """Add the gated shared expert (Qwen2.5-MoE) to the routed output."""
     if not has_shared_expert:
         # Pure routed MoE (Qwen3-MoE): no shared expert
         return routed_result
@@ -712,6 +844,126 @@ def _add_qwen3_moe_block(
     return combined.get_output(0)
 
 
+def _add_routed_experts_rows(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    top_indices: trt.ITensor,
+    top_weights: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    hidden_size: int,
+    num_experts: int,
+    *,
+    dtype: np.dtype,
+) -> trt.ITensor:
+    """Routed experts for ``[rows, hidden]`` input.
+
+    Every expert runs on every row with three batched matmuls, so the expert
+    weights are read once per launch whatever the row count. Each row then
+    sums the expert outputs weighted by its renormalized top-k weights;
+    unselected experts get weight zero.
+    """
+    # Dense routing weights [rows, experts]: one-hot(top_indices) * top_weights.
+    expert_ids = graph_ops.add_constant(
+        network,
+        (1, 1, num_experts),
+        np.arange(num_experts, dtype=np.int32).reshape(1, 1, num_experts),
+        dtype=np.int32,
+    )
+    idx_3d = network.add_shuffle(top_indices)
+    idx_3d.reshape_dims = (0, 0, 1)
+    selected = network.add_elementwise(
+        idx_3d.get_output(0), expert_ids, trt.ElementWiseOperation.EQUAL
+    ).get_output(0)
+    one_hot = network.add_cast(selected, top_weights.dtype).get_output(0)
+    w_3d = network.add_shuffle(top_weights)
+    w_3d.reshape_dims = (0, 0, 1)
+    weighted = network.add_elementwise(
+        one_hot, w_3d.get_output(0), trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    dense_weights = network.add_reduce(
+        weighted, trt.ReduceOperation.SUM, 1 << 1, keep_dims=False
+    ).get_output(0)  # [rows, experts]
+
+    # All expert outputs [experts, rows, hidden].
+    expert_outputs = _add_packed_swiglu_experts_rows(
+        network,
+        inp,
+        hidden_size,
+        weights[f"{prefix}.experts.w_gate"],
+        weights[f"{prefix}.experts.w_up"],
+        weights[f"{prefix}.experts.w_down"],
+        dtype=dtype,
+    )
+
+    # [rows, experts] -> [experts, rows, 1], scale, and sum over experts.
+    w_t = network.add_shuffle(dense_weights)
+    w_t.first_transpose = (1, 0)
+    w_t.reshape_dims = (0, 0, 1)
+    scaled = network.add_elementwise(
+        expert_outputs, w_t.get_output(0), trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    return network.add_reduce(
+        scaled, trt.ReduceOperation.SUM, 1 << 0, keep_dims=False
+    ).get_output(0)
+
+
+def _add_packed_swiglu_experts_rows(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    hidden_size: int,
+    w_gate: np.ndarray,
+    w_up: np.ndarray,
+    w_down: np.ndarray,
+    *,
+    dtype: np.dtype = np.float32,
+) -> trt.ITensor:
+    """Evaluate every expert on ``[rows, hidden]``; returns ``[experts, rows, hidden]``."""
+    num_experts = w_gate.shape[0]
+    inp_3d = network.add_shuffle(inp)
+    inp_3d.reshape_dims = (1, -1, hidden_size)
+    expert_scale = graph_ops.add_constant(
+        network,
+        (num_experts, 1, 1),
+        np.ones((num_experts, 1, 1), dtype=dtype),
+        dtype=dtype,
+    )
+    batched_inp = network.add_elementwise(
+        inp_3d.get_output(0), expert_scale, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+
+    gate_w = graph_ops.add_constant(network, w_gate.shape, w_gate, dtype=dtype)
+    up_w = graph_ops.add_constant(network, w_up.shape, w_up, dtype=dtype)
+    down_w = graph_ops.add_constant(network, w_down.shape, w_down, dtype=dtype)
+    gate = network.add_matrix_multiply(
+        batched_inp, trt.MatrixOperation.NONE, gate_w, trt.MatrixOperation.NONE
+    ).get_output(0)
+    up = network.add_matrix_multiply(
+        batched_inp, trt.MatrixOperation.NONE, up_w, trt.MatrixOperation.NONE
+    ).get_output(0)
+    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
+    swish = network.add_elementwise(
+        gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    gated = network.add_elementwise(swish, up, trt.ElementWiseOperation.PROD).get_output(0)
+    return network.add_matrix_multiply(
+        gated, trt.MatrixOperation.NONE, down_w, trt.MatrixOperation.NONE
+    ).get_output(0)
+
+
+def _add_last_row(network: trt.INetworkDefinition, rows: trt.ITensor, width: int) -> trt.ITensor:
+    """Slice ``[rows, width]`` to its last row, ``[1, width]``."""
+    shape = network.add_shape(rows).get_output(0)
+    one_row = graph_ops.add_constant(
+        network, (2,), np.array([1, width], dtype=np.int64), dtype=np.int64
+    )
+    start = network.add_elementwise(shape, one_row, trt.ElementWiseOperation.SUB).get_output(0)
+    slicer = network.add_slice(rows, start=(0, 0), shape=(0, 0), stride=(1, 1))
+    slicer.set_input(1, start)
+    slicer.set_input(2, one_row)
+    return slicer.get_output(0)
+
+
 def _add_qwen3_moe_decoder_layer(
     *,
     network: trt.INetworkDefinition,
@@ -740,6 +992,8 @@ def _add_qwen3_moe_decoder_layer(
     top_k: int,
     has_shared_expert: bool = True,
     dtype: np.dtype = np.float32,
+    quant_ctx=None,
+    sequence_length: int | None = 1,
 ) -> dict[str, trt.ITensor]:
     """Add one Qwen MoE decoder layer: attention + (dense MLP or MoE)."""
 
@@ -767,6 +1021,8 @@ def _add_qwen3_moe_decoder_layer(
         cos_half_tensor=cos_half_tensor,
         sin_half_tensor=sin_half_tensor,
         rotary_embedding_dim=head_dim,
+        quant_ctx=quant_ctx,
+        sequence_length=sequence_length,
     )
     attn_out = attn["attn_out"]
 
@@ -809,6 +1065,9 @@ def _add_qwen3_moe_decoder_layer(
             top_k,
             has_shared_expert=has_shared_expert,
             dtype=dtype,
+            quant_ctx=quant_ctx,
+            weight_name=prefix,
+            sequence_length=sequence_length,
         )
 
     # Residual connection
@@ -906,8 +1165,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("Qwen-MoE max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Qwen-MoE has no qualified family-owned quantized build")
+    if request.quantization not in {None, "none", "nvfp4"}:
+        raise NotImplementedError(
+            f"Qwen-MoE does not support quantization={request.quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("Qwen-MoE does not expose mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -916,9 +1177,21 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
     parallel.validate()
+    quantized = request.quantization == "nvfp4"
+    if quantized and (parallel.enabled or precision != "fp16"):
+        raise NotImplementedError(
+            "quantized Qwen-MoE builds need tensor_parallel_size=1 and fp16 precision"
+        )
     model = _QwenMoeModel()
     config.raw["_model_dir"] = str(model_dir)
-    weights = model.load_weights(str(model_dir), config, precision=precision)
+    quant_ctx = None
+    if quantized:
+        from .quantization import calibrate_qwen_moe
+
+        quant_ctx = calibrate_qwen_moe(model_dir, config, graph_ops, request.quantization)
+    weights = model.load_weights(
+        str(model_dir), config, precision=precision, quant_ctx=quant_ctx
+    )
     writer.set_header(family="qwen_moe", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -935,18 +1208,22 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             writer.add_bytes(f"engine.rank{rank}.plan", plan)
         layout = "dual_profile"
     else:
+        # Unquantized single-GPU engines prefill in multi-token chunks; the
+        # quantized MoE path gathers per-token experts and stays one token wide.
+        dual_profile = quant_ctx is None
         plan = model.build_engine(
             config,
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,
+            dual_profile=dual_profile,
         )
         writer.add_bytes("engine.plan", plan)
-        layout = "single"
+        layout = "dual_profile" if dual_profile else "single"
     writer.add_json(
         "runtime.json",
         _runtime_config(

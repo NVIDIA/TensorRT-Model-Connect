@@ -81,8 +81,8 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
     suite = build_suite(model_suite(check["suite"], model), environment)
     if model.get("family") in check.get("latent_replay_families", ()):
         suite = with_latent_seeds(suite)
-    native, native_backend, native_precision = generate_native(environment, model, suite, python, out, "edits",
-                                                               reuse=bool(check.get("reuse_outputs")))
+    native, native_backend, native_precision, native_mode = generate_native(
+        environment, model, suite, python, out, "edits", reuse=bool(check.get("reuse_outputs")))
     outputs = {"candidate": generate(environment, model, "trtmc", out / "edits-candidate", suite,
                                      reuse=bool(check.get("reuse_outputs"))), "native": native}
     targets = [sample["label"]["png_b64"] for sample in suite.samples]
@@ -117,7 +117,8 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
                 "gate": dict(check.get("gate") or {"margin": 1.0})}
         entry = absolute.judge(item, problems, sides["candidate"], sides["native"])
         baseline = [row["baseline"][0 if metric == "clip_i" else 1] for row in scored["native"]]
-        entry.update(benchmark=label, native={"backend": native_backend, "precision": native_precision},
+        entry.update(benchmark=label, native={"backend": native_backend, "precision": native_precision,
+                                              "mode": native_mode},
                      notes=[*entry.get("notes", []), f"no-edit baseline (source vs target): "
                                                      f"{sum(baseline) / max(len(baseline), 1):.2f}"])
         entries.append(entry)

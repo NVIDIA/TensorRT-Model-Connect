@@ -8,6 +8,8 @@ Tensor names and shapes must stay compatible with the C++ bundle runtime.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import tensorrt as trt
 
@@ -21,6 +23,21 @@ def _cast_back_to_trt_dtype(
     if tensor.dtype == target_dtype:
         return tensor
     return network.add_cast(tensor, target_dtype).get_output(0)
+
+
+def add_residual_sum(
+    network: trt.INetworkDefinition, residual: trt.ITensor, update: trt.ITensor
+) -> trt.ITensor:
+    """Add already rounded branch outputs and restore the residual dtype.
+
+    Summing in FP32 keeps the producer's Half rounding boundary distinct from
+    the residual add. Otherwise GEMM fusion can add the unrounded accumulator.
+    """
+    output_dtype = residual.dtype
+    residual = _cast_back_to_trt_dtype(network, residual, trt.float32)
+    update = _cast_back_to_trt_dtype(network, update, trt.float32)
+    total = network.add_elementwise(residual, update, trt.ElementWiseOperation.SUM).get_output(0)
+    return _cast_back_to_trt_dtype(network, total, output_dtype)
 
 
 def _add_matrix_multiply_with_fp32_accumulation(
@@ -118,7 +135,9 @@ def add_rms_norm(
     """RMSNorm: gamma * (x / sqrt(mean(x^2) + eps)).
 
     FP32 precision boundary: when dtype != float32, casts to FP32 before
-    norm computation for numerical stability, then casts back.
+    norm computation for numerical stability, then casts back. gamma is
+    first rounded to the input dtype, because the reference stores the norm
+    weight in the model dtype and only computes in FP32.
 
     TRT's native normalization API implements mean-centered LayerNorm, not
     RMSNorm, so this remains a manual shared implementation.
@@ -135,6 +154,10 @@ def add_rms_norm(
     recip = network.add_unary(sqrt_l.get_output(0), trt.UnaryOperation.RECIP)
     normalized = network.add_elementwise(inp, recip.get_output(0), trt.ElementWiseOperation.PROD)
     gamma_t = add_constant(network, (1, hidden_size), gamma, dtype=np.float32)
+    if need_cast:
+        # Small BF16 checkpoint weights are not all exact in Half.
+        gamma_t = network.add_cast(gamma_t, output_dtype).get_output(0)
+        gamma_t = network.add_cast(gamma_t, trt.float32).get_output(0)
     scaled = network.add_elementwise(
         normalized.get_output(0), gamma_t, trt.ElementWiseOperation.PROD
     )
@@ -789,17 +812,13 @@ def make_rope_table_half_dim(
     default = 1.0 if cosine else 0.0
     if max_cache_length <= 0 or rope_theta <= 0.0:
         return np.full((max(max_cache_length, 1), max(half, 1)), default, dtype=np.float32)
-    table = np.full((max_cache_length, half), default, dtype=np.float32)
-    for pos in range(max_cache_length):
-        for d in range(half):
-            # For both interleaved and rotate-half the frequency index is d
-            # (the distinction only affects which input pair is rotated; the
-            # freq assignment per half-dim is the same).
-            exponent = (2.0 * d) / rotary_ndims
-            inv_freq = rope_theta ** (-exponent)
-            angle = pos * inv_freq
-            table[pos, d] = np.cos(angle) if cosine else np.sin(angle)
-    return table
+    # Moshi forms frequencies, angles and trigonometric values in FP32.
+    # Computing them in float64 and converting afterwards changes coefficients.
+    frequency_scale = np.float32(-math.log(rope_theta) * 2.0 / rotary_ndims)
+    frequencies = np.exp(np.arange(half, dtype=np.float32) * frequency_scale)
+    positions = np.arange(max_cache_length, dtype=np.float32)
+    angles = positions[:, None] * frequencies[None, :]
+    return np.cos(angles) if cosine else np.sin(angles)
 
 
 def reshape_rows_to_heads_4d(
@@ -979,7 +998,11 @@ def add_apply_rope_native(
     """
     rotary_embedding_dim = validate_native_rope_dim(rotary_embedding_dim)
     attention_size = num_heads * head_dim
-
+    output_dtype = inp.dtype
+    # Moshi rotates FP32 real/imaginary components, then rounds to the input dtype.
+    inp = _cast_back_to_trt_dtype(network, inp, trt.float32)
+    cos_cache_2d = _cast_back_to_trt_dtype(network, cos_cache_2d, trt.float32)
+    sin_cache_2d = _cast_back_to_trt_dtype(network, sin_cache_2d, trt.float32)
     inp_4d = reshape_rows_to_heads_4d(network, inp, num_heads, head_dim, sequence_length)
 
     # Reshape position_id [Sq] -> [1, Sq] (batch=1).
@@ -996,7 +1019,8 @@ def add_apply_rope_native(
     )
     rope.set_input(3, pos_2d.get_output(0))
 
-    return reshape_heads_4d_to_rows(network, rope.get_output(0), attention_size, sequence_length)
+    rotated = reshape_heads_4d_to_rows(network, rope.get_output(0), attention_size, sequence_length)
+    return _cast_back_to_trt_dtype(network, rotated, output_dtype)
 
 
 def add_apply_rope_native_sequence(

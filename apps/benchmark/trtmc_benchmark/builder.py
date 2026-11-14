@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import importlib
 import importlib.util
 import json
 import re
@@ -231,7 +232,9 @@ class BundleBuilder:
         os.close(descriptor)
         temporary = Path(raw_temporary)
         temporary.unlink()
-        command = _build_command(plan.model, plan.model_dir, temporary, plan.cases)
+        model_dir = _buildable_model_dir(plan.model.family, plan.model_dir,
+                                         plan.bundle.parent / "checkpoint")
+        command = _build_command(plan.model, model_dir, temporary, plan.cases)
         started = time.monotonic()
         try:
             completed = subprocess.run(
@@ -437,6 +440,30 @@ def default_bundle_cache() -> Path:
     if configured:
         return Path(configured)
     return Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache")) / "trtmc/bench/bundles"
+
+
+def _buildable_model_dir(family: str, model_dir: Path, destination: Path) -> Path:
+    """The checkpoint directory the family builder reads.
+
+    A family whose builder needs a converted checkpoint (an older official
+    ``pytorch_model.bin`` the builder does not read) states it with
+    ``families/<family>/convert_checkpoint.py:prepare``; the converted copy
+    lives next to the bundle, and the build identity stays the pinned source.
+    """
+    name = f"families.{family}.convert_checkpoint"
+    try:
+        module = importlib.import_module(name)
+    except ModuleNotFoundError as error:
+        if error.name not in {"families", f"families.{family}", name}:
+            raise
+        return model_dir
+    prepare = getattr(module, "prepare", None)
+    if prepare is None:
+        return model_dir
+    try:
+        return Path(prepare(model_dir, destination))
+    except Exception as error:
+        raise BenchmarkError(f"cannot prepare the {family} checkpoint {model_dir}: {error}") from error
 
 
 def _build_command(
