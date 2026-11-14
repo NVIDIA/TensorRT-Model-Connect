@@ -120,7 +120,7 @@ void valid_requests(EncoderPipeline& pipeline, Engine& engine) {
 
 int oversized_requests(EncoderPipeline& pipeline, Engine& engine) {
     int failures = 0;
-    for (int route = 0; route < 4; ++route) {
+    for (int route = 0; route < 3; ++route) {
         const auto before = engine.calls;
         bool rejected = false;
         try {
@@ -128,8 +128,6 @@ int oversized_requests(EncoderPipeline& pipeline, Engine& engine) {
                 pipeline.embed("oversize");
             else if (route == 1)
                 pipeline.encode("oversize");
-            else if (route == 2)
-                pipeline.rerank("query", "document");
             else
                 pipeline.encode_ids({0, 3, 4, 5, 2});
         } catch (const std::invalid_argument&) {

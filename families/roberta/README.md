@@ -1,9 +1,24 @@
-# RoBERTa runtime input capacity
+# RoBERTa encoder tasks
+
+The family supports `encoding` (the first token's hidden state) and `embedding`
+(mean pooling followed by L2 normalization). The graph emits encoder hidden
+states; it does not load or execute a sequence-classification scoring head.
+
+`reranking` is therefore unsupported. Builds reject that task before checkpoint
+loading, and the native factory rejects older bundles labeled `reranking`
+before engine deserialization. A hidden-state coordinate is not a reranking
+logit. Existing encoding and embedding bundles keep their current task IDs.
+
+Implementing a reranker requires its checkpoint's scoring head, query/document
+tokenization and official-reference validation. Loading an encoder backbone
+from a sequence-classification checkpoint does not provide those behaviors.
+
+## Runtime input capacity
 
 A fixed-sequence bundle accepts at most the number of token IDs declared by its
 `input_ids` engine binding. The limit includes tokenizer-added special tokens.
 
-Native `embed`, `encode`, `rerank`, and token-ID encoding reject inputs above
+Native `embed`, `encode`, and token-ID encoding reject inputs above
 that capacity with an invalid-argument error before submitting work to the
 engine. Shorten or split longer text before invoking the bundle. Dynamic-input
 engines retain their existing profile validation.
