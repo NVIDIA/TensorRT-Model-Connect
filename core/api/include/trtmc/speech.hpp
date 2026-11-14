@@ -493,6 +493,21 @@ class SpeechSession {
         detail::check(state_->model->api, status, error);
         return true;
     }
+    [[nodiscard]] bool append_text(std::string_view text) {
+        const auto required =
+            offsetof(trtmc_speech_session_api_v1, append_text) + sizeof(state_->api->append_text);
+        if (state_->api->header.byte_size < required || !state_->api->append_text)
+            throw Error(TRTMC_UNSUPPORTED, "speech runtime does not expose text input");
+        trtmc_error* error = nullptr;
+        const auto status = state_->api->append_text(
+            state_->handle, {text.data(), static_cast<std::uint64_t>(text.size())}, &error);
+        if (status == TRTMC_AGAIN) {
+            state_->model->api.error_release(error);
+            return false;
+        }
+        detail::check(state_->model->api, status, error);
+        return true;
+    }
     void finish_input() {
         trtmc_error* e = nullptr;
         auto s = state_->api->finish_input(state_->handle, &e);
