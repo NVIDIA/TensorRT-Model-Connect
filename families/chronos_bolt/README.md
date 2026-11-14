@@ -2,7 +2,7 @@
 
 This family builds Chronos-Bolt forecasters (`amazon/chronos-bolt-tiny` in the
 manifests; mini, small and base build from the same code path) for
-`time_series_forecast` as one TensorRT engine: a T5 encoder-decoder, batch 1,
+`series_to_quantile_forecast` as one TensorRT engine: a T5 encoder-decoder, batch 1,
 context 2048, fp32 (default) or fp16. The family has no quantized build.
 
 ## FP8 quantization study (not shipped)
