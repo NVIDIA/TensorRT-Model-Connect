@@ -715,6 +715,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "facebook/hubert-large-ls960-ft",
+      "revision": "ece5fabbf034c1073acae96d5401b25be96709d8",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "hubert",
+      "architectures": [
+        "HubertForCTC"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "facebook/nllb-200-distilled-600M",
       "revision": "f8d333a098d19b4fd9a8b18f94170487ad3f821d",
       "revision_source": "resolved",
