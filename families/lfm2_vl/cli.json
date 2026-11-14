@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "commands": [{
+    "name": "build",
+    "help": "Build the LFM2-VL image and text generation bundle",
+    "executor": "python",
+    "handler": "cli:build",
+    "arguments": [
+      {"name": "model", "type": "string", "help": "Hugging Face model ID or local snapshot"},
+      {"name": "output", "type": "path", "flags": ["-o", "--output"], "required": true},
+      {"name": "revision", "type": "string", "flags": ["--revision"]},
+      {"name": "precision", "type": "string", "flags": ["--precision"], "choices": ["bf16", "fp16"], "default": "bf16"},
+      {"name": "max_sequence_length", "type": "int", "flags": ["--max-sequence-length"], "default": 32768},
+      {"name": "verbose", "type": "bool", "flags": ["--verbose"], "action": "store_true", "default": false}
+    ]
+  }]
+}
