@@ -1275,6 +1275,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "poolside/Laguna-XS.2",
+      "revision": "a397bde04501591d0ac3d74a5d9d0a4ec298ffb8",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "laguna",
+      "architectures": [
+        "LagunaForCausalLM"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "sentence-transformers/all-MiniLM-L6-v2",
       "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
       "revision_source": "resolved",
