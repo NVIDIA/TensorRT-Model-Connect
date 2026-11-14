@@ -286,6 +286,40 @@ def vector_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
     return ok, f"cosine {cosine:.5f}, relative L2 {relative:.4f}"
 
 
+def decision_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                    gate: Mapping[str, Any]) -> tuple[bool | None, str]:
+    """A structured decision (``scores``: per question, its options' probabilities) against the native one:
+    the same questions and options, the same most probable option, and every probability within
+    ``atol`` + ``rtol`` x native (the families' E2E gate, 0.015 and 0.01 by default)."""
+    sides = [(side or {}).get("scores") for side in (candidate, native)]
+    if not all(isinstance(scores, list) for scores in sides):
+        return None, "no decision scores"
+    if sides == [[], []]:  # a schema without questions: both sides decide nothing
+        return True, "no questions on either side"
+    mine = {str(item.get("question_id")): item for item in sides[0]}
+    theirs = {str(item.get("question_id")): item for item in sides[1]}
+    if not mine or not theirs:
+        return None, f"no decision scores ({len(mine)} vs {len(theirs)} questions)"
+    if mine.keys() != theirs.keys():
+        return False, f"questions differ: {sorted(mine)} vs {sorted(theirs)}"
+    atol, rtol = float(gate.get("atol", 0.015)), float(gate.get("rtol", 0.01))
+    worst = 0.0
+    for question, item in theirs.items():
+        own = mine[question]
+        if own.get("option_ids") and item.get("option_ids") and list(own["option_ids"]) != list(item["option_ids"]):
+            return False, f"{question}: options differ"  # compared where both sides name them
+        p, q = [float(v) for v in own.get("probabilities") or []], [float(v) for v in item.get("probabilities") or []]
+        if not p or len(p) != len(q) or not all(math.isfinite(v) for v in p):
+            return False, f"{question}: probabilities missing or malformed"
+        if max(range(len(p)), key=p.__getitem__) != max(range(len(q)), key=q.__getitem__):
+            return False, f"{question}: a different option is most probable"
+        excess = max(abs(a - b) - (atol + rtol * abs(b)) for a, b in zip(p, q))
+        if excess > 0:
+            return False, f"{question}: a probability differs beyond the tolerance by {excess:.4f}"
+        worst = max(worst, max(abs(a - b) for a, b in zip(p, q)))
+    return True, f"{len(theirs)} questions, same choices, max probability difference {worst:.4f}"
+
+
 def mask_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
                 gate: Mapping[str, Any]) -> tuple[bool | None, str]:
     """Binary masks: equal source geometry, labels in {0, 1}, and foreground IoU within the gate."""
@@ -410,6 +444,7 @@ def family_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
 
 
 PARITY: dict[str, Callable[..., tuple[bool | None, str]]] = {"family_parity": family_parity,
+                                                      "decision_parity": decision_parity,
                                                       "vector_parity": vector_parity, "mask_parity": mask_parity,
                                                       "geometry_parity": geometry_parity,
                                                       "action_parity": action_parity, "disparity_parity": disparity_parity,
@@ -441,6 +476,24 @@ def wer_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int, 
     for index, problem in enumerate(problems):
         reference = _words(str(problem["gold"]))
         units.append((float(_edit_distance(reference, _words(_text(observations.get(index))))), float(len(reference))))
+    return units
+
+
+def _characters(text: str) -> list[str]:
+    """NFKC characters without whitespace or punctuation: the units of a language written without spaces."""
+    import unicodedata
+
+    return [character for character in unicodedata.normalize("NFKC", text).lower()
+            if not character.isspace() and not unicodedata.category(character).startswith("P")]
+
+
+def cer_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int, Any]) -> list[tuple[float, float]]:
+    """Per utterance: (character errors, reference characters)."""
+    units = []
+    for index, problem in enumerate(problems):
+        reference = _characters(str(problem["gold"]))
+        units.append((float(_edit_distance(reference, _characters(_text(observations.get(index))))),
+                      float(len(reference))))
     return units
 
 
@@ -686,7 +739,33 @@ def miou(units: Sequence[tuple[Any, Any]]) -> float:
 COCO_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 31, 32,
             33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59,
             60, 61, 62, 63, 64, 65, 67, 70, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 84, 85, 86, 87, 88, 89, 90]
-LABEL_FIELDS = {"coco-contiguous-80": "category_index", "coco-category-id": "category_id"}
+LABEL_FIELDS = {"coco-contiguous-80": "category_index", "coco-category-id": "category_id",
+                "coco-names-80": "category_index"}
+# The 80 COCO categories in contiguous order: the phrases an open-vocabulary detector is prompted with, and how
+# its text labels map back to categories (``coco-names-80``).
+COCO_NAMES = ["person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
+              "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+              "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie", "suitcase", "frisbee",
+              "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove", "skateboard", "surfboard",
+              "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon", "bowl", "banana", "apple",
+              "sandwich", "orange", "broccoli", "carrot", "hot dog", "pizza", "donut", "cake", "chair", "couch",
+              "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote", "keyboard",
+              "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book", "clock", "vase",
+              "scissors", "teddy bear", "hair drier", "toothbrush"]
+
+
+def _named_detections(output: Mapping[str, Any]) -> dict[str, Any]:
+    """An open-vocabulary detector's output with its text labels as contiguous COCO classes: a label that names
+    no category (a merged or partial phrase) drops its box, as it answers no category."""
+    index = {name: position for position, name in enumerate(COCO_NAMES)}
+    boxes = output.get("boxes") or []
+    if boxes and not isinstance(boxes[0], (list, tuple)):
+        boxes = [boxes[position:position + 4] for position in range(0, len(boxes), 4)]
+    kept = [(box, score, index[" ".join(str(label).lower().replace(".", " ").split())])
+            for box, score, label in zip(boxes, output.get("scores") or [], output.get("labels") or [])
+            if " ".join(str(label).lower().replace(".", " ").split()) in index and score is not None]
+    return {**output, "boxes": [box for box, _, _ in kept], "scores": [score for _, score, _ in kept],
+            "class_ids": [label for _, _, label in kept]}
 
 
 def coco_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int, Any],
@@ -702,6 +781,8 @@ def coco_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int,
                         "category_id": COCO_IDS[int(category)], **({"area": float(area)} if area is not None else {})}
                        for box, category, area in zip(objects["bbox"], objects["category"], areas)]
         output = observations.get(index) or {"boxes": [], "scores": [], "class_ids": []}
+        if params.get("label_space") == "coco-names-80":
+            output = _named_detections(output)
         units.append(({"sample_id": problem.get("sample_id", str(index)), "annotations": annotations}, output, field))
     return units
 
@@ -815,7 +896,7 @@ def _value_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) ->
 # Per corpus metric: whether an output answers its problem (the field the metric reads, well formed). An
 # output that does not is a missing answer (an error), never scored as zeros or an empty prediction.
 ANSWERS: dict[str, Callable[[Mapping[str, Any], Mapping[str, Any]], bool]] = {
-    "chrf": _text_answer, "wer": _text_answer, "coco_map": _detections_answer, "forecast_mse": _forecast_answer,
+    "chrf": _text_answer, "wer": _text_answer, "cer": _text_answer, "coco_map": _detections_answer, "forecast_mse": _forecast_answer,
     "miou": _label_map_answer, "mask_iou": _masks_answer, "precomputed_mean": _value_answer,
     "sts_spearman": _vector_answer, "rerank_ndcg": _scores_answer, "retrieval_ndcg": _vector_answer,
     "retrieval_ndcg10": _vector_answer}
@@ -836,6 +917,7 @@ CORPUS: dict[str, tuple[Callable, Callable, bool]] = {"chrf": (translation_units
                                                       "mask_iou": (mask_iou_units, mean_percent, True),
                                                       "precomputed_mean": (precomputed_units, mean, True),
                                                       "wer": (wer_units, wer, False),
+                                                      "cer": (cer_units, wer, False),  # the same error rate
                                                       "sts_spearman": (sts_units, spearman, True),
                                                       "rerank_ndcg": (rerank_units, mean_percent, True),
                                                       "retrieval_ndcg": (retrieval_units, mean_percent, True),

@@ -311,7 +311,7 @@ def _hf_rows(name: str, meta: Any, revision: str, source: Mapping[str, Any],
         if "prompt" in roles:
             record["prompt"] = row[roles["prompt"]]
         if "image" in roles:
-            record["image"] = _encoded_media(row[roles["image"]], ".png")
+            record["image"] = _encoded_media(row[roles["image"]], ".png", bool(source.get("lossless_images")))
         if "audio" in roles:
             record["audio"] = _wav_media(row[roles["audio"]]["bytes"], sample_rate)
         if label_column:
@@ -341,12 +341,19 @@ def _hf_rows(name: str, meta: Any, revision: str, source: Mapping[str, Any],
     return records
 
 
-def _encoded_media(value: Mapping[str, Any], default_suffix: str) -> dict[str, Any]:
+def _encoded_media(value: Mapping[str, Any], default_suffix: str, lossless: bool = False) -> dict[str, Any]:
+    """The image as stored, or with ``lossless`` its RGB pixels decoded once and stored as PNG: both sides
+    then read the same pixels instead of decoding a JPEG with different decoders (Pillow and stb_image
+    differ by a few levels per pixel, which a strict feature-parity gate reads as conversion error)."""
     from PIL import Image
 
     data = value["bytes"]
     with Image.open(io.BytesIO(data)) as image:
         suffix = {"JPEG": ".jpg", "PNG": ".png", "WEBP": ".webp"}.get(image.format or "", default_suffix)
+        if lossless and suffix != ".png":
+            buffer = io.BytesIO()
+            image.convert("RGB").save(buffer, format="PNG")
+            data, suffix = buffer.getvalue(), ".png"
     return {"$file": {"suffix": suffix, "b64": base64.b64encode(data).decode()}}
 
 
@@ -525,8 +532,16 @@ def unstated_defaults(request: Mapping[str, Any], operation: str | None = None) 
 
 def _catalog_testcase_records(source: Mapping[str, Any], environment: Environment) -> list[dict[str, Any]]:
     """The catalog testcase request (``profile`` is a catalog name or a model descriptor file),
-    resolved by trtmc-perf-serve exactly as trtmc-bench does."""
+    resolved by trtmc-perf-serve exactly as trtmc-bench does; ``all_testcases`` takes every testcase of a
+    catalog profile, one record each (the family's own inputs, for a Task with no public data set)."""
     repo = environment.path("repo")
+    if source.get("all_testcases"):
+        from trtmc_benchmark.catalog import ManifestCatalog  # importable wherever the catalog resolves profiles
+
+        model = ManifestCatalog(repo / "families").resolve(require(source, "profile", "source"))
+        names = [str(case["name"]) for case in model.testcases]
+        return [record for name in names for record in _catalog_testcase_records(
+            {"profile": source["profile"], "testcase": name}, environment)]
     env = {**os.environ, "HF_HUB_OFFLINE": "1",
            "PYTHONPATH": f"{repo}/apps/perf_serving:{repo}/apps/benchmark:{repo}/core/builder:{repo}"}
     with tempfile.TemporaryDirectory() as scratch:

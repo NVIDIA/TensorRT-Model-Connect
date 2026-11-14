@@ -68,6 +68,9 @@ benchmarks:
              gate: {margin: 2.0}, quantized_gate: {margin: 3.0}, sampled_gate: {margin: 3.0}}
   librispeech: {suite: librispeech-test-clean, suite_definition: librispeech-test-clean-500, metric: wer,
                 gate: {margin: 0.3, relative_margin: 0.05}}
+  # Japanese has no word boundaries: the character error rate of FLEURS ja (models that state it).
+  fleurs_ja: {suite: fleurs-ja-test, suite_definition: fleurs-ja-test-650, metric: cer,
+              gate: {margin: 0.5, relative_margin: 0.05}}
   # Streaming TRTMC vs the native transcription: a wider margin.
   librispeech_streaming: {suite: librispeech-test-clean, suite_definition: librispeech-test-clean-500,
                           metric: wer, gate: {margin: 0.5, relative_margin: 0.10}}
@@ -94,6 +97,35 @@ benchmarks:
   # (coco-contiguous-80 or coco-category-id).
   coco: {suite: coco-map, suite_definition: coco-val2017-500, metric: coco_map,
          metric_params: {label_space: coco-contiguous-80}, gate: {margin: 1.0}}
+  # The same images for an open-vocabulary detector (an image_text_to_boxes Task): one prompt naming the 80
+  # categories, its text labels mapped back to them (unmatched phrases drop their box). Each family states its
+  # thresholds as its own request fields.
+  coco_prompted:
+    suite: coco-map-prompted
+    suite_definition: coco-val2017-500
+    metric: coco_map
+    metric_params: {label_space: coco-names-80}
+    request:
+      score_threshold: null
+      prompt: >-
+        person. bicycle. car. motorcycle. airplane. bus. train. truck. boat. traffic light. fire hydrant.
+        stop sign. parking meter. bench. bird. cat. dog. horse. sheep. cow. elephant. bear. zebra. giraffe.
+        backpack. umbrella. handbag. tie. suitcase. frisbee. skis. snowboard. sports ball. kite. baseball
+        bat. baseball glove. skateboard. surfboard. tennis racket. bottle. wine glass. cup. fork. knife.
+        spoon. bowl. banana. apple. sandwich. orange. broccoli. carrot. hot dog. pizza. donut. cake. chair.
+        couch. potted plant. bed. dining table. toilet. tv. laptop. mouse. remote. keyboard. cell phone.
+        microwave. oven. toaster. sink. refrigerator. book. clock. vase. scissors. teddy bear. hair drier.
+        toothbrush.
+    gate: {margin: 1.0}
+  # A structured decision (per-option probabilities of a schema's questions) has no public gold set: every
+  # catalog testcase of the profile (its family's fixtures), the same choices and the families' E2E probability
+  # tolerance against the release implementation.
+  decision_parity:
+    suite: decision-parity
+    metric: decision_parity
+    suite_definition: {suite: decision-parity, version: 1, source: {kind: catalog_testcase, all_testcases: true},
+                       selection: {method: first, count: 16}}
+    gate: {atol: 0.015, rtol: 0.01}
   # ETTh1 rolling forecasts (the model's columns / context / horizon in config/models `window`): MSE against
   # the observed future, within 1% of the native MSE.
   etth1: {suite: etth1-mse, suite_definition: etth1-test-rolling, metric: forecast_mse,
@@ -168,8 +200,10 @@ tasks:
   # otherwise or needs a query/document role state `exclude`.
   text_to_embedding: *embed
 
-  image_features:
+  # Features have no gold answer: each family states its conversion-parity benchmark (tests/aiperf).
+  image_features: &image_features
     performance: {output_grader: parity_numeric, output_grader_params: {min_cosine: 0.99}}
+  image_to_token_and_pooled_features: *image_features
 
   object_detection:
     absolute: [coco]
@@ -178,6 +212,10 @@ tasks:
   # default it, and declare no score_threshold config: the suite's field is not sent.
   image_to_boxes:
     absolute: [{name: coco, request: {score_threshold: null}}]
+    performance: {output_grader: parity_boxes}
+  # Open-vocabulary detection: the family states coco_prompted with its thresholds (tests/aiperf).
+  image_text_to_boxes:
+    absolute: [coco_prompted]
     performance: {output_grader: parity_boxes}
 
   segmentation:
@@ -196,6 +234,7 @@ tasks:
   transcription_streaming:
     <<: *transcribe
     absolute: [librispeech_streaming]
+  speech_transcription: *transcribe  # a non-English model states its own test set (tests/aiperf)
 
   # Generative media are slow per request: fewer requests per run, still three runs for the CI.
   audio_generation: &generate_audio
@@ -268,10 +307,14 @@ tasks:
     supplementary: [{check: world_model_parity, suite: coco-world-model-10, min_psnr_db: 5.0, min_ssim: 0.1}]
     performance: *media_policy
 
-  time_series_forecast:
+  time_series_forecast: &forecast
     absolute: [etth1]
     # The catalog testcases are a few values, not the models' context: Perf times the first ETTh1 window.
     performance: {suite: {from_benchmark: etth1-mse}, output_grader: parity_numeric}
+  series_to_point_forecast: *forecast
+  structured_decision:  # the family states its release implementation (reference.adapter)
+    absolute: [decision_parity]
+    performance: {output_grader: parity_numeric}
   reranking: &rerank_documents
     absolute: [rerank]
     performance: {output_grader: parity_scores}

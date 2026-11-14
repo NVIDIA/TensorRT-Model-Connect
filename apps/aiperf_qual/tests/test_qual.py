@@ -396,12 +396,7 @@ def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():
     from trtmc_aiperf_qual.config import CONFIG_ROOT
     from trtmc_aiperf_qual.selection import catalog
 
-    not_qualified = {  # Tasks no generic native reference or benchmark serves yet
-        "structured_decision": "no generic native adapter for decide",
-        "image_text_to_boxes": "no generic native adapter for detect_prompted",
-        "image_to_token_and_pooled_features": "no image feature benchmark outside the families that state one",
-        "speech_transcription": "the generic transcribe reference loads Whisper-style speech-seq2seq models only",
-    }
+    not_qualified: dict[str, str] = {}  # Task -> why no generic native reference or benchmark serves it yet
     tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
     assert {profile.task for profile in catalog(REPOSITORY)} - set(tasks) == set(not_qualified)
 
