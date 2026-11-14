@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+Pillow
+accelerate==1.14.0
+diffusers==0.42.1
+# diffusers 0.42.1 requires huggingface-hub>=1.32.0; the repository's transformers 5.2.0 requires <2.0.
+huggingface-hub==1.33.0
