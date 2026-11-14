@@ -47,10 +47,42 @@ if(TRTMC_BUILD_TESTS)
   target_include_directories(test_gpt2_parallel_kv_contract SYSTEM PRIVATE
     ${TRTMC_CUDA_INCLUDE_DIR}
   )
-  target_include_directories(test_gpt2_parallel_kv_contract SYSTEM PRIVATE
-    ${TRTMC_CUDA_INCLUDE_DIR}
-  )
   target_link_libraries(test_gpt2_parallel_kv_contract PRIVATE trtmc_model_gpt2)
   target_compile_options(test_gpt2_parallel_kv_contract PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME gpt2_parallel_kv_contract COMMAND test_gpt2_parallel_kv_contract)
+
+  add_executable(test_gpt2_task_contract
+    ${PROJECT_SOURCE_DIR}/families/gpt2/tests/cpp/test_task_contract.cpp
+  )
+  target_include_directories(test_gpt2_task_contract PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_gpt2_task_contract SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(test_gpt2_task_contract PRIVATE
+    trtmc_model_gpt2 trtmc_core ${TRTMC_CUDART_LIBRARY}
+  )
+  target_compile_options(test_gpt2_task_contract PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+  )
+  add_test(NAME gpt2_task_contract COMMAND test_gpt2_task_contract)
+  set_tests_properties(gpt2_task_contract PROPERTIES LABELS "cpu")
+
+  foreach(_language IN ITEMS c cpp)
+    add_executable(test_gpt2_sdk_${_language}
+      ${PROJECT_SOURCE_DIR}/families/gpt2/tests/sdk_consumer.${_language}
+    )
+    target_link_libraries(test_gpt2_sdk_${_language} PRIVATE trtmc_c)
+    target_compile_options(test_gpt2_sdk_${_language} PRIVATE
+      -Wall -Wextra -Wpedantic -Werror
+    )
+    set_target_properties(test_gpt2_sdk_${_language} PROPERTIES
+      RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+    )
+  endforeach()
+  add_dependencies(test_gpt2_task_contract
+    test_gpt2_sdk_c test_gpt2_sdk_cpp
+  )
 endif()
