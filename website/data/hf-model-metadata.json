@@ -1308,6 +1308,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "stabilityai/stable-audio-open-1.0",
+      "revision": "f21265c1e2710b3bd2386596943f0007f55f802e",
+      "revision_source": "resolved",
+      "metadata_file": "model_index.json",
+      "model_type": null,
+      "architectures": [
+        "StableAudioPipeline"
+      ],
+      "architecture_source": "model_index._class_name"
+    },
+    {
       "hf_id": "stabilityai/stablelm-2-1_6b",
       "revision": "f499ead74c53749bd93cebc6ce8bc0d7bdf1eaef",
       "revision_source": "resolved",
