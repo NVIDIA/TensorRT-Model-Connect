@@ -57,6 +57,10 @@ distributed under the Apache License 2.0 with the rest of the project:
   `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the input of the FP8
   E2E case, chosen for its clear top-1 margin
 
+- `families/table_transformer/tests/data/structure-table.jpeg` — synthetic
+  scientific table with invented values, rendered for structure-recognition
+  parity testing; no external document or model output is embedded
+
 ## Project overview media
 
 The following project overview images and animation were supplied by the
