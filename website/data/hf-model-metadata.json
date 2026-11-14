@@ -1504,6 +1504,17 @@
         "DeepseekV3ForCausalLM"
       ],
       "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "microsoft/swinv2-tiny-patch4-window16-256",
+      "revision": "f4d3075206f2ad5eda586c30d6b4d0500f312421",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "swinv2",
+      "architectures": [
+        "Swinv2ForImageClassification"
+      ],
+      "architecture_source": "config.architectures"
     }
   ]
 }
