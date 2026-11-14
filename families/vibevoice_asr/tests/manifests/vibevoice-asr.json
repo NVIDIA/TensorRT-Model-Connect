@@ -1,0 +1,45 @@
+{
+  "name": "vibevoice-asr",
+  "hf_id": "microsoft/VibeVoice-ASR",
+  "hf_revision": "d0c9efdb8d614685062c04425d91e01b6f37d944",
+  "hf_dependencies": [
+    {
+      "repo_id": "Qwen/Qwen2.5-7B",
+      "revision": "d149729398750b98c0af14eb82c78cfe92750796"
+    }
+  ],
+  "bundle": "vibevoice-asr.bundle",
+  "family": "vibevoice_asr",
+  "task": "speech_transcription",
+  "precision": "bf16",
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "vibevoice-asr-librispeech-24k",
+      "premerge": true,
+      "audio": "data/librispeech-test-clean-6930-75918-0003.wav",
+      "input_sample_rate": 24000,
+      "oracle": "tokens"
+    },
+    {
+      "name": "vibevoice-asr-librispeech-hotwords",
+      "audio": "data/librispeech-test-clean-6930-75918-0003.wav",
+      "input_sample_rate": 24000,
+      "context_info": "An audiobook reading by a single narrator.",
+      "oracle": "tokens"
+    },
+    {
+      "name": "vibevoice-asr-librispeech-long",
+      "audio": "data/librispeech-test-clean-6930-75918-0003.wav",
+      "input_sample_rate": 24000,
+      "repeat": 3,
+      "oracle": "tokens"
+    },
+    {
+      "name": "vibevoice-asr-librispeech-16k",
+      "audio": "data/librispeech-test-clean-6930-75918-0003.wav",
+      "input_sample_rate": 16000,
+      "oracle": "transcript_words"
+    }
+  ]
+}

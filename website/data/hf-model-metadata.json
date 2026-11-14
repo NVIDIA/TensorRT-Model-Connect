@@ -1504,6 +1504,17 @@
         "DeepseekV3ForCausalLM"
       ],
       "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "microsoft/VibeVoice-ASR",
+      "revision": "d0c9efdb8d614685062c04425d91e01b6f37d944",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "vibevoice",
+      "architectures": [
+        "VibeVoiceForASRTraining"
+      ],
+      "architecture_source": "config.architectures"
     }
   ]
 }

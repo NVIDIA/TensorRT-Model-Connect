@@ -141,6 +141,8 @@ audiobooks.
 
 - Source and attribution: https://www.openslr.org/12/
 - License: https://creativecommons.org/licenses/by/4.0/
+- `families/vibevoice_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+  is a byte-identical copy distributed under the same terms.
 
 ## SANA world-model fixtures
 
