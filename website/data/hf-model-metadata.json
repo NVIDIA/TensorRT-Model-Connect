@@ -1504,6 +1504,17 @@
         "DeepseekV3ForCausalLM"
       ],
       "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "tencent/HunyuanOCR",
+      "revision": "47644ecc4fc854efa4f505155158831f36773ee4",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "hunyuan_vl",
+      "architectures": [
+        "HunYuanVLForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
     }
   ]
 }
