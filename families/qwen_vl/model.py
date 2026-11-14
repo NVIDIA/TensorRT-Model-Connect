@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from .checkpoint_mapper import (
 from .parallel import ParallelConfig, normalize_parallel_config
 from .decoder_tp_builder import build_qwen_vl_tp_decoder_engine
 from .lora import DynamicLoraConfig
+from .quantization import calibrate_qwen_vl, is_quantized_checkpoint
 from .default_decoder import build_standard_decoder_engine
 from . import graph_ops
 from . import graph_blocks
@@ -119,7 +121,8 @@ def _dynamic_vision_profile(
 ) -> tuple[bool, int, int, int]:
     """Resolve dynamic smart-resize limits from build and processor configs."""
     options = _vision_build_options(config)
-    enabled = bool(options.get("dynamic_resolution", False))
+    enabled = bool(options.get("dynamic_resolution", not any(
+        key in options for key in ("image_height", "image_width"))))
     processor_config: dict = {}
     processor_path = Path(model_dir) / "preprocessor_config.json"
     if processor_path.exists():
@@ -131,15 +134,36 @@ def _dynamic_vision_profile(
     min_pixels = int(options.get("min_pixels", 0))
     max_pixels = int(options.get("max_pixels", 0))
     if min_pixels <= 0:
-        min_pixels = int(processor_config.get("min_pixels", 3136))
+        size = processor_config.get("size", {})
+        min_pixels = int(processor_config.get("min_pixels", size.get(
+            "shortest_edge", 65536 if _is_qwen3_vl(config) else 3136)))
     if max_pixels <= 0:
-        max_pixels = int(processor_config.get("max_pixels", 12845056))
+        # Preserve the existing 448-square token budget while allowing the
+        # checkpoint's smart-resize geometry within that declared build limit.
+        # A larger explicit max_pixels, such as the checkpoint's own limit,
+        # also enlarges the default text capacity below.
+        max_pixels = _DEFAULT_FIXED_IMAGE_SIZE**2
     opt_pixels = int(options.get("opt_pixels", 200704))
     if not min_pixels <= opt_pixels <= max_pixels:
         raise ValueError(
             "qwen_vl_vision pixel limits must satisfy min_pixels <= opt_pixels <= max_pixels"
         )
     return enabled, min_pixels, opt_pixels, max_pixels
+
+
+def _default_sequence_length(model_dir: str, config: ModelConfig) -> int:
+    """Reserve the largest image the dynamic vision profile admits plus text."""
+    from .qwen_vl_vision_builder import _smart_resize_max_profile_patches
+
+    length = 256
+    enabled, minimum, _, maximum = _dynamic_vision_profile(model_dir, config)
+    if enabled:
+        vision = config.raw.get("vision_config", {})
+        patch_size = int(vision.get("patch_size", 16 if _is_qwen3_vl(config) else 14))
+        merge_size = int(vision.get("spatial_merge_size", 2))
+        patches = _smart_resize_max_profile_patches(minimum, maximum, patch_size, merge_size)
+        length += patches // (merge_size * merge_size)
+    return min(config.max_position_embeddings, length)
 
 
 if TYPE_CHECKING:
@@ -155,10 +179,11 @@ class _QwenVLModel:
         self,
         model_dir: str,
         config: ModelConfig,
+        quant_ctx=None,
     ) -> WeightDict:
         if _is_qwen3_vl(config):
             return _load_qwen3_vl_weights(model_dir, config)
-        return load_standard_weights(model_dir, config)
+        return load_standard_weights(model_dir, config, quant_ctx=quant_ctx)
 
     def build_engine(
         self,
@@ -275,16 +300,16 @@ class _QwenVLModel:
         }
 
         if _is_qwen3_vl(config):
-            if dynamic_resolution:
-                raise NotImplementedError(
-                    "Dynamic image resolution currently supports Qwen2.5-VL only"
-                )
             from .qwen_vl_vision_builder import build_qwen3_vl_vision_engine
 
             return build_qwen3_vl_vision_engine(
                 vision_config,
                 vision_weights,
                 fixed_image_size=fixed_h,
+                dynamic_image_resolution=dynamic_resolution,
+                min_image_pixels=min_pixels,
+                opt_image_pixels=opt_pixels,
+                max_image_pixels=max_pixels,
                 precision=vision_precision,
                 fp32_layers=vision_fp32_layers,
                 verbose=verbose,
@@ -323,16 +348,16 @@ class _QwenVLModel:
         dynamic_resolution = bool(
             profile.get(
                 "enabled",
-                _vision_build_options(config).get("dynamic_resolution", False),
+                _vision_build_options(config).get("dynamic_resolution", not any(
+                    key in _vision_build_options(config) for key in ("image_height", "image_width"))),
             )
         )
 
         if dynamic_resolution:
-            if _is_qwen3_vl(config):
-                raise NotImplementedError(
-                    "Dynamic image resolution currently supports Qwen2.5-VL only"
-                )
-            preproc = "qwen_smart_resize_patchify"
+            preproc = (
+                "qwen3_smart_resize_patchify" if _is_qwen3_vl(config)
+                else "qwen_smart_resize_patchify"
+            )
         else:
             # Rectangular buckets preserve the source aspect ratio before
             # applying Qwen's required merge-group pixel ordering.
@@ -370,8 +395,16 @@ class _QwenVLModel:
             "dynamic_image_resolution": dynamic_resolution,
             "vision_output_dim": config.hidden_size,
             "preprocessor_type": preproc,
-            "image_mean": [0.48145466, 0.4578275, 0.40821073],
-            "image_std": [0.26862954, 0.26130258, 0.27577711],
+            "image_mean": (
+                [0.5, 0.5, 0.5]
+                if _is_qwen3_vl(config)
+                else [0.48145466, 0.4578275, 0.40821073]
+            ),
+            "image_std": (
+                [0.5, 0.5, 0.5]
+                if _is_qwen3_vl(config)
+                else [0.26862954, 0.26130258, 0.27577711]
+            ),
             "interpolation": "bicubic",
             "vl_prompt_template": prompt_template,
             "image_token_str": "<|image_pad|>",
@@ -381,9 +414,11 @@ class _QwenVLModel:
             options = _vision_build_options(config)
             vl_cfg.update(
                 {
-                    "min_pixels": int(profile.get("min_pixels", options.get("min_pixels") or 3136)),
+                    "min_pixels": int(profile.get("min_pixels", options.get("min_pixels") or (
+                        65536 if _is_qwen3_vl(config) else 3136
+                    ))),
                     "max_pixels": int(
-                        profile.get("max_pixels", options.get("max_pixels") or 12845056)
+                        profile.get("max_pixels", options.get("max_pixels") or _DEFAULT_FIXED_IMAGE_SIZE**2)
                     ),
                     "vision_embed_dim": int(
                         vision_config.get("embed_dim", vision_config.get("hidden_size", 1280))
@@ -395,6 +430,13 @@ class _QwenVLModel:
                     "vision_rope_theta": float(vision_config.get("rope_theta", 10000.0)),
                 }
             )
+
+        if dynamic_resolution and _is_qwen3_vl(config):
+            position_count = int(vision_config.get("num_position_embeddings", 2304))
+            position_side = math.isqrt(position_count)
+            if position_side * position_side != position_count:
+                raise ValueError("Qwen3-VL learned position table must have a square grid")
+            vl_cfg["vision_position_grid_size"] = position_side
 
         if _is_qwen3_vl(config):
             ds_indexes = vision_config.get("deepstack_visual_indexes", [])
@@ -1068,6 +1110,8 @@ def _generation_token_contract(model_dir: Path, vocab_size: int) -> dict[str, ob
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Qwen-VL vision-language bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Qwen-VL does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("qwen_vl does not support dynamic_kv_cache")
 
@@ -1088,20 +1132,44 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
     if request.task != "vision_language_generation":
         raise ValueError("qwen_vl supports only task=vision_language_generation")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Qwen-VL supports only non-quantized builds")
+    if request.quantization not in {None, "none", "fp8", "nvfp4"}:
+        raise NotImplementedError(f"qwen_vl does not support quantization={request.quantization!r}")
+    quantized = request.quantization in {"fp8", "nvfp4"}
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if not ("qwen" in str(config.model_type).lower() and "vl" in str(config.model_type).lower()):
         raise ValueError(f"Qwen-VL does not support model_type={config.model_type!r}")
     precision = str(request.precision).lower()
-    max_length = int(request.max_sequence_length or min(config.max_position_embeddings, 256))
+    if quantized:
+        if str(config.model_type).lower() != "qwen2_5_vl" or _is_qwen3_vl(config):
+            raise NotImplementedError("quantized qwen_vl builds support Qwen2.5-VL only")
+        if precision != "fp16":
+            raise NotImplementedError("quantized qwen_vl builds require fp16 precision")
+        if int(request.tensor_parallel_size) != 1:
+            raise NotImplementedError("quantized qwen_vl builds do not support tensor parallelism")
+        if request.fp32_layers:
+            raise NotImplementedError("quantized qwen_vl builds do not support fp32_layers")
+    elif is_quantized_checkpoint(model_dir):
+        raise ValueError("this checkpoint is quantized; build it with --quantization fp8 or nvfp4")
+    max_length = int(request.max_sequence_length or _default_sequence_length(str(model_dir), config))
     parallel = ParallelConfig(tp_size=int(request.tensor_parallel_size))
     parallel.validate()
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_fp32_layers"] = tuple(request.fp32_layers)
+    if quantized:
+        # The fp16 decoder engines with native IAttention do not compile on TensorRT 11.4,
+        # while the FP32-score decomposed graph builds on every release. An explicit
+        # model-level option still wins.
+        build_options = config.raw.setdefault("_family_build_options", {})
+        if isinstance(build_options, dict):
+            decoder_options = build_options.setdefault("qwen_vl_decoder", {})
+            decoder_options.setdefault("decode_attention", "decomposed")
+            decoder_options.setdefault("prefill_attention", "decomposed")
     model = _QwenVLModel()
-    weights = model.load_weights(str(model_dir), config)
+    quant_ctx = None
+    if quantized:
+        quant_ctx = calibrate_qwen_vl(model_dir, config, graph_ops, request.quantization)
+    weights = model.load_weights(str(model_dir), config, quant_ctx=quant_ctx)
     writer.set_header(family="qwen_vl", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -1112,7 +1180,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                     weights,
                     max_length,
                     precision=precision,
-                    quant_ctx=None,
+                    quant_ctx=quant_ctx,
                     verbose=request.verbose,
                     parallel_config=parallel.for_rank(rank),
                 ),
@@ -1125,7 +1193,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=request.verbose,
             parallel_config=parallel,
         )
@@ -1135,7 +1203,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=request.verbose,
             parallel_config=parallel,
         )

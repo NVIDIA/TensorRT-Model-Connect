@@ -28,10 +28,14 @@ class WindowTensor:
 class TrtLayers:
     """Add named, strongly typed layers while retaining all host weights."""
 
-    def __init__(self, trt: Any, network: Any, checkpoint: Checkpoint) -> None:
+    def __init__(self, trt: Any, network: Any, checkpoint: Checkpoint, half: Any = None) -> None:
         self.trt = trt
         self.network = network
         self.checkpoint = checkpoint
+        # 16-bit compute type of the GEMM, convolution and attention paths: bf16 or fp16.
+        self.half = trt.bfloat16 if half is None else half
+        if self.half not in (trt.bfloat16, trt.float16):
+            raise NetworkBuildError("SAM2 supports only BF16 and FP16 compute")
         self._owned: list[np.ndarray] = []
 
     @staticmethod
@@ -54,6 +58,16 @@ class TrtLayers:
         self._owned.append(rounded)
         return self.trt.Weights(self.trt.bfloat16, rounded.ctypes.data, rounded.size)
 
+    def _fp16_weights(self, values: np.ndarray) -> Any:
+        source = np.ascontiguousarray(values, dtype=np.float16)
+        self._owned.append(source)
+        return self.trt.Weights(source)
+
+    def _half_weights(self, values: np.ndarray) -> Any:
+        if self.half == self.trt.float16:
+            return self._fp16_weights(values)
+        return self._bf16_weights(values)
+
     def _fp32_weights(self, values: np.ndarray) -> Any:
         source = np.ascontiguousarray(values, dtype=np.float32)
         self._owned.append(source)
@@ -64,7 +78,9 @@ class TrtLayers:
             return self._fp32_weights(values)
         if dtype == self.trt.bfloat16:
             return self._bf16_weights(values)
-        raise NetworkBuildError("SAM2 supports only FP32 and BF16 weights")
+        if dtype == self.trt.float16:
+            return self._fp16_weights(values)
+        raise NetworkBuildError("SAM2 supports only FP32, BF16 and FP16 weights")
 
     def cast(self, tensor: Any, dtype: Any, name: str) -> Any:
         if tensor.dtype == dtype:
@@ -220,7 +236,7 @@ class TrtLayers:
         epsilon: float,
         name: str,
     ) -> Any:
-        tensor = self.cast(tensor, self.trt.bfloat16, f"{name}.input_bf16")
+        tensor = self.cast(tensor, self.half, f"{name}.input_bf16")
         kernel_values, bias_values = self._fold_batch_norm(
             module_name, input_channels, output_channels, kernel, groups, epsilon
         )
@@ -229,8 +245,8 @@ class TrtLayers:
                 tensor,
                 output_channels,
                 (kernel, kernel),
-                self._bf16_weights(kernel_values),
-                self._bf16_weights(bias_values),
+                self._half_weights(kernel_values),
+                self._half_weights(bias_values),
             ),
             "convolution",
             f"{name}.conv_bn_folded",
@@ -240,7 +256,7 @@ class TrtLayers:
         layer.num_groups = groups
         return self.silu(layer.get_output(0), f"{name}.silu")
 
-    def linear_bf16(
+    def linear_half(
         self,
         tensor: Any,
         module_name: str,
@@ -249,14 +265,14 @@ class TrtLayers:
         name: str,
     ) -> Any:
         input_shape = self._shape(tensor)
-        tensor = self.cast(tensor, self.trt.bfloat16, f"{name}.input_bf16")
+        tensor = self.cast(tensor, self.half, f"{name}.input_bf16")
         weight = self.constant(
             f"{module_name}.weight",
             (output_features, input_features),
             (output_features, input_features),
             f"{name}.weight",
         )
-        weight = self.cast(weight, self.trt.bfloat16, f"{name}.weight_bf16")
+        weight = self.cast(weight, self.half, f"{name}.weight_bf16")
         weight_shape = [1] * len(input_shape)
         weight_shape[-2:] = (output_features, input_features)
         weight = self.shuffle(weight, weight_shape, f"{name}.weight_broadcast")
@@ -275,7 +291,7 @@ class TrtLayers:
             "constant",
             f"{name}.bias",
         ).get_output(0)
-        bias = self.cast(bias, self.trt.bfloat16, f"{name}.bias_bf16")
+        bias = self.cast(bias, self.half, f"{name}.bias_bf16")
         return self.elementwise(output, bias, self.trt.ElementWiseOperation.SUM, f"{name}.bias_add")
 
     def layer_norm_fp32(

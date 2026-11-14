@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# FLORES-200 devtest en->fr (all 1,012 sentences) in Riva-Translate's chat prompt; gold is the reference.
+suite: flores200-en-fr-riva-1012
+version: 1
+source:
+  kind: json_manifest
+  path: FLORES200_en_fr/flores200_en_fr_task_eval.json
+  sha256: a797a331fa208a48f6a168c3172e741795c92f70655726f20d8065665bd00534
+  records: requests
+  label_field: answer
+selection: {method: first, count: 1012}
+fields: {prompt: prompt}
+request:
+  max_new_tokens: 128
+  temperature: 0.0
+  top_k: 1
+  top_p: 1.0
+  min_p: 0.0
+  seed: -1
+  repetition_penalty: 1.0
+  use_chat_template: false
+  enable_thinking: false
+  do_sample: false

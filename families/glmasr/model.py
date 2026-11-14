@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from . import graph_ops
 from .audio_encoder_builder import build_audio_encoder_engine
 from .checkpoint_mapper import (
     WeightDict,
@@ -40,6 +41,7 @@ from .config import (
 )
 from .standard_decoder_builder import build_standard_decoder_engine
 from .parallel import ParallelConfig
+from .quantization import calibrate_glmasr
 
 if TYPE_CHECKING:
     from tensorrt_model_connect.build import BuildRequest
@@ -114,14 +116,16 @@ class GlmAsrPlugin:
         return overrides
 
     def load_weights(
-        self, model_dir: str, config: ModelConfig, *, precision: str = "fp32",
+        self, model_dir: str, config: ModelConfig, *, precision: str = "fp32", quant_ctx=None,
     ) -> WeightDict:
         """Load the Llama decoder, the audio tower, and the projector.
 
         The decoder maps onto the shared flat weight-key convention. The audio
         tower and projector keep their checkpoint names under ``audio.`` and
         ``projector.`` namespaces, because their builders consume the HF layout
-        directly.
+        directly. Projections owned by ``quant_ctx`` are not loaded: the engine
+        consumes the FP8 bytes the context quantized itself, so the decoder keeps a
+        shape-only placeholder and the encoder keeps no weight.
         """
         readers = _open_safetensors(Path(model_dir))
         target_dtype = _target_np_dtype(precision)
@@ -151,25 +155,32 @@ class GlmAsrPlugin:
                 readers, f"{hf_prefix}.post_attention_layernorm.weight",
             ).astype(np.float32)
 
+            def _projection(engine_key: str, hf_name: str) -> np.ndarray:
+                """One projection as [in, out], or a placeholder when it is quantized."""
+                name = f"{prefix}.{engine_key}"
+                if quant_ctx is not None and quant_ctx.should_quantize(name):
+                    w = quant_ctx.scales[name].weight
+                    zero = np.zeros((), dtype=target_dtype)
+                    return np.broadcast_to(zero, (w.in_features, w.out_features))
+                raw = _load_tensor(readers, f"{hf_prefix}.{hf_name}.weight")
+                return _transpose_2d(raw, f"{hf_prefix}.{hf_name}", precision)
+
             # Llama attention: separate projections, no biases and no QK norms.
             for engine_key, hf_key in (
                 ("w_q", "q_proj"), ("w_k", "k_proj"),
                 ("w_v", "v_proj"), ("w_o", "o_proj"),
             ):
-                raw = _load_tensor(
-                    readers, f"{hf_prefix}.self_attn.{hf_key}.weight")
-                weights[f"{prefix}.{engine_key}"] = _transpose_2d(
-                    raw, f"{hf_prefix}.self_attn.{hf_key}", precision)
+                weights[f"{prefix}.{engine_key}"] = _projection(
+                    engine_key, f"self_attn.{hf_key}")
                 if engine_key == "w_q":
-                    attention_size = raw.shape[0]
+                    attention_size = weights[f"{prefix}.{engine_key}"].shape[1]
 
             for engine_key, hf_key in (
                 ("w_gate", "gate_proj"), ("w_up", "up_proj"),
                 ("w_down", "down_proj"),
             ):
-                raw = _load_tensor(readers, f"{hf_prefix}.mlp.{hf_key}.weight")
-                weights[f"{prefix}.{engine_key}"] = _transpose_2d(
-                    raw, f"{hf_prefix}.mlp.{hf_key}", precision)
+                weights[f"{prefix}.{engine_key}"] = _projection(
+                    engine_key, f"mlp.{hf_key}")
 
         weights["final_norm"] = _load_tensor(
             readers, f"{_DECODER}norm.weight",
@@ -187,8 +198,11 @@ class GlmAsrPlugin:
             {} if projector is None else projector.__dict__.copy()
         )
 
+        skipped = frozenset() if quant_ctx is None else quant_ctx.quantized_checkpoint_keys()
         for reader in readers:
             for key in reader.keys():
+                if key in skipped:
+                    continue
                 if key.startswith(_AUDIO_TOWER):
                     weights[f"audio.{key}"] = _load_tensor([reader], key)
                 elif key.startswith(_PROJECTOR):
@@ -272,13 +286,13 @@ class GlmAsrPlugin:
 
     def build_vision_engine(
         self, model_dir: str, config: ModelConfig, weights: WeightDict,
-        *, precision: str = "fp32", verbose: bool = False,
+        *, precision: str = "fp32", quant_ctx=None, verbose: bool = False,
     ) -> bytes | None:
         """Build the audio encoder and its projector as one engine."""
         if audio_encoder_config(config.raw) is None:
             return None
         return build_audio_encoder_engine(
-            config, weights, precision=precision, verbose=verbose)
+            config, weights, precision=precision, quant_ctx=quant_ctx, verbose=verbose)
 
     def get_vl_config(self, config: ModelConfig) -> dict | None:
         """Encoder geometry the runtime needs to place audio embeddings."""
@@ -326,32 +340,25 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
     }
 
 
-def _eot_token_id(config: ModelConfig) -> int:
-    """Resolve the decoder's EOS id.
-
-    The checkpoint keeps it under ``text_config`` (config.raw is the
-    unmerged JSON), and it can be a list of alternates rather than a single
-    id. The runtime only supports one stop id, so this picks the first.
-    """
-    text_config = config.raw.get("text_config")
-    sources = [text_config, config.raw] if isinstance(text_config, dict) else [config.raw]
-    for source in sources:
-        value = source.get("eos_token_id")
-        if isinstance(value, (list, tuple)) and value:
-            return int(value[0])
-        if value is not None:
-            return int(value)
-    raise ValueError("glmasr checkpoint declares no eos_token_id")
-
-
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build a GLM-ASR bundle using the family-owned encoder and decoder."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("GLM-ASR does not support MTP speculative decoding")
     if request.task != "transcription":
         raise ValueError("glmasr supports only task=transcription")
     if request.max_batch_size != 1 or request.context_parallel_size != 1:
         raise ValueError("glmasr supports only batch=1 and context_parallel_size=1")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("glmasr does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"glmasr does not support quantization={request.quantization!r}"
+        )
+    quantized = request.quantization == "fp8"
+    if quantized and request.precision != "fp16":
+        raise NotImplementedError("glmasr fp8 quantization requires precision fp16")
+    if quantized and (request.fp32_layers or int(request.tensor_parallel_size) != 1):
+        raise NotImplementedError(
+            "glmasr fp8 quantization does not support fp32_layers or tensor parallelism"
+        )
     if request.precision == "bf16":
         # The audio encoder's weight constants are materialized in
         # work_np_dtype (np.float16 for this branch, not ml_dtypes.bfloat16),
@@ -375,7 +382,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_fp32_layers"] = tuple(request.fp32_layers)
     parallel = ParallelConfig(tp_size=int(request.tensor_parallel_size))
     parallel.validate()
-    weights = plugin.load_weights(str(model_dir), config, precision=request.precision)
+    quant_ctx = (
+        calibrate_glmasr(model_dir, graph_ops, "fp8", config) if quantized else None
+    )
+    weights = plugin.load_weights(
+        str(model_dir), config, precision=request.precision, quant_ctx=quant_ctx
+    )
     max_length = int(request.max_sequence_length or 256)
     audio_rows = int((plugin.get_vl_config(config) or {}).get("num_audio_embeddings", 0))
     if max_length <= audio_rows:
@@ -387,20 +399,40 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     writer.add_bytes(
         "engine.plan",
         plugin.build_engine(
-            config, weights, max_length, precision=request.precision, verbose=request.verbose
+            config, weights, max_length, precision=request.precision,
+            quant_ctx=quant_ctx, verbose=request.verbose,
         ),
     )
+    # A second engine prefills the prompt (tokens and audio frames) in one
+    # launch; decoding stays on the one-token engine above. TensorRT 11.4
+    # fails shape inference of the FP8 graph over a runtime row count, so FP8
+    # bundles keep the token loop.
+    split = not quantized and not request.fp32_layers and parallel.tp_size == 1
+    if split:
+        config.raw["_decoder_engine_role"] = "prefill"
+        try:
+            writer.add_bytes(
+                "prefill.plan",
+                plugin.build_engine(
+                    config, weights, max_length, precision=request.precision,
+                    quant_ctx=quant_ctx, verbose=request.verbose,
+                ),
+            )
+        finally:
+            config.raw.pop("_decoder_engine_role", None)
     encoder = plugin.build_vision_engine(
-        str(model_dir), config, weights, precision=request.precision, verbose=request.verbose
+        str(model_dir), config, weights, precision=request.precision,
+        quant_ctx=quant_ctx, verbose=request.verbose,
     )
     if encoder is None:
         raise RuntimeError("glmasr audio encoder build returned no engine")
     writer.add_bytes("encoder.plan", encoder)
     runtime = {
+        "decoder_engine_layout": "split" if split else "single",
         "tensor_parallel_size": parallel.tp_size,
         "hidden_size": config.hidden_size,
         "max_cache_length": max_length,
-        "eot_token_id": _eot_token_id(config),
+        "eot_token_ids": config.eos_token_ids,
         "mel_frontend": "whisper",
         "mel_n_fft": _MEL_DEFAULTS["n_fft"],
         "mel_hop_length": _MEL_DEFAULTS["hop_length"],

@@ -198,7 +198,12 @@ class _DebertaModel:
             )
 
         return _build_deberta_encoder_engine(
-            config, weights, max_seq_length=max_cache_length, precision=precision, verbose=verbose
+            config,
+            weights,
+            max_seq_length=max_cache_length,
+            precision=precision,
+            verbose=verbose,
+            quant_ctx=quant_ctx,
         )
 
 
@@ -222,6 +227,7 @@ def _build_deberta_encoder_engine(
     *,
     precision="fp32",
     verbose=False,
+    quant_ctx=None,
 ):
     hidden = config.hidden_size
     vocab = config.vocab_size
@@ -254,6 +260,9 @@ def _build_deberta_encoder_engine(
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
     trt_config.clear_flag(trt.BuilderFlag.TF32)
+    if quant_ctx is not None and quant_ctx.has_fp8_weights:
+        # Keep layer names so the plan inspector shows the FP8 GEMMs.
+        trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
 
     input_ids = network.add_input("input_ids", trt.int32, (max_seq_length,))
     token_type_ids = network.add_input("token_type_ids", trt.int32, (max_seq_length,))
@@ -379,6 +388,7 @@ def _build_deberta_encoder_engine(
             hidden_act=hidden_act,
             eps=eps,
             dtype=work_np_dtype,
+            quant_ctx=quant_ctx,
         )
 
     public_output = hidden_state
@@ -422,17 +432,25 @@ def _add_deberta_layer(
     hidden_act,
     eps,
     dtype=np.float32,
+    quant_ctx=None,
 ):
     attention_size = num_heads * head_dim
 
-    q = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_q"], dtype=dtype
-    )
-    k = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_k"], dtype=dtype
-    )
-    v = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, attention_size, weights[f"{prefix}.w_v"], dtype=dtype
+    def project(name, activation, keys, widths):
+        # FP8 projection when the quantization context holds it, else the constant matmul.
+        if quant_ctx is not None:
+            outputs = quant_ctx.project(network, activation, f"encoder.{prefix}.{name}")
+            if outputs is not None:
+                return outputs
+        return [
+            graph_ops.add_matmul_rhs_constant(
+                network, activation, widths[0], widths[1], weights[f"{prefix}.{key}"], dtype=dtype
+            )
+            for key in keys
+        ]
+
+    q, k, v = project(
+        "attention.self.in_proj", hidden, ("w_q", "w_k", "w_v"), (hidden_size, attention_size)
     )
 
     q = graph_ops.add_bias_sum(network, q, attention_size, weights[f"{prefix}.q_bias"], dtype=dtype)
@@ -554,13 +572,11 @@ def _add_deberta_layer(
     context_flat.first_transpose = trt.Permutation([1, 0, 2])
     context_flat.reshape_dims = (seq_length, attention_size)
 
-    attn_out = graph_ops.add_matmul_rhs_constant(
-        network,
+    (attn_out,) = project(
+        "attention.output.dense",
         context_flat.get_output(0),
-        attention_size,
-        hidden_size,
-        weights[f"{prefix}.w_o"],
-        dtype=dtype,
+        ("w_o",),
+        (attention_size, hidden_size),
     )
     attn_out = graph_ops.add_bias_sum(
         network, attn_out, hidden_size, weights[f"{prefix}.o_bias"], dtype=dtype
@@ -577,16 +593,12 @@ def _add_deberta_layer(
         dtype=dtype,
     )
 
-    fc1 = graph_ops.add_matmul_rhs_constant(
-        network, normed1, hidden_size, intermediate_size, weights[f"{prefix}.w_fc1"], dtype=dtype
-    )
+    (fc1,) = project("intermediate.dense", normed1, ("w_fc1",), (hidden_size, intermediate_size))
     fc1 = graph_ops.add_bias_sum(
         network, fc1, intermediate_size, weights[f"{prefix}.fc1_bias"], dtype=dtype
     )
     activated = graph_ops.add_activation(network, fc1, hidden_act)
-    fc2 = graph_ops.add_matmul_rhs_constant(
-        network, activated, intermediate_size, hidden_size, weights[f"{prefix}.w_fc2"], dtype=dtype
-    )
+    (fc2,) = project("output.dense", activated, ("w_fc2",), (intermediate_size, hidden_size))
     fc2 = graph_ops.add_bias_sum(
         network, fc2, hidden_size, weights[f"{prefix}.fc2_bias"], dtype=dtype
     )
@@ -629,6 +641,8 @@ def _positive_int(value: object, name: str) -> int:
 def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
     """Resolve this family's exact native-tokenizer framing."""
 
+    import tempfile
+
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -636,6 +650,25 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
         trust_remote_code=True,
         use_fast=True,
     )
+    tokenizer_path = model_dir / "tokenizer.json"
+    if not tokenizer_path.is_file():
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=model_dir,
+                prefix=".trtmc-deberta-tokenizer-",
+                suffix=".json",
+                delete=False,
+            ) as output:
+                temporary_path = Path(output.name)
+            tokenizer.backend_tokenizer.save(str(temporary_path))
+            if not temporary_path.is_file() or temporary_path.stat().st_size == 0:
+                raise RuntimeError("tokenizer conversion did not create tokenizer.json")
+            temporary_path.replace(tokenizer_path)
+            temporary_path = None
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
     default_ids = list(tokenizer.encode("hello"))
     plain_ids = list(tokenizer.encode("hello", add_special_tokens=False))
     if default_ids == plain_ids:
@@ -681,8 +714,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task not in {"encoding", "embedding", "reranking"}:
-        raise ValueError("deberta task must be encoding, embedding, or reranking")
+    if request.task not in {"text_to_pooled_features", "text_to_embedding"}:
+        raise ValueError("deberta task must be text_to_pooled_features or text_to_embedding")
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower() != "deberta":
@@ -698,16 +731,37 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("DeBERTa max_sequence_length exceeds checkpoint capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("DeBERTa has no family-owned quantized build")
+    quantization = request.quantization
+    if quantization in {None, "none"}:
+        quantization = None
+    elif quantization != "fp8":
+        raise NotImplementedError(
+            f"DeBERTa supports quantization 'fp8' or none; got {quantization!r}"
+        )
+    elif precision != "fp16":
+        # FP8 in an fp32 graph is faster than fp32 but slower than plain fp16.
+        raise ValueError("deberta quantization=fp8 requires precision=fp16")
     if request.fp32_layers:
         raise NotImplementedError("DeBERTa does not expose mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("DeBERTa does not support MTP speculative decoding")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
     parallel.validate()
+    if quantization is not None and parallel.enabled:
+        raise ValueError("DeBERTa tensor-parallel builds do not support quantization")
+    if quantization is not None:
+        from .quantization import check_not_quantized
+
+        check_not_quantized(model_dir, config)
     model = _DebertaModel()
     weights = model.load_weights(str(model_dir), config)
+    quant_ctx = None
+    if quantization is not None:
+        from .quantization import create_quant_context
+
+        quant_ctx = create_quant_context(weights, config, quantization)
     writer.set_header(family="deberta", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -727,7 +781,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             parallel_config=parallel,
         )
@@ -737,6 +791,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         {
             **_tokenizer_runtime_contract(model_dir),
             "tensor_parallel_size": parallel.tp_size,
+            "vocab_size": _positive_int(config.vocab_size, "vocab_size"),
         },
     )
     for filename in _BUNDLE_FILES:

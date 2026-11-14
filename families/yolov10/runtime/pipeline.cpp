@@ -6,6 +6,9 @@
 #include "families/yolov10/runtime/pipeline.h"
 
 #include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -28,8 +31,27 @@ Yolov10ObjectDetectionPipeline::Yolov10ObjectDetectionPipeline(
         throw std::runtime_error("Yolov10ObjectDetectionPipeline: invalid model");
 }
 
-ObjectDetectionResult Yolov10ObjectDetectionPipeline::detect(const float* pixels, int32_t height,
-                                                             int32_t width) {
+internal::DetectedBoxesResult
+Yolov10ObjectDetectionPipeline::run(const internal::ImageToBoxesRequest& request,
+                                    internal::ConfigView config) {
+    if (!config.empty())
+        throw internal::ConfigError("YOLOv10 has no runtime configuration");
+    const auto& image = request.image;
+    constexpr auto kInt32Max = static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max());
+    if (image.format != internal::ImageFormat::Float32 || image.channels != 3 ||
+        image.data == nullptr || image.height == 0 || image.width == 0 ||
+        image.height > kInt32Max || image.width > kInt32Max ||
+        static_cast<std::uint64_t>(image.height) >
+            std::numeric_limits<std::size_t>::max() / image.width / 3U / sizeof(float) ||
+        image.byte_size !=
+            static_cast<std::size_t>(image.height) * image.width * 3U * sizeof(float))
+        throw std::invalid_argument("YOLOv10 requires one contiguous float32 RGB image");
+    return detect(static_cast<const float*>(image.data), static_cast<std::int32_t>(image.height),
+                  static_cast<std::int32_t>(image.width));
+}
+
+internal::DetectedBoxesResult
+Yolov10ObjectDetectionPipeline::detect(const float* pixels, int32_t height, int32_t width) {
     Yolov10Letterbox letterbox;
     auto values = preprocess_yolov10_image(pixels, height, width, preprocess_config_, letterbox);
     Tensor input;
@@ -57,7 +79,7 @@ ObjectDetectionResult Yolov10ObjectDetectionPipeline::detect(const float* pixels
     const auto* score_values = static_cast<const float*>(scores->data);
     const auto* class_values = static_cast<const int32_t*>(classes->data);
 
-    ObjectDetectionResult result;
+    internal::DetectedBoxesResult result;
     result.image_height = height;
     result.image_width = width;
     result.boxes.reserve(count);

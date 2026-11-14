@@ -738,6 +738,7 @@ def add_attention_core(
     mask: trt.ITensor | None = None,
     scale: float | None = None,
     fp32_accumulation: bool = False,
+    fp16_mask_with_fp32_accumulation: bool = False,
 ) -> trt.ITensor:
     """Scaled dot-product attention via TRT native IAttention layer.
 
@@ -764,6 +765,10 @@ def add_attention_core(
                  back to the original Q dtype.  TRT may still select a
                  Half-input fused MHA tactic after optimizing the casts, while
                  keeping the IAttention accumulation/output boundary in FP32.
+        fp16_mask_with_fp32_accumulation:
+                 With ``fp32_accumulation``, leave an FP16 ``mask`` FP16 instead
+                 of casting it to FP32. TensorRT 11.4 rejects the FP32 mask
+                 (mixed half/float add in the optimizer); TensorRT 11.1 needs it.
 
     Returns:
         Context tensor [B, H, q_seq, D].
@@ -773,7 +778,7 @@ def add_attention_core(
         q_4d = network.add_cast(q_4d, trt.float32).get_output(0)
         k_4d = network.add_cast(k_4d, trt.float32).get_output(0)
         v_4d = network.add_cast(v_4d, trt.float32).get_output(0)
-        if mask is not None and mask.dtype != trt.float32:
+        if mask is not None and mask.dtype != trt.float32 and not fp16_mask_with_fp32_accumulation:
             mask = network.add_cast(mask, trt.float32).get_output(0)
 
     # Pre-scale Q: TRT IAttention does not apply score scaling itself.
@@ -955,6 +960,7 @@ def add_attention_from_rows(
     scale: float | None = None,
     logit_softcap: float | None = None,
     fp32_accumulation: bool = False,
+    fp16_mask_with_fp32_accumulation: bool = False,
     tag: str | None = None,
 ) -> trt.ITensor:
     """Native IAttention for row-major [S, H * D] Q/K/V tensors.
@@ -987,7 +993,8 @@ def add_attention_from_rows(
     else:
         ctx_4d = add_attention_core(
             network, q_4d, k_4d, v_4d, causal=causal, mask=mask, scale=scale,
-            fp32_accumulation=fp32_accumulation)
+            fp32_accumulation=fp32_accumulation,
+            fp16_mask_with_fp32_accumulation=fp16_mask_with_fp32_accumulation)
     return reshape_heads_4d_to_rows(
         network, ctx_4d, attention_size, sequence_length=q_seq,
         tag=None if tag is None else tag + ".ctx")

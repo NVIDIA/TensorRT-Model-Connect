@@ -307,7 +307,6 @@ def native_kv_build_capability(
     precision: str = "bf16",
     max_cache_length: int | None = None,
     parallel_enabled: bool | None = None,
-    quantized: bool | None = None,
     debug_layer_outputs: bool = False,
 ) -> NativeKvCapability:
     """Apply deployment constraints once, after architecture routing."""
@@ -324,8 +323,10 @@ def native_kv_build_capability(
         reasons.append("native SmolLM3 requires split prefill/decode engines")
     if parallel_enabled or raw.get("_parallel_build_enabled"):
         reasons.append("native SmolLM3 does not support tensor parallel builds")
-    if quantized or raw.get("quantization_config") or raw.get("_quantized_build_requested"):
-        reasons.append("native SmolLM3 does not support quantized builds")
+    # FP8 self-quantization of the BF16 checkpoint runs on this graph. A checkpoint
+    # that is already quantized (compressed-tensors, ModelOpt) is not loadable.
+    if raw.get("quantization_config"):
+        reasons.append("native SmolLM3 does not support pre-quantized checkpoints")
     if raw.get("_fp32_layers"):
         reasons.append("native SmolLM3 does not support FP32 layer overrides")
     if debug_layer_outputs:

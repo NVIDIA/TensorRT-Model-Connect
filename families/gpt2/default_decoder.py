@@ -28,10 +28,12 @@ from . import graph_ops
 from . import graph_blocks
 from .config import ModelConfig
 from .default_dual_profile_decoder import build_dual_profile_decoder_engine
+from .quantization import configure_fp8_build
 from .utils import const_in_work_dtype, create_builder_context
 
 if TYPE_CHECKING:
     from .checkpoint_mapper import WeightDict
+    from typing import Any as QuantContext
 
 
 def _mark_debug_output(
@@ -53,6 +55,7 @@ def build_standard_decoder_engine(
     max_cache_length: int,
     *,
     precision: str = "fp32",
+    quant_ctx: QuantContext | None = None,
     norm_type: str = "rmsnorm",
     mlp_type: str = "swiglu",
     position_type: str = "rope",
@@ -129,6 +132,7 @@ def build_standard_decoder_engine(
             interleaved_rope=interleaved_rope,
             parallel_residual=parallel_residual,
             scale_attn_weights=scale_attn_weights,
+            quant_ctx=quant_ctx,
             verbose=verbose,
             profile_mode=("prefill" if decoder_engine_role == "prefill" else "dual_profile"),
         )
@@ -151,6 +155,7 @@ def build_standard_decoder_engine(
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config
+    configure_fp8_build(trt_config, quant_ctx)
 
     # Precision configuration
     if precision == "fp16":
@@ -370,6 +375,7 @@ def build_standard_decoder_engine(
             sin_half_tensor=sin_half_tensor,
             rotary_embedding_dim=rotary_embedding_dim,
             interleaved_rope=interleaved_rope,
+            quant_ctx=quant_ctx,
         )
 
         hidden_state = result["hidden"]
@@ -500,6 +506,7 @@ def _add_decoder_layer(
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
     eps: float | None = None,
+    quant_ctx: QuantContext | None = None,
 ) -> dict[str, trt.ITensor]:
     """Add one standard decoder layer block. Returns hidden, present_k, present_v."""
 
@@ -522,6 +529,7 @@ def _add_decoder_layer(
         sin_half_tensor=sin_half_tensor,
         rotary_embedding_dim=rotary_embedding_dim,
         interleaved_rope=interleaved_rope,
+        quant_ctx=quant_ctx,
     )
     attn_out = attn["attn_out"]
     present_k = attn["present_k"]
@@ -553,12 +561,12 @@ def _add_decoder_layer(
             network, norm2, weights=weights, prefix=prefix,
             hidden_size=hidden_size, mlp_size=mlp_size,
             activation=activation, dtype=dtype,
-            layer_prefix=prefix)
+            quant_ctx=quant_ctx, layer_prefix=prefix)
     else:
         mlp_out = graph_blocks.add_swiglu_mlp(
             network, norm2, weights=weights, prefix=prefix,
             hidden_size=hidden_size, mlp_size=mlp_size, dtype=dtype,
-            layer_prefix=prefix)
+            quant_ctx=quant_ctx, layer_prefix=prefix)
 
     # Final residual connection
     if parallel_residual:

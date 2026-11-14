@@ -1200,3 +1200,120 @@ def test_raft_gru_stacks_update_and_reset_convolutions() -> None:
         ("gates", (0, 0, 0, 0), (1, 60, 176, 176)),
         ("gates", (0, 60, 0, 0), (1, 60, 176, 176)),
     ]
+
+
+@pytest.mark.parametrize("fp32_conv_accumulation", [False, True])
+def test_native_graph_fp32_conv_accumulation_rounds_operands_and_output(
+    fp32_conv_accumulation,
+) -> None:
+    from families.fast_foundation_stereo.native_graph import NativeGraph
+
+    class Weights:
+        def __init__(self, values=None) -> None:
+            self.values = values
+
+    class Tensor:
+        shape = (1, 1, 2, 2)
+
+        def __init__(self, dtype: str) -> None:
+            self.dtype = dtype
+
+    class Layer:
+        def __init__(self, output) -> None:
+            self.output = output
+
+        def get_output(self, index: int):
+            assert index == 0
+            return self.output
+
+    class Network:
+        def __init__(self) -> None:
+            self.casts = []
+            self.convolutions = []
+
+        def add_cast(self, tensor, dtype):
+            self.casts.append((tensor.dtype, dtype))
+            return Layer(Tensor(dtype))
+
+        def add_convolution_nd(self, tensor, _channels, _kernel, weights, biases):
+            self.convolutions.append((tensor.dtype, weights.values, biases.values))
+            return Layer(Tensor(tensor.dtype))
+
+    network = Network()
+    trt = SimpleNamespace(float16="float16", float32="float32", Weights=Weights)
+    graph = NativeGraph(network, trt, fp16=True, fp32_conv_accumulation=fp32_conv_accumulation)
+    convolution = SimpleNamespace(
+        weight=np.full((1, 1, 1, 1), 1.0001, dtype=np.float32),
+        bias=np.full((1,), 0.1, dtype=np.float32),
+        out_channels=1,
+        kernel_size=(1, 1),
+        stride=(1, 1),
+        padding=(0, 0),
+        dilation=(1, 1),
+        groups=1,
+    )
+
+    output = graph.conv2d(Tensor("float32"), convolution)
+
+    assert output.dtype == "float16"
+    ((input_dtype, weight, bias),) = network.convolutions
+    expected_dtype = np.float32 if fp32_conv_accumulation else np.float16
+    assert input_dtype == ("float32" if fp32_conv_accumulation else "float16")
+    assert weight.dtype == expected_dtype and bias.dtype == expected_dtype
+    # Operands keep the FP16-rounded checkpoint values in both modes.
+    assert weight.item() == float(np.float16(1.0001))
+    assert bias.item() == float(np.float16(0.1))
+    expected_casts = [("float32", "float16")]
+    if fp32_conv_accumulation:
+        expected_casts += [("float16", "float32"), ("float32", "float16")]
+    assert network.casts == expected_casts
+
+
+def test_only_the_feature_engine_enables_fp32_conv_accumulation(
+    family_builder, monkeypatch, tmp_path
+) -> None:
+    from families.fast_foundation_stereo import (
+        native_feature,
+        native_graph,
+        native_plugin_builder,
+        native_post,
+    )
+
+    graphs = []
+
+    class Graph:
+        def __init__(self, _network, _trt, *, fp16, fp32_conv_accumulation=False) -> None:
+            self.options = (fp16, fp32_conv_accumulation)
+            graphs.append(self)
+
+        @staticmethod
+        def cast(tensor, _dtype):
+            return tensor
+
+    class Network:
+        @staticmethod
+        def add_input(name, _dtype, _shape):
+            return SimpleNamespace(name=name)
+
+        @staticmethod
+        def mark_output(_tensor) -> None:
+            pass
+
+    trt = SimpleNamespace(float16="float16", float32="float32")
+    network = Network()
+    monkeypatch.setattr(native_graph, "NativeGraph", Graph)
+    monkeypatch.setattr(native_feature, "add_feature_graph", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(native_post, "add_post_graph", lambda *_args, **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(native_plugin_builder, "load_native_plugin", lambda **_kwargs: None)
+    monkeypatch.setattr(family_builder, "_load_model", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(family_builder, "_create_network", lambda **_kwargs: (trt, None, network))
+    monkeypatch.setattr(family_builder, "_mark_feature_outputs", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(family_builder, "_serialize_network", lambda *_args, **_kwargs: b"plan")
+
+    options = {"precision": "fp16", "max_disparity": 192, "valid_iters": 8}
+    assert family_builder.build_feature_engine(str(tmp_path), **options) == b"plan"
+    assert family_builder.build_post_engine(str(tmp_path), **options) == b"plan"
+
+    feature, post = graphs
+    assert feature.options == (True, True)
+    assert post.options == (True, False)

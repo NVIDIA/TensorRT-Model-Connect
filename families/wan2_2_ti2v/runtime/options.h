@@ -19,6 +19,9 @@ inline constexpr int32_t kWan22OfficialFrameRate = 24;
 inline constexpr int32_t kWan22OfficialInferenceSteps = 50;
 inline constexpr float kWan22OfficialGuidanceScale = 5.0F;
 inline constexpr float kWan22OfficialFlowShift = 5.0F;
+// Upstream ti2v-5B's portrait size 704*1280, for vertical 9:16 video.
+inline constexpr int32_t kWan22PortraitVideoHeight = 1280;
+inline constexpr int32_t kWan22PortraitVideoWidth = 704;
 inline constexpr int32_t kWan22L0VideoHeight = 384;
 inline constexpr int32_t kWan22L0VideoWidth = 672;
 inline constexpr int32_t kWan22L0VideoFrames = 5;

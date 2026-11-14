@@ -61,3 +61,27 @@ def test_processor_values_update_both_build_and_runtime_names(tmp_path) -> None:
     assert config["vision_image_size"] == config["image_size"] == 896
     assert config["processor_image_mean"] == config["image_mean"] == [0.1, 0.2, 0.3]
     assert config["processor_image_std"] == config["image_std"] == [0.4, 0.5, 0.6]
+
+
+def test_sam3_builds_fp16_by_default() -> None:
+    from tensorrt_model_connect.model_support import ModelMetadata
+
+    from families.sam3.support import describe
+
+    support = describe(ModelMetadata(config={"model_type": "sam3"}, model_index={}))
+    assert support is not None
+    assert support.default_precision == "fp16"
+    manifest = json.loads(
+        (Path(__file__).parent / "manifests" / "sam3.json").read_text(encoding="utf-8")
+    )
+    assert manifest["precision"] == support.default_precision
+
+
+def test_sam3_core_keeps_its_fp32_schedule_for_every_bundle_precision() -> None:
+    import inspect
+
+    from families.sam3 import model
+
+    assert model._CORE_PRECISION == "fp32"
+    source = inspect.getsource(model._Sam3Model.build_extra_engines)
+    assert '"precision": _CORE_PRECISION' in source

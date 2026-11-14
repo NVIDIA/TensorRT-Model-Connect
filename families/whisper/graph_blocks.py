@@ -77,6 +77,7 @@ def add_gelu_fc_mlp(
     dtype: np.dtype = np.float32,
     quant_ctx=None,
     layer_prefix: str = "",
+    activation_type: str = "gelu",
 ) -> trt.ITensor:
     """fc1 -> activation -> fc2 MLP. Returns output tensor."""
     matmul = _make_matmul_fn(network, dtype, quant_ctx)
@@ -85,7 +86,7 @@ def add_gelu_fc_mlp(
     fc1_bias = weights.get(f"{prefix}.fc1_bias")
     if fc1_bias is not None:
         fc1 = graph_ops.add_bias_sum(network, fc1, mlp_size, fc1_bias, dtype=dtype)
-    activated = graph_ops.add_activation(network, fc1, "gelu_new", dtype=dtype)
+    activated = graph_ops.add_activation(network, fc1, activation_type, dtype=dtype)
     fc2 = matmul(activated, mlp_size, hidden_size, weights[f"{prefix}.w_fc2"], f"{_lp}.w_fc2")
     fc2_bias = weights.get(f"{prefix}.fc2_bias")
     if fc2_bias is not None:

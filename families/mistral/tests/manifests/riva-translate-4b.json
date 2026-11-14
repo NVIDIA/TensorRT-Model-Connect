@@ -1,6 +1,7 @@
 {
   "name": "riva-translate-4b",
   "hf_id": "nvidia/Riva-Translate-4B-Instruct-v1.1",
+  "hf_revision": "1eb944ce9f2717d7be6b7b7c2310f7c58b35d10b",
   "bundle": "riva-translate-4b.bundle",
   "family": "mistral",
   "task": "text_generation",

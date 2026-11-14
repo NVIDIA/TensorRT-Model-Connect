@@ -152,20 +152,19 @@ void require_batched_prefill_contract(ITrtModule& prefill, const QwenMoeTextGenC
             "QwenMoeTextGenerationPipeline: prefill requires a non-empty prompt");
     if (cfg.prefill_max_length <= 0 || cfg.num_layers <= 0 || cfg.vocab_size <= 0)
         throw std::runtime_error("QwenMoeTextGenerationPipeline: invalid prefill configuration");
-    if (sq > cfg.prefill_max_length)
-        throw std::runtime_error(
-            "QwenMoeTextGenerationPipeline: prompt exceeds the prefill profile");
     auto* kv = dynamic_cast<QwenMoeKvCache*>(state);
     if (kv == nullptr)
         throw std::runtime_error("QwenMoeTextGenerationPipeline: prefill requires QwenMoeKvCache");
+    if (sq > kv->max_length())
+        throw std::runtime_error("QwenMoeTextGenerationPipeline: prompt exceeds the KV cache");
 }
 
 } // namespace
 
 void QwenMoeTextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>& input_ids,
                                                         std::vector<float>& logits) {
-    const auto sq = static_cast<int32_t>(input_ids.size());
-    require_batched_prefill_contract(*prefill_, config_, sq, state_.get());
+    const auto total = static_cast<int32_t>(input_ids.size());
+    require_batched_prefill_contract(*prefill_, config_, total, state_.get());
     auto* kv = static_cast<QwenMoeKvCache*>(state_.get());
 
     // The prefill module shares the same external KV cache buffers as the
@@ -173,32 +172,39 @@ void QwenMoeTextGenerationPipeline::run_prefill_batched(const std::vector<int32_
     // prefill execution context before running.
     kv->bind_cache_inputs(*prefill_);
 
-    TensorMap inputs;
-    Tensor tok_t;
-    tok_t.data = const_cast<int32_t*>(input_ids.data());
-    tok_t.shape = {static_cast<int64_t>(sq)};
-    tok_t.dtype = DType::kInt32;
-    inputs[config_.token_id_name] = tok_t;
-    state_->prepare_step(inputs, sq);
-
-    TensorMap outputs = prefill_->forward(inputs);
-    auto logits_it = outputs.find(config_.logits_output_name);
-    if (logits_it == outputs.end())
-        throw std::runtime_error(
-            "QwenMoeTextGenerationPipeline: prefill module has no logits output");
-
-    const auto vocab = static_cast<std::size_t>(config_.vocab_size);
-    const auto& lt = logits_it->second;
-    if (static_cast<std::size_t>(lt.numel()) < vocab)
-        throw std::runtime_error(
-            "QwenMoeTextGenerationPipeline: prefill logits are smaller than vocabulary");
-    logits.resize(vocab);
-    const auto offset = static_cast<std::size_t>(lt.numel()) - vocab;
-    std::memcpy(logits.data(), static_cast<const float*>(lt.data) + offset, vocab * sizeof(float));
-
+    // Feed the prompt in chunks of at most prefill_max_length rows. Each chunk
+    // attends to the rows already committed to the cache, then appends its own.
     std::vector<const void*> pk, pv;
-    require_prefill_kv_pointers(*prefill_, config_, pk, pv);
-    kv->write_prefill_kv(pk, pv, sq);
+    for (int32_t start = 0; start < total; start += config_.prefill_max_length) {
+        const int32_t sq = std::min(config_.prefill_max_length, total - start);
+        TensorMap inputs;
+        Tensor tok_t;
+        tok_t.data = const_cast<int32_t*>(input_ids.data() + start);
+        tok_t.shape = {static_cast<int64_t>(sq)};
+        tok_t.dtype = DType::kInt32;
+        inputs[config_.token_id_name] = tok_t;
+        state_->prepare_step(inputs, sq);
+
+        TensorMap outputs = prefill_->forward(inputs);
+        require_prefill_kv_pointers(*prefill_, config_, pk, pv);
+        kv->append_prefill_kv(pk, pv, sq);
+        if (start + sq < total)
+            continue;
+
+        auto logits_it = outputs.find(config_.logits_output_name);
+        if (logits_it == outputs.end())
+            throw std::runtime_error(
+                "QwenMoeTextGenerationPipeline: prefill module has no logits output");
+        const auto vocab = static_cast<std::size_t>(config_.vocab_size);
+        const auto& lt = logits_it->second;
+        if (static_cast<std::size_t>(lt.numel()) < vocab)
+            throw std::runtime_error(
+                "QwenMoeTextGenerationPipeline: prefill logits are smaller than vocabulary");
+        logits.resize(vocab);
+        const auto offset = static_cast<std::size_t>(lt.numel()) - vocab;
+        std::memcpy(logits.data(), static_cast<const float*>(lt.data) + offset,
+                    vocab * sizeof(float));
+    }
 }
 
 void QwenMoeTextGenerationPipeline::prime_decoder_after_batched_prefill(

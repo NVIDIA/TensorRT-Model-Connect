@@ -132,6 +132,13 @@ class WheelArchiveValidator:
             ]
             if generated:
                 raise CiError(f"{wheel}: generated Python cache files are packaged")
+            reference_programs = [
+                name for name in names
+                if name.startswith("families/")
+                and ("/tests/reference/" in name or name.endswith("/tests/requirements.txt"))
+            ]
+            if reference_programs:
+                raise CiError(f"{wheel}: isolated test references are packaged: {reference_programs}")
             if "tensorrt_model_connect/__init__.py" not in names:
                 raise CiError(f"{wheel}: Python core package is missing")
             if "trtmc_benchmark/__init__.py" not in names:
@@ -172,6 +179,7 @@ class WheelArchiveValidator:
                 for path in (self.context.repository / "families").glob("*/tests/**/*")
                 if path.is_file()
                 and path.suffix not in source_suffixes
+                and path.name != "requirements.txt"
                 and "__pycache__" not in path.parts
             }
             missing_catalog = sorted(expected_catalog - set(names))
@@ -188,7 +196,7 @@ class WheelArchiveValidator:
                 for line in metadata.splitlines()
                 if line.startswith("Provides-Extra:")
             )
-            if extras != ["cutedsl", "serve", "test"]:
+            if extras != ["cutedsl", "edgellm", "serve", "test"]:
                 raise CiError(f"{wheel}: expected only application extras, found {extras}")
             expected_server_python = {
                 path.relative_to(

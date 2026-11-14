@@ -426,6 +426,93 @@ def add_routed_swiglu_experts(
         keep_dims=False).get_output(0)
 
 
+def dense_expert_layout(w_gate: np.ndarray, w_up: np.ndarray, w_down: np.ndarray):
+    """Re-lay the stacked expert weights ``[E, in, out]`` for the all-experts matmuls.
+
+    Gate and up become ``[in, E * out]`` (expert ``e`` owns columns ``e * out:(e + 1) * out``),
+    down becomes ``[E * in, out]``, which is a plain reshape of the stack.
+    """
+    experts, hidden, inter = w_gate.shape
+
+    def wide(values: np.ndarray) -> np.ndarray:
+        return np.ascontiguousarray(np.transpose(values, (1, 0, 2))).reshape(
+            hidden, experts * inter
+        )
+
+    return wide(w_gate), wide(w_up), np.ascontiguousarray(w_down).reshape(experts * inter, hidden)
+
+
+def add_dense_routed_swiglu_experts(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    top_indices: trt.ITensor,
+    routing_weights: trt.ITensor,
+    gate_weights: trt.ITensor,
+    up_weights: trt.ITensor,
+    down_weights: trt.ITensor,
+    *,
+    hidden_size: int,
+    top_k: int,
+    num_experts: int,
+    inter_size: int,
+) -> trt.ITensor:
+    """All-experts SwiGLU for many tokens (prefill): three plain matmuls, no per-token gather.
+
+    ``gate_weights`` / ``up_weights`` are ``[hidden, E * inter]``, ``down_weights`` is
+    ``[E * inter, hidden]`` in the compute type of ``inp``. Every expert is evaluated for
+    every token; the routing weight of an expert a token did not select is zero, so it
+    contributes nothing. The weights are read once per layer instead of once per token and
+    selected expert.
+    """
+    gate = network.add_matrix_multiply(
+        inp, trt.MatrixOperation.NONE, gate_weights, trt.MatrixOperation.NONE
+    ).get_output(0)
+    up = network.add_matrix_multiply(
+        inp, trt.MatrixOperation.NONE, up_weights, trt.MatrixOperation.NONE
+    ).get_output(0)
+    swish = network.add_elementwise(
+        gate,
+        network.add_activation(gate, trt.ActivationType.SIGMOID).get_output(0),
+        trt.ElementWiseOperation.PROD,
+    ).get_output(0)
+    gated = network.add_elementwise(swish, up, trt.ElementWiseOperation.PROD).get_output(0)
+
+    # dense routing weights [tokens, E]: sum over the k selections of (index == e) * weight
+    experts_axis = np.arange(num_experts, dtype=np.int32).reshape(1, 1, num_experts)
+    experts_const = network.add_constant(experts_axis.shape, trt.Weights(experts_axis)).get_output(
+        0
+    )
+    idx3 = network.add_shuffle(top_indices)
+    idx3.reshape_dims = (-1, top_k, 1)
+    hit = network.add_elementwise(
+        idx3.get_output(0), experts_const, trt.ElementWiseOperation.EQUAL
+    ).get_output(0)
+    hit = network.add_cast(hit, routing_weights.dtype).get_output(0)
+    w3 = network.add_shuffle(routing_weights)
+    w3.reshape_dims = (-1, top_k, 1)
+    dense = network.add_reduce(
+        network.add_elementwise(hit, w3.get_output(0), trt.ElementWiseOperation.PROD).get_output(0),
+        trt.ReduceOperation.SUM,
+        1 << 1,
+        keep_dims=False,
+    ).get_output(0)  # [tokens, E]
+    if dense.dtype != gated.dtype:
+        dense = network.add_cast(dense, gated.dtype).get_output(0)
+
+    per_expert = network.add_shuffle(gated)
+    per_expert.reshape_dims = (-1, num_experts, inter_size)
+    dense3 = network.add_shuffle(dense)
+    dense3.reshape_dims = (-1, num_experts, 1)
+    weighted = network.add_elementwise(
+        per_expert.get_output(0), dense3.get_output(0), trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    flat = network.add_shuffle(weighted)
+    flat.reshape_dims = (-1, num_experts * inter_size)
+    return network.add_matrix_multiply(
+        flat.get_output(0), trt.MatrixOperation.NONE, down_weights, trt.MatrixOperation.NONE
+    ).get_output(0)
+
+
 def add_gelu_fc_mlp(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,

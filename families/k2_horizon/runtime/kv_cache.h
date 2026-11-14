@@ -26,8 +26,9 @@ struct K2HorizonKvCacheNames {
 };
 
 // Owns the fixed-capacity BF16 KV buffers used by the qualified K2-Horizon
-// single-token TensorRT graph. The engine updates each cache in place: its
-// present output must alias the corresponding cache input.
+// TensorRT graph (multi-token prefill and single-token decode contexts share
+// them). The engine updates each cache in place: its present output must alias
+// the corresponding cache input.
 class K2HorizonKvCache : public K2HorizonInferenceState {
   public:
     K2HorizonKvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim, cudaStream_t stream,
@@ -53,7 +54,7 @@ class K2HorizonKvCache : public K2HorizonInferenceState {
     int32_t max_length_{0};
     int32_t num_kv_heads_{0};
     int32_t position_{0};
-    int32_t position_id_{0};
+    std::vector<int32_t> position_ids_;
     int32_t cache_write_index_{0};
     int32_t key_value_length_{0};
     K2HorizonKvCacheNames names_;

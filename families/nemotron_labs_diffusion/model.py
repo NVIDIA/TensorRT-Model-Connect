@@ -21,7 +21,9 @@ from safetensors import safe_open
 
 from .checkpoint_mapper import WeightDict, load_standard_weights
 from .config import ModelConfig
+from . import graph_ops
 from .default_decoder import build_standard_decoder_engine
+from .quantization import calibrate_nemotron
 
 
 if TYPE_CHECKING:
@@ -227,19 +229,30 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         )
     if request.tensor_parallel_size != 1:
         raise NotImplementedError("Nemotron Labs Diffusion does not support tensor parallelism")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Nemotron Labs Diffusion has no family-owned quantized build")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"Nemotron Labs Diffusion does not support quantization={request.quantization!r}"
+        )
+    if request.quantization == "fp8" and precision not in {"fp16", "bf16"}:
+        raise ValueError("Nemotron Labs Diffusion FP8 requires precision=fp16 or bf16")
     if request.fp32_layers:
         raise NotImplementedError("Nemotron Labs Diffusion does not expose mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError(
+            "Nemotron Labs Diffusion does not support MTP speculative decoding"
+        )
     model = _NemotronLabsDiffusionModel()
     config.raw["_model_dir"] = str(model_dir)
     weights = model.load_weights(str(model_dir), config, precision=precision)
+    quant_ctx = None
+    if request.quantization == "fp8":
+        quant_ctx = calibrate_nemotron(weights, config, graph_ops, request.quantization)
     plan = model.build_engine(
         config,
         weights,
         max_sequence_length,
         precision=precision,
-        quant_ctx=None,
+        quant_ctx=quant_ctx,
         verbose=bool(request.verbose),
     )
     extra = model.build_extra_engines(
@@ -247,7 +260,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         weights,
         max_sequence_length,
         precision=precision,
-        quant_ctx=None,
+        quant_ctx=quant_ctx,
         verbose=bool(request.verbose),
     )
     runtime = {

@@ -50,6 +50,7 @@ import tensorrt as trt
 
 from . import graph_ops
 from . import graph_blocks
+from .quantization import configure_fp8_build
 
 
 if TYPE_CHECKING:
@@ -270,6 +271,7 @@ def build_dual_profile_decoder_engine(
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
+    configure_fp8_build(trt_config, quant_ctx)
     if verbose:
         trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
 

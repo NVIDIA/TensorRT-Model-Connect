@@ -7,6 +7,7 @@
 
 #include "families/glmasr/runtime/glmasr_mel_spectrogram.h"
 #include "families/glmasr/runtime/glmasr_prompt_plan.h"
+#include "families/glmasr/runtime/kv_cache.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -65,10 +66,22 @@ GlmAsrPipeline::GlmAsrPipeline(std::unique_ptr<ITrtModule> encoder,
                                std::unique_ptr<ITrtModule> decoder,
                                std::unique_ptr<GlmAsrInferenceState> state, GlmAsrConfig config,
                                MelFilterbank mel_filterbank, cudaStream_t stream,
-                               std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
+                               std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
+                               std::unique_ptr<ITrtModule> prefill)
     : encoder_(std::move(encoder)), decoder_(std::move(decoder)), state_(std::move(state)),
       config_(std::move(config)), mel_filterbank_(std::move(mel_filterbank)), stream_(stream),
-      tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)) {}
+      tokenizer_(std::move(tokenizer)), model_id_(std::move(model_id_str)),
+      prefill_(std::move(prefill)) {
+    if (prefill_) {
+        if (!prefill_->ok() || dynamic_cast<GlmAsrKvCache*>(state_.get()) == nullptr)
+            throw std::runtime_error("glmasr batched prefill needs a prefill context and KV cache");
+        const auto rows = prefill_->input_profile_shape("token_id", prefill_->profile_idx(),
+                                                        ProfileShapeSelector::kMax);
+        if (rows.size() != 1 || rows[0] < 1)
+            throw std::runtime_error("glmasr prefill context has an invalid token profile");
+        prefill_rows_ = static_cast<int32_t>(std::min<int64_t>(rows[0], state_->max_length()));
+    }
+}
 
 GlmAsrPipeline::~GlmAsrPipeline() = default;
 
@@ -94,6 +107,27 @@ std::vector<float> GlmAsrPipeline::run_audio_encoder(const std::vector<float>& m
         static_cast<std::size_t>(config_.max_audio_embeddings) * config_.audio_embedding_size;
     std::vector<float> embeddings(count, 0.0F);
     std::memcpy(embeddings.data(), found->second.data, count * sizeof(float));
+    return embeddings;
+}
+
+std::vector<float>
+GlmAsrPipeline::encode_audio_windows(const float* samples,
+                                     const std::vector<glmasr::AudioWindow>& windows) {
+    const auto hidden = static_cast<std::size_t>(config_.audio_embedding_size);
+    std::vector<float> embeddings;
+    for (const auto& window : windows) {
+        const glmasr::MelResult mel = glmasr::extract_mel_spectrogram(
+            samples + window.offset, window.samples, mel_filterbank_.data.data(),
+            mel_filterbank_.n_freq_bins, mel_filterbank_.n_mel_bins, config_.mel_n_fft,
+            config_.mel_hop_length, config_.mel_chunk_length, config_.mel_sampling_rate);
+        if (mel.data.empty())
+            throw std::runtime_error("GlmAsrPipeline: audio window produced no mel frames");
+        const auto encoded = run_audio_encoder(mel.data);
+        const auto rows =
+            static_cast<std::size_t>(std::min(window.embeddings, config_.max_audio_embeddings));
+        embeddings.insert(embeddings.end(), encoded.begin(),
+                          encoded.begin() + static_cast<std::ptrdiff_t>(rows * hidden));
+    }
     return embeddings;
 }
 
@@ -155,6 +189,47 @@ int32_t GlmAsrPipeline::run_decode_step(int32_t token_id, const float* audio_emb
     return host_argmax_logits(outputs, config_.vocab_size);
 }
 
+int32_t GlmAsrPipeline::run_prefill(const std::vector<int32_t>& input_ids,
+                                    const std::vector<float>& audio_embeds, int32_t audio_offset,
+                                    int32_t num_audio_embeddings) {
+    const auto rows = static_cast<int32_t>(input_ids.size());
+    const auto hidden = static_cast<std::size_t>(config_.audio_embedding_size);
+    // Text rows keep their token embedding; placeholder rows take their frame.
+    std::vector<float> embeds(static_cast<std::size_t>(rows) * hidden, 0.0F);
+    std::vector<float> use_embed(static_cast<std::size_t>(rows), 0.0F);
+    for (int32_t index = 0; index < rows; ++index) {
+        const int64_t audio_index = static_cast<int64_t>(index) - audio_offset;
+        if (audio_index < 0 || audio_index >= num_audio_embeddings)
+            continue;
+        std::copy_n(audio_embeds.data() + static_cast<std::size_t>(audio_index) * hidden, hidden,
+                    embeds.data() + static_cast<std::size_t>(index) * hidden);
+        use_embed[static_cast<std::size_t>(index)] = 1.0F;
+    }
+    std::vector<int32_t> tokens = input_ids;
+    TensorMap inputs;
+    inputs["token_id"] = Tensor{tokens.data(), {rows}, DType::kInt32};
+    inputs["input_embed"] =
+        Tensor{embeds.data(), {rows, static_cast<int64_t>(hidden)}, DType::kFloat32};
+    inputs["use_input_embed"] = Tensor{use_embed.data(), {rows}, DType::kFloat32};
+    auto* kv = static_cast<GlmAsrKvCache*>(state_.get());
+    kv->bind_cache_inputs(*prefill_);
+    state_->prepare_step(inputs, rows);
+
+    ++stats_.decode_launches;
+    TensorMap outputs = prefill_->forward(inputs);
+    std::vector<const void*> keys(static_cast<std::size_t>(kv->num_layers()));
+    std::vector<const void*> values(keys.size());
+    for (std::size_t layer = 0; layer < keys.size(); ++layer) {
+        const auto suffix = "_" + std::to_string(layer);
+        keys[layer] = prefill_->device_ptr("present_k" + suffix);
+        values[layer] = prefill_->device_ptr("present_v" + suffix);
+        if (keys[layer] == nullptr || values[layer] == nullptr)
+            throw std::runtime_error("glmasr prefill context has no present K/V output");
+    }
+    kv->append_prefill_kv(keys, values, rows);
+    return host_argmax_logits(outputs, config_.vocab_size);
+}
+
 std::vector<int32_t> GlmAsrPipeline::run_decoder(const std::vector<int32_t>& input_ids,
                                                  const std::vector<float>& audio_embeds,
                                                  int32_t audio_offset, int32_t num_audio_embeddings,
@@ -166,26 +241,34 @@ std::vector<int32_t> GlmAsrPipeline::run_decoder(const std::vector<int32_t>& inp
     state_->set_prompt_length(static_cast<int32_t>(input_ids.size()));
     state_->bind_to(*decoder_);
 
-    // Replay the prompt one token at a time, feeding each placeholder position
-    // its projected audio frame through the decoder's embed-input contract.
     int32_t next_token = -1;
     const auto hidden = static_cast<std::size_t>(config_.audio_embedding_size);
-    for (std::size_t index = 0; index < input_ids.size(); ++index) {
-        const auto audio_index = static_cast<int64_t>(index) - audio_offset;
-        const bool is_audio = audio_index >= 0 && audio_index < num_audio_embeddings;
-        const float* embed =
-            is_audio ? audio_embeds.data() + static_cast<std::size_t>(audio_index) * hidden
-                     : nullptr;
-        next_token = run_decode_step(input_ids[index], embed);
+    if (prefill_ && static_cast<int64_t>(input_ids.size()) <= prefill_rows_) {
+        next_token = run_prefill(input_ids, audio_embeds, audio_offset, num_audio_embeddings);
+    } else {
+        // Replay the prompt one token at a time, feeding each placeholder position
+        // its projected audio frame through the decoder's embed-input contract.
+        for (std::size_t index = 0; index < input_ids.size(); ++index) {
+            const auto audio_index = static_cast<int64_t>(index) - audio_offset;
+            const bool is_audio = audio_index >= 0 && audio_index < num_audio_embeddings;
+            const float* embed =
+                is_audio ? audio_embeds.data() + static_cast<std::size_t>(audio_index) * hidden
+                         : nullptr;
+            next_token = run_decode_step(input_ids[index], embed);
+        }
     }
     state_->mark_prefill_complete();
 
     std::vector<int32_t> generated;
     generated.reserve(static_cast<std::size_t>(max_new_tokens));
     for (int32_t step = 0; step < max_new_tokens; ++step) {
-        if (next_token < 0 || next_token == config_.eos_token_id)
+        if (next_token < 0)
             break;
         generated.push_back(next_token);
+        // Keep the generated stop token in the result, as Native does. The
+        // tokenizer hides special tokens from text; work counts include EOS.
+        if (config_.is_eos_token(next_token))
+            break;
         next_token = run_decode_step(next_token);
     }
     return generated;
@@ -212,22 +295,17 @@ TextResult GlmAsrPipeline::transcribe(const float* audio_samples, int32_t num_sa
     if (mel_filterbank_.data.empty())
         throw std::runtime_error("GlmAsrPipeline: bundle carries no mel filterbank");
 
-    const glmasr::MelResult mel = glmasr::extract_mel_spectrogram(
-        samples, sample_count, mel_filterbank_.data.data(), mel_filterbank_.n_freq_bins,
-        mel_filterbank_.n_mel_bins, config_.mel_n_fft, config_.mel_hop_length,
-        config_.mel_chunk_length, config_.mel_sampling_rate);
-    if (mel.data.empty())
+    // GlmAsrProcessor splits the audio into chunk_length windows, encodes each
+    // window as its own padded chunk, and splices the windows' valid
+    // embeddings in order. Its placeholder count comes from the windows'
+    // summed feature-mask frames, not from the centered STFT frame count.
+    const auto windows = glmasr::plan_audio_windows(
+        sample_count, config_.mel_chunk_length, config_.mel_sampling_rate, config_.mel_hop_length,
+        config_.audio_merge_factor);
+    if (windows.empty())
         return TextResult{"", {}};
-
-    // The engine always consumes a padded chunk, but only the embeddings the
-    // real audio covers become prompt placeholders. This mirrors the reference
-    // processor, which derives the placeholder count from the unpadded length.
-    const int32_t real_mel_frames =
-        glmasr::mel_frames_for_samples(sample_count, config_.mel_hop_length, config_.mel_n_fft,
-                                       config_.mel_chunk_length, config_.mel_sampling_rate);
     const int32_t num_audio_embeddings =
-        std::min(glmasr::audio_embedding_count(real_mel_frames, config_.audio_merge_factor),
-                 config_.max_audio_embeddings);
+        glmasr::audio_placeholder_count(windows, config_.audio_merge_factor);
 
     // Bisection aid: inject a reference implementation's audio embeddings in
     // place of this engine's own, to separate an audio-encoder fault from a
@@ -244,29 +322,35 @@ TextResult GlmAsrPipeline::transcribe(const float* audio_samples, int32_t num_sa
         in.read(reinterpret_cast<char*>(audio_embeds.data()), static_cast<std::streamsize>(bytes));
         std::cerr << "[glmasr] injected audio embeddings: " << audio_embeds.size() << " floats\n";
     } else {
-        audio_embeds = run_audio_encoder(mel.data);
+        audio_embeds = encode_audio_windows(samples, windows);
     }
 
+    // The prompt may only reference embeddings the encoder actually produced.
+    GlmAsrConfig plan_config = config_;
+    plan_config.max_audio_embeddings = static_cast<int32_t>(
+        audio_embeds.size() / static_cast<std::size_t>(config_.audio_embedding_size));
     const auto plan =
-        glmasr::build_prompt_plan(config_, tokenize_instruction(), num_audio_embeddings);
+        glmasr::build_prompt_plan(plan_config, tokenize_instruction(), num_audio_embeddings);
     stats_.prompt_tokens = static_cast<int32_t>(plan.input_ids.size());
     stats_.audio_embeddings = plan.num_audio_embeddings;
 
-    // One placeholder per audio embedding means the prompt grows with the clip.
-    // Overflowing the compiled cache silently returns nonsense, so refuse
-    // instead and name the numbers the caller needs to fix the build.
-    if (config_.max_cache_length > 0 && stats_.prompt_tokens >= config_.max_cache_length) {
-        std::cerr << "[glmasr] Audio needs " << stats_.audio_embeddings << " embeddings, giving a "
-                  << stats_.prompt_tokens << " token prompt, but the bundle's KV cache holds "
-                  << config_.max_cache_length
-                  << ". Rebuild with a larger --max-cache-length or shorten the audio."
-                  << std::endl;
-        return TextResult{"", {}};
+    // One placeholder per audio embedding means the prompt grows with the
+    // clip. The dense cache must hold the prompt and every generated token;
+    // refuse a request it cannot hold instead of returning a truncated or
+    // degenerate transcript, and name the numbers the caller needs.
+    const int32_t new_tokens = max_new_tokens > 0 ? max_new_tokens : 224;
+    if (config_.max_cache_length > 0 &&
+        stats_.prompt_tokens + new_tokens > config_.max_cache_length) {
+        throw std::invalid_argument(
+            "GLM-ASR audio needs a " + std::to_string(stats_.prompt_tokens) +
+            "-token prompt plus up to " + std::to_string(new_tokens) +
+            " generated tokens, which exceeds the bundle's KV cache length of " +
+            std::to_string(config_.max_cache_length) +
+            "; rebuild with a larger max_sequence_length or shorten the audio");
     }
 
-    const std::vector<int32_t> generated =
-        run_decoder(plan.input_ids, audio_embeds, plan.audio_offset, plan.num_audio_embeddings,
-                    max_new_tokens > 0 ? max_new_tokens : 224);
+    const std::vector<int32_t> generated = run_decoder(
+        plan.input_ids, audio_embeds, plan.audio_offset, plan.num_audio_embeddings, new_tokens);
 
     // TRTMC_GLMASR_DEBUG reports how the audio mapped onto the prompt, which is
     // what to check first when a transcript comes back empty or truncated.

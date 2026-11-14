@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+reference:
+  adapter: families/birefnet/reference/adapter.py
+  requirements: families/birefnet/requirements.txt
+  trust_remote_code: true
+  offline: true
+  options: {input_size: 1024}
+
+absolute: [foreground_masks]
+benchmarks:
+  foreground_masks:
+    suite: foreground-mask-parity
+    metric: mask_parity
+    # The unchanged family E2E criterion applies to every benchmark image.
+    gate: {min_mask_iou: 0.9}
+    suite_definition:
+      suite: birefnet-coco-masks-50
+      version: 1
+      source:
+        kind: hf_dataset
+        dataset: detection-datasets/coco
+        split: val
+        revision: cf0b22332314a937e9dc8a1957b21725430bb41d
+        data_files: {val: data/val-*.parquet}
+        image_column: image
+      selection: {method: seeded, count: 50}
+      fields: {image: image_path}

@@ -30,9 +30,9 @@ Tensor contract (matches the C++ runtime KvCache naming):
   Inputs (dynamic shapes — Sq varies by profile)
     token_id        int32   (-1,)
     position_id     int32   (-1,)
-    attention_mask  float32 (-1, -1)                 # (Sq, max_cache + Sq)
-    cache_k_i       fp16/f32 (max_cache, kv_size)    # static
-    cache_v_i       fp16/f32 (max_cache, kv_size)    # static
+    attention_mask  float32 (-1, -1)                 # (Sq, cache_rows + Sq)
+    cache_k_i       fp16/f32 (cache_rows, kv_size)   # max_cache; 1..max_cache (prefill engine)
+    cache_v_i       fp16/f32 (cache_rows, kv_size)   # max_cache; 1..max_cache (prefill engine)
   Outputs
     logits          float32 (1, vocab)               # last-row sliced inside the engine
     present_k_i     fp16/f32 (-1, kv_size)           # (Sq, kv_size)
@@ -231,8 +231,13 @@ def build_dual_profile_decoder_engine(
         use_input_embed_tensor = network.add_input(
             "use_input_embed", trt.float32, (-1, 1))
 
+    # A prefill engine takes runtime-sized cache inputs: the runtime binds only
+    # the cached prefix (one masked row for an empty cache), so attention
+    # follows the context rather than the allocated capacity. Dual-profile
+    # engines keep the static cache that their decode profile shares.
+    dynamic_cache_rows = profile_mode == "prefill"
     cache_shape: tuple[int, int]
-    cache_shape = (max_cache_length, kv_attention_size)
+    cache_shape = (-1 if dynamic_cache_rows else max_cache_length, kv_attention_size)
     cache_k_inputs: list[trt.ITensor] = []
     cache_v_inputs: list[trt.ITensor] = []
     for i in range(num_layers):
@@ -258,11 +263,21 @@ def build_dual_profile_decoder_engine(
         min_sq = opt_sq if fixed else 1
         prof.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
         prof.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
+        # Prompts are prefilled from an empty cache, so its optimum is one row.
+        min_rows, opt_rows = (1, 1) if dynamic_cache_rows else (max_cache_length,) * 2
         prof.set_shape(
             "attention_mask",
-            (min_sq, max_cache_length + min_sq),
-            (opt_sq, max_cache_length + opt_sq),
+            (min_sq, min_rows + min_sq),
+            (opt_sq, opt_rows + opt_sq),
             (max_sq, max_cache_length + max_sq))
+        if dynamic_cache_rows:
+            for layer in range(num_layers):
+                for name in ("cache_k", "cache_v"):
+                    prof.set_shape(
+                        graph_ops.layer_tensor_name(name, layer),
+                        (min_rows, kv_attention_size),
+                        (opt_rows, kv_attention_size),
+                        (max_cache_length, kv_attention_size))
         if embed_input:
             prof.set_shape(
                 "input_embed", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
@@ -287,35 +302,16 @@ def build_dual_profile_decoder_engine(
     # native IRotaryEmbeddingLayer.
     cos_half_table: trt.ITensor | None = None
     sin_half_table: trt.ITensor | None = None
+    rope_position_id = position_id
     if position_type == "rope":
         kmax = max_cache_length + max_prefill_length
         graph_ops.validate_native_rope_dim(rotary_embedding_dim)
-        rope_frequency_factors = None
-        rope_attention_factor = 1.0
-        rope_scaling = config.raw.get("rope_scaling") or {}
-        if rope_scaling.get("type") == "longrope":
-            original_max = int(config.raw.get(
-                "original_max_position_embeddings",
-                config.raw.get("max_position_embeddings", kmax)))
-            max_positions = int(config.raw.get(
-                "max_position_embeddings", original_max))
-            extension_factor = max_positions / max(original_max, 1)
-            rope_attention_factor = float(rope_scaling.get(
-                "attention_factor",
-                1.0 if extension_factor <= 1.0 else np.sqrt(
-                    1.0 + np.log(extension_factor) / np.log(original_max))))
-            factor_key = "long_factor" if kmax > original_max else "short_factor"
-            rope_frequency_factors = rope_scaling.get(factor_key)
-        cos_half_np = graph_ops.make_rope_table_half_dim(
-            kmax, head_dim, config.rope_theta, True,
-            partial_rotary_factor, interleaved=interleaved_rope,
-            frequency_factors=rope_frequency_factors,
-            attention_factor=rope_attention_factor)
-        sin_half_np = graph_ops.make_rope_table_half_dim(
-            kmax, head_dim, config.rope_theta, False,
-            partial_rotary_factor, interleaved=interleaved_rope,
-            frequency_factors=rope_frequency_factors,
-            attention_factor=rope_attention_factor)
+        cos_half_np, sin_half_np, rope_threshold = graph_ops.make_rope_half_tables(
+            config.raw, kmax, head_dim, config.rope_theta,
+            partial_rotary_factor, interleaved=interleaved_rope)
+        if rope_threshold:
+            rope_position_id = graph_ops.add_rope_regime_positions(
+                network, position_id, kmax)
         cos_half_table = _const_in_work_dtype(
             network, cos_half_np.shape, cos_half_np,
             work_np_dtype, work_trt_dtype)
@@ -476,12 +472,12 @@ def build_dual_profile_decoder_engine(
         if position_type == "rope":
             q = graph_ops.add_apply_rope_native(
                 network, q, num_heads, head_dim,
-                cos_half_table, sin_half_table, position_id,
+                cos_half_table, sin_half_table, rope_position_id,
                 rotary_embedding_dim, interleaved_rope,
                 sequence_length=None)
             k = graph_ops.add_apply_rope_native(
                 network, k, num_kv_heads, head_dim,
-                cos_half_table, sin_half_table, position_id,
+                cos_half_table, sin_half_table, rope_position_id,
                 rotary_embedding_dim, interleaved_rope,
                 sequence_length=None)
 
@@ -583,9 +579,8 @@ def build_dual_profile_decoder_engine(
 
     out_vocab = (weights["w_out"].shape[1]
                  if isinstance(weights["w_out"], np.ndarray) else vocab)
-    logits = graph_ops.add_matmul_rhs_constant(
-        network, last_hidden, hidden, out_vocab, weights["w_out"],
-        dtype=work_np_dtype)
+    logits = graph_blocks.make_matmul_fn(network, work_np_dtype, quant_ctx)(
+        last_hidden, hidden, out_vocab, weights["w_out"], "w_out")
     lm_bias = weights.get("lm_head_bias")
     if lm_bias is not None:
         logits = graph_ops.add_bias_sum(

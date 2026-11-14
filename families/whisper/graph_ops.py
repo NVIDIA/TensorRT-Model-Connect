@@ -84,6 +84,20 @@ def add_bias_sum(
     return _cast_back_to_trt_dtype(network, s.get_output(0), inp.dtype)
 
 
+def add_logits_projection(
+    network: trt.INetworkDefinition,
+    hidden: trt.ITensor,
+    hidden_size: int,
+    vocab_size: int,
+    weights: np.ndarray,
+) -> trt.ITensor:
+    """Compute comparison-sensitive logits in FP32 before token selection."""
+    hidden = _cast_back_to_trt_dtype(network, hidden, trt.float32)
+    return add_matmul_rhs_constant(
+        network, hidden, hidden_size, vocab_size, weights, dtype=np.float32
+    )
+
+
 def add_layer_norm(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
@@ -188,7 +202,14 @@ def add_activation(
     dtype: np.dtype = np.float32,
 ) -> trt.ITensor:
     """Dispatch activation by name: 'silu', 'gelu_new', 'gelu', 'relu', 'relu2'/'squared_relu'."""
-    if activation_type in ("gelu_new", "gelu"):
+    if activation_type == "gelu":
+        output_dtype = inp.dtype
+        if output_dtype != trt.float32:
+            inp = network.add_cast(inp, trt.float32).get_output(0)
+        # Preserve GELU's sensitive negative tail before casting back to half.
+        result = network.add_activation(inp, trt.ActivationType.GELU_ERF).get_output(0)
+        return _cast_back_to_trt_dtype(network, result, output_dtype)
+    elif activation_type == "gelu_new":
         return add_gelu_new(network, inp, dtype=dtype)
     elif activation_type == "relu":
         act = network.add_activation(inp, trt.ActivationType.RELU)
@@ -227,18 +248,29 @@ def add_self_attention_block(
     v_bias: np.ndarray | None = None,
     o_bias: np.ndarray | None = None,
     dtype: np.dtype = np.float32,
+    matmul=None,
+    weight_prefix: str = "",
 ) -> trt.ITensor:
     """Full self-attention without KV cache (single-pass, for vision encoders).
+
+    ``matmul(lhs, lhs_width, rhs_width, rhs_weights, weight_name)`` replaces the plain
+    constant matmul when a quantization context routes the projections.
 
     Input hidden: [seq_length, hidden_size]
     Output: [seq_length, hidden_size]
     """
     head_dim = hidden_size // num_heads
+    if matmul is None:
+
+        def matmul(lhs, lhs_width, rhs_width, rhs_weights, weight_name):
+            return add_matmul_rhs_constant(
+                network, lhs, lhs_width, rhs_width, rhs_weights, dtype=dtype
+            )
 
     # Q, K, V projections: [seq, hidden] @ [hidden, hidden] = [seq, hidden]
-    q = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_q, dtype=dtype)
-    k = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_k, dtype=dtype)
-    v = add_matmul_rhs_constant(network, hidden, hidden_size, hidden_size, w_v, dtype=dtype)
+    q = matmul(hidden, hidden_size, hidden_size, w_q, f"{weight_prefix}.w_q")
+    k = matmul(hidden, hidden_size, hidden_size, w_k, f"{weight_prefix}.w_k")
+    v = matmul(hidden, hidden_size, hidden_size, w_v, f"{weight_prefix}.w_v")
 
     if q_bias is not None:
         q = add_bias_sum(network, q, hidden_size, q_bias, dtype=dtype)
@@ -259,7 +291,7 @@ def add_self_attention_block(
     )
 
     # Output projection
-    out = add_matmul_rhs_constant(network, context_flat, hidden_size, hidden_size, w_o, dtype=dtype)
+    out = matmul(context_flat, hidden_size, hidden_size, w_o, f"{weight_prefix}.w_o")
     if o_bias is not None:
         out = add_bias_sum(network, out, hidden_size, o_bias, dtype=dtype)
 

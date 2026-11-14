@@ -1,0 +1,38 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+candidate:
+  model_directory: trtmc-reference/personaplex-model
+  build: {fp32_layers: []}
+reference:
+  precision: fp16
+  requirements: families/personaplex/tests/requirements.txt
+  prepare: families/personaplex/reference/prepare_voicebench.py
+  options:
+    listen_before_answer: true
+    system_prompt: trtmc-reference/personaplex-model/system_prompt.npz
+    voice_prompt: trtmc-reference/personaplex-model/NATM1.pt
+absolute: [voicebench_speech_qa]
+benchmarks:
+  voicebench_speech_qa:
+    suite: voicebench-openbookqa
+    suite_definition:
+      suite: voicebench-openbookqa-455
+      version: 1
+      source:
+        kind: hf_dataset
+        dataset: hlt-lab/voicebench
+        subset: openbookqa
+        split: test
+        revision: b02edcef1330480be3a11bd6f7434ac32f05ad08
+        audio_column: audio
+        audio_sample_rate: 24000  # Mimi's rate: both sides read the same resampled 16 kHz questions
+        label_fields: {answer: reference, prompt: prompt}
+      selection: {method: first, count: 455}
+      fields: {audio: audio_path}
+      request: {max_new_tokens: 1024, tail_frames: 125}
+    metric: spoken_choice
+    gate: {margin: 2.0}
+    postprocess:
+      script: apps/aiperf_qual/trtmc_aiperf_qual/transcribe_outputs.py
+      arguments: [--model, openai/whisper-large-v3-turbo, --revision, 41f01f3fe87f28c78e2fbf8b568835947dd65ed9,
+                  --last-seconds, "10"]

@@ -150,12 +150,13 @@ def test_load_weights_rejects_a_checkpoint_without_dense_blocks(tmp_path: Path):
         model.load_weights(str(tmp_path), cfg)
 
 
-def test_build_engine_rejects_quantized_context(tmp_path: Path):
+def test_build_engine_rejects_quantized_context_on_fp32(tmp_path: Path):
+    """FP8 runs on the fp16 engine only (see test_quantization.py for the FP8 path)."""
     _write_tiny_densenet(tmp_path)
     cfg = ModelConfig.from_dir(tmp_path)
     weights = model.load_weights(str(tmp_path), cfg)
 
-    with pytest.raises(NotImplementedError, match="quantized"):
+    with pytest.raises(ValueError, match="precision fp16"):
         model.build_engine(cfg, weights, 0, quant_ctx=object())
 
 

@@ -1,6 +1,7 @@
 {
   "name": "patchtsmixer-granite-official-tp4",
   "hf_id": "ibm-granite/granite-timeseries-patchtsmixer",
+  "hf_revision": "90dc5a88d45f032b7dceefb5d814ca2af54f2ff9",
   "bundle": "patchtsmixer-granite-official-tp4.bundle",
   "family": "patchtsmixer",
   "task": "time_series_forecast",

@@ -187,14 +187,14 @@ def test_build_rejects_batch_norm_variant_the_graph_does_not_implement(tmp_path:
         build_family(request, object())
 
 
-def test_build_rejects_quantization(tmp_path: Path):
+def test_build_rejects_unsupported_quantization(tmp_path: Path):
     request = BuildRequest(
         model_dir=tmp_path,
         output_path=tmp_path / "unused.bundle",
         family="timm_vgg",
         task="classification",
         precision="fp16",
-        quantization="fp8",
+        quantization="nvfp4",
     )
 
     with pytest.raises(NotImplementedError, match="quantization"):

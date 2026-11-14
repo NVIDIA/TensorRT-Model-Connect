@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cuda_fp16.h>
 #include <vector>
 
 namespace trtmc {
@@ -23,6 +24,63 @@ inline void add_speech_embedding_row(const std::vector<float>& table, std::size_
     const float* row = table.data() + offset;
     for (int32_t d = 0; d < hidden_size; ++d) {
         out_embed[d] += row[d];
+    }
+}
+
+// Round an FP32 value to FP16 (round to nearest even) and back: the result of
+// one PyTorch Half operation, which computes in FP32 and rounds once. Host-side
+// cuda_fp16 conversion; no device code.
+inline float personaplex_round_to_half(float value) {
+    return __half2float(__float2half_rn(value));
+}
+
+// Accumulate one embedding row as a Half tensor add: the row is rounded to
+// FP16 and the first row starts the sum.
+inline void accumulate_half_embedding_row(const std::vector<float>& table, std::size_t offset,
+                                          int32_t hidden_size, bool& started, float* out_embed) {
+    if (offset + hidden_size > table.size()) {
+        return;
+    }
+    const float* row = table.data() + offset;
+    for (int32_t d = 0; d < hidden_size; ++d) {
+        const float value = personaplex_round_to_half(row[d]);
+        out_embed[d] = started ? personaplex_round_to_half(out_embed[d] + value) : value;
+    }
+    started = true;
+}
+
+inline std::size_t temporal_text_offset(const SpeechConfig& cfg, int32_t hidden_size,
+                                        int32_t text_token) {
+    const int32_t ttok = clamp_speech_depth_token(text_token, cfg.temporal_text_vocab);
+    return static_cast<std::size_t>(ttok) * hidden_size;
+}
+
+inline std::size_t temporal_audio_offset(const SpeechConfig& cfg, int32_t hidden_size,
+                                         int32_t emb_codebook_idx, int32_t token) {
+    const int32_t tok = clamp_speech_depth_token(token, cfg.audio_vocab_size);
+    return static_cast<std::size_t>(emb_codebook_idx) * cfg.audio_vocab_size * hidden_size +
+           static_cast<std::size_t>(tok) * hidden_size;
+}
+
+// The reference's FP16 embed_codes: audio codebooks in order (model stream,
+// then user stream), then text, each add a Half tensor add.
+inline void compute_half_summed_embed(const SpeechConfig& cfg, int32_t hidden_size,
+                                      const std::vector<int32_t>& audio_tokens, int32_t text_token,
+                                      float* out_embed) {
+    std::fill(out_embed, out_embed + hidden_size, 0.0F);
+    bool started = false;
+    if (cfg.audio_vocab_size > 0) {
+        for (std::size_t cb = 0; cb < audio_tokens.size(); ++cb) {
+            const auto offset =
+                temporal_audio_offset(cfg, hidden_size, static_cast<int32_t>(cb), audio_tokens[cb]);
+            accumulate_half_embedding_row(cfg.audio_embeddings, offset, hidden_size, started,
+                                          out_embed);
+        }
+    }
+    if (!cfg.temporal_text_embedding.empty() && cfg.temporal_text_vocab > 0) {
+        accumulate_half_embedding_row(cfg.temporal_text_embedding,
+                                      temporal_text_offset(cfg, hidden_size, text_token),
+                                      hidden_size, started, out_embed);
     }
 }
 
@@ -54,6 +112,12 @@ inline void compute_dual_stream_summed_embed(const SpeechConfig& cfg, int32_t hi
                                              int32_t stream_cb, const int32_t* moshi_tokens,
                                              const int32_t* user_tokens, int32_t text_token,
                                              float* out_embed) {
+    if (cfg.temporal_embed_half) {
+        std::vector<int32_t> audio_tokens(moshi_tokens, moshi_tokens + stream_cb);
+        audio_tokens.insert(audio_tokens.end(), user_tokens, user_tokens + stream_cb);
+        compute_half_summed_embed(cfg, hidden_size, audio_tokens, text_token, out_embed);
+        return;
+    }
     std::fill(out_embed, out_embed + hidden_size, 0.0F);
     add_temporal_text_embedding(cfg, hidden_size, text_token, out_embed);
     for (int32_t cb = 0; cb < stream_cb; ++cb) {

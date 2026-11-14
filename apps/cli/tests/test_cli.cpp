@@ -6,8 +6,10 @@
 #include "cli/cli.h"
 #include "cli/io.h"
 #include "cli/sdk_dispatch.h"
+#include "runtime/bundle/bundle_format.h"
 
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -46,6 +48,28 @@ bool parse_throws(std::vector<std::string> arguments) {
     } catch (const std::invalid_argument&) {
         return true;
     }
+}
+
+int run_cli(std::vector<std::string> arguments, std::ostream& output, std::ostream& error) {
+    std::vector<char*> argv;
+    argv.reserve(arguments.size());
+    for (auto& argument : arguments)
+        argv.push_back(argument.data());
+    return trtmc::cli::run(static_cast<int>(argv.size()), argv.data(), output, error);
+}
+
+void write_fake_bundle(const std::filesystem::path& path, const std::string& task) {
+    const std::string header = "{\"format\":1,\"family\":\"fake\",\"task\":\"" + task +
+                               "\",\"backend\":\"fake\","
+                               "\"sections\":{\"runtime.json\":{\"offset\":0,\"length\":2},"
+                               "\"engine.plan\":{\"offset\":2,\"length\":4}}}";
+    std::ofstream output(path, std::ios::binary);
+    output.write(reinterpret_cast<const char*>(trtmc::kBundleMagic), 8);
+    const std::uint64_t length = header.size();
+    for (int shift = 0; shift < 64; shift += 8)
+        output.put(static_cast<char>((length >> shift) & 0xffU));
+    output.write(header.data(), static_cast<std::streamsize>(header.size()));
+    output.write("{}PLAN", 6);
 }
 
 class FakeText final : public trtmc::ITextGeneration,
@@ -319,6 +343,43 @@ bool dispatch_throws(const trtmc::cli::Command& command, trtmc::ITask& task) {
     }
 }
 
+std::filesystem::path
+write_inspect_bundle(const std::string& name,
+                     const std::vector<std::pair<std::string, std::string>>& sections) {
+    nlohmann::json table = nlohmann::json::object();
+    std::string payload;
+    for (const auto& [section, bytes] : sections) {
+        table[section] = {{"offset", payload.size()}, {"length", bytes.size()}};
+        payload += bytes;
+    }
+    const std::string header = nlohmann::json{
+        {"format", 1},
+        {"family", "example"},
+        {"task", "text_generation"},
+        {"backend", "trt"},
+        {"sections", table}}.dump();
+    const auto path = std::filesystem::temp_directory_path() / name;
+    std::ofstream output(path, std::ios::binary);
+    output.write("BUNDLE\x01\x00", 8);
+    const std::uint64_t length = header.size();
+    for (int shift = 0; shift < 64; shift += 8)
+        output.put(static_cast<char>((length >> shift) & 0xffU));
+    output << header << payload;
+    return path;
+}
+
+nlohmann::json inspect_json(const std::filesystem::path& bundle) {
+    std::vector<std::string> arguments{"trtmc", "inspect", bundle.string()};
+    std::vector<char*> argv;
+    for (auto& argument : arguments)
+        argv.push_back(argument.data());
+    std::ostringstream output;
+    std::ostringstream error;
+    const int status = trtmc::cli::run(static_cast<int>(argv.size()), argv.data(), output, error);
+    check(status == 0, "inspect succeeds");
+    return status == 0 ? nlohmann::json::parse(output.str()) : nlohmann::json::object();
+}
+
 } // namespace
 
 int main() {
@@ -357,6 +418,19 @@ int main() {
 
     check(parse({"trtmc", "run", "model.bundle"}).runtime_root.empty(),
           "Task SDK execution leaves an omitted runtime root for the installed default");
+    {
+        // CMake stages the fake backend and family beside libtrtmc_runtime.
+        const auto bundle =
+            std::filesystem::temp_directory_path() / "trtmc-cli-default-runtime-root.bundle";
+        write_fake_bundle(bundle, trtmc::IEmbedding::kTask);
+        std::ostringstream output;
+        std::ostringstream error;
+        const int status =
+            run_cli({"trtmc", "embed", bundle.string(), "--text", "abc"}, output, error);
+        std::filesystem::remove(bundle);
+        check(status == 0 && output.str().find("\"values\":[3.0,4.0]") != std::string::npos,
+              "existing bundle mode loads plugins beside the active runtime by default");
+    }
     const auto configured = parse({"trtmc", "run", "model.bundle", "--task", "text_continuation",
                                    "--set", "suffix=", "--set", "emit_eos=false"});
     check(configured.selected_task == "text_continuation" &&
@@ -499,6 +573,21 @@ int main() {
           "batch transcription inputs preserve repeated option order");
     check(parse({"trtmc", "inspect", "model.bundle"}).kind == trtmc::cli::CommandKind::kInspect,
           "inspect does not require runtime root");
+    {
+        const nlohmann::json record{{"version", 1}, {"checkpoint", nullptr}};
+        const auto recorded = write_inspect_bundle(
+            "trtmc-cli-inspect-provenance.bundle",
+            {{"runtime.json", "{}"}, {"trtmc.provenance.json", record.dump()}});
+        const auto legacy =
+            write_inspect_bundle("trtmc-cli-inspect-legacy.bundle", {{"runtime.json", "{}"}});
+        check(inspect_json(recorded).value("provenance", nlohmann::json()) == record,
+              "inspect reports core build provenance");
+        const auto legacy_info = inspect_json(legacy);
+        check(legacy_info.contains("provenance") && legacy_info.at("provenance").is_null(),
+              "inspect reports a bundle without provenance as null");
+        std::filesystem::remove(recorded);
+        std::filesystem::remove(legacy);
+    }
     check(parse({"trtmc", "version"}).kind == trtmc::cli::CommandKind::kVersion,
           "version parses without bundle");
     check(parse_throws({"trtmc", "--version"}), "version flag alias is not accepted");
@@ -668,6 +757,7 @@ int main() {
     audio_command.options.emplace("--output", audio_path.string());
     audio_command.options.emplace("--max-new-tokens", "9");
     audio_command.options.emplace("--seed", "17");
+    audio_command.options.emplace("--description", "warm acoustic backing");
     audio_command.options.emplace("--stream", "true");
     audio_command.options.emplace("--chunk-frames", "4");
     FakeStreamingAudio audio;
@@ -676,7 +766,8 @@ int main() {
           "streaming audio task dispatch succeeds");
     check(std::filesystem::file_size(audio_path) == 3 * sizeof(float),
           "streaming audio writes raw float32 samples");
-    check(audio.seen.max_new_tokens == 9 && audio.seen.seed == 17 && audio.seen_chunk_frames == 4,
+    check(audio.seen.max_new_tokens == 9 && audio.seen.seed == 17 &&
+              audio.seen.description == "warm acoustic backing" && audio.seen_chunk_frames == 4,
           "streaming audio options reach the Task API");
     check(audio_output.str().find("\"format\":\"float32le\"") != std::string::npos,
           "streaming audio output format is explicit");

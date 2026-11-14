@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Translation: FLORES-200 en->fr chrF++ on all 1,012 sentences.
+absolute: [flores_riva]

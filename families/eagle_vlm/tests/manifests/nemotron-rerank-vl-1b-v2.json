@@ -4,7 +4,7 @@
   "hf_revision": "9e95da054312436dfc703319dd2b793a3bee2465",
   "bundle": "nemotron-rerank-vl-1b-v2.bundle",
   "family": "eagle_vlm",
-  "task": "reranking",
+  "task": "text_query_documents_to_relevance",
   "precision": "fp16",
   "testcases": [
     {

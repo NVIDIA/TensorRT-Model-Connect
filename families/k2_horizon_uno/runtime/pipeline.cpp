@@ -27,10 +27,14 @@ int32_t checked_size_to_int32(std::size_t value, const char* label) {
     return static_cast<int32_t>(value);
 }
 
-void validate_pipeline_components(const std::unique_ptr<ITrtModule>& decoder,
+void validate_pipeline_components(const std::unique_ptr<ITrtModule>& lora_decoder,
+                                  const std::unique_ptr<ITrtModule>& base_decoder,
                                   const std::unique_ptr<K2HorizonUnoKvCache>& cache) {
-    if (!decoder || !decoder->ok())
+    if (!lora_decoder || !lora_decoder->ok() || !base_decoder || !base_decoder->ok())
         throw std::runtime_error("K2HorizonUnoTextGenerationPipeline: invalid decoder module");
+    if (lora_decoder->stream() != base_decoder->stream())
+        throw std::runtime_error(
+            "K2HorizonUnoTextGenerationPipeline: decoders must share a stream");
     if (!cache || !cache->ok())
         throw std::runtime_error("K2HorizonUnoTextGenerationPipeline: invalid native KV cache");
 }
@@ -47,10 +51,27 @@ void validate_generation_inputs(const std::vector<int32_t>& token_ids, int32_t m
 } // namespace
 
 K2HorizonUnoTextGenerationPipeline::K2HorizonUnoTextGenerationPipeline(
-    std::unique_ptr<ITrtModule> decoder, std::unique_ptr<K2HorizonUnoKvCache> cache,
-    std::shared_ptr<ITokenizer> tokenizer)
-    : decoder_(std::move(decoder)), cache_(std::move(cache)), tokenizer_(std::move(tokenizer)) {
-    validate_pipeline_components(decoder_, cache_);
+    std::unique_ptr<ITrtModule> lora_decoder, std::unique_ptr<ITrtModule> base_decoder,
+    std::unique_ptr<K2HorizonUnoKvCache> cache, std::shared_ptr<ITokenizer> tokenizer)
+    : lora_decoder_(std::move(lora_decoder)), base_decoder_(std::move(base_decoder)),
+      cache_(std::move(cache)), tokenizer_(std::move(tokenizer)) {
+    validate_pipeline_components(lora_decoder_, base_decoder_, cache_);
+    const auto maximum = base_decoder_->input_profile_shape(
+        "token_id", base_decoder_->profile_idx(), ProfileShapeSelector::kMax);
+    if (maximum.size() != 1 || maximum.front() < 1)
+        throw std::runtime_error("K2HorizonUnoTextGenerationPipeline: invalid base token profile");
+    // A larger base profile is fine, but one cache call takes at most kMaximumCallRows rows.
+    prompt_rows_ = static_cast<int32_t>(
+        std::min<int64_t>(maximum.front(), K2HorizonUnoKvCache::kMaximumCallRows));
+    // The engine has no data-dependent shapes or host reads, so a call is a
+    // fixed kernel sequence for its row count and a context can replay it as
+    // a CUDA graph; a context keeps one graph and recaptures when its row
+    // count changes. Draft calls keep 8 rows (fewer only in the last cycle),
+    // so the LoRA context replays its graph. The base context changes row
+    // count in every request (prompt chunks of 8, k and 1 rows, then verify
+    // blocks); a recapture (2 to 13 ms) costs more than the replay saves on it
+    // (about 0.2 ms per call), so it runs without a graph.
+    lora_decoder_->enable_cuda_graph();
 }
 
 TextResult K2HorizonUnoTextGenerationPipeline::generate(const std::string& prompt,
@@ -212,25 +233,38 @@ K2HorizonUnoTextGenerationPipeline::generate_linear_psi_spec(
 void K2HorizonUnoTextGenerationPipeline::reset_generation_context() {
     const auto start = std::chrono::steady_clock::now();
     cache_->reset();
-    decoder_->reset_execution_context();
-    cache_->bind_to(*decoder_);
+    lora_decoder_->reset_execution_context();
+    base_decoder_->reset_execution_context();
+    cache_->bind_to(*lora_decoder_);
+    cache_->bind_to(*base_decoder_);
     last_setup_ms_ =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
 void K2HorizonUnoTextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
                                                      std::vector<float>& logits) {
-    const std::size_t chunk = kMaximumBlockLength;
+    // Every prompt row but the last only fills the KV cache, in chunks of up to
+    // the base profile's maximum rows.
+    const std::size_t chunk = static_cast<std::size_t>(prompt_rows_);
     std::size_t offset = 0;
     while (input_ids.size() - offset > 1) {
         const std::size_t rows = std::min(chunk, input_ids.size() - offset - 1);
-        const auto begin = input_ids.begin() + static_cast<std::ptrdiff_t>(offset);
-        const std::vector<int32_t> tokens(begin, begin + static_cast<std::ptrdiff_t>(rows));
-        run_block(tokens, std::vector<float>(rows, 0.0F), logits);
+        run_prompt_rows(input_ids.data() + offset, static_cast<int32_t>(rows));
         offset += rows;
     }
     // Keep the final row isolated because seed selection consumes logits row zero.
     run_block({input_ids[offset]}, {0.0F}, logits);
+}
+
+void K2HorizonUnoTextGenerationPipeline::run_prompt_rows(const int32_t* token_ids, int32_t rows) {
+    TensorMap inputs;
+    inputs["token_id"] = Tensor{const_cast<int32_t*>(token_ids), {rows}, DType::kInt32};
+    float empty_mask = 0.0F;
+    inputs["lora_mask"] = Tensor{&empty_mask, {int64_t{0}}, DType::kFloat32};
+    cache_->prepare_block(inputs, rows);
+    base_decoder_->forward_async(inputs);
+    base_decoder_->sync();
+    cache_->advance(rows);
 }
 
 void K2HorizonUnoTextGenerationPipeline::run_block(const std::vector<int32_t>& token_ids,
@@ -241,12 +275,17 @@ void K2HorizonUnoTextGenerationPipeline::run_block(const std::vector<int32_t>& t
         throw std::invalid_argument("K2-Horizon-Uno block input contract is invalid");
     }
     const int32_t rows = checked_size_to_int32(token_ids.size(), "block length");
+    // An all-zero mask adds nothing, so those calls skip the LoRA branch: the
+    // base profile takes an empty mask.
+    const bool uses_lora = k2_horizon_uno_mask_uses_lora(lora_mask);
+    ITrtModule& decoder = uses_lora ? *lora_decoder_ : *base_decoder_;
     TensorMap inputs;
     inputs["token_id"] = Tensor{const_cast<int32_t*>(token_ids.data()), {rows}, DType::kInt32};
-    inputs["lora_mask"] = Tensor{const_cast<float*>(lora_mask.data()), {rows}, DType::kFloat32};
+    inputs["lora_mask"] = Tensor{
+        const_cast<float*>(lora_mask.data()), {uses_lora ? rows : int64_t{0}}, DType::kFloat32};
     cache_->prepare_block(inputs, rows);
 
-    const TensorMap outputs = decoder_->forward(inputs);
+    const TensorMap outputs = decoder.forward(inputs);
     const auto found = outputs.find("logits");
     if (found == outputs.end() || found->second.dtype != DType::kFloat32 ||
         found->second.shape != std::vector<int64_t>{rows, kVocabSize}) {

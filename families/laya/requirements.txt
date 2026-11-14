@@ -1,0 +1,4 @@
+laya==0.3.20
+transformers==5.10.2
+safetensors>=0.4
+unicodedata2==16.0.0

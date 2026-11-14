@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# COCO val2017 (detection-datasets/coco, pinned): 10 images in seeded order as world-model start frames, the
+# rest of each request (prompt, action, camera, steps, seed) from the profile's catalog testcase.
+suite: coco-world-model-10
+version: 1
+base: catalog
+source:
+  kind: hf_dataset
+  dataset: detection-datasets/coco
+  split: val
+  revision: cf0b22332314a937e9dc8a1957b21725430bb41d
+  data_files: {val: data/val-*.parquet}
+  image_column: image
+selection: {method: seeded, count: 10}
+fields: {image: image_path}

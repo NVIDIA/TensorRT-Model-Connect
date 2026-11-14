@@ -1044,12 +1044,14 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
-    if request.task != "audio_generation":
-        raise ValueError("bark supports only task=audio_generation")
+    if request.task != "text_to_audio":
+        raise ValueError("bark supports only task=text_to_audio")
     if request.quantization not in {None, "none"}:
         raise NotImplementedError("Bark does not support quantization")
     if request.fp32_layers:
         raise NotImplementedError("Bark does not support fp32_layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Bark does not support MTP speculative decoding")
 
     model_dir = Path(request.model_dir)
     config = ModelConfig.from_dir(model_dir)

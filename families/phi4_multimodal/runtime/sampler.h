@@ -7,6 +7,7 @@
 
 // Family-owned host token sampling.
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -21,6 +22,13 @@ struct Phi4MultimodalSamplingParams {
     float min_p{0.0f}; // 0.0 = disabled; filters tokens below min_p * max_prob
     int32_t seed{-1};  // -1 = deterministic (argmax)
     int32_t eos_token_id{-1};
+    std::vector<int32_t> additional_eos_token_ids;
+
+    bool is_eos(int32_t token) const {
+        return token == eos_token_id ||
+               std::find(additional_eos_token_ids.begin(), additional_eos_token_ids.end(), token) !=
+                   additional_eos_token_ids.end();
+    }
 };
 
 /// Token selection result.

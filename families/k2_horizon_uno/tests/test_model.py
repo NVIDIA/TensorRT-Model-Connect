@@ -92,7 +92,12 @@ def test_support_matches_only_the_adapter_identity() -> None:
     adapter = ModelMetadata({}, {}, ("adapter_config.json", "adapter_model.safetensors"))
     assert describe(adapter).tasks == ("text_generation",)
     assert describe(ModelMetadata({}, {}, ("adapter_config.json",))) is None
-    assert describe(ModelMetadata({}, {}, (*adapter.files, "README.md"))) is None
+    published = ModelMetadata(
+        {},
+        {},
+        (*adapter.files, ".gitattributes", "README.md", "conversion_summary.json"),
+    )
+    assert describe(published).tasks == ("text_generation",)
 
 
 def test_exact_base_config_and_adapter_recipe(tmp_path: Path) -> None:

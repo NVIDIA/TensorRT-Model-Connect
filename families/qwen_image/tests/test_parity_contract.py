@@ -22,7 +22,7 @@ def _thresholds() -> dict:
 
 def test_qwen_image_thresholds_only_declare_active_comparisons() -> None:
     paths = sorted(THRESHOLD_ROOT.glob("*.json"))
-    assert len(paths) == 4
+    assert len(paths) == 5
     for path in paths:
         values = json.loads(path.read_text(encoding="utf-8"))["threshold_overrides"]
         assert "latent_cosine_per_step" not in values

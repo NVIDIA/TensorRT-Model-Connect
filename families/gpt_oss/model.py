@@ -62,12 +62,18 @@ class _GptOssModel:
         self,
         model_dir: str,
         config: ModelConfig,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
     ) -> WeightDict:
         """Load GPT-OSS weights via AutoModelForCausalLM (handles MXFP4 dequant).
 
         The model uses packed expert tensors [num_experts, ...] which must be
         unpacked into per-expert weight/bias arrays for the TRT engine builder.
         """
+        if quant_ctx is not None:
+            return self._load_weights_quantized(model_dir, config, precision=precision)
+
         import torch
         from transformers import AutoModelForCausalLM
 
@@ -82,9 +88,17 @@ class _GptOssModel:
             torch_dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
         )
-        state = {k: v.float().cpu().numpy() for k, v in model.state_dict().items()}
+        state = model.state_dict()
         del model
         gc.collect()
+
+        target_np_dtype = np.float16 if precision in {"fp16", "bf16"} else np.float32
+        target_torch_dtype = torch.float16 if target_np_dtype == np.float16 else torch.float32
+
+        def take(name: str) -> np.ndarray:
+            """Convert one tensor and release its dequantized source storage."""
+            tensor = state.pop(name)
+            return tensor.detach().to(device="cpu", dtype=target_torch_dtype).numpy()
 
         hidden = config.hidden_size
         vocab = config.vocab_size
@@ -94,11 +108,11 @@ class _GptOssModel:
         weights = WeightDict()
 
         # Embedding
-        embedding = state["model.embed_tokens.weight"]
+        embedding = take("model.embed_tokens.weight")
         assert embedding.shape == (vocab, hidden), (
             f"Embedding shape {embedding.shape} != ({vocab}, {hidden})"
         )
-        weights["embedding"] = embedding.astype(np.float32)
+        weights["embedding"] = np.ascontiguousarray(embedding, dtype=target_np_dtype)
 
         attention_size = 0
         moe_intermediate = 0
@@ -108,26 +122,22 @@ class _GptOssModel:
             hf = f"model.layers.{layer_idx}"
 
             # RMSNorm (no biases)
-            weights[f"{prefix}.input_norm"] = state[f"{hf}.input_layernorm.weight"].astype(
-                np.float32
-            )
-            weights[f"{prefix}.post_attn_norm"] = state[
-                f"{hf}.post_attention_layernorm.weight"
-            ].astype(np.float32)
+            weights[f"{prefix}.input_norm"] = take(f"{hf}.input_layernorm.weight")
+            weights[f"{prefix}.post_attn_norm"] = take(f"{hf}.post_attention_layernorm.weight")
 
             # --- Attention projections (with biases) ---
-            q_raw = state[f"{hf}.self_attn.q_proj.weight"]
-            k_raw = state[f"{hf}.self_attn.k_proj.weight"]
-            v_raw = state[f"{hf}.self_attn.v_proj.weight"]
-            o_raw = state[f"{hf}.self_attn.o_proj.weight"]
+            q_raw = take(f"{hf}.self_attn.q_proj.weight")
+            k_raw = take(f"{hf}.self_attn.k_proj.weight")
+            v_raw = take(f"{hf}.self_attn.v_proj.weight")
+            o_raw = take(f"{hf}.self_attn.o_proj.weight")
 
             if attention_size == 0:
                 attention_size = q_raw.shape[0]
 
-            q_t = _transpose_2d(q_raw, "q_proj")
-            k_t = _transpose_2d(k_raw, "k_proj")
-            v_t = _transpose_2d(v_raw, "v_proj")
-            o_t = _transpose_2d(o_raw, "o_proj")
+            q_t = _transpose_2d(q_raw, "q_proj", precision=precision)
+            k_t = _transpose_2d(k_raw, "k_proj", precision=precision)
+            v_t = _transpose_2d(v_raw, "v_proj", precision=precision)
+            o_t = _transpose_2d(o_raw, "o_proj", precision=precision)
 
             # Keep compact GQA/MQA K/V
 
@@ -137,27 +147,27 @@ class _GptOssModel:
             weights[f"{prefix}.w_o"] = o_t
 
             # Attention biases
-            weights[f"{prefix}.q_bias"] = state[f"{hf}.self_attn.q_proj.bias"].astype(np.float32)
-            weights[f"{prefix}.o_bias"] = state[f"{hf}.self_attn.o_proj.bias"].astype(np.float32)
+            weights[f"{prefix}.q_bias"] = take(f"{hf}.self_attn.q_proj.bias")
+            weights[f"{prefix}.o_bias"] = take(f"{hf}.self_attn.o_proj.bias")
 
-            weights[f"{prefix}.k_bias"] = state[f"{hf}.self_attn.k_proj.bias"].astype(np.float32)
-            weights[f"{prefix}.v_bias"] = state[f"{hf}.self_attn.v_proj.bias"].astype(np.float32)
+            weights[f"{prefix}.k_bias"] = take(f"{hf}.self_attn.k_proj.bias")
+            weights[f"{prefix}.v_bias"] = take(f"{hf}.self_attn.v_proj.bias")
 
             # Attention sinks (per-head learned parameter for softmax normalization)
             sinks_key = f"{hf}.self_attn.sinks"
             if sinks_key in state:
-                weights[f"{prefix}.sinks"] = state[sinks_key].astype(np.float32)
+                weights[f"{prefix}.sinks"] = take(sinks_key)
 
             # --- Router ---
-            router_w = state[f"{hf}.mlp.router.weight"]  # [num_experts, hidden]
-            weights[f"{prefix}.router"] = _transpose_2d(router_w, "router")
-            weights[f"{prefix}.router_bias"] = state[f"{hf}.mlp.router.bias"].astype(np.float32)
+            router_w = take(f"{hf}.mlp.router.weight")  # [num_experts, hidden]
+            weights[f"{prefix}.router"] = _transpose_2d(router_w, "router", precision=precision)
+            weights[f"{prefix}.router_bias"] = take(f"{hf}.mlp.router.bias")
 
             # --- Packed expert weights ---
-            gate_up = state[f"{hf}.mlp.experts.gate_up_proj"]
-            gate_up_bias = state[f"{hf}.mlp.experts.gate_up_proj_bias"]
-            down = state[f"{hf}.mlp.experts.down_proj"]
-            down_bias = state[f"{hf}.mlp.experts.down_proj_bias"]
+            gate_up = take(f"{hf}.mlp.experts.gate_up_proj")
+            gate_up_bias = take(f"{hf}.mlp.experts.gate_up_proj_bias")
+            down = take(f"{hf}.mlp.experts.down_proj")
+            down_bias = take(f"{hf}.mlp.experts.down_proj_bias")
 
             # gate_up_proj is [E, hidden, 2*inter] with INTERLEAVED
             # gate/up columns: gate=even indices, up=odd indices.
@@ -168,13 +178,13 @@ class _GptOssModel:
                 gu = gate_up[e_idx]  # [hidden, 2*inter]
                 # Interleaved: gate = columns 0,2,4,...  up = columns 1,3,5,...
                 weights[f"{prefix}.expert.{e_idx}.w_gate"] = np.ascontiguousarray(
-                    gu[:, ::2], dtype=np.float32
+                    gu[:, ::2], dtype=target_np_dtype
                 )
                 weights[f"{prefix}.expert.{e_idx}.w_up"] = np.ascontiguousarray(
-                    gu[:, 1::2], dtype=np.float32
+                    gu[:, 1::2], dtype=target_np_dtype
                 )
                 weights[f"{prefix}.expert.{e_idx}.w_down"] = np.ascontiguousarray(
-                    down[e_idx], dtype=np.float32
+                    down[e_idx], dtype=target_np_dtype
                 )
 
             if moe_intermediate == 0:
@@ -183,27 +193,37 @@ class _GptOssModel:
             # Per-expert biases (also interleaved for gate_up)
             for e_idx in range(num_experts):
                 gu_b = gate_up_bias[e_idx]  # [2*inter]
-                weights[f"{prefix}.expert.{e_idx}.gate_bias"] = gu_b[::2].astype(np.float32)
-                weights[f"{prefix}.expert.{e_idx}.up_bias"] = gu_b[1::2].astype(np.float32)
-                weights[f"{prefix}.expert.{e_idx}.down_bias"] = down_bias[e_idx].astype(np.float32)
+                weights[f"{prefix}.expert.{e_idx}.gate_bias"] = np.ascontiguousarray(
+                    gu_b[::2], dtype=target_np_dtype
+                )
+                weights[f"{prefix}.expert.{e_idx}.up_bias"] = np.ascontiguousarray(
+                    gu_b[1::2], dtype=target_np_dtype
+                )
+                weights[f"{prefix}.expert.{e_idx}.down_bias"] = np.ascontiguousarray(
+                    down_bias[e_idx], dtype=target_np_dtype
+                )
+            del gate_up, gate_up_bias, down, down_bias
 
         # Final norm
         final_key = "model.norm.weight"
         if final_key in state:
-            weights["final_norm"] = state[final_key].astype(np.float32)
+            weights["final_norm"] = take(final_key)
         else:
-            weights["final_norm"] = np.ones(hidden, dtype=np.float32)
+            weights["final_norm"] = np.ones(hidden, dtype=target_np_dtype)
 
         # LM head
         lm_key = "lm_head.weight"
         if lm_key in state:
-            weights["w_out"] = _transpose_2d(state[lm_key], "lm_head")
+            weights["w_out"] = _transpose_2d(take(lm_key), "lm_head", precision=precision)
         else:
-            weights["w_out"] = _transpose_2d(embedding.copy(), "embedding_tied")
+            weights["w_out"] = _transpose_2d(embedding, "embedding_tied", precision=precision)
 
         lm_bias_key = "lm_head.bias"
         if lm_bias_key in state:
-            weights["lm_head_bias"] = state[lm_bias_key].astype(np.float32)
+            weights["lm_head_bias"] = take(lm_bias_key)
+
+        state.clear()
+        gc.collect()
 
         # Metadata
         weights["_attention_size"] = attention_size  # type: ignore[assignment]
@@ -211,6 +231,77 @@ class _GptOssModel:
         weights["_moe_intermediate_size"] = moe_intermediate  # type: ignore[assignment]
         weights["_num_experts_per_tok"] = config.raw.get("num_experts_per_tok", 4)  # type: ignore[assignment]
 
+        return weights
+
+    def _load_weights_quantized(
+        self, model_dir: str, config: ModelConfig, *, precision: str
+    ) -> WeightDict:
+        """Load everything except the experts straight from the safetensors files.
+
+        The routed experts come from ``quant_ctx`` as packed FP4, so the MXFP4
+        weights are never dequantized to a full-size bf16 model.
+        """
+        import torch
+
+        from .quantization import _open_raw_readers
+
+        print(
+            "[trtmc build] Loading GPT-OSS weights (experts stay MXFP4) ...",
+            file=sys.stderr,
+            flush=True,
+        )
+        readers = _open_raw_readers(Path(model_dir))
+        target_np_dtype = np.float16 if precision in {"fp16", "bf16"} else np.float32
+        target_torch_dtype = torch.float16 if target_np_dtype == np.float16 else torch.float32
+
+        def take(name: str) -> np.ndarray:
+            tensor = readers[name].get_tensor(name)
+            return tensor.to(device="cpu", dtype=target_torch_dtype).numpy()
+
+        num_layers = config.num_hidden_layers
+        weights = WeightDict()
+        embedding = take("model.embed_tokens.weight")
+        weights["embedding"] = np.ascontiguousarray(embedding, dtype=target_np_dtype)
+        attention_size = 0
+        for layer_idx in range(num_layers):
+            prefix = f"layer.{layer_idx}"
+            hf = f"model.layers.{layer_idx}"
+            weights[f"{prefix}.input_norm"] = take(f"{hf}.input_layernorm.weight")
+            weights[f"{prefix}.post_attn_norm"] = take(f"{hf}.post_attention_layernorm.weight")
+            for stem, hf_stem in (
+                ("w_q", "q_proj"),
+                ("w_k", "k_proj"),
+                ("w_v", "v_proj"),
+                ("w_o", "o_proj"),
+            ):
+                weights[f"{prefix}.{stem}"] = _transpose_2d(
+                    take(f"{hf}.self_attn.{hf_stem}.weight"), hf_stem, precision=precision
+                )
+            attention_size = attention_size or weights[f"{prefix}.w_q"].shape[1]
+            for stem, hf_stem in (
+                ("q_bias", "q_proj"),
+                ("k_bias", "k_proj"),
+                ("v_bias", "v_proj"),
+                ("o_bias", "o_proj"),
+            ):
+                weights[f"{prefix}.{stem}"] = take(f"{hf}.self_attn.{hf_stem}.bias")
+            if f"{hf}.self_attn.sinks" in readers:
+                weights[f"{prefix}.sinks"] = take(f"{hf}.self_attn.sinks")
+            weights[f"{prefix}.router"] = _transpose_2d(
+                take(f"{hf}.mlp.router.weight"), "router", precision=precision
+            )
+            weights[f"{prefix}.router_bias"] = take(f"{hf}.mlp.router.bias")
+        weights["final_norm"] = take("model.norm.weight")
+        if "lm_head.weight" in readers:
+            weights["w_out"] = _transpose_2d(take("lm_head.weight"), "lm_head", precision=precision)
+        else:
+            weights["w_out"] = _transpose_2d(embedding, "embedding_tied", precision=precision)
+        if "lm_head.bias" in readers:
+            weights["lm_head_bias"] = take("lm_head.bias")
+        weights["_attention_size"] = attention_size  # type: ignore[assignment]
+        weights["_num_experts"] = config.raw.get("num_local_experts", 32)  # type: ignore[assignment]
+        weights["_moe_intermediate_size"] = config.intermediate_size  # type: ignore[assignment]
+        weights["_num_experts_per_tok"] = config.raw.get("num_experts_per_tok", 4)  # type: ignore[assignment]
         return weights
 
     def build_engine(
@@ -262,6 +353,9 @@ class _GptOssModel:
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 1
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 16 << 30)
+        if quant_ctx is not None:
+            # Lets the engine inspector show which kernels the quantized matmuls use.
+            trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
 
         if precision == "fp16":
             work_np_dtype = np.float16
@@ -409,6 +503,7 @@ class _GptOssModel:
                 moe_intermediate=moe_intermediate,
                 top_k=top_k,
                 dtype=layer_np_dtype,
+                quant_ctx=quant_ctx,
             )
 
             hidden_state = result["hidden"]
@@ -576,6 +671,7 @@ def _add_gpt_oss_moe_block(
     moe_intermediate: int,
     top_k: int = 4,
     dtype: np.dtype = np.float32,
+    quant_ctx=None,
 ) -> trt.ITensor:
     """GPT-OSS MoE block: topk on raw logits, softmax over selected only.
 
@@ -605,6 +701,10 @@ def _add_gpt_oss_moe_block(
     sm = network.add_softmax(top_values)
     sm.axes = 1 << 1
     routing_weights = sm.get_output(0)  # [1, top_k], sums to 1
+
+    if quant_ctx is not None and quant_ctx.should_quantize(f"{prefix}.experts"):
+        # Batched FP4 expert GEMMs, then the router's top-k picks the rows.
+        return quant_ctx.moe(network, inp, top_indices, routing_weights, prefix, hidden_size)
 
     # 4. Compute ALL expert outputs and stack
     expert_outputs = []
@@ -894,6 +994,7 @@ def _add_gpt_oss_decoder_layer(
     moe_intermediate: int,
     top_k: int = 4,
     dtype: np.dtype = np.float32,
+    quant_ctx=None,
 ) -> dict[str, trt.ITensor]:
     """One GPT-OSS decoder layer: attention with sinks + MoE."""
 
@@ -958,6 +1059,7 @@ def _add_gpt_oss_decoder_layer(
         moe_intermediate,
         top_k,
         dtype=dtype,
+        quant_ctx=quant_ctx,
     )
 
     # Residual connection
@@ -1055,19 +1157,31 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("GPT-OSS max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("GPT-OSS quantization requires a family-owned qualified path")
+    if request.quantization not in {None, "none", "nvfp4"}:
+        raise NotImplementedError(f"GPT-OSS does not support quantization={request.quantization!r}")
+    quantized = request.quantization == "nvfp4"
     if request.fp32_layers:
         raise NotImplementedError("GPT-OSS does not expose mixed-precision layer selection")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("GPT-OSS does not support MTP speculative decoding")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
     parallel.validate()
+    if quantized and (parallel.enabled or precision != "fp16"):
+        raise NotImplementedError(
+            "quantized GPT-OSS builds need tensor_parallel_size=1 and fp16 precision"
+        )
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_resolved_build_precision"] = precision
     config.raw["_parallel_build_enabled"] = parallel.enabled
-    config.raw["_quantized_build_requested"] = False
-    weights = model.load_weights(str(model_dir), config)
+    config.raw["_quantized_build_requested"] = quantized
+    quant_ctx = None
+    if quantized:
+        from .quantization import calibrate_gpt_oss
+
+        quant_ctx = calibrate_gpt_oss(model_dir, config, graph_ops, request.quantization)
+    weights = model.load_weights(str(model_dir), config, precision=precision, quant_ctx=quant_ctx)
     writer.set_header(family="gpt_oss", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -1089,7 +1203,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,

@@ -1,0 +1,29 @@
+{
+  "name": "wan22-ti2v-5b-i2v-portrait",
+  "hf_id": "Wan-AI/Wan2.2-TI2V-5B",
+  "hf_revision": "921dbaf3f1674a56f47e83fb80a34bac8a8f203e",
+  "bundle": "wan22-ti2v-5b-i2v-portrait.bundle",
+  "family": "wan2_2_ti2v",
+  "task": "initial_image_text_to_video",
+  "precision": "bf16",
+  "testcases": [
+    {
+      "name": "wan22-ti2v-5b-i2v-portrait",
+      "premerge": true,
+      "reference_backend": "wan_official",
+      "semantic_assessment": true,
+      "semantic_samples": 6,
+      "runtime_timeout_s": 14400,
+      "test_type": "diffusion",
+      "test_prompt": "The sun sinks slowly toward a calm sea while small waves roll onto the sand",
+      "initial_image": true,
+      "num_inference_steps": 50,
+      "guidance_scale": 5.0,
+      "seed": 42
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "image_height": 1280,
+  "image_width": 704,
+  "video_num_frames": 121
+}

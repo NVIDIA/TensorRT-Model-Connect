@@ -13,6 +13,7 @@
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace trtmc::eagle_vlm_factory {
@@ -44,9 +45,20 @@ std::int32_t require_tensor_parallel_size(const nlohmann::json& config) {
     return static_cast<std::int32_t>(value);
 }
 
+std::int64_t require_vocab_size(const nlohmann::json& config) {
+    if (!config.contains("vocab_size") || !config.at("vocab_size").is_number_integer())
+        throw std::runtime_error("Eagle-VLM runtime.json requires vocab_size; rebuild the bundle");
+    const auto value = config.at("vocab_size").get<std::int64_t>();
+    if (value <= 0)
+        throw std::runtime_error("Eagle-VLM vocab_size is invalid");
+    return value;
+}
+
 std::string require_task(const BundleInfo& info) {
-    if (info.task == IEncoding::kTask || info.task == IEmbedding::kTask ||
-        info.task == IReranking::kTask) {
+    const std::string_view task = info.task;
+    if (task == internal::ITextToPooledFeatures::kTask ||
+        task == internal::ITextToEmbedding::kTask ||
+        task == internal::ITextQueryDocumentsToRelevance::kTask) {
         return info.task;
     }
     throw std::runtime_error("Eagle-VLM does not implement task: " + info.task);
@@ -77,11 +89,12 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         throw std::runtime_error("Eagle-VLM bundle does not contain its required tokenizer");
     const auto task = trtmc::eagle_vlm_factory::require_task(context.reader.info());
     std::string pooling = "last";
-    if (task == trtmc::IReranking::kTask) {
+    if (task == trtmc::internal::ITextQueryDocumentsToRelevance::kTask) {
         if (!config.contains("pooling") || !config.at("pooling").is_string())
             throw std::runtime_error("Eagle-VLM reranking runtime.json requires pooling");
         pooling = config.at("pooling").get<std::string>();
     }
-    return new trtmc::EncoderPipeline(std::move(loaded.module), task, std::move(tokenizer), "",
+    return new trtmc::EncoderPipeline(std::move(loaded.module), task, std::move(tokenizer),
+                                      trtmc::eagle_vlm_factory::require_vocab_size(config),
                                       std::move(pooling));
 }

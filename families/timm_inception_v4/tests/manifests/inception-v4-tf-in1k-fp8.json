@@ -1,0 +1,19 @@
+{
+  "name": "inception-v4-tf-in1k-fp8",
+  "hf_id": "timm/inception_v4.tf_in1k",
+  "hf_revision": "ad5d294cda312745a9afa433e45d9ccd956a1548",
+  "bundle": "inception-v4-tf-in1k-fp8.bundle",
+  "family": "timm_inception_v4",
+  "task": "image_to_class_scores",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "inception-v4-tf-in1k-fp8",
+      "premerge": true,
+      "test_image": "data/orc_test_img.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1,
+  "quantization": "fp8"
+}

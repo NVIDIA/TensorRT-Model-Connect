@@ -124,6 +124,7 @@ struct FocalObjective {
     double cost{std::numeric_limits<double>::infinity()};
     double gradient{0.0};
     double curvature{0.0};
+    double shift_curvature{0.0};
     bool ok{false};
 };
 
@@ -154,7 +155,8 @@ bool estimate_focal(const std::vector<FocalSample>& samples, double shift, doubl
 
 bool valid_focal_objective(const FocalObjective& objective) {
     return std::isfinite(objective.cost) && std::isfinite(objective.gradient) &&
-           std::isfinite(objective.curvature) && objective.curvature > kDenominatorEpsilon;
+           std::isfinite(objective.curvature) && std::isfinite(objective.shift_curvature) &&
+           objective.shift_curvature > kDenominatorEpsilon;
 }
 
 FocalObjective accumulate_focal_objective(const std::vector<FocalSample>& samples, double shift,
@@ -163,7 +165,9 @@ FocalObjective accumulate_focal_objective(const std::vector<FocalSample>& sample
     result.focal = focal;
     result.cost = 0.0;
     result.gradient = 0.0;
-    result.curvature = 0.0;
+    double shift_shift = 0.0;
+    double shift_focal = 0.0;
+    double focal_focal = 0.0;
     for (const auto& sample : samples) {
         const double depth = sample.z + shift;
         const double inv_depth = 1.0 / depth;
@@ -177,8 +181,20 @@ FocalObjective accumulate_focal_objective(const std::vector<FocalSample>& sample
         const double derivative_y = -focal * sample.y * inv_depth * inv_depth;
         result.cost += residual_x * residual_x + residual_y * residual_y;
         result.gradient += residual_x * derivative_x + residual_y * derivative_y;
-        result.curvature += derivative_x * derivative_x + derivative_y * derivative_y;
+        shift_shift += derivative_x * derivative_x + derivative_y * derivative_y;
+        shift_focal += derivative_x * projected_x + derivative_y * projected_y;
+        focal_focal += projected_x * projected_x + projected_y * projected_y;
     }
+    // Focal is re-solved for every shift, so the curvature is that of the
+    // reduced problem: the shift Jacobian without its component along the
+    // focal Jacobian (projected XY). When depth barely varies the two are
+    // nearly parallel; the full shift curvature then overstates the reduced
+    // one by orders of magnitude and the damped steps stall far from the
+    // optimum the official least-squares solve reaches. A constant-depth scene
+    // makes them exactly parallel; the reduced curvature is then zero up to
+    // rounding and the damping alone sizes the step.
+    result.shift_curvature = shift_shift;
+    result.curvature = std::max(0.0, shift_shift - shift_focal * shift_focal / focal_focal);
     result.ok = valid_focal_objective(result);
     return result;
 }

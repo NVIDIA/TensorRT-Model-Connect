@@ -5,14 +5,19 @@
 
 #include "families/qwen/runtime/chat_templates.h"
 
+#include <stdexcept>
 #include <string>
 
 namespace trtmc {
 namespace {
 
-std::string apply_chatml(const std::string& prompt, bool enable_thinking) {
-    std::string r = "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
-    if (!enable_thinking)
+std::string apply_chatml(const std::string& prompt, bool append_empty_think,
+                         const std::string& system_prompt) {
+    std::string r;
+    if (!system_prompt.empty())
+        r = "<|im_start|>system\n" + system_prompt + "<|im_end|>\n";
+    r += "<|im_start|>user\n" + prompt + "<|im_end|>\n<|im_start|>assistant\n";
+    if (append_empty_think)
         r += "<think>\n\n</think>\n\n";
     return r;
 }
@@ -22,18 +27,59 @@ std::string apply_chatml(const std::string& prompt, bool enable_thinking) {
 std::string qwen_detect_chat_template_format(const std::string& jinja_template) {
     if (jinja_template.empty())
         return {};
-    if (jinja_template.find("<|im_start|>") != std::string::npos)
+    if (jinja_template.find("<|im_start|>") != std::string::npos) {
+        // ChatML framing alone does not imply the hybrid Qwen3 thinking suffix.
+        const bool has_empty_think =
+            jinja_template.find("<think>\\n\\n</think>\\n\\n") != std::string::npos ||
+            jinja_template.find("<think>\n\n</think>\n\n") != std::string::npos;
+        if (jinja_template.find("enable_thinking") != std::string::npos && has_empty_think)
+            return "chatml_thinking";
         return "chatml";
+    }
     return {};
 }
 
 std::string qwen_apply_chat_template(const std::string& format, const std::string& prompt,
-                                     bool enable_thinking) {
+                                     bool enable_thinking, const std::string& system_prompt) {
     if (format.empty())
         return prompt;
-    if (format == "chatml")
-        return apply_chatml(prompt, enable_thinking);
+    if (format == "chatml" || format == "chatml_thinking")
+        return apply_chatml(prompt, format == "chatml_thinking" && !enable_thinking, system_prompt);
     return prompt;
+}
+
+std::string
+qwen_apply_conversation_template(const std::string& format,
+                                 const std::vector<std::pair<std::string, std::string>>& messages,
+                                 bool enable_thinking) {
+    if (format != "chatml" && format != "chatml_thinking")
+        throw std::invalid_argument("Qwen conversation requires a supported chat template");
+    if (messages.empty() || messages.back().first != "user")
+        throw std::invalid_argument("Qwen conversation must end with a user message");
+    std::string result;
+    for (std::size_t index = 0; index < messages.size(); ++index) {
+        const auto& [role, original] = messages[index];
+        if (role != "user" && role != "assistant" && !(role == "system" && index == 0))
+            throw std::invalid_argument(
+                "Qwen conversation supports user/assistant and a leading system message");
+        auto content = original;
+        // The pinned hybrid Qwen3 template omits reasoning from assistant turns
+        // before the final user query. Preserve the original typed input; only
+        // this family-owned rendering applies that model-specific convention.
+        if (role == "assistant" && format == "chatml_thinking") {
+            const auto end = content.rfind("</think>");
+            if (end != std::string::npos) {
+                content.erase(0, end + std::string("</think>").size());
+                const auto first = content.find_first_not_of('\n');
+                content.erase(0, first == std::string::npos ? content.size() : first);
+            }
+        }
+        result += "<|im_start|>" + role + "\n" + content + "<|im_end|>\n";
+    }
+    result += "<|im_start|>assistant\n";
+    if (format == "chatml_thinking" && !enable_thinking)
+        result += "<think>\n\n</think>\n\n";
+    return result;
 }
 
 } // namespace trtmc

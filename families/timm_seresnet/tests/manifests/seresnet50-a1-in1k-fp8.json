@@ -1,0 +1,20 @@
+{
+  "name": "seresnet50-a1-in1k-fp8",
+  "hf_id": "timm/seresnet50.a1_in1k",
+  "hf_revision": "23f3482ee9acc4f51a2668a7cdf255fbd9420417",
+  "bundle": "seresnet50-a1-in1k-fp8.bundle",
+  "family": "timm_seresnet",
+  "task": "classification",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "seresnet50-a1-in1k-fp8",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg",
+      "logit_cosine_floor": 0.997
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1,
+  "quantization": "fp8"
+}

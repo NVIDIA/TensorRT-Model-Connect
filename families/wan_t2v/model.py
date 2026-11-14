@@ -14,6 +14,7 @@ from .checkpoint_mapper import WeightDict
 
 
 from .parallel import ParallelConfig
+from .quantization import calibrate_wan_t2v, reject_quantized_checkpoint
 
 if TYPE_CHECKING:
     from tensorrt_model_connect.build import BuildRequest
@@ -170,6 +171,9 @@ class _WanT2VModel:
             )
 
         # 2. DiT denoiser
+        quantization = config.raw.get("_quantization")
+        if quantization:
+            reject_quantized_checkpoint(transformer_dir)
         print("[wan-t2v] Loading DiT weights ...", file=sys.stderr)
         with timed_weight_loading(build_timing, "dit"):
             dit_weights = load_dit_weights(
@@ -179,6 +183,15 @@ class _WanT2VModel:
                 num_layers=self._DIT_NUM_LAYERS,
                 ffn_dim=self._DIT_FFN_DIM,
                 context_dim=self._DIT_CONTEXT_DIM,
+            )
+        quant_ctx = None
+        if quantization:
+            quant_ctx = calibrate_wan_t2v(
+                dit_weights,
+                quantization,
+                dim=self._DIT_DIM,
+                num_layers=self._DIT_NUM_LAYERS,
+                ffn_dim=self._DIT_FFN_DIM,
             )
         # Note: context_dim=dim (1536) because the text embedding projection
         # (4096->1536) is handled externally in the runner, so cross-attn
@@ -238,6 +251,7 @@ class _WanT2VModel:
                     text_seq_len=self._T5_MAX_SEQ_LEN,
                     precision=precision,
                     verbose=verbose,
+                    quant_ctx=quant_ctx,
                 )
 
         # 3. Causal 3D VAE decoder
@@ -455,6 +469,8 @@ def _serialize_preprocessor_weights(dit_weights: dict) -> bytes:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Wan text-to-video bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Wan T2V does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("wan_t2v does not support dynamic_kv_cache")
 
@@ -467,8 +483,18 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError("Wan T2V supports only precision=fp16 or fp32")
     if request.max_batch_size != 1:
         raise NotImplementedError("Wan T2V requires max_batch_size=1")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Wan T2V does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"Wan T2V supports quantization fp8 or none; got {request.quantization!r}"
+        )
+    quantization = "fp8" if request.quantization == "fp8" else None
+    if quantization is not None:
+        if request.precision != "fp16":
+            raise ValueError("Wan T2V fp8 builds require precision=fp16")
+        if int(request.tensor_parallel_size) != 1 or int(request.context_parallel_size) != 1:
+            raise NotImplementedError(
+                "Wan T2V fp8 builds do not support tensor or context parallelism"
+            )
 
     height = int(request.image_height or 480)
     width = int(request.image_width or 832)
@@ -485,6 +511,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "video_width": width,
             "video_num_frames": frames,
             "_fp32_layers": request.fp32_layers,
+            "_quantization": quantization,
         },
     )
     parallel = ParallelConfig(

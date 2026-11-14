@@ -16,6 +16,11 @@ import tensorrt as trt
 
 from . import graph
 from .checkpoint import Checkpoint
+from .quantization import (
+    calibrate_timm_repvgg,
+    configure_fp8_build,
+    refuse_quantized_checkpoint,
+)
 
 
 if TYPE_CHECKING:
@@ -209,6 +214,7 @@ def _build_engine(
     checkpoint: Checkpoint,
     precision: str,
     verbose: bool,
+    quantization: str | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     if precision == "fp16":
         numpy_dtype, tensor_dtype = np.float16, trt.float16
@@ -216,6 +222,8 @@ def _build_engine(
         numpy_dtype, tensor_dtype = np.float32, trt.float32
     else:
         raise ValueError(f"unsupported timm RepVGG precision: {precision}")
+    if quantization is not None and precision != "fp16":
+        raise ValueError(f"timm_repvgg FP8 needs precision fp16, got {precision!r}")
     config = _preprocess_config(raw)
     blocks = _layout(checkpoint)
     weights = _weights(checkpoint, blocks, numpy_dtype)
@@ -223,6 +231,15 @@ def _build_engine(
     if head.shape != (config["num_classes"], config["num_features"]):
         raise ValueError("RepVGG classifier dimensions do not match config.json")
 
+    quant_ctx = None
+    if quantization is not None:
+        quant_ctx = calibrate_timm_repvgg(
+            blocks,
+            (config["image_height"], config["image_width"]),
+            weights,
+            quantization,
+            precision=precision,
+        )
     total_stride = 2
     for block in blocks:
         total_stride *= int(block["stride"])
@@ -234,7 +251,8 @@ def _build_engine(
         print(
             "[trtmc build] timm_repvgg: "
             f"image={height}x{width}, blocks={len(blocks)}, "
-            f"classes={config['num_classes']}, precision={precision}",
+            f"classes={config['num_classes']}, precision={precision}, "
+            f"quantization={quantization or 'none'}",
             file=sys.stderr,
         )
 
@@ -247,6 +265,7 @@ def _build_engine(
     builder_config.max_aux_streams = 0
     builder_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
     builder_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+    configure_fp8_build(builder_config, quant_ctx)
 
     pixels = network.add_input("pixel_values", trt.float32, (1, 3, height, width))
     if pixels is None:
@@ -268,14 +287,23 @@ def _build_engine(
     hidden = graph.relu(network, hidden)
     for block in blocks:
         prefix = str(block["prefix"])
-        hidden = graph.convolution(
-            network,
-            hidden,
-            weights[f"{prefix}.weight"],
-            weights[f"{prefix}.bias"],
-            stride=int(block["stride"]),
-            dtype=numpy_dtype,
-        )
+        if quant_ctx is not None and quant_ctx.should_quantize(prefix):
+            hidden = quant_ctx.convolution(
+                network,
+                hidden,
+                prefix,
+                weights[f"{prefix}.bias"],
+                stride=int(block["stride"]),
+            )
+        else:
+            hidden = graph.convolution(
+                network,
+                hidden,
+                weights[f"{prefix}.weight"],
+                weights[f"{prefix}.bias"],
+                stride=int(block["stride"]),
+                dtype=numpy_dtype,
+            )
         hidden = graph.relu(network, hidden)
     hidden = graph.global_average_pool(
         network,
@@ -331,18 +359,27 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_repvgg does not support context parallelism")
     if request.task != "classification":
         raise ValueError("timm_repvgg supports only task=classification")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("timm_repvgg does not support quantization")
+    quantization = None if request.quantization in {None, "none"} else str(request.quantization)
+    if quantization not in {None, "fp8"}:
+        raise NotImplementedError(
+            f"timm_repvgg supports quantization fp8 or none, got {request.quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("timm_repvgg does not support mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("timm_repvgg does not support MTP speculative decoding")
     _positive_int(request.max_sequence_length or 1, "max_sequence_length")
     model_dir = Path(request.model_dir)
     raw = _read_config(model_dir)
+    checkpoint = Checkpoint.open(model_dir)
+    if quantization is not None:
+        refuse_quantized_checkpoint(model_dir, checkpoint.names)
     plan, runtime = _build_engine(
         raw,
-        Checkpoint.open(model_dir),
+        checkpoint,
         str(request.precision).lower(),
         bool(request.verbose),
+        quantization,
     )
     writer.set_header(family="timm_repvgg", task=request.task, backend=request.backend)
     writer.add_bytes("engine.plan", plan)

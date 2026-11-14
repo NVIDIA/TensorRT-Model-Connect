@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Direct build, native runtime, and ultralytics reference proof for YOLOv10."""
+"""Direct build, native runtime, and PyTorch reference proof for YOLOv10."""
 
 from __future__ import annotations
 
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -27,7 +28,7 @@ def _cases() -> dict[str, tuple[dict, dict]]:
     for path in sorted(MANIFEST_ROOT.glob("*.json")):
         manifest = json.loads(path.read_text(encoding="utf-8"))
         assert manifest["family"] == FAMILY
-        assert manifest["task"] == "object_detection"
+        assert manifest["task"] == "image_to_boxes"
         for case in manifest["testcases"]:
             name = str(case["name"])
             assert name not in result
@@ -104,22 +105,6 @@ def _asset(case: dict) -> Path:
     return path
 
 
-def _reference_yaml(model_dir: Path) -> str:
-    config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
-    model = config.get("model") if isinstance(config, dict) else None
-    if not isinstance(model, str) or model not in {"yolov10n.yaml", "yolov10s.yaml", "yolov10x.yaml"}:
-        raise ValueError(f"unsupported YOLOv10 reference architecture: {model!r}")
-    record_evidence("checkpoint", {"configuration": config})
-    return model
-
-
-def _reference_tensors(model_dir: Path) -> dict:
-    from families.yolov10.checkpoint import Checkpoint
-
-    checkpoint = Checkpoint.open(model_dir, framework="pt")
-    return {name: reader.get_tensor(name) for name, reader in checkpoint.tensor_map.items()}
-
-
 def _record_reference_boxes(rows, scale: float, pad_x: float, pad_y: float) -> None:
     if not evidence_enabled():
         return
@@ -138,6 +123,65 @@ def _record_reference_boxes(rows, scale: float, pad_x: float, pad_y: float) -> N
         )
     except Exception as error:
         record_evidence("reference_preview", {"error": f"{type(error).__name__}: {error}"})
+
+
+def _assert_matches_reference(actual: dict, kept: list, scale: float, pad_x: float, pad_y: float) -> None:
+    """The original native-vs-PyTorch oracle, applied unchanged to every path."""
+    assert kept, "the reference found nothing above the threshold to compare against"
+    assert len(actual["scores"]) == len(kept), (
+        f"engine returned {len(actual['scores'])} detections, reference {len(kept)}"
+    )
+    for index, row in enumerate(kept):
+        assert int(actual["classes"][index]) == int(row[5])
+        assert abs(float(actual["scores"][index]) - float(row[4])) < 5e-3
+        for axis in range(4):
+            # Each path reports original-image pixels, so the reference box has
+            # to come back out of the letterbox before they can be compared.
+            reference_pixel = (float(row[axis]) - (pad_x if axis % 2 == 0 else pad_y)) / scale
+            assert abs(float(actual["boxes"][index * 4 + axis]) - reference_pixel) < 1.0
+
+
+def _sdk_detections(runtime_root: Path, bundle: Path, image: Path, tmp_path: Path) -> list[dict]:
+    """Run the public C and C++ consumers on the reference's own decoded pixels."""
+    from PIL import Image
+
+    native_build = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    pixels = np.asarray(Image.open(image).convert("RGB"), dtype=np.float32) / np.float32(255.0)
+    raw = tmp_path / "sdk-input.rgb.f32"
+    np.ascontiguousarray(pixels).tofile(raw)
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = os.pathsep.join(
+        value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value
+    )
+    outputs = []
+    for language in ("c", "cpp"):
+        consumer = native_build / f"test_yolov10_sdk_{language}"
+        assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
+        completed = subprocess.run(
+            [
+                str(consumer),
+                str(bundle),
+                str(runtime_root),
+                str(raw),
+                str(pixels.shape[0]),
+                str(pixels.shape[1]),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=600,
+        )
+        record_evidence(f"sdk_{language}_process", {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr})
+        payloads = [line for line in completed.stdout.splitlines() if line.startswith("{")]
+        assert len(payloads) == 1, f"the {language} consumer must print one result"
+        result = json.loads(payloads[0])
+        assert result["task"] == "image_to_boxes"
+        assert (result["image_height"], result["image_width"]) == pixels.shape[:2]
+        outputs.append(result)
+    # Same pixels, same bundle, same runtime: the two public bindings agree exactly.
+    assert outputs[0] == outputs[1], "the C and C++ SDK consumers disagree"
+    return outputs
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
@@ -189,26 +233,17 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     record_evidence("native", actual)
 
     with evidence_stage("reference"):
-        from ultralytics import YOLO
-
-        # The reference must run the checkpoint under test. YOLO(<directory>)
-        # quietly downloads its own weights instead, which would compare the engine
-        # against a different model.
-        reference = YOLO(_reference_yaml(model_dir), task="detect").model
-        raw = _reference_tensors(model_dir)
-        state = {key[len("model."):]: value for key, value in raw.items() if key.startswith("model.")}
-        missing, unexpected = reference.load_state_dict(state, strict=False)
-        assert not missing, f"reference is missing checkpoint tensors: {missing[:5]}"
-        reference = reference.eval()
-
-        import torch
-        from PIL import Image
-
-        source = Image.open(image).convert("RGB")
-        letterboxed, scale, pad_x, pad_y = _letterbox(source, 640)
-        with torch.no_grad():
-            expected = reference(torch.from_numpy(letterboxed))
-        expected = (expected[0] if isinstance(expected, (list, tuple)) else expected)[0].numpy()
+        record_evidence("checkpoint", {"configuration": json.loads((model_dir / "config.json").read_text())})
+        reference_output = tmp_path / "reference.npz"
+        subprocess.run(
+            [sys.executable, str(TEST_ROOT / "reference/e2e.py"),
+             str(model_dir), str(image), str(reference_output)],
+            check=True, timeout=600,
+            env={**os.environ, "PYTHONPATH": str(TEST_ROOT.parents[2]) + os.pathsep + os.environ.get("PYTHONPATH", "")},
+        )
+        with np.load(reference_output, allow_pickle=False) as result:
+            expected = result["expected"]
+            scale, pad_x, pad_y = (float(result[name]) for name in ("scale", "pad_x", "pad_y"))
 
     record_evidence("reference_raw", {"detections": expected, "coordinate_space": "letterboxed-image pixels", "scale": scale, "pad_x": pad_x, "pad_y": pad_y})
     threshold = 0.25
@@ -216,31 +251,9 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     kept = [row for row in expected if float(row[4]) >= threshold]
     _record_reference_boxes(kept, scale, pad_x, pad_y)
     with evidence_stage("compare"):
-        assert kept, "the reference found nothing above the threshold to compare against"
-        assert len(actual["scores"]) == len(kept), (
-            f"engine returned {len(actual['scores'])} detections, reference {len(kept)}"
-        )
-        for index, row in enumerate(kept):
-            assert int(actual["classes"][index]) == int(row[5])
-            assert abs(float(actual["scores"][index]) - float(row[4])) < 5e-3
-            for axis in range(4):
-                # The engine reports original-image pixels, so the reference box has
-                # to come back out of the letterbox before they can be compared.
-                reference_pixel = (float(row[axis]) - (pad_x if axis % 2 == 0 else pad_y)) / scale
-                assert abs(float(actual["boxes"][index * 4 + axis]) - reference_pixel) < 1.0
-
-
-def _letterbox(image, size: int):
-    """Ultralytics preprocessing: keep aspect, pad with 114, scale to [0, 1]."""
-    from PIL import Image
-
-    scale = min(size / image.height, size / image.width)
-    resized = image.resize(
-        (round(image.width * scale), round(image.height * scale)), Image.BILINEAR
-    )
-    canvas = Image.new("RGB", (size, size), (114, 114, 114))
-    left = (size - resized.width) // 2
-    top = (size - resized.height) // 2
-    canvas.paste(resized, (left, top))
-    array = np.asarray(canvas, dtype=np.float32).transpose(2, 0, 1) / 255.0
-    return array[None].copy(), scale, float(left), float(top)
+        _assert_matches_reference(actual, kept, scale, pad_x, pad_y)
+    # The public SDK reads the same pixels the reference decoded, so it is held to
+    # the same oracle; the CLI's own JPEG decoder is not claimed bitwise equal.
+    with evidence_stage("sdk"):
+        for sdk in _sdk_detections(runtime_root, bundle, image, tmp_path):
+            _assert_matches_reference(sdk, kept, scale, pad_x, pad_y)

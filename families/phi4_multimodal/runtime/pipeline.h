@@ -16,7 +16,9 @@
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
 
+#include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <utility>
@@ -28,11 +30,14 @@ struct Phi4MultimodalConfig {
     int32_t vocab_size{0};
     int32_t id_bos{0};
     int32_t id_eos{0};
+    std::vector<int32_t> eos_token_ids;
     int32_t image_token_id{-1};
     int32_t vision_output_dim{0};
     bool has_position_input{true};
     int32_t num_layers{0};
     int32_t prefill_max_length{0};
+    // Sequences longer than this use the long LongRoPE factors (0: one regime).
+    int32_t rope_long_factor_threshold{0};
     std::string present_k_pattern{"present_k_{i}"};
     std::string present_v_pattern{"present_v_{i}"};
 };
@@ -78,6 +83,7 @@ class Phi4MultimodalPipeline final : public ITextGeneration, public IVisionLangu
     cudaStream_t stream_;
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
+    int32_t rope_long_factor_{0};
 
     std::vector<int32_t> generate_from_ids(const std::vector<int32_t>& input_ids,
                                            int32_t max_new_tokens,
@@ -92,6 +98,7 @@ class Phi4MultimodalPipeline final : public ITextGeneration, public IVisionLangu
     std::pair<int32_t, int32_t> resolve_gen_limits(const TextGenerationConfig& cfg) const;
 
     void reset_generation_context(int32_t prompt_length);
+    void reset_sequence_state(int32_t prompt_length);
 
     void run_vl_prefill_token(int32_t token_id, const std::vector<float>& image_features,
                               const std::vector<std::vector<float>>& deepstack_features,
@@ -104,10 +111,22 @@ class Phi4MultimodalPipeline final : public ITextGeneration, public IVisionLangu
                                 int32_t num_features, int32_t feature_dim,
                                 std::vector<float>& logits);
 
+    // Recomputes the whole sequence and returns the logits of its last token.
+    using SequencePrefill = std::function<void(const std::vector<int32_t>&, std::vector<float>&)>;
+
     void run_vl_decode_loop(Phi4MultimodalISampler* sampler,
                             const Phi4MultimodalSamplingParams& params,
                             std::vector<int32_t>& output, std::vector<float>& logits,
-                            int32_t max_new_tokens);
+                            int32_t max_new_tokens, const SequencePrefill& prefill_sequence);
+
+    // Select the LongRoPE regime for a new sequence (prompt) of this length.
+    void begin_rope_regime(std::size_t sequence_length);
+
+    // Run the next decode step for output.back(); when the sequence first
+    // exceeds the LongRoPE threshold, recompute it with the long factors as
+    // the reference does.
+    void run_decode_step(const std::vector<int32_t>& output, std::vector<float>& logits,
+                         const SequencePrefill& prefill_sequence);
 
     void run_text_step(int32_t token_id, std::vector<float>& logits);
 

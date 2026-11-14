@@ -170,6 +170,17 @@ void NemotronHKvCache::bind_to(ITrtModule& module) {
     if (mask_rank != 2)
         throw std::runtime_error("nemotron_h decoder has an invalid attention-mask rank");
 
+    // External state must have the engine's exact storage type. In particular,
+    // an FP8 buffer cannot safely back a wider floating-point engine binding.
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        const auto layer = static_cast<std::size_t>(i);
+        for (const auto& name : {names_.cache_k[layer], names_.cache_v[layer],
+                                 names_.present_k[layer], names_.present_v[layer]}) {
+            if (module.tensor_dtype(name) != cache_dtype_)
+                throw std::runtime_error(
+                    "nemotron_h decoder KV dtype differs from runtime metadata");
+        }
+    }
     bound_module_ = &module;
     has_position_input_ = module.has_input(names_.position_id);
     for (int32_t i = 0; i < num_layers_; ++i) {
@@ -241,6 +252,19 @@ void NemotronHKvCache::append_prefill_kv(const std::vector<const void*>& prefill
 
 void NemotronHKvCache::set_position(int32_t position) {
     position_ = std::max(0, std::min(position, max_length_));
+}
+
+void NemotronHKvCache::append_prefill_from(const ITrtModule& module, int32_t seq_len) {
+    std::vector<const void*> keys(static_cast<std::size_t>(num_layers_));
+    std::vector<const void*> values(static_cast<std::size_t>(num_layers_));
+    for (int32_t i = 0; i < num_layers_; ++i) {
+        const auto layer = static_cast<std::size_t>(i);
+        keys[layer] = module.device_ptr(names_.present_k[layer]);
+        values[layer] = module.device_ptr(names_.present_v[layer]);
+        if (keys[layer] == nullptr || values[layer] == nullptr)
+            throw std::runtime_error("nemotron_h prefill context has no present K/V output");
+    }
+    append_prefill_kv(keys, values, seq_len);
 }
 
 void NemotronHKvCache::advance(int32_t n_tokens) {

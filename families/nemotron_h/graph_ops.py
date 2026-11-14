@@ -65,9 +65,10 @@ def add_matmul_rhs_constant(
     rhs_weights: np.ndarray,
     dtype: np.dtype = np.float32,
     fp32_accumulation: bool = True,
+    rank: int | None = None,
 ) -> trt.ITensor:
     """Matrix multiply: lhs @ rhs_constant.  rhs is [lhs_width, rhs_width]."""
-    rank = len(tuple(lhs.shape))
+    rank = len(tuple(lhs.shape)) if rank is None else rank
     rhs_shape = (lhs_width, rhs_width) if rank <= 2 else (1,) * (rank - 2) + (lhs_width, rhs_width)
     rhs = add_constant(
         network,
@@ -99,9 +100,10 @@ def add_bias_sum(
     width: int,
     bias: np.ndarray,
     dtype: np.dtype = np.float32,
+    rank: int | None = None,
 ) -> trt.ITensor:
     """Element-wise add a bias broadcast over all non-feature axes."""
-    rank = len(tuple(inp.shape))
+    rank = len(tuple(inp.shape)) if rank is None else rank
     bias_shape = (width,) if rank <= 1 else (1,) * (rank - 1) + (width,)
     bias_t = add_constant(network, bias_shape, np.asarray(bias).reshape(bias_shape), dtype=dtype)
     bias_t = _cast_back_to_trt_dtype(network, bias_t, inp.dtype)
@@ -532,8 +534,14 @@ def add_attention_core(
     mask: trt.ITensor | None = None,
     scale: float | None = None,
     fp32_accumulation: bool = False,
+    static_geometry: tuple[int, int, int, int, int] | None = None,
+    decompose_attention: bool = False,
 ) -> trt.ITensor:
-    """Scaled dot-product attention via TRT native IAttention layer.
+    """Scaled dot-product attention, with explicit primitives after conditional MoE.
+
+    The conditional-to-IAttention composition can stall during enqueue. The
+    owning MoE graph uses equivalent TensorRT math; TensorRT still owns fusion,
+    tactics and execution. Ordinary graphs retain IAttention.
 
     Replaces the manual Q@K^T → scale → softmax → @V chain.  TRT 10 fuses
     this into a single kernel when a supported implementation is available;
@@ -586,16 +594,56 @@ def add_attention_core(
         scale_t = network.add_cast(scale_t, trt.bfloat16).get_output(0)
     q_scaled = network.add_elementwise(q_4d, scale_t, trt.ElementWiseOperation.PROD)
 
+    if decompose_attention:
+        if static_geometry is None or causal:
+            raise ValueError("Post-MoE attention requires static geometry and an explicit mask")
+        heads, kv_heads, dim, q_rows, kv_rows = static_geometry
+        if kv_heads <= 0 or heads % kv_heads:
+            raise ValueError("Invalid Nemotron-H grouped-query attention geometry")
+        group = heads // kv_heads
+
+        def reshape(value, shape):
+            layer = network.add_shuffle(value)
+            layer.reshape_dims = shape
+            return layer.get_output(0)
+
+        # Grouped batch dimensions broadcast K/V without materializing repeated
+        # heads. Keep the same scaling, masking and precision as IAttention.
+        query = reshape(q_scaled.get_output(0), (1, kv_heads, group, q_rows, dim))
+        key = reshape(k_4d, (1, kv_heads, 1, kv_rows, dim))
+        value = reshape(v_4d, (1, kv_heads, 1, kv_rows, dim))
+        scores = network.add_matrix_multiply(
+            query, trt.MatrixOperation.NONE, key, trt.MatrixOperation.TRANSPOSE
+        ).get_output(0)
+        if mask is not None:
+            mask_shape = ((1, 1, 1, q_rows, kv_rows) if mask.shape[1] == 1
+                          else (1, kv_heads, group, q_rows, kv_rows))
+            scores = network.add_elementwise(
+                scores, reshape(mask, mask_shape), trt.ElementWiseOperation.SUM
+            ).get_output(0)
+        # Conditional predecessors defer shape inference. Construct the
+        # normalization at its known rank, then wire the actual score tensor.
+        seed = network.add_fill(
+            (1, kv_heads, group, q_rows, kv_rows), trt.FillOperation.LINSPACE, trt.float32
+        )
+        seed.alpha = 0.0
+        seed.beta = 0.0
+        probabilities = network.add_softmax(
+            _cast_back_to_trt_dtype(network, seed.get_output(0), scores.dtype)
+        )
+        probabilities.axes = 1 << 4
+        probabilities.set_input(0, scores)
+        context = network.add_matrix_multiply(
+            probabilities.get_output(0), trt.MatrixOperation.NONE,
+            value, trt.MatrixOperation.NONE,
+        ).get_output(0)
+        return _cast_back_to_trt_dtype(
+            network, reshape(context, (1, heads, q_rows, dim)), output_dtype
+        )
+
     attn = network.add_attention(
-        q_scaled.get_output(0),
-        k_4d,
-        v_4d,
-        trt.AttentionNormalizationOp.SOFTMAX,
-        causal,
+        q_scaled.get_output(0), k_4d, v_4d, trt.AttentionNormalizationOp.SOFTMAX, causal
     )
-    # Allow TRT to decompose into primitive ops when no fused kernel is
-    # available (e.g. unsupported head-dim or dtype).  This guarantees
-    # correctness on any configuration at the cost of potential performance.
     attn.decomposable = True
     if mask is not None and not causal:
         attn.mask = mask
@@ -740,6 +788,7 @@ def add_attention_from_rows(
     logit_softcap: float | None = None,
     fp32_accumulation: bool = False,
     tag: str | None = None,
+    decompose_attention: bool = False,
 ) -> trt.ITensor:
     """Native IAttention for row-major [S, H * D] Q/K/V tensors.
 
@@ -800,6 +849,9 @@ def add_attention_from_rows(
             mask=mask,
             scale=scale,
             fp32_accumulation=fp32_accumulation,
+            decompose_attention=decompose_attention,
+            static_geometry=(num_heads, kv_heads, head_dim, q_seq, kv_seq)
+            if q_seq is not None and kv_seq is not None else None,
         )
     return reshape_heads_4d_to_rows(
         network,

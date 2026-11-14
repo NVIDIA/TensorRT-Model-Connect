@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# ADE20K SceneParse150 validation: 500 images in seeded order; gold is the 150-class annotation map, scored as the
+# dataset-level class mIoU.
+suite: ade20k-val-500
+version: 2
+source:
+  kind: hf_dataset
+  dataset: zhoubolei/scene_parse_150
+  split: validation
+  revision: e660d866a1351c70bcf07925d2600b60bd6e3bc3
+  data_files: {validation: scene_parsing/validation/*.parquet}
+  image_column: image
+  label_column: annotation
+  label_image: true
+selection: {method: seeded, count: 500}
+fields: {image: image_path}

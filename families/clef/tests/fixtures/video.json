@@ -1,0 +1,19 @@
+{
+  "model": "clef",
+  "state": "Review the video frames.",
+  "questions": {
+    "color": {
+      "type": "choice",
+      "instructions": "What color is the moving square?",
+      "criteria": {
+        "red": "Red",
+        "blue": "Blue",
+        "green": "Green"
+      }
+    },
+    "moving": {
+      "type": "noul",
+      "instructions": "Does the square move to the right?"
+    }
+  }
+}

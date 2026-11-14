@@ -142,6 +142,12 @@ void test_row_gate_is_exact() {
     for (std::size_t index = 1; index < mask.size(); ++index)
         noise_enabled = noise_enabled && mask[index] == 1.0F;
     check(noise_enabled, "all noise rows have LoRA enabled");
+    check(trtmc::k2_horizon_uno_mask_uses_lora(mask), "draft mask selects the LoRA profile");
+    check(trtmc::k2_horizon_uno_mask_uses_lora({0.0F, 0.0F, 0.5F}),
+          "any nonzero row selects the LoRA profile");
+    check(!trtmc::k2_horizon_uno_mask_uses_lora(std::vector<float>(8, 0.0F)),
+          "all-zero verify mask selects the base profile");
+    check(!trtmc::k2_horizon_uno_mask_uses_lora({-0.0F}), "negative zero selects the base profile");
 }
 
 void test_official_deterministic_uniform_golden() {
@@ -221,7 +227,11 @@ void test_cache_cursor_rollback_contract() {
     check(rejects([&] { cursor.rollback(4); }), "rollback cannot move frontier forward");
     cursor.reset();
     check(cursor.position() == 0, "cursor reset clears logical state");
-    check(rejects([&] { cursor.advance(9); }), "cursor rejects blocks above engine maximum");
+    // Decode blocks use at most 8 rows; prompt chunks of the base profile up to 64.
+    trtmc::K2HorizonUnoCacheCursor prompt(128);
+    check(rejects([&] { prompt.advance(65); }), "cursor rejects calls above engine maximum");
+    prompt.advance(64);
+    check(prompt.position() == 64, "prompt chunk advances cursor by up to 64 rows");
 
     // Three prompt rows plus five completion tokens fill capacity exactly.
     // The first completion seed remains uncached: draft reaches 7, then

@@ -161,7 +161,13 @@ def resolve_model(model: str, revision: str | None = None) -> Path:
         raise ValueError(f"model path is not a directory: {local}")
     from huggingface_hub import snapshot_download
 
-    return Path(snapshot_download(repo_id=model, revision=revision))
+    return Path(
+        snapshot_download(
+            repo_id=model,
+            revision=revision,
+            ignore_patterns=["*flax_model*", "*tf_model*"],
+        )
+    )
 
 
 def _family_directories() -> list[Path]:

@@ -1,0 +1,199 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import pytest
+
+torch = pytest.importorskip("torch")
+
+from trtmc_perf_serving.backends.base import BackendError  # noqa: E402
+from trtmc_perf_serving.backends.reference.text import (  # noqa: E402
+    _generation_kwargs, _language_controls, _place_source_language, _without_appended_eos, encoder_input_limit,
+)
+
+
+class NllbTokenizer:
+    src_lang = "eng_Latn"
+    unk_token_id = 3
+    ids = {"eng_Latn": 256047, "fra_Latn": 256057}
+
+    def convert_tokens_to_ids(self, token):
+        return self.ids[token]
+
+    def convert_ids_to_tokens(self, token_id):
+        return {value: key for key, value in self.ids.items()}[token_id]
+
+
+class PairTokenizer:  # a fixed-pair tokenizer without language APIs (Marian-style)
+    unk_token_id = 3
+
+    def convert_ids_to_tokens(self, token_id):
+        return f"<{token_id}>"
+
+
+def test_generation_is_greedy_with_one_beam_unless_requested():
+    assert _generation_kwargs({"max_new_tokens": 20}) == {"max_new_tokens": 20, "num_beams": 1, "do_sample": False}
+    assert _generation_kwargs({"num_beams": 4})["num_beams"] == 4
+    assert _generation_kwargs({"repetition_penalty": 1.2})["repetition_penalty"] == 1.2
+
+
+def test_nllb_generate_requests_keep_their_language_controls():
+    tokenizer = NllbTokenizer()
+    request = {"source_language": "eng_Latn", "source_language_token_id": 256047, "target_language": "fra_Latn",
+               "forced_bos_token_id": 256057}
+    controls, manual = _language_controls(tokenizer, request)
+    assert controls == {"forced_bos_token_id": 256057} and manual is None and tokenizer.src_lang == "eng_Latn"
+    with pytest.raises(BackendError):
+        _language_controls(tokenizer, {**request, "forced_bos_token_id": 1})
+    assert _language_controls(tokenizer, {}) == ({}, None)
+
+
+def test_a_source_token_replaces_the_final_unknown_token_for_pair_tokenizers():
+    request = {"source_language": "<7>", "source_language_token_id": 7, "source_language_placement": "replace-final-unk"}
+    controls, manual = _language_controls(PairTokenizer(), request)
+    assert (controls, manual) == ({}, 7)
+    inputs = {"input_ids": torch.tensor([[5, 6, 3, 0]]), "attention_mask": torch.tensor([[1, 1, 1, 0]])}
+    _place_source_language(inputs, manual, PairTokenizer())
+    assert inputs["input_ids"].tolist() == [[5, 6, 7, 0]]
+
+
+def test_encoder_inputs_are_cut_at_the_declared_limit():
+    from types import SimpleNamespace
+
+    assert encoder_input_limit(SimpleNamespace(model_max_length=512), SimpleNamespace(max_position_embeddings=514)) == 512
+    unbounded = SimpleNamespace(model_max_length=int(1e30))  # tokenizers without a declared maximum
+    assert encoder_input_limit(unbounded, SimpleNamespace(max_position_embeddings=8192)) == 8192
+    assert encoder_input_limit(unbounded, SimpleNamespace()) is None
+
+
+def test_a_causal_lm_prompt_drops_the_eos_its_tokenizer_appends():
+    class Tokenizer:  # OLMo-style: "<|endoftext|>" appended to every encoded text
+        eos_token, eos_token_id = "<|endoftext|>", 9
+
+    def inputs(*ids):
+        return {"input_ids": torch.tensor([list(ids)]), "attention_mask": torch.ones(1, len(ids), dtype=torch.long)}
+
+    trimmed = _without_appended_eos(inputs(5, 6, 9), Tokenizer(), "The capital of France is")
+    assert trimmed["input_ids"].tolist() == [[5, 6]] and trimmed["attention_mask"].shape == (1, 2)
+    kept = _without_appended_eos(inputs(5, 6, 9), Tokenizer(), "text<|endoftext|>")  # the prompt's own EOS stays
+    assert kept["input_ids"].tolist() == [[5, 6, 9]]
+    assert _without_appended_eos(inputs(5, 6), Tokenizer(), "no eos")["input_ids"].tolist() == [[5, 6]]
+    assert _without_appended_eos(inputs(9), Tokenizer(), "")["input_ids"].tolist() == [[9]]  # never an empty prompt
+
+
+def test_an_image_text_reference_applies_its_processor_kwargs(monkeypatch):
+    from types import SimpleNamespace
+
+    import transformers
+
+    from trtmc_perf_serving.backends.reference.common import ReferenceSpec
+    from trtmc_perf_serving.backends.reference.text import TextGeneration
+
+    calls = []
+
+    class Model:
+        def eval(self):
+            return self
+
+    def processor(model, **kwargs):
+        calls.append((model, kwargs))
+        return SimpleNamespace(tokenizer=object())
+
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained",
+                        lambda *_args, **_kwargs: SimpleNamespace(vision_config={}, is_encoder_decoder=False))
+    monkeypatch.setattr(transformers.AutoProcessor, "from_pretrained", processor)
+    monkeypatch.setattr(transformers.AutoModelForImageTextToText, "from_pretrained",
+                        lambda *_args, **_kwargs: Model())
+    budget = ReferenceSpec(operation="generate", model="vl", revision="r", device="cpu",
+                           options={"processor_kwargs": {"max_pixels": 200704}})
+    TextGeneration(budget)
+    TextGeneration(ReferenceSpec(operation="generate", model="vl", device="cpu"))
+    assert calls == [("vl", {"trust_remote_code": False, "revision": "r", "max_pixels": 200704}),
+                     ("vl", {"trust_remote_code": False})]
+
+
+@pytest.mark.parametrize("operation, adapter, loader", [
+    ("generate", "TextGeneration", "AutoModelForCausalLM"),
+    ("embed", "TextEncoder", "AutoModel"),
+    ("rerank", "Reranker", "AutoModelForSequenceClassification"),
+])
+def test_text_references_load_their_weights_straight_onto_the_device(monkeypatch, operation, adapter, loader):
+    from types import SimpleNamespace
+
+    import transformers
+
+    from trtmc_perf_serving.backends.reference import text
+    from trtmc_perf_serving.backends.reference.common import ReferenceSpec
+
+    loads = []
+
+    class Model:  # no ``to``: building the model in host memory and then moving it would fail here
+        def eval(self):
+            return self
+
+    def load(model, **kwargs):
+        loads.append((model, kwargs))
+        return Model()
+
+    config = SimpleNamespace(is_encoder_decoder=False, model_type="bert")
+    monkeypatch.setattr(transformers.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: config)
+    monkeypatch.setattr(transformers.AutoTokenizer, "from_pretrained",
+                        lambda *_args, **_kwargs: SimpleNamespace(model_max_length=512))
+    monkeypatch.setattr(transformers.AutoProcessor, "from_pretrained", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(getattr(transformers, loader), "from_pretrained", load)
+    getattr(text, adapter)(ReferenceSpec(operation=operation, model="checkpoint", device="cuda:1"))
+    assert [(model, kwargs["device_map"], kwargs.get("dtype", kwargs.get("torch_dtype")))
+            for model, kwargs in loads] == [("checkpoint", "cuda:1", torch.float16)]
+
+
+def test_a_bare_cuda_device_loads_onto_the_current_device(monkeypatch):
+    # Inputs moved with .to("cuda") land there; Transformers alone would read "cuda" as cuda:$LOCAL_RANK.
+    from trtmc_perf_serving.backends.reference.common import ReferenceSpec
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 2)
+    assert [ReferenceSpec(operation="generate", model="checkpoint", device=device).device_map
+            for device in ("cuda", "cuda:1", "cpu")] == ["cuda:2", "cuda:1", "cpu"]
+
+
+@pytest.mark.parametrize("options, values, shape", [
+    ({}, [1.0, 2.0], [1, 2]),
+    ({"all_tokens": True}, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [3, 2]),
+])
+def test_encode_returns_the_first_token_or_every_token_with_all_tokens(tmp_path, options, values, shape):
+    from types import SimpleNamespace
+
+    from trtmc_perf_serving.backends.reference.common import ReferenceSpec
+    from trtmc_perf_serving.backends.reference.text import TextEncoder
+
+    class Batch(dict):
+        def to(self, _device):
+            return self
+
+    hidden = torch.tensor([[[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]]])
+    encoder = TextEncoder.__new__(TextEncoder)
+    encoder.spec = ReferenceSpec(operation="encode", model="encoder", device="cpu", options=options)
+    encoder.tokenizer = lambda *_args, **_kwargs: Batch(input_ids=torch.tensor([[7, 8, 9]]))
+    encoder.model = lambda **_kwargs: SimpleNamespace(last_hidden_state=hidden)
+    encoder.forward_kwargs, encoder.max_length = {}, None
+    observation = encoder.invoke({"prompt": "a b"}, tmp_path / "out").observation
+    assert (observation["values"], observation["shape"], observation["dim"]) == (values, shape, 2)
+    assert observation["feature_kind"] == "token"
+
+
+def test_all_tokens_never_reports_a_pooled_output_as_token_features(tmp_path):
+    from types import SimpleNamespace
+
+    from trtmc_perf_serving.backends.reference.common import ReferenceSpec
+    from trtmc_perf_serving.backends.reference.text import TextEncoder
+
+    class Batch(dict):
+        def to(self, _device):
+            return self
+
+    encoder = TextEncoder.__new__(TextEncoder)
+    encoder.spec = ReferenceSpec(operation="encode", model="dpr", device="cpu", options={"all_tokens": True})
+    encoder.tokenizer = lambda *_args, **_kwargs: Batch(input_ids=torch.tensor([[7, 8]]))
+    encoder.model = lambda **_kwargs: SimpleNamespace(pooler_output=torch.ones(1, 2))  # no token states
+    encoder.forward_kwargs, encoder.max_length = {}, None
+    with pytest.raises(BackendError, match="no hidden states"):
+        encoder.invoke({"prompt": "a b"}, tmp_path / "out")

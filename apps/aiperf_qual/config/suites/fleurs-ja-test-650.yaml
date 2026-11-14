@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# FLEURS Japanese test split (google/fleurs, pinned; CC-BY-4.0): all 650 utterances of its 321 sentences, each read by
+# one or more speakers; the sentence is the bootstrap cluster. Gold is the normalized transcription (scored by CER).
+suite: fleurs-ja-test-650
+version: 1
+source:
+  kind: hf_dataset
+  dataset: google/fleurs
+  split: test
+  revision: 70bb2e84b976b7e960aa89f1c648e09c59f894dd
+  data_files: {test: parquet-data/ja_jp/test-00000-of-00001.parquet}
+  audio_column: audio
+  audio_sample_rate: 16000
+  label_column: transcription
+  cluster_column: id
+selection: {method: first, count: 650}
+fields: {audio: audio_path}
+request:
+  max_new_tokens: 200
+  language: ja

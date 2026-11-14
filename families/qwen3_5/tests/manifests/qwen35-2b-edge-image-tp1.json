@@ -1,0 +1,31 @@
+{
+  "name": "qwen35-2b-edge-image-tp1",
+  "hf_id": "Qwen/Qwen3.5-2B",
+  "hf_revision": "15852e8c16360a2fea060d615a32b45270f8a8fc",
+  "bundle": "qwen35-2b-edge-image-tp1.bundle",
+  "family": "qwen3_5",
+  "task": "vision_language_generation",
+  "trust_remote_code": true,
+  "precision": "fp16",
+  "max_sequence_length": 8192,
+  "tensor_parallel_size": 1,
+  "require_edge_llm": false,
+  "testcases": [
+    {
+      "name": "qwen35-2b-edge-image-tp1",
+      "premerge": true,
+      "prompt": "What color is the car? Answer in one word.",
+      "image": "families/qwen3_5/tests/data/test_img.jpeg",
+      "max_new_tokens": 10,
+      "temperature": 0.0,
+      "top_k": 1,
+      "top_p": 1.0,
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "reference_precision": "fp32",
+      "expected_answers": [
+        "white"
+      ]
+    }
+  ]
+}

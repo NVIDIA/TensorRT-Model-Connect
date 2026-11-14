@@ -1,0 +1,9 @@
+{
+  "requests": [
+    {
+      "id": "office",
+      "left_image": "office_left.png",
+      "right_image": "office_right.png"
+    }
+  ]
+}

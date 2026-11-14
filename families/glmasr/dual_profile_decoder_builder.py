@@ -58,6 +58,7 @@ from .native_kv_attention_builder import (
 
 from . import graph_ops
 from . import graph_blocks
+from .quantization import configure_fp8_build
 
 
 if TYPE_CHECKING:
@@ -234,6 +235,7 @@ def build_dual_profile_decoder_engine(
     dynamic_kv_profile_rows: list[int] | None = None,
     profile_mode: str = "dual_profile",
     native_kv_cache: bool = False,
+    embed_input: bool = False,
 ) -> bytes:
     """Build a prefill/decode-capable dynamic-Sq decoder engine.
 
@@ -263,6 +265,11 @@ def build_dual_profile_decoder_engine(
     Dynamic-KV cache bucket profiles are only meaningful in ``dual_profile``
     mode. In either mode, cache_k/cache_v inputs are declared dynamic when
     bucket profiles are requested so each profile can constrain their row count.
+
+    ``embed_input`` adds ``input_embed [Sq, hidden]`` (FP32) and
+    ``use_input_embed [Sq]`` (FP32 0/1): rows with the flag set take the
+    provided embedding instead of the token embedding, so a prompt with
+    projected audio frames prefills in one launch.
 
     ``native_kv_cache`` selects TensorRT's ``IKVCacheUpdateLayer`` and a
     primitive attention graph with an explicit active-prefix causal mask.
@@ -341,6 +348,7 @@ def build_dual_profile_decoder_engine(
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
+    configure_fp8_build(trt_config, quant_ctx)
     # Native full-context decoder builds can require substantial tactic workspace
     # while TensorRT compiles the primitive attention graph. This is build-time
     # scratch only (it is not serialized as runtime KV memory), and the limit
@@ -360,6 +368,11 @@ def build_dual_profile_decoder_engine(
     # ---- Inputs (dynamic Sq) ---------------------------------------------
     token_id = network.add_input("token_id", trt.int32, (-1,))
     position_id = network.add_input("position_id", trt.int32, (-1,))
+    input_embed: trt.ITensor | None = None
+    use_input_embed: trt.ITensor | None = None
+    if embed_input:
+        input_embed = network.add_input("input_embed", trt.float32, (-1, hidden))
+        use_input_embed = network.add_input("use_input_embed", trt.float32, (-1,))
     attention_mask: trt.ITensor | None = None
     cache_write_indices: trt.ITensor | None = None
     key_value_lengths: trt.ITensor | None = None
@@ -415,6 +428,9 @@ def build_dual_profile_decoder_engine(
             cmn = cop = cmx = max_cache_length
         prof.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
         prof.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
+        if embed_input:
+            prof.set_shape("input_embed", (min_sq, hidden), (opt_sq, hidden), (max_sq, hidden))
+            prof.set_shape("use_input_embed", (min_sq,), (opt_sq,), (max_sq,))
         if not native_kv_cache:
             prof.set_shape(
                 "attention_mask",
@@ -539,6 +555,27 @@ def build_dual_profile_decoder_engine(
     # ---- Embedding -------------------------------------------------------
     emb = network.add_gather(embedding_table, token_id, 0)
     hidden_state = emb.get_output(0)  # (Sq, hidden)
+    if embed_input:
+        # Per row: (1 - flag) * token_embed + flag * input_embed, in the work dtype.
+        def work(tensor):
+            if tensor.dtype == work_trt_dtype:
+                return tensor
+            return network.add_cast(tensor, work_trt_dtype).get_output(0)
+
+        flag = network.add_shuffle(use_input_embed)
+        flag.reshape_dims = (-1, 1)
+        flag = work(flag.get_output(0))
+        one = network.add_constant(
+            (1, 1), trt.Weights(np.ones((1, 1), dtype=work_np_dtype))).get_output(0)
+        if one.dtype != work_trt_dtype:
+            one = network.add_cast(one, work_trt_dtype).get_output(0)
+        token_part = network.add_elementwise(
+            network.add_elementwise(one, flag, trt.ElementWiseOperation.SUB).get_output(0),
+            work(hidden_state), trt.ElementWiseOperation.PROD).get_output(0)
+        embed_part = network.add_elementwise(
+            flag, work(input_embed), trt.ElementWiseOperation.PROD).get_output(0)
+        hidden_state = network.add_elementwise(
+            token_part, embed_part, trt.ElementWiseOperation.SUM).get_output(0)
 
     if position_type == "learned" and position_embed_table is not None:
         pos_gather = network.add_gather(position_embed_table, position_id, 0)

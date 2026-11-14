@@ -1,6 +1,7 @@
 {
   "name": "locateanything-3b",
   "hf_id": "nvidia/LocateAnything-3B",
+  "hf_revision": "c32291ca5e996f5a7a485845b4f57a233936bba0",
   "bundle": "locateanything-3b.bundle",
   "family": "locateanything",
   "task": "vision_language_generation",

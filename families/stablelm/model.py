@@ -250,6 +250,8 @@ def _runtime_config(model_dir: Path, config: ModelConfig, **updates) -> dict:
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one StableLM bundle."""
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("StableLM does not support MTP speculative decoding")
     if request.dynamic_kv_cache:
         raise NotImplementedError("stablelm does not support dynamic_kv_cache")
 
@@ -284,8 +286,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("StableLM max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("StableLM has no qualified family-owned quantized build")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(f"StableLM does not support quantization={request.quantization!r}")
+    quantized = request.quantization == "fp8"
+    if quantized and precision != "fp16":
+        raise NotImplementedError("StableLM fp8 quantization requires precision fp16")
+    if quantized and request.tensor_parallel_size != 1:
+        raise NotImplementedError("StableLM fp8 quantization does not support tensor parallelism")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
@@ -293,7 +300,19 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     model = _StableLMModel()
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_fp32_layers"] = tuple(request.fp32_layers)
+    if quantized:
+        from .quantization import reject_quantized_checkpoint
+
+        reject_quantized_checkpoint(model_dir, config)
     weights = model.load_weights(str(model_dir), config)
+    quant_ctx = None
+    if quantized:
+        from . import graph_ops
+        from .quantization import calibrate_stablelm_fp8
+
+        quant_ctx = calibrate_stablelm_fp8(
+            config, weights, graph_ops, skip_layers=tuple(request.fp32_layers)
+        )
     writer.set_header(family="stablelm", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -302,7 +321,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 weights,
                 max_sequence_length,
                 precision=precision,
-                quant_ctx=None,
+                quant_ctx=quant_ctx,
                 verbose=bool(request.verbose),
                 debug_layer_outputs=False,
                 parallel_config=parallel.for_rank(rank),
@@ -316,7 +335,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,
@@ -327,7 +346,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,

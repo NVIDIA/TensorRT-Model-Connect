@@ -26,7 +26,7 @@ std::vector<char> require_section(const BundleReader& bundle, const char* name) 
 
 std::shared_ptr<ITokenizer> load_tokenizer(const BundleReader& bundle, const char* section) {
     const auto& data = require_section(bundle, section);
-    auto tokenizer = CreateSanaWmBpeTokenizer(data.data(), data.size(), false);
+    auto tokenizer = CreateSanaWmCheckpointTokenizer(data.data(), data.size());
     if (!tokenizer)
         throw std::runtime_error("SANA-WM tokenizer is invalid: " + std::string(section));
     return std::shared_ptr<ITokenizer>(std::move(tokenizer));

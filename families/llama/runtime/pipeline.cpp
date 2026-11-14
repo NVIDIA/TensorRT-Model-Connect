@@ -252,32 +252,11 @@ void LlamaTextGenerationPipeline::run_prefill_chunk(const int32_t* token_ids, in
     kv.append_prefill_kv(present_k, present_v, chunk_size);
 }
 
-void LlamaTextGenerationPipeline::prime_decoder_after_batched_prefill(
-    const std::vector<int32_t>& input_ids) {
-    if (input_ids.empty())
-        return;
-
-    ITrtModule& decoder = bind_decoder_for_step();
-    if (!decoder.cuda_graph_active())
-        return;
-
-    int32_t token_id = input_ids.back();
-    TensorMap inputs;
-    Tensor token_tensor;
-    token_tensor.data = &token_id;
-    token_tensor.shape = {1};
-    token_tensor.dtype = DType::kInt32;
-    inputs[config_.token_id_name] = token_tensor;
-
-    state_->prepare_step(inputs);
-    decoder.forward_async(inputs);
-    decoder.sync();
-}
-
 void LlamaTextGenerationPipeline::run_prefill(const std::vector<int32_t>& input_ids,
                                               std::vector<float>& logits) {
+    // The prefill logits give the first new token. The decoder's CUDA graph is
+    // captured by its first real step, so no priming launch is needed here.
     run_prefill_batched(input_ids, logits);
-    prime_decoder_after_batched_prefill(input_ids);
     state_->mark_prefill_complete();
 }
 
@@ -361,6 +340,10 @@ int32_t LlamaTextGenerationPipeline::run_decode_loop(
         if (should_stop_on_answer(output, prompt_token_count, cfg, steps, stop_interval, is_eos))
             break;
         if (is_eos)
+            break;
+        // The sampled token is the last one requested: its logits would never
+        // be read, so do not spend a decoder step on them.
+        if (step + 1 >= max_new_tokens)
             break;
         run_step(result.token_id, logits);
     }

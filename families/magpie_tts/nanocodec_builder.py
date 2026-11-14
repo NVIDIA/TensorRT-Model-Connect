@@ -74,15 +74,18 @@ def _make_fsq_lookup_table(levels: list[int]) -> np.ndarray:
 
 
 def _build_length_mask(network, current_len, max_len, dtype=np.float32):
-    """[1,1,max_len] float mask: 1 where pos < current_len, else 0."""
+    """[1,1,max_len] mask in ``dtype``: 1 where pos < current_len, else 0.
+
+    Positions and lengths reach 512 * 1024 samples, above the fp16 limit (65504),
+    so the mask is computed in fp32 and only the 0/1 result is cast to ``dtype``.
+    """
     arange = graph_ops.add_constant(
         network,
         (1, 1, max_len),
-        np.arange(max_len, dtype=dtype).reshape(1, 1, max_len),
-        dtype=dtype,
+        np.arange(max_len, dtype=np.float32).reshape(1, 1, max_len),
+        dtype=np.float32,
     )
-    work_trt_dtype = trt.float16 if dtype == np.float16 else trt.float32
-    len_f = network.add_cast(current_len, work_trt_dtype)
+    len_f = network.add_cast(current_len, trt.float32)
     len_r = network.add_shuffle(len_f.get_output(0))
     len_r.reshape_dims = (1, 1, 1)
     diff = network.add_elementwise(
@@ -91,7 +94,10 @@ def _build_length_mask(network, current_len, max_len, dtype=np.float32):
     clip = network.add_activation(diff, trt.ActivationType.CLIP)
     clip.alpha = 0.0
     clip.beta = 1.0
-    return network.add_unary(clip.get_output(0), trt.UnaryOperation.FLOOR).get_output(0)
+    mask = network.add_unary(clip.get_output(0), trt.UnaryOperation.FLOOR).get_output(0)
+    if dtype == np.float16:
+        mask = network.add_cast(mask, trt.float16).get_output(0)
+    return mask
 
 
 def _apply_mask(network, x, mask):

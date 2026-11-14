@@ -1,0 +1,27 @@
+{
+  "name": "nemotron-h-nano-9b-nvfp4",
+  "hf_id": "nvidia/NVIDIA-Nemotron-Nano-9B-v2-NVFP4",
+  "hf_revision": "8556c9164ddb43fe1f4f4ad730593b3c5e3f7328",
+  "bundle": "nemotron-h-nano-9b-nvfp4.bundle",
+  "family": "nemotron_h",
+  "task": "text_generation",
+  "precision": "fp16",
+  "quantization": "nvfp4",
+  "trust_remote_code": true,
+  "testcases": [
+    {
+      "name": "nemotron-h-nano-9b-nvfp4",
+      "premerge": true,
+      "reference_backend": "golden_snapshot",
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "metadata": {
+        "golden_snapshot_path": "data/nemotron_h_nano_9b_golden.json"
+      }
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

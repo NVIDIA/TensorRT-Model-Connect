@@ -1,6 +1,7 @@
 {
   "name": "phi-moe",
   "hf_id": "microsoft/Phi-tiny-MoE-instruct",
+  "hf_revision": "2fe50e88d0e2a5a132563815686ea0dcc8e252b5",
   "bundle": "phi-moe.bundle",
   "family": "phi_moe",
   "task": "text_generation",

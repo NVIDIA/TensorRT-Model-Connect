@@ -1,6 +1,7 @@
 {
   "name": "camembert-base",
   "hf_id": "almanach/camembert-base",
+  "hf_revision": "a75967561c78f2aa81cc41045378d3b4ee25af9e",
   "bundle": "camembert-base.bundle",
   "family": "roberta",
   "task": "encoding",

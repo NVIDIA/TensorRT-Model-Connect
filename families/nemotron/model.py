@@ -196,6 +196,7 @@ class _NemotronModel:
         max_cache_length: int,
         *,
         precision: str = "fp32",
+        quant_ctx=None,
         verbose: bool = False,
     ) -> bytes:
         partial_rotary = config.raw.get("partial_rotary_factor", 0.5)
@@ -204,6 +205,7 @@ class _NemotronModel:
             weights,
             max_cache_length,
             precision=precision,
+            quant_ctx=quant_ctx,
             norm_type="layernorm",
             mlp_type="gelu_fc",
             activation="relu2",
@@ -303,21 +305,35 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError("Nemotron max_sequence_length exceeds checkpoint context capacity")
     if request.tensor_parallel_size != 1:
         raise NotImplementedError("Nemotron does not expose a tensor-parallel builder")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Nemotron has no qualified family-owned quantized build")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"Nemotron does not support quantization={request.quantization!r}"
+        )
+    quantized = request.quantization == "fp8"
+    if quantized and precision not in {"fp16", "bf16"}:
+        raise NotImplementedError("Nemotron fp8 quantization requires precision fp16 or bf16")
     if request.fp32_layers:
         raise NotImplementedError("Nemotron does not expose mixed-precision layer selection")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Nemotron does not support MTP speculative decoding")
 
     model = _NemotronModel()
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_resolved_build_precision"] = precision
     weights = model.load_weights(str(model_dir), config, precision=precision)
+    quant_ctx = None
+    if quantized:
+        from . import graph_ops
+        from .quantization import calibrate_nemotron_fp8
+
+        quant_ctx = calibrate_nemotron_fp8(config, weights, graph_ops)
     config.raw["_decoder_engine_role"] = "prefill"
     prefill = model.build_engine(
         config,
         weights,
         max_sequence_length,
         precision=precision,
+        quant_ctx=quant_ctx,
         verbose=bool(request.verbose),
     )
     config.raw["_decoder_engine_role"] = "decode"
@@ -326,6 +342,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         weights,
         max_sequence_length,
         precision=precision,
+        quant_ctx=quant_ctx,
         verbose=bool(request.verbose),
     )
     config.raw.pop("_decoder_engine_role", None)

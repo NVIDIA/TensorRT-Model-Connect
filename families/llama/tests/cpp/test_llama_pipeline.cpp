@@ -97,14 +97,16 @@ class MockTokenizer final : public trtmc::ITokenizer {
 class FixedLlamaModule final : public trtmc::ITrtModule {
   public:
     FixedLlamaModule(cudaStream_t stream, bool prefill, std::vector<std::int32_t> output_tokens,
-                     std::int32_t capacity = 16)
-        : stream_(stream), prefill_(prefill), output_tokens_(std::move(output_tokens)),
-          capacity_(capacity), present_k_(std::vector<std::int64_t>{prefill ? capacity : 1, 4},
-                                          trtmc::DType::kFloat32, stream),
+                     std::int32_t capacity = 16, bool cuda_graph = false)
+        : stream_(stream), prefill_(prefill), cuda_graph_(cuda_graph),
+          output_tokens_(std::move(output_tokens)), capacity_(capacity),
+          present_k_(std::vector<std::int64_t>{prefill ? capacity : 1, 4}, trtmc::DType::kFloat32,
+                     stream),
           present_v_(std::vector<std::int64_t>{prefill ? capacity : 1, 4}, trtmc::DType::kFloat32,
                      stream) {}
 
     trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
+        ++forward_calls_;
         const auto rows = static_cast<std::int32_t>(inputs.at("token_id").numel());
         const auto index = std::min(cursor_, output_tokens_.size() - 1);
         const std::int32_t token = output_tokens_[index];
@@ -122,7 +124,7 @@ class FixedLlamaModule final : public trtmc::ITrtModule {
     void sync() override {}
     cudaStream_t stream() const override { return stream_; }
     void enable_cuda_graph() override {}
-    bool cuda_graph_active() const override { return false; }
+    bool cuda_graph_active() const override { return cuda_graph_; }
     bool cuda_graph_captured() const override { return false; }
     std::int32_t profile_idx() const override { return 0; }
     std::vector<trtmc::TensorInfo> input_info() const override { return {}; }
@@ -193,9 +195,13 @@ class FixedLlamaModule final : public trtmc::ITrtModule {
     }
     void keep_alive(std::shared_ptr<void>) override {}
 
+    std::int32_t forward_calls() const { return forward_calls_; }
+
   private:
     cudaStream_t stream_{nullptr};
     bool prefill_{false};
+    bool cuda_graph_{false};
+    std::int32_t forward_calls_{0};
     std::vector<std::int32_t> output_tokens_;
     std::size_t cursor_{0};
     std::int32_t capacity_{0};
@@ -280,6 +286,37 @@ void test_generate_max_tokens() {
     request.max_new_tokens = 3;
     check(pipeline->generate_ids({1}, request).token_ids == std::vector<std::int32_t>({1, 2, 2, 2}),
           "generation respects max_new_tokens");
+}
+
+void test_generation_runs_only_consumed_decoder_steps() {
+    StreamFixture fixture;
+    auto config = make_config();
+    config.id_eos = 99;
+    auto decoder = std::make_unique<FixedLlamaModule>(fixture.stream, false,
+                                                      std::vector<std::int32_t>{2}, 16, true);
+    auto prefill = std::make_unique<FixedLlamaModule>(fixture.stream, true,
+                                                      std::vector<std::int32_t>{2}, 16, true);
+    const FixedLlamaModule* decoder_view = decoder.get();
+    const FixedLlamaModule* prefill_view = prefill.get();
+    trtmc::LlamaTextGenerationPipeline pipeline(
+        std::move(decoder), std::make_unique<trtmc::LlamaKvCache>(1, 16, 4, fixture.stream),
+        std::move(config), std::make_shared<MockTokenizer>(), std::move(prefill));
+    trtmc::TextGenerationConfig request;
+    request.max_new_tokens = 3;
+    check(pipeline.generate_ids({1, 3}, request).token_ids ==
+              std::vector<std::int32_t>({1, 3, 2, 2, 2}),
+          "generation returns every requested token");
+    check(prefill_view->forward_calls() == 1, "prompt is prefilled in one launch");
+    // The prefill logits give the first token; each later token needs one
+    // decoder step. No step is spent on priming the decoder or on logits after
+    // the final token.
+    check(decoder_view->forward_calls() == 2,
+          "decoder runs once per token after the first and not after the last");
+
+    request.max_new_tokens = 1;
+    check(pipeline.generate_ids({1, 3}, request).token_ids == std::vector<std::int32_t>({1, 3, 2}),
+          "one-token generation uses the prefill logits");
+    check(decoder_view->forward_calls() == 2, "one-token generation never runs the decoder");
 }
 
 void test_argmax() {
@@ -405,6 +442,7 @@ int main() {
     test_generate_stops_at_any_default_eos();
     test_explicit_eos_override_replaces_default_set();
     test_generate_max_tokens();
+    test_generation_runs_only_consumed_decoder_steps();
     test_zero_max_tokens();
     test_kv_reset_is_logical_and_masks_stale_rows();
     test_generation_reset_reuses_execution_context();

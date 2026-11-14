@@ -8,10 +8,12 @@ decord2==3.4.0
 diffusers>=0.31.0
 easydict
 einops==0.8.1
-flash-attn
+flash-attn==2.8.3
 ftfy==6.3.1
 imageio[ffmpeg]
 librosa
+# ml-dtypes 0.6 requires NumPy 2; the base image's onnx 1.23 requires >=0.5.4.
+ml-dtypes==0.5.4
 numpy>=1.23.5,<2
 opencv-python>=4.9.0.80
 peft

@@ -25,7 +25,14 @@
 namespace trtmc::cli::io {
 
 void write_wav(const AudioResult& audio, const std::string& path) {
-    write_wav_interleaved({audio.samples.data(), audio.samples.size()}, audio.sample_rate, 1, path);
+    // num_samples counts total scalar samples; zero means unspecified. The
+    // interleaved writer validates the rest of the format.
+    if (audio.num_samples < 0 ||
+        (audio.num_samples != 0 &&
+         static_cast<std::size_t>(audio.num_samples) != audio.samples.size()))
+        throw std::runtime_error("write_wav: sample count does not match buffer");
+    write_wav_interleaved({audio.samples.data(), audio.samples.size()}, audio.sample_rate,
+                          audio.num_channels, path);
 }
 
 void write_wav_interleaved(Span<const float> samples, std::int32_t sample_rate,

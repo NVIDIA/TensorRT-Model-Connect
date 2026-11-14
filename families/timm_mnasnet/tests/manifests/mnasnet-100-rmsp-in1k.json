@@ -1,6 +1,7 @@
 {
   "name": "mnasnet-100-rmsp-in1k",
   "hf_id": "timm/mnasnet_100.rmsp_in1k",
+  "hf_revision": "a30af72360c7a4871b0156cc11d7b767208273d7",
   "bundle": "mnasnet-100-rmsp-in1k.bundle",
   "family": "timm_mnasnet",
   "task": "classification",

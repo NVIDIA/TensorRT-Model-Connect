@@ -410,10 +410,13 @@ def build_vae_2d_decoder_engine(
     """
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16
+    elif precision == "bf16":
+        # numpy has no bf16: add_conv2d casts the weights of a bf16 input in the graph.
+        work_np_dtype, work_trt_dtype = np.float16, trt.bfloat16
     elif precision == "fp32":
         work_np_dtype, work_trt_dtype = np.float32, trt.float32
     else:
-        raise ValueError(f"Unsupported VAE precision {precision!r}; expected fp32 or fp16")
+        raise ValueError(f"Unsupported VAE precision {precision!r}; expected fp32, fp16 or bf16")
     if max_batch_size != 1:
         raise NotImplementedError("Z-Image VAE requires max_batch_size=1")
     # Decision E: VAE always caps at 1 regardless of the requested ceiling.

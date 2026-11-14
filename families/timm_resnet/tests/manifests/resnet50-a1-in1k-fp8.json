@@ -1,0 +1,19 @@
+{
+  "name": "resnet50-a1-in1k-fp8",
+  "hf_id": "timm/resnet50.a1_in1k",
+  "hf_revision": "767268603ca0cb0bfe326fa87277f19c419566ef",
+  "bundle": "resnet50-a1-in1k-fp8.bundle",
+  "family": "timm_resnet",
+  "task": "image_to_class_scores",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "resnet50-a1-in1k-fp8",
+      "premerge": true,
+      "test_image": "data/test_img_car.jpeg"
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1,
+  "quantization": "fp8"
+}

@@ -147,6 +147,7 @@ def build_dual_profile_tp_decoder_engine(
     max_cache_length: int,
     *,
     precision: str = "fp16",
+    quant_ctx: object | None = None,
     opt_prefill_length: int = 64,
     max_prefill_length: int | None = None,
     norm_type: str = "rmsnorm",
@@ -175,6 +176,8 @@ def build_dual_profile_tp_decoder_engine(
     profile.
     """
     _supports_config(config, weights)
+    if quant_ctx is not None:
+        raise NotImplementedError("Tensor-parallel GPT-2 builds do not support quantization")
     parallel = normalize_parallel_config(parallel_config)
     if not parallel.enabled:
         raise ValueError(
@@ -325,7 +328,7 @@ def build_dual_profile_tp_decoder_engine(
     # Attention scale.
     attn_scale = (1.0 / np.sqrt(max(head_dim, 1))) if scale_attn_weights else 1.0
 
-    matmul = _make_matmul_fn(network, work_np_dtype)
+    matmul = _make_matmul_fn(network, work_np_dtype, None)
 
     # ---- Embedding -------------------------------------------------------
     emb = network.add_gather(embedding_table, token_id, 0)

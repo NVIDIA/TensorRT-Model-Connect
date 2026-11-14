@@ -1,0 +1,27 @@
+{
+  "name": "llama-3.1-8b-nvfp4",
+  "hf_id": "nvidia/Llama-3.1-8B-Instruct-NVFP4",
+  "hf_revision": "bdb54e24298451af785c0ac63c1b485e9b7400a2",
+  "bundle": "llama-3.1-8b-nvfp4.bundle",
+  "family": "llama",
+  "task": "text_generation",
+  "precision": "bf16",
+  "quantization": "nvfp4",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "llama-3.1-8b-nvfp4",
+      "premerge": true,
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "reference": "none",
+      "expected_answers": [
+        "Paris"
+      ]
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

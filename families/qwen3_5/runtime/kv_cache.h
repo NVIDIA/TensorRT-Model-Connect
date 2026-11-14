@@ -61,6 +61,10 @@ class Qwen35KvCache : public Qwen35InferenceState {
     DeviceTensor& cache_k(int32_t layer) { return cache_k_[static_cast<std::size_t>(layer)]; }
     DeviceTensor& cache_v(int32_t layer) { return cache_v_[static_cast<std::size_t>(layer)]; }
 
+    // A verifier shares cache inputs but owns multi-row present-output scratch.
+    int32_t kv_dim() const { return kv_dim_; }
+    DType dtype() const { return cache_dtype_; }
+
     // Write per-layer KV produced by a batched prefill engine into the cache
     // at positions [0, seq_len). Device-to-device copy on this cache's stream;
     // advances position_ to seq_len. Requires seq_len <= max_length.
@@ -75,6 +79,9 @@ class Qwen35KvCache : public Qwen35InferenceState {
     // block verification in diffusion-style text decoders.
     void append_prefill_kv(const std::vector<const void*>& prefill_k,
                            const std::vector<const void*>& prefill_v, int32_t seq_len);
+
+    // Append the first `seq_len` present K/V rows a prefill context produced.
+    void append_prefill_from(const ITrtModule& module, int32_t seq_len);
 
     // Move the logical cache length without touching device memory. Stale rows
     // remain masked out by subsequent prepare_step calls.

@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# WMT14 newstest2014 en->de (all 3,003 sentences) with T5's task prefix; gold is the reference translation.
+suite: wmt14-en-de-3003
+version: 1
+source:
+  kind: json_manifest
+  path: WMT14_de_en/wmt14_en_de_t5_task_eval.json
+  sha256: 7851c9e2ed3627bbc8b0420415eeb2360422418a8e31e8dd5726b666c450479a
+  records: requests
+  label_field: answer
+selection: {method: first, count: 3003}
+fields: {prompt: prompt}
+request:
+  max_new_tokens: 128
+  temperature: 0.0
+  top_k: 1
+  top_p: 1.0
+  min_p: 0.0
+  seed: -1
+  repetition_penalty: 1.0
+  use_chat_template: false
+  enable_thinking: false
+  do_sample: false

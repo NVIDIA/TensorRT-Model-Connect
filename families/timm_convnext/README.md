@@ -64,3 +64,48 @@ SDK benchmark worker. The existing reference policy still excludes input
 preparation (`task-model-call-wall`), while the native public Task call includes
 family preprocessing. This fixes reduction/reporting placement, not that existing
 scope difference, and does not establish a performance improvement.
+
+## FP8
+
+`--quantization fp8` self-quantizes the original checkpoint at build time; no FP8
+checkpoint exists for these models. FP8 needs the fp16 work precision.
+
+```sh
+trtmc build timm/convnext_tiny.in12k_ft_in1k --precision fp16 --quantization fp8 -o timm_convnext_fp8.bundle
+```
+
+- Quantized: the two MLP projections of every block (`mlp.fc1`, `mlp.fc2`,
+  built as 1x1 convolutions) and the 2x2 downsample convolution of every stage
+  after the first. Each runs as an e4m3 convolution with a static per-tensor
+  activation scale and a per-tensor weight scale (`max(abs(weight)) / 448`).
+- Kept in fp16: the stem convolution, the 7x7 depthwise convolutions, the layer
+  norms, the layer scale, the GELU and the classifier head.
+- Activation scales are calibrated once with ModelOpt `FP8_DEFAULT_CFG` (max
+  calibration, 500 ImageNet validation images) and stored in
+  `fp8_activation_scales.json`, keyed by model config and two weight sums.
+  Calibrated: `convnext_tiny.in12k_ft_in1k`, `convnext_small.in12k_ft_in1k`,
+  `convnext_base.fb_in22k_ft_in1k` at 224x224 (automatic family resolution
+  claims `convnext_tiny` only; the other two were built through the family
+  builder). Another model config is refused;
+  run `python -m families.timm_convnext.calibrate_fp8_scales` (`fetch`, then
+  `calibrate`) to add it. FP8 weights are never stored.
+- An already quantized checkpoint, `--precision fp32` and any quantization other
+  than `fp8` are refused.
+
+The `convnext-tiny-in12k-ft-in1k-fp8` manifest runs the same top-1 E2E check as
+the fp16 case.
+
+### NVFP4
+
+NVFP4 is not used. TensorRT has no FP4 convolution (block-scaled FP4 needs a
+2-D GEMM input), so only the 1x1 MLP convolutions could take NVFP4, after a
+rewrite to matrix multiplies with a channels-last layout. They are less than
+half of the time: on B300, batch 1, `convnext_tiny`, the fp16 engine spends
+0.475 ms of GPU kernel time per run, of which about 0.22 ms are in the layers
+that FP8 quantizes.
+
+On the closest measured case (timm Swin, same widths 96 to 1024, batch 1 to 32,
+B200 and B300, TensorRT 11.4), every NVFP4 layout was 3% to 14% slower than FP8,
+because each FP4 projection adds a dynamic-quantize kernel and the GELU stops
+fusing, and its KL divergence was 5x to 14x the FP8 KL divergence. NVFP4 was not
+built for ConvNeXt.

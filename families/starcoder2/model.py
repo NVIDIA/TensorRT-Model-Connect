@@ -302,10 +302,21 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("StarCoder2 max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("StarCoder2 has no qualified family-owned quantized build")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"StarCoder2 does not support quantization={request.quantization!r}"
+        )
+    quantized = request.quantization == "fp8"
+    if quantized and precision not in {"fp16", "bf16"}:
+        raise NotImplementedError("StarCoder2 fp8 quantization requires precision fp16 or bf16")
+    if quantized and request.tensor_parallel_size != 1:
+        raise NotImplementedError("StarCoder2 fp8 quantization does not support tensor parallelism")
+    if quantized and config.raw.get("quantization_config"):
+        raise ValueError("the checkpoint is already quantized; FP8 self-quantization needs BF16")
     if request.fp32_layers:
         raise NotImplementedError("StarCoder2 does not expose mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("StarCoder2 does not support MTP speculative decoding")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
@@ -313,6 +324,12 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     model = _StarCoder2Model()
     config.raw["_model_dir"] = str(model_dir)
     weights = model.load_weights(str(model_dir), config)
+    quant_ctx = None
+    if quantized:
+        from . import graph_ops
+        from .quantization import calibrate_starcoder2_fp8
+
+        quant_ctx = calibrate_starcoder2_fp8(config, weights, graph_ops)
     writer.set_header(family="starcoder2", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -335,7 +352,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,
@@ -346,7 +363,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,

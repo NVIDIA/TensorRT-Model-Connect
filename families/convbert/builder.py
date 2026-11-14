@@ -38,9 +38,14 @@ def build_convbert_encoder_engine(
     max_seq_length: int,
     *,
     precision: str = "fp32",
+    quant_ctx=None,
     verbose: bool = False,
 ) -> bytes:
-    """Build a TRT engine plan for ConvBERT encoder."""
+    """Build a TRT engine plan for ConvBERT encoder.
+
+    ``quant_ctx`` is an optional FP8 context (``quantization.ConvBertQuantContext``); it
+    needs ``precision="fp16"``.
+    """
     hidden = config.hidden_size
     embedding_size = config.raw.get("embedding_size", hidden)
     vocab = config.vocab_size
@@ -55,6 +60,8 @@ def build_convbert_encoder_engine(
         work_np_dtype, work_trt_dtype = np.float32, trt.float32
     else:
         raise ValueError(f"Unsupported ConvBERT precision: {precision}")
+    if quant_ctx is not None and precision != "fp16":
+        raise ValueError(f"ConvBERT FP8 needs precision fp16, got {precision!r}")
 
     # ConvBERT specific
     new_num_heads = int(weights["_convbert_new_num_heads"][0])
@@ -69,6 +76,8 @@ def build_convbert_encoder_engine(
     trt_config = builder.create_builder_config()
     trt_config.builder_optimization_level = 1
     trt_config.clear_flag(trt.BuilderFlag.TF32)
+    if quant_ctx is not None:
+        quant_ctx.configure_build(trt_config)
 
     S = max_seq_length  # alias for brevity
 
@@ -99,6 +108,8 @@ def build_convbert_encoder_engine(
 
     # Additive attention mask: [1, 1, S]
     mask_float = network.add_cast(attention_mask_input, work_trt_dtype)
+    sequence_mask = network.add_shuffle(mask_float.get_output(0))
+    sequence_mask.reshape_dims = (S, 1)
     ones_mask = graph_ops.add_constant(
         network, (1,), np.array([1.0], dtype=work_np_dtype),
         dtype=work_np_dtype)
@@ -156,9 +167,11 @@ def build_convbert_encoder_engine(
             conv_kernel_size=conv_kernel_size,
             seq_length=S,
             attn_mask=attn_mask,
+            sequence_mask=sequence_mask.get_output(0),
             hidden_act=hidden_act,
             eps=eps,
             dtype=work_np_dtype,
+            quant_ctx=quant_ctx,
         )
 
     # -------------------------------------------------------------------
@@ -341,6 +354,24 @@ def _add_unfold(
     return cat.get_output(0)
 
 
+def _quantized_input(network, activation, quant_ctx, modules):
+    """Shared Quantize/Dequantize of the input of ``modules``, or None when all stay 16-bit."""
+    if quant_ctx is None:
+        return None
+    return quant_ctx.quantize_input(network, activation, modules)
+
+
+def _projection(
+    network, activation, dequantized, in_width, out_width, weight, *, dtype,
+    quant_ctx, module,
+):
+    """``activation @ weight``; FP8 when ``module`` is quantized and has a Q/DQ input."""
+    if dequantized is None or not quant_ctx.should_quantize(module):
+        return graph_ops.add_matmul_rhs_constant(
+            network, activation, in_width, out_width, weight, dtype=dtype)
+    return quant_ctx.matmul(network, dequantized, module)
+
+
 def _add_convbert_layer(
     *,
     network: trt.INetworkDefinition,
@@ -355,23 +386,30 @@ def _add_convbert_layer(
     conv_kernel_size: int,
     seq_length: int,
     attn_mask: trt.ITensor,
+    sequence_mask: trt.ITensor,
     hidden_act: str,
     eps: float,
     dtype: np.dtype = np.float32,
+    quant_ctx=None,
 ) -> trt.ITensor:
     """Add one ConvBERT encoder layer with mixed attention + dynamic convolution."""
     S = seq_length
 
+    # Query, key, value and the convolution value projection read the same input: FP8 when
+    # quant_ctx quantizes them, with one shared input Q/DQ.
+    self_prefix = f"{prefix}.attention.self"
+    shared_modules = tuple(
+        f"{self_prefix}.{name}" for name in ("query", "key", "value", "conv_out_layer"))
+    shared_input = _quantized_input(network, hidden, quant_ctx, shared_modules)
+
     # === Branch 1: Standard multi-head self-attention ===
-    q = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, all_head_size,
-        weights[f"{prefix}.w_q"], dtype=dtype)
-    k = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, all_head_size,
-        weights[f"{prefix}.w_k"], dtype=dtype)
-    v = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, all_head_size,
-        weights[f"{prefix}.w_v"], dtype=dtype)
+    q, k, v = (
+        _projection(
+            network, hidden, shared_input, hidden_size, all_head_size,
+            weights[f"{prefix}.w_{part}"], dtype=dtype, quant_ctx=quant_ctx,
+            module=module)
+        for part, module in zip("qkv", shared_modules)
+    )
 
     q = graph_ops.add_bias_sum(
         network, q, all_head_size, weights[f"{prefix}.q_bias"], dtype=dtype)
@@ -401,9 +439,11 @@ def _add_convbert_layer(
 
     # === Branch 2: Span-based dynamic convolution ===
 
-    # SeparableConv1D on hidden_states
+    # The runtime supplies a contiguous valid prefix. Its convolution boundary
+    # must be zero, just as for the native unpadded sequence.
+    conv_hidden = network.add_elementwise(hidden, sequence_mask, trt.ElementWiseOperation.PROD)
     key_conv_attn = _add_separable_conv1d(
-        network, hidden,
+        network, conv_hidden.get_output(0),
         hidden_size, all_head_size, conv_kernel_size, S,
         weights[f"{prefix}.sep_conv_dw"],
         weights[f"{prefix}.sep_conv_pw"],
@@ -431,12 +471,15 @@ def _add_convbert_layer(
     ck_softmax.axes = 1 << 1
 
     # conv_out = linear(hidden) -> [seq, all_head_size]
-    conv_out = graph_ops.add_matmul_rhs_constant(
-        network, hidden, hidden_size, all_head_size,
-        weights[f"{prefix}.conv_out_w"], dtype=dtype)
+    conv_out = _projection(
+        network, hidden, shared_input, hidden_size, all_head_size,
+        weights[f"{prefix}.conv_out_w"], dtype=dtype, quant_ctx=quant_ctx,
+        module=shared_modules[3])
     conv_out = graph_ops.add_bias_sum(
         network, conv_out, all_head_size,
         weights[f"{prefix}.conv_out_bias"], dtype=dtype)
+    conv_out = network.add_elementwise(
+        conv_out, sequence_mask, trt.ElementWiseOperation.PROD).get_output(0)
 
     # Transpose to [all_head_size, seq] for unfold
     conv_out_t = network.add_shuffle(conv_out)
@@ -481,9 +524,14 @@ def _add_convbert_layer(
     cat_flat.reshape_dims = (S, 2 * new_num_heads * head_size)
 
     # === Output projection ===
-    attn_out = graph_ops.add_matmul_rhs_constant(
-        network, cat_flat.get_output(0), hidden_size, hidden_size,
-        weights[f"{prefix}.w_o"], dtype=dtype)
+    # 16-bit in the shipped recipe (see quantization.py); a context that carries a scale for
+    # it (to retest on a newer TensorRT) routes it through Q/DQ like the others.
+    o_module = f"{prefix}.attention.output.dense"
+    attn_out = _projection(
+        network, cat_flat.get_output(0),
+        _quantized_input(network, cat_flat.get_output(0), quant_ctx, (o_module,)),
+        hidden_size, hidden_size, weights[f"{prefix}.w_o"],
+        dtype=dtype, quant_ctx=quant_ctx, module=o_module)
     attn_out = graph_ops.add_bias_sum(
         network, attn_out, hidden_size, weights[f"{prefix}.o_bias"],
         dtype=dtype)
@@ -497,16 +545,22 @@ def _add_convbert_layer(
         weights[f"{prefix}.post_attn_norm_beta"], eps, dtype=dtype)
 
     # === FFN ===
-    fc1 = graph_ops.add_matmul_rhs_constant(
-        network, normed1, hidden_size, intermediate_size,
-        weights[f"{prefix}.w_fc1"], dtype=dtype)
+    fc1_module = f"{prefix}.intermediate.dense"
+    fc1 = _projection(
+        network, normed1,
+        _quantized_input(network, normed1, quant_ctx, (fc1_module,)),
+        hidden_size, intermediate_size, weights[f"{prefix}.w_fc1"],
+        dtype=dtype, quant_ctx=quant_ctx, module=fc1_module)
     fc1 = graph_ops.add_bias_sum(
         network, fc1, intermediate_size, weights[f"{prefix}.fc1_bias"],
         dtype=dtype)
     activated = graph_ops.add_activation(network, fc1, hidden_act)
-    fc2 = graph_ops.add_matmul_rhs_constant(
-        network, activated, intermediate_size, hidden_size,
-        weights[f"{prefix}.w_fc2"], dtype=dtype)
+    fc2_module = f"{prefix}.output.dense"
+    fc2 = _projection(
+        network, activated,
+        _quantized_input(network, activated, quant_ctx, (fc2_module,)),
+        intermediate_size, hidden_size, weights[f"{prefix}.w_fc2"],
+        dtype=dtype, quant_ctx=quant_ctx, module=fc2_module)
     fc2 = graph_ops.add_bias_sum(
         network, fc2, hidden_size, weights[f"{prefix}.fc2_bias"],
         dtype=dtype)

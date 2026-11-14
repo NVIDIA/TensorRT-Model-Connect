@@ -5,7 +5,7 @@
   "bundle": "sam3.bundle",
   "family": "sam3",
   "task": "text_prompted_segmentation",
-  "precision": "fp32",
+  "precision": "fp16",
   "testcases": [
     {
       "name": "sam3",

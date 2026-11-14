@@ -78,6 +78,10 @@ class NativeKvModuleStub final : public ITrtModule {
         entry.dtype = dtype;
     }
 
+    void add_key_positions_input(std::vector<int64_t> shape = {-1}) {
+        add("key_positions", std::move(shape), DType::kInt32, true);
+    }
+
     TensorMap forward(const TensorMap& inputs) override {
         if (!trace_)
             return {};
@@ -289,6 +293,48 @@ int run_native_kv_contract_tests(const char* model) {
               "standard attention-mask cache path still advances normally");
     }
 
+    {
+        // Native engines with a `key_positions` input attend over the valid
+        // context rounded up to 32 rows; engines without it keep full capacity.
+        Cache legacy_cache(1, 100, 2, stream, DType::kFloat16);
+        NativeKvModuleStub legacy(stream, 1, 100, 1, 2, DType::kFloat16);
+        legacy_cache.bind_to(legacy);
+        TensorMap inputs;
+        legacy_cache.prepare_step(inputs);
+        check(inputs.count("key_positions") == 0,
+              "engines without key_positions keep the full-capacity contract");
+
+        Cache cache(1, 100, 2, stream, DType::kFloat16);
+        NativeKvModuleStub module(stream, 1, 100, 1, 2, DType::kFloat16);
+        module.add_key_positions_input();
+        cache.bind_to(module);
+        inputs.clear();
+        cache.prepare_step(inputs, 4);
+        const auto& rows = inputs.at("key_positions");
+        const auto* values = static_cast<const int32_t*>(rows.data);
+        check(rows.shape == std::vector<int64_t>({32}) && rows.dtype == DType::kInt32 &&
+                  values[0] == 0 && values[31] == 31,
+              "key_positions binds 0..R-1 for the bucketed active rows");
+        cache.set_position(97);
+        inputs.clear();
+        cache.prepare_step(inputs);
+        check(inputs.at("key_positions").shape == std::vector<int64_t>({100}),
+              "active key rows are capped at the capacity");
+        check(cache.active_key_rows(1) == 32 && cache.active_key_rows(32) == 32 &&
+                  cache.active_key_rows(33) == 64,
+              "active key rows round the valid context up to 32");
+        bool rejected = false;
+        try {
+            static_cast<void>(cache.active_key_rows(101));
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        check(rejected, "active key rows reject counts beyond the capacity");
+    }
+    check(rejects_native_contract<Cache>(
+              stream, [](auto& module) { module.add_key_positions_input({-1, 1}); }),
+          "rejects a key_positions input that is not int32 [R]");
+
     const auto make_config = [] {
         Config config;
         config.vocab_size = 16;
@@ -360,6 +406,29 @@ int run_native_kv_contract_tests(const char* model) {
         check(overflow && prefill_trace->calls.empty() && decode_trace->calls.empty() &&
                   cache_ptr->position() == 0,
               "request over capacity is rejected before any runtime progression");
+
+        const internal::TextContinuationRequest sdk_request{
+            Span<const std::int32_t>{prompt.data(), prompt.size()}};
+        const internal::ConfigEntry sdk_config[] = {{"max_new_tokens", std::int64_t{2}}};
+        bool sdk_run_overflow = false;
+        try {
+            (void)pipeline.run(sdk_request, sdk_config);
+        } catch (const std::invalid_argument&) {
+            sdk_run_overflow = true;
+        }
+        bool sdk_stream_overflow = false;
+        try {
+            (void)pipeline.start(sdk_request, sdk_config);
+        } catch (const std::invalid_argument&) {
+            sdk_stream_overflow = true;
+        }
+        check(sdk_run_overflow && sdk_stream_overflow && prefill_trace->calls.empty() &&
+                  decode_trace->calls.empty() && cache_ptr->position() == 0,
+              "Task SDK overflow is an invalid request without runtime progression");
+        const auto valid_result = pipeline.generate_ids(prompt, make_request(1));
+        check(valid_result.token_ids.size() == 11 && valid_result.token_ids.back() == 9 &&
+                  cache_ptr->position() == 10,
+              "rejected SDK requests release generation ownership for the next request");
     }
 
     cudaStreamDestroy(stream);

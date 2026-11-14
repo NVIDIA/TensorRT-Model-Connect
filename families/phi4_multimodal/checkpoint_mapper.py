@@ -10,14 +10,17 @@ standard_decoder_builder.py. All projections are transposed from HF
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
 
 # Register NumPy bfloat16 support required by safetensors.
-import ml_dtypes  # noqa: F401
+import ml_dtypes
 
 from safetensors import safe_open
+
+from .prepared_quantization import PreparedLinear
 
 
 def _target_np_dtype(precision: str) -> np.dtype:
@@ -29,6 +32,8 @@ def _target_np_dtype(precision: str) -> np.dtype:
 
 def _transpose_2d(arr: np.ndarray, name: str, precision: str = "fp32") -> np.ndarray:
     """Transpose [rows, cols] -> [cols, rows] in C-contiguous target dtype."""
+    if isinstance(arr, PreparedLinear):
+        return arr.transpose()
     if arr.ndim != 2:
         raise ValueError(f"Expected rank-2 tensor for transpose: {name}")
     return np.ascontiguousarray(arr.T, dtype=_target_np_dtype(precision))
@@ -71,13 +76,49 @@ class _ReaderCollection(list):
         self.tensor_map = tensor_map
 
 
+class PreparedSafetensorsReader:
+    """Validated, read-only NumPy access without a training-framework dependency.
+
+    safe_open validates the file layout first. Its NumPy backend does not expose
+    FP8 on all supported NumPy versions, so map those bytes with the declared
+    ml_dtypes dependency rather than modifying NumPy or unpacking whole shards.
+    """
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.reader = safe_open(str(path), framework="numpy")
+        with path.open("rb") as source:
+            length = int.from_bytes(source.read(8), "little")
+            self.header = json.loads(source.read(length))
+        self.data_offset = 8 + length
+
+    def keys(self):
+        return self.reader.keys()
+
+    def get_tensor(self, name: str):
+        tensor = self.header[name]
+        dtype = {"F8_E4M3": ml_dtypes.float8_e4m3fn, "BF16": ml_dtypes.bfloat16}.get(
+            tensor["dtype"]
+        )
+        if dtype is None:
+            return self.reader.get_tensor(name)
+        # Layout, shape, dtype and data bounds were already checked by safe_open.
+        return np.memmap(
+            self.path,
+            mode="r",
+            dtype=dtype,
+            shape=tuple(tensor["shape"]),
+            offset=self.data_offset + tensor["data_offsets"][0],
+        )
+
+
 def _open_safetensors(model_dir: Path) -> _ReaderCollection:
     """Open the checkpoint's required NumPy safetensors readers."""
     import json
 
     single = model_dir / "model.safetensors"
     if single.is_file():
-        return _ReaderCollection([safe_open(str(single), framework="numpy")])
+        return _ReaderCollection([PreparedSafetensorsReader(single)])
 
     index_path = model_dir / "model.safetensors.index.json"
     if index_path.is_file():
@@ -87,7 +128,7 @@ def _open_safetensors(model_dir: Path) -> _ReaderCollection:
             raise ValueError("model.safetensors.index.json has no weight_map")
         shard_files = sorted(set(str(value) for value in weight_map.values()))
         readers_by_file = {
-            shard: safe_open(str(model_dir / shard), framework="numpy") for shard in shard_files
+            shard: PreparedSafetensorsReader(model_dir / shard) for shard in shard_files
         }
         return _ReaderCollection(
             [readers_by_file[shard] for shard in shard_files],
@@ -98,7 +139,7 @@ def _open_safetensors(model_dir: Path) -> _ReaderCollection:
 
     diff_single = model_dir / "diffusion_pytorch_model.safetensors"
     if diff_single.is_file():
-        return _ReaderCollection([safe_open(str(diff_single), framework="numpy")])
+        return _ReaderCollection([PreparedSafetensorsReader(diff_single)])
 
     diff_index = model_dir / "diffusion_pytorch_model.safetensors.index.json"
     if diff_index.is_file():
@@ -108,7 +149,7 @@ def _open_safetensors(model_dir: Path) -> _ReaderCollection:
             raise ValueError("diffusion safetensors index has no weight_map")
         shard_files = sorted(set(str(value) for value in weight_map.values()))
         readers_by_file = {
-            shard: safe_open(str(model_dir / shard), framework="numpy") for shard in shard_files
+            shard: PreparedSafetensorsReader(model_dir / shard) for shard in shard_files
         }
         return _ReaderCollection(
             [readers_by_file[shard] for shard in shard_files],

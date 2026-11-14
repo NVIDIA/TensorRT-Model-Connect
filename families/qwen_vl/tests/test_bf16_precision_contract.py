@@ -16,6 +16,7 @@ pytest.importorskip("tensorrt", reason="Qwen-VL precision contracts require Tens
 from families.qwen_vl import graph_blocks, graph_ops  # noqa: E402
 from families.qwen_vl.config import get_rope_scaling  # noqa: E402
 from families.qwen_vl.qwen_vl_vision_builder import (  # noqa: E402
+    _add_dynamic_qwen3_positions,
     _interpolate_qwen3_position_bf16,
 )
 
@@ -111,6 +112,43 @@ def test_qwen3_position_interpolation_matches_bf16_operation_order() -> None:
     expected = expected.float().numpy()
 
     np.testing.assert_array_equal(actual.view(np.uint32), expected.view(np.uint32))
+
+
+@pytest.mark.gpu
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="TensorRT execution requires CUDA")
+def test_dynamic_qwen3_position_graph_matches_bf16_torch() -> None:
+    from families.qwen_vl.tests.vision_oracle import _execute_vision_plan
+    from families.qwen_vl.utils import create_builder_context
+
+    rng = np.random.default_rng(20261016)
+    embeddings = rng.standard_normal((48 * 48, 16)).astype(np.float32)
+    context = create_builder_context(verbose=False, workspace_bytes=1 << 26)
+    network = context.network
+    output = _add_dynamic_qwen3_positions(network, embeddings, graph_ops.trt.bfloat16)
+    output = network.add_cast(output, graph_ops.trt.float32).get_output(0)
+    output.name = "image_features"
+    network.mark_output(output)
+    profile = context.builder.create_optimization_profile()
+    for corner in range(4):
+        profile.set_shape(f"vision_position_indices_{corner}", (4,), (12,), (24,))
+        profile.set_shape(f"vision_position_weights_{corner}", (4, 1), (12, 1), (24, 1))
+    context.config.add_optimization_profile(profile)
+    plan = context.builder.build_serialized_network(network, context.config)
+    assert plan is not None
+    for count in (4, 12, 24):
+        indices = rng.integers(0, len(embeddings), size=(4, count), dtype=np.int32)
+        blends = rng.random((4, count, 1), dtype=np.float32)
+        blends /= blends.sum(axis=0, keepdims=True)
+        inputs = {}
+        terms = []
+        for corner in range(4):
+            inputs[f"vision_position_indices_{corner}"] = indices[corner]
+            inputs[f"vision_position_weights_{corner}"] = blends[corner]
+            terms.append(torch.from_numpy(embeddings[indices[corner]]).bfloat16()
+                         * torch.from_numpy(blends[corner]).bfloat16())
+        expected = ((terms[0] + terms[1]) + terms[2]) + terms[3]
+        actual = _execute_vision_plan(bytes(plan), inputs)
+        np.testing.assert_array_equal(actual, expected.float().numpy())
 
 
 def test_bf16_swiglu_uses_fp32_silu_then_bf16_up_product(monkeypatch) -> None:

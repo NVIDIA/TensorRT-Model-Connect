@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The catalog has only this NVFP4 export, which Transformers cannot load: the native reference is its BF16
+# original (MuseGlimmerForConditionalGeneration, from Transformers 5.16.0).
+reference:
+  model: meta-models/Muse-Glimmer-30B
+  revision: cec94fcfd6512f2cfe708138c32533b346ea4f69
+  requirements: families/muse_glimmer/tests/requirements.txt

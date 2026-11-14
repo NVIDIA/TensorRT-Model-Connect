@@ -346,6 +346,7 @@ def test_build_writes_the_same_transformer_geometry_used_by_the_plan(
         backend="trt",
         context_parallel_size=1,
         dynamic_kv_cache=False,
+        mtp_seq_len=None,
         fp32_layers=(),
         image_height=256,
         image_width=384,

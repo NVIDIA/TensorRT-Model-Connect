@@ -1,0 +1,54 @@
+{
+  "name": "lfm3-1.7b-fp16",
+  "hf_id": "LiquidAI/LFM3-1.7B",
+  "hf_revision": "ac2586a34f1a1c03329dbdcdefabd8b6478ddaa7",
+  "bundle": "lfm3-1.7b-fp16.bundle",
+  "family": "lfm3",
+  "task": "text_generation",
+  "precision": "fp16",
+  "trust_remote_code": true,
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 512,
+  "testcases": [
+    {
+      "name": "lfm3-1.7b-fp16-raw",
+      "premerge": true,
+      "reference_precision": "fp16",
+      "prompt": "The capital of France is",
+      "max_new_tokens": 16,
+      "do_sample": false,
+      "temperature": 0.0,
+      "top_k": 1,
+      "repetition_penalty": 1.0
+    },
+    {
+      "name": "lfm3-1.7b-fp16-chat",
+      "premerge": true,
+      "reference_precision": "fp16",
+      "prompt": "What is the capital of France?",
+      "max_new_tokens": 16,
+      "do_sample": false,
+      "temperature": 0.0,
+      "top_k": 1,
+      "repetition_penalty": 1.0,
+      "use_chat_template": true,
+      "enable_thinking": false
+    },
+    {
+      "name": "lfm3-1.7b-fp16-window",
+      "reference_precision": "fp16",
+      "prompt_repeat": {
+        "text": "The river flows through the valley.",
+        "separator": " ",
+        "count": 40,
+        "suffix": " Summarize this in one sentence:"
+      },
+      "max_new_tokens": 16,
+      "do_sample": false,
+      "temperature": 0.0,
+      "top_k": 1,
+      "repetition_penalty": 1.0,
+      "premerge": true
+    }
+  ]
+}

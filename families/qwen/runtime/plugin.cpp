@@ -21,6 +21,8 @@
 
 namespace trtmc::qwen {
 
+ITask* create_embedding(const FamilyContext& context);
+
 namespace {
 
 struct RuntimeConfig {
@@ -236,5 +238,9 @@ ITask* create(const FamilyContext& context) {
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("qwen does not support --kv-cache-size");
+    if (context.reader.info().task == trtmc::IEmbedding::kTask)
+        return trtmc::qwen::create_embedding(context);
+    if (context.reader.info().task != trtmc::ITextGeneration::kTask)
+        throw std::invalid_argument("qwen unsupported task");
     return trtmc::qwen::create(context);
 }

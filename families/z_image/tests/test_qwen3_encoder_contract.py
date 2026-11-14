@@ -319,7 +319,10 @@ def test_build_qwen3_encoder_engine_raises_when_builder_returns_none(monkeypatch
         )
 
 
-def test_build_qwen3_encoder_engine_dynamic_batch_supports_fp16(monkeypatch) -> None:
+@pytest.mark.parametrize(("precision", "compute"), [("fp16", "float16"), ("bf16", "bfloat16")])
+def test_build_qwen3_encoder_engine_dynamic_batch_supports_half_precision(
+    monkeypatch, precision: str, compute: str
+) -> None:
     fake_trt = _make_fake_trt()
     monkeypatch.setattr(encoder, "trt", fake_trt)
     monkeypatch.setattr(encoder, "add_dynamic_batch_profile", lambda *_args, **_kwargs: None)
@@ -345,15 +348,18 @@ def test_build_qwen3_encoder_engine_dynamic_batch_supports_fp16(monkeypatch) -> 
         intermediate_size=6,
         vocab_size=8,
         max_seq_len=3,
-        precision="fp16",
+        precision=precision,
         max_batch_size=2,
     )
 
     assert plan == b"engine-plan"
     builder = fake_trt.Builder.last_instance
-    assert any(
-        operation == "add_cast" and args[1] == fake_trt.float16
-        for operation, args, _kwargs in builder.network.calls
-    )
+    calls = builder.network.calls
+    casts = [args[1] for operation, args, _kwargs in calls if operation == "add_cast"]
+    assert getattr(fake_trt, compute) in casts
+    assert (fake_trt.bfloat16 if compute == "float16" else fake_trt.float16) not in casts
+    # The gathered embedding rows are cast to the compute dtype; both store weights as fp16.
+    after_gather = calls[[operation for operation, _args, _kwargs in calls].index("add_gather") + 1]
+    assert after_gather[0] == "add_cast" and after_gather[1][1] == getattr(fake_trt, compute)
     assert dtype_calls and all(dtype == np.float16 for dtype in dtype_calls)
     assert [tensor.dtype for tensor in builder.network.outputs] == [fake_trt.float32]

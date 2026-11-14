@@ -1,0 +1,27 @@
+{
+  "name": "llama-3.1-8b-fp8",
+  "hf_id": "nvidia/Llama-3.1-8B-Instruct-FP8",
+  "hf_revision": "42d9515ebd69eea3a87351d079c671c3c5ff0a31",
+  "bundle": "llama-3.1-8b-fp8.bundle",
+  "family": "llama",
+  "task": "text_generation",
+  "precision": "bf16",
+  "quantization": "fp8",
+  "trust_remote_code": false,
+  "testcases": [
+    {
+      "name": "llama-3.1-8b-fp8",
+      "premerge": true,
+      "prompt": "What is the capital of France? Answer in one word.",
+      "max_new_tokens": 10,
+      "use_chat_template": true,
+      "enable_thinking": false,
+      "reference": "none",
+      "expected_answers": [
+        "Paris"
+      ]
+    }
+  ],
+  "max_sequence_length": 256,
+  "tensor_parallel_size": 1
+}

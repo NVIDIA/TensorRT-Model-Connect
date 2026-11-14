@@ -32,16 +32,17 @@ Hold these inputs constant across comparisons:
 ## Choose the measurement layer
 
 - Use `trtmc-bench` for repeatable public task latency and throughput. See the
-  [Benchmarking Reference](/reference/benchmarking).
+  [Benchmarking Reference](./benchmarking.md).
 - Use Nsight Systems around the same CLI or benchmark worker to study process,
   CPU, CUDA API, and kernel timelines.
 - Use Nsight Compute only after narrowing the question to a specific kernel.
 - Use family-owned tests and reference comparisons to establish correctness
   before interpreting a speedup.
 
-Profile loading separately from steady-state task execution. The public CLI
-requires `--runtime-root`; include its exact directory in the evidence so the
-loaded shared objects are reproducible.
+Profile loading separately from steady-state task execution. Record the exact
+runtime directory in the evidence, either the `--runtime-root` value or the
+directory containing the active `libtrtmc_runtime.so`, so the loaded shared
+objects are reproducible.
 
 ## Interpreting results
 

@@ -15,6 +15,7 @@ from families.lance.tests.official_reference import (
     _source_dir,
     run_official_generation,
 )
+from families.lance.tests.benchmark import prepare_environment
 
 
 def test_reference_source_is_required_and_fail_closed(monkeypatch, tmp_path) -> None:
@@ -58,6 +59,21 @@ def test_image_source_removes_only_the_eager_video_import(tmp_path) -> None:
     assert "video: VideoReader" not in patched
     assert "return VideoReader, decord, video" in patched
     assert (image_source / "modeling").is_symlink()
+
+
+def test_qualification_checkout_removes_only_the_eager_video_import(tmp_path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _fake_source(source)
+
+    prepare_environment._prepare_image_only_checkout(source)
+    prepare_environment._prepare_image_only_checkout(source)
+
+    patched = (source / "data/datasets_custom/validation_dataset.py").read_text()
+    assert "import decord" not in patched
+    assert "from decord" not in patched
+    assert "video: VideoReader" not in patched
+    assert "return VideoReader, decord, video" in patched
 
 
 def test_result_requires_one_nonempty_answer(tmp_path) -> None:

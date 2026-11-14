@@ -5,6 +5,11 @@ add_library(trtmc_model_gemma SHARED
   bpe_tokenizer.cpp
   chat_templates.cpp
   distributed_runtime.cpp
+  gemma4_audio.cpp
+  gemma4_image.cpp
+  gemma4_mtp.cpp
+  gemma4_dflash.cpp
+  image_pipeline.cpp
   kv_cache.cpp
   pipeline.cpp
   plugin.cpp
@@ -26,7 +31,10 @@ target_link_libraries(trtmc_model_gemma PRIVATE
   ${TRTMC_CUDART_LIBRARY}
   ${CMAKE_DL_LIBS}
 )
-target_compile_options(trtmc_model_gemma PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(trtmc_model_gemma PRIVATE
+  "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
+  "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>"
+)
 set_target_properties(trtmc_model_gemma PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
   BUILD_RPATH "\$ORIGIN"
@@ -54,3 +62,5 @@ if(TRTMC_BUILD_TESTS)
   endforeach()
   set_tests_properties(test_gemma_pipeline PROPERTIES SKIP_RETURN_CODE 77)
 endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/edge_llm/Adapter.cmake")

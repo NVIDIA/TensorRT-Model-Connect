@@ -1,0 +1,11 @@
+{
+  "state": {"invoice": {"vendor": "Acme", "total": 1250.0, "currency": "USD", "status": "overdue"}},
+  "questions": {
+    "status": {
+      "type": "choice",
+      "instructions": "What is the invoice status?",
+      "criteria": {"paid": "Invoice is paid.", "overdue": "Invoice is past due.", "draft": "Not sent."}
+    },
+    "large": {"type": "noul", "instructions": "Is the total above 1000 USD?"}
+  }
+}

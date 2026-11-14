@@ -230,6 +230,11 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _QwenModel, **u
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Qwen bundle through family-owned code."""
+    if request.task == "embedding":
+        from .embedding import build_embedding
+
+        return build_embedding(request, writer)
+
     if request.dynamic_kv_cache:
         raise NotImplementedError("qwen does not support dynamic_kv_cache")
 
@@ -277,6 +282,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError(f"Qwen does not support quantization={request.quantization!r}")
     if request.fp32_layers:
         raise NotImplementedError("Qwen does not expose mixed-precision layer selection")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("Qwen does not support MTP speculative decoding")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )

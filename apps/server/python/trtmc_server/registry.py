@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Own text-model worker processes without leaking serving concerns into the runtime."""
+"""Own model worker processes without leaking serving concerns into the runtime."""
 
 from __future__ import annotations
 
@@ -33,6 +33,9 @@ class ModelSpec:
         object.__setattr__(self, "bundle", Path(self.bundle))
 
 
+# Text-to-video, and video that starts from an initial image (input_reference).
+VIDEO_CAPABILITIES = frozenset({"video_generation", "initial_image_video_generation"})
+
 class ModelRegistry:
     def __init__(
         self,
@@ -44,7 +47,7 @@ class ModelRegistry:
         request_timeout: float,
     ) -> None:
         if not specs:
-            raise ValueError("at least one text model is required")
+            raise ValueError("at least one model is required")
         if len({spec.name for spec in specs}) != len(specs):
             raise ValueError("model names must be unique")
         self._specs = {spec.name: spec for spec in specs}
@@ -125,6 +128,40 @@ class ModelRegistry:
             value = 128
         return min(value, hard_cap)
 
+    def supports_streaming(self, model: str) -> bool:
+        metadata = self._metadata.get(model)
+        if metadata is None:
+            raise ModelNotFoundError(f"model {model!r} is not registered")
+        return (metadata.get("protocol_version") == 2 and
+                "streaming_text_continuation" in metadata.get("capabilities", []))
+
+    def supports(self, model: str, capability: str) -> bool:
+        metadata = self._metadata.get(model)
+        if metadata is None:
+            raise ModelNotFoundError(f"model {model!r} is not registered")
+        return capability in metadata.get("capabilities", [])
+
+    def video_geometry(self, model: str) -> dict[str, int]:
+        if not any(self.supports(model, capability) for capability in VIDEO_CAPABILITIES):
+            raise ValueError("model does not support video generation")
+        return self._checked_video_geometry(self._metadata[model])
+
+    @staticmethod
+    def _checked_video_geometry(metadata: dict) -> dict[str, int]:
+        geometry = metadata.get("video", {})
+        if (not isinstance(geometry, dict) or
+                any(type(geometry.get(k)) is not int or geometry[k] <= 0
+                    for k in ("width", "height", "num_frames")) or geometry["num_frames"] < 2 or
+                geometry["width"] * geometry["height"] * geometry["num_frames"] > 512 * 1024 * 1024):
+            raise WorkerProtocolError("worker does not declare valid video geometry")
+        return dict(geometry)
+
+    def default_model(self, capability: str) -> str:
+        matches = [name for name in self._order if self.supports(name, capability)]
+        if len(matches) != 1:
+            raise ValueError("specify model when there is not exactly one compatible model")
+        return matches[0]
+
     def models(self) -> list[dict[str, Any]]:
         return [
             {
@@ -132,6 +169,11 @@ class ModelRegistry:
                 "object": "model",
                 "created": self._started_at,
                 "owned_by": "tensorrt-model-connect",
+                "trtmc": {"streaming": ("incremental" if self.supports_streaming(name) else
+                                         "buffered" if self.supports(name, "text_generation") else "none"),
+                          "capabilities": self._metadata.get(name, {}).get("capabilities", []),
+                          "protocol_version": self._metadata.get(name, {}).get("protocol_version"),
+                          "video": self._metadata.get(name, {}).get("video")},
             }
             for name in self._order
         ]
@@ -151,8 +193,12 @@ class ModelRegistry:
 
     @staticmethod
     def _validate_ready(metadata: dict[str, Any]) -> None:
-        if metadata.get("event") != "ready" or metadata.get("protocol_version") != 1:
+        if metadata.get("event") != "ready" or type(metadata.get("protocol_version")) is not int or metadata.get("protocol_version") not in (1, 2):
             raise WorkerProtocolError("worker uses an unsupported ready protocol")
         capabilities = metadata.get("capabilities")
-        if not isinstance(capabilities, list) or "text_generation" not in capabilities:
-            raise WorkerProtocolError("worker does not advertise text_generation")
+        if (not isinstance(capabilities, list) or not capabilities or
+                not all(isinstance(value, str) for value in capabilities) or
+                not {"text_generation", "embeddings", "reranking", "audio_transcription", "object_detection", "vision_language_generation", "image_generation", "image_edit", *VIDEO_CAPABILITIES}.intersection(capabilities)):
+            raise WorkerProtocolError("worker does not advertise a supported capability")
+        if VIDEO_CAPABILITIES.intersection(capabilities):
+            ModelRegistry._checked_video_geometry(metadata)

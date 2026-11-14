@@ -5,6 +5,7 @@
 
 #include "families/phi_moe/runtime/chat_templates.h"
 #include "families/phi_moe/runtime/distributed_runtime.h"
+#include "families/phi_moe/runtime/eos_tokens.h"
 #include "families/phi_moe/runtime/kv_cache.h"
 #include "families/phi_moe/runtime/pipeline.h"
 #include "families/phi_moe/runtime/plugin_helpers.h"
@@ -30,7 +31,7 @@ struct RuntimeConfig {
     std::int32_t head_dim;
     std::int32_t vocab_size;
     std::int32_t bos_token_id;
-    std::int32_t eos_token_id;
+    std::vector<std::int32_t> eos_token_ids;
     std::int32_t pad_token_id;
     std::int32_t max_cache_length;
     std::int32_t tensor_parallel_size;
@@ -50,15 +51,10 @@ T require_value(const nlohmann::json& json, const char* name) {
     }
 }
 
-std::int32_t require_eos_token(const nlohmann::json& json) {
+std::vector<std::int32_t> require_eos_tokens(const nlohmann::json& json) {
     if (!json.contains("eos_token_id"))
         throw std::runtime_error("phi_moe runtime.json missing 'eos_token_id'");
-    const auto& value = json.at("eos_token_id");
-    if (value.is_number_integer())
-        return value.get<std::int32_t>();
-    if (value.is_array() && !value.empty() && value.front().is_number_integer())
-        return value.front().get<std::int32_t>();
-    throw std::runtime_error("phi_moe runtime.json has invalid 'eos_token_id'");
+    return phi_moe_parse_eos_tokens(json.at("eos_token_id"));
 }
 
 RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
@@ -82,7 +78,7 @@ RuntimeConfig parse_runtime_config(const BundleReader& bundle) {
         require_value<std::int32_t>(json, "head_dim"),
         require_value<std::int32_t>(json, "vocab_size"),
         require_value<std::int32_t>(json, "bos_token_id"),
-        require_eos_token(json),
+        require_eos_tokens(json),
         require_value<std::int32_t>(json, "pad_token_id"),
         require_value<std::int32_t>(json, "max_cache_length"),
         require_value<std::int32_t>(json, "tensor_parallel_size"),
@@ -200,7 +196,8 @@ ITask* create(const FamilyContext& context) {
     PhiMoeTextGenConfig text_config;
     text_config.vocab_size = config.vocab_size;
     text_config.id_bos = config.bos_token_id;
-    text_config.id_eos = config.eos_token_id;
+    text_config.id_eos = config.eos_token_ids.front();
+    text_config.eos_token_ids = config.eos_token_ids;
     text_config.chat_template_format =
         phi_moe_detect_chat_template_format(chat_template(context.reader));
     text_config.prefill_max_length = config.max_cache_length;

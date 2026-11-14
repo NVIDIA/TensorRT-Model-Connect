@@ -19,6 +19,7 @@ from .timing_cache import build_sam3_serialized_network
 
 
 _VISION_FP16_GEMMS = frozenset({"qkv", "o_proj", "fc2"})
+_VISION_PRECISIONS = frozenset({"fp16", "fp32"})
 
 
 def _timing_cache_graph_profile(
@@ -99,7 +100,12 @@ def _add_fp16_matmul_island(
     residual operations remain FP32.  The network is strongly typed, so the
     explicit casts and FP16 constant are the precision contract; builder flags
     and weakly typed layer precision overrides are intentionally not used.
+    In the fp16 graph the input is already FP16 and the GEMM stays FP16.
     """
+    if getattr(inp, "dtype", None) == _trt().float16:
+        return _graph_ops().add_matmul_rhs_constant(
+            network, inp, input_width, output_width, weight, dtype=np.float16
+        )
     narrowed = network.add_cast(inp, _trt().float16).get_output(0)
     out = _graph_ops().add_matmul_rhs_constant(
         network,
@@ -610,9 +616,34 @@ def _add_sam3_vision_mlp(
     intermediate_size: int,
     hidden_act: str,
 ):
-    """Keep FC1 on Tensor Cores and narrow FC2 at the residual boundary."""
+    """Keep FC1 on Tensor Cores and narrow FC2 at the residual boundary.
+
+    In the fp16 graph (FP16 input) the whole MLP, GELU included, stays FP16.
+    """
     trt = _trt()
     graph_ops = _graph_ops()
+
+    if getattr(normed, "dtype", None) == trt.float16:
+        mlp = graph_ops.add_matmul_rhs_constant(
+            network,
+            normed,
+            hidden_size,
+            intermediate_size,
+            weights[f"{prefix}.mlp.fc1.weight"],
+            dtype=np.float16,
+        )
+        mlp = graph_ops.add_bias_sum(
+            network, mlp, intermediate_size, weights[f"{prefix}.mlp.fc1.bias"]
+        )
+        mlp = _add_sam3_vision_activation(network, mlp, hidden_act)
+        mlp = _add_fp16_matmul_island(
+            network,
+            mlp,
+            intermediate_size,
+            hidden_size,
+            weights[f"{prefix}.mlp.fc2.weight"],
+        )
+        return graph_ops.add_bias_sum(network, mlp, hidden_size, weights[f"{prefix}.mlp.fc2.bias"])
 
     mlp = network.add_cast(normed, trt.float16).get_output(0)
     mlp = graph_ops.add_matmul_rhs_constant(
@@ -654,9 +685,15 @@ def build_sam3_vision_encoder_engine(
     hidden_act: str = "gelu",
     verbose: bool = False,
 ) -> bytes:
-    """Build the exact-B1 SAM3 ViT+FPN vision plan with TensorRT APIs."""
-    if precision != "fp32":
-        raise ValueError("The SAM3 vision plan supports only its selected FP32/FP16 configuration")
+    """Build the exact-B1 SAM3 ViT+FPN vision plan with TensorRT APIs.
+
+    ``fp32`` keeps the residual stream, norms, GELU and the necks in FP32 and
+    runs the GEMMs and attention in FP16.  ``fp16`` runs the ViT blocks and the
+    necks in FP16; the patch embedding, the pre-norm and the plan outputs stay
+    FP32.
+    """
+    if precision not in _VISION_PRECISIONS:
+        raise ValueError(f"The SAM3 vision plan supports fp16 or fp32, got {precision!r}")
     trt = _trt()
     graph_ops = _graph_ops()
     grid_size = image_size // patch_size
@@ -668,6 +705,7 @@ def build_sam3_vision_encoder_engine(
     num_windows = seq_len // window_seq
     global_layers = set(global_attn_indexes)
     work_np_dtype = np.float32
+    block_np_dtype = np.float16 if precision == "fp16" else np.float32
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -714,6 +752,8 @@ def build_sam3_vision_encoder_engine(
         weights["vision.pre_layer_norm.bias"],
         eps,
     )
+    if precision == "fp16":
+        hidden = network.add_cast(hidden, trt.float16).get_output(0)
 
     gather_window = graph_ops.add_constant(network, (seq_len,), window_order, dtype=np.int32)
     gather_inverse = graph_ops.add_constant(
@@ -750,7 +790,7 @@ def build_sam3_vision_encoder_engine(
                 seq_len=seq_len,
                 cos_table=global_cos,
                 sin_table=global_sin,
-                dtype=work_np_dtype,
+                dtype=block_np_dtype,
             )
         else:
             ordered = network.add_gather(normed, gather_window, axis=1).get_output(0)
@@ -766,7 +806,7 @@ def build_sam3_vision_encoder_engine(
                 cos_table=window_cos,
                 sin_table=window_sin,
                 num_windows=num_windows,
-                dtype=work_np_dtype,
+                dtype=block_np_dtype,
             )
             attn = network.add_gather(attn_ordered, gather_inverse, axis=1).get_output(0)
 
@@ -804,7 +844,7 @@ def build_sam3_vision_encoder_engine(
             level,
             hidden_size,
             fpn_hidden_size,
-            dtype=work_np_dtype,
+            dtype=block_np_dtype,
         )
         pos_np = _sam3_position_encoding(grid_size * scale, grid_size * scale, fpn_hidden_size)
         pos = graph_ops.add_constant(network, pos_np.shape, pos_np, dtype=work_np_dtype)
@@ -822,7 +862,7 @@ def build_sam3_vision_encoder_engine(
                 level,
                 hidden_size,
                 fpn_hidden_size,
-                dtype=work_np_dtype,
+                dtype=block_np_dtype,
             )
             # Memory attention consumes only the lowest-resolution positional
             # map.  The two high-resolution maps feed the mask decoder without

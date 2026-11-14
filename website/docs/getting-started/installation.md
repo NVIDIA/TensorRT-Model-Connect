@@ -6,7 +6,7 @@ Choose one path:
 
 | Path | Current boundary |
 | --- | --- |
-| Release wheel | Linux aarch64, Python 3.10 or 3.12, glibc 2.39 or newer, and official TensorRT 11.1.0.106. |
+| Release wheel | Linux aarch64, Python 3.10 or 3.12, glibc 2.39 or newer, and official TensorRT 11.4.0.106. |
 | Source build | Linux x86_64 or aarch64 with Docker and NVIDIA Container Toolkit. |
 
 Release wheels currently support aarch64 only. x86_64 wheels are planned; use

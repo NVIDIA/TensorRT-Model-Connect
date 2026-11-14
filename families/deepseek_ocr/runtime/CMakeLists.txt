@@ -49,6 +49,21 @@ install(TARGETS trtmc_model_deepseek_ocr
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_deepseek_ocr_image_padding
+    ../tests/cpp/test_image_padding.cpp
+  )
+  target_include_directories(test_deepseek_ocr_image_padding PRIVATE
+    ${PROJECT_SOURCE_DIR}
+  )
+  target_link_libraries(test_deepseek_ocr_image_padding PRIVATE
+    trtmc_model_deepseek_ocr
+  )
+  target_compile_options(test_deepseek_ocr_image_padding PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME deepseek_ocr_image_padding COMMAND test_deepseek_ocr_image_padding)
+  set_tests_properties(deepseek_ocr_image_padding PROPERTIES LABELS cpu)
+
   add_executable(test_deepseek_ocr_runtime_config
     ../tests/cpp/test_runtime_config.cpp
   )

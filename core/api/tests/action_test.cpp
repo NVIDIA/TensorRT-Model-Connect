@@ -425,6 +425,84 @@ void exercise_nested_models(const std::filesystem::path& root) {
     check(a.run({input}).inference_ms() == 102 && b.run({input}).inference_ms() == 102,
           "both model stacks unwind without a lingering reentry marker");
 }
+void exercise_multi_image(const std::filesystem::path& root) {
+    using namespace trtmc;
+    auto model = load(root, "multi_image");
+    check(model.tasks().size() == 1 && model.supports<ImagesStateTextToActionChunk>() &&
+              !model.supports<ImageStateToActionChunk>() &&
+              !model.supports<ImageStateActionQueue>(),
+          "multi-image Task is advertised alone and does not imply the image/state Tasks");
+    const auto predictor = model.task<ImagesStateTextToActionChunk>();
+    check(predictor.config_fields().empty(), "multi-image fixture declares no config");
+
+    const float pixel_a[] = {0.5F, 0.25F, 0.125F};
+    const std::uint8_t pixel_b[] = {255, 255, 255};
+    const float state[] = {2, 4};
+    const ImageInput camera_a({pixel_a, 3}, 1, 1);
+    const ImageInput camera_b({pixel_b, 3}, 1, 1);
+    const std::string text = "pick up the cup";
+    const std::vector<NamedImage> forward{{"cam_a", camera_a}, {"cam_b", camera_b}};
+    const std::vector<NamedImage> reversed{{"cam_b", camera_b}, {"cam_a", camera_a}};
+    const auto request = [&](const std::vector<NamedImage>& images, Span<const float> values,
+                             std::string_view instruction) {
+        return ImagesStateTextToActionChunkRequest{
+            {{images.data(), images.size()}, values, instruction}};
+    };
+
+    auto first = predictor.run(request(forward, {state, 2}, text));
+    const auto actions = first.actions();
+    check(actions.rows == 2 && actions.columns == 2 && actions.values[0] == 2.5F &&
+              actions.values[1] == 5.0F && actions.values[2] == 15.0F &&
+              actions.values[3] == 22.0F && !first.within_training_bounds() &&
+              first.inference_ms() == 201,
+          "multi-image prediction routes each named camera, passes text bytes and state "
+          "through, and keeps the family's flag and timing");
+    const auto schema = first.view().actions.schema;
+    check(trtmc::detail::string_view(schema.domain) == "fixture.multi_image" &&
+              schema.component_names.size == 2 &&
+              trtmc::detail::string_view(schema.normalization) == "unnormalized",
+          "multi-image action schema is retained");
+
+    auto swapped = predictor.run(request(reversed, {state, 2}, text));
+    check(swapped.actions().values[0] == 2.5F && swapped.actions().values[1] == 5.0F &&
+              swapped.inference_ms() == 202,
+          "camera order is not interpreted by the Core");
+
+    const std::string unicode = "\xE6\x8B\xBF\xE8\xB5\xB7\xE6\x9D\xAF\xE5\xAD\x90";
+    check(predictor.run(request(forward, {state, 2}, unicode)).actions().values[2] ==
+              static_cast<float>(unicode.size()),
+          "UTF-8 instruction bytes reach the family unchanged");
+
+    // Core validation rejects malformed shapes before the family runs, and family
+    // validation rejects semantic errors; neither consumes a prediction.
+    const std::vector<NamedImage> empty_name{{"", camera_a}, {"cam_b", camera_b}};
+    const std::vector<NamedImage> duplicated{{"cam_a", camera_a}, {"cam_a", camera_b}};
+    const std::vector<NamedImage> none;
+    const std::vector<NamedImage> unknown{{"cam_a", camera_a}, {"cam_z", camera_b}};
+    const std::vector<NamedImage> missing{{"cam_a", camera_a}};
+    rejects([&] { (void)predictor.run(request(none, {state, 2}, text)); }, TRTMC_INVALID_ARGUMENT,
+            "an observation without images is rejected by the Core");
+    rejects([&] { (void)predictor.run(request(empty_name, {state, 2}, text)); },
+            TRTMC_INVALID_ARGUMENT, "an empty camera name is rejected by the Core");
+    rejects([&] { (void)predictor.run(request(duplicated, {state, 2}, text)); },
+            TRTMC_INVALID_ARGUMENT, "duplicate camera names are rejected by the Core");
+    rejects([&] { (void)predictor.run(request(unknown, {state, 2}, text)); },
+            TRTMC_INVALID_ARGUMENT, "an unknown camera name is rejected by the family");
+    rejects([&] { (void)predictor.run(request(missing, {state, 2}, text)); },
+            TRTMC_INVALID_ARGUMENT, "a missing required camera is rejected by the family");
+    rejects([&] { (void)predictor.run(request(forward, {state, 1}, text)); },
+            TRTMC_INVALID_ARGUMENT, "a wrong state size is rejected by the family");
+    rejects([&] { (void)predictor.run(request(forward, {state, 2}, "")); }, TRTMC_INVALID_ARGUMENT,
+            "an empty required instruction is rejected by the family");
+    rejects([&] { (void)predictor.run(request(forward, {state, 2}, text), {{"unknown", 1}}); },
+            TRTMC_INVALID_CONFIG, "undeclared config is rejected before the family runs");
+    check(predictor.run(request(forward, {state, 2}, text)).inference_ms() == 204,
+          "rejected requests do not consume a prediction");
+
+    auto malformed = load(root, "multi_image_bad_chunk").task<ImagesStateTextToActionChunk>();
+    rejects([&] { (void)malformed.run(request(forward, {state, 2}, text)); }, TRTMC_INTERNAL_ERROR,
+            "malformed multi-image chunk shape does not escape C ABI");
+}
 } // namespace
 int main(int argc, char** argv) {
     if (argc != 2)
@@ -438,6 +516,7 @@ int main(int argc, char** argv) {
         exercise_throwing_creation_cleanup(argv[1]);
         exercise_unreserved_chunk_reentry(argv[1]);
         exercise_nested_models(argv[1]);
+        exercise_multi_image(argv[1]);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 2;

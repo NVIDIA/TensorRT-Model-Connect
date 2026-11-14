@@ -15,6 +15,7 @@
 #include <queue>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -75,6 +76,54 @@ inline std::string utf32_to_utf8(char32_t cp) {
         r.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
     }
     return r;
+}
+
+std::string replace_invalid_utf8(const std::string& text) {
+    static constexpr std::string_view replacement = "\xef\xbf\xbd";
+    std::string result;
+    result.reserve(text.size());
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        const auto lead = static_cast<unsigned char>(text[pos]);
+        if (lead < 0x80) {
+            result.push_back(text[pos++]);
+            continue;
+        }
+
+        std::size_t length = 0;
+        if (lead >= 0xC2 && lead <= 0xDF)
+            length = 2;
+        else if (lead >= 0xE0 && lead <= 0xEF)
+            length = 3;
+        else if (lead >= 0xF0 && lead <= 0xF4)
+            length = 4;
+        else {
+            result.append(replacement);
+            ++pos;
+            continue;
+        }
+
+        if (pos + length > text.size()) {
+            result.append(replacement);
+            break;
+        }
+        const auto second = static_cast<unsigned char>(text[pos + 1]);
+        bool valid = (second & 0xC0) == 0x80;
+        if (length >= 3)
+            valid = valid && (static_cast<unsigned char>(text[pos + 2]) & 0xC0) == 0x80;
+        if (length == 4)
+            valid = valid && (static_cast<unsigned char>(text[pos + 3]) & 0xC0) == 0x80;
+        valid = valid && !(lead == 0xE0 && second < 0xA0) && !(lead == 0xED && second >= 0xA0) &&
+                !(lead == 0xF0 && second < 0x90) && !(lead == 0xF4 && second >= 0x90);
+        if (!valid) {
+            result.append(replacement);
+            ++pos;
+            continue;
+        }
+        result.append(text, pos, length);
+        pos += length;
+    }
+    return result;
 }
 
 // Read one UTF-8 codepoint from raw bytes, advance ptr. Returns 0xFFFD on error.
@@ -1009,7 +1058,7 @@ class BpeTokenizer final : public ITokenizer {
                 result.append(text, start, pos - start);
             }
         }
-        return result;
+        return replace_invalid_utf8(result);
     }
 
     // Generic pre-tokenizer used when no GPT-2 pattern is declared.
@@ -1223,19 +1272,52 @@ class BpeTokenizer final : public ITokenizer {
         return pretok::Variant::kLlama;
     }
 
-    // Detect variant from the Split inside a Sequence pre_tokenizer.
+    // Detect variant from the Split step(s) inside a Sequence pre_tokenizer.
+    // Some checkpoints isolate digit-grouping (\p{N}{1,3}) as its own Split
+    // step, ahead of the step whose regex actually identifies the variant
+    // (e.g. Qwen3's `[^\r\n...`). That earlier step's regex never matches
+    // any known variant signature and falls through to kLlama, so scanning
+    // stops before reaching the real classifier. Scan every Split step for
+    // classification instead of only the first; take the digit-group size
+    // independently, from whichever step's own regex encodes one, since the
+    // classifying step and the digit-grouping step are not guaranteed to be
+    // the same step.
     static pretok::Variant detect_split_variant(const nlohmann::json& pt, int& digit_group_out) {
         digit_group_out = 0;
         if (!pt.contains("pretokenizers"))
             return pretok::Variant::kLlama;
+
+        pretok::Variant variant = pretok::Variant::kLlama;
+        bool variant_found = false;
         for (auto& sub : pt["pretokenizers"]) {
             if (sub.value("type", "") != "Split")
                 continue;
             if (!sub.contains("pattern") || !sub["pattern"].contains("Regex"))
                 continue;
-            return classify_split(sub, digit_group_out);
+            const auto regex = sub["pattern"]["Regex"].get<std::string>();
+
+            if (digit_group_out == 0) {
+                if (int group = parse_digit_group(regex); group > 0)
+                    digit_group_out = group;
+            }
+
+            int step_digit_group = 0; // discarded; digit_group_out is tracked separately above
+            pretok::Variant step_variant = classify_split(sub, step_digit_group);
+            if (step_variant == pretok::Variant::kLlama)
+                continue;
+            if (variant_found && step_variant != variant) {
+                throw std::runtime_error(
+                    "Ambiguous Sequence pre_tokenizer: Split steps classify to different "
+                    "variants (" +
+                    std::to_string(static_cast<int>(variant)) + " and " +
+                    std::to_string(static_cast<int>(step_variant)) + ")");
+            }
+            if (!variant_found) {
+                variant = step_variant;
+                variant_found = true;
+            }
         }
-        return pretok::Variant::kLlama;
+        return variant;
     }
 
     static bool is_space_split_pre_tokenizer(const nlohmann::json& pt, const std::string& pt_type) {

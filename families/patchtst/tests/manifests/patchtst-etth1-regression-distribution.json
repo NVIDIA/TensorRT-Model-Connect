@@ -1,6 +1,7 @@
 {
   "name": "patchtst-etth1-regression-distribution",
   "hf_id": "ibm-research/patchtst-etth1-regression-distribution",
+  "hf_revision": "d5ef731ed80ffcd2f0a3262138b1009bbcedb2c4",
   "bundle": "patchtst-etth1-regression-distribution.bundle",
   "family": "patchtst",
   "task": "time_series_forecast",

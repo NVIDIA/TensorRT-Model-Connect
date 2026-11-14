@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# MagicBrush dev: 100 of its 266 first-turn edits (every other one; square source images with an
+# instruction); gold is the human-made target image, scored as CLIP-I.
+suite: magicbrush-dev-100
+version: 1
+base: catalog
+source:
+  kind: hf_dataset
+  dataset: osunlp/MagicBrush
+  split: dev
+  revision: 1d8d4629150d18ca50afab66391866f2085be989
+  data_files: {dev: data/dev-*.parquet}
+  image_column: source_img
+  prompt_column: instruction
+  label_column: target_img
+  label_image: true
+  where: {turn_index: 1}
+selection: {method: stride, count: 100}
+fields: {image: image_path, prompt: prompt}

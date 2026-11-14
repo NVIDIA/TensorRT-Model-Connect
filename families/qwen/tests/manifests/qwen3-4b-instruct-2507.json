@@ -1,6 +1,7 @@
 {
   "name": "qwen3-4b-instruct-2507",
   "hf_id": "Qwen/Qwen3-4B-Instruct-2507",
+  "hf_revision": "cdbee75f17c01a7cc42f958dc650907174af0554",
   "bundle": "qwen3-4b-instruct-2507.bundle",
   "family": "qwen",
   "task": "text_generation",

@@ -60,10 +60,10 @@ _BLOCKS = (
 
 
 class ImageNetworkBuilder:
-    def __init__(self, trt: Any, network: Any, checkpoint: Checkpoint) -> None:
+    def __init__(self, trt: Any, network: Any, checkpoint: Checkpoint, half: Any = None) -> None:
         self.trt = trt
         self.network = network
-        self.layers = TrtLayers(trt, network, checkpoint)
+        self.layers = TrtLayers(trt, network, checkpoint, half)
 
     @staticmethod
     def _prefix(index: int) -> str:
@@ -83,7 +83,7 @@ class ImageNetworkBuilder:
         weights = f"{self._prefix(index)}.attn"
         name = self._name(index, "attention")
 
-        qkv = self.layers.linear_bf16(
+        qkv = self.layers.linear_half(
             tensor, f"{weights}.qkv", input_channels, 3 * output_channels, f"{name}.qkv"
         )
         grouped = self.layers.shuffle(
@@ -122,7 +122,7 @@ class ImageNetworkBuilder:
         k = self.layers.transpose(k, (0, 2, 1, 3), f"{name}.k_heads")
         v = self.layers.transpose(v, (0, 2, 1, 3), f"{name}.v_heads")
         scale = self.layers.scalar(
-            reciprocal_sqrtf(head_channels), 4, self.trt.bfloat16, f"{name}.q_scale"
+            reciprocal_sqrtf(head_channels), 4, self.layers.half, f"{name}.q_scale"
         )
         q = self.layers.elementwise(
             q, scale, self.trt.ElementWiseOperation.PROD, f"{name}.q_scaled"
@@ -148,7 +148,7 @@ class ImageNetworkBuilder:
             (batch, query_height, query_width, output_channels),
             f"{name}.image",
         )
-        return self.layers.linear_bf16(
+        return self.layers.linear_half(
             image,
             f"{weights}.proj",
             output_channels,
@@ -164,7 +164,7 @@ class ImageNetworkBuilder:
         )
         shortcut = tensor
         if contract.input_channels != contract.output_channels:
-            projected = self.layers.linear_bf16(
+            projected = self.layers.linear_half(
                 normalized,
                 f"{weights}.proj",
                 contract.input_channels,
@@ -220,7 +220,7 @@ class ImageNetworkBuilder:
         mlp_input = self.layers.layer_norm_fp32(
             result, f"{weights}.norm2", contract.output_channels, 1.0e-6, f"{name}.norm2"
         )
-        mlp = self.layers.linear_bf16(
+        mlp = self.layers.linear_half(
             mlp_input,
             f"{weights}.mlp.layers.0",
             contract.output_channels,
@@ -228,7 +228,7 @@ class ImageNetworkBuilder:
             f"{name}.mlp.fc1",
         )
         mlp = self.layers.gelu(mlp, f"{name}.mlp.gelu")
-        mlp = self.layers.linear_bf16(
+        mlp = self.layers.linear_half(
             mlp,
             f"{weights}.mlp.layers.1",
             4 * contract.output_channels,
@@ -241,7 +241,7 @@ class ImageNetworkBuilder:
         )
 
     def _hiera(self, pixels: Any) -> list[Any]:
-        tensor = self.layers.cast(pixels, self.trt.bfloat16, "hiera.input_bf16")
+        tensor = self.layers.cast(pixels, self.layers.half, "hiera.input_bf16")
         tensor = self.layers.convolution(
             tensor,
             "image_encoder.trunk.patch_embed.proj.weight",
@@ -309,7 +309,7 @@ class ImageNetworkBuilder:
         for level in range(3, -1, -1):
             module = f"image_encoder.neck.convs.{3 - level}.conv"
             name = f"fpn.lateral.{level}"
-            tensor = self.layers.cast(trunk[level], self.trt.bfloat16, f"{name}.input_bf16")
+            tensor = self.layers.cast(trunk[level], self.layers.half, f"{name}.input_bf16")
             fpn[level] = self.layers.convolution(
                 tensor,
                 f"{module}.weight",
@@ -402,6 +402,9 @@ class ImageNetworkBuilder:
     def _output(self, tensor: Any, contract: tuple[str, str, tuple[int, ...]]) -> None:
         name, dtype_name, shape = contract
         dtype = self.trt.bfloat16 if dtype_name == "bf16" else self.trt.float32
+        if dtype == self.trt.bfloat16 and tensor.dtype == self.layers.half:
+            # The runtime contract keeps BF16 interface tensors for both compute types.
+            tensor = self.layers.cast(tensor, dtype, f"{name}.output_bf16")
         if tensor.dtype != dtype or self.layers._shape(tensor) != shape:
             raise NetworkBuildError(
                 f"output contract mismatch for {name}: actual shape {self.layers._shape(tensor)}"
@@ -419,7 +422,9 @@ class ImageNetworkBuilder:
             self._output(tensor, contract)
 
 
-def populate_image_network(trt: Any, network: Any, checkpoint: Checkpoint) -> ImageNetworkBuilder:
-    builder = ImageNetworkBuilder(trt, network, checkpoint)
+def populate_image_network(
+    trt: Any, network: Any, checkpoint: Checkpoint, half: Any = None
+) -> ImageNetworkBuilder:
+    builder = ImageNetworkBuilder(trt, network, checkpoint, half)
     builder.build()
     return builder

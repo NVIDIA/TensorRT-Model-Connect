@@ -14,7 +14,8 @@
         {"name": "precision", "flags": ["--precision"], "type": "string", "choices": ["bf16"], "default": "bf16"},
         {"name": "backend", "flags": ["--backend"], "type": "string", "choices": ["trt"], "default": "trt"},
         {"name": "max_sequence_length", "flags": ["--max-sequence-length"], "type": "int", "choices": [117], "default": 117},
-        {"name": "verbose", "flags": ["--verbose"], "type": "bool", "action": "store_true", "default": false}
+        {"name": "verbose", "flags": ["--verbose"], "type": "bool", "action": "store_true", "default": false},
+        {"name": "diffusion_token_precision", "flags": ["--diffusion-token-precision"], "type": "string", "choices": ["bf16", "fp32"], "default": "bf16", "help": "Matmul precision of the diffusion token-transformer projections (fp32 = upstream policy)"}
       ]
     },
     {

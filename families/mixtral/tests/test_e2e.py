@@ -327,6 +327,82 @@ def _record_text_diagnostics(native_ids: list[int], reference_ids: list[int]) ->
     })
 
 
+# FP16 relative steps within which the reference cannot tell two greedy picks
+# apart: the FP16 engine's own rounding reorders tokens that close.
+_GREEDY_TIE_FP16_STEPS = 2
+
+
+def _greedy_tie(torch, scores, reference_id: int, native_id: int) -> dict | None:
+    """The tie record when the reference scores ``native_id`` level with its own pick."""
+    if not 0 <= native_id < scores.numel():
+        return None
+    top = float(scores[reference_id])
+    gap = top - float(scores[native_id])
+    tolerance = _GREEDY_TIE_FP16_STEPS * torch.finfo(torch.float16).eps * max(abs(top), 1.0)
+    if not gap <= tolerance:
+        return None
+    return {
+        "reference_token_id": reference_id,
+        "native_token_id": native_id,
+        "score_gap": gap,
+        "tolerance": tolerance,
+    }
+
+
+def _greedy_reference(
+    model,
+    prompt_ids,
+    case: dict,
+    actual_ids: list[int],
+    torch,
+) -> tuple[list[int], list[dict]]:
+    """Greedy reference ids that follow the native token through near-ties.
+
+    Where the native engine first picks another token, generation resumes from
+    the native token only if the reference scored it within FP16 resolution of
+    its own pick; any wider gap keeps the reference's own continuation.
+    """
+    max_new_tokens = int(case["max_new_tokens"])
+    options = {"do_sample": False, "output_scores": True, "return_dict_in_generate": True}
+    if "repetition_penalty" in case:
+        options["repetition_penalty"] = float(case["repetition_penalty"])
+    eos = model.generation_config.eos_token_id
+    eos_ids = set(eos if isinstance(eos, list) else [] if eos is None else [eos])
+    reference_ids: list[int] = []
+    ties: list[dict] = []
+    while len(reference_ids) < max_new_tokens:
+        prefix = torch.tensor([reference_ids], dtype=prompt_ids.dtype, device=prompt_ids.device)
+        input_ids = torch.cat([prompt_ids, prefix], dim=1)
+        output = model.generate(
+            input_ids=input_ids,
+            attention_mask=torch.ones_like(input_ids),
+            max_new_tokens=max_new_tokens - len(reference_ids),
+            **options,
+        )
+        continuation = output.sequences[0, input_ids.shape[1] :].tolist()
+        start = len(reference_ids)
+        step = next(
+            (
+                offset
+                for offset, token_id in enumerate(continuation)
+                if start + offset < len(actual_ids) and actual_ids[start + offset] != token_id
+            ),
+            None,
+        )
+        tie = None
+        if step is not None:
+            native_id = actual_ids[start + step]
+            tie = _greedy_tie(torch, output.scores[step][0], continuation[step], native_id)
+        if tie is None:
+            reference_ids.extend(continuation)
+            break
+        ties.append({"index": start + step, **tie})
+        reference_ids.extend([*continuation[:step], native_id])
+        if native_id in eos_ids:
+            break
+    return reference_ids, ties
+
+
 def _hf_reference(
     model_dir: Path,
     manifest: dict,
@@ -405,14 +481,10 @@ def _hf_reference(
                 past = output.past_key_values
             sampling_support = accepted / len(actual_ids)
         else:
-            generate_options = {
-                "max_new_tokens": int(case["max_new_tokens"]),
-                "do_sample": False,
-            }
-            if "repetition_penalty" in case:
-                generate_options["repetition_penalty"] = float(case["repetition_penalty"])
-            generated = model.generate(**inputs, **generate_options)
-            reference_ids = generated[0, inputs["input_ids"].shape[1] :].tolist()
+            reference_ids, ties = _greedy_reference(
+                model, inputs["input_ids"], case, actual_ids, torch
+            )
+            record_evidence("reference_greedy_ties", ties)
             reference_text = tokenizer.decode(reference_ids, skip_special_tokens=True).strip()
 
     actual_decoded = tokenizer.decode(actual_ids, skip_special_tokens=True).strip()

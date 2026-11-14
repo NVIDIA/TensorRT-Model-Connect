@@ -1,0 +1,162 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "help": "Build one qwen3_8 TensorRT bundle",
+      "executor": "python",
+      "handler": "cli:build",
+      "arguments": [
+        {
+          "name": "model",
+          "type": "string",
+          "help": "Hugging Face model ID or local snapshot"
+        },
+        {
+          "name": "output",
+          "flags": [
+            "-o",
+            "--output"
+          ],
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "flags": [
+            "--revision"
+          ],
+          "type": "string"
+        },
+        {
+          "name": "task",
+          "flags": [
+            "--task"
+          ],
+          "type": "string",
+          "choices": [
+            "text_generation",
+            "vision_language_generation"
+          ],
+          "default": "text_generation"
+        },
+        {
+          "name": "precision",
+          "flags": [
+            "--precision"
+          ],
+          "type": "string",
+          "choices": [
+            "fp32",
+            "fp16",
+            "bf16"
+          ],
+          "help": "Compute precision (default: fp16 for paired execution, bf16 otherwise)"
+        },
+        {
+          "name": "backend",
+          "flags": [
+            "--backend"
+          ],
+          "type": "string",
+          "choices": [
+            "trt",
+            "trt_rtx"
+          ],
+          "default": "trt"
+        },
+        {
+          "name": "max_sequence_length",
+          "flags": [
+            "--max-sequence-length"
+          ],
+          "type": "int"
+        },
+        {
+          "name": "tensor_parallel_size",
+          "flags": [
+            "--tensor-parallel-size"
+          ],
+          "type": "int",
+          "choices": [
+            1,
+            2,
+            4,
+            8
+          ],
+          "default": 1
+        },
+        {
+          "name": "verbose",
+          "flags": [
+            "--verbose"
+          ],
+          "type": "bool",
+          "action": "store_true",
+          "default": false
+        },
+        {
+          "name": "fp32_layers",
+          "flags": [
+            "--fp32-layer"
+          ],
+          "type": "int",
+          "action": "append",
+          "default": []
+        },
+        {
+          "name": "quantization",
+          "flags": [
+            "--quantization"
+          ],
+          "type": "string",
+          "choices": [
+            "none",
+            "nvfp4",
+            "fp8",
+            "int4_awq"
+          ]
+        },
+        {
+          "name": "prefill_chunk_len",
+          "flags": [
+            "--prefill-chunk-len"
+          ],
+          "type": "int",
+          "help": "Prompt tokens per multi-token prefill engine call (default 128; 0 = single-token prefill)"
+        },
+        {
+          "name": "mtp_seq_len",
+          "flags": [
+            "--mtp-seq-len"
+          ],
+          "type": "int",
+          "help": "Build the embedded MTP engines (the checkpoint must have MTP weights); N = 1 real token + N-1 drafted tokens verified per round, N >= 2. Without this option no MTP engines are built."
+        },
+        {
+          "name": "execution_variant",
+          "flags": [
+            "--execution-variant"
+          ],
+          "type": "string",
+          "choices": [
+            "dspark",
+            "dflash",
+            "mtp"
+          ],
+          "help": "Explicit execution mode; MTP uses an embedded draft, external companions are explicit"
+        },
+        {
+          "name": "companion",
+          "flags": [
+            "--companion"
+          ],
+          "type": "string",
+          "action": "append",
+          "default": [],
+          "help": "Local companion checkpoint as ROLE=LOCAL_DIR"
+        }
+      ]
+    }
+  ]
+}

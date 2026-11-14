@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# FlashAttention imports psutil while preparing its source-build metadata.
+# Bootstrap it before pip resolves the unchanged family requirements.
+RUN python -m pip install --disable-pip-version-check --no-cache-dir psutil==7.0.0
+
+COPY requirements.txt /opt/trtmc-ci/family-requirements.txt
+# ml_dtypes 0.6 requires NumPy 2; retain the family's existing NumPy 1.26 pin.
+RUN python -m pip install --disable-pip-version-check --no-cache-dir \
+        --no-build-isolation ml_dtypes==0.5.4 \
+        -r /opt/trtmc-ci/family-requirements.txt \
+    && python -m pip check

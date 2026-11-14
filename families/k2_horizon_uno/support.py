@@ -7,10 +7,10 @@ from tensorrt_model_connect.model_support import FamilySupport, ModelMetadata
 
 
 _SUPPORT = FamilySupport(tasks=("text_generation",), default_task="text_generation")
-_FILES = ("adapter_config.json", "adapter_model.safetensors")
+_FILES = frozenset({"adapter_config.json", "adapter_model.safetensors"})
 
 
 def describe(metadata: ModelMetadata) -> FamilySupport | None:
-    """Select the two-file adapter snapshot; build validates its exact recipe."""
+    """Select snapshots containing the adapter pair; build validates the exact recipe."""
 
-    return _SUPPORT if metadata.files == _FILES else None
+    return _SUPPORT if _FILES.issubset(metadata.files) else None

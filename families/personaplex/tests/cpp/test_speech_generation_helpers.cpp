@@ -111,6 +111,32 @@ void test_waveform_trim_and_peak_normalize() {
     check_close(waveform[1], -0.475F, 1e-6F, "waveform normalize sample 1");
 }
 
+void test_prefilled_cache_writes_the_first_user_frame_at_the_absolute_offset() {
+    auto state = trtmc::make_delay_cache_state({}, 16);
+    const std::vector<int32_t> codec_tokens{101, 102, 103, 104, 105, 106, 107, 108};
+    trtmc::write_user_tokens_to_delay_cache(state, codec_tokens, 109, 8, 1, 8, 2048, 0);
+    for (int32_t cb = 0; cb < 8; ++cb) {
+        const int32_t stream = 9 + cb;
+        const auto index = trtmc::delay_cache_index(state, stream, 109 + state.delays[stream]);
+        check(state.cache[index] == codec_tokens[cb], "prefilled cache reads relative user frame");
+        check(state.provided[index] == 1, "prefilled cache forces the user stream");
+    }
+}
+
+void test_listening_forces_only_the_agent_streams_at_their_delays() {
+    auto state = trtmc::make_delay_cache_state({}, 16);
+    trtmc::write_user_tokens_to_delay_cache(state, std::vector<int32_t>(8, 101), 109, 8, 1, 8, 2048,
+                                            0);
+    trtmc::write_listening_tokens_to_delay_cache(state, 109, 3);
+    const std::vector<int32_t> agent{3, 948, 243, 1178, 546, 1736, 1030, 1978, 2008};
+    for (int32_t k = 0; k < 17; ++k) {
+        const auto index = trtmc::delay_cache_index(state, k, 109 + state.delays[k]);
+        check(state.cache[index] == (k < 9 ? agent[k] : 101),
+              "listening retains user audio and forces official agent silence");
+        check(state.provided[index] == 1, "listening marks each forced stream");
+    }
+}
+
 void test_waveform_postprocess_skips_invalid_or_safe_inputs() {
     std::vector<float> waveform = {0.1F, 0.2F, 0.3F};
     std::vector<float> empty_waveform;
@@ -200,6 +226,8 @@ void test_mimi_ring_attention_matches_official_cache_wrap() {
 int main() {
     test_default_speech_delays_generalize_to_num_codebooks();
     test_delay_cache_reads_and_collects_outputs();
+    test_prefilled_cache_writes_the_first_user_frame_at_the_absolute_offset();
+    test_listening_forces_only_the_agent_streams_at_their_delays();
     test_waveform_trim_and_peak_normalize();
     test_waveform_postprocess_skips_invalid_or_safe_inputs();
     test_mimi_encode_plan_keeps_only_the_causal_input_prefix();

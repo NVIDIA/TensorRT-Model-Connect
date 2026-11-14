@@ -7,10 +7,15 @@ add_library(trtmc_model_qwen3_5 SHARED
   hybrid_state.cpp
   kv_cache.cpp
   pipeline.cpp
+  paired.cpp
+  mtp_scheduler.cpp
+  native_visual.cpp
+  native_media.cpp
   plugin.cpp
   plugin_helpers.cpp
   recurrent_state.cpp
   sampler.cpp
+  tensor_parallel.cpp
 )
 
 target_include_directories(trtmc_model_qwen3_5
@@ -25,10 +30,11 @@ target_link_libraries(trtmc_model_qwen3_5 PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
 )
 target_compile_options(trtmc_model_qwen3_5 PRIVATE
   "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
-  "$<$<COMPILE_LANGUAGE:CUDA>:-Wall;-Wextra>"
+  "$<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-Wall,-Wextra>"
 )
 set_target_properties(trtmc_model_qwen3_5 PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
@@ -55,3 +61,5 @@ if(TRTMC_BUILD_TESTS)
   )
   add_test(NAME ${test_name} COMMAND ${test_name})
 endif()
+
+include(edge_llm/Adapter.cmake)

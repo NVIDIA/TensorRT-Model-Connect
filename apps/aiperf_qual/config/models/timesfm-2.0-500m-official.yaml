@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The model's forecast window: its input columns, context, and horizon (model card / config).
+absolute: [{name: etth1, window: {columns: [OT], context_length: 2048, prediction_length: 128, stride: 24, frequency: 0}}]
+
+reference:
+  adapter: families/timesfm/reference/adapter.py  # TimesFM's decoder (no generic time-series adapter)

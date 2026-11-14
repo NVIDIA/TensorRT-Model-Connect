@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import json
+import runpy
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tools import pr_metadata
@@ -141,6 +144,68 @@ def test_draft_event_allows_self_review_to_remain_pending(tmp_path: Path) -> Non
     event_path.write_text(json.dumps(event), encoding="utf-8")
 
     assert pr_metadata.main(["validate", "--event", str(event_path)]) == 0
+
+
+def test_script_entry_point_exits_successfully_for_complete_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    event_path = tmp_path / "event.json"
+    event = {
+        "pull_request": {
+            "body": _complete_body(),
+            "draft": False,
+        }
+    }
+    event_path.write_text(json.dumps(event), encoding="utf-8")
+    script_path = REPO_ROOT / "tools" / "pr_metadata.py"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [str(script_path), "validate", "--event", str(event_path)],
+    )
+
+    with pytest.raises(SystemExit) as exit_info:
+        runpy.run_path(str(script_path), run_name="__main__")
+
+    assert exit_info.value.code == 0
+    assert capsys.readouterr().out == "Pull-request metadata is complete.\n"
+
+
+@pytest.mark.parametrize(
+    ("event_contents", "expected_error", "expected_annotation"),
+    (
+        ("not JSON", "Expecting value", None),
+        ("{}", "GitHub event does not contain pull_request metadata", None),
+        (
+            json.dumps({"pull_request": {"body": _complete_body()}}),
+            "GitHub event does not contain pull_request draft state",
+            None,
+        ),
+        (
+            json.dumps({"pull_request": {"body": None, "draft": True}}),
+            "Pull-request metadata has",
+            "::error title=PR metadata::Missing required section: Background",
+        ),
+    ),
+)
+def test_invalid_event_metadata_is_reported(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    event_contents: str,
+    expected_error: str,
+    expected_annotation: str | None,
+) -> None:
+    event_path = tmp_path / "event.json"
+    event_path.write_text(event_contents, encoding="utf-8")
+
+    assert pr_metadata.main(["validate", "--event", str(event_path)]) == 1
+
+    captured = capsys.readouterr()
+    assert expected_error in captured.err
+    if expected_annotation is not None:
+        assert expected_annotation in captured.out
 
 
 def test_change_category_and_risk_choices_are_enforced() -> None:

@@ -233,7 +233,12 @@ class _ConvBertModel:
         from .builder import build_convbert_encoder_engine
 
         return build_convbert_encoder_engine(
-            config, weights, max_seq_length=max_cache_length, precision=precision, verbose=verbose
+            config,
+            weights,
+            max_seq_length=max_cache_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
+            verbose=verbose,
         )
 
 
@@ -262,6 +267,8 @@ def _positive_int(value: object, name: str) -> int:
 def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
     """Resolve this family's exact native-tokenizer framing."""
 
+    import tempfile
+
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -269,6 +276,25 @@ def _tokenizer_runtime_contract(model_dir: Path) -> dict[str, object]:
         trust_remote_code=True,
         use_fast=True,
     )
+    tokenizer_path = model_dir / "tokenizer.json"
+    if not tokenizer_path.is_file():
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=model_dir,
+                prefix=".trtmc-convbert-tokenizer-",
+                suffix=".json",
+                delete=False,
+            ) as output:
+                temporary_path = Path(output.name)
+            tokenizer.backend_tokenizer.save(str(temporary_path))
+            if not temporary_path.is_file() or temporary_path.stat().st_size == 0:
+                raise RuntimeError("tokenizer conversion did not create tokenizer.json")
+            temporary_path.replace(tokenizer_path)
+            temporary_path = None
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
     default_ids = list(tokenizer.encode("hello"))
     plain_ids = list(tokenizer.encode("hello", add_special_tokens=False))
     if default_ids == plain_ids:
@@ -331,16 +357,34 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("ConvBERT max_sequence_length exceeds checkpoint capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("ConvBERT has no family-owned quantized build")
+    quantization = None if request.quantization in {None, "none"} else request.quantization
+    if quantization is not None and quantization != "fp8":
+        raise NotImplementedError(
+            f"ConvBERT supports quantization fp8 or none; got {request.quantization!r}"
+        )
+    if quantization is not None and precision != "fp16":
+        raise ValueError(f"ConvBERT FP8 needs precision fp16, got {precision!r}")
     if request.fp32_layers:
         raise NotImplementedError("ConvBERT does not expose mixed-precision layers")
+    if request.mtp_seq_len is not None:
+        raise NotImplementedError("ConvBERT does not support MTP speculative decoding")
     parallel = ParallelConfig(
         tp_size=_positive_int(request.tensor_parallel_size, "tensor_parallel_size")
     )
     parallel.validate()
+    if quantization is not None and parallel.enabled:
+        raise ValueError("ConvBERT tensor-parallel builds do not support quantization")
     model = _ConvBertModel()
+    quant_ctx = None
+    if quantization is not None:
+        from .quantization import calibrate_convbert, refuse_quantized_checkpoint
+
+        readers = _open_torch_checkpoint(model_dir)
+        refuse_quantized_checkpoint(config, model_dir, readers.tensor_map)
+        del readers
     weights = model.load_weights(str(model_dir), config)
+    if quantization is not None:
+        quant_ctx = calibrate_convbert(config, weights, quantization, precision=precision)
     writer.set_header(family="convbert", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -360,7 +404,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             parallel_config=parallel,
         )

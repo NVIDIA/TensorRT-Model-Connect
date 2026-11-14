@@ -11,6 +11,7 @@
 #include <iostream>
 #include <nlohmann/json.hpp>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace {
@@ -129,6 +130,218 @@ int main(int argc, char** argv) {
         check(summary.at("windows") == 1, "summary window returned");
         check(summary.at("forecast_elements") == 3, "summary values returned");
         check(summary.at("shape") == Json::array({1, 3}), "summary shape returned");
+
+        for (const auto& [task, operation, expected_values, feature_kind] : {
+                 std::tuple{"encoding", "encode", Json::array({5.0, 1.0, 2.0, 3.0}), "token"},
+                 std::tuple{"embedding", "embed", Json::array({5.0, 4.0}), "pooled"},
+             }) {
+            const auto vector_bundle =
+                runtime_root / (std::string("benchmark_fake_") + task + ".bundle");
+            write_bundle(vector_bundle, task);
+            Json vector_request = request;
+            vector_request["case_name"] = std::string("fake-") + task;
+            vector_request["bundle"] = vector_bundle.string();
+            vector_request["operation"] = operation;
+            vector_request["request"] = {{"prompt", "Hello"}};
+            {
+                std::ofstream request_file(request_path);
+                request_file << vector_request << '\n';
+            }
+            check(std::system(command.c_str()) == 0, "encoder worker process completed");
+            std::ifstream vector_output_file(output_path);
+            Json vector_result;
+            vector_output_file >> vector_result;
+            const auto& vector_summary = vector_result.at("output_summary");
+            check(vector_summary.at("values") == expected_values,
+                  "legacy encoder output retains values for Accuracy comparison");
+            check(vector_summary.at("feature_kind") == feature_kind,
+                  "legacy encoder output identifies token or pooled semantics");
+            std::filesystem::remove(vector_bundle);
+        }
+
+        const auto feature_image = runtime_root / "benchmark_fake_features.ppm";
+        {
+            std::ofstream image(feature_image, std::ios::binary);
+            image << "P6\n1 1\n255\n";
+            image.write("ABC", 3);
+        }
+        const auto feature_bundle = runtime_root / "benchmark_fake_image_features.bundle";
+        write_bundle(feature_bundle, "image_features");
+        Json feature_request = request;
+        feature_request["case_name"] = "fake-image-features";
+        feature_request["bundle"] = feature_bundle.string();
+        feature_request["operation"] = "extract_features";
+        feature_request["request"] = {{"image_path", feature_image.string()}};
+        {
+            std::ofstream request_file(request_path);
+            request_file << feature_request << '\n';
+        }
+        check(std::system(command.c_str()) == 0, "legacy image feature worker completed");
+        std::ifstream feature_output_file(output_path);
+        Json feature_result;
+        feature_output_file >> feature_result;
+        const auto& feature_summary = feature_result.at("output_summary");
+        check(feature_summary.at("pooler_output") == Json::array({0.25F, 0.75F}),
+              "legacy image feature output retains pooled values for Accuracy comparison");
+        check(feature_summary.at("pooler_output_shape") == Json::array({1, 2}),
+              "legacy image feature output retains pooled shape");
+        std::filesystem::remove(feature_bundle);
+        std::filesystem::remove(feature_image);
+
+        const auto image_bundle = runtime_root / "benchmark_fake_image_generation.bundle";
+        write_bundle(image_bundle, "image_generation");
+        Json image_request = request;
+        image_request["case_name"] = "fake-image-generation";
+        image_request["bundle"] = image_bundle.string();
+        image_request["operation"] = "generate_image";
+        image_request["request"] = {{"prompt", "Hello"}};
+        {
+            std::ofstream request_file(request_path);
+            request_file << image_request << '\n';
+        }
+        check(std::system(command.c_str()) == 0,
+              "text-only prompt uses generation when a task also supports editing and batching");
+        std::ifstream image_output_file(output_path);
+        Json image_result;
+        image_output_file >> image_result;
+        check(image_result.at("status") == "completed" &&
+                  image_result.at("output_summary").at("generated_images") == 1,
+              "single image generation returns one result");
+        const auto image_artifacts = image_result.at("output_summary").at("image_artifacts");
+        check(image_artifacts.size() == 1 &&
+                  std::filesystem::is_regular_file(runtime_root / image_artifacts.at(0)),
+              "legacy image generation retains the actual PNG outside timed execution");
+        std::filesystem::remove(image_bundle);
+
+        const auto audio_bundle = runtime_root / "benchmark_fake_audio_generation.bundle";
+        write_bundle(audio_bundle, "audio_generation");
+        Json audio_request = request;
+        audio_request["case_name"] = "fake-audio-generation";
+        audio_request["bundle"] = audio_bundle.string();
+        audio_request["operation"] = "generate_audio";
+        audio_request["request"] = {{"prompt", "Hello"}};
+        {
+            std::ofstream request_file(request_path);
+            request_file << audio_request << '\n';
+        }
+        check(std::system(command.c_str()) == 0, "legacy audio worker process completed");
+        std::ifstream audio_output_file(output_path);
+        Json audio_result;
+        audio_output_file >> audio_result;
+        const auto audio_artifact =
+            audio_result.at("output_summary").at("audio_artifact").get<std::string>();
+        check(audio_result.at("status") == "completed" &&
+                  std::filesystem::is_regular_file(runtime_root / audio_artifact),
+              "legacy audio generation retains the actual WAV outside timed execution");
+        std::filesystem::remove(audio_bundle);
+
+        const auto legacy_image = runtime_root / "benchmark_legacy_segment.ppm";
+        {
+            std::ofstream image(legacy_image, std::ios::binary);
+            image << "P6\n2 1\n255\n";
+            image.write("ABCDEF", 6);
+        }
+        const auto segment_bundle = runtime_root / "benchmark_fake_segmentation.bundle";
+        write_bundle(segment_bundle, "segmentation");
+        Json segment_request = request;
+        segment_request["case_name"] = "fake-segmentation";
+        segment_request["bundle"] = segment_bundle.string();
+        segment_request["operation"] = "segment";
+        segment_request["request"] = {{"image_path", legacy_image.string()}};
+        {
+            std::ofstream request_file(request_path);
+            request_file << segment_request << '\n';
+        }
+        check(std::system(command.c_str()) == 0, "segmentation worker process completed");
+        std::ifstream segment_output_file(output_path);
+        Json segment_result;
+        segment_output_file >> segment_result;
+        check(segment_result.at("output_summary").at("mask") == Json::array({7, 7}),
+              "legacy segmentation retains labels for Accuracy comparison");
+        std::filesystem::remove(segment_bundle);
+
+        const auto detection_bundle = runtime_root / "benchmark_fake_detection.bundle";
+        write_bundle(detection_bundle, "object_detection");
+        Json detection_request = request;
+        detection_request["case_name"] = "fake-detection";
+        detection_request["bundle"] = detection_bundle.string();
+        detection_request["operation"] = "detect";
+        detection_request["request"] = {{"image_path", legacy_image.string()}};
+        {
+            std::ofstream request_file(request_path);
+            request_file << detection_request << '\n';
+        }
+        check(std::system(command.c_str()) == 0, "detection worker process completed");
+        std::ifstream detection_output_file(output_path);
+        Json detection_result;
+        detection_output_file >> detection_result;
+        const auto& detection = detection_result.at("output_summary");
+        check(detection.at("boxes") == Json::array({-2, 1, 5, 1, 0, 0, 1, 1}) &&
+                  detection.at("scores") == Json::array({0.75, 0.0}) &&
+                  detection.at("class_ids") == Json::array({42, 7}) &&
+                  detection.at("shape") == Json::array({2, 4}) &&
+                  detection.at("coordinates") == "xyxy" && detection.at("units") == "pixels",
+              "legacy detection retains boxes, scores and classes for Accuracy comparison");
+        std::filesystem::remove(detection_bundle);
+
+        const auto prompted_bundle = runtime_root / "benchmark_fake_prompted.bundle";
+        write_bundle(prompted_bundle, "prompted_segmentation");
+        Json prompted_request = request;
+        prompted_request["case_name"] = "fake-prompted-segmentation";
+        prompted_request["bundle"] = prompted_bundle.string();
+        prompted_request["operation"] = "segment_prompted";
+        prompted_request["request"] = {{"image_path", legacy_image.string()}};
+        {
+            std::ofstream request_file(request_path);
+            request_file << prompted_request << '\n';
+        }
+        check(std::system(command.c_str()) == 0, "prompted segmentation worker process completed");
+        std::ifstream prompted_output_file(output_path);
+        Json prompted_result;
+        prompted_output_file >> prompted_result;
+        const auto& prompted = prompted_result.at("output_summary");
+        check(prompted.at("masks") == Json::array({1, -1, -2, 2}) &&
+                  prompted.at("iou_scores") == Json::array({0.5, 0.75}) &&
+                  prompted.at("boxes") == Json::array({{0, 0, 1, 1}, {1, 0, 2, 1}}) &&
+                  prompted.at("box_coordinates") == "original_image_pixels_xyxy",
+              "legacy prompted segmentation retains masks, scores and boxes for comparison");
+        std::filesystem::remove(prompted_bundle);
+
+        const auto geometry_bundle = runtime_root / "benchmark_fake_geometry.bundle";
+        write_bundle(geometry_bundle, "monocular_geometry");
+        Json geometry_request = request;
+        geometry_request["case_name"] = "fake-monocular-geometry";
+        geometry_request["bundle"] = geometry_bundle.string();
+        geometry_request["operation"] = "geometry";
+        geometry_request["request"] = {{"image_path", legacy_image.string()}};
+        {
+            std::ofstream request_file(request_path);
+            request_file << geometry_request << '\n';
+        }
+        check(std::system(command.c_str()) == 0, "monocular geometry worker process completed");
+        std::ifstream geometry_output_file(output_path);
+        Json geometry_result;
+        geometry_output_file >> geometry_result;
+        const auto& geometry = geometry_result.at("output_summary");
+        check(geometry_result.at("task") == "monocular_geometry" &&
+                  geometry_result.at("selected_task") == "monocular_geometry" &&
+                  geometry.at("geometry_pixels") == 2 &&
+                  geometry.at("point_shape") == Json::array({1, 2, 3}) &&
+                  geometry.at("valid_pixels") == 1 &&
+                  geometry.at("normalized_intrinsics") ==
+                      Json::array({{1.0, 0.0, 0.5}, {0.0, 1.0, 0.5}, {0.0, 0.0, 1.0}}) &&
+                  std::filesystem::file_size(geometry.at("points_artifact").get<std::string>()) ==
+                      6 * sizeof(float) &&
+                  std::filesystem::file_size(geometry.at("depth_artifact").get<std::string>()) ==
+                      2 * sizeof(float) &&
+                  std::filesystem::file_size(
+                      geometry.at("valid_mask_artifact").get<std::string>()) == 2,
+              "legacy monocular geometry retains complete metric artifacts");
+        std::filesystem::remove(geometry.at("points_artifact").get<std::string>());
+        std::filesystem::remove(geometry.at("depth_artifact").get<std::string>());
+        std::filesystem::remove(geometry.at("valid_mask_artifact").get<std::string>());
+        std::filesystem::remove(geometry_bundle);
+        std::filesystem::remove(legacy_image);
 
         Json sdk = request;
         sdk["runtime_root"] = argv[3];

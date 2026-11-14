@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import re
+import signal
 import shlex
 import tempfile
 import xml.etree.ElementTree as ET
@@ -23,6 +24,21 @@ from .process import CiError
 
 _E2E_CASE_NAME = re.compile(r"^test_.*e2e\[(?P<case>.+)\]$")
 _JUNIT_OPTIONS = ("--junitxml", "--junit-xml")
+SDK_CONSUMER_LANGUAGES = ("c", "cpp")
+
+
+def sdk_consumer_targets(repository: Path, families: tuple[str, ...]) -> list[str]:
+    """Name the public SDK consumers that each family's E2E executes.
+
+    A family source ``tests/sdk_consumer.<language>`` builds the CMake target
+    ``test_<family>_sdk_<language>``.
+    """
+    return sorted(
+        f"test_{family}_sdk_{language}"
+        for family in families
+        for language in SDK_CONSUMER_LANGUAGES
+        if (repository / "families" / family / "tests" / f"sdk_consumer.{language}").is_file()
+    )
 
 
 def _pytest_addopts_junit(repository: Path, value: str) -> Path | None:
@@ -157,6 +173,34 @@ def _require_e2e_junit(
         problems.append("unrequested E2E testcase executed: " + ", ".join(unexpected_executions))
     if problems:
         raise CiError(f"{family} E2E result validation failed: " + "; ".join(problems))
+
+
+def _require_e2e_process_result(
+    report: Path,
+    family: str,
+    requested_testcases: tuple[str, ...],
+    returncode: int,
+) -> None:
+    """Preserve process termination details when pytest cannot write JUnit."""
+    if returncode and not report.is_file():
+        if returncode < 0:
+            try:
+                cause = signal.Signals(-returncode).name
+            except ValueError:
+                cause = f"signal {-returncode}"
+            raise CiError(
+                f"{family} E2E pytest was terminated by {cause} before writing JUnit report"
+            )
+        cause = f"exit code {returncode}"
+        if 128 < returncode <= 192:
+            try:
+                cause += f" ({signal.Signals(returncode - 128).name})"
+            except ValueError:
+                pass
+        raise CiError(f"{family} E2E pytest failed with {cause} before writing JUnit report")
+    _require_e2e_junit(report, family, requested_testcases)
+    if returncode:
+        raise CiError(f"{family} E2E pytest failed with exit code {returncode}")
 
 
 class E2ERunner:
@@ -320,13 +364,12 @@ class E2ERunner:
                     check=False,
                     limit=self.context.env.get("TRTMC_E2E_TIMEOUT", "12h"),
                 )
-            _require_e2e_junit(
+            _require_e2e_process_result(
                 e2e_junit,
                 family,
                 tuple(requested_testcases),
+                completed.returncode,
             )
-            if completed.returncode:
-                raise CiError(f"{family} E2E pytest failed with exit code {completed.returncode}")
 
     def _family_testcases(self, family: str) -> tuple[str, ...]:
         manifests = self.context.repository / "families" / family / "tests/manifests"
@@ -417,21 +460,19 @@ class E2ERunner:
                 if name.startswith("test_")
                 else f"test_{name}"
             )
+        # Build SDK consumers by name: premerge loads a prebuilt model library,
+        # so a consumer that only the model target depends on is never built.
+        targets = sorted(
+            set(targets) | set(sdk_consumer_targets(self.context.repository, families))
+        )
+        if targets:
+            self.context.run(
+                ["cmake", "--build", build, "--parallel", "8", "--target", *targets],
+                limit=self.context.env.get("CPP_BUILD_TIMEOUT", "30m"),
+            )
         if not selected:
             print("No family-owned C++ tests selected")
             return
-        self.context.run(
-            [
-                "cmake",
-                "--build",
-                build,
-                "--parallel",
-                "8",
-                "--target",
-                *sorted(set(targets)),
-            ],
-            limit=self.context.env.get("CPP_BUILD_TIMEOUT", "30m"),
-        )
         expression = "^(" + "|".join(re.escape(name) for name in sorted(selected)) + ")$"
         junit = build / "trtmc-family-ctest.xml"
         self.context.run(

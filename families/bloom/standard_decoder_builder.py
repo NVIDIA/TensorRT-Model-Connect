@@ -27,6 +27,7 @@ import tensorrt as trt
 from . import graph_ops
 from . import graph_blocks
 from .config import ModelConfig
+from .quantization import configure_fp8_build
 from .dual_profile_decoder_builder import build_dual_profile_decoder_engine
 
 
@@ -176,6 +177,7 @@ def build_standard_decoder_engine(
         work_np_dtype = np.float32
         work_trt_dtype = trt.float32
         trt_config.clear_flag(trt.BuilderFlag.TF32)
+    configure_fp8_build(trt_config, quant_ctx)
 
 
     # ---------------------------------------------------------------
