@@ -1,0 +1,5 @@
+{
+  "threshold_overrides": {
+    "max_logit_gap_bf16_ulps": 1.0
+  }
+}

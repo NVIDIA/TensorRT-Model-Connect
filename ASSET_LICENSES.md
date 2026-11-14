@@ -142,6 +142,19 @@ audiobooks.
 - Source and attribution: https://www.openslr.org/12/
 - License: https://creativecommons.org/licenses/by/4.0/
 
+## MOSS-Transcribe-Diarize multi-speaker fixtures
+
+The following clips join utterances of several speakers from the LibriSpeech
+`test-clean` split (OpenSLR SLR12, Creative Commons Attribution 4.0
+International), with 0.8 s of silence between utterances, as 16 kHz mono
+16-bit PCM. The utterance IDs and their positions are listed in
+`families/moss_transcribe_diarize/tests/data/README.md`.
+
+- `families/moss_transcribe_diarize/tests/data/two_speakers_22s.wav`
+- `families/moss_transcribe_diarize/tests/data/continuation_20s.wav`
+- Source and attribution: https://www.openslr.org/12/
+- License: https://creativecommons.org/licenses/by/4.0/
+
 ## SANA world-model fixtures
 
 The following files are unmodified copies from NVlabs/Sana revision
