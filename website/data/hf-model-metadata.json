@@ -1308,6 +1308,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "stabilityai/stable-diffusion-3.5-medium",
+      "revision": "b940f670f0eda2d07fbb75229e779da1ad11eb80",
+      "revision_source": "declared",
+      "metadata_file": "model_index.json",
+      "model_type": null,
+      "architectures": [
+        "StableDiffusion3Pipeline"
+      ],
+      "architecture_source": "model_index._class_name"
+    },
+    {
       "hf_id": "stabilityai/stablelm-2-1_6b",
       "revision": "f499ead74c53749bd93cebc6ce8bc0d7bdf1eaef",
       "revision_source": "resolved",
