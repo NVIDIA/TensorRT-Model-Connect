@@ -1,0 +1,37 @@
+{
+  "name": "minicpm-ocr-1.0",
+  "hf_id": "openbmb/MiniCPM-OCR-1.0",
+  "hf_revision": "883ca368d17335b9ce5aa6fef4d000ef0684fcaa",
+  "bundle": "minicpm-ocr-1.0.bundle",
+  "family": "minicpm_ocr",
+  "task": "images_text_to_text",
+  "precision": "fp16",
+  "max_sequence_length": 4096,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "minicpm-ocr-page",
+      "premerge": true,
+      "images": ["minicpm_ocr_page.png"],
+      "prompt": "Text Recognition:",
+      "max_new_tokens": 384,
+      "oracle": "teacher_forced_near_tie"
+    },
+    {
+      "name": "minicpm-ocr-line",
+      "premerge": false,
+      "images": ["minicpm_ocr_line.png"],
+      "prompt": "Text Recognition:",
+      "max_new_tokens": 64,
+      "oracle": "teacher_forced_near_tie"
+    },
+    {
+      "name": "minicpm-ocr-two-regions",
+      "premerge": false,
+      "images": ["minicpm_ocr_paragraph.png", "minicpm_ocr_block.png"],
+      "prompt": "Text Recognition:",
+      "max_new_tokens": 512,
+      "oracle": "teacher_forced_near_tie"
+    }
+  ]
+}

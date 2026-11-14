@@ -56,6 +56,14 @@ distributed under the Apache License 2.0 with the rest of the project:
 - `families/timm_inception_v4/tests/data/orc_test_img.jpeg` — byte-identical copy of
   `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the input of the FP8
   E2E case, chosen for its clear top-1 margin
+- `families/minicpm_ocr/tests/data/minicpm_ocr_page.png` — the decoded pixels of
+  `families/deepseek_ocr/tests/data/orc_test_img.jpeg` saved losslessly as PNG, so
+  the native loader and the reference processor read identical pixels
+- `families/minicpm_ocr/tests/data/minicpm_ocr_line.png`,
+  `minicpm_ocr_paragraph.png` and `minicpm_ocr_block.png` — crops of
+  `minicpm_ocr_page.png` (columns 0 to 869 x rows 0 to 35, columns 0 to 930 x
+  rows 52 to 199, and columns 0 to 930 x rows 228 to 467) saved as PNG, the OCR
+  E2E inputs of a text line, a paragraph and an indented list
 
 ## Project overview media
 

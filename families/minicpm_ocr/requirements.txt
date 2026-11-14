@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Official reference model and processor of the family E2E. The base environment
+# pins transformers 5.2.0, which predates the minicpm_ocr model; the processor's
+# Torchvision image backend uses the base image's torchvision.
+transformers==5.22.2
+Pillow
