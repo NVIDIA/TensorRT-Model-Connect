@@ -280,7 +280,7 @@ tasks:
   # content diverges across precisions. Acc is the gold-referenced checks below (GenEval, VBench CLIP-T);
   # the pixel parity under latent replay is reported only (`informational`): generated media drift
   # between TRTMC and the native model at any precision.
-  image_generation:
+  image_generation: &generate_image
     reference: {precision: bf16}
     # Families whose TRTMC runtime takes caller initial latents render with the same initial noise on
     # both sides (latent replay), which makes them comparable pixel by pixel: how much further TRTMC is
@@ -309,6 +309,7 @@ tasks:
                      detector_threshold: 0.2, gate: {margin: 1.0}}]
     performance: &media_policy {output_grader: parity_image, output_grader_params: {min_psnr: 0, min_ssim: -1},
                      measurement: {settle_s: 0, warmup: 1, requests: 3, runs: 3}}
+  text_to_image: *generate_image  # image_generation under its Task SDK name
   image_edit:  # edit inputs are model-specific: the catalog testcase
     reference: {precision: bf16}
     # Edits of ten Imagenette images with the same initial noise on both sides (latent replay),

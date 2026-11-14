@@ -1,0 +1,23 @@
+{
+  "name": "chroma1-hd-512-fp32",
+  "hf_id": "lodestones/Chroma1-HD",
+  "hf_revision": "0e0c60ece1e82b17cb7f77342d765ba5024c40c0",
+  "bundle": "chroma1-hd-512-fp32.bundle",
+  "family": "chroma",
+  "task": "text_to_image",
+  "precision": "fp32",
+  "image_height": 512,
+  "image_width": 512,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "chroma1-hd-512-fp32",
+      "premerge": true,
+      "prompt": "A high-fashion close-up portrait of a blonde woman in clear sunglasses. The image uses a bold teal and red color split for dramatic lighting. The background is a simple teal-green.",
+      "negative_prompt": "low quality, ugly, unfinished, out of focus, deformed, disfigure, blurry, smudged, restricted palette, flat colors",
+      "num_inference_steps": 40,
+      "guidance_scale": 3.0,
+      "seed": 433
+    }
+  ]
+}

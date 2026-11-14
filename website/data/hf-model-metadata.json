@@ -953,6 +953,17 @@
       "architecture_source": null
     },
     {
+      "hf_id": "lodestones/Chroma1-HD",
+      "revision": "0e0c60ece1e82b17cb7f77342d765ba5024c40c0",
+      "revision_source": "resolved",
+      "metadata_file": "model_index.json",
+      "model_type": null,
+      "architectures": [
+        "ChromaPipeline"
+      ],
+      "architecture_source": "model_index._class_name"
+    },
+    {
       "hf_id": "microsoft/Phi-3-mini-4k-instruct",
       "revision": "f39ac1d28e925b323eae81227eaba4464caced4e",
       "revision_source": "resolved",
