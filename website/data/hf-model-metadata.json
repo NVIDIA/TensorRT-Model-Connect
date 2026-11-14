@@ -1504,6 +1504,17 @@
         "DeepseekV3ForCausalLM"
       ],
       "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "google/siglip2-base-patch16-naflex",
+      "revision": "b53b807d3a2d5e2b3911292f2d69e5341cdc064c",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "siglip2",
+      "architectures": [
+        "Siglip2Model"
+      ],
+      "architecture_source": "config.architectures"
     }
   ]
 }
