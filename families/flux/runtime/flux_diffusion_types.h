@@ -43,6 +43,12 @@ struct FluxDiffusionConfig {
 
     bool guidance_embeds{false};
     bool use_rope{true};
+    // FLUX.2 text conditioning: prompt template ("" = Mistral 3, "qwen3_chat" =
+    // FLUX.2-klein), the tokenizer's pad token, and true classifier-free
+    // guidance (two denoiser passes per step against an empty prompt).
+    std::string text_template;
+    std::string pad_token{"<pad>"};
+    bool true_cfg{false};
     float vae_scaling_factor{0.0F};
 
     std::string diffusion_backend_type;

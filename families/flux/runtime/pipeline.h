@@ -97,7 +97,11 @@ class FluxPipeline final : public IImageGeneration, public IImageBatchGeneration
     bool run_denoising(const diffusion::FluxGenerationPlan& plan,
                        const std::vector<float>& pooled_output, std::vector<float>& encoder_hidden,
                        std::vector<float>& cos_vals, std::vector<float>& sin_vals,
-                       std::vector<float>& latents);
+                       std::vector<float>& latents, const std::vector<float>& negative_hidden);
+    // FLUX.2-klein true CFG: encodes the unconditional prompt. The FLUX.2
+    // encoder output feeds the denoiser directly, so no projection is needed.
+    bool encode_flux2_negative(const std::string& negative_prompt,
+                               std::vector<float>& negative_hidden);
     bool decode_and_convert(const diffusion::FluxGenerationPlan& plan, std::vector<float>& latents,
                             ImageResult& result);
 

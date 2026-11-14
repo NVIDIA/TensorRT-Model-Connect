@@ -66,6 +66,7 @@ void test_flux_generation_plan_derives_layout_and_scheduler() {
     check(plan.layout.h_packed == 64 && plan.layout.w_packed == 64,
           "flux plan derives packed spatial size");
     check(plan.is_flux2, "flux plan detects flux2 from bn weights");
+    check(!plan.true_cfg, "flux plan keeps single-pass guidance without true_cfg");
     check(plan.latent_size == static_cast<std::size_t>(64 * 64 * 64),
           "flux plan computes flux2 latent size");
     check(plan.scheduler_config.use_dynamic_shifting, "flux plan forwards dynamic shift flag");
@@ -94,10 +95,28 @@ void test_flux_initial_latents_honor_caller_bytes_and_size() {
           "flux reports caller initial latent size mismatch");
 }
 
+void test_flux2_klein_plan_enables_true_cfg_above_unit_scale() {
+    trtmc::FluxDiffusionConfig config;
+    config.num_inference_steps = 50;
+    config.guidance_scale = 4.0F;
+    config.z_dim = 32;
+    config.patch_size = {1, 2, 2};
+    config.true_cfg = true;
+    trtmc::FluxPreprocessorWeights weights;
+    weights.vae_bn_mean = {0.0F};
+
+    auto plan =
+        trtmc::diffusion::make_flux_generation_plan(config, weights, 0, -1.0F, 64, 64, 1024);
+    check(plan.true_cfg, "klein plan runs true CFG at the default scale");
+    plan = trtmc::diffusion::make_flux_generation_plan(config, weights, 0, 1.0F, 64, 64, 1024);
+    check(!plan.true_cfg, "klein plan skips the unconditional pass at scale 1");
+}
+
 } // namespace
 
 int main() {
     test_flux_generation_plan_derives_layout_and_scheduler();
+    test_flux2_klein_plan_enables_true_cfg_above_unit_scale();
     test_flux_initial_latents_honor_caller_bytes_and_size();
 
     if (g_failures != 0) {
