@@ -217,13 +217,15 @@ static void test_audio(trtmc_model* model, trtmc_model* restricted) {
             model, TRTMC_TASK_AUDIO_LANGUAGE_IDENTIFICATION);
     const trtmc_audio_to_class_scores_api_v1* events =
         (const trtmc_audio_to_class_scores_api_v1*)table(model, TRTMC_TASK_AUDIO_TO_CLASS_SCORES);
+    const trtmc_audio_to_timed_labels_api_v1* timed =
+        (const trtmc_audio_to_timed_labels_api_v1*)table(model, TRTMC_TASK_AUDIO_TO_TIMED_LABELS);
     const trtmc_batch_speech_transcription_api_v1* batch =
         (const trtmc_batch_speech_transcription_api_v1*)table(
             model, TRTMC_TASK_BATCH_SPEECH_TRANSCRIPTION);
     const trtmc_mixed_batch_speech_to_text_api_v1* mixed =
         (const trtmc_mixed_batch_speech_to_text_api_v1*)table(
             model, TRTMC_TASK_MIXED_BATCH_SPEECH_TO_TEXT);
-    if (!generation || !asr || !translation || !language || !events || !batch || !mixed)
+    if (!generation || !asr || !translation || !language || !events || !timed || !batch || !mixed)
         return;
     trtmc_error* error = NULL;
     trtmc_result* result = NULL;
@@ -320,6 +322,29 @@ static void test_audio(trtmc_model* model, trtmc_model* restricted) {
               event_scores.labels.data[0].size == 6 &&
               memcmp(event_scores.labels.data[0].data, "Speech", 6) == 0,
           "sound-event labels are named and the scores stay raw logits");
+    core->result_release(result);
+
+    trtmc_audio_to_timed_labels_request_v1 timed_input = {request.audio};
+    status = timed->run(model, &timed_input, NULL, &result, &error);
+    status_is(status, TRTMC_OK, error, "C audio timed labels succeed");
+    trtmc_timed_labels_view_v1 timed_labels = {0};
+    status = timed->result_view(result, &timed_labels, &error);
+    status_is(status, TRTMC_OK, error, "C audio timed labels result view succeeds");
+    check(timed_labels.interval_count == 3 && timed_labels.labels.size == 2 &&
+              timed_labels.intervals[1].label == 1 &&
+              timed_labels.intervals[1].start_seconds == 0.01 &&
+              timed_labels.labels.data[1].size == 9 &&
+              memcmp(timed_labels.labels.data[1].data, "speaker_1", 9) == 0 &&
+              timed_labels.vocabulary_id.size == 0,
+          "timed labels name result-local speakers and keep their intervals");
+    check(timed_labels.frame_scores.rows == 3 && timed_labels.frame_scores.columns == 2 &&
+              timed_labels.frame_scores.count == 6 && timed_labels.frame_scores.data[1] == -1.0F &&
+              timed_labels.frame_seconds == 0.01 && timed_labels.score_kind == TRTMC_SCORE_LOGIT,
+          "timed label frame scores are raw [frame, label] logits");
+    trtmc_label_scores_view_v1 not_scores = {0};
+    status = events->result_view(result, &not_scores, &error);
+    status_is(status, TRTMC_INVALID_ARGUMENT, error,
+              "timed labels are not readable through a label-scores view");
     core->result_release(result);
 
     trtmc_batch_speech_transcription_item_v1 item = {0};

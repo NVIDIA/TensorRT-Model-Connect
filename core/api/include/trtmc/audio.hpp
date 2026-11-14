@@ -6,6 +6,7 @@
 #pragma once
 
 #include "trtmc/audio.h"
+#include "trtmc/matrix.hpp"
 #include "trtmc/scores.hpp"
 #include "trtmc/text.hpp"
 
@@ -59,6 +60,9 @@ struct AudioLanguageIdentificationRequest {
 struct AudioToClassScoresRequest {
     AudioView audio;
 };
+struct AudioToTimedLabelsRequest {
+    AudioView audio;
+};
 struct SpeechToSpeechResponseRequest {
     AudioView audio;
 };
@@ -96,6 +100,52 @@ class AudioGenerationResult {
     trtmc_audio_result_view_v1 view_{};
 };
 
+using TimedLabel = trtmc_timed_label_v1;
+
+class TimedLabelsResult {
+  public:
+    TimedLabelsResult(std::shared_ptr<detail::ModelState> state, trtmc_result* result) noexcept
+        : owner_(std::move(state), result) {}
+    TimedLabelsResult(const TimedLabelsResult&) = delete;
+    TimedLabelsResult& operator=(const TimedLabelsResult&) = delete;
+    TimedLabelsResult(TimedLabelsResult&& other) noexcept
+        : owner_(std::move(other.owner_)), view_(std::exchange(other.view_, {})) {}
+    TimedLabelsResult& operator=(TimedLabelsResult&& other) noexcept {
+        if (this != &other) {
+            owner_ = std::move(other.owner_);
+            view_ = std::exchange(other.view_, {});
+        }
+        return *this;
+    }
+    // Ordered by start, then label; label indexes labels().
+    Span<const TimedLabel> intervals() const noexcept {
+        return {view_.intervals, static_cast<std::size_t>(view_.interval_count)};
+    }
+    std::vector<std::string_view> labels() const {
+        std::vector<std::string_view> labels;
+        for (std::uint64_t i = 0; i < view_.labels.size; ++i)
+            labels.push_back(detail::string_view(view_.labels.data[i]));
+        return labels;
+    }
+    std::string_view vocabulary_id() const { return detail::string_view(view_.vocabulary_id); }
+    // Raw [frame, label] scores; empty when the family has none.
+    FloatMatrixView frame_scores() const noexcept {
+        return {{view_.frame_scores.data, static_cast<std::size_t>(view_.frame_scores.count)},
+                view_.frame_scores.rows,
+                view_.frame_scores.columns};
+    }
+    double frame_seconds() const noexcept { return view_.frame_seconds; }
+    std::uint32_t score_kind() const noexcept { return view_.score_kind; }
+    double setup_ms() const noexcept { return view_.setup_ms; }
+    double inference_ms() const noexcept { return view_.inference_ms; }
+    // C views and the convenience views above borrow this result owner.
+    trtmc_timed_labels_view_v1& wire_view() noexcept { return view_; }
+
+  private:
+    detail::ResultOwner owner_;
+    trtmc_timed_labels_view_v1 view_{};
+};
+
 using TextToAudioResult = AudioGenerationResult;
 using TextToSpeechResult = AudioGenerationResult;
 using SpeechToSpeechResponseResult = AudioGenerationResult;
@@ -103,6 +153,7 @@ using SpeechTranscriptionResult = TextContinuationResult;
 using SpeechTranslationResult = TextContinuationResult;
 using AudioLanguageIdentificationResult = LabelScoresResult;
 using AudioToClassScoresResult = LabelScoresResult;
+using AudioToTimedLabelsResult = TimedLabelsResult;
 using BatchSpeechTranscriptionResult = BatchTextContinuationResult;
 using BatchSpeechTranslationResult = BatchTextContinuationResult;
 using MixedBatchSpeechToTextResult = BatchTextContinuationResult;
@@ -348,6 +399,42 @@ class AudioToClassScores {
           api_(reinterpret_cast<const trtmc_audio_to_class_scores_api_v1*>(table)) {}
     std::shared_ptr<detail::ModelState> state_;
     const trtmc_audio_to_class_scores_api_v1* api_;
+};
+
+class AudioToTimedLabels {
+  public:
+    static constexpr std::string_view kTask = TRTMC_TASK_AUDIO_TO_TIMED_LABELS;
+    static constexpr std::uint32_t kMajor = 1, kMinor = 0;
+    AudioToTimedLabelsResult run(const AudioToTimedLabelsRequest& input,
+                                 const Config& config = {}) const {
+        const trtmc_audio_to_timed_labels_request_v1 request{detail::c_audio(input.audio)};
+        auto entries = config.c_entries();
+        auto options = entries.view();
+        trtmc_result* raw = nullptr;
+        trtmc_error* error = nullptr;
+        auto status = api_->run(state_->handle, &request, &options, &raw, &error);
+        TimedLabelsResult result(state_, raw);
+        detail::check(state_->api, status, error);
+        error = nullptr;
+        status = api_->result_view(raw, &result.wire_view(), &error);
+        detail::check(state_->api, status, error);
+        return result;
+    }
+    std::vector<ConfigField> config_fields() const {
+        return detail::config_fields(state_, kTask, kMajor, kMinor);
+    }
+    static void validate_table(const trtmc_api_header* table) {
+        detail::validate_audio_table<trtmc_audio_to_timed_labels_api_v1>(table);
+    }
+
+  private:
+    friend class Model;
+    AudioToTimedLabels(std::shared_ptr<detail::ModelState> state,
+                       const trtmc_api_header* table) noexcept
+        : state_(std::move(state)),
+          api_(reinterpret_cast<const trtmc_audio_to_timed_labels_api_v1*>(table)) {}
+    std::shared_ptr<detail::ModelState> state_;
+    const trtmc_audio_to_timed_labels_api_v1* api_;
 };
 
 class SpeechToSpeechResponse {

@@ -32,6 +32,45 @@ AudioView audio_view(const io::LoadedAudio& audio) {
             static_cast<std::uint32_t>(audio.sample_rate),
             static_cast<std::uint32_t>(audio.channels)};
 }
+const char* frame_score_kind(std::uint32_t kind) {
+    switch (kind) {
+    case 0:
+        return "none";
+    case TRTMC_SCORE_LOGIT:
+        return "logit";
+    case TRTMC_SCORE_PROBABILITY:
+        return "probability";
+    case TRTMC_SCORE_UNBOUNDED:
+        return "unbounded";
+    default:
+        throw std::runtime_error("timed labels have an unknown frame score kind");
+    }
+}
+nlohmann::json timed_labels_json(const TimedLabelsResult& result) {
+    auto intervals = nlohmann::json::array();
+    for (const auto& interval : result.intervals())
+        intervals.push_back({{"start_seconds", interval.start_seconds},
+                             {"end_seconds", interval.end_seconds},
+                             {"label", interval.label}});
+    const auto matrix = result.frame_scores();
+    std::vector<float> values(matrix.values.begin(), matrix.values.end());
+    detail::require_finite(values, "timed label frame scores");
+    auto rows = nlohmann::json::array();
+    for (std::uint64_t row = 0; row < matrix.rows; ++row)
+        rows.push_back(std::vector<float>(values.begin() + row * matrix.columns,
+                                          values.begin() + (row + 1) * matrix.columns));
+    std::vector<std::string> labels;
+    for (const auto label : result.labels())
+        labels.emplace_back(label);
+    return {{"labels", labels},
+            {"vocabulary_id", std::string(result.vocabulary_id())},
+            {"intervals", std::move(intervals)},
+            {"frame_seconds", result.frame_seconds()},
+            {"score_kind", frame_score_kind(result.score_kind())},
+            {"frame_scores", std::move(rows)},
+            {"setup_ms", result.setup_ms()},
+            {"inference_ms", result.inference_ms()}};
+}
 bool translate(const Command& command) {
     return has_option(command, "--translate") &&
            detail::parse_bool(command.options.at("--translate"), "--translate");
@@ -423,6 +462,9 @@ std::string_view audio_task_for_command(const Command& command, const Model& mod
     // the audio Task runs, and --audio never reaches the image path.
     if (command.kind == CommandKind::kClassify && has_option(command, "--audio"))
         return AudioToClassScores::kTask;
+    // detect follows the same rule: --audio asks who or what is active when.
+    if (command.kind == CommandKind::kDetect && has_option(command, "--audio"))
+        return AudioToTimedLabels::kTask;
     if (command.kind == CommandKind::kSpeak)
         return SpeechToSpeechResponse::kTask;
     if (command.kind == CommandKind::kTranscribeStreaming)
@@ -460,6 +502,15 @@ bool dispatch_sdk_audio(const Command& command, const Model& model, std::string_
         const auto task = model.task<AudioToClassScores>();
         const auto config = detail::task_config(command, task.config_fields(), {"--audio"});
         auto payload = detail::label_scores_json(task.run({audio_view(audio)}, config));
+        payload["task"] = std::string(id);
+        detail::write_json(output, payload);
+        return true;
+    }
+    if (command.kind == CommandKind::kDetect && id == AudioToTimedLabels::kTask) {
+        const auto audio = read_audio(require_option(command, "--audio"));
+        const auto task = model.task<AudioToTimedLabels>();
+        const auto config = detail::task_config(command, task.config_fields(), {"--audio"});
+        auto payload = timed_labels_json(task.run({audio_view(audio)}, config));
         payload["task"] = std::string(id);
         detail::write_json(output, payload);
         return true;

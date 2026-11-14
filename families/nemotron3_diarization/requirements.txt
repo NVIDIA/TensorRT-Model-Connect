@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# The official reference of the E2E and the front-end tests. The bundle build
+# needs neither: the mel filters and the window are computed in this family.
+# Both are pinned to the releases the family was measured against.
+transformers==5.22.2
+# The reference feature extractor builds its mel filters with librosa.
+librosa==1.0.0
+# Installed on top of the base image, transformers 5.22.2 (huggingface-hub
+# >=1.31.0,<3.0) would otherwise take huggingface-hub to 2.x, past the <2.0
+# that other packages of the image require; numpy stays in the image's range.
+huggingface-hub==1.33.0
+numpy>=1.24,<2.5

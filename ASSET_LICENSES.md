@@ -112,6 +112,11 @@ fixture and is distributed under the Apache License 2.0:
 
 - `families/personaplex/tests/data/personaplex_recording_official_tokens_greedy.npy`
 
+The Nemotron 3 Diarization E2E uses a byte-identical copy of
+`probe_02_clean_16k_mono_no_resample.wav` as one of its two speakers:
+
+- `families/nemotron3_diarization/tests/data/maintainer-recording-16k-mono.wav`
+
 ## Nemotron VoiceChat report audio
 
 `families/nemotron_voicechat/tests/assets/sample_general_input.flac` is a
@@ -141,6 +146,24 @@ audiobooks.
 
 - Source and attribution: https://www.openslr.org/12/
 - License: https://creativecommons.org/licenses/by/4.0/
+
+A byte-identical copy is the other speaker of the Nemotron 3 Diarization E2E,
+which mixes the two recordings into a conversation at test time and stores no
+derived audio:
+
+- `families/nemotron3_diarization/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+
+## Nemotron 3 Diarization runtime golden data
+
+The files below are project-generated test data, distributed under the Apache
+License 2.0. `families/nemotron3_diarization/tests/generate_runtime_golden.py`
+produces them from a synthetic signal and seeded random inputs with the
+family's own front-end constants and the Apache-2.0 Hugging Face Transformers
+5.22.2 reference implementation; they contain no third-party content.
+
+- `families/nemotron3_diarization/tests/data/runtime_golden.json`
+- `families/nemotron3_diarization/tests/data/mel_filters.f32`
+- `families/nemotron3_diarization/tests/data/window.f32`
 
 ## SANA world-model fixtures
 

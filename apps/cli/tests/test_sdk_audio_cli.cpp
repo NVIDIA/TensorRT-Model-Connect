@@ -311,6 +311,37 @@ void streamed_and_session(const std::filesystem::path& root, const std::filesyst
     for (const auto& path : {live, offline, bad, raw, output, too_large})
         std::filesystem::remove(path);
 }
+void timed_labels(const std::filesystem::path& root, const std::filesystem::path& model,
+                  const std::filesystem::path& input) {
+    const std::vector<std::string> base{"trtmc",       "detect",  model.string(), "--runtime-root",
+                                        root.string(), "--audio", input.string()};
+    const auto detected = run(base);
+    check(detected.status == 0, "detect --audio selects the timed-labels Task");
+    if (detected.status != 0)
+        throw std::runtime_error(detected.error);
+    const auto value = json::parse(detected.output);
+    check(value.at("task") == "audio_to_timed_labels" &&
+              value.at("labels") == json::array({"speaker_0", "speaker_1"}) &&
+              value.at("vocabulary_id") == "" && value.at("intervals").size() == 3 &&
+              value.at("intervals").at(1).at("label") == 1 &&
+              value.at("intervals").at(2).at("start_seconds") == 0.02,
+          "timed labels keep result-local speakers and overlapping intervals");
+    check(value.at("score_kind") == "logit" && value.at("frame_seconds") == 0.01 &&
+              value.at("frame_scores").size() == 3 &&
+              value.at("frame_scores").at(2) == json::array({1.0, 4.0}),
+          "frame scores render as [frame][label] rows of raw logits");
+    auto scaled = base;
+    scaled.insert(scaled.end(), {"--set", "gain=2"});
+    const auto gained = run(scaled);
+    check(gained.status == 0 &&
+              json::parse(gained.output).at("frame_scores").at(0) == json::array({4.0, -2.0}),
+          "family-declared config reaches the timed-labels Task");
+    auto unknown = base;
+    unknown.insert(unknown.end(), {"--set", "threshold=0.5"});
+    const auto rejected = run(unknown);
+    check(rejected.status != 0 && rejected.output.empty(),
+          "undeclared timed-labels config is rejected, not ignored");
+}
 void exercise(const std::filesystem::path& root) {
     const auto all = root / "audio_cli.bundle", restricted = root / "audio_cli_asr.bundle",
                translation_default = root / "audio_cli_translation.bundle",
@@ -384,6 +415,7 @@ void exercise(const std::filesystem::path& root) {
     generated_and_batch(root, all, input);
     streamed_and_session(root, input);
     empty_audio_inputs(root, all, input, empty);
+    timed_labels(root, all, input);
     for (const auto& path : {all, restricted, translation_default, input, empty})
         std::filesystem::remove(path);
 }
