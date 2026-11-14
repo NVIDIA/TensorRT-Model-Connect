@@ -31,7 +31,7 @@ HF_OPERATIONS = {"generate", "translate", "encode", "embed", "rerank", "classify
                  "solve", "regress"}
 # Tasks whose inputs the generic adapters would silently ignore (a world-model context, a text prompt for
 # masks): only a family's own native adapter (``reference.adapter``) serves them.
-NO_GENERIC_TASKS = {"world_model_generation", "text_prompted_segmentation"}
+NO_GENERIC_TASKS = {"world_model_generation", "text_prompted_segmentation", "initial_image_text_to_video"}
 PRECISIONS = ("fp16", "bf16", "fp32")
 # A configuration's numeric precision (its quantization, else its precision): a quantized checkpoint ranks below
 # every unquantized one, and bf16, the usual checkpoint dtype, above fp16.

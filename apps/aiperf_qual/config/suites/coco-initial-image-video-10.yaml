@@ -1,0 +1,19 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# COCO val2017 (detection-datasets/coco, pinned): 10 images in seeded order as image-to-video start frames, each
+# scaled and center-cropped to the profile's video size (fit_to_request), the rest of each request (prompt, steps,
+# guidance, seed, size) from the profile's catalog testcase.
+suite: coco-initial-image-video-10
+version: 1
+base: catalog
+source:
+  kind: hf_dataset
+  dataset: detection-datasets/coco
+  split: val
+  revision: cf0b22332314a937e9dc8a1957b21725430bb41d
+  data_files: {val: data/val-*.parquet}
+  image_column: image
+selection: {method: seeded, count: 10}
+fields: {image: image_path}
+fit_to_request: [image_path]

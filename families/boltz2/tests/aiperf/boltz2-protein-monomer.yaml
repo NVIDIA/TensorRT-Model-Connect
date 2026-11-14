@@ -1,0 +1,21 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The bundle builds from the package root (model_config.resolve_package_root): the checkpoints with the packaged
+# monomer request preprocessed, which reference/prepare.py stages.
+candidate:
+  model_directory: trtmc-reference/boltz2-model
+reference:
+  requirements: families/boltz2/tests/requirements.txt
+  prepare: families/boltz2/reference/prepare.py
+  adapter: families/boltz2/reference/adapter.py  # the family's seeded eager reference (reference.py)
+  mode: eager  # the E2E reference: eager under bf16 autocast
+benchmarks:
+  structure_parity:
+    suite_definition:
+      suite: uniref50-single-sequence-structures-20
+      version: 1
+      source:
+        kind: family_inputs
+        module: families/boltz2/reference/inputs.py
+      selection: {method: first, count: 20}
