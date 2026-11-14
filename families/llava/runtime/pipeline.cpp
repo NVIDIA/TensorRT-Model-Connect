@@ -1,0 +1,708 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include "families/llava/runtime/pipeline.h"
+
+#include "families/llava/runtime/image_preprocessor.h"
+#include "families/llava/runtime/rope_regime.h"
+#include "families/llava/runtime/tensor_names.h"
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <iostream>
+#include <stdexcept>
+
+namespace trtmc {
+
+namespace {
+
+void validate_pipeline_components(const ITrtModule* text_decoder, const LlavaInferenceState* state,
+                                  const ITrtModule* prefill) {
+    if (text_decoder == nullptr || !text_decoder->ok())
+        throw std::runtime_error("LlavaPipeline: invalid text decoder");
+    if (state == nullptr || !state->ok())
+        throw std::runtime_error("LlavaPipeline: invalid inference state");
+    if (prefill != nullptr && !prefill->ok())
+        throw std::runtime_error("LlavaPipeline: invalid prefill decoder");
+}
+
+void sync_vision_config(LlavaConfig& config, const LlavaPreprocessConfig& preprocess) {
+    if (config.image_token_id < 0 && preprocess.image_token_id >= 0)
+        config.image_token_id = preprocess.image_token_id;
+    if (config.vision_output_dim <= 0 && preprocess.vision_output_dim > 0)
+        config.vision_output_dim = preprocess.vision_output_dim;
+}
+
+} // namespace
+
+LlavaPipeline::LlavaPipeline(std::unique_ptr<ITrtModule> text_decoder,
+                             std::unique_ptr<ITrtModule> vision_encoder,
+                             std::unique_ptr<LlavaInferenceState> state, LlavaConfig config,
+                             LlavaPreprocessConfig vl_preprocess, cudaStream_t stream,
+                             std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str,
+                             std::unique_ptr<ITrtModule> prefill)
+    : text_decoder_(std::move(text_decoder)), prefill_(std::move(prefill)),
+      vision_encoder_(std::move(vision_encoder)), state_(std::move(state)), config_(config),
+      vl_preprocess_(std::move(vl_preprocess)), stream_(stream), tokenizer_(std::move(tokenizer)),
+      model_id_(std::move(model_id_str)) {
+    validate_pipeline_components(text_decoder_.get(), state_.get(), prefill_.get());
+    sync_vision_config(config_, vl_preprocess_);
+}
+
+TextResult LlavaPipeline::generate(const std::string& prompt, const TextGenerationConfig& cfg) {
+    if (!tokenizer_)
+        throw std::runtime_error("LlavaPipeline: no tokenizer configured");
+
+    auto input_ids = tokenizer_->encode(prompt);
+    auto [max_new, eos] = resolve_gen_limits(cfg);
+    if (static_cast<int64_t>(input_ids.size()) + max_new > config_.prefill_max_length)
+        throw std::invalid_argument(
+            "LLaVA prompt plus generated tokens exceeds the bundle context");
+    auto sp = llava_sampling_params_from_config(cfg, eos);
+    if (cfg.eos_token_id < 0)
+        sp.additional_eos_token_ids = config_.eos_token_ids;
+    auto output_ids = generate_from_ids(input_ids, max_new, sp);
+
+    std::vector<int32_t> new_tokens(
+        output_ids.begin() + static_cast<std::ptrdiff_t>(input_ids.size()), output_ids.end());
+    std::string text = tokenizer_->decode(new_tokens);
+
+    auto result = TextResult{std::move(text), std::move(new_tokens)};
+    result.setup_ms = last_setup_ms_;
+    return result;
+}
+
+namespace {
+
+runtime::adapters::io::DecodedImage convert_float_to_decoded(const float* pixels, int32_t height,
+                                                             int32_t width) {
+    runtime::adapters::io::DecodedImage decoded;
+    decoded.width = width;
+    decoded.height = height;
+    decoded.channels = 3;
+    auto n = static_cast<std::size_t>(width) * height * 3;
+    decoded.pixels.resize(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        if (!std::isfinite(pixels[i]))
+            throw std::invalid_argument("LLaVA image contains a nonfinite value");
+        float v = std::max(0.0F, std::min(255.0F, pixels[i] * 255.0F));
+        decoded.pixels[i] = static_cast<uint8_t>(v + 0.5F);
+    }
+    return decoded;
+}
+
+int32_t infer_feature_dim(const ITrtModule& encoder, int32_t configured_dim) {
+    if (configured_dim > 0)
+        return configured_dim;
+    for (const auto& info : encoder.output_info()) {
+        if (info.name == "image_features" && info.shape.size() >= 2)
+            return static_cast<int32_t>(info.shape.back());
+    }
+    return 0;
+}
+
+std::vector<const float*>
+select_deepstack_feature_pointers(const std::vector<std::vector<float>>& deepstack_features,
+                                  int32_t feature_index, int32_t feature_dim) {
+    std::vector<const float*> embeds;
+    embeds.reserve(deepstack_features.size());
+    for (const auto& deepstack : deepstack_features) {
+        const int32_t count =
+            static_cast<int32_t>(deepstack.size() / static_cast<std::size_t>(feature_dim));
+        embeds.push_back(feature_index < count
+                             ? deepstack.data() +
+                                   static_cast<std::size_t>(feature_index) * feature_dim
+                             : nullptr);
+    }
+    return embeds;
+}
+
+struct VlSequenceEmbeddingInputs {
+    std::vector<float> input_embed;
+    std::vector<float> use_input_embed;
+    std::vector<std::vector<float>> deepstack_embed;
+    std::vector<float> deepstack_active;
+};
+
+VlSequenceEmbeddingInputs
+build_vl_sequence_embedding_inputs(const std::vector<int32_t>& input_ids, int32_t image_token_id,
+                                   const std::vector<float>& image_features,
+                                   const std::vector<std::vector<float>>& deepstack_features,
+                                   int32_t num_features, int32_t feature_dim) {
+    const auto sq = input_ids.size();
+    VlSequenceEmbeddingInputs result;
+    result.input_embed.assign(sq * static_cast<std::size_t>(feature_dim), 0.0F);
+    result.use_input_embed.assign(sq, 0.0F);
+    result.deepstack_active.assign(sq, 0.0F);
+    result.deepstack_embed.resize(deepstack_features.size());
+    for (auto& level : result.deepstack_embed)
+        level.assign(sq * static_cast<std::size_t>(feature_dim), 0.0F);
+
+    int32_t feature_index = 0;
+    for (std::size_t token_index = 0; token_index < sq; ++token_index) {
+        if (input_ids[token_index] != image_token_id || feature_index >= num_features)
+            continue;
+        const auto source_offset = static_cast<std::size_t>(feature_index) * feature_dim;
+        const auto target_offset = token_index * static_cast<std::size_t>(feature_dim);
+        std::copy_n(image_features.data() + source_offset, feature_dim,
+                    result.input_embed.data() + target_offset);
+        result.use_input_embed[token_index] = 1.0F;
+
+        for (std::size_t level_index = 0; level_index < deepstack_features.size(); ++level_index) {
+            const auto& source = deepstack_features[level_index];
+            if (source_offset + static_cast<std::size_t>(feature_dim) > source.size())
+                continue;
+            std::copy_n(source.data() + source_offset, feature_dim,
+                        result.deepstack_embed[level_index].data() + target_offset);
+            result.deepstack_active[token_index] = 1.0F;
+        }
+        ++feature_index;
+    }
+    return result;
+}
+
+bool gather_vl_prefill_kv_pointers(ITrtModule& prefill, const LlavaConfig& config,
+                                   std::vector<const void*>& present_k,
+                                   std::vector<const void*>& present_v) {
+    present_k.resize(static_cast<std::size_t>(config.num_layers));
+    present_v.resize(static_cast<std::size_t>(config.num_layers));
+    for (int32_t layer = 0; layer < config.num_layers; ++layer) {
+        const auto index = static_cast<std::size_t>(layer);
+        present_k[index] =
+            prefill.device_ptr(llava_expand_layer_name(config.present_k_pattern, layer));
+        present_v[index] =
+            prefill.device_ptr(llava_expand_layer_name(config.present_v_pattern, layer));
+        if (present_k[index] == nullptr || present_v[index] == nullptr)
+            return false;
+    }
+    return true;
+}
+
+LlavaKvCache* eligible_vl_prefill_cache(ITrtModule* prefill, LlavaInferenceState* state,
+                                        const LlavaConfig& config, int32_t sequence_length,
+                                        int32_t feature_dim) {
+    if (prefill == nullptr)
+        return nullptr;
+    if (sequence_length <= 0 || feature_dim <= 0 || config.num_layers <= 0)
+        return nullptr;
+    if (!prefill->has_input("input_embed"))
+        return nullptr;
+    if (config.prefill_max_length > 0 && sequence_length > config.prefill_max_length)
+        return nullptr;
+    return dynamic_cast<LlavaKvCache*>(state);
+}
+
+bool valid_vl_features(const std::vector<float>& image_features, int32_t num_features,
+                       int32_t feature_dim) {
+    if (num_features < 0)
+        return false;
+    const auto required =
+        static_cast<std::size_t>(num_features) * static_cast<std::size_t>(feature_dim);
+    return image_features.size() >= required;
+}
+
+void add_vl_prefill_base_inputs(TensorMap& inputs, LlavaInferenceState& state,
+                                const std::vector<int32_t>& input_ids,
+                                VlSequenceEmbeddingInputs& embedding_inputs, int32_t feature_dim) {
+    const auto sequence_length = static_cast<int32_t>(input_ids.size());
+    inputs["token_id"] =
+        Tensor{const_cast<int32_t*>(input_ids.data()), {sequence_length}, DType::kInt32};
+    state.prepare_step(inputs, sequence_length);
+    inputs["input_embed"] = Tensor{
+        embedding_inputs.input_embed.data(), {sequence_length, feature_dim}, DType::kFloat32};
+    inputs["use_input_embed"] =
+        Tensor{embedding_inputs.use_input_embed.data(), {sequence_length, 1}, DType::kFloat32};
+}
+
+bool add_vl_prefill_deepstack_inputs(ITrtModule& prefill, TensorMap& inputs,
+                                     VlSequenceEmbeddingInputs& embedding_inputs,
+                                     int32_t sequence_length, int32_t feature_dim) {
+    if (!prefill.has_input("deepstack_active"))
+        return true;
+    inputs["deepstack_active"] =
+        Tensor{embedding_inputs.deepstack_active.data(), {sequence_length, 1}, DType::kFloat32};
+    for (std::size_t level = 0;; ++level) {
+        const auto name = "deepstack_embed_" + std::to_string(level);
+        if (!prefill.has_input(name))
+            break;
+        if (level >= embedding_inputs.deepstack_embed.size())
+            return false;
+        inputs[name] = Tensor{embedding_inputs.deepstack_embed[level].data(),
+                              {sequence_length, feature_dim},
+                              DType::kFloat32};
+    }
+    return true;
+}
+
+// The decoder engines take the LongRoPE regime when the checkpoint has two.
+void add_rope_regime_input(const ITrtModule& module, TensorMap& inputs, int32_t& rope_long_factor) {
+    if (module.has_input("rope_long_factor"))
+        inputs["rope_long_factor"] = Tensor{&rope_long_factor, {1}, DType::kInt32};
+}
+
+bool copy_last_prefill_logits(const TensorMap& outputs, int32_t vocab_size,
+                              std::vector<float>& logits) {
+    const auto logits_it = outputs.find("logits");
+    if (logits_it == outputs.end())
+        return false;
+    const auto size = static_cast<std::size_t>(vocab_size);
+    if (logits_it->second.numel() < size)
+        return false;
+    const auto offset = logits_it->second.numel() - size;
+    logits.resize(size);
+    std::memcpy(logits.data(), static_cast<const float*>(logits_it->second.data) + offset,
+                size * sizeof(float));
+    return true;
+}
+
+int32_t resolve_input_embed_dim(const ITrtModule& decoder, int32_t configured_dim) {
+    if (configured_dim > 0)
+        return configured_dim;
+    const auto declared_shape = decoder.tensor_shape("input_embed");
+    if (!declared_shape.empty())
+        return static_cast<int32_t>(declared_shape.back());
+    throw std::runtime_error("LlavaPipeline: invalid input embedding dimension");
+}
+
+std::vector<int64_t> selector_shape(const ITrtModule& decoder, const std::string& name) {
+    return decoder.input_rank(name) == 2 ? std::vector<int64_t>{1, 1} : std::vector<int64_t>{1};
+}
+
+void add_text_step_deepstack_inputs(ITrtModule& decoder, TensorMap& inputs, int32_t embed_dim,
+                                    const std::vector<const float*>& deepstack_embeds,
+                                    float& deepstack_active, std::vector<float>& zero_deepstack) {
+    if (!decoder.has_input("deepstack_active"))
+        return;
+    inputs["deepstack_active"] =
+        Tensor{&deepstack_active, selector_shape(decoder, "deepstack_active"), DType::kFloat32};
+    for (std::size_t index = 0;; ++index) {
+        const auto name = "deepstack_embed_" + std::to_string(index);
+        if (!decoder.has_input(name))
+            break;
+        const float* embed = index < deepstack_embeds.size() ? deepstack_embeds[index] : nullptr;
+        if (embed == nullptr) {
+            if (zero_deepstack.empty())
+                zero_deepstack.resize(static_cast<std::size_t>(embed_dim), 0.0F);
+            embed = zero_deepstack.data();
+        }
+        inputs[name] = Tensor{const_cast<float*>(embed), {1, embed_dim}, DType::kFloat32};
+    }
+}
+
+void add_text_step_embedding_inputs(ITrtModule& decoder, const LlavaConfig& config,
+                                    TensorMap& inputs, const float* input_embed,
+                                    float& use_input_embed,
+                                    const std::vector<const float*>& deepstack_embeds,
+                                    float& deepstack_active, std::vector<float>& zero_embed,
+                                    std::vector<float>& zero_deepstack) {
+    if (!decoder.has_input("input_embed"))
+        return;
+    const int32_t embed_dim = resolve_input_embed_dim(decoder, config.vision_output_dim);
+    if (input_embed == nullptr) {
+        zero_embed.resize(static_cast<std::size_t>(embed_dim), 0.0F);
+        input_embed = zero_embed.data();
+    }
+    inputs["input_embed"] =
+        Tensor{const_cast<float*>(input_embed), {1, embed_dim}, DType::kFloat32};
+    inputs["use_input_embed"] =
+        Tensor{&use_input_embed, selector_shape(decoder, "use_input_embed"), DType::kFloat32};
+    add_text_step_deepstack_inputs(decoder, inputs, embed_dim, deepstack_embeds, deepstack_active,
+                                   zero_deepstack);
+}
+
+Tensor make_pixel_values_tensor(const LlavaPreprocessedImage& preprocessed,
+                                const ITrtModule& encoder) {
+    Tensor pixel_t;
+    pixel_t.data = const_cast<float*>(preprocessed.pixel_values.data());
+    for (const auto& info : encoder.input_info()) {
+        if (info.name == "pixel_values") {
+            pixel_t.shape = info.shape;
+            break;
+        }
+    }
+    if (!preprocessed.hd_crop_valid.empty())
+        pixel_t.shape = {static_cast<int64_t>(preprocessed.hd_crop_valid.size() / 2),
+                         preprocessed.channels, preprocessed.height, preprocessed.width};
+    if (pixel_t.shape.empty())
+        pixel_t.shape = {static_cast<int64_t>(preprocessed.pixel_values.size())};
+    pixel_t.dtype = DType::kFloat32;
+    return pixel_t;
+}
+
+// Dynamic-HD metadata: valid patch rows/cols per vision batch entry and the
+// rows forming the image tokens.
+void add_dynamic_hd_inputs(TensorMap& inputs, const LlavaPreprocessedImage& preprocessed,
+                           const ITrtModule& encoder) {
+    if (preprocessed.hd_crop_valid.empty())
+        return;
+    if (!encoder.has_input("crop_valid") || !encoder.has_input("image_token_rows"))
+        throw std::runtime_error("LlavaPipeline: vision engine lacks the Dynamic-HD "
+                                 "inputs; rebuild the bundle");
+    inputs["crop_valid"] = Tensor{const_cast<int32_t*>(preprocessed.hd_crop_valid.data()),
+                                  {static_cast<int64_t>(preprocessed.hd_crop_valid.size() / 2), 2},
+                                  DType::kInt32};
+    inputs["image_token_rows"] = Tensor{const_cast<int32_t*>(preprocessed.hd_token_rows.data()),
+                                        {static_cast<int64_t>(preprocessed.hd_token_rows.size())},
+                                        DType::kInt32};
+}
+
+void add_image_grid_input(TensorMap& inputs, const LlavaPreprocessedImage& preprocessed,
+                          const ITrtModule& encoder) {
+    if (!encoder.has_input("image_grid_hws") || preprocessed.image_grid_hws.empty())
+        return;
+
+    Tensor grid_t;
+    grid_t.data = const_cast<int32_t*>(preprocessed.image_grid_hws.data());
+    grid_t.shape = {static_cast<int64_t>(preprocessed.image_grid_hws.size() / 2), 2};
+    grid_t.dtype = DType::kInt32;
+    inputs["image_grid_hws"] = grid_t;
+}
+
+bool copy_float_output(const TensorMap& outputs, const std::string& name,
+                       std::vector<float>& values) {
+    auto it = outputs.find(name);
+    if (it == outputs.end())
+        return false;
+
+    auto n = it->second.numel();
+    values.resize(static_cast<std::size_t>(n));
+    std::memcpy(values.data(), it->second.data, n * sizeof(float));
+    return true;
+}
+
+void copy_deepstack_outputs(const TensorMap& outputs,
+                            std::vector<std::vector<float>>* deepstack_features) {
+    if (deepstack_features == nullptr)
+        return;
+
+    deepstack_features->clear();
+    for (std::size_t i = 0;; ++i) {
+        const std::string name = "deepstack_features_" + std::to_string(i);
+        auto ds_it = outputs.find(name);
+        if (ds_it == outputs.end())
+            break;
+        auto ds_n = ds_it->second.numel();
+        deepstack_features->emplace_back(static_cast<std::size_t>(ds_n));
+        std::memcpy(deepstack_features->back().data(), ds_it->second.data, ds_n * sizeof(float));
+    }
+}
+
+} // namespace
+
+std::pair<int32_t, int32_t>
+LlavaPipeline::resolve_gen_limits(const TextGenerationConfig& cfg) const {
+    int32_t max_new = (cfg.max_new_tokens > 0) ? cfg.max_new_tokens : 128;
+    int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
+    return {max_new, eos};
+}
+
+TextResult LlavaPipeline::generate(const std::string& prompt, const float* image_pixels,
+                                   int32_t image_height, int32_t image_width,
+                                   const TextGenerationConfig& cfg) {
+    if (!tokenizer_)
+        throw std::runtime_error("LlavaPipeline: no tokenizer configured");
+
+    bool valid = image_pixels && image_height > 0 && image_width > 0;
+    if (!valid || !vision_encoder_)
+        throw std::invalid_argument("LLaVA requires a nonempty image and a vision encoder");
+
+    // Preprocess and encode the image
+    auto decoded = convert_float_to_decoded(image_pixels, image_height, image_width);
+    auto preprocessed = llava_preprocess_decoded_image(decoded, vl_preprocess_);
+    if (!preprocessed.ok)
+        throw std::runtime_error("LlavaPipeline: image preprocessing failed");
+
+    std::vector<float> features;
+    std::vector<std::vector<float>> deepstack_features;
+    if (!run_vision_encoder(preprocessed, features, &deepstack_features))
+        throw std::runtime_error("LlavaPipeline: vision encoder failed");
+
+    int32_t dim = infer_feature_dim(*vision_encoder_, config_.vision_output_dim);
+    if (dim <= 0)
+        throw std::runtime_error("LlavaPipeline: cannot determine vision feature dim");
+    int32_t nf = static_cast<int32_t>(features.size() / static_cast<std::size_t>(dim));
+
+    // Format prompt, tokenize, generate with vision features
+    if (!preprocessed.hd_token_rows.empty() &&
+        static_cast<std::size_t>(nf) != preprocessed.hd_token_rows.size())
+        throw std::runtime_error("LlavaPipeline: image feature count mismatch");
+    auto input_ids = tokenizer_->encode(llava_format_prompt(prompt, vl_preprocess_, nf));
+    auto [max_new, eos] = resolve_gen_limits(cfg);
+    if (config_.prefill_max_length > 0 &&
+        static_cast<int64_t>(input_ids.size()) + std::max(max_new, 0) > config_.prefill_max_length)
+        throw std::runtime_error("LlavaPipeline: the prompt (" + std::to_string(input_ids.size()) +
+                                 " tokens with " + std::to_string(nf) + " image tokens) plus " +
+                                 std::to_string(max_new) +
+                                 " new tokens exceeds the bundle context of " +
+                                 std::to_string(config_.prefill_max_length) + " tokens");
+    auto sp_vl = llava_sampling_params_from_config(cfg, eos);
+    if (cfg.eos_token_id < 0)
+        sp_vl.additional_eos_token_ids = config_.eos_token_ids;
+    auto out =
+        generate_vl_from_ids(input_ids, features, deepstack_features, nf, dim, max_new, sp_vl);
+
+    std::vector<int32_t> new_tokens(out.begin() + static_cast<std::ptrdiff_t>(input_ids.size()),
+                                    out.end());
+    auto result = TextResult{tokenizer_->decode(new_tokens), std::move(new_tokens)};
+    result.setup_ms = last_setup_ms_;
+    return result;
+}
+
+LlavaPipeline::GenerationResult LlavaPipeline::generate_ids(const std::vector<int32_t>& input_ids,
+                                                            const TextGenerationConfig& cfg) {
+    int32_t max_new = cfg.max_new_tokens;
+    int32_t eos = (cfg.eos_token_id >= 0) ? cfg.eos_token_id : config_.id_eos;
+    auto sp = llava_sampling_params_from_config(cfg, eos);
+    if (cfg.eos_token_id < 0)
+        sp.additional_eos_token_ids = config_.eos_token_ids;
+    return GenerationResult{generate_from_ids(input_ids, max_new, sp)};
+}
+
+void LlavaPipeline::reset_generation_context(int32_t prompt_length) {
+    const auto start = std::chrono::steady_clock::now();
+    reset_sequence_state(prompt_length);
+    last_setup_ms_ =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
+void LlavaPipeline::reset_sequence_state(int32_t prompt_length) {
+    state_->reset();
+    state_->set_prompt_length(prompt_length);
+    text_decoder_->reset_execution_context();
+    if (prefill_)
+        prefill_->reset_execution_context();
+    state_->bind_to(*text_decoder_);
+}
+
+std::vector<int32_t> LlavaPipeline::generate_from_ids(const std::vector<int32_t>& input_ids,
+                                                      int32_t max_new_tokens,
+                                                      const LlavaSamplingParams& params) {
+    if (max_new_tokens == 0 || input_ids.empty())
+        return input_ids;
+
+    auto local_sampler = create_llava_sampler(params);
+    auto* active_sampler = local_sampler.get();
+    active_sampler->reset();
+
+    reset_generation_context(static_cast<int32_t>(input_ids.size()));
+    begin_rope_regime(input_ids.size());
+
+    std::vector<float> logits;
+
+    for (std::size_t i = 0; i + 1 < input_ids.size(); ++i)
+        run_text_step(input_ids[i], logits);
+
+    run_text_step(input_ids.back(), logits);
+
+    std::vector<int32_t> output = input_ids;
+    const int32_t vocab_size = static_cast<int32_t>(logits.size());
+    const SequencePrefill prefill_sequence = [this](const std::vector<int32_t>& sequence,
+                                                    std::vector<float>& sequence_logits) {
+        reset_sequence_state(static_cast<int32_t>(sequence.size()));
+        for (const auto token_id : sequence)
+            run_text_step(token_id, sequence_logits);
+    };
+
+    for (int32_t step = 0; step < max_new_tokens; ++step) {
+        LlavaSampleResult result = active_sampler->sample(logits.data(), vocab_size, params);
+        output.push_back(result.token_id);
+        // No forward pass once generation is over, as in the reference.
+        if (result.is_eos || step + 1 == max_new_tokens)
+            break;
+        run_decode_step(output, logits, prefill_sequence);
+    }
+
+    return output;
+}
+
+std::vector<int32_t> LlavaPipeline::generate_vl_from_ids(
+    const std::vector<int32_t>& input_ids, const std::vector<float>& image_features,
+    const std::vector<std::vector<float>>& deepstack_features, int32_t num_features,
+    int32_t feature_dim, int32_t max_new_tokens, const LlavaSamplingParams& params) {
+    if (max_new_tokens == 0 || input_ids.empty())
+        return input_ids;
+
+    auto local_sampler = create_llava_sampler(params);
+    auto* active_sampler = local_sampler.get();
+    active_sampler->reset();
+
+    reset_generation_context(static_cast<int32_t>(input_ids.size()));
+    begin_rope_regime(input_ids.size());
+
+    // Image features stay at their image-token positions when the whole
+    // sequence is recomputed.
+    const SequencePrefill prefill_sequence = [&](const std::vector<int32_t>& sequence,
+                                                 std::vector<float>& sequence_logits) {
+        if (!run_vl_prefill_batched(sequence, image_features, deepstack_features, num_features,
+                                    feature_dim, sequence_logits)) {
+            int32_t feature_index = 0;
+            for (const auto& tid : sequence)
+                run_vl_prefill_token(tid, image_features, deepstack_features, num_features,
+                                     feature_dim, feature_index, sequence_logits);
+        }
+        state_->mark_prefill_complete();
+    };
+
+    std::vector<float> logits;
+    prefill_sequence(input_ids, logits);
+
+    std::vector<int32_t> output = input_ids;
+    run_vl_decode_loop(
+        active_sampler, params, output, logits, max_new_tokens,
+        [&](const std::vector<int32_t>& sequence, std::vector<float>& sequence_logits) {
+            reset_sequence_state(static_cast<int32_t>(sequence.size()));
+            prefill_sequence(sequence, sequence_logits);
+        });
+    return output;
+}
+
+bool LlavaPipeline::run_vl_prefill_batched(
+    const std::vector<int32_t>& input_ids, const std::vector<float>& image_features,
+    const std::vector<std::vector<float>>& deepstack_features, int32_t num_features,
+    int32_t feature_dim, std::vector<float>& logits) {
+    const auto sq = static_cast<int32_t>(input_ids.size());
+    auto* kv_cache =
+        eligible_vl_prefill_cache(prefill_.get(), state_.get(), config_, sq, feature_dim);
+    if (kv_cache == nullptr)
+        return false;
+    if (!valid_vl_features(image_features, num_features, feature_dim))
+        return false;
+
+    kv_cache->bind_cache_inputs(*prefill_);
+    auto embedding_inputs =
+        build_vl_sequence_embedding_inputs(input_ids, config_.image_token_id, image_features,
+                                           deepstack_features, num_features, feature_dim);
+
+    TensorMap inputs;
+    add_vl_prefill_base_inputs(inputs, *state_, input_ids, embedding_inputs, feature_dim);
+    add_rope_regime_input(*prefill_, inputs, rope_long_factor_);
+    if (!add_vl_prefill_deepstack_inputs(*prefill_, inputs, embedding_inputs, sq, feature_dim))
+        return false;
+
+    auto outputs = prefill_->forward(inputs);
+    if (!copy_last_prefill_logits(outputs, config_.vocab_size, logits))
+        return false;
+
+    std::vector<const void*> present_k;
+    std::vector<const void*> present_v;
+    if (!gather_vl_prefill_kv_pointers(*prefill_, config_, present_k, present_v))
+        return false;
+    kv_cache->write_prefill_kv(present_k, present_v, sq);
+    return true;
+}
+
+void LlavaPipeline::run_vl_prefill_token(int32_t token_id, const std::vector<float>& image_features,
+                                         const std::vector<std::vector<float>>& deepstack_features,
+                                         int32_t num_features, int32_t feature_dim,
+                                         int32_t& feature_index, std::vector<float>& logits) {
+    const bool use_image_embed = token_id == config_.image_token_id && feature_index < num_features;
+    if (!use_image_embed) {
+        run_text_step_with_embed(token_id, nullptr, 0.0F, {}, 0.0F, logits);
+        return;
+    }
+
+    const float* embed =
+        image_features.data() + static_cast<std::size_t>(feature_index) * feature_dim;
+    const auto deepstack_embeds =
+        select_deepstack_feature_pointers(deepstack_features, feature_index, feature_dim);
+    run_text_step_with_embed(token_id, embed, 1.0F, deepstack_embeds,
+                             deepstack_embeds.empty() ? 0.0F : 1.0F, logits);
+    ++feature_index;
+}
+
+void LlavaPipeline::run_vl_decode_loop(LlavaISampler* sampler, const LlavaSamplingParams& params,
+                                       std::vector<int32_t>& output, std::vector<float>& logits,
+                                       int32_t max_new_tokens,
+                                       const SequencePrefill& prefill_sequence) {
+    const int32_t vocab_size = static_cast<int32_t>(logits.size());
+    for (int32_t step = 0; step < max_new_tokens; ++step) {
+        LlavaSampleResult result = sampler->sample(logits.data(), vocab_size, params);
+        output.push_back(result.token_id);
+        // No forward pass once generation is over, as in the reference.
+        if (result.is_eos || step + 1 == max_new_tokens)
+            break;
+        run_decode_step(output, logits, prefill_sequence);
+    }
+}
+
+void LlavaPipeline::begin_rope_regime(std::size_t sequence_length) {
+    rope_long_factor_ = llava_rope_long_factor(sequence_length, config_.rope_long_factor_threshold);
+}
+
+void LlavaPipeline::run_decode_step(const std::vector<int32_t>& output, std::vector<float>& logits,
+                                    const SequencePrefill& prefill_sequence) {
+    const auto long_factor =
+        llava_rope_long_factor(output.size(), config_.rope_long_factor_threshold);
+    if (long_factor == rope_long_factor_) {
+        run_text_step(output.back(), logits);
+        return;
+    }
+    // The cached keys were rotated with the short factors; recompute them all.
+    rope_long_factor_ = long_factor;
+    prefill_sequence(output, logits);
+}
+
+void LlavaPipeline::run_text_step(int32_t token_id, std::vector<float>& logits) {
+    run_text_step_with_embed(token_id, nullptr, 0.0F, {}, 0.0F, logits);
+}
+
+void LlavaPipeline::run_text_step_with_embed(int32_t token_id, const float* input_embed,
+                                             float use_input_embed,
+                                             const std::vector<const float*>& deepstack_embeds,
+                                             float deepstack_active, std::vector<float>& logits) {
+    TensorMap inputs;
+
+    Tensor token_t;
+    token_t.data = &token_id;
+    token_t.shape = {1};
+    token_t.dtype = DType::kInt32;
+    inputs["token_id"] = token_t;
+
+    state_->prepare_step(inputs);
+    add_rope_regime_input(*text_decoder_, inputs, rope_long_factor_);
+
+    std::vector<float> zero_embed;
+    std::vector<float> zero_deepstack;
+    add_text_step_embedding_inputs(*text_decoder_, config_, inputs, input_embed, use_input_embed,
+                                   deepstack_embeds, deepstack_active, zero_embed, zero_deepstack);
+
+    auto outputs = text_decoder_->forward(inputs);
+
+    auto it = outputs.find("logits");
+    if (it == outputs.end())
+        throw std::runtime_error("LlavaPipeline: no 'logits' output");
+
+    auto n = it->second.numel();
+    logits.resize(static_cast<std::size_t>(n));
+    std::memcpy(logits.data(), it->second.data, n * sizeof(float));
+
+    state_->advance();
+}
+
+bool LlavaPipeline::run_vision_encoder(const LlavaPreprocessedImage& preprocessed,
+                                       std::vector<float>& image_features,
+                                       std::vector<std::vector<float>>* deepstack_features) {
+    if (!vision_encoder_ || !vision_encoder_->ok())
+        return false;
+
+    TensorMap inputs;
+    inputs["pixel_values"] = make_pixel_values_tensor(preprocessed, *vision_encoder_);
+    add_image_grid_input(inputs, preprocessed, *vision_encoder_);
+    add_dynamic_hd_inputs(inputs, preprocessed, *vision_encoder_);
+
+    auto outputs = vision_encoder_->forward(inputs);
+
+    if (!copy_float_output(outputs, "image_features", image_features)) {
+        std::cerr << "[trtmc] Vision encoder has no 'image_features' output" << std::endl;
+        return false;
+    }
+
+    copy_deepstack_outputs(outputs, deepstack_features);
+    return true;
+}
+
+} // namespace trtmc
