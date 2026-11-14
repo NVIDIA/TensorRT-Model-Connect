@@ -1504,6 +1504,17 @@
         "DeepseekV3ForCausalLM"
       ],
       "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "lightonai/LightOnOCR-2-1B",
+      "revision": "be7c41313c30e940fe5571de59e5fabc779e00c8",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "mistral3",
+      "architectures": [
+        "LightOnOCRForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
     }
   ]
 }

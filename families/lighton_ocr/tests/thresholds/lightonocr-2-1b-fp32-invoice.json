@@ -1,0 +1,15 @@
+{
+  "threshold_overrides": {
+    "pixel_maximum_absolute_error": 1e-06,
+    "image_features_relative_l2": 0.0001,
+    "image_features_maximum_absolute_error": 0.005,
+    "logits_relative_l2": 0.0001,
+    "logits_maximum_absolute_error": 0.01,
+    "logits_argmax_agreement": 1.0,
+    "generation_exact_token_ids": true,
+    "generation_exact_text": true,
+    "generation_nonempty": true,
+    "generation_reaches_eos": true,
+    "teacher_forced_steps": 2
+  }
+}

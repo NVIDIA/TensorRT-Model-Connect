@@ -1,0 +1,26 @@
+{
+  "name": "lightonocr-2-1b-fp32",
+  "hf_id": "lightonai/LightOnOCR-2-1B",
+  "hf_revision": "be7c41313c30e940fe5571de59e5fabc779e00c8",
+  "bundle": "lightonocr-2-1b-fp32.bundle",
+  "family": "lighton_ocr",
+  "task": "images_text_to_text",
+  "precision": "fp32",
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 4096,
+  "testcases": [
+    {
+      "name": "lightonocr-2-1b-fp32-invoice",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "reference_transformers_version": "5.2.0",
+      "reference_use_fast": false,
+      "reference_use_cache": true,
+      "prompt": "",
+      "test_image": "data/invoice.png",
+      "max_new_tokens": 1024,
+      "do_sample": false,
+      "expected_fragments": ["LIGHTON OCR", "1042", "30.00"]
+    }
+  ]
+}

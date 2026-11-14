@@ -45,6 +45,8 @@ distributed under the Apache License 2.0 with the rest of the project:
 
 - `families/deepseek_ocr/tests/data/orc_test_img.jpeg` — screenshot of
   project source text created for OCR regression testing
+- `families/lighton_ocr/tests/data/invoice.png` — synthetic invoice with
+  invented data rendered by the family-owned `generate_fixture.py`
 - `families/phi4_multimodal/tests/data/dynamic-hd/synthetic-*.png` (7 images) —
   synthetic test patterns written by the checked-in
   `families/phi4_multimodal/tests/data/dynamic-hd/generate.py` for Dynamic-HD
