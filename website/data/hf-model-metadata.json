@@ -418,6 +418,17 @@
       "architecture_source": "model_index._class_name"
     },
     {
+      "hf_id": "unsloth/gemma-3n-E4B-it",
+      "revision": "45e9fb1dd0e34db5ff9db1f43a49ac5d8e8b8778",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "gemma3n",
+      "architectures": [
+        "Gemma3nForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
       "revision": "0fad780a534b6463e45facd96134c9f345acfa5b",
       "revision_source": "resolved",
