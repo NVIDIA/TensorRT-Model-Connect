@@ -38,6 +38,10 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 photograph (columns 260 to 639, rows 60 to 381, saved again as JPEG) and is
 distributed under the same terms.
 
+`families/minicpmv4_7/tests/data/test_img.png` is a lossless PNG re-encoding of
+the decoded photograph, so that the native runtime and the reference decoder read
+identical pixels, and is distributed under the same terms.
+
 ## Project-created image fixtures
 
 The following images were created for TensorRT Model Connect testing and are
