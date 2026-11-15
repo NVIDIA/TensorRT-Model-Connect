@@ -11,6 +11,7 @@ pairs): each side's units are scored, and a paired bootstrap over independent cl
 from __future__ import annotations
 
 import importlib
+import json
 import math
 import os
 import re
@@ -450,6 +451,93 @@ def action_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
     return error <= limit, f"max abs error {error:.3g} (limit {limit:.3g}, range {span:.3g})"
 
 
+def pose_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                gate: Mapping[str, Any]) -> tuple[bool | None, str]:
+    """Refined pose hypotheses and their scores (``refined_poses`` row-major [N, 4, 4], ``scores``) against the
+    native ones from the same crops: the largest pose and score errors at most ``max_pose_abs_error`` and
+    ``max_score_abs_error``, the same score ranking, and rigid poses (the family's E2E gate)."""
+    import numpy as np
+
+    sides = [(np.asarray((side or {}).get("refined_poses") or [], dtype=np.float64),
+              np.asarray((side or {}).get("scores") or [], dtype=np.float64)) for side in (candidate, native)]
+    (poses, scores), (native_poses, native_scores) = sides
+    if not poses.size or not native_poses.size or not scores.size or not native_scores.size:
+        return None, f"no refined poses ({poses.size} vs {native_poses.size} values)"
+    if poses.shape != native_poses.shape or scores.shape != native_scores.shape:
+        return False, f"{scores.size} hypotheses vs {native_scores.size}"
+    if not (np.isfinite(poses).all() and np.isfinite(scores).all()):
+        return False, "non-finite poses or scores"
+    pose_error = float(np.max(np.abs(poses - native_poses)))
+    score_error = float(np.max(np.abs(scores - native_scores)))
+    ranked = bool(np.array_equal(np.argsort(-scores, kind="stable"), np.argsort(-native_scores, kind="stable")))
+    rotations = poses.reshape(-1, 4, 4)[:, :3, :3]
+    rigid = bool(np.all(np.abs(rotations @ rotations.transpose(0, 2, 1) - np.eye(3)) <= 2e-3)
+                 and np.all(np.abs(np.linalg.det(rotations) - 1.0) <= 6e-3))
+    ok = (pose_error <= float(gate.get("max_pose_abs_error", 0.005))
+          and score_error <= float(gate.get("max_score_abs_error", 0.05)) and ranked and rigid)
+    return ok, (f"pose max abs error {pose_error:.2g}, score max abs error {score_error:.2g}"
+                f"{'' if ranked else ', ranking differs'}{'' if rigid else ', non-rigid pose'}")
+
+
+def _mmcif_atoms(path: str) -> list[list[float]]:
+    """Atom coordinates of an mmCIF ``ATOM`` loop in file order (Cartn_x/y/z: the 8th to 10th of the 13 columns the
+    Boltz-2 runtime writes)."""
+    rows = [line.split() for line in Path(path).read_text(encoding="utf-8").splitlines() if line.startswith("ATOM ")]
+    return [[float(value) for value in row[7:10]] for row in rows]
+
+
+def _structure(side: Mapping[str, Any]) -> tuple[Any, Any, float]:
+    """A predicted structure's atom coordinates [N, 3], per-token pLDDT and confidence score: inline (``coords``,
+    ``confidence``), or the ``structure_artifact`` mmCIF and ``metadata_artifact`` a TRTMC worker writes."""
+    import numpy as np
+
+    if "structure_artifact" in side:
+        coords = _mmcif_atoms(side["structure_artifact"])
+        confidence = json.loads(Path(side["metadata_artifact"]).read_text(encoding="utf-8"))
+    else:
+        coords, confidence = side["coords"], side["confidence"]
+    return (np.asarray(coords, dtype=np.float64).reshape(-1, 3), np.asarray(confidence["plddt"], dtype=np.float64),
+            float(confidence["confidence_score"]))
+
+
+def structure_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                     gate: Mapping[str, Any]) -> tuple[bool | None, str]:
+    """A predicted structure against the native one from the same noise (each side inline or as the files the
+    TRTMC worker writes, ``_structure``): the same atoms, lDDT at least ``min_lddt``, aligned RMSD at most
+    ``max_rmsd``, and mean pLDDT and confidence-score differences at most ``max_plddt_mean_abs`` and
+    ``max_confidence_abs`` (the family's E2E gate)."""
+    import numpy as np
+
+    try:
+        (mine, plddt, confidence), (theirs, native_plddt, native_confidence) = (
+            _structure(side or {}) for side in (candidate, native))
+    except (KeyError, OSError, TypeError, ValueError) as error:
+        return None, f"no structure: {error}"
+    if not len(mine) or not len(theirs):
+        return None, f"no structure ({len(mine)} vs {len(theirs)} atoms)"
+    if mine.shape != theirs.shape:
+        return False, f"{len(mine)} atoms vs {len(theirs)}"
+    if not (np.isfinite(mine).all() and np.isfinite(plddt).all() and math.isfinite(confidence)):
+        return False, "non-finite structure"
+    distances = [np.linalg.norm(side[:, None] - side[None, :], axis=-1) for side in (theirs, mine)]
+    pairs = (distances[0] < 15.0) & (distances[0] > 0.0)
+    delta = np.abs(distances[1][pairs] - distances[0][pairs])
+    lddt = float(np.mean([(delta < threshold).mean() for threshold in (0.5, 1.0, 2.0, 4.0)]))
+    centered = [side - side.mean(axis=0) for side in (theirs, mine)]
+    left, _, right = np.linalg.svd(centered[1].T @ centered[0])
+    correction = np.diag([1.0, 1.0, np.sign(np.linalg.det(left @ right))])
+    rmsd = float(np.sqrt(np.mean(np.sum((centered[1] @ (left @ correction @ right) - centered[0]) ** 2, axis=1))))
+    if plddt.shape != native_plddt.shape or not plddt.size:
+        return False, f"pLDDT of {plddt.size} tokens vs {native_plddt.size}"
+    plddt_error = float(np.mean(np.abs(plddt - native_plddt)))
+    confidence_error = abs(confidence - native_confidence)
+    ok = (lddt >= float(gate.get("min_lddt", 0.55)) and rmsd <= float(gate.get("max_rmsd", 9.0))
+          and plddt_error <= float(gate.get("max_plddt_mean_abs", 0.10))
+          and confidence_error <= float(gate.get("max_confidence_abs", 0.10)))
+    return ok, (f"lDDT {lddt:.3f}, RMSD {rmsd:.2f} A, pLDDT mean abs {plddt_error:.3f}, "
+                f"confidence abs {confidence_error:.3f}")
+
+
 def disparity_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
                      gate: Mapping[str, Any]) -> tuple[bool | None, str]:
     """A stereo disparity map (the ``disparity_artifact`` file both sides write) against the native one: equal
@@ -509,9 +597,10 @@ PARITY: dict[str, Callable[..., tuple[bool | None, str]]] = {"family_parity": fa
                                                       "vector_parity": vector_parity, "mask_parity": mask_parity,
                                                       "geometry_parity": geometry_parity,
                                                       "action_parity": action_parity, "disparity_parity": disparity_parity,
-                                                      "audio_parity": audio_parity}
+                                                      "audio_parity": audio_parity, "structure_parity": structure_parity,
+                                                      "pose_parity": pose_parity}
 # Parity metrics that read the output files the servers write (their artifacts are kept).
-ARTIFACT_METRICS = {"geometry_parity", "disparity_parity"}
+ARTIFACT_METRICS = {"geometry_parity", "disparity_parity", "structure_parity"}
 
 
 # ---------------- corpus metrics ----------------
