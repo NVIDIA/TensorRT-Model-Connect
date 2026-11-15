@@ -652,6 +652,18 @@ def test_a_quantized_profile_is_qualified_as_its_models_highest_precision_profil
     assert qualified_as("m", entries) == "m"  # not quantized: its own configuration
     assert qualified_as("x-fp8", entries) == "x-fp8"  # nothing ranks higher
     assert qualified_as("y-nvfp4", entries) == "y-fp8"  # the highest precision there is, quantized too
+    entries["m-int4-awq"] = entry("m-int4-awq", precision="fp16", quantization="int4_awq")
+    assert qualified_as("m-int4-awq", entries) == "m-bf16"  # both name parts name the quantization
+
+
+def test_only_the_profiles_own_suffix_marks_an_l0_or_regression_variant():
+    from trtmc_aiperf_qual.models import smoke_variant
+
+    assert smoke_variant("qwen3-0.6b-regression-native-kv-chunked-prefill", "Qwen/Qwen3-0.6B")
+    assert smoke_variant("cosmos3-nano-l0", "nvidia/Cosmos3-Nano") and smoke_variant("ltx-video-fp8-l0", "")
+    # A regression model, not a regression variant: the word is its checkpoint's name.
+    assert not smoke_variant("patchtst-etth1-regression-distribution",
+                             "ibm-research/patchtst-etth1-regression-distribution")
 
 
 def test_quantized_profiles_take_their_bases_native_reference_and_benchmarks():
