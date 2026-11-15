@@ -22,7 +22,7 @@ from . import noninferiority
 
 BOOTSTRAP_SAMPLES = 2000
 # Corpus statistics that cost seconds per evaluation resample less.
-BOOTSTRAP_SAMPLES_BY_METRIC = {"coco_map": 200, "miou": 200}
+BOOTSTRAP_SAMPLES_BY_METRIC = {"coco_map": 200, "miou": 200, "point_miou": 200}
 
 
 def _text(observation: Mapping[str, Any] | None) -> str:
@@ -260,8 +260,38 @@ def box_iou50(gold: Any, observation: Mapping[str, Any] | None, task: str | None
     return _iou(predicted, target) >= 0.5, match.group(0)
 
 
+def _best(observation: Mapping[str, Any]) -> int | None:
+    if observation.get("top_class") is not None:
+        return int(observation["top_class"])
+    scores = observation.get("scores") or []
+    return max(range(len(scores)), key=lambda index: float(scores[index])) if scores else None
+
+
+def label_hit(gold: Any, observation: Mapping[str, Any] | None, task: str | None = None) -> tuple[bool, str]:
+    """Multi-label audio tagging (AudioSet): the top-scoring class's name (``labels[top_class]``) is one of the
+    clip's gold labels, compared case-insensitively."""
+    observation = observation or {}
+    best, labels = _best(observation), observation.get("labels") or []
+    if best is None or best >= len(labels):
+        return False, ""
+    name = str(labels[best])
+    return name.strip().lower() in {str(label).strip().lower() for label in gold or []}, name
+
+
+def query_hit(gold: Any, observation: Mapping[str, Any] | None, task: str | None = None) -> tuple[bool, str]:
+    """Zero-shot classification by text-image relevance: the best-scoring query (``queries[top_class]``, one
+    prompt per class) names the gold class."""
+    observation = observation or {}
+    best, queries = _best(observation), observation.get("queries") or []
+    if best is None or best >= len(queries):
+        return False, ""
+    query = str(queries[best]).lower()
+    return query.endswith(f" {str(gold).strip().lower()}") or query == str(gold).strip().lower(), query
+
+
 BINARY: dict[str, Callable[..., tuple[bool, str]]] = {"choice": choice, "spoken_choice": spoken_choice, "contains": contains, "code_pass": code_pass,
-                                                      "top1": top1, "box_iou50": box_iou50}
+                                                      "top1": top1, "box_iou50": box_iou50, "label_hit": label_hit,
+                                                      "query_hit": query_hit}
 
 
 # ---------------- conversion parity: (TRTMC observation, native observation, gate) -> (match, reason) -------
@@ -271,8 +301,9 @@ def vector_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
                   gate: Mapping[str, Any]) -> tuple[bool | None, str]:
     """An encoder output vector (``values``) against the native one: equal length, finite values, cosine
     at least ``min_cosine`` and relative L2 error at most ``max_relative_l2`` (magnitude, not only direction)."""
-    mine = [float(value) for value in (candidate or {}).get("values") or []]
-    theirs = [float(value) for value in (native or {}).get("values") or []]
+    field = str(gate.get("field", "values"))  # the output vector (``logits`` for token scores)
+    mine = [float(value) for value in (candidate or {}).get(field) or []]
+    theirs = [float(value) for value in (native or {}).get(field) or []]
     if not mine or not theirs:
         return None, f"no output vector ({len(mine)} vs {len(theirs)} values)"
     if len(mine) != len(theirs):
@@ -284,6 +315,32 @@ def vector_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
     relative = math.sqrt(sum((a - b) ** 2 for a, b in zip(mine, theirs))) / norm
     ok = cosine >= float(gate.get("min_cosine", 0.999)) and relative <= float(gate.get("max_relative_l2", 0.02))
     return ok, f"cosine {cosine:.5f}, relative L2 {relative:.4f}"
+
+
+def depth_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
+                 gate: Mapping[str, Any]) -> tuple[bool | None, str]:
+    """A relative depth map against the native one at the image's size: Pearson correlation at least
+    ``min_correlation`` and mean absolute error over the native maximum at most ``max_relative_error`` (the
+    family's E2E gate)."""
+    import numpy as np
+
+    sides = []
+    for side in (candidate, native):
+        depth, height, width = (side or {}).get("depth"), int((side or {}).get("height") or 0), int((side or {}).get("width") or 0)
+        values = np.asarray(depth if depth is not None else [], dtype=np.float64)
+        if height <= 0 or width <= 0 or values.size != height * width:
+            return None, "missing depth map or inconsistent dimensions"
+        sides.append((values, (height, width)))
+    (mine, shape), (theirs, expected) = sides
+    if shape != expected:
+        return False, f"depth map {shape} vs {expected}"
+    if not np.isfinite(mine).all():
+        return False, "non-finite depth"
+    correlation = float(np.corrcoef(mine, theirs)[0, 1])
+    scale = float(theirs.max()) if float(theirs.max()) > 0.0 else 1.0
+    relative = float(np.abs(mine - theirs).mean() / scale)
+    ok = correlation >= float(gate.get("min_correlation", 0.998)) and relative <= float(gate.get("max_relative_error", 0.01))
+    return ok, f"correlation {correlation:.5f}, relative error {relative:.5f}"
 
 
 def decision_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
@@ -376,7 +433,8 @@ def geometry_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, An
 def action_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
                   gate: Mapping[str, Any]) -> tuple[bool | None, str]:
     """A robot action chunk (``actions``, row-major [step, component]) against the native one: equal shape,
-    finite values, and the largest absolute error at most ``max_error_of_range`` of the native chunk's range."""
+    finite values, and the largest absolute error at most ``max_error_of_range`` of the native chunk's range, or
+    at most ``max_abs_error`` (robot units) when the gate states that instead."""
     mine = [float(value) for value in (candidate or {}).get("actions") or []]
     theirs = [float(value) for value in (native or {}).get("actions") or []]
     if not mine or not theirs:
@@ -387,7 +445,9 @@ def action_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
         return False, "non-finite actions"
     span = (max(theirs) - min(theirs)) or 1.0
     error = max(abs(a - b) for a, b in zip(mine, theirs))
-    return error <= float(gate.get("max_error_of_range", 1e-3)) * span, f"max abs error {error:.3g} (range {span:.3g})"
+    limit = (float(gate["max_abs_error"]) if "max_abs_error" in gate
+             else float(gate.get("max_error_of_range", 1e-3)) * span)
+    return error <= limit, f"max abs error {error:.3g} (limit {limit:.3g}, range {span:.3g})"
 
 
 def disparity_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
@@ -445,6 +505,7 @@ def family_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
 
 PARITY: dict[str, Callable[..., tuple[bool | None, str]]] = {"family_parity": family_parity,
                                                       "decision_parity": decision_parity,
+                                                      "depth_parity": depth_parity,
                                                       "vector_parity": vector_parity, "mask_parity": mask_parity,
                                                       "geometry_parity": geometry_parity,
                                                       "action_parity": action_parity, "disparity_parity": disparity_parity,
@@ -735,6 +796,26 @@ def miou(units: Sequence[tuple[Any, Any]]) -> float:
     return float(100.0 * np.mean(intersection[present] / union[present])) if present.any() else 0.0
 
 
+def point_miou_units(problems: Sequence[Mapping[str, Any]], observations: Mapping[int, Any]) -> list[tuple[Any, Any]]:
+    """Per point cloud: (intersection, union) per class of the predicted per-point classes (``labels``) against
+    the gold ones (``labels``, ``num_classes``), scored by ``miou`` over the corpus (S3DIS: 13 classes)."""
+    import numpy as np
+
+    units = []
+    for index, problem in enumerate(problems):
+        gold = np.asarray(problem["gold"]["labels"], dtype=np.int64)
+        classes = int(problem["gold"]["num_classes"])
+        predicted = np.asarray((observations.get(index) or {}).get("labels") or [], dtype=np.int64)
+        if predicted.shape != gold.shape:
+            predicted = np.full(gold.shape, -1, dtype=np.int64)
+        known = (predicted >= 0) & (predicted < classes)
+        intersection = np.bincount(gold[predicted == gold], minlength=classes)[:classes]
+        area_gold = np.bincount(gold, minlength=classes)[:classes]
+        area_predicted = np.bincount(predicted[known], minlength=classes)[:classes]
+        units.append((intersection, area_gold + area_predicted - intersection))
+    return units
+
+
 # COCO category ids of the 80 contiguous class indices.
 COCO_IDS = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 27, 28, 31, 32,
             33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59,
@@ -889,6 +970,11 @@ def _label_map_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]
     return planes is not None and planes[0].size == planes[1]
 
 
+def _point_labels_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) -> bool:
+    labels = observation.get("labels")  # one class per gold point
+    return isinstance(labels, list) and len(labels) == len(problem["gold"]["labels"])
+
+
 def _value_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) -> bool:
     return _finite([observation.get("value")])
 
@@ -897,7 +983,7 @@ def _value_answer(problem: Mapping[str, Any], observation: Mapping[str, Any]) ->
 # output that does not is a missing answer (an error), never scored as zeros or an empty prediction.
 ANSWERS: dict[str, Callable[[Mapping[str, Any], Mapping[str, Any]], bool]] = {
     "chrf": _text_answer, "wer": _text_answer, "cer": _text_answer, "coco_map": _detections_answer, "forecast_mse": _forecast_answer,
-    "miou": _label_map_answer, "mask_iou": _masks_answer, "precomputed_mean": _value_answer,
+    "miou": _label_map_answer, "point_miou": _point_labels_answer, "mask_iou": _masks_answer, "precomputed_mean": _value_answer,
     "sts_spearman": _vector_answer, "rerank_ndcg": _scores_answer, "retrieval_ndcg": _vector_answer,
     "retrieval_ndcg10": _vector_answer}
 
@@ -914,6 +1000,7 @@ CORPUS: dict[str, tuple[Callable, Callable, bool]] = {"chrf": (translation_units
                                                       "coco_map": (coco_units, coco_map, True),
                                                       "forecast_mse": (forecast_units, mse, False),
                                                       "miou": (miou_units, miou, True),
+                                                      "point_miou": (point_miou_units, miou, True),
                                                       "mask_iou": (mask_iou_units, mean_percent, True),
                                                       "precomputed_mean": (precomputed_units, mean, True),
                                                       "wer": (wer_units, wer, False),

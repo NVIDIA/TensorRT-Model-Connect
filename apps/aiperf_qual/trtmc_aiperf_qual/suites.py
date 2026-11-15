@@ -227,6 +227,58 @@ def _image_archive_records(source: Mapping[str, Any], environment: Environment) 
     return records
 
 
+def _s3dis_block_records(source: Mapping[str, Any], selection: Mapping[str, Any],
+                         environment: Environment) -> list[dict[str, Any]]:
+    """Point-cloud blocks of the PointNet authors' S3DIS release (``indoor3d_sem_seg_hdf5_data``: 1 m x 1 m
+    blocks of 4096 points in the 9 channels the S3DIS PointNet models take, one of 13 classes per point), from a
+    pinned archive in a Hugging Face dataset repository (``repo``, ``revision``, ``filename``). The blocks of the
+    ``area`` rooms are selected, then each is written once as a float32 [points, 9] file. A block's room is its
+    bootstrap cluster: neighbouring blocks of one room are not independent."""
+    import zipfile
+
+    import h5py
+    import numpy as np
+    from huggingface_hub import hf_hub_download
+
+    revision = require(source, "revision", "source")
+    archive = Path(hf_hub_download(require(source, "repo", "source"), require(source, "filename", "source"),
+                                   repo_type="dataset", revision=revision))
+    root = Path(environment["hf_datasets_cache"]) / "archives" / f"{revision}-{archive.stem}"
+    if not (root / ".extracted").is_file():
+        root.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(archive) as handle:
+            members = [name for name in handle.namelist() if name.endswith((".h5", ".txt"))]
+            handle.extractall(root, members)
+        (root / ".extracted").write_text(str(source["filename"]))
+    listing = next(root.rglob("all_files.txt"))
+    files = [listing.parent / Path(line).name for line in listing.read_text().split()]
+    rooms = next(root.rglob("room_filelist.txt")).read_text().split()
+    blocks = []  # (file, index in file) of each block, in the release's order
+    for path in files:
+        with h5py.File(path, "r") as handle:
+            blocks += [(path, index) for index in range(handle["label"].shape[0])]
+    if len(blocks) != len(rooms):
+        raise ConfigError(f"S3DIS release lists {len(rooms)} rooms for {len(blocks)} blocks")
+    area = f"{require(source, 'area', 'source')}_"
+    records = [{"id": f"{room}/{position}", "cluster": room, "position": position}
+               for position, room in enumerate(rooms) if room.startswith(area)]
+    chosen = select(records, selection)
+    output = root / "trtmc-blocks"
+    output.mkdir(exist_ok=True)
+    for record in chosen:
+        path, index = blocks[record.pop("position")]
+        with h5py.File(path, "r") as handle:
+            points = np.asarray(handle["data"][index], dtype="<f4")
+            labels = np.asarray(handle["label"][index], dtype=np.int64)
+        target = output / f"{path.stem}-{index}.f32"
+        if not target.is_file():
+            points.tofile(target)
+        record.update(points=str(target), request={"num_points": int(points.shape[0]),
+                                                   "input_dim": int(points.shape[1])},
+                      label={"labels": labels.tolist(), "num_classes": int(source.get("num_classes", 13))})
+    return chosen
+
+
 def polygon_mask(polygon: Any, size: Sequence[int]) -> Any:
     """A COCO polygon (flat [x, y, ...], or a list of them) rasterized as a boolean [height, width] mask."""
     import numpy as np
@@ -675,7 +727,7 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
     source = definition["source"]
     kind = require(source, "kind", "source")
     selection = definition["selection"]
-    if environment.values.get("smoke") and kind in ("aiperf_public", "hf_dataset"):  # decode only what smoke sends
+    if environment.values.get("smoke") and kind in ("aiperf_public", "hf_dataset", "s3dis_blocks"):  # decode only what smoke sends
         selection = {"method": "first", "count": int(definition.get("smoke_samples", 1))}
     if kind == "aiperf_public":
         records = _aiperf_public_records(source, selection)
@@ -685,6 +737,9 @@ def build_suite(definition: Mapping[str, Any], environment: Environment) -> Suit
         selection = {"method": "first", "count": len(records)}  # already selected before decoding
     elif kind == "image_archive":
         records = _image_archive_records(source, environment)
+    elif kind == "s3dis_blocks":
+        records = _s3dis_block_records(source, selection, environment)
+        selection = {"method": "first", "count": len(records)}  # already selected before writing
     elif kind == "url_jsonl":
         records = _url_jsonl_records(source, environment)
     elif kind in ("json_manifest", "hf_file"):
