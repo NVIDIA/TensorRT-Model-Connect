@@ -176,6 +176,13 @@ benchmarks:
   # LeRobot action chunks (GR00T, pi0.5) on recorded LIBERO observations with the family's fixed flow noise on
   # both sides (each family states its suite and its precision's E2E tolerance: tests/aiperf), every observation.
   action_chunk_parity: {suite: action-chunk-parity, metric: action_parity, gate: {max_error_of_range: 0.001}}
+  # Structure prediction from the same noise as the native model (the family's suite): lDDT, aligned RMSD, pLDDT
+  # and confidence against the native structure, the family's E2E gate.
+  structure_parity: {suite: structure-parity, metric: structure_parity,
+                     gate: {min_lddt: 0.55, max_rmsd: 9.0, max_plddt_mean_abs: 0.10, max_confidence_abs: 0.10}}
+  # Pose hypothesis refinement on the same crops as the native networks (the family's suite): pose and score
+  # errors, score ranking and rigidity, the family's E2E gate.
+  pose_parity: {suite: pose-parity, metric: pose_parity, gate: {max_pose_abs_error: 0.005, max_score_abs_error: 0.05}}
   # Fast-FoundationStereo on the 15 Middlebury v3 trainingQ scenes of its 700x700 profile (conversion parity).
   disparity_parity: {suite: disparity-parity, suite_definition: middlebury-q-700-15, metric: disparity_parity,
                      gate: {max_mean_epe: 0.1}}
@@ -332,6 +339,13 @@ tasks:
     # validity and coarse agreement (PSNR >= 5 dB, SSIM >= 0.1); action-conditional fidelity is not covered.
     supplementary: [{check: world_model_parity, suite: coco-world-model-10, min_psnr_db: 5.0, min_ssim: 0.1}]
     performance: *media_policy
+  initial_image_text_to_video:  # the family states its native pipeline (reference.adapter)
+    reference: {precision: bf16}
+    # 10 COCO images fitted to the profile's video size, with the catalog's prompt and seed on both sides: video
+    # validity (frame count, motion) and coarse agreement (PSNR >= 5 dB, SSIM >= 0.1); the two sides draw their
+    # noise differently, so pixel fidelity and prompt following are not covered.
+    supplementary: [{check: world_model_parity, suite: coco-initial-image-video-10, min_psnr_db: 5.0, min_ssim: 0.1}]
+    performance: {<<: *media_policy, suite: coco-initial-image-video-1}
 
   time_series_forecast: &forecast
     absolute: [etth1]
@@ -371,6 +385,14 @@ tasks:
   images_state_text_to_action_chunk:
     absolute: [action_chunk_parity]
     performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}
+  pose_hypothesis_refinement:  # the family prepares its model and crops (reference.prepare, family_inputs)
+    absolute: [pose_parity]
+    performance: {output_grader: parity_numeric,
+                  output_grader_params: {fields: [refined_hypotheses, refined_poses], min_cosine: 0.999}}
+  structure_prediction:  # the family prepares its package and requests (reference.prepare, family_inputs)
+    absolute: [structure_parity]
+    performance: {output_grader: parity_numeric,
+                  output_grader_params: {fields: [structures, confidence.confidence_score], rtol: 0.2}}
   stereo_disparity:
     absolute: [disparity_parity]
     performance: {output_grader: parity_numeric, output_grader_params: {count_rtol: 0.01}}
