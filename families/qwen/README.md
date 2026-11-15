@@ -64,7 +64,25 @@ The family and Config CTest targets also build both SDK consumers. Set
 `TRTMC_NATIVE_BUILD_DIR="$PWD/build"` for the [family E2E commands](../../website/docs/extend/model-validation.md#4-run-the-declared-family-e2e)
 to locate them. The server consumer must support semantic
 Tasks before serving a migrated family; legacy-interface inheritance is not kept
-in this family to work around an unmigrated application.
+in this family to work around an unmigrated application. The standalone batch
+runner and [Node.js binding](../../bindings/nodejs/README.md) also consume the
+public continuation Task; existing bundle modes retain their explicit loader.
+
+### Timing and workload boundaries
+
+| Route | Configuration and measured call | Output handling |
+| --- | --- | --- |
+| Standalone batch runner | Token limit and request are built before `TextContinuation::run`; `wall_ms` covers that call, including SDK marshalling and result ownership. Existing bundles time `ITextGeneration::generate`. Other SDK controls use family defaults. | JSON and stdout writes follow the timer. |
+| Node.js | Existing defaults and explicit controls are built before `run`. The existing timing fields are forwarded from the native result; no JavaScript wall timer is added. | JavaScript strings/arrays are built after the call. |
+| Dataset benchmark | Workload Config and request precede the `run_sdk` timer; it times `task.run`, including SDK marshalling/result ownership. | Answer extraction and JSON writing follow the timer. |
+| Benchmark worker | Source/Config construction precedes `measure`; it times `task.run` for each recorded iteration. | `text_observation` runs after the timer. |
+| `trtmc run` | Config/request construction precedes the Task call. Printed setup/prefill/decode fields are native result metrics, not CLI wall time. | Text/JSON serialization follows the call. |
+| Performance catalog | `tests/perf_validation.json` selects `text_continuation` and invokes `trtmc run` with the declared prompt/token limit. | Catalog selection does not itself measure or prove performance equivalence. |
+
+CPU fixture tests cover dataset/batch and Node.js semantic/legacy execution,
+controls and failure propagation. No same-prompt GPU before/after campaign has
+been run; generated-token, memory, throughput and latency equivalence remain
+unverified. Existing bundle artifacts must be rebuilt for the semantic runtime.
 
 ## Quantization
 

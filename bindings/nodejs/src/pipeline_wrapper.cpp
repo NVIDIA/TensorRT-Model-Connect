@@ -5,7 +5,29 @@
 
 #include "pipeline_wrapper.h"
 
+#include "task_runtime.h"
+#include "trtmc/control.hpp"
+
+#include <algorithm>
+#include <stdexcept>
 #include <trtmc/runtime/family_loader.h>
+
+namespace {
+Napi::Object text_result(Napi::Env env, std::string_view text,
+                         trtmc::Span<const std::int32_t> tokens, double setup_ms, double prefill_ms,
+                         double decode_ms) {
+    Napi::Object ret = Napi::Object::New(env);
+    ret.Set("text", Napi::String::New(env, text.data(), text.size()));
+    Napi::Array token_ids = Napi::Array::New(env, tokens.size());
+    for (std::size_t i = 0; i < tokens.size(); ++i)
+        token_ids.Set(i, Napi::Number::New(env, tokens[i]));
+    ret.Set("token_ids", token_ids);
+    ret.Set("setup_ms", Napi::Number::New(env, setup_ms));
+    ret.Set("prefill_ms", Napi::Number::New(env, prefill_ms));
+    ret.Set("decode_ms", Napi::Number::New(env, decode_ms));
+    return ret;
+}
+} // namespace
 
 Napi::Object PipelineWrapper::Init(Napi::Env env, Napi::Object exports) {
     Napi::Function func = DefineClass(env, "Pipeline",
@@ -41,15 +63,24 @@ Napi::Value PipelineWrapper::Load(const Napi::CallbackInfo& info) {
     }
 
     try {
-        // Load the actual TRTMC Task
-        std::unique_ptr<trtmc::ITask> task = trtmc::load_task(path, runtime_root);
+        std::unique_ptr<trtmc::ITask> task;
+        std::optional<trtmc::TextContinuation> continuation;
+        if (trtmc::app::uses_existing_task_runtime(trtmc::Bundle::open(path).info().task)) {
+            task = trtmc::load_task(path, runtime_root);
+        } else {
+            trtmc::LoadOptions options;
+            options.runtime_root = runtime_root;
+            continuation = trtmc::Model::load(path, options).task<trtmc::TextContinuation>();
+        }
 
         Napi::FunctionReference* constructor = env.GetInstanceData<Napi::FunctionReference>();
         Napi::Object obj = constructor->New({});
 
-        // Unwrap and set the native task pointer
         PipelineWrapper* wrapper = Napi::ObjectWrap<PipelineWrapper>::Unwrap(obj);
         wrapper->task_ = std::move(task);
+        wrapper->continuation_ = std::move(continuation);
+        if (wrapper->continuation_)
+            wrapper->config_fields_ = wrapper->continuation_->config_fields();
 
         return obj;
     } catch (const std::exception& e) {
@@ -83,29 +114,36 @@ Napi::Value PipelineWrapper::Generate(const Napi::CallbackInfo& info) {
     }
 
     try {
-        // Call the C++ engine
+        if (continuation_) {
+            const trtmc::Config workload{{"max_new_tokens", std::int64_t{config.max_new_tokens}},
+                                         {"temperature", double{config.temperature}},
+                                         {"top_k", std::int64_t{config.top_k}}};
+            trtmc::Config controls;
+            for (const auto& entry : workload.entries()) {
+                const auto field =
+                    std::find_if(config_fields_.begin(), config_fields_.end(),
+                                 [&](const auto& value) { return value.name == entry.name; });
+                if (field == config_fields_.end()) {
+                    if (info.Length() > 1 && info[1].IsObject() &&
+                        info[1].As<Napi::Object>().Has(entry.name))
+                        throw std::invalid_argument("Task does not declare config: " + entry.name);
+                    continue;
+                }
+                controls.add(entry.name, entry.value);
+            }
+            const auto result =
+                continuation_->run(trtmc::TextContinuationRequest{prompt}, controls);
+            return text_result(env, result.text(), result.token_ids(), result.setup_ms(),
+                               result.prefill_ms(), result.decode_ms());
+        }
         auto* text_gen = dynamic_cast<trtmc::ITextGeneration*>(task_.get());
         if (!text_gen) {
             throw std::runtime_error("Loaded task does not support text generation");
         }
         trtmc::TextResult result = text_gen->generate(prompt, config);
 
-        // Construct the JS return object
-        Napi::Object ret = Napi::Object::New(env);
-        ret.Set("text", Napi::String::New(env, result.text));
-
-        // Token IDs array
-        Napi::Array tokenIds = Napi::Array::New(env, result.token_ids.size());
-        for (size_t i = 0; i < result.token_ids.size(); ++i) {
-            tokenIds.Set(i, Napi::Number::New(env, result.token_ids[i]));
-        }
-        ret.Set("token_ids", tokenIds);
-
-        ret.Set("setup_ms", Napi::Number::New(env, result.setup_ms));
-        ret.Set("prefill_ms", Napi::Number::New(env, result.prefill_ms));
-        ret.Set("decode_ms", Napi::Number::New(env, result.decode_ms));
-
-        return ret;
+        return text_result(env, result.text, {result.token_ids.data(), result.token_ids.size()},
+                           result.setup_ms, result.prefill_ms, result.decode_ms);
     } catch (const std::exception& e) {
         Napi::Error::New(env, e.what()).ThrowAsJavaScriptException();
         return env.Null();
