@@ -35,12 +35,16 @@ function controls(result) {
     return JSON.parse(result.text.slice(result.text.lastIndexOf('\n') + 1));
 }
 
-test('semantic continuation forwards defaults and repeated explicit controls through the SDK', () => {
+test('semantic continuation uses family defaults and forwards repeated explicit controls', () => {
     const pipe = trtmc.load(bundle('text_continuation'), runtime);
     const defaults = controls(pipe.generate('First'));
-    assert.equal(defaults.max_new_tokens, 128);
-    assert.equal(defaults.temperature, 1);
-    assert.equal(defaults.top_k, 1);
+    assert.equal(defaults.max_new_tokens, 5);
+    assert.equal(defaults.temperature, 0.75);
+    assert.equal(defaults.top_k, 7);
+    const partial = controls(pipe.generate('Partial', { max_new_tokens: 9 }));
+    assert.equal(partial.max_new_tokens, 9);
+    assert.equal(partial.temperature, 0.75);
+    assert.equal(partial.top_k, 7);
     for (const prompt of ['Second', 'Third']) {
         const result = pipe.generate(prompt, { max_new_tokens: 9, temperature: 0.5, top_k: 2 });
         assert.ok(result.text.startsWith(prompt));
@@ -53,6 +57,9 @@ test('semantic continuation forwards defaults and repeated explicit controls thr
 
 test('legacy generation retains its declared loader and controls', () => {
     const pipe = trtmc.load(bundle('text_generation'), runtime);
+    const defaults = controls(pipe.generate('Legacy defaults'));
+    assert.equal(defaults.max_new_tokens, 128);
+    assert.equal(defaults.top_k, 1);
     const config = controls(pipe.generate('Legacy', { max_new_tokens: 9, top_k: 2 }));
     assert.equal(config.max_new_tokens, 9);
     assert.equal(config.top_k, 2);
@@ -76,4 +83,19 @@ test('model-only fixture runs without legacy inheritance or undeclared implicit 
     assert.equal(result.prefill_ms, 0.5);
     assert.equal(result.decode_ms, 9);
     assert.throws(() => pipe.generate('Unsupported', { top_k: 1 }), /does not declare config: top_k/);
+});
+
+test('SDK numeric controls retain precision and reject lossy or nonnumeric input', () => {
+    const pipe = trtmc.load(bundle('text_continuation'), runtime);
+    const value = 0.123456789012345;
+    assert.equal(controls(pipe.generate('Precise', { temperature: value })).temperature, value);
+    for (const temperature of [NaN, Infinity, -Infinity, '0.5', null, true]) {
+        assert.throws(() => pipe.generate('Invalid', { temperature }), /must be (finite|a number)/);
+    }
+    for (const name of ['max_new_tokens', 'top_k']) {
+        for (const value of [1.5, 2 ** 53, NaN, Infinity, '2', null, true]) {
+            assert.throws(() => pipe.generate('Invalid', { [name]: value }), /must be (a safe integer|finite|a number)/);
+        }
+    }
+    assert.equal(controls(pipe.generate('Valid after rejection')).max_new_tokens, 5);
 });

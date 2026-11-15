@@ -9,6 +9,7 @@
 #include "trtmc/control.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <trtmc/runtime/family_loader.h>
 
@@ -97,44 +98,51 @@ Napi::Value PipelineWrapper::Generate(const Napi::CallbackInfo& info) {
     }
 
     std::string prompt = info[0].As<Napi::String>().Utf8Value();
-    trtmc::TextGenerationConfig config;
-
-    // Optional Config argument parsing (basic)
-    if (info.Length() > 1 && info[1].IsObject()) {
-        Napi::Object configObj = info[1].As<Napi::Object>();
-        if (configObj.Has("max_new_tokens")) {
-            config.max_new_tokens = configObj.Get("max_new_tokens").As<Napi::Number>().Int32Value();
-        }
-        if (configObj.Has("temperature")) {
-            config.temperature = configObj.Get("temperature").As<Napi::Number>().FloatValue();
-        }
-        if (configObj.Has("top_k")) {
-            config.top_k = configObj.Get("top_k").As<Napi::Number>().Int32Value();
-        }
-    }
-
     try {
         if (continuation_) {
-            const trtmc::Config workload{{"max_new_tokens", std::int64_t{config.max_new_tokens}},
-                                         {"temperature", double{config.temperature}},
-                                         {"top_k", std::int64_t{config.top_k}}};
             trtmc::Config controls;
-            for (const auto& entry : workload.entries()) {
-                const auto field =
-                    std::find_if(config_fields_.begin(), config_fields_.end(),
-                                 [&](const auto& value) { return value.name == entry.name; });
-                if (field == config_fields_.end()) {
-                    if (info.Length() > 1 && info[1].IsObject() &&
-                        info[1].As<Napi::Object>().Has(entry.name))
-                        throw std::invalid_argument("Task does not declare config: " + entry.name);
-                    continue;
+            if (info.Length() > 1 && info[1].IsObject()) {
+                const auto options = info[1].As<Napi::Object>();
+                for (const char* name : {"max_new_tokens", "temperature", "top_k"}) {
+                    if (!options.Has(name))
+                        continue;
+                    const auto field =
+                        std::find_if(config_fields_.begin(), config_fields_.end(),
+                                     [&](const auto& value) { return value.name == name; });
+                    if (field == config_fields_.end())
+                        throw std::invalid_argument(std::string("Task does not declare config: ") +
+                                                    name);
+                    const auto value = options.Get(name);
+                    if (!value.IsNumber())
+                        throw std::invalid_argument(std::string(name) + " must be a number");
+                    const auto number = value.As<Napi::Number>().DoubleValue();
+                    if (!std::isfinite(number))
+                        throw std::invalid_argument(std::string(name) + " must be finite");
+                    if (std::string_view(name) == "temperature") {
+                        controls.add(name, number);
+                    } else {
+                        if (std::floor(number) != number || std::abs(number) > 9007199254740991.0)
+                            throw std::invalid_argument(std::string(name) +
+                                                        " must be a safe integer");
+                        controls.add(name, static_cast<std::int64_t>(number));
+                    }
                 }
-                controls.add(entry.name, entry.value);
             }
             const auto result =
                 continuation_->run(trtmc::TextContinuationRequest{prompt}, controls);
             return text_result(env, result.text(), result.token_ids(), result.setup_ms(),
                                result.prefill_ms(), result.decode_ms());
+        }
+        trtmc::TextGenerationConfig config;
+        if (info.Length() > 1 && info[1].IsObject()) {
+            const auto options = info[1].As<Napi::Object>();
+            if (options.Has("max_new_tokens"))
+                config.max_new_tokens =
+                    options.Get("max_new_tokens").As<Napi::Number>().Int32Value();
+            if (options.Has("temperature"))
+                config.temperature = options.Get("temperature").As<Napi::Number>().FloatValue();
+            if (options.Has("top_k"))
+                config.top_k = options.Get("top_k").As<Napi::Number>().Int32Value();
         }
         auto* text_gen = dynamic_cast<trtmc::ITextGeneration*>(task_.get());
         if (!text_gen) {

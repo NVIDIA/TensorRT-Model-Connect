@@ -73,7 +73,7 @@ public continuation Task; existing bundle modes retain their explicit loader.
 | Route | Configuration and measured call | Output handling |
 | --- | --- | --- |
 | Standalone batch runner | Token limit and request are built before `TextContinuation::run`; `wall_ms` covers that call, including SDK marshalling and result ownership. Existing bundles time `ITextGeneration::generate`. Other SDK controls use family defaults. | JSON and stdout writes follow the timer. |
-| Node.js | Existing defaults and explicit controls are built before `run`. The existing timing fields are forwarded from the native result; no JavaScript wall timer is added. | JavaScript strings/arrays are built after the call. |
+| Node.js | Only caller-supplied controls are built before `run`; omitted SDK controls use family defaults. The existing timing fields are forwarded from the native result; no JavaScript wall timer is added. | JavaScript strings/arrays are built after the call. |
 | Dataset benchmark | Workload Config and request precede the `run_sdk` timer; it times `task.run`, including SDK marshalling/result ownership. | Answer extraction and JSON writing follow the timer. |
 | Benchmark worker | Source/Config construction precedes `measure`; it times `task.run` for each recorded iteration. | `text_observation` runs after the timer. |
 | `trtmc run` | Config/request construction precedes the Task call. Printed setup/prefill/decode fields are native result metrics, not CLI wall time. | Text/JSON serialization follows the call. |

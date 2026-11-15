@@ -24,9 +24,12 @@ set `LD_LIBRARY_PATH` to that build directory before starting Node.
 keep their original loader; a failed SDK load or execution never retries that
 path. The Task handle retains the loaded model between calls.
 
-The existing `max_new_tokens`, `temperature` and `top_k` defaults are 128, 1
-and 1 where the Task declares those fields. An explicit unsupported control
-is an error. Other SDK controls use the owning family's defaults. Results keep
+For semantic bundles, only explicitly supplied `max_new_tokens`, `temperature`
+and `top_k` controls are forwarded. Omitted controls use the owning family's
+defaults; an explicitly supplied listed control must be declared by the Task.
+Integer controls must be
+safe JavaScript integers, and numeric controls must be finite. Legacy bundles
+retain their existing defaults. Results keep
 `text`, `token_ids`, `setup_ms`, `prefill_ms` and `decode_ms`. Timings come from
 the native result and exclude JavaScript object construction; they are not
 a JavaScript wall-clock measurement or a performance-equivalence claim.
