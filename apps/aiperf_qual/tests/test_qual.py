@@ -751,6 +751,18 @@ def test_timing_reference_precision_can_differ_from_the_candidate_precision():
     assert timing_precisions({"perf_precision": "fp16", "precision": "fp32"}) == ["fp16", "fp32"]
 
 
+def test_report_reference_names_the_precision_the_native_model_ran_at():
+    from trtmc_aiperf_qual.runner import reported_reference
+
+    reference = {"backend": "reference", "perf_precision": "fp16", "precision": "fp32", "timing_precision": None}
+    accuracy = [{"suite": "encoder-parity", "native": {"backend": "reference", "precision": "fp16", "mode": "eager"}}]
+    reported = reported_reference(reference, [], accuracy)
+    assert reported["precision"] == "fp16" and reported["fallback_precision"] == "fp32"
+    timed = [{"reference": {"precision": "fp32", "precision_fallback": "fp16 failed"}}]
+    assert reported_reference(reference, timed, accuracy)["precision"] == "fp32"  # as timed, after a fallback
+    assert reported_reference(reference, [], [])["precision"] == "fp16"  # nothing ran: the first it would time at
+
+
 def test_always_sampling_tts_models_compare_duration_in_perf():
     from trtmc_aiperf_qual.models import resolve_model
 
