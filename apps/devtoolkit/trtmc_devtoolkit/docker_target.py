@@ -120,6 +120,15 @@ class DockerTargetState:
     image_id: str
 
 
+def _same_source(actual: Any, expected: Path) -> bool:
+    """Whether Docker's recorded bind source is the expected (resolved) host directory. Docker may record the
+    path it was given, so a source reached through a symlink (a data directory linked to a network share, say)
+    is compared after resolving it on this host."""
+    if not isinstance(actual, str) or not actual:
+        return False
+    return actual == str(expected) or Path(actual).resolve() == Path(expected)
+
+
 def _gpu_devices(value: str) -> tuple[str, ...] | None:
     if value == "all":
         return None
@@ -295,7 +304,7 @@ class DockerLifecycle:
             if (
                 len(actual) != 1
                 or actual[0].get("Type") != "bind"
-                or actual[0].get("Source") != str(mount.source)
+                or not _same_source(actual[0].get("Source"), mount.source)
                 or actual[0].get("RW") is not (not mount.read_only)
             ):
                 mismatches.append(f"mount:{target}")
