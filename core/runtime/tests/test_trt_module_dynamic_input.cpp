@@ -6,6 +6,7 @@
 #include "runtime/primitives/trt_common.h"
 #include "runtime/tensorrt/trt_logger.h"
 #include "runtime/tensorrt/trt_module_impl.h"
+#include "trtmc/runtime/trt_backend.h"
 
 #include <NvInfer.h>
 #include <cmath>
@@ -281,6 +282,62 @@ void test_short_external_static_upload_preserves_its_tail(nvinfer1::ICudaEngine&
     cudaFree(external);
 }
 
+void test_stripped_engine_refit_contract() {
+    auto& logger = trtmc::trt_shared_logger();
+    trtmc::TrtUniquePtr<nvinfer1::IBuilder> builder(nvinfer1::createInferBuilder(logger));
+    trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition> network(builder->createNetworkV2(0));
+    trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig> config(builder->createBuilderConfig());
+    const nvinfer1::Dims shape{1, {2}};
+    auto* input = network->addInput("input", nvinfer1::DataType::kFLOAT, shape);
+    auto* constant = network->addConstant(shape, {nvinfer1::DataType::kFLOAT, nullptr, 2});
+    check(network->setWeightsName(constant->getWeights(), "bias"), "name canonical null weights");
+    auto* sum = network->addElementWise(*input, *constant->getOutput(0),
+                                        nvinfer1::ElementWiseOperation::kSUM);
+    sum->getOutput(0)->setName("output");
+    network->markOutput(*sum->getOutput(0));
+    config->setFlag(nvinfer1::BuilderFlag::kSTRIP_PLAN);
+    config->setFlag(nvinfer1::BuilderFlag::kREFIT_INDIVIDUAL);
+    config->setBuilderOptimizationLevel(0);
+    trtmc::TrtUniquePtr<nvinfer1::IHostMemory> plan(
+        builder->buildSerializedNetwork(*network, *config));
+    check(plan != nullptr, "build tiny stripped plan");
+    if (!plan)
+        return;
+    std::unique_ptr<trtmc::IBackend> backend(trtmc_create_backend());
+    auto rejects = [&](const trtmc::RefitWeightMap* weights) {
+        trtmc::ModuleCreateOptions options;
+        options.requires_refit = true;
+        options.refit_weights = weights;
+        try {
+            (void)backend->create_module(plan->data(), plan->size(), options);
+        } catch (const std::exception&) {
+            return true;
+        }
+        return false;
+    };
+    float values[] = {2, 3};
+    trtmc::RefitWeightMap weights{{"bias", {trtmc::DType::kFloat32, values, 2}}};
+    check(rejects(nullptr), "stripped plan without a weight source fails closed");
+    const trtmc::RefitWeightMap empty;
+    check(rejects(&empty), "empty weight inventory fails closed");
+    const trtmc::RefitWeightMap unknown{{"other", {trtmc::DType::kFloat32, values, 2}}};
+    check(rejects(&unknown), "unknown weight names fail closed");
+    auto wrong = weights;
+    wrong.at("bias").count = 1;
+    check(rejects(&wrong), "incorrect weight element count is rejected");
+    wrong = weights;
+    wrong.at("bias").dtype = trtmc::DType::kFloat16;
+    check(rejects(&wrong), "incorrect weight storage type is rejected");
+    trtmc::ModuleCreateOptions options;
+    options.refit_weights = &weights;
+    auto module = backend->create_module(plan->data(), plan->size(), options);
+    values[0] = values[1] = 99; // The backend must have consumed the borrowed buffer.
+    float inputs[] = {4, 5};
+    const auto result = module->forward({{"input", {inputs, {2}, trtmc::DType::kFloat32}}});
+    const auto* actual = static_cast<const float*>(result.at("output").data);
+    check(actual[0] == 6 && actual[1] == 8, "refit values are installed before inference");
+}
+
 } // namespace
 
 int main() {
@@ -290,6 +347,7 @@ int main() {
     int device_count = 0;
     if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0)
         return 77;
+    test_stripped_engine_refit_contract();
     auto engine = build_identity(true);
     auto static_engine = build_identity(false);
     if (!engine || !static_engine)

@@ -19,7 +19,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from tensorrt_model_connect import BuildRequest, build
+from families.qwen.build_request import BuildRequest
+from families.qwen.cli import build_bundle as build
 from tensorrt_model_connect.provenance import checkpoint_identity
 
 
@@ -148,6 +149,9 @@ def _prebuilt_provenance(
     assert (info.get("family"), info.get("task")) == (_FAMILY, "text_continuation"), (
         "prebuilt bundle has the wrong family or task"
     )
+    assert bool(manifest.get("strip_weights", False)) == ("refit.json" in info.get("sections", {})), (
+        "prebuilt build profile differs from the family manifest's weight storage"
+    )
     provenance = info.get("provenance")
     assert isinstance(provenance, dict), "prebuilt bundle lacks build provenance; rebuild it with TRTMC"
     assert provenance.get("version") == 1, "unsupported prebuilt provenance version"
@@ -237,6 +241,7 @@ def _build_bundle(manifest: dict, model_dir: Path, bundle: Path) -> None:
             tensor_parallel_size=manifest["tensor_parallel_size"],
             quantization=quantization,
             fp32_layers=fp32_layers,
+            strip_weights=manifest.get("strip_weights", False),
         )
     )
     assert bundle.is_file() and bundle.stat().st_size > 0, bundle

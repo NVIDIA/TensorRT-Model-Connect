@@ -17,6 +17,16 @@
 #include <string_view>
 #include <vector>
 
+#ifdef _WIN32
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 namespace trtmc {
 
 namespace {
@@ -214,6 +224,86 @@ std::vector<char> BundleReader::read_section(std::string_view name) const {
                                  "' from: " + path_);
     }
     return data;
+}
+
+namespace {
+
+std::uint64_t mapping_granularity() {
+#ifdef _WIN32
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    return info.dwAllocationGranularity;
+#else
+    const auto page_size = ::sysconf(_SC_PAGE_SIZE);
+    if (page_size <= 0)
+        throw std::runtime_error("Cannot determine file mapping granularity");
+    return static_cast<std::uint64_t>(page_size);
+#endif
+}
+
+#ifdef _WIN32
+std::shared_ptr<const char> map_file_range(const std::string& path, std::uint64_t offset,
+                                           std::size_t length) {
+    auto fail = [&]() { return std::runtime_error("Cannot map bundle: " + path); };
+    HANDLE file = CreateFileW(std::filesystem::path(path).c_str(), GENERIC_READ, FILE_SHARE_READ,
+                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        throw fail();
+    LARGE_INTEGER size;
+    const bool valid = GetFileSizeEx(file, &size) && size.QuadPart >= 0 &&
+                       static_cast<std::uint64_t>(size.QuadPart) >= offset + length;
+    HANDLE mapping =
+        valid ? CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr) : nullptr;
+    CloseHandle(file);
+    if (!mapping)
+        throw fail();
+    void* base = MapViewOfFile(mapping, FILE_MAP_READ, static_cast<DWORD>(offset >> 32),
+                               static_cast<DWORD>(offset), length);
+    CloseHandle(mapping);
+    if (!base)
+        throw fail();
+    return {static_cast<const char*>(base), [](const char* address) { UnmapViewOfFile(address); }};
+}
+#else
+std::shared_ptr<const char> map_file_range(const std::string& path, std::uint64_t offset,
+                                           std::size_t length) {
+    auto fail = [&]() { return std::runtime_error("Cannot map bundle: " + path); };
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        throw fail();
+    struct stat info{};
+    const bool valid = ::fstat(fd, &info) == 0 && info.st_size >= 0 &&
+                       static_cast<std::uint64_t>(info.st_size) >= offset + length &&
+                       offset <= static_cast<std::uint64_t>(std::numeric_limits<off_t>::max());
+    void* base =
+        valid ? ::mmap(nullptr, length, PROT_READ, MAP_PRIVATE, fd, static_cast<off_t>(offset))
+              : MAP_FAILED;
+    ::close(fd);
+    if (base == MAP_FAILED)
+        throw fail();
+    return {static_cast<const char*>(base),
+            [length](const char* address) { ::munmap(const_cast<char*>(address), length); }};
+}
+#endif
+} // namespace
+
+MappedBundleSection BundleReader::map_section(std::string_view name) const {
+    const auto* section = find_section(name);
+    if (!section)
+        throw std::runtime_error("Bundle section not found: " + std::string(name));
+    const auto offset = checked_section_file_offset(*section, data_offset_, file_size_, path_);
+    if (section->length == 0)
+        return {};
+    const auto granularity = mapping_granularity();
+    const auto aligned = offset - offset % granularity;
+    const auto delta = offset - aligned;
+    if (section->length > std::numeric_limits<std::size_t>::max() - delta)
+        throw std::runtime_error("Bundle mapping size overflows: " + std::string(name));
+    const auto length = static_cast<std::size_t>(section->length + delta);
+    auto owner = map_file_range(path_, aligned, length);
+    auto* begin = owner.get() + delta;
+    return {std::shared_ptr<const char>(std::move(owner), begin),
+            static_cast<std::size_t>(section->length)};
 }
 
 void BundleReader::copy_section(std::string_view name, std::ostream& output) const {

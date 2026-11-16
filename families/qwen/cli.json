@@ -1,0 +1,118 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "build",
+      "executor": "python",
+      "handler": "cli:build",
+      "help": "Build a Qwen bundle",
+      "arguments": [
+        {
+          "name": "model",
+          "type": "string",
+          "help": "Hugging Face model ID or local snapshot"
+        },
+        {
+          "name": "output",
+          "flags": [
+            "-o",
+            "--output"
+          ],
+          "type": "path",
+          "required": true
+        },
+        {
+          "name": "revision",
+          "flags": [
+            "--revision"
+          ],
+          "type": "string"
+        },
+        {
+          "name": "task",
+          "flags": [
+            "--task"
+          ],
+          "type": "string",
+          "choices": [
+            "text_continuation",
+            "embedding"
+          ]
+        },
+        {
+          "name": "precision",
+          "flags": [
+            "--precision"
+          ],
+          "type": "string",
+          "choices": [
+            "fp16",
+            "bf16",
+            "fp32"
+          ]
+        },
+        {
+          "name": "backend",
+          "flags": [
+            "--backend"
+          ],
+          "type": "string",
+          "choices": [
+            "trt",
+            "trt_rtx"
+          ],
+          "default": "trt"
+        },
+        {
+          "name": "max_sequence_length",
+          "flags": [
+            "--max-sequence-length"
+          ],
+          "type": "int"
+        },
+        {
+          "name": "max_batch_size",
+          "flags": [
+            "--max-batch-size"
+          ],
+          "type": "int",
+          "default": 1
+        },
+        {
+          "name": "tensor_parallel_size",
+          "flags": [
+            "--tensor-parallel-size"
+          ],
+          "type": "int",
+          "default": 1
+        },
+        {
+          "name": "quantization",
+          "flags": [
+            "--quantization"
+          ],
+          "type": "string"
+        },
+        {
+          "name": "strip_weights",
+          "flags": [
+            "--strip-weights"
+          ],
+          "type": "bool",
+          "action": "store_true",
+          "default": false,
+          "help": "Build stripped plans with one shared in-bundle weight payload; dense Qwen3 only; requires TensorRT 11.3+"
+        },
+        {
+          "name": "verbose",
+          "flags": [
+            "--verbose"
+          ],
+          "type": "bool",
+          "action": "store_true",
+          "default": false
+        }
+      ]
+    }
+  ]
+}

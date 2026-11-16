@@ -5,8 +5,10 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <iosfwd>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -33,6 +35,12 @@ struct BundleInfo {
     std::vector<BundleSectionInfo> sections;
 };
 
+/// An immutable section mapping. Copies retain its backing storage.
+struct MappedBundleSection {
+    std::shared_ptr<const char> data;
+    std::size_t size{0};
+};
+
 // Validates a bundle once and reads named sections directly from the file.
 // The reader owns its path and metadata, so copies remain valid after the
 // caller that created them returns.
@@ -44,6 +52,10 @@ class BundleReader {
     const BundleInfo& info() const noexcept { return info_; }
     const BundleSectionInfo* find_section(std::string_view name) const noexcept;
     std::vector<char> read_section(std::string_view name) const;
+
+    /// Map a validated section without copying its payload into host memory.
+    /// The returned storage outlives this reader. Do not modify the backing file.
+    MappedBundleSection map_section(std::string_view name) const;
 
     /// Copy a named section to an output stream using bounded working memory.
     /// @param name Validated bundle section name.

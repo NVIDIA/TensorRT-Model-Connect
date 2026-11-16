@@ -65,6 +65,7 @@ void test_copy_section(const std::filesystem::path& directory) {
     std::ostringstream output;
     reader.copy_section("data", output);
     check(output.str() == payload, "stream copy preserves boundaries across chunks");
+    check(reader.map_section("empty").size == 0, "empty section mapping has no payload");
     reader.copy_section("empty", output);
     check(output.str() == payload, "empty section appends nothing");
     auto fails = [&](const char* section, std::ostream& destination) {
@@ -81,6 +82,13 @@ void test_copy_section(const std::filesystem::path& directory) {
     check(fails("data", broken), "stream copy reports output failure");
     std::filesystem::resize_file(path, 16 + header.size() + 3 + payload.size() - 1);
     check(fails("data", output), "stream copy detects truncation after validation");
+    bool truncated_mapping = false;
+    try {
+        (void)reader.map_section("data");
+    } catch (const std::runtime_error&) {
+        truncated_mapping = true;
+    }
+    check(truncated_mapping, "mapping detects truncation after validation");
 }
 
 } // namespace
@@ -101,6 +109,22 @@ int main() {
     check(valid_reader.info().sections.size() == 1, "one section descriptor");
     check(valid_reader.info().sections.front().length == 4, "section length parsed");
     check(valid_reader.read_section("engine.plan").size() == 4, "section payload read");
+
+    auto mapping = valid_reader.map_section("engine.plan");
+    check(mapping.size == 4 && std::string(mapping.data.get(), mapping.size) == "PLAN",
+          "mapped section has exact bounds and contents");
+    auto retained = trtmc::BundleReader(valid.string()).map_section("engine.plan");
+    mapping = retained;
+    retained = {};
+    check(std::string(mapping.data.get(), mapping.size) == "PLAN",
+          "mapping survives reader destruction and shared owner release");
+    bool missing_mapping = false;
+    try {
+        (void)valid_reader.map_section("missing");
+    } catch (const std::runtime_error&) {
+        missing_mapping = true;
+    }
+    check(missing_mapping, "mapping rejects absent sections");
 
     const auto original_directory = std::filesystem::current_path();
     std::filesystem::current_path(directory);

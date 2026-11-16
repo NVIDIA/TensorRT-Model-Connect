@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tensorrt_model_connect import BuildRequest
+from families.qwen.build_request import BuildRequest
 from tensorrt_model_connect.provenance import collect
 from . import test_e2e
 from .test_e2e import _validation_bundle, _validation_revision
@@ -86,7 +86,7 @@ def test_prebuilt_bundle_rejects_another_checkpoint(tmp_path, monkeypatch, check
 
 @pytest.mark.parametrize("field,value", [("precision", "bf16"), ("max_sequence_length", 128),
                                         ("tensor_parallel_size", 2), ("quantization", "fp8"),
-                                        ("fp32_layers", [0])])
+                                        ("fp32_layers", [0]), ("strip_weights", True)])
 def test_prebuilt_bundle_rejects_another_build_profile(tmp_path, monkeypatch, field, value):
     model_dir, manifest, bundle = _inputs(tmp_path, monkeypatch)
     _inspect_returns(monkeypatch, bundle, _recorded(manifest, model_dir))
