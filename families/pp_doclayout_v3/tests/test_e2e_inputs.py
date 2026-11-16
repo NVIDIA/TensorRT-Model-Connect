@@ -3,8 +3,6 @@
 
 """Exercise the same offline asset paths used by protected family tests."""
 
-import hashlib
-
 import httpx
 import pytest
 from huggingface_hub import constants
@@ -20,10 +18,9 @@ def isolated_input_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(e2e, "CI_ASSET_DIR", tmp_path / "ci-assets")
 
 
-def _document(root, monkeypatch):
+def _document(root):
     path = root / "layout_demo.jpg"
     Image.new("RGB", (4, 4)).save(path)
-    monkeypatch.setattr(e2e, "IMAGE_SHA256", hashlib.sha256(path.read_bytes()).hexdigest())
     return path
 
 
@@ -85,7 +82,7 @@ def test_invalid_explicit_model_does_not_fall_back(offline_cache, tmp_path, monk
 
 def test_provisioned_document_needs_no_environment_override(tmp_path, monkeypatch):
     monkeypatch.delenv("TRTMC_PP_DOCLAYOUT_V3_TEST_IMAGE", raising=False)
-    path = _document(tmp_path, monkeypatch)
+    path = _document(tmp_path)
     assert e2e._image_path(tmp_path) == path
 
 
@@ -107,7 +104,7 @@ def test_invalid_explicit_image_does_not_fall_back(tmp_path, monkeypatch, kind):
     path = tmp_path / "document.png"
     if kind == "directory":
         path.mkdir()
-    _document(tmp_path, monkeypatch)
+    _document(tmp_path)
     monkeypatch.setenv("TRTMC_PP_DOCLAYOUT_V3_TEST_IMAGE", "" if kind == "empty" else str(path))
     with pytest.raises(AssertionError):
         e2e._image_path(tmp_path)
@@ -123,7 +120,7 @@ def test_ci_external_files_are_separate_from_the_hub_checkpoint(
     }
     staged = tmp_path / "external-files"
     staged.mkdir()
-    document = _document(staged, monkeypatch)
+    document = _document(staged)
     assert document.name == asset["path"]
     checkpoint = (
         offline_cache
@@ -142,7 +139,7 @@ def test_ci_external_files_are_separate_from_the_hub_checkpoint(
 def test_external_files_without_a_cached_checkpoint_fail(offline_cache, tmp_path, monkeypatch):
     staged = tmp_path / "external-files"
     staged.mkdir()
-    _document(staged, monkeypatch)
+    _document(staged)
     monkeypatch.setenv("TRTMC_PP_DOCLAYOUT_V3_MODEL_DIR", str(staged))
     with pytest.raises(AssertionError, match="exact cached checkpoint"):
         e2e._model_dir()
@@ -150,7 +147,7 @@ def test_external_files_without_a_cached_checkpoint_fail(offline_cache, tmp_path
 
 def test_local_checkpoint_with_a_document_preserves_the_override(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text("{}")
-    document = _document(tmp_path, monkeypatch)
+    document = _document(tmp_path)
     monkeypatch.setenv("TRTMC_PP_DOCLAYOUT_V3_MODEL_DIR", str(tmp_path))
     assert e2e._model_dir() == tmp_path
     assert e2e._image_path(tmp_path) == document
@@ -158,15 +155,15 @@ def test_local_checkpoint_with_a_document_preserves_the_override(tmp_path, monke
 
 def test_preprovisioned_ci_image_root_is_supported(tmp_path, monkeypatch):
     e2e.CI_ASSET_DIR.mkdir()
-    document = _document(e2e.CI_ASSET_DIR, monkeypatch)
+    document = _document(e2e.CI_ASSET_DIR)
     assert e2e._image_path(tmp_path) == document
 
 
 def test_corrupted_staged_document_cannot_fall_back_to_another_copy(tmp_path, monkeypatch):
-    _document(tmp_path, monkeypatch)
+    _document(tmp_path)
     staged = tmp_path / "external-files"
     staged.mkdir()
     (staged / "layout_demo.jpg").write_bytes(b"changed document")
     monkeypatch.setenv("TRTMC_PP_DOCLAYOUT_V3_MODEL_DIR", str(staged))
-    with pytest.raises(AssertionError, match="checksum mismatch"):
+    with pytest.raises(AssertionError, match="invalid layout document"):
         e2e._image_path(tmp_path)

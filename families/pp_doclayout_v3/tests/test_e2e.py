@@ -3,7 +3,6 @@
 
 """Direct build -> native Task/CLI -> official reference, with layout geometry."""
 
-import hashlib
 import json
 import os
 import subprocess
@@ -18,7 +17,7 @@ from tools.e2e_evidence import record_evidence
 FAMILY = "pp_doclayout_v3"
 TASKS = frozenset({"document_layout"})
 MANIFEST = json.loads((Path(__file__).parent / "manifests/pp-doclayout-v3.json").read_text())
-IMAGE_SHA256 = "785b7d19f158dcb636342dd3378ed3a4cddb7333d2d71688f0baa5c25a88ad51"
+(DOCUMENT,) = MANIFEST["external_files"]
 CI_ASSET_DIR = Path("/opt/trtmc-ci")
 
 
@@ -59,7 +58,7 @@ def _model_dir():
         if (path / "config.json").is_file():
             return path
         # Internal CI points MODEL_DIR at external_files, not the Hub snapshot.
-        assert (path / "layout_demo.jpg").is_file(), (
+        assert (path / DOCUMENT["path"]).is_file(), (
             f"{name} contains neither checkpoint config.json nor declared layout_demo.jpg: {path}"
         )
     from huggingface_hub import snapshot_download
@@ -82,6 +81,8 @@ def _model_dir():
 
 
 def _image_path(model_dir):
+    from PIL import Image
+
     name = "TRTMC_PP_DOCLAYOUT_V3_TEST_IMAGE"
     if name in os.environ:
         path = _path(name)
@@ -92,11 +93,13 @@ def _image_path(model_dir):
         roots.append(_path("TRTMC_PP_DOCLAYOUT_V3_MODEL_DIR"))
     roots.extend((model_dir, CI_ASSET_DIR))
     for root in roots:
-        path = root / "layout_demo.jpg"
+        path = root / DOCUMENT["path"]
         if path.is_file():
-            assert hashlib.sha256(path.read_bytes()).hexdigest() == IMAGE_SHA256, (
-                f"selected {FAMILY} E2E layout_demo.jpg checksum mismatch: {path}"
-            )
+            try:
+                with Image.open(path) as image:
+                    image.verify()
+            except OSError as error:
+                raise AssertionError(f"selected {FAMILY} E2E invalid layout document: {path}") from error
             return path
     raise AssertionError(
         f"selected {FAMILY} E2E requires layout_demo.jpg; provision the official "

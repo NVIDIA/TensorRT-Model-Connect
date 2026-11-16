@@ -44,8 +44,9 @@ Hub snapshot and is downloaded at setup time, not redistributed in this repo:
 `https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/layout_demo.jpg`.
 The original file's SHA-256 is
 `785b7d19f158dcb636342dd3378ed3a4cddb7333d2d71688f0baa5c25a88ad51`.
-Default image resolution checks CI's external-file directory, the local
-checkpoint directory, and `/opt/trtmc-ci`, verifying the original SHA-256 before
-use. For a local run, `TRTMC_PP_DOCLAYOUT_V3_TEST_IMAGE` can select another image
+Default image resolution uses the manifest's declared path in CI's external-file
+directory, the local checkpoint directory, and `/opt/trtmc-ci`, checking the
+selected image with Pillow before use. For a local run,
+`TRTMC_PP_DOCLAYOUT_V3_TEST_IMAGE` can select another image
 path. No network download occurs during E2E. Invalid explicit paths and corrupt
 default images fail without silently selecting another input.
