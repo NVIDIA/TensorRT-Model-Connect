@@ -221,7 +221,7 @@ def build_dual_profile_decoder_engine(
     native_kv_cache: bool = False,
     runtime_sized_kv_cache: bool = False,
     quant_ctx=None,
-    full_forward: bool = False,
+    single_forward: bool = False,
 ) -> bytes:
     """Build a prefill/decode-capable dynamic-Sq decoder engine.
 
@@ -241,9 +241,6 @@ def build_dual_profile_decoder_engine(
       split-engine bundle.
 
 
-    ``full_forward`` emits all sequence logits with no KV-cache inputs/outputs.
-    It uses the prefill profile and a caller-supplied [Sq,Sq] additive mask.
-
     ``native_kv_cache`` selects TensorRT's ``IKVCacheUpdateLayer`` and a
     primitive attention graph with an explicit active-prefix causal mask.
     Llama enables it internally by default; it is not exposed as a user build
@@ -253,7 +250,7 @@ def build_dual_profile_decoder_engine(
     from one row through the bundle capacity.
     """
     _supports_config(config, weights)
-    if full_forward and (
+    if single_forward and (
         native_kv_cache or runtime_sized_kv_cache or quant_ctx is not None
         or profile_mode != "prefill"
     ):
@@ -308,13 +305,13 @@ def build_dual_profile_decoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
-    if full_forward and precision == "fp32":
-        # The full-forward FP32 oracle uses strict FP32 matmuls. TF32's
-        # truncated mantissa accumulates visible logit error over the stack.
-        trt_config.clear_flag(trt.BuilderFlag.TF32)
     trt_config.builder_optimization_level = (
         1 if quant_ctx is None else quant_ctx.builder_optimization_level
     )
+    if single_forward and precision == "fp32":
+        # The full-forward FP32 oracle uses strict FP32 matmuls. TF32's
+        # truncated mantissa accumulates visible logit error over the stack.
+        trt_config.clear_flag(trt.BuilderFlag.TF32)
     if quant_ctx is not None and quant_ctx.disable_dual_gemm_fusion:
         trt_config.build_route = "-peep:match_dual_gemm=off"
     if quant_ctx is not None:
@@ -359,7 +356,7 @@ def build_dual_profile_decoder_engine(
         cache_shape = (max_cache_length, kv_attention_size)
     cache_k_inputs: list[trt.ITensor] = []
     cache_v_inputs: list[trt.ITensor] = []
-    for i in range(0 if full_forward else num_layers):
+    for i in range(0 if single_forward else num_layers):
         ck = network.add_input(
             graph_ops.layer_tensor_name("cache_k", i), work_trt_dtype, cache_shape
         )
@@ -388,7 +385,7 @@ def build_dual_profile_decoder_engine(
                 (min(NATIVE_KV_ACTIVE_KEY_ROWS_OPTIMUM, max_cache_length),),
                 (max_cache_length,),
             )
-        if full_forward:
+        if single_forward:
             prof.set_shape("attention_mask", (min_sq, min_sq), (opt_sq, opt_sq), (max_sq, max_sq))
         elif not native_kv_cache:
             prof.set_shape(
@@ -670,7 +667,7 @@ def build_dual_profile_decoder_engine(
             k = quantize_cache_value(network, k, weights[f"{prefix}.kv_k_scale"])
             v = quantize_cache_value(network, v, weights[f"{prefix}.kv_v_scale"])
 
-        if full_forward:
+        if single_forward:
             context = graph_ops.add_attention_from_rows(
                 network, q, k, v, num_heads=num_heads, head_dim=head_dim,
                 num_kv_heads=num_kv_heads, q_seq=None, kv_seq=None,
@@ -821,7 +818,7 @@ def build_dual_profile_decoder_engine(
     # engine (logits shape = (1, vocab)) under both profiles and avoids
     # computing (Sq - 1) redundant vocab-sized matmul rows during prefill.
     last_hidden = hidden_state
-    if not full_forward:
+    if not single_forward:
         shape_t = network.add_shape(hidden_state).get_output(0)  # [2] int64
         one_hidden = graph_ops.add_constant(
             network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64
@@ -852,7 +849,7 @@ def build_dual_profile_decoder_engine(
     logits.name = "logits"
     network.mark_output(logits)
 
-    for i in range(0 if full_forward else num_layers):
+    for i in range(0 if single_forward else num_layers):
         pk = present_k_outs[i]
         pv = present_v_outs[i]
         pk.name = graph_ops.layer_tensor_name("present_k", i)

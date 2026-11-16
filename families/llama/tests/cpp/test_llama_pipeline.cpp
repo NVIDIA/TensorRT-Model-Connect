@@ -288,6 +288,27 @@ void test_generate_max_tokens() {
           "generation respects max_new_tokens");
 }
 
+void test_bringup_single_forward_stops_at_logits() {
+    StreamFixture fixture;
+    auto config = make_config();
+    config.single_forward = true;
+    auto module = std::make_unique<FixedLlamaModule>(fixture.stream, true,
+                                                    std::vector<std::int32_t>{2, 3});
+    const auto* view = module.get();
+    trtmc::LlamaTextGenerationPipeline pipeline(std::move(module), nullptr, config, nullptr, nullptr);
+    trtmc::TextGenerationConfig request;
+    request.max_new_tokens = 5;
+    const auto first = pipeline.generate_ids({1, 3}, request);
+    check(view->forward_calls() == 1, "bringup runs exactly one forward");
+    check(first.token_ids == std::vector<std::int32_t>({1, 3}), "bringup does not sample tokens");
+    check(first.logits.size() == 8 && first.logits[2] == 10.0F && first.logits[6] == 10.0F,
+          "bringup retains every sequence row's logits");
+    const auto second = pipeline.generate_ids({1}, request);
+    check(view->forward_calls() == 2 && second.logits.size() == 4,
+          "repeated bringup calls run once with their own sequence length");
+    check(first.logits[2] == 10.0F, "bringup results own their logits after later calls");
+}
+
 void test_generation_runs_only_consumed_decoder_steps() {
     StreamFixture fixture;
     auto config = make_config();
@@ -443,6 +464,7 @@ int main() {
     test_explicit_eos_override_replaces_default_set();
     test_generate_max_tokens();
     test_generation_runs_only_consumed_decoder_steps();
+    test_bringup_single_forward_stops_at_logits();
     test_zero_max_tokens();
     test_kv_reset_is_logical_and_masks_stale_rows();
     test_generation_reset_reuses_execution_context();

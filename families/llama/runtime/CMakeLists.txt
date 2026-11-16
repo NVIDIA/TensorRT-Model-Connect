@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 add_library(trtmc_model_llama SHARED
-  forward.cpp
   bpe_tokenizer.cpp
   chat_templates.cpp
   kv_cache.cpp
@@ -115,13 +114,10 @@ if(TRTMC_BUILD_TESTS)
     LABELS gpu
     SKIP_RETURN_CODE 77
   )
+  add_executable(llama_forward_runner ${PROJECT_SOURCE_DIR}/families/llama/tests/cpp/forward_runner.cpp)
+  target_include_directories(llama_forward_runner PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(llama_forward_runner PRIVATE trtmc_model_llama trtmc_backend_trt
+    trtmc_core nlohmann_json::nlohmann_json)
 endif()
 
 include(edge_llm/Adapter.cmake)
-
-if(TRTMC_BUILD_TESTS)
-  add_executable(llama_forward_runner ${PROJECT_SOURCE_DIR}/families/llama/tests/cpp/forward_runner.cpp)
-  target_link_libraries(llama_forward_runner PRIVATE trtmc_c nlohmann_json::nlohmann_json)
-  # Family CI builds its registered CTest targets before invoking Python E2E.
-  add_dependencies(test_llama_pipeline llama_forward_runner)
-endif()

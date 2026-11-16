@@ -71,7 +71,20 @@ def _build_engine(
     precision: str,
     verbose: bool,
     quant_ctx=None,
+    single_forward: bool = False,
 ) -> bytes:
+    if single_forward:
+        # Internal bringup only: one full-sequence enqueue, without KV state.
+        if quant_ctx is not None or weights.get("_prepared_quantized", False) or config.raw.get("quantization_config"):
+            raise NotImplementedError("single forward requires unquantized weights")
+        rope = config.raw.get("rope_parameters") or config.raw.get("rope_scaling")
+        if rope:
+            kind = rope.get("rope_type", rope.get("type", "default"))
+            config.raw["rope_scaling"] = None if kind == "default" else rope
+        return build_dual_profile_decoder_engine(
+            config, weights, max_sequence_length, precision=precision, verbose=verbose,
+            profile_mode="prefill", single_forward=True,
+        )
     capability = native_kv_build_capability(
         config,
         precision=precision,
@@ -164,11 +177,6 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     from .build_request import coerce_request
 
     request = coerce_request(request)
-    if request.task == "text_prediction_positions_to_token_scores":
-        from .forward import build_forward
-
-        build_forward(request, writer)
-        return
     if request.mtp_seq_len is not None:
         raise NotImplementedError("Llama does not support MTP speculative decoding")
 

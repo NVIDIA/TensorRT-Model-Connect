@@ -35,8 +35,7 @@
           ],
           "type": "string",
           "choices": [
-            "text_generation",
-            "text_prediction_positions_to_token_scores"
+            "text_generation"
           ],
           "default": "text_generation"
         },
