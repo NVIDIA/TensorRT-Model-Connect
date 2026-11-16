@@ -292,21 +292,24 @@ void test_single_forward_pass_stops_at_logits() {
     StreamFixture fixture;
     auto config = make_config();
     config.single_forward = true;
-    auto module = std::make_unique<FixedLlamaModule>(fixture.stream, true,
-                                                    std::vector<std::int32_t>{2, 3});
+    auto module =
+        std::make_unique<FixedLlamaModule>(fixture.stream, true, std::vector<std::int32_t>{2, 3});
     const auto* view = module.get();
-    trtmc::LlamaTextGenerationPipeline pipeline(std::move(module), nullptr, config, nullptr, nullptr);
+    trtmc::LlamaTextGenerationPipeline pipeline(std::move(module), nullptr, config, nullptr,
+                                                nullptr);
     trtmc::TextGenerationConfig request;
     request.max_new_tokens = 5;
     const auto first = pipeline.generate_ids({1, 3}, request);
     check(view->forward_calls() == 1, "single forward pass runs exactly one forward");
-    check(first.token_ids == std::vector<std::int32_t>({1, 3}), "single forward pass does not sample tokens");
+    check(first.token_ids == std::vector<std::int32_t>({1, 3}),
+          "single forward pass does not sample tokens");
     check(first.logits.size() == 8 && first.logits[2] == 10.0F && first.logits[6] == 10.0F,
           "single forward pass retains every sequence row's logits");
     const auto second = pipeline.generate_ids({1}, request);
     check(view->forward_calls() == 2 && second.logits.size() == 4,
           "repeated single forward pass calls run once with their own sequence length");
-    check(first.logits[2] == 10.0F, "single forward pass results own their logits after later calls");
+    check(first.logits[2] == 10.0F,
+          "single forward pass results own their logits after later calls");
 }
 
 void test_generation_runs_only_consumed_decoder_steps() {
