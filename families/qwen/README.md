@@ -1,11 +1,88 @@
 # Qwen
 
 This family builds text-only Qwen decoders (Qwen, Qwen2, Qwen3, QwQ) for
-`text_generation` and Qwen3 embedding models for `embedding`
+`text_continuation` and Qwen3 embedding models for `embedding`
 (`Qwen/Qwen3-0.6B`, `Qwen/Qwen3-4B-Instruct-2507` and
 `Qwen/Qwen3-Embedding-0.6B` in the manifests, fp16 or bf16, tensor parallel
 size 1 and 4). Unquantized Qwen3 decoders use the family's native KV-cache
 engine; FP8 builds use the family's quantized decoder graph.
+
+## Text continuation Task
+
+This family implements `IModel` and `ITextContinuation` with its own binding
+and Config declaration. The existing shared C ABI and header-only C++
+`TextContinuation` wrapper discover that binding. No sibling family is imported.
+Single-process bundles also retain the upstream streaming Task, cancellation and
+exclusive generation lease. Tensor-parallel bundles do not advertise streaming.
+
+The input is UTF-8 text or checkpoint token IDs. Text uses the existing family
+tokenizer and optional chat template. Token IDs are passed directly to the
+decoder, without decoding/re-tokenizing or applying a chat template. Results own
+only the newly generated text and token IDs, plus setup/prefill/decode timings.
+The original graph, weights, sampler, native-KV cache and tensor-parallel
+implementation remain. Family-local logits tracing still uses the same pipeline.
+
+Build a fresh bundle; the old `text_generation` primary mode is not retained by
+this family runtime. The usual CLI remains:
+
+```sh
+trtmc build Qwen/Qwen3-0.6B -o model.bundle
+trtmc run model.bundle --prompt "Hello" --max-new-tokens 20
+```
+
+## Config and defaults
+
+`runtime/task_config.h` owns the complete declaration and conversion. Defaults
+remain 128 new tokens, temperature 1, top-k 1, top-p 1, min-p 0, seed -1, checkpoint
+EOS, autoregressive mode, chat template off, thinking on, answer-stop off and
+stop-check interval 16. An explicit token limit of zero returns an empty
+continuation. Unknown or mistyped options are errors, not silently ignored.
+`repetition_penalty` accepts only the neutral value 1: the existing sampler does
+not implement a non-neutral penalty. No new sampling algorithm is added.
+`system_prompt` retains the upstream ChatML behavior and requires
+`use_chat_template=true`.
+
+## Validation
+
+The existing Qwen3 and Qwen2.5 checkpoint cases, including FP8, native-KV and
+tensor-parallel cases, and their reference criteria remain.
+The single-device HF-reference cases also call the direct public C11 and C++17
+consumers with both input representations. Their complete token IDs and text
+must agree; text input must also agree with the existing CLI. Consumers read
+the owned result after releasing the model handle. Sampling and contract-only
+cases retain their existing CLI checks. The added checks do not replace the
+original reference oracle or certify unexecuted distributed profiles.
+
+```sh
+cmake --build build --target trtmc trtmc_backend_trt trtmc_model_qwen test_qwen_task_config
+ctest --test-dir build --output-on-failure -R '^qwen_task_config$'
+build/test_qwen_sdk_c model.bundle build text "Hello" max_new_tokens=20
+build/test_qwen_sdk_cpp model.bundle build text "Hello" max_new_tokens=20
+```
+
+The family and Config CTest targets also build both SDK consumers. Set
+`TRTMC_NATIVE_BUILD_DIR="$PWD/build"` for the [family E2E commands](../../website/docs/extend/model-validation.md#4-run-the-declared-family-e2e)
+to locate them. The server consumer must support semantic
+Tasks before serving a migrated family; legacy-interface inheritance is not kept
+in this family to work around an unmigrated application. The standalone batch
+runner and [Node.js binding](../../bindings/nodejs/README.md) also consume the
+public continuation Task; existing bundle modes retain their explicit loader.
+
+### Timing and workload boundaries
+
+| Route | Configuration and measured call | Output handling |
+| --- | --- | --- |
+| Standalone batch runner | Token limit and request are built before `TextContinuation::run`; `wall_ms` covers that call, including SDK marshalling and result ownership. Existing bundles time `ITextGeneration::generate`. Other SDK controls use family defaults. | JSON and stdout writes follow the timer. |
+| Node.js | Only caller-supplied controls are built before `run`; omitted SDK controls use family defaults. The existing timing fields are forwarded from the native result; no JavaScript wall timer is added. | JavaScript strings/arrays are built after the call. |
+| Dataset benchmark | Workload Config and request precede the `run_sdk` timer; it times `task.run`, including SDK marshalling/result ownership. | Answer extraction and JSON writing follow the timer. |
+| Benchmark worker | Source/Config construction precedes `measure`; it times `task.run` for each recorded iteration. | `text_observation` runs after the timer. |
+| `trtmc run` | Config/request construction precedes the Task call. Printed setup/prefill/decode fields are native result metrics, not CLI wall time. | Text/JSON serialization follows the call. |
+| Performance catalog | `tests/perf_validation.json` selects `text_continuation` and invokes `trtmc run` with the declared prompt/token limit. | Catalog selection does not itself measure or prove performance equivalence. |
+
+CPU fixture tests cover dataset/batch and Node.js semantic/legacy execution,
+controls and failure propagation. No same-prompt GPU before/after campaign has
+been run; generated-token, memory, throughput and latency equivalence remain
+unverified. Existing bundle artifacts must be rebuilt for the semantic runtime.
 
 ## Quantization
 
