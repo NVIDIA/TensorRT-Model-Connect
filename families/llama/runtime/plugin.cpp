@@ -4,6 +4,7 @@
  */
 
 #include "families/llama/runtime/chat_templates.h"
+#include "families/llama/runtime/forward.h"
 #include "families/llama/runtime/kv_cache.h"
 #include "families/llama/runtime/pipeline.h"
 #include "families/llama/runtime/plugin_helpers.h"
@@ -221,6 +222,8 @@ DecoderModules load_modules(const FamilyContext& context, const RuntimeConfig& c
 } // namespace
 
 ITask* create(const FamilyContext& context) {
+    if (context.reader.info().task == internal::ITextPredictionPositionsToTokenScores::kTask)
+        return create_forward(context);
     if (context.reader.find_section("speculative.json") != nullptr)
         return new speculative::Pipeline(context);
 

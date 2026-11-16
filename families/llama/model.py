@@ -164,6 +164,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     from .build_request import coerce_request
 
     request = coerce_request(request)
+    if request.task == "text_prediction_positions_to_token_scores":
+        from .forward import build_forward
+
+        build_forward(request, writer)
+        return
     if request.mtp_seq_len is not None:
         raise NotImplementedError("Llama does not support MTP speculative decoding")
 
