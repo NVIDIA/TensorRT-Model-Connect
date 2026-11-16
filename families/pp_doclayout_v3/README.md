@@ -12,8 +12,9 @@ score, box, and contour polygon in original-image pixels. Region labels are
 the checkpoint's `id2label` mapping. The runtime performs bicubic
 resize and mask contour extraction; it does not execute Python.
 
-Install the native OpenCV core and imgproc development packages before CMake
-configuration, for example `libopencv-core-dev libopencv-imgproc-dev` on Ubuntu.
+The CI and development Docker images include the native OpenCV core and imgproc
+development packages. For a host build, install them before CMake configuration,
+for example `libopencv-core-dev libopencv-imgproc-dev` on Ubuntu.
 The family target is omitted when these optional dependencies are absent.
 
 ```bash
