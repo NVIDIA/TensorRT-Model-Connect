@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 from typing import Any, Iterable
 
-from .models import _import_repository
+from .models import _import_repository, smoke_variant
 
 
 GROUP_TASKS = {
@@ -52,7 +52,7 @@ def group_inventory(entries: Iterable[Any], group: str) -> list[dict[str, Any]]:
             # geometry belongs to the video workload, regardless of family name.
             if is_video_model(model) != (group == "videos"):
                 continue
-        smoke = "-l0-" in f"-{entry.name}-" or "-regression-" in f"-{entry.name}-"
+        smoke = smoke_variant(entry.name, entry.hf_id)
         variant = {
             "profile": entry.name, "manifest": str(model.manifest_path),
             "task": model.task, "precision": entry.precision,
