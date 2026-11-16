@@ -5,6 +5,9 @@
 
 #include "api_internal.h"
 
+#include <cmath>
+#include <cstdint>
+
 namespace trtmc::api {
 
 internal::AudioView audio_view(const trtmc_audio_view_v1& input) {
@@ -242,6 +245,125 @@ extern "C" trtmc_status TRTMC_CALL audio_to_class_scores_run(
                     throw ApiFailure{TRTMC_INTERNAL_ERROR,
                                      "audio class scores without a vocabulary need named labels"};
         *output = make_result<LabelScoresStorage>(std::move(result));
+    });
+}
+
+void require_named_labels(const std::vector<std::string>& labels) {
+    if (labels.empty() || labels.size() > UINT32_MAX)
+        throw ApiFailure{TRTMC_INTERNAL_ERROR, "timed labels need between one and 2^32-1 labels"};
+    for (const auto& label : labels)
+        if (label.empty())
+            throw ApiFailure{TRTMC_INTERNAL_ERROR, "timed labels must name every label"};
+}
+
+void require_valid_interval(const internal::TimedLabel& interval, std::size_t label_count) {
+    if (!std::isfinite(interval.start_seconds) || !std::isfinite(interval.end_seconds) ||
+        interval.start_seconds < 0 || interval.end_seconds <= interval.start_seconds)
+        throw ApiFailure{TRTMC_INTERNAL_ERROR, "timed label interval is empty or not finite"};
+    if (interval.label >= label_count)
+        throw ApiFailure{TRTMC_INTERNAL_ERROR, "timed label interval names an unknown label"};
+}
+
+bool ordered_after(const internal::TimedLabel& interval, const internal::TimedLabel& previous) {
+    return interval.start_seconds > previous.start_seconds ||
+           (interval.start_seconds == previous.start_seconds && interval.label > previous.label);
+}
+
+void require_ordered_intervals(const std::vector<internal::TimedLabel>& intervals,
+                               std::size_t label_count) {
+    std::vector<double> label_end(label_count, 0.0);
+    for (std::size_t index = 0; index < intervals.size(); ++index) {
+        const auto& interval = intervals[index];
+        require_valid_interval(interval, label_count);
+        if (index > 0 && !ordered_after(interval, intervals[index - 1]))
+            throw ApiFailure{TRTMC_INTERNAL_ERROR,
+                             "timed label intervals are not ordered by start, then label"};
+        if (interval.start_seconds < label_end[interval.label])
+            throw ApiFailure{TRTMC_INTERNAL_ERROR, "intervals of one timed label overlap"};
+        label_end[interval.label] = interval.end_seconds;
+    }
+}
+
+void require_frame_scores(const internal::TimedLabelsResult& result) {
+    if (result.frame_scores.empty()) {
+        if (result.frame_count != 0 || result.frame_seconds != 0)
+            throw ApiFailure{TRTMC_INTERNAL_ERROR,
+                             "timed labels without frame scores declare frames"};
+        return;
+    }
+    const auto labels = static_cast<std::uint64_t>(result.labels.size());
+    if (result.frame_count == 0 || result.frame_count > UINT64_MAX / labels ||
+        result.frame_count * labels != result.frame_scores.size())
+        throw ApiFailure{TRTMC_INTERNAL_ERROR,
+                         "timed label frame scores are not one row per frame and label"};
+    if (!std::isfinite(result.frame_seconds) || result.frame_seconds <= 0)
+        throw ApiFailure{TRTMC_INTERNAL_ERROR, "timed label frames need a positive duration"};
+    switch (result.score_kind) {
+    case internal::ScoreKind::Logit:
+    case internal::ScoreKind::Probability:
+    case internal::ScoreKind::Unbounded:
+        return;
+    }
+    throw ApiFailure{TRTMC_INTERNAL_ERROR, "timed label frame scores have an unknown kind"};
+}
+
+struct TimedLabelsStorage final : ResultStorage {
+    explicit TimedLabelsStorage(internal::TimedLabelsResult value) : result(std::move(value)) {
+        require_named_labels(result.labels);
+        require_ordered_intervals(result.intervals, result.labels.size());
+        require_frame_scores(result);
+        intervals.reserve(result.intervals.size());
+        for (const auto& interval : result.intervals)
+            intervals.push_back({interval.start_seconds, interval.end_seconds, interval.label});
+        labels.reserve(result.labels.size());
+        for (const auto& label : result.labels)
+            labels.push_back(borrowed_string(label));
+    }
+    internal::TimedLabelsResult result;
+    std::vector<trtmc_timed_label_v1> intervals;
+    std::vector<trtmc_string_view> labels;
+};
+
+extern "C" trtmc_status TRTMC_CALL audio_to_timed_labels_run(
+    trtmc_model* model, const trtmc_audio_to_timed_labels_request_v1* input,
+    const trtmc_config_view_v1* config, trtmc_result** output, trtmc_error** error) noexcept {
+    if (output)
+        *output = nullptr;
+    return guarded(error, [&] {
+        require(input && output, "audio timed-labels request and result output are required");
+        const internal::AudioToTimedLabelsRequest request{audio_view(input->audio)};
+        const ConvertedConfig options(config);
+
+        std::lock_guard<std::mutex> lock(model_mutex(model));
+        auto& task = require_interface<internal::IAudioToTimedLabels>(
+            model, internal::IAudioToTimedLabels::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::IAudioToTimedLabels>(),
+                             options.view());
+        *output = make_result<TimedLabelsStorage>(task.run(request, options.view()));
+    });
+}
+
+trtmc_status TRTMC_CALL timed_labels_result_view(const trtmc_result* result,
+                                                 trtmc_timed_labels_view_v1* output,
+                                                 trtmc_error** error) noexcept {
+    if (output)
+        *output = {};
+    return guarded(error, [&] {
+        require(output != nullptr, "timed labels output is required");
+        const auto& storage = require_result<TimedLabelsStorage>(result);
+        const auto& value = storage.result;
+        const bool framed = !value.frame_scores.empty();
+        *output = {storage.intervals.data(),
+                   storage.intervals.size(),
+                   {storage.labels.data(), storage.labels.size()},
+                   borrowed_string(value.vocabulary_id),
+                   {value.frame_scores.data(), value.frame_scores.size(), value.frame_count,
+                    framed ? value.labels.size() : 0},
+                   value.frame_seconds,
+                   framed ? static_cast<std::uint32_t>(value.score_kind) : 0U,
+                   value.setup_ms,
+                   value.inference_ms};
     });
 }
 
@@ -521,6 +643,8 @@ const trtmc_audio_language_identification_api_v1 language_api{
     {1, 0, sizeof(language_api)}, language_identification_run, label_scores_result_view};
 const trtmc_audio_to_class_scores_api_v1 audio_class_scores_api{
     {1, 0, sizeof(audio_class_scores_api)}, audio_to_class_scores_run, label_scores_result_view};
+const trtmc_audio_to_timed_labels_api_v1 audio_timed_labels_api{
+    {1, 0, sizeof(audio_timed_labels_api)}, audio_to_timed_labels_run, timed_labels_result_view};
 const trtmc_speech_to_speech_response_api_v1 response_api{
     {1, 0, sizeof(response_api)}, speech_response_run, audio_result_view};
 const trtmc_batch_speech_transcription_api_v1 batch_transcription_api{
@@ -562,6 +686,7 @@ const TaskBinding bindings[] = {
     {internal::ISpeechTranslation::kTask, 1, 0, &translation_api.header},
     {internal::IAudioLanguageIdentification::kTask, 1, 0, &language_api.header},
     {internal::IAudioToClassScores::kTask, 1, 0, &audio_class_scores_api.header},
+    {internal::IAudioToTimedLabels::kTask, 1, 0, &audio_timed_labels_api.header},
     {internal::ISpeechToSpeechResponse::kTask, 1, 0, &response_api.header},
     {internal::IBatchSpeechTranscription::kTask, 1, 0, &batch_transcription_api.header},
     {internal::IBatchSpeechTranslation::kTask, 1, 0, &batch_translation_api.header},

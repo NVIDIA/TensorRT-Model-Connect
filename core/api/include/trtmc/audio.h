@@ -6,6 +6,7 @@
 #ifndef TRTMC_AUDIO_H
 #define TRTMC_AUDIO_H
 
+#include "trtmc/matrix.h"
 #include "trtmc/scores.h"
 #include "trtmc/types.h"
 
@@ -41,6 +42,7 @@ typedef struct {
 #define TRTMC_TASK_SPEECH_TRANSLATION "speech_translation"
 #define TRTMC_TASK_AUDIO_LANGUAGE_IDENTIFICATION "audio_language_identification"
 #define TRTMC_TASK_AUDIO_TO_CLASS_SCORES "audio_to_class_scores"
+#define TRTMC_TASK_AUDIO_TO_TIMED_LABELS "audio_to_timed_labels"
 #define TRTMC_TASK_SPEECH_TO_SPEECH_RESPONSE "speech_to_speech_response"
 #define TRTMC_TASK_BATCH_SPEECH_TRANSCRIPTION "batch_speech_transcription"
 #define TRTMC_TASK_BATCH_SPEECH_TRANSLATION "batch_speech_translation"
@@ -91,7 +93,41 @@ typedef struct {
 } trtmc_audio_to_class_scores_request_v1;
 typedef struct {
     trtmc_audio_view_v1 audio;
+} trtmc_audio_to_timed_labels_request_v1;
+typedef struct {
+    trtmc_audio_view_v1 audio;
 } trtmc_speech_to_speech_response_request_v1;
+
+/* One active interval of one label, [start_seconds, end_seconds) on the input
+ * clock: seconds from the first audio frame, 0 <= start < end. label indexes
+ * the result's labels. Intervals of one label never overlap; intervals of
+ * different labels may (overlapping speakers or sound events). */
+typedef struct {
+    double start_seconds;
+    double end_seconds;
+    uint32_t label;
+} trtmc_timed_label_v1;
+
+/* Time-localized labels of one audio input. labels names every label ordinal
+ * (at least one, each nonempty). An empty vocabulary_id means the names carry
+ * no identity beyond this result: a diarization family numbers anonymous
+ * speakers by first appearance in each input. intervals are ordered by start,
+ * then label. frame_scores is optional: either empty (rows 0, frame_seconds
+ * 0, score_kind 0) or [frame, label] with one column per label, frame f
+ * covering [f * frame_seconds, (f + 1) * frame_seconds) of the input, and the
+ * scores raw in the declared TRTMC_SCORE_* kind. Multi-label families score
+ * every label independently; nothing normalizes across labels. */
+typedef struct {
+    const trtmc_timed_label_v1* intervals;
+    uint64_t interval_count;
+    trtmc_strings_view labels;
+    trtmc_string_view vocabulary_id;
+    trtmc_f32_matrix_view_v1 frame_scores;
+    double frame_seconds;
+    uint32_t score_kind;
+    double setup_ms;
+    double inference_ms;
+} trtmc_timed_labels_view_v1;
 
 /* Language presence fields are exactly zero or one. Present identifiers must
  * be nonempty. Absence uses only a default declared by the loaded family;
@@ -159,6 +195,17 @@ typedef struct {
     trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_label_scores_view_v1*,
                                           trtmc_error**);
 } trtmc_audio_to_class_scores_api_v1;
+
+/* Who or what is active when: speaker diarization, voice activity or sound-event
+ * detection over the whole input, returned as labelled intervals plus the
+ * family's frame scores. Not transcription and not clip-level tagging. */
+typedef struct {
+    trtmc_api_header header;
+    trtmc_status(TRTMC_CALL* run)(trtmc_model*, const trtmc_audio_to_timed_labels_request_v1*,
+                                  const trtmc_config_view_v1*, trtmc_result**, trtmc_error**);
+    trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_timed_labels_view_v1*,
+                                          trtmc_error**);
+} trtmc_audio_to_timed_labels_api_v1;
 
 /* Response speech to the complete input utterance, not generic audio editing. */
 typedef struct {

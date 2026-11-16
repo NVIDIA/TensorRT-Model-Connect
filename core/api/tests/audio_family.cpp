@@ -45,6 +45,7 @@ class AudioFixture final : public IModel,
                            public ISpeechTranslation,
                            public IAudioLanguageIdentification,
                            public IAudioToClassScores,
+                           public IAudioToTimedLabels,
                            public ISpeechToSpeechResponse,
                            public IBatchSpeechTranscription,
                            public IBatchSpeechTranslation,
@@ -79,6 +80,7 @@ class AudioFixture final : public IModel,
             bind<IAudioLanguageIdentification>(*this,
                                                fields_for(IAudioLanguageIdentification::kTask)),
             bind<IAudioToClassScores>(*this, fields_for(IAudioToClassScores::kTask)),
+            bind<IAudioToTimedLabels>(*this, fields_for(IAudioToTimedLabels::kTask)),
             bind<ISpeechToSpeechResponse>(*this, fields_for(ISpeechToSpeechResponse::kTask)),
             bind<IBatchSpeechTranscription>(*this, fields_for(IBatchSpeechTranscription::kTask)),
             bind<IBatchSpeechTranslation>(*this, fields_for(IBatchSpeechTranslation::kTask)),
@@ -120,6 +122,11 @@ class AudioFixture final : public IModel,
         if (task == ISpeechToSpeechResponse::kTask) {
             static const ConfigField declared[] = {
                 {"gain", ConfigKind::F64, ConfigValue{1.0}, "Response gain"}};
+            return declared;
+        }
+        if (task == IAudioToTimedLabels::kTask) {
+            static const ConfigField declared[] = {
+                {"gain", ConfigKind::F64, ConfigValue{1.0}, "Frame score gain"}};
             return declared;
         }
         if (task == ISpeechTranscription::kTask || task == ISpeechTranslation::kTask) {
@@ -216,6 +223,25 @@ class AudioFixture final : public IModel,
             {1.5F, -0.25F, -3.0F}, {"Speech", "Music", "Silence"}, ScoreKind::Logit, ""};
         if (mode_ == "bad_labels")
             result.labels[1].clear();
+        return result;
+    }
+    TimedLabelsResult run(const AudioToTimedLabelsRequest& input, ConfigView config) override {
+        const auto audio = resolve_audio(input.audio);
+        const auto options = parse(config, IAudioToTimedLabels::kTask);
+        // Two anonymous speakers over three 10 ms frames: speaker 1 overlaps
+        // both turns of speaker 0, and the scores stay raw per-label logits.
+        TimedLabelsResult result;
+        result.labels = {"speaker_0", "speaker_1"};
+        result.intervals = {{0.0, 0.01, 0}, {0.01, 0.03, 1}, {0.02, 0.03, 0}};
+        const auto gain = static_cast<float>(options.gain);
+        result.frame_scores = {2.0F * gain, -1.0F * gain, -1.0F * gain,
+                               3.0F * gain, 1.0F * gain,  4.0F * gain};
+        result.frame_count = 3;
+        result.frame_seconds = 0.01;
+        result.score_kind = ScoreKind::Logit;
+        result.setup_ms = audio.channels;
+        result.inference_ms = static_cast<double>(audio.samples.size());
+        damage_timed_labels(result);
         return result;
     }
     AudioResult run(const SpeechToSpeechResponseRequest& input, ConfigView config) override {
@@ -374,6 +400,30 @@ class AudioFixture final : public IModel,
     }
 
   private:
+    // Each mode breaks exactly one promise of the timed-labels contract.
+    void damage_timed_labels(TimedLabelsResult& result) const {
+        if (mode_ == "bad_labels")
+            result.labels[1].clear();
+        if (mode_ == "timed_unknown_label")
+            result.intervals[1].label = 2;
+        if (mode_ == "timed_unordered")
+            std::swap(result.intervals[0], result.intervals[1]);
+        if (mode_ == "timed_overlap")
+            result.intervals[0].end_seconds = 0.025;
+        if (mode_ == "timed_empty_interval")
+            result.intervals[0].end_seconds = result.intervals[0].start_seconds;
+        if (mode_ == "timed_frame_shape")
+            result.frame_scores.pop_back();
+        if (mode_ == "timed_frame_seconds")
+            result.frame_seconds = 0;
+        if (mode_ == "timed_frames_without_scores")
+            result.frame_scores.clear();
+        if (mode_ == "timed_intervals_only") {
+            result.frame_scores.clear();
+            result.frame_count = 0;
+            result.frame_seconds = 0;
+        }
+    }
     BatchAudioResult finish_generated_batch(BatchAudioResult result) const {
         if (mode_ == "batch_execution_error")
             throw std::runtime_error("fixture native batch execution failed");

@@ -99,6 +99,7 @@ const TASKS = {
   speech_translation: ['Speech translation', 'Audio', null, 'transcribe'],
   audio_language_identification: ['Audio language identification', 'Audio', 'audio-classification', null],
   audio_to_class_scores: ['Audio to class scores', 'Audio', 'audio-classification', 'classify'],
+  audio_to_timed_labels: ['Audio to timed labels', 'Audio', 'voice-activity-detection', 'detect'],
   speech_to_speech_response: ['Speech-to-speech response', 'Audio', 'audio-to-audio', 'speak'],
   batch_speech_transcription: ['Batch speech transcription', 'Audio', 'automatic-speech-recognition', 'transcribe-batch'],
   batch_speech_translation: ['Batch speech translation', 'Audio', null, 'transcribe-batch'],

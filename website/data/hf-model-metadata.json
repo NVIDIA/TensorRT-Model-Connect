@@ -1061,6 +1061,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "nvidia/Nemotron-3-Diarization",
+      "revision": "52a432672732425e4c19765b9fec9b5810e6f4ba",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "nemotron3_diarization",
+      "architectures": [
+        "Nemotron3DiarizationForAudioFrameClassification"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
       "revision": "6533e8de2c68e4536bf7c411d7a3ce5734111476",
       "revision_source": "resolved",

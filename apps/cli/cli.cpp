@@ -98,7 +98,7 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
           {"--text", "--token-ids", "--image", "--title", "--body", "--role"}}},
         {"rerank", {CommandKind::kRerank, {"--query", "--document", "--image", "--documents"}}},
         {"classify", {CommandKind::kClassify, {"--image", "--audio"}}},
-        {"detect", {CommandKind::kDetect, {"--image", "--prompt"}}},
+        {"detect", {CommandKind::kDetect, {"--image", "--prompt", "--audio"}}},
         {"extract-features", {CommandKind::kExtractFeatures, {"--image"}}},
         {"predict-structure",
          {CommandKind::kPredictStructure,
@@ -856,7 +856,7 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
     if (command.kind == CommandKind::kGenerateWorld)
         reject_sdk_inputs({"--camera-trajectory"});
     if (command.kind == CommandKind::kDetect)
-        reject_sdk_inputs({"--prompt"});
+        reject_sdk_inputs({"--prompt", "--audio"});
     switch (command.kind) {
     case CommandKind::kRun:
         return dispatch_run(command, task, output);
@@ -1640,7 +1640,9 @@ void print_usage(std::ostream& output) {
               "  SDK output defaults to prediction.cif or prediction.pdb.\n\n"
               "Audio classification input:\n"
               "  classify BUNDLE --audio WAV scores an audio model's own classes;\n"
-              "  classify BUNDLE --image FILE stays the image path.\n\n"
+              "  classify BUNDLE --image FILE stays the image path.\n"
+              "  detect BUNDLE --audio WAV returns who or what is active when:\n"
+              "  labelled time intervals plus the model's frame scores.\n\n"
               "BYOK options:\n"
               "  --byok-library DSO --byok-function FUNCTION --byok-name KERNEL\n\n"
               "Runtime-sized KV cache:\n"

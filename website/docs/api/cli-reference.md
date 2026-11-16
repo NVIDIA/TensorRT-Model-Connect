@@ -109,7 +109,7 @@ Common load options are:
 | Classification and features | `classify --image PATH`, `extract-features --image PATH` |
 | Stereo and geometry | `disparity --left PATH --right PATH`, `geometry --image PATH --output DIR` |
 | Segmentation | `segment --image PATH`, `segment-prompted --image PATH` with text or point prompt, `video-segment --frame PATH --prompt TEXT` |
-| Audio | `generate-audio --prompt TEXT --output PATH`, `speak --input WAV --output WAV`, `speech-session --input WAV` |
+| Audio | `generate-audio --prompt TEXT --output PATH`, `speak --input WAV --output WAV`, `speech-session --input WAV`, `detect --audio WAV` for timed labels (who or what is active when) |
 | Transcription | `transcribe --input WAV`, repeatable-input `transcribe-batch`, or `transcribe-streaming --input WAV` |
 | Image and video generation | `generate-image`, `generate-image-batch`, or `generate-video`, each with the command-specific prompt/output options |
 | Numeric tasks | `solve --branch F32 [--trunk F32]`, `forecast --input F32 [--mask F32]` |
