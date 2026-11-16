@@ -14,6 +14,16 @@ using namespace trtmc;
 
 class CtcEngine final : public ITrtModule {
   public:
+    explicit CtcEngine(bool boundary_delimiters = false) {
+        if (boundary_delimiters) {
+            logits_[1] = 4;
+            logits_[2] = 0;
+            logits_[4] = 0;
+            logits_[6] = 4;
+            logits_[12] = 0;
+            logits_[13] = 4;
+        }
+    }
     TensorMap forward(const TensorMap&) override {
         return {{"logits", {logits_, {4, 4}, DType::kFloat32}}};
     }
@@ -76,6 +86,30 @@ int test_pipeline_language() {
                 return 1;
         } catch (const std::exception& error) {
             std::cerr << "FAIL: checkpoint-defined language: " << error.what() << '\n';
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int test_pipeline_boundaries() {
+    using namespace trtmc;
+    Wav2Vec2RuntimeConfig cfg;
+    cfg.do_normalize = false;
+    cfg.conv_kernel = {1};
+    cfg.conv_stride = {1};
+    cfg.max_samples = 4;
+    cfg.vocabulary.tokens = {"<pad>", "|", "日", "本"};
+    cfg.vocabulary.blank_token_id = 0;
+    cfg.vocabulary.word_delimiter_token = "|";
+    Wav2Vec2Pipeline pipeline(std::make_unique<CtcEngine>(true), std::move(cfg));
+    const float samples[]{0, 1, 0, -1};
+    internal::SpeechTranscriptionRequest request;
+    request.audio.samples = {samples, 4};
+    for (int repeat = 0; repeat < 2; ++repeat) {
+        const auto result = pipeline.run(request, {});
+        if (result.text != "日本" || result.token_ids != std::vector<int32_t>{1, 2, 3, 1}) {
+            std::cerr << "FAIL: pipeline boundary text or collapsed token ids\n";
             return 1;
         }
     }
