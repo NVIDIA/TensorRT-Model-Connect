@@ -9,5 +9,8 @@ target_include_directories(test_llava_kv_cache SYSTEM PRIVATE ${TRTMC_CUDA_INCLU
 target_compile_options(test_llava_kv_cache PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(test_llava_kv_cache PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 foreach(mode zero exhaustion allocation)
+  # Before the executable exists, CTest omits its command from JSON discovery.
+  # CI therefore builds each discovered test name before running the cases.
+  add_custom_target(test_llava_kv_cache_${mode} DEPENDS test_llava_kv_cache)
   add_test(NAME test_llava_kv_cache_${mode} COMMAND test_llava_kv_cache ${mode})
 endforeach()
