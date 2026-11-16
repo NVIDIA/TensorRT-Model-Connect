@@ -3,6 +3,7 @@
 
 """Direct build -> native Task/CLI -> official reference, with layout geometry."""
 
+import hashlib
 import json
 import os
 import subprocess
@@ -17,6 +18,8 @@ from tools.e2e_evidence import record_evidence
 FAMILY = "pp_doclayout_v3"
 TASKS = frozenset({"document_layout"})
 MANIFEST = json.loads((Path(__file__).parent / "manifests/pp-doclayout-v3.json").read_text())
+IMAGE_SHA256 = "785b7d19f158dcb636342dd3378ed3a4cddb7333d2d71688f0baa5c25a88ad51"
+CI_ASSET_DIR = Path("/opt/trtmc-ci")
 
 
 def _selected(config):
@@ -52,34 +55,53 @@ def _model_dir():
     name = "TRTMC_PP_DOCLAYOUT_V3_MODEL_DIR"
     if name in os.environ:
         path = _path(name)
-    else:
-        from huggingface_hub import snapshot_download
+        assert path.is_dir(), f"selected {FAMILY} E2E model path is not a directory: {path}"
+        if (path / "config.json").is_file():
+            return path
+        # Internal CI points MODEL_DIR at external_files, not the Hub snapshot.
+        assert (path / "layout_demo.jpg").is_file(), (
+            f"{name} contains neither checkpoint config.json nor declared layout_demo.jpg: {path}"
+        )
+    from huggingface_hub import snapshot_download
 
-        try:
-            path = Path(
-                snapshot_download(
-                    repo_id=MANIFEST["hf_id"],
-                    revision=MANIFEST["hf_revision"],
-                    local_files_only=True,
-                )
+    try:
+        path = Path(
+            snapshot_download(
+                repo_id=MANIFEST["hf_id"],
+                revision=MANIFEST["hf_revision"],
+                local_files_only=True,
             )
-        except OSError as error:
-            raise AssertionError(
-                f"selected {FAMILY} E2E requires the exact cached checkpoint "
-                f"{MANIFEST['hf_id']}@{MANIFEST['hf_revision']}"
-            ) from error
+        )
+    except OSError as error:
+        raise AssertionError(
+            f"selected {FAMILY} E2E requires the exact cached checkpoint "
+            f"{MANIFEST['hf_id']}@{MANIFEST['hf_revision']}"
+        ) from error
     assert path.is_dir(), f"selected {FAMILY} E2E model path is not a directory: {path}"
     return path
 
 
 def _image_path(model_dir):
     name = "TRTMC_PP_DOCLAYOUT_V3_TEST_IMAGE"
-    path = _path(name) if name in os.environ else model_dir / "layout_demo.jpg"
-    assert path.is_file(), (
-        f"selected {FAMILY} E2E image is not a file: {path}; provision the official "
-        "layout_demo.jpg beside the cached checkpoint before offline execution"
+    if name in os.environ:
+        path = _path(name)
+        assert path.is_file(), f"selected {FAMILY} E2E image is not a file: {path}"
+        return path
+    roots = []
+    if "TRTMC_PP_DOCLAYOUT_V3_MODEL_DIR" in os.environ:
+        roots.append(_path("TRTMC_PP_DOCLAYOUT_V3_MODEL_DIR"))
+    roots.extend((model_dir, CI_ASSET_DIR))
+    for root in roots:
+        path = root / "layout_demo.jpg"
+        if path.is_file():
+            assert hashlib.sha256(path.read_bytes()).hexdigest() == IMAGE_SHA256, (
+                f"selected {FAMILY} E2E layout_demo.jpg checksum mismatch: {path}"
+            )
+            return path
+    raise AssertionError(
+        f"selected {FAMILY} E2E requires layout_demo.jpg; provision the official "
+        "document declared in the manifest's external_files before offline execution"
     )
-    return path
 
 
 def _iou(left, right):

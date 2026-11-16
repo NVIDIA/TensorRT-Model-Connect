@@ -3,6 +3,12 @@
   "family": "pp_doclayout_v3",
   "hf_id": "PaddlePaddle/PP-DocLayoutV3_safetensors",
   "hf_revision": "e4f489dc536556fc1be02b973ba06756e0d4a2ac",
+  "external_files": [
+    {
+      "path": "layout_demo.jpg",
+      "url": "https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/layout_demo.jpg"
+    }
+  ],
   "task": "document_layout",
   "precision": "fp32",
   "image_height": 800,
