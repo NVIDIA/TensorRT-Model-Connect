@@ -28,9 +28,19 @@ build/trtmc layout pp-doclayout-v3.bundle --runtime-root build --image document.
 The direct E2E test rebuilds the bundle and compares both the supplied document
 and its horizontal mirror with Transformers 5.2.0. It checks class and reading
 order, detection counts, score error, box IoU, and rasterized polygon IoU.
-Install `tests/requirements.txt`, then set `TRTMC_BINARY`, `TRTMC_RUNTIME_ROOT`,
-`TRTMC_PP_DOCLAYOUT_V3_MODEL_DIR`, and `TRTMC_PP_DOCLAYOUT_V3_TEST_IMAGE` before
-running `pytest families/pp_doclayout_v3/tests --e2e-model pp_doclayout_v3`.
-The checkpoint revision is pinned in `tests/manifests/pp-doclayout-v3.json`.
-Use the official model-card demonstration document as the test image:
+Install `tests/requirements.txt`, then set `TRTMC_BINARY` and `TRTMC_RUNTIME_ROOT`
+before running `pytest families/pp_doclayout_v3/tests --e2e-model pp_doclayout_v3`.
+Provision the exact checkpoint revision pinned in
+`tests/manifests/pp-doclayout-v3.json` into the Hugging Face Hub cache first;
+the test resolves that snapshot with `local_files_only=True`. Alternatively,
+set `TRTMC_PP_DOCLAYOUT_V3_MODEL_DIR` to an existing local checkpoint directory.
+Before offline execution, place the official model-card demonstration document
+at `layout_demo.jpg` inside the selected checkpoint directory. It is a separate
+test asset, absent from the Hub snapshot and not redistributed in this repo:
 `https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/layout_demo.jpg`.
+The original file's SHA-256 is
+`785b7d19f158dcb636342dd3378ed3a4cddb7333d2d71688f0baa5c25a88ad51`.
+For a local run, `TRTMC_PP_DOCLAYOUT_V3_TEST_IMAGE` can select another image path.
+CI needs the document provisioned beside the checkpoint because its container
+does not automatically forward that image override. Invalid explicit paths fail
+without falling back to the cache or provisioned image.

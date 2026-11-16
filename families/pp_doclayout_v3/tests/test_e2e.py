@@ -48,6 +48,40 @@ def _path(name):
     return path
 
 
+def _model_dir():
+    name = "TRTMC_PP_DOCLAYOUT_V3_MODEL_DIR"
+    if name in os.environ:
+        path = _path(name)
+    else:
+        from huggingface_hub import snapshot_download
+
+        try:
+            path = Path(
+                snapshot_download(
+                    repo_id=MANIFEST["hf_id"],
+                    revision=MANIFEST["hf_revision"],
+                    local_files_only=True,
+                )
+            )
+        except OSError as error:
+            raise AssertionError(
+                f"selected {FAMILY} E2E requires the exact cached checkpoint "
+                f"{MANIFEST['hf_id']}@{MANIFEST['hf_revision']}"
+            ) from error
+    assert path.is_dir(), f"selected {FAMILY} E2E model path is not a directory: {path}"
+    return path
+
+
+def _image_path(model_dir):
+    name = "TRTMC_PP_DOCLAYOUT_V3_TEST_IMAGE"
+    path = _path(name) if name in os.environ else model_dir / "layout_demo.jpg"
+    assert path.is_file(), (
+        f"selected {FAMILY} E2E image is not a file: {path}; provision the official "
+        "layout_demo.jpg beside the cached checkpoint before offline execution"
+    )
+    return path
+
+
 def _iou(left, right):
     lo = np.maximum(left[:2], right[:2])
     hi = np.minimum(left[2:], right[2:])
@@ -83,9 +117,9 @@ def test_official_checkpoint_e2e(request, tmp_path, case_name):
 
     logging.disable_progress_bar()
     torch.set_num_threads(8)
-    model_dir = _path("TRTMC_PP_DOCLAYOUT_V3_MODEL_DIR")
+    model_dir = _model_dir()
     record_evidence("inputs", {"hf_id": MANIFEST["hf_id"], "hf_revision": MANIFEST["hf_revision"]})
-    image_path = _path("TRTMC_PP_DOCLAYOUT_V3_TEST_IMAGE")
+    image_path = _image_path(model_dir)
     binary, runtime = _path("TRTMC_BINARY"), _path("TRTMC_RUNTIME_ROOT")
     assert (runtime / "libtrtmc_model_pp_doclayout_v3.so").is_file()
     assert (runtime / "libtrtmc_backend_trt.so").is_file()
