@@ -13,10 +13,31 @@ from PIL import Image
 import pytest
 
 
+def _checkpoint_dir():
+    explicit = os.environ.get("TRTMC_LLAVA_MODEL_DIR")
+    if explicit:
+        model = Path(explicit)
+        assert model.is_dir(), "TRTMC_LLAVA_MODEL_DIR must be a checkpoint directory"
+        return model
+
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    manifest = json.loads((Path(__file__).parent / "manifests/llava-1.5-7b.json").read_text())
+    try:
+        return Path(snapshot_download(repo_id=manifest["hf_id"], revision=manifest["hf_revision"],
+                                      local_files_only=True))
+    except LocalEntryNotFoundError:
+        pytest.skip("requires the pinned checkpoint tokenizer in the local Hub cache")
+
+
 @pytest.fixture(scope="module")
-def probe(tmp_path_factory):
-    if not os.environ.get("TRTMC_LLAVA_MODEL_DIR"):
-        pytest.skip("requires the pinned checkpoint tokenizer")
+def model_dir():
+    return _checkpoint_dir()
+
+
+@pytest.fixture(scope="module")
+def probe(tmp_path_factory, model_dir):
     root = Path(__file__).resolve().parents[3]
     output = tmp_path_factory.mktemp("llava-input-probe") / "probe"
     runtime = root / "families/llava/runtime"
@@ -29,10 +50,10 @@ def probe(tmp_path_factory):
 
 
 @pytest.mark.parametrize("shape", [(113, 195), (195, 113)])
-def test_native_inputs_match_hugging_face(probe, shape, tmp_path):
+def test_native_inputs_match_hugging_face(probe, model_dir, shape, tmp_path):
     from transformers import AutoProcessor
-    model = Path(os.environ["TRTMC_LLAVA_MODEL_DIR"])
-    processor = AutoProcessor.from_pretrained(str(model), use_fast=False)
+    model = model_dir
+    processor = AutoProcessor.from_pretrained(str(model), use_fast=False, local_files_only=True)
     rng = np.random.default_rng(83)
     pixels = rng.integers(0, 256, size=(*shape, 3), dtype=np.uint8)
     raw = tmp_path / "pixels.f32"
