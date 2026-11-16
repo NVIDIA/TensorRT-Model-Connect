@@ -541,6 +541,19 @@ class _Phases:
         return None
 
 
+def reported_reference(reference: Mapping[str, Any], performance: Sequence[Mapping[str, Any]],
+                       accuracy: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The report's native-reference summary. ``precision`` is the precision the native model ran at (as timed,
+    else as it answered the benchmarks, else the first it would be timed at); the configured fallback precision
+    is ``fallback_precision``, so a reader does not take the fallback for the precision that ran."""
+    ran = next((precision for precision in [*((item.get("reference") or {}).get("precision") for item in performance),
+                                            *((item.get("native") or {}).get("precision") for item in accuracy)]
+                if precision), None)
+    return {"backend": reference.get("backend"), "precision": ran or timing_precisions(reference)[0],
+            "fallback_precision": reference.get("precision"), "perf_precision": reference.get("perf_precision"),
+            "timing_precision": reference.get("timing_precision")}
+
+
 def timing_precisions(reference: Mapping[str, Any]) -> list[str]:
     """Precisions to time the native model at, in order: a declared ``timing_precision`` (when the
     native model does not run correctly at the candidate precision), else the candidate precision,
@@ -964,8 +977,7 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
               "performance_source": "quality" if dataset_only else "fixed",
               **({"accuracy_note": model["accuracy_note"]} if model.get("accuracy_note") else {}),
               **({"coverage": model["coverage"]} if model.get("coverage") else {}),
-              "reference": {key: reference.get(key) for key in ("backend", "precision", "perf_precision",
-                                                                 "timing_precision")},
+              "reference": reported_reference(reference, performance, accuracy),
               "reference_python": python, "duration_s": time.time() - started, "accuracy": accuracy,
               "performance": performance, "service_metrics": service_metrics,
               "errors": phases.errors,
