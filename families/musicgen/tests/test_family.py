@@ -2,15 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import os
 from pathlib import Path
 import struct
 import subprocess
 
 import pytest
 from tensorrt_model_connect import BuildRequest
+from tensorrt_model_connect.bundle_writer import BundleWriter
 
-from families.musicgen.model import build, relative_buckets
+from families.musicgen.model import build, relative_buckets, write_tokenizer
+from families.musicgen.tests.inputs import checkpoint_dir, tokenizer_binary
 
 
 @pytest.mark.parametrize(
@@ -65,10 +66,8 @@ def test_manifest_revision_and_duration_are_explicit():
 def test_native_tokenizer_matches_official_checkpoint(tmp_path):
     from transformers import AutoTokenizer
 
-    if "TRTMC_MUSICGEN_MODEL_DIR" not in os.environ:
-        pytest.skip("native tokenizer parity requires the pinned checkpoint and native runtime")
-    model_dir = Path(os.environ["TRTMC_MUSICGEN_MODEL_DIR"])
-    binary = Path(os.environ["TRTMC_RUNTIME_ROOT"]) / "test_musicgen_tokenizer"
+    model_dir = checkpoint_dir()
+    binary = tokenizer_binary()
     prompts = [
         "A mellow jazz piano with soft drums.",
         "Energetic rock music with electric guitar.",
@@ -103,15 +102,17 @@ def test_native_tokenizer_matches_official_checkpoint(tmp_path):
     assert json.loads(result.stdout) == expected
 
 
-def test_bundle_preserves_the_official_tokenizer_backend():
+def test_bundle_preserves_the_official_tokenizer_backend(tmp_path):
     from transformers import AutoTokenizer
 
-    if "TRTMC_MUSICGEN_BUNDLE" not in os.environ:
-        pytest.skip("bundle tokenizer regression check requires a built bundle")
-    tokenizer = AutoTokenizer.from_pretrained(
-        os.environ["TRTMC_MUSICGEN_MODEL_DIR"], local_files_only=True
-    )
-    with Path(os.environ["TRTMC_MUSICGEN_BUNDLE"]).open("rb") as bundle:
+    model_dir = checkpoint_dir()
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+    path = tmp_path / "tokenizer.bundle"
+    writer = BundleWriter(path)
+    writer.set_header(family="musicgen", task="text_to_audio", backend="trt")
+    write_tokenizer(model_dir, writer)
+    writer.finish()
+    with path.open("rb") as bundle:
         assert bundle.read(8) == b"BUNDLE\x01\x00"
         header_size = struct.unpack("<Q", bundle.read(8))[0]
         header = json.loads(bundle.read(header_size))

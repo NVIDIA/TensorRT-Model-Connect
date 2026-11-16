@@ -15,6 +15,8 @@ from tensorrt_model_connect import BuildRequest, build
 from tensorrt_model_connect.model_support import load_model_metadata, resolve_family
 from tools.e2e_evidence import evidence_stage, record_evidence
 
+from families.musicgen.tests.inputs import checkpoint_dir
+
 ROOT = Path(__file__).parent
 MANIFEST = json.loads((ROOT / "manifests/musicgen-medium-fp32.json").read_text())
 CASE = MANIFEST["testcases"][0]
@@ -78,17 +80,7 @@ def test_musicgen_e2e(case_name, tmp_path):
 
     disable_progress_bar()
 
-    model_dir = os.environ.get("TRTMC_MUSICGEN_MODEL_DIR")
-    if model_dir:
-        model_dir = Path(model_dir)
-    else:
-        from huggingface_hub import snapshot_download
-
-        model_dir = Path(
-            snapshot_download(
-                MANIFEST["hf_id"], revision=MANIFEST["hf_revision"], local_files_only=True
-            )
-        )
+    model_dir = checkpoint_dir(MANIFEST["hf_id"], MANIFEST["hf_revision"])
     binary = Path(os.environ["TRTMC_BINARY"])
     runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
     assert torch.cuda.is_available()
@@ -114,6 +106,14 @@ def test_musicgen_e2e(case_name, tmp_path):
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
         tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
+        with bundle.open("rb") as built:
+            assert built.read(8) == b"BUNDLE\x01\x00"
+            header_size = struct.unpack("<Q", built.read(8))[0]
+            header = json.loads(built.read(header_size))
+            section = header["sections"]["tokenizer.json"]
+            built.seek(16 + header_size + section["offset"])
+            backend = json.loads(built.read(section["length"]))
+        assert backend == json.loads(tokenizer.backend_tokenizer.to_str())
         reference = (
             MusicgenForConditionalGeneration.from_pretrained(
                 model_dir, local_files_only=True, dtype=torch.float32, attn_implementation="eager"

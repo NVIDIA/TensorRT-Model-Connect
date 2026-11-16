@@ -85,16 +85,32 @@ official-reference greedy comparison.
 ## Validation
 
 ```bash
-export TRTMC_MUSICGEN_MODEL_DIR=/absolute/path/to/pinned/checkpoint
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+unset TRTMC_MUSICGEN_MODEL_DIR TRTMC_MUSICGEN_BUNDLE
 export TRTMC_BINARY="$PWD/build-musicgen/trtmc"
 export TRTMC_RUNTIME_ROOT="$PWD/build-musicgen"
+export TRTMC_NATIVE_BUILD_DIR="$PWD/build-musicgen"
 export TRTMC_E2E_ARTIFACT_DIR="$PWD/artifacts/musicgen"
+cmake --build build-musicgen --target test_musicgen_tokenizer_config
+ctest --test-dir build-musicgen -R '^musicgen_tokenizer_config$' --output-on-failure
 PYTHONPATH=core/builder:apps/benchmark:. python -m tools.model_ci validate
 PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \
   families/musicgen/tests --e2e-model musicgen -q
 build-musicgen/test_musicgen_sdk_cpp musicgen-medium.bundle build-musicgen
 git diff --check
 ```
+
+The tests resolve the manifest's immutable revision from the offline Hub cache.
+`TRTMC_MUSICGEN_MODEL_DIR` can instead name an explicit local checkpoint;
+an invalid override fails rather than falling back to another model. The native
+tokenizer probe comes from `TRTMC_NATIVE_BUILD_DIR`, with `TRTMC_RUNTIME_ROOT`
+as a fallback for direct local builds. Building the tokenizer configuration
+CTest also builds this probe, without requiring a GPU bundle.
+
+The CPU bundle regression serializes the pinned tokenizer through the production
+writer into a fresh tokenizer-only bundle and compares the complete backend.
+The E2E test also checks that backend in the full inference bundle.
 
 The E2E test builds a fresh bundle unless `TRTMC_MUSICGEN_BUNDLE` explicitly names
 an existing one. It compares two distinct prompts with official Transformers

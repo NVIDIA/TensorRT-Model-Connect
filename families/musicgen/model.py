@@ -238,10 +238,21 @@ def validate_request(
     return length
 
 
+def write_tokenizer(root, writer):
+    from transformers import AutoTokenizer
+
+    # Serialize the backend actually used by the pinned reference library.
+    # Transformers 5.2's T5 tokenizer reconstructs it from the checkpoint's
+    # vocabulary, and its normalization can differ from the legacy JSON file.
+    tokenizer = AutoTokenizer.from_pretrained(root, local_files_only=True)
+    writer.add_bytes("tokenizer.json", tokenizer.backend_tokenizer.to_str().encode("utf-8"))
+    for name in ("tokenizer_config.json", "special_tokens_map.json"):
+        writer.add_bytes(name, (root / name).read_bytes())
+
+
 def build(request, writer):
     from tensorrt_model_connect.model_support import ModelMetadata
     import torch
-    from transformers import AutoTokenizer
 
     length = validate_request(
         backend=request.backend,
@@ -301,10 +312,4 @@ def build(request, writer):
             "samples_per_frame": 640,
         },
     )
-    # Serialize the backend actually used by the pinned reference library.
-    # Transformers 5.2's T5 tokenizer reconstructs it from the checkpoint's
-    # vocabulary, and its normalization can differ from the legacy JSON file.
-    tokenizer = AutoTokenizer.from_pretrained(root, local_files_only=True)
-    writer.add_bytes("tokenizer.json", tokenizer.backend_tokenizer.to_str().encode("utf-8"))
-    for name in ("tokenizer_config.json", "special_tokens_map.json"):
-        writer.add_bytes(name, (root / name).read_bytes())
+    write_tokenizer(root, writer)
