@@ -114,10 +114,6 @@ if(TRTMC_BUILD_TESTS)
     LABELS gpu
     SKIP_RETURN_CODE 77
   )
-  add_executable(llama_forward_runner ${PROJECT_SOURCE_DIR}/families/llama/tests/cpp/forward_runner.cpp)
-  target_include_directories(llama_forward_runner PRIVATE ${PROJECT_SOURCE_DIR})
-  target_link_libraries(llama_forward_runner PRIVATE trtmc_model_llama trtmc_backend_trt
-    trtmc_core nlohmann_json::nlohmann_json)
 endif()
 
 include(edge_llm/Adapter.cmake)

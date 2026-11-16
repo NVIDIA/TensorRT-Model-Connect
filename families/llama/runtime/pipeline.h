@@ -39,7 +39,7 @@ struct LlamaTextGenConfig {
     std::string present_v_pattern{"present_v_{i}"};
     int32_t prefill_max_length{0};
     int32_t num_layers{0};
-    bool single_forward{false}; // Internal bringup: stop at full-sequence logits.
+    bool single_forward{false}; // Internal single forward pass: stop at full-sequence logits.
 };
 
 class LlamaTextGenerationPipeline final : public ITextGeneration {

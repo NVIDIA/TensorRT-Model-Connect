@@ -74,7 +74,7 @@ def _build_engine(
     single_forward: bool = False,
 ) -> bytes:
     if single_forward:
-        # Internal bringup only: one full-sequence enqueue, without KV state.
+        # Internal single forward pass: one full-sequence enqueue, without KV state.
         if quant_ctx is not None or weights.get("_prepared_quantized", False) or config.raw.get("quantization_config"):
             raise NotImplementedError("single forward requires unquantized weights")
         rope = config.raw.get("rope_parameters") or config.raw.get("rope_scaling")

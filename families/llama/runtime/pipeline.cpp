@@ -112,7 +112,7 @@ TextResult LlamaTextGenerationPipeline::generate(const std::string& prompt,
                                                  const TextGenerationConfig& cfg) {
 
     if (config_.single_forward)
-        throw std::invalid_argument("bringup single forward requires token IDs");
+        throw std::invalid_argument("single forward pass requires token IDs");
     auto input_ids = encode_prompt(*tokenizer_, config_, prompt, cfg);
     int32_t max_new = (cfg.max_new_tokens > 0) ? cfg.max_new_tokens : 128;
     auto sp = llama_sampling_params_from_config(cfg, config_.id_eos_ids);
@@ -137,13 +137,13 @@ LlamaTextGenerationPipeline::generate_ids(const std::vector<int32_t>& input_ids,
     if (config_.single_forward) {
         const auto length = static_cast<int64_t>(input_ids.size());
         if (length < 1 || length > config_.prefill_max_length)
-            throw std::invalid_argument("single-forward input exceeds the engine profile");
+            throw std::invalid_argument("single forward pass input exceeds the engine profile");
         for (auto id : input_ids)
             if (id < 0 || id >= config_.vocab_size)
-                throw std::invalid_argument("single-forward token ID outside vocabulary");
+                throw std::invalid_argument("single forward pass token ID outside vocabulary");
         std::vector<int32_t> positions(input_ids.size());
         std::iota(positions.begin(), positions.end(), 0);
-        // Bringup recsys uses is_causal=False, all-valid tokens, positions 0..L-1.
+        // The single forward pass uses is_causal=False, all-valid tokens, positions 0..L-1.
         std::vector<float> mask(input_ids.size() * input_ids.size(), 0.0F);
         const auto outputs = decoder_->forward({
             {"token_id", {const_cast<int32_t*>(input_ids.data()), {length}, DType::kInt32}},
@@ -153,7 +153,7 @@ LlamaTextGenerationPipeline::generate_ids(const std::vector<int32_t>& input_ids,
         const auto& logits = outputs.at(logits_output_name_);
         if (logits.dtype != DType::kFloat32 ||
             logits.shape != std::vector<int64_t>{length, config_.vocab_size})
-            throw std::runtime_error("single-forward engine must return all sequence logits");
+            throw std::runtime_error("single forward pass engine must return all sequence logits");
         const auto* values = static_cast<const float*>(logits.data);
         return GenerationResult{input_ids, {values, values + logits.numel()}};
     }
