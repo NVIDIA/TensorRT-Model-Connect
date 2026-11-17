@@ -41,6 +41,40 @@ def _path(name):
     return Path(value).absolute()
 
 
+def _validate_bundle(inspection):
+    assert inspection["family"] == MANIFEST["family"]
+    assert inspection["task"] == MANIFEST["task"] and inspection["backend"] == "trt"
+    provenance = inspection.get("provenance")
+    assert isinstance(provenance, dict) and provenance.get("version") == 1, (
+        "Molmo2 qualification requires recorded build provenance"
+    )
+    assert provenance.get("checkpoint") == {
+        "hf_id": MANIFEST["hf_id"],
+        "revision": MANIFEST["hf_revision"],
+    }, "Molmo2 bundle checkpoint identity does not match the selected manifest"
+    expected = {
+        "precision": MANIFEST["precision"],
+        "max_sequence_length": MANIFEST["max_sequence_length"],
+        "tensor_parallel_size": MANIFEST["tensor_parallel_size"],
+        "context_parallel_size": 1,
+        "max_batch_size": 1,
+        "image_height": None,
+        "image_width": None,
+        "video_num_frames": None,
+        "quantization": None,
+        "fp32_layers": [],
+        "dynamic_kv_cache": False,
+        "mtp_seq_len": None,
+        "graph_transform": False,
+    }
+    recorded = provenance.get("build")
+    assert isinstance(recorded, dict), "Molmo2 bundle has no recorded build settings"
+    for name, value in expected.items():
+        assert (
+            name in recorded and type(recorded[name]) is type(value) and recorded[name] == value
+        ), f"Molmo2 bundle build.{name} does not match the selected manifest"
+
+
 @pytest.fixture(scope="session")
 def artifacts(tmp_path_factory):
     root = tmp_path_factory.mktemp("molmo2")
@@ -64,9 +98,7 @@ def artifacts(tmp_path_factory):
     inspection = json.loads(
         subprocess.check_output([str(binary), "inspect", str(bundle)], text=True)
     )
-    assert inspection["family"] == "molmo2"
-    assert inspection["task"] == MANIFEST["task"] and inspection["backend"] == "trt"
-    assert inspection["provenance"]["build"]["precision"] == MANIFEST["precision"]
+    _validate_bundle(inspection)
     reference = os.environ.get("TRTMC_MOLMO2_REFERENCE_RESULTS")
     if reference:
         reference = Path(reference)

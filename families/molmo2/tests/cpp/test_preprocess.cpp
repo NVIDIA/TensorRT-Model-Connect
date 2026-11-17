@@ -27,6 +27,10 @@ void write(const std::string& path, const std::vector<T>& values) {
 } // namespace
 int main(int argc, char** argv) {
     try {
+        require(trtmc::molmo2::detail::rgb_index(29999, 29999, 30000, 2) == 2699999999ULL,
+                "large image RGB offsets must not overflow signed int");
+        require(trtmc::molmo2::detail::rgb_index(32767, 32767, 32768, 2) == 3221225471ULL,
+                "maximum accepted image RGB offsets must retain their full range");
         if (argc == 7) {
             int h = std::stoi(argv[1]), w = std::stoi(argv[2]);
             std::vector<float> pixels(static_cast<std::size_t>(h) * w * 3);

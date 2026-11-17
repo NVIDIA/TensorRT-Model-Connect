@@ -80,6 +80,12 @@ not satisfy the upstream reference's 4.57.1 requirement.
 By default E2E builds a fresh bundle and runs the independent reference. For
 an explicitly prepared bundle/reference run, the test accepts
 `TRTMC_MOLMO2_BUNDLE` and `TRTMC_MOLMO2_REFERENCE_RESULTS`.
+Before generation, qualification checks the builder-recorded Hub identity and
+all recorded build settings against the selected manifest, including the
+2,048-token sequence limit. Use a checkpoint path resolving to the pinned Hub
+snapshot so the builder can record its identity. Bundles with missing or
+mismatched provenance are rejected; the recorded identity remains metadata
+and does not authenticate the contents of supplied local files.
 
 Video, multiple images, batching, parallel execution, quantization, FP16,
 sampling, system prompts, and LoRA are outside this initial path. FP32 graph

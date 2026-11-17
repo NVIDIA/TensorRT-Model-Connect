@@ -133,7 +133,7 @@ class Pipeline final : public ITextGeneration, public IVisionLanguageGeneration 
         checked(cudaMemcpyAsync(features.data(), vision_->device_ptr("features"),
                                 features.size() * sizeof(float), cudaMemcpyDeviceToHost,
                                 vision_->stream()));
-        vision_->sync();
+        checked(cudaStreamSynchronize(vision_->stream()));
         auto result = generate_ids(ids, features, cfg);
         result.setup_ms = milliseconds(started) - result.prefill_ms - result.decode_ms;
         return result;
@@ -213,7 +213,7 @@ class Pipeline final : public ITextGeneration, public IVisionLanguageGeneration 
         checked(cudaMemcpyAsync(logits.data(), decoder_->device_ptr("logits"),
                                 logits.size() * sizeof(float), cudaMemcpyDeviceToHost,
                                 decoder_->stream()));
-        decoder_->sync();
+        checked(cudaStreamSynchronize(decoder_->stream()));
         if (!std::all_of(logits.begin(), logits.end(), [](float x) { return std::isfinite(x); }))
             throw std::runtime_error("Molmo2 produced nonfinite logits");
         return logits;

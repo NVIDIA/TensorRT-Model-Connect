@@ -3,11 +3,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace trtmc::molmo2 {
+namespace detail {
+constexpr std::size_t rgb_index(std::size_t row, std::size_t column, std::size_t width,
+                                std::size_t channel) {
+    return (row * width + column) * 3 + channel;
+}
+} // namespace detail
 struct ImageInputs {
     std::vector<float> pixels;
     std::vector<std::int32_t> pooling;

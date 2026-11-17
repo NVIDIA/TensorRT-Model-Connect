@@ -19,8 +19,14 @@ int main(int argc, char** argv) {
                                std::istreambuf_iterator<char>());
         auto tokenizer = trtmc::molmo2::CreateBpeTokenizer(text.data(), text.size(), false);
         nlohmann::json output = nlohmann::json::array();
-        for (int i = 2; i < argc; ++i)
-            output.push_back(tokenizer->encode(argv[i]));
+        if (argc == 3 && std::string(argv[2]) == "--decode") {
+            const auto sequences = nlohmann::json::parse(std::cin);
+            for (const auto& ids : sequences)
+                output.push_back(tokenizer->decode(ids.get<std::vector<std::int32_t>>()));
+        } else {
+            for (int i = 2; i < argc; ++i)
+                output.push_back(tokenizer->encode(argv[i]));
+        }
         std::cout << output.dump() << '\n';
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

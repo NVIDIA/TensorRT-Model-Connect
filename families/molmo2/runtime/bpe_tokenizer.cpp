@@ -18,6 +18,7 @@
 #include <unicode/bytestream.h>
 #include <unicode/normalizer2.h>
 #include <unicode/uchar.h>
+#include <unicode/unistr.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -997,7 +998,11 @@ class BpeTokenizer final : public ITokenizer {
                 result.append(text, start, pos - start);
             }
         }
-        return result;
+        // Decode only after joining every token's bytes: a character may span
+        // tokens, while generation can stop partway through its UTF-8 sequence.
+        std::string decoded;
+        icu::UnicodeString::fromUTF8(icu::StringPiece(result)).toUTF8String(decoded);
+        return decoded;
     }
 
     // Generic pre-tokenizer used when no GPT-2 pattern is declared.

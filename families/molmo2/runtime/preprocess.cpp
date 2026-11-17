@@ -62,10 +62,10 @@ std::vector<float> resize(const float* source, int height, int width, int out_h,
                       x1 = std::min(x0 + 1, width - 1);
             const float dx = fx - x0;
             for (int c = 0; c < 3; ++c) {
-                const float top = source[(y0 * width + x0) * 3 + c] * (1 - dx) +
-                                  source[(y0 * width + x1) * 3 + c] * dx;
-                const float bottom = source[(y1 * width + x0) * 3 + c] * (1 - dx) +
-                                     source[(y1 * width + x1) * 3 + c] * dx;
+                const float top = source[detail::rgb_index(y0, x0, width, c)] * (1 - dx) +
+                                  source[detail::rgb_index(y0, x1, width, c)] * dx;
+                const float bottom = source[detail::rgb_index(y1, x0, width, c)] * (1 - dx) +
+                                     source[detail::rgb_index(y1, x1, width, c)] * dx;
                 const float value = std::nearbyint(top * (1 - dy) + bottom * dy);
                 result[(static_cast<std::size_t>(y) * out_w + x) * 3 + c] =
                     (value / 255.0F - 0.5F) / 0.5F;
@@ -82,8 +82,8 @@ void append_patches(std::vector<float>& output, const std::vector<float>& image,
             for (int dy = 0; dy < 14; ++dy)
                 for (int dx = 0; dx < 14; ++dx)
                     for (int c = 0; c < 3; ++c)
-                        output.push_back(
-                            image[((y0 + py * 14 + dy) * width + x0 + px * 14 + dx) * 3 + c]);
+                        output.push_back(image[detail::rgb_index(y0 + py * 14 + dy,
+                                                                 x0 + px * 14 + dx, width, c)]);
 }
 } // namespace
 
