@@ -49,6 +49,11 @@ The native primary task is `text_continuation`, exposed through the public
 For instruction requests, apply the checkpoint's chat template before passing
 the prefix. Runtime configuration accepts `max_new_tokens` and `seed`.
 
+Returned text contains the answer outside the checkpoint's thought-channel
+blocks. The raw generated token IDs retain those blocks, including the empty
+thought channel that can appear when thinking is disabled, as described in the
+[checkpoint's thinking-mode documentation](https://huggingface.co/google/diffusiongemma-26B-A4B-it/blob/f7f5b7f5fa82ffc52addd066915886d497f5517b/README.md#2-thinking-mode-configuration).
+
 ## Validate the exact checkpoint
 
 Build `trtmc`, `trtmc_backend_trt`, `trtmc_model_diffusion_gemma`,

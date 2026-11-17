@@ -34,6 +34,25 @@ std::string trim(std::string value) {
     return value.substr(start, end - start + 1);
 }
 
+std::string response_text(const ITokenizer& tokenizer, const std::vector<std::int32_t>& token_ids) {
+    // The checkpoint emits a thought channel even when thinking is disabled.
+    // Remove the complete channel before decoding: skipping its special-token
+    // boundaries alone leaves the ordinary header token "thought" in the answer.
+    const auto channel_start = tokenizer.id_for_token("<|channel>");
+    const auto channel_end = tokenizer.id_for_token("<channel|>");
+    std::vector<std::int32_t> visible;
+    bool inside_channel = false;
+    for (const auto id : token_ids) {
+        if (id == channel_start)
+            inside_channel = true;
+        else if (id == channel_end)
+            inside_channel = false;
+        else if (!inside_channel)
+            visible.push_back(id);
+    }
+    return tokenizer.decode(visible);
+}
+
 void check_legacy_options(const TextGenerationConfig& config) {
     if (config.temperature != 1.0F || config.top_k != 1 || config.top_p != 1.0F ||
         config.min_p != 0.0F || config.repetition_penalty != 1.0F)
@@ -120,7 +139,7 @@ TextResult Pipeline::generate_ids(const std::vector<std::int32_t>& prompt,
             encode_tokens(final_canvas, false);
     }
     result.decode_ms = elapsed_ms(decode_start);
-    result.text = tokenizer_->decode(result.token_ids);
+    result.text = response_text(*tokenizer_, result.token_ids);
     return result;
 }
 
