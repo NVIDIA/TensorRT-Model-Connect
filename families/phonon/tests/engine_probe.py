@@ -11,7 +11,8 @@ import numpy as np
 
 def section(bundle, name):
     with bundle.open("rb") as stream:
-        assert stream.read(8) == b"BUNDLE\x01\x00"
+        if stream.read(8) != b"BUNDLE\x01\x00":
+            raise ValueError("Phonon probe received an invalid bundle header")
         size = struct.unpack("<Q", stream.read(8))[0]
         header = json.loads(stream.read(size))
         info = header["sections"][name]
@@ -24,16 +25,21 @@ def execute(plan, inputs):
     from cuda.bindings import runtime as cuda
 
     def checked(result):
-        assert int(result[0]) == 0, result[0]
+        if int(result[0]) != 0:
+            raise RuntimeError(f"CUDA operation failed: {result[0]}")
         return result[1] if len(result) > 1 else None
 
     logger = trt.Logger(trt.Logger.ERROR)
     runtime = trt.Runtime(logger)
     engine = runtime.deserialize_cuda_engine(plan)
-    assert engine is not None
+    if engine is None:
+        raise RuntimeError("Phonon probe could not deserialize the engine")
     context = engine.create_execution_context()
+    if context is None:
+        raise RuntimeError("Phonon probe could not create an execution context")
     for name, value in inputs.items():
-        assert context.set_input_shape(name, value.shape)
+        if not context.set_input_shape(name, value.shape):
+            raise RuntimeError(f"Phonon probe rejected input shape for {name}")
     buffers, outputs, arrays = [], {}, {}
     try:
         for i in range(engine.num_io_tensors):
@@ -48,7 +54,8 @@ def execute(plan, inputs):
             arrays[name] = value
             pointer = checked(cuda.cudaMalloc(value.nbytes))
             buffers.append(pointer)
-            assert context.set_tensor_address(name, pointer)
+            if not context.set_tensor_address(name, pointer):
+                raise RuntimeError(f"Phonon probe could not bind tensor {name}")
             if name in inputs:
                 checked(
                     cuda.cudaMemcpy(
@@ -58,7 +65,8 @@ def execute(plan, inputs):
                         cuda.cudaMemcpyKind.cudaMemcpyHostToDevice,
                     )
                 )
-        assert context.execute_async_v3(0)
+        if not context.execute_async_v3(0):
+            raise RuntimeError("Phonon probe engine execution failed")
         checked(cuda.cudaDeviceSynchronize())
         for name, value in outputs.items():
             checked(

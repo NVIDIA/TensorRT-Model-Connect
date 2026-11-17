@@ -3,6 +3,8 @@
 
 """Phonon ownership must not claim Pocket TTS or unrelated speech models."""
 
+import pytest
+
 from families.phonon.support import describe
 from tensorrt_model_connect.model_support import ModelMetadata, resolve_family
 
@@ -26,3 +28,22 @@ def test_architecture_identity():
         config={"architectures": ["GradiumPhononTTSForConditionalGeneration"]}, model_index={}
     )
     assert describe(metadata).default_task == "text_to_speech"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("hidden_size", 768),
+        ("num_hidden_layers", 12),
+        ("hidden_act", "silu"),
+        ("flow_lm", {"gelu": "tanh"}),
+        ("flow_lm", {"time_rms_norm": "layer_norm"}),
+        ("mimi", {"sample_rate": 48000}),
+        ("flow_head_config", {"latent_dim": 64}),
+    ],
+)
+def test_unsupported_checkpoint_geometry_is_not_owned(field, value):
+    metadata = ModelMetadata(
+        config={"model_type": "gradium_phonon_tts", field: value}, model_index={}
+    )
+    assert describe(metadata) is None

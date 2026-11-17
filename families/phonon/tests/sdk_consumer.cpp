@@ -49,8 +49,31 @@ int main(int argc, char** argv) {
         for (const auto value : saved)
             if (!std::isfinite(value))
                 throw std::runtime_error("Phonon returned nonfinite PCM");
+
+        const trtmc::Config sampled{{"temperature", 0.3}, {"seed", std::int64_t{42}}};
+        const auto stochastic = task.run({"Hello from Phonon.", "en"}, sampled);
+        const std::vector<float> stochastic_saved(stochastic.samples().begin(),
+                                                  stochastic.samples().end());
+        if (stochastic_saved.empty() || stochastic_saved == saved)
+            throw std::runtime_error("Phonon nonzero temperature did not affect sampling");
+        task.run({"Hello from Phonon.", "en"}, {{"temperature", 0.3}, {"seed", std::int64_t{43}}});
+        const auto repeated = task.run({"Hello from Phonon.", "en"}, sampled);
+        if (repeated.samples().size() != stochastic_saved.size() ||
+            !std::equal(stochastic_saved.begin(), stochastic_saved.end(),
+                        repeated.samples().begin()))
+            throw std::runtime_error("Phonon seeded output changed after an intervening request");
+        auto independent_model = trtmc::Model::load(argv[1], options);
+        const auto independent = independent_model.task<trtmc::TextToSpeech>().run(
+            {"Hello from Phonon.", "en"}, sampled);
+        if (independent.samples().size() != stochastic_saved.size() ||
+            !std::equal(stochastic_saved.begin(), stochastic_saved.end(),
+                        independent.samples().begin()))
+            throw std::runtime_error("Phonon seeded output changed across model loads");
+        if (!std::equal(stochastic_saved.begin(), stochastic_saved.end(),
+                        stochastic.samples().begin()))
+            throw std::runtime_error("Phonon sampled result storage changed after later requests");
         std::cout << "Phonon C++ SDK: deterministic reuse, language/seed rejection and retained "
-                     "result passed\n";
+                     "result plus seeded stochastic sampling passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

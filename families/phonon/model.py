@@ -8,67 +8,7 @@ import io
 import json
 
 
-def _validate_architecture(config):
-    expected = {
-        "model_type": "gradium_phonon_tts",
-        "hidden_size": 512,
-        "num_hidden_layers": 6,
-        "num_attention_heads": 8,
-        "num_key_value_heads": 8,
-        "head_dim": 64,
-        "intermediate_size": 2048,
-        "latent_dim": 32,
-        "audio_prompt_dim": 512,
-        "hidden_act": "gelu",
-        "attention_bias": False,
-        "layer_norm_eps": 1e-5,
-        "vocab_size": 4001,
-    }
-    for name, value in expected.items():
-        if config.get(name) != value:
-            raise ValueError(f"unsupported Phonon architecture: {name}={config.get(name)!r}")
-    flow = config["flow_head_config"]
-    for name, value in {
-        "flow_type": "lsd",
-        "hidden_size": 512,
-        "num_hidden_layers": 6,
-        "latent_dim": 32,
-        "condition_dim": 512,
-        "hidden_act": "silu",
-        "layer_norm_eps": 1e-6,
-        "rms_norm_eps": 1e-5,
-    }.items():
-        if flow.get(name) != value:
-            raise ValueError(f"unsupported Phonon flow head: {name}")
-    mimi = config["mimi"]
-    expected_codec = {
-        "channels": 1,
-        "sample_rate": 24000,
-        "frame_rate": 12.5,
-        "dimension": 512,
-        "quantizer_dimension": 32,
-        "quantizer_output_dimension": 512,
-        "n_filters": 64,
-        "n_residual_layers": 1,
-        "ratios": [6, 5, 4],
-        "kernel_size": 7,
-        "last_kernel_size": 3,
-        "residual_kernel_size": 3,
-        "compress": 2,
-        "transformer_d_model": 512,
-        "transformer_num_heads": 8,
-        "transformer_num_layers": 2,
-        "transformer_context": 250,
-        "transformer_max_period": 10000.0,
-        "gelu": "erf",
-    }
-    for name, value in expected_codec.items():
-        if mimi.get(name) != value:
-            raise ValueError(f"unsupported Phonon audio decoder: {name}")
-    if config.get("rope_parameters") != {"rope_type": "default", "rope_theta": 10000.0}:
-        raise ValueError("unsupported Phonon rotary embeddings")
-    if config.get("flow_lm", {}).get("time_rms_norm") != "rms":
-        raise ValueError("unsupported Phonon timestep normalization")
+from .support import _validate_architecture
 
 
 def _engine(module, inputs, names, outputs, dynamic_axes, shapes, verbose):

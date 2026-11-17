@@ -54,13 +54,15 @@ def run(root, text, destination):
             np.random.default_rng(42).standard_normal((1, 32)).astype(np.float32)
         )
         latent = model.sample_latent(condition, noise, 1)
+        tail_frames = 3 if len(text.split()) <= 4 else 1
+        minimum_frames = model.generation_config.min_frames_before_eos
         generated = model.generate(
             input_ids=ids,
             audio_prompt_latents=voice,
             do_sample=False,
             num_flow_steps=1,
             eos_threshold=4.0,
-            frames_after_eos=3 if len(text.split()) <= 4 else 1,
+            frames_after_eos=tail_frames,
             max_new_tokens=int(np.ceil((len(tokens) / 3 + 2) * 12.5)),
             output_logits=True,
             return_dict_in_generate=True,
@@ -78,6 +80,9 @@ def run(root, text, destination):
         normalized_latents=normalized.numpy(),
         pcm=pcm.numpy(),
         eos_trace=torch.stack(generated.logits).numpy(),
+        eos_threshold=np.asarray(4.0),
+        min_frames_before_eos=np.asarray(minimum_frames),
+        frames_after_eos=np.asarray(tail_frames),
     )
 
 

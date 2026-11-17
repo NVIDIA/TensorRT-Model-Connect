@@ -17,10 +17,10 @@ period appended to text ending in an alphanumeric character.
 
 ## Build and run
 
-Prepare the checkout using `apps/devtoolkit`; select `family="phonon"` to install
-this family's optional reference dependency. The builder uses the base
-PyTorch, ONNX, safetensors and TensorRT packages. The additional Transformers
-dependency is pinned to the official implementation used by the tests.
+Prepare the checkout using `apps/devtoolkit` with `family="phonon"`. The builder
+uses the base PyTorch, ONNX, safetensors and TensorRT packages. The official
+reference has a separate pinned dependency in `tests/requirements.txt` so it
+does not replace the builder's Transformers version.
 
 From the checkout root in the prepared development environment:
 
@@ -84,7 +84,7 @@ export TRTMC_RUNTIME_ROOT="$PWD/build"
 export TRTMC_NATIVE_BUILD_DIR="$PWD/build"
 # Optional: explicit local copy of the pinned checkpoint.
 export TRTMC_PHONON_MODEL_DIR=/absolute/path/to/checkpoint
-# Optional: a separate interpreter containing the pinned family requirements and torch.
+# Optional: a separate interpreter containing tests/requirements.txt and torch.
 export TRTMC_PHONON_REFERENCE_PYTHON=/absolute/path/to/reference/python
 
 PYTHONPATH=core/builder:apps/benchmark:. python -m tools.model_ci validate
@@ -95,9 +95,16 @@ git diff --check
 ```
 
 Without `TRTMC_PHONON_MODEL_DIR`, tests require the exact revision in the local
-Hugging Face cache. Without a separate reference interpreter, the test
-interpreter must contain `families/phonon/requirements.txt`. Missing execution
-prerequisites fail an explicitly selected E2E instead of producing a skip.
+Hugging Face cache. Without a separate reference interpreter, prepare the
+manifest's reference environment after building the wheel:
+
+```bash
+MODEL=phonon python -m tools.ci pipeline setup
+```
+
+The existing setup stage installs
+`tests/requirements.txt` in that environment. Missing execution prerequisites
+fail an explicitly selected E2E instead of producing a skip.
 
 The independent oracle is the official Transformers Phonon implementation and
 its official Mimi checkpoint conversion. It imports no family graph code.
@@ -105,5 +112,7 @@ Tests compare transformer conditions and EOS logits, a nonzero-noise flow
 sample, the decoded official latents, and complete native waveforms. Short and
 longer sentences exercise both EOS tail policies and Mimi's attention window.
 The C/C++ consumers test public Task execution, repeated requests, unsupported
-language rejection and retained result storage. Acceptance limits are owned
+language rejection and retained result storage. The C++ consumer also checks
+nonzero-temperature seeded sampling after intervening requests and across
+independent model loads. Acceptance limits are owned
 by `tests/test_e2e.py`; no upstream reference or passing criterion is relaxed.

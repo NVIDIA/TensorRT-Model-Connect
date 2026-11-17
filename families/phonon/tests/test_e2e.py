@@ -8,14 +8,15 @@ import os
 from pathlib import Path
 import struct
 import subprocess
-import sys
 
 import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.ci.environment import prepared_python
 from tools.e2e_evidence import evidence_stage, record_evidence
 from .engine_probe import execute, section
+from .validation import assert_complete_eos
 
 ROOT = Path(__file__).resolve().parent
 FAMILY = "phonon"
@@ -124,7 +125,11 @@ def test_direct_e2e(case_name, tmp_path):
         )
     with evidence_stage("reference"):
         reference = tmp_path / "official.npz"
-        interpreter = os.environ.get("TRTMC_PHONON_REFERENCE_PYTHON", sys.executable)
+        interpreter = os.environ.get("TRTMC_PHONON_REFERENCE_PYTHON")
+        if interpreter is None:
+            if manifest["reference_environment"] != "isolated":
+                raise ValueError("Phonon requires an isolated official reference environment")
+            interpreter = prepared_python(ROOT.parents[2], FAMILY, dict(os.environ))
         subprocess.run(
             [
                 interpreter,
@@ -193,7 +198,13 @@ def test_direct_e2e(case_name, tmp_path):
         assert rmse <= limits["waveform_rmse"]
         assert correlation >= limits["waveform_correlation"]
         # The selected reference must terminate through EOS, rather than its frame cap.
-        assert np.any(ref["eos_trace"] > 4.0)
+        first_eos = assert_complete_eos(
+            ref["eos_trace"],
+            float(ref["eos_threshold"]),
+            int(ref["min_frames_before_eos"]),
+            int(ref["frames_after_eos"]),
+        )
+        record_evidence("first_eligible_eos_frame", first_eos)
     with evidence_stage("sdk"):
         native_build = Path(os.environ["TRTMC_NATIVE_BUILD_DIR"])
         encoded = subprocess.run(

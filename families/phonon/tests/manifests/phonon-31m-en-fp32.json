@@ -6,6 +6,7 @@
   "family": "phonon",
   "task": "text_to_speech",
   "precision": "fp32",
+  "reference_environment": "isolated",
   "tensor_parallel_size": 1,
   "max_sequence_length": 256,
   "testcases": [
