@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from families.bevfusion.model import build_engine
+from families.bevfusion.calibrate_fp8_scales import calibrate
 from families.bevfusion.quantization import (
     CONVOLUTIONS,
     DEFAULT_EXCLUSIONS,
@@ -16,6 +17,20 @@ from families.bevfusion.quantization import (
     load_scales,
     quantize_weight,
 )
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"first_seed": -1},
+        {"samples": 0},
+        {"exclude": ["unknown"]},
+        {"exclude": list(CONVOLUTIONS)},
+    ],
+)
+def test_calibration_rejects_invalid_input_before_loading_modelopt(tmp_path, options):
+    with pytest.raises(ValueError, match="calibration requires"):
+        calibrate(tmp_path, tmp_path / SCALES_FILE, **options)
 
 
 def test_provided_recipe_has_disjoint_calibration_and_validation_seeds():
