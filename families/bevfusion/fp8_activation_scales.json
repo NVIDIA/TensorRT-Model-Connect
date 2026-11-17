@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "checkpoint_key": "bevfusion-bev128-7.95188096e+04-4.97339318e+02",
+  "calibration": {
+    "checkpoint_file": "bevfusion-seg.pth",
+    "architecture_revision": "326653dc06e0938edf1aae7d01efcd158ba83de5",
+    "modelopt_version": "0.46.0",
+    "torch_version": "2.12.0+cu130",
+    "algorithm": "max",
+    "input_distribution": "numpy default_rng standard_normal float32",
+    "input_shapes": {
+      "camera_bev": [
+        1,
+        80,
+        128,
+        128
+      ],
+      "lidar_bev": [
+        1,
+        256,
+        128,
+        128
+      ]
+    },
+    "first_seed": 32,
+    "samples": 32,
+    "excluded_layers": [
+      "decoder.backbone.blocks.0.0",
+      "decoder.backbone.blocks.0.12",
+      "decoder.backbone.blocks.0.15",
+      "decoder.backbone.blocks.0.3",
+      "decoder.backbone.blocks.0.6",
+      "decoder.backbone.blocks.0.9",
+      "decoder.backbone.blocks.1.0",
+      "decoder.backbone.blocks.1.12",
+      "decoder.backbone.blocks.1.15",
+      "decoder.backbone.blocks.1.3",
+      "decoder.backbone.blocks.1.6",
+      "decoder.backbone.blocks.1.9",
+      "fuser.0"
+    ]
+  },
+  "layers": {
+    "fuser.0": null,
+    "decoder.backbone.blocks.0.0": null,
+    "decoder.backbone.blocks.0.3": null,
+    "decoder.backbone.blocks.0.6": null,
+    "decoder.backbone.blocks.0.9": null,
+    "decoder.backbone.blocks.0.12": null,
+    "decoder.backbone.blocks.0.15": null,
+    "decoder.backbone.blocks.1.0": null,
+    "decoder.backbone.blocks.1.3": null,
+    "decoder.backbone.blocks.1.6": null,
+    "decoder.backbone.blocks.1.9": null,
+    "decoder.backbone.blocks.1.12": null,
+    "decoder.backbone.blocks.1.15": null,
+    "decoder.neck.deblocks.0.0": 0.013463994222027915,
+    "heads.map.classifier.0": 0.005511807011706489,
+    "heads.map.classifier.3": 0.004898044679846082
+  }
+}

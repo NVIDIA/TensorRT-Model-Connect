@@ -5,6 +5,7 @@
 import json
 import os
 from pathlib import Path
+import struct
 import subprocess
 
 import numpy as np
@@ -44,6 +45,32 @@ def _enabled(config, name):
         and (not models or "bevfusion" in models or name in models)
         and (not cases or name in cases)
     )
+
+
+def _inspect_fp8_engine(bundle, output):
+    """Require engine evidence of FP8 activation and convolution-weight execution."""
+    import tensorrt as trt
+
+    with bundle.open("rb") as source:
+        assert source.read(8) == b"BUNDLE\x01\x00"
+        size = struct.unpack("<Q", source.read(8))[0]
+        section = json.loads(source.read(size))["sections"]["engine.plan"]
+        source.seek(16 + size + section["offset"])
+        plan = source.read(section["length"])
+    logger = trt.Logger(trt.Logger.WARNING)
+    runtime = trt.Runtime(logger)
+    engine = runtime.deserialize_cuda_engine(plan)
+    inspector = engine.create_engine_inspector()
+    information = json.loads(inspector.get_engine_information(trt.LayerInformationFormat.JSON))
+    output.write_text(json.dumps(information, indent=2) + "\n")
+    layers = [
+        layer["Name"]
+        for layer in information["Layers"]
+        if any(value.get("Datatype") == "FP8" for value in layer.get("Inputs", []))
+        and any(value.get("Datatype") == "FP8" for value in layer.get("Constants", []))
+    ]
+    assert layers, "FP8 build must execute convolutions with FP8 activations and weights"
+    record_evidence("fp8_execution", {"layer_count": len(layers), "layers": layers})
 
 
 @pytest.mark.e2e
@@ -101,9 +128,12 @@ def test_official_bev_checkpoint(name, request, tmp_path):
                 family="bevfusion",
                 task=manifest["task"],
                 precision=manifest["precision"],
+                quantization=manifest.get("quantization"),
                 tensor_parallel_size=manifest["tensor_parallel_size"],
             )
         )
+    if manifest.get("quantization") == "fp8":
+        _inspect_fp8_engine(bundle, tmp_path / "engine-layers.json")
     previous = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
@@ -169,6 +199,15 @@ def test_official_bev_checkpoint(name, request, tmp_path):
                     assert report["engine_forward_calls_per_iteration"] == 1
                     assert report["transfers_included"] is False
                     assert np.isfinite(report["median_ms"]) and report["median_ms"] > 0
+                    if manifest.get("quantization") == "fp8":
+                        metadata = report["runtime_metadata"]
+                        assert metadata["quantization"] == "fp8" and metadata["fp8_layers"]
+                        calibration = metadata["calibration"]
+                        calibration_seeds = range(
+                            calibration["first_seed"],
+                            calibration["first_seed"] + calibration["samples"],
+                        )
+                        assert set(case["seeds"]).isdisjoint(calibration_seeds)
                 record_evidence("engine_performance", report)
         record_evidence(
             "metrics",

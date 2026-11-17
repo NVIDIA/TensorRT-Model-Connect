@@ -51,12 +51,13 @@ class Weights:
 
 
 class Graph:
-    def __init__(self, network, weights, precision):
+    def __init__(self, network, weights, precision, fp8_scales=None):
         import tensorrt as trt
 
         self.trt = trt
         self.network = network
         self.weights = weights
+        self.fp8_scales = fp8_scales or {}
         self.dtype = trt.float16 if precision == "fp16" else trt.float32
         self.numpy_dtype = np.float16 if precision == "fp16" else np.float32
         self.storage = []
@@ -78,14 +79,24 @@ class Graph:
         shape = (
             (inputs, channels, kernel, kernel) if transpose else (channels, inputs, kernel, kernel)
         )
-        weight = self.keep(self.weights.get(name + ".weight", shape), self.numpy_dtype)
+        source_weight = self.weights.get(name + ".weight", shape)
         offset = (
             self.keep(self.weights.get(name + ".bias", (channels,)), self.numpy_dtype)
             if bias
             else self.trt.Weights(self.dtype)
         )
-        add = self.network.add_deconvolution_nd if transpose else self.network.add_convolution_nd
-        layer = add(value, channels, (kernel, kernel), weight, offset)
+        if self.fp8_scales.get(name) is not None:
+            from .quantization import add_convolution
+
+            if transpose or bias:
+                raise ValueError("BEVFusion FP8 recipe requires ordinary, bias-free convolutions")
+            layer = add_convolution(self, value, source_weight, self.fp8_scales[name])
+        else:
+            weight = self.keep(source_weight, self.numpy_dtype)
+            add = (
+                self.network.add_deconvolution_nd if transpose else self.network.add_convolution_nd
+            )
+            layer = add(value, channels, (kernel, kernel), weight, offset)
         layer.name = name
         layer.stride_nd = (stride, stride)
         layer.padding_nd = (kernel // 2, kernel // 2) if not transpose else (0, 0)
@@ -164,19 +175,39 @@ class Graph:
         self.weights.finish()
 
 
-def build_engine(checkpoint: Path, precision="fp32", verbose=False) -> bytes:
+def build_engine(
+    checkpoint: Path, precision="fp32", verbose=False, quantization=None, *, metadata=None
+) -> bytes:
     """Build one fixed-shape BEV forward engine; inputs and output use FP32."""
     import tensorrt as trt
 
     if precision not in {"fp32", "fp16"}:
         raise ValueError("BEVFusion supports only fp32 and fp16")
+    if quantization not in (None, "none", "fp8"):
+        raise ValueError("BEVFusion supports only fp8 quantization or none")
+    if quantization == "fp8" and precision != "fp16":
+        raise ValueError("BEVFusion FP8 requires precision fp16")
+    weights = Weights(Path(checkpoint))
+    fp8_scales, calibration = {}, None
+    if quantization == "fp8":
+        from .quantization import load_scales
+
+        fp8_scales, calibration = load_scales(checkpoint, weights.values)
+    if metadata is not None:
+        metadata.update(
+            quantization=quantization or "none",
+            fp8_layers=[name for name, scale in fp8_scales.items() if scale is not None],
+            calibration=calibration,
+        )
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
-    graph = Graph(network, Weights(Path(checkpoint)), precision)
+    graph = Graph(network, weights, precision, fp8_scales)
     graph.create()
     config = builder.create_builder_config()
     config.builder_optimization_level = 3
+    if fp8_scales:
+        config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
     config.clear_flag(trt.BuilderFlag.TF32)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 * 1024**3)
     plan = builder.build_serialized_network(network, config)
@@ -208,16 +239,18 @@ def build(request, writer):
         raise ValueError("BEVFusion uses fixed BEV feature shapes without text/image/video options")
     if request.dynamic_kv_cache:
         raise NotImplementedError("bevfusion does not support dynamic_kv_cache")
-    if request.quantization not in (None, "none") or request.fp32_layers:
-        raise ValueError(
-            "BEVFusion does not support KV caches, quantization or selected FP32 layers"
-        )
+    if request.fp32_layers:
+        raise ValueError("BEVFusion does not support KV caches or selected FP32 layers")
     checkpoint = Path(request.model_dir) / "bevfusion-seg.pth"
-    plan = build_engine(checkpoint, request.precision, request.verbose)
+    metadata = {}
+    plan = build_engine(
+        checkpoint, request.precision, request.verbose, request.quantization, metadata=metadata
+    )
     writer.set_header(family="bevfusion", task=request.task, backend=request.backend)
     writer.add_json(
         "runtime.json",
         {
+            **metadata,
             "precision": request.precision,
             "input_shapes": INPUT_SHAPES,
             "output_shape": OUTPUT_SHAPE,

@@ -23,9 +23,10 @@ Classes may overlap; scores retain independent sigmoid probabilities.
 
 The path starts at BEV feature tensors. Raw camera encoding/view transformation,
 LiDAR voxelization/sparse encoding, and dataset-level nuScenes evaluation are
-outside this family. FP32 and FP16 are supported; inputs/output and BatchNorm
-statistics remain FP32. BF16, quantization, other configurations, batching and
-parallel sharding are unsupported.
+outside this family. FP32 and FP16 are supported, along with FP8 quantization
+using FP16 graph boundaries; inputs/output and BatchNorm statistics remain FP32.
+BF16, other quantization formats/configurations, batching and parallel sharding
+are unsupported.
 
 ## Checkpoint and build
 
@@ -70,6 +71,53 @@ auto result = model.task<trtmc::SpatialFeaturesToClassScores>().run(request);
 auto scores = result.view(); // Owned result; scores.values is contiguous [6,200,200].
 ```
 
+## FP8 quantization
+
+Use the same official checkpoint with `precision="fp16", quantization="fp8"`:
+
+```python
+build(
+    BuildRequest(
+        model_dir=Path("artifacts/bevfusion/model"),
+        output_path=Path("artifacts/bevfusion/bevfusion-bev-fp8.bundle"),
+        family="bevfusion",
+        task="spatial_features_to_class_scores",
+        precision="fp16",
+        quantization="fp8",
+    )
+)
+```
+
+The family converts original convolution weights to E4M3 at build time using
+per-output-channel scales. Static per-tensor activation scales come from
+`fp8_activation_scales.json`; ModelOpt is only needed to regenerate them.
+Explicit Q/DQ describes the computation and TensorRT chooses its GPU lowering.
+The qualified recipe quantizes the ordinary FPN convolution and the two large
+512-channel map-head convolutions. The fuser and SECOND backbone stay FP16 based
+on separate tuning seeds 16..19. The transposed convolution and final six-class
+convolution also stay FP16; normalization, grid sampling and sigmoid preserve
+their FP32 boundaries. A null scale explicitly retains a convolution in FP16;
+missing/invalid scales are errors.
+
+The provided table uses the official weights and ModelOpt max calibration on
+synthetic standard-normal BEV features, seeds 32..63, at the fixed shapes above.
+It is intended for the feature-input performance workload. It does not establish
+nuScenes dataset accuracy or calibration for real sensor feature distributions.
+Numeric checkpoint weight summaries select the matching table. Other weights
+require recalibration; a table beside the checkpoint overrides the provided one:
+
+```bash
+python -m pip install nvidia-modelopt==0.46.0
+PYTHONPATH=core/builder:. python -m families.bevfusion.calibrate_fp8_scales \
+  --model-dir artifacts/bevfusion/model \
+  --output artifacts/bevfusion/model/fp8_activation_scales.json
+```
+
+Prepare the declared reference inputs first as described below. By default the
+developer tool uses the qualified three-convolution recipe. Supplying `--exclude`
+replaces its exclusion list with the explicitly named FP16 convolutions.
+The bundle records the quantized layer list and calibration provenance.
+
 ## Validate and benchmark
 
 Prepare the declared reference files at their recorded revision. The reference adapter
@@ -77,6 +125,7 @@ executes the upstream class bodies, replacing only registry and dependency
 plumbing with the corresponding PyTorch constructors. It loads every BEV-stage
 weight strictly. The test compares all output probabilities for seeds 0, 1 and 2
 against FP32 PyTorch with TF32 disabled: FP32 atol/rtol 0.0002; FP16 0.02.
+The FP8 testcase uses held-out seeds 0..7 with the same 0.02 probability tolerances.
 The native helper exercises bundle loading and the public Task, including
 reversed input order, repeated calls, class identity and result ownership.
 
@@ -108,8 +157,8 @@ build/test_bevfusion_sdk_cpp \
   artifacts/bevfusion/engine-fp16.json --engine-only
 ```
 
-Read `median_ms` and `p95_ms` from the output JSON. Use the FP32 bundle instead
-to measure FP32 execution with the same inputs.
+Read `median_ms` and `p95_ms` from the output JSON. Substitute the FP32 or FP8
+bundle and output filename to measure those modes with the same inputs.
 
 The existing source-derived benchmark runner uses randomly initialized weights and a transposed 1x1 first
 FPN branch. This family follows the selected upstream config's ordinary 1x1
