@@ -6,6 +6,14 @@ This family builds MPNet encoders as one TensorRT engine for the
 fp16, bf16 and fp32 with tensor parallelism (4 GPUs). Batch is 1. The window is
 static, so every call computes the full window.
 
+## Tokenizer validation
+
+The CPU CTest target `mpnet_tokenizer` checks Unicode cleaning, lowercasing,
+normalizer flags and special-token framing through the native tokenizer factory.
+The lowercase table is generated from `tokenizers==0.23.3`; regenerate it with
+`python families/mpnet/tools/generate_lowercase.py` in an environment with that
+version installed. The runtime does not depend on Python or `tokenizers`.
+
 ## Quantization
 
 `--precision fp16 --quantization fp8` quantizes the original checkpoint at build

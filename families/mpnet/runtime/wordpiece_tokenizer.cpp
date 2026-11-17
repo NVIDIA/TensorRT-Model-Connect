@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/mpnet/runtime/lowercase_data.h"
 #include "families/mpnet/runtime/tokenizer.h"
 
 #include <algorithm>
@@ -185,15 +186,15 @@ inline void nfd_decompose(char32_t cp, std::vector<char32_t>& out) {
     out.push_back(cp);
 }
 
-// Simple ASCII lowercase (handles A-Z only; full Unicode tolower is complex)
 inline char32_t to_lower(char32_t cp) {
-    if (cp >= 'A' && cp <= 'Z')
-        return cp + 32;
-    // Latin-1 Supplement uppercase
-    if (cp >= 0xC0 && cp <= 0xD6)
-        return cp + 32;
-    if (cp >= 0xD8 && cp <= 0xDE)
-        return cp + 32;
+    if (cp < 0x80)
+        return cp >= 'A' && cp <= 'Z' ? cp + 32 : cp;
+    const auto* ranges = mpnet_unicode::kLowercaseRanges;
+    const auto* end = ranges + sizeof(mpnet_unicode::kLowercaseRanges) / sizeof(*ranges);
+    const auto* range = std::lower_bound(
+        ranges, end, cp, [](const auto& entry, char32_t point) { return entry.last < point; });
+    if (range != end && cp >= range->first && (cp - range->first) % range->stride == 0)
+        return static_cast<char32_t>(static_cast<std::int32_t>(cp) + range->delta);
     return cp;
 }
 
@@ -244,7 +245,11 @@ std::string bert_lowercase(const std::string& text) {
     size_t pos = 0;
     while (pos < text.size()) {
         char32_t cp = utf8_to_char32(text, pos);
-        result += char32_to_utf8(to_lower(cp));
+        // Note (Jiaxin Deng): The reference expands dotted I into two Unicode scalars.
+        if (cp == 0x0130)
+            result += "i\xCC\x87";
+        else
+            result += char32_to_utf8(to_lower(cp));
     }
     return result;
 }
