@@ -15,6 +15,7 @@ import pytest
 from families.molmo2.tests.inputs import checkpoint_directory, native_tool
 from tensorrt_model_connect import BuildRequest, build
 from tools.e2e_evidence import record_evidence
+from tools.ci.environment import prepared_python
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST = json.loads((ROOT / "manifests/molmo2-8b.json").read_text())
@@ -39,6 +40,17 @@ def _path(name):
     # Resolving a venv's Python symlink selects the base interpreter and loses
     # the isolated reference dependencies.
     return Path(value).absolute()
+
+
+def _reference_python():
+    if "TRTMC_MOLMO2_REFERENCE_PYTHON" in os.environ:
+        python = _path("TRTMC_MOLMO2_REFERENCE_PYTHON")
+        assert python.is_file() and os.access(python, os.X_OK), (
+            "TRTMC_MOLMO2_REFERENCE_PYTHON is not an executable file"
+        )
+        return python
+    assert MANIFEST["reference_environment"] == "isolated"
+    return prepared_python(ROOT.parents[2], MANIFEST["family"], dict(os.environ))
 
 
 def _validate_bundle(inspection):
@@ -82,7 +94,11 @@ def artifacts(tmp_path_factory):
     runtime = _path("TRTMC_RUNTIME_ROOT")
     binary = _path("TRTMC_BINARY")
     bundle = Path(os.environ.get("TRTMC_MOLMO2_BUNDLE", root / MANIFEST["bundle"]))
+    reference = os.environ.get("TRTMC_MOLMO2_REFERENCE_RESULTS")
+    python = None
     if "TRTMC_MOLMO2_BUNDLE" not in os.environ:
+        if not reference:
+            python = _reference_python()
         build(
             BuildRequest(
                 checkpoint,
@@ -99,12 +115,11 @@ def artifacts(tmp_path_factory):
         subprocess.check_output([str(binary), "inspect", str(bundle)], text=True)
     )
     _validate_bundle(inspection)
-    reference = os.environ.get("TRTMC_MOLMO2_REFERENCE_RESULTS")
     if reference:
         reference = Path(reference)
     else:
         reference = root / "reference"
-        python = _path("TRTMC_MOLMO2_REFERENCE_PYTHON")
+        python = python or _reference_python()
         subprocess.run(
             [
                 str(python),

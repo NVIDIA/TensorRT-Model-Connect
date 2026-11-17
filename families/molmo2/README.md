@@ -59,7 +59,10 @@ Invalid explicit paths fail instead of selecting another snapshot.
 For direct E2E:
 
 ```bash
-export TRTMC_MOLMO2_REFERENCE_PYTHON=/path/to/reference/python
+# With the matching native wheel under dist/, prepare the opted-in reference
+# dependencies while network access is available.
+MODEL=molmo2 python -m tools.ci pipeline setup
+
 export TRTMC_NATIVE_BUILD_DIR=/path/to/native/build
 export TRTMC_RUNTIME_ROOT=/path/to/installed/tensorrt_model_connect/bin
 export TRTMC_BINARY="$TRTMC_RUNTIME_ROOT/trtmc"
@@ -73,10 +76,17 @@ Provision the pinned checkpoint in `HF_HUB_CACHE` before offline execution, or
 set `TRTMC_MOLMO2_MODEL_DIR` to an explicit local checkpoint. Native test helpers
 come from `TRTMC_NATIVE_BUILD_DIR`; the CLI and model libraries come from
 `TRTMC_RUNTIME_ROOT`. A combined local build can use the same path for both.
-Prepare the separate reference environment before offline execution and make
-its interpreter available as `TRTMC_MOLMO2_REFERENCE_PYTHON` inside the test
-container. The ordinary builder image's Transformers 5.2.0 installation does
-not satisfy the upstream reference's 4.57.1 requirement.
+The manifest opts into isolated reference preparation. Trusted CI forwards its
+selected `MODEL` to the container; the existing setup stage prepares only that
+family's reference requirements before the workflow disconnects networking.
+The environment lives under `.ci/reference/molmo2` (or `TRTMC_CI_STATE_DIR`),
+with reference overrides installed ahead of the builder's shared packages so
+the existing CUDA/PyTorch stack can be reused. The builder retains Transformers
+5.2.0 while the reference imports 4.57.1. E2E finds this prepared interpreter
+automatically and rejects missing or stale preparation before engine build.
+For a manually prepared reference environment, set
+`TRTMC_MOLMO2_REFERENCE_PYTHON` inside the test container; the interpreter path
+must preserve its virtual environment.
 By default E2E builds a fresh bundle and runs the independent reference. For
 an explicitly prepared bundle/reference run, the test accepts
 `TRTMC_MOLMO2_BUNDLE` and `TRTMC_MOLMO2_REFERENCE_RESULTS`.
