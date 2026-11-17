@@ -242,18 +242,25 @@ std::size_t input_capacity(const ITrtModule& module) {
 
 EncoderPipeline::EncoderPipeline(std::unique_ptr<ITrtModule> encoder, std::string mode,
                                  std::shared_ptr<ITokenizer> tokenizer, std::int64_t vocab_size,
-                                 std::string reranking_pooling)
-    : encoder_(std::move(encoder)), mode_(std::move(mode)), tokenizer_(std::move(tokenizer)),
-      vocab_size_(vocab_size), reranking_pooling_(std::move(reranking_pooling)) {
+                                 std::string reranking_pooling, bool single_forward,
+                                 std::unique_ptr<ITrtModule> vision)
+    : encoder_(std::move(encoder)), single_forward_(single_forward), vision_(std::move(vision)),
+      mode_(std::move(mode)), tokenizer_(std::move(tokenizer)), vocab_size_(vocab_size),
+      reranking_pooling_(std::move(reranking_pooling)) {
     if (!encoder_ || !encoder_->ok())
         throw std::runtime_error("EncoderPipeline: invalid encoder module");
-    if (!tokenizer_)
+    if (!single_forward_ && !tokenizer_)
         throw std::runtime_error("EncoderPipeline: no tokenizer configured");
+    if (single_forward_ && (!vision_ || !vision_->ok()))
+        throw std::runtime_error("EncoderPipeline: single forward pass requires a vision module");
     if (vocab_size_ <= 0)
         throw std::runtime_error("EncoderPipeline: vocabulary size must be positive");
 }
 
 void EncoderPipeline::require_mode(std::string_view expected) const {
+    if (single_forward_)
+        throw internal::UnsupportedTask(
+            "EncoderPipeline: single forward pass requires preprocessed inputs");
     if (mode_ != expected)
         throw internal::UnsupportedTask("EncoderPipeline: this bundle was built for " + mode_ +
                                         ", not " + std::string(expected));
@@ -266,6 +273,8 @@ void EncoderPipeline::require_relevance_mode() const {
 }
 
 std::vector<internal::TaskInstance> EncoderPipeline::task_bindings() {
+    if (single_forward_)
+        return {};
     if (mode_ == internal::ITextToEmbedding::kTask)
         return {internal::bind<internal::ITextToEmbedding>(*this)};
     if (mode_ == internal::ITextQueryDocumentsToRelevance::kTask)
@@ -453,7 +462,7 @@ EncoderPipeline::encode_batch(const std::vector<std::int32_t>& input_ids,
 EncoderPipeline::EncodedOutput
 EncoderPipeline::forward_ids(const std::vector<int32_t>& input_ids,
                              const std::vector<int32_t>& attention_mask,
-                             const std::vector<int64_t>& shape) const {
+                             const std::vector<int64_t>& shape, TensorMap extra_inputs) const {
     std::vector<float> mask_f32;
     if (!engine_mask_is_int32(*encoder_)) {
         mask_f32.reserve(attention_mask.size());
@@ -479,7 +488,7 @@ EncoderPipeline::forward_ids(const std::vector<int32_t>& input_ids,
         mask_t.dtype = DType::kFloat32;
     }
 
-    TensorMap inputs;
+    TensorMap inputs = std::move(extra_inputs);
     inputs["input_ids"] = ids_t;
     inputs["attention_mask"] = mask_t;
 
@@ -501,6 +510,49 @@ EncoderPipeline::forward_ids(const std::vector<int32_t>& input_ids,
     }
 
     return output;
+}
+
+std::vector<float> EncoderPipeline::forward_image(const std::vector<int32_t>& input_ids,
+                                                  const std::vector<float>& pixels,
+                                                  std::size_t image_token_start) const {
+    if (!single_forward_)
+        throw std::runtime_error("EncoderPipeline: single forward pass is disabled");
+    const auto pixel_shape = vision_->tensor_shape("pixel_values");
+    const auto feature_shape = vision_->tensor_shape("vision_features");
+    const auto capacity = input_capacity(*encoder_);
+    if (feature_shape.size() != 2 || feature_shape[0] <= 0 || feature_shape[1] <= 0 ||
+        pixels.size() != checked_element_count(pixel_shape) || input_ids.empty() ||
+        input_ids.size() > capacity ||
+        (!encoder_->input_is_dynamic("input_ids") && input_ids.size() != capacity) ||
+        image_token_start > input_ids.size() ||
+        static_cast<std::size_t>(feature_shape[0]) > input_ids.size() - image_token_start)
+        throw std::invalid_argument(
+            "EncoderPipeline: invalid single forward pass image/text shapes");
+    for (const auto id : input_ids)
+        if (id < 0 || id >= vocab_size_)
+            throw std::invalid_argument("EncoderPipeline: token id outside the model vocabulary");
+    Tensor pixel_tensor{const_cast<float*>(pixels.data()), pixel_shape, DType::kFloat32};
+    const auto features = vision_->forward({{"pixel_values", pixel_tensor}});
+    const auto& feature = features.at("vision_features");
+    if (!feature.data || feature.dtype != DType::kFloat32 || feature.shape != feature_shape)
+        throw std::runtime_error("EncoderPipeline: invalid vision feature output");
+
+    const auto hidden = static_cast<std::size_t>(feature_shape[1]);
+    std::vector<float> embeddings(input_ids.size() * hidden, 0.0f);
+    std::vector<float> selector(input_ids.size(), 0.0f);
+    std::memcpy(embeddings.data() + image_token_start * hidden, feature.data,
+                checked_element_count(feature_shape) * sizeof(float));
+    std::fill_n(selector.begin() + image_token_start, feature_shape[0], 1.0f);
+    std::vector<int64_t> shape{static_cast<int64_t>(input_ids.size())};
+    if (encoder_->input_rank("input_ids") == 2)
+        shape.insert(shape.begin(), 1);
+    auto embedding_shape = shape;
+    embedding_shape.push_back(feature_shape[1]);
+    TensorMap extra{{"input_embed", {embeddings.data(), embedding_shape, DType::kFloat32}},
+                    {"use_input_embed", {selector.data(), shape, DType::kFloat32}}};
+    return forward_ids(input_ids, std::vector<int32_t>(input_ids.size(), 1), shape,
+                       std::move(extra))
+        .data;
 }
 
 bool EncoderPipeline::supports_batched_reranking() const {
