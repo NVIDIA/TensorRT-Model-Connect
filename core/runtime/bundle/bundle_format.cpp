@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
@@ -15,17 +16,10 @@
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string_view>
-#include <vector>
-
-#ifdef _WIN32
-#define NOMINMAX
-#include <windows.h>
-#else
-#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
-#endif
+#include <vector>
 
 namespace trtmc {
 
@@ -229,42 +223,12 @@ std::vector<char> BundleReader::read_section(std::string_view name) const {
 namespace {
 
 std::uint64_t mapping_granularity() {
-#ifdef _WIN32
-    SYSTEM_INFO info;
-    GetSystemInfo(&info);
-    return info.dwAllocationGranularity;
-#else
     const auto page_size = ::sysconf(_SC_PAGE_SIZE);
     if (page_size <= 0)
         throw std::runtime_error("Cannot determine file mapping granularity");
     return static_cast<std::uint64_t>(page_size);
-#endif
 }
 
-#ifdef _WIN32
-std::shared_ptr<const char> map_file_range(const std::string& path, std::uint64_t offset,
-                                           std::size_t length) {
-    auto fail = [&]() { return std::runtime_error("Cannot map bundle: " + path); };
-    HANDLE file = CreateFileW(std::filesystem::path(path).c_str(), GENERIC_READ, FILE_SHARE_READ,
-                              nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE)
-        throw fail();
-    LARGE_INTEGER size;
-    const bool valid = GetFileSizeEx(file, &size) && size.QuadPart >= 0 &&
-                       static_cast<std::uint64_t>(size.QuadPart) >= offset + length;
-    HANDLE mapping =
-        valid ? CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr) : nullptr;
-    CloseHandle(file);
-    if (!mapping)
-        throw fail();
-    void* base = MapViewOfFile(mapping, FILE_MAP_READ, static_cast<DWORD>(offset >> 32),
-                               static_cast<DWORD>(offset), length);
-    CloseHandle(mapping);
-    if (!base)
-        throw fail();
-    return {static_cast<const char*>(base), [](const char* address) { UnmapViewOfFile(address); }};
-}
-#else
 std::shared_ptr<const char> map_file_range(const std::string& path, std::uint64_t offset,
                                            std::size_t length) {
     auto fail = [&]() { return std::runtime_error("Cannot map bundle: " + path); };
@@ -284,7 +248,6 @@ std::shared_ptr<const char> map_file_range(const std::string& path, std::uint64_
     return {static_cast<const char*>(base),
             [length](const char* address) { ::munmap(const_cast<char*>(address), length); }};
 }
-#endif
 } // namespace
 
 MappedBundleSection BundleReader::map_section(std::string_view name) const {
