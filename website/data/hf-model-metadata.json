@@ -1275,6 +1275,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "openbmb/MiniCPM-V-4.7-35B-A3B",
+      "revision": "98e79ba972b586ac6146d3505771ce1467e199ba",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "minicpmv4_7",
+      "architectures": [
+        "MiniCPMV4_7ForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "sentence-transformers/all-MiniLM-L6-v2",
       "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
       "revision_source": "resolved",
