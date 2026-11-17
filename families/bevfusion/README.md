@@ -125,7 +125,9 @@ executes the upstream class bodies, replacing only registry and dependency
 plumbing with the corresponding PyTorch constructors. It loads every BEV-stage
 weight strictly. The test compares all output probabilities for seeds 0, 1 and 2
 against FP32 PyTorch with TF32 disabled: FP32 atol/rtol 0.0002; FP16 0.02.
-The FP8 testcase uses held-out seeds 0..7 with the same 0.02 probability tolerances.
+The FP8 testcase validates seeds 0..7 with the same 0.02 probability tolerances.
+Seed 0 also exposed the initial full-FP8 recipe's error; seeds 1..7 were not used
+for recipe selection. Sensitivity tuning used separate seeds 16..19.
 The native helper exercises bundle loading and the public Task, including
 reversed input order, repeated calls, class identity and result ownership.
 

@@ -19,7 +19,7 @@ CONVOLUTIONS = (
     "heads.map.classifier.3",
 )
 # The fuser/backbone are sensitive on tuning seeds 16..19. The neck and the
-# two large head convolutions retain an error margin before held-out validation.
+# two large head convolutions retain an error margin before validation.
 DEFAULT_EXCLUSIONS = tuple(
     name for name in CONVOLUTIONS if name == "fuser.0" or name.startswith("decoder.backbone.")
 )
