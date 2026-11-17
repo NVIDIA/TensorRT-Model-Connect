@@ -48,12 +48,9 @@ def generate() -> str:
         ranges.append((first, last, stride, delta))
         index += 1
 
-    header = """/*
- * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
- */
-
-#pragma once
+    license_lines = Path(__file__).read_text(encoding="utf-8").splitlines()[:2]
+    header = "/*\n" + "\n".join(" *" + line[1:] for line in license_lines) + "\n */\n\n"
+    header += """#pragma once
 
 #include <cstdint>
 
