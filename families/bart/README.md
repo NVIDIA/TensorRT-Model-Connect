@@ -200,6 +200,8 @@ already drifts on `bart-large-cnn`.
 
 ### 8. Found on the way (main, independent of FP8; not fixed here)
 
+Items 2 and 3 have since been fixed on main; item 1 is open.
+
 1. The fp16 engine at `max_sequence_length` 1024 gives wrong logits. The
    encoder output matches Transformers (cosine at least 0.9998), the decoder
    output does not. 256 is correct (section 5). The unquantized `bart-base`
