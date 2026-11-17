@@ -12,10 +12,14 @@ Whisper is an encoder-decoder transformer for automatic speech recognition:
   - model_type: "whisper", architectures: ["WhisperForConditionalGeneration"]
 
 Cross-attention design:
-  The cross_k/cross_v inputs to the decoder engine are the RAW encoder output
-  (same tensor copied to all layers). The per-layer K/V projections are baked
-  into the decoder TRT graph. The C++ runtime's compute_cross_kv() correctly
-  copies the raw encoder output to all cross_k/cross_v slots.
+  Single-GPU bundles: the encoder engine outputs every decoder layer's
+  cross-attention K and V, projected and split into heads (cross_k_<i>,
+  cross_v_<i>: [1, heads, positions, head_dim]), once per request. The decoder
+  engine reads them in every step; the C++ runtime binds the encoder's outputs
+  to the decoder's inputs.
+  Tensor-parallel bundles: the encoder outputs the RAW encoder states
+  (encoder_output), the runtime copies them to every cross_k/cross_v slot and
+  each rank's decoder projects its own head shard in every step.
 """
 
 from __future__ import annotations
@@ -53,6 +57,21 @@ def _encoder_precision(raw: dict, precision: str) -> str:
             f"Whisper fp32_layers supports only selector 0 (the encoder); got {invalid}"
         )
     return "fp32" if precision == "fp16" and 0 in fp32_layers else precision
+
+
+# The encoder input that marks the encoder positions past a request's audio
+# (1; every other position 0, so an input left at zero changes nothing); only
+# an engine that projects the decoder's cross-attention K/V has it.
+ENCODER_PADDED_ROWS = "encoder_padded_rows"
+
+
+def _cross_kv_np_dtype(precision: str):
+    """The dtype a decoder of this precision projects its cross-attention K/V in."""
+    return np.float16 if precision in ("fp16", "bf16") else np.float32
+
+
+def _cross_kv_trt_dtype(precision: str):
+    return trt.float16 if _cross_kv_np_dtype(precision) == np.float16 else trt.float32
 
 
 _DUAL_GEMM_KNOB = "peep:match_dual_gemm"
@@ -347,21 +366,20 @@ class _WhisperModel:
                 )
             )
 
-        # [C3] Cross-attention inputs: raw encoder output (projections baked in graph)
+        # [C3] Cross-attention inputs: each layer's K and V, projected and split
+        # into heads once per request by the encoder engine (_add_cross_kv_heads).
+        cross_trt_dtype = _cross_kv_trt_dtype(precision)
+        cross_shape = (1, dec_heads, max_source_positions, head_dim)
         cross_k_inputs, cross_v_inputs = [], []
         for i in range(dec_layers):
             cross_k_inputs.append(
                 network.add_input(
-                    graph_ops.layer_tensor_name("cross_k", i),
-                    trt.float32,
-                    (max_source_positions, hidden),
+                    graph_ops.layer_tensor_name("cross_k", i), cross_trt_dtype, cross_shape
                 )
             )
             cross_v_inputs.append(
                 network.add_input(
-                    graph_ops.layer_tensor_name("cross_v", i),
-                    trt.float32,
-                    (max_source_positions, hidden),
+                    graph_ops.layer_tensor_name("cross_v", i), cross_trt_dtype, cross_shape
                 )
             )
 
@@ -399,8 +417,8 @@ class _WhisperModel:
                 hidden=hidden_state,
                 cache_k=cache_k_inputs[layer_idx],
                 cache_v=cache_v_inputs[layer_idx],
-                cross_k=cross_k_inputs[layer_idx],
-                cross_v=cross_v_inputs[layer_idx],
+                cross_k_heads=cross_k_inputs[layer_idx],
+                cross_v_heads=cross_v_inputs[layer_idx],
                 attention_mask=attention_mask,
                 eps_tensor=eps_tensor,
                 weights=weights,
@@ -410,7 +428,6 @@ class _WhisperModel:
                 head_dim=head_dim,
                 ffn_dim=dec_ffn,
                 max_cache_length=max_cache_length,
-                max_source_positions=max_source_positions,
                 dtype=work_np_dtype,
                 activation_type=config.hidden_act or "gelu",
                 quant_ctx=quant_ctx,
@@ -462,10 +479,19 @@ class _WhisperModel:
         precision: str = "fp32",
         quant_ctx=None,
         verbose: bool = False,
+        project_cross_kv: bool = True,
     ) -> bytes | None:
+        """``project_cross_kv``: output the decoder layers' projected cross-attention
+        K/V (a single-GPU bundle) instead of the raw encoder states (a
+        tensor-parallel bundle, whose decoders project their own head shards)."""
         encoder_precision = _encoder_precision(config.raw, precision)
         return _build_whisper_encoder(
-            config, weights, precision=encoder_precision, quant_ctx=quant_ctx, verbose=verbose
+            config,
+            weights,
+            precision=encoder_precision,
+            quant_ctx=quant_ctx,
+            verbose=verbose,
+            cross_kv_precision=precision if project_cross_kv else None,
         )
 
     def get_vl_config(self, config: ModelConfig) -> dict | None:
@@ -546,7 +572,17 @@ class _WhisperModel:
         return {"mel_filterbank": mel_fb_bytes}
 
 
-def _build_whisper_encoder(config, weights, *, precision="fp32", quant_ctx=None, verbose=False):
+def _build_whisper_encoder(
+    config,
+    weights,
+    *,
+    precision="fp32",
+    quant_ctx=None,
+    verbose=False,
+    cross_kv_precision=None,
+):
+    """``cross_kv_precision`` (the decoder's precision, or None): output every
+    decoder layer's projected cross-attention K/V instead of ``encoder_output``."""
     enc_layers = weights["_enc_layers"]
     enc_heads = weights["_enc_heads"]
     enc_ffn = weights["_enc_ffn"]
@@ -711,11 +747,22 @@ def _build_whisper_encoder(config, weights, *, precision="fp32", quant_ctx=None,
         dtype=work_np_dtype,
     )
 
-    # Encoder output is always FP32 for the downstream tensor contract
+    # The encoder states are always FP32 for the downstream tensor contract
     if work_trt_dtype != trt.float32:
         hs = network.add_cast(hs, trt.float32).get_output(0)
-    hs.name = "encoder_output"
-    network.mark_output(hs)
+    if cross_kv_precision is None:
+        hs.name = "encoder_output"
+        network.mark_output(hs)
+    else:
+        _add_cross_kv_outputs(
+            network,
+            hs,
+            weights=weights,
+            hidden_size=hidden,
+            max_source_positions=max_source_positions,
+            precision=cross_kv_precision,
+            quant_ctx=quant_ctx,
+        )
 
     if verbose:
         print(
@@ -728,14 +775,132 @@ def _build_whisper_encoder(config, weights, *, precision="fp32", quant_ctx=None,
     return bytes(plan)
 
 
+def _add_cross_kv_heads(
+    network,
+    encoder_states,
+    *,
+    weights,
+    prefix,
+    hidden_size,
+    num_heads,
+    head_dim,
+    max_source_positions,
+    dtype,
+    quant_ctx=None,
+):
+    """One decoder layer's cross-attention K and V of the encoder states
+    ([positions, hidden] -> two [1, heads, positions, head_dim]). They depend
+    on the encoder output only, so the encoder engine computes them once per
+    request instead of the decoder in every step."""
+    attention_size = hidden_size
+    matmul = graph_blocks.make_matmul_fn(network, dtype, quant_ctx)
+    ck_proj = graph_ops.add_bias_sum(
+        network,
+        matmul(
+            encoder_states,
+            hidden_size,
+            attention_size,
+            weights[f"{prefix}.cross_w_k"],
+            f"{prefix}.cross_w_k",
+        ),
+        attention_size,
+        weights[f"{prefix}.cross_b_k"],
+        dtype=dtype,
+    )
+    cv_proj = graph_ops.add_bias_sum(
+        network,
+        matmul(
+            encoder_states,
+            hidden_size,
+            attention_size,
+            weights[f"{prefix}.cross_w_v"],
+            f"{prefix}.cross_w_v",
+        ),
+        attention_size,
+        weights[f"{prefix}.cross_b_v"],
+        dtype=dtype,
+    )
+    return (
+        graph_ops.reshape_rows_to_heads_4d(
+            network,
+            ck_proj,
+            num_heads,
+            head_dim,
+            sequence_length=max_source_positions,
+            tag=f"{prefix}.cross_attn.k",
+        ),
+        graph_ops.reshape_rows_to_heads_4d(
+            network,
+            cv_proj,
+            num_heads,
+            head_dim,
+            sequence_length=max_source_positions,
+            tag=f"{prefix}.cross_attn.v",
+        ),
+    )
+
+
+def _add_cross_kv_outputs(
+    network,
+    encoder_states,
+    *,
+    weights,
+    hidden_size,
+    max_source_positions,
+    precision,
+    quant_ctx=None,
+):
+    """Mark every decoder layer's projected cross-attention K/V as encoder
+    outputs (cross_k_<i>, cross_v_<i>), from the FP32 encoder states.
+
+    The runtime used to zero the states past a short request's valid length
+    before the decoder projected them. The states no longer leave the engine,
+    so the ``encoder_padded_rows`` input ([positions, 1], 0 or 1) selects those
+    rows here: a row marked 1 reads as zero, any other row is unchanged."""
+    dec_layers = weights["_dec_layers"]
+    dec_heads = weights["_dec_heads"]
+    head_dim = hidden_size // dec_heads
+    dtype = _cross_kv_np_dtype(precision)
+
+    padded_rows = network.add_input(ENCODER_PADDED_ROWS, trt.float32, (max_source_positions, 1))
+    zero = graph_ops.add_constant(
+        network, (1, 1), np.zeros((1, 1), dtype=np.float32), dtype=np.float32
+    )
+    is_padded = network.add_elementwise(
+        padded_rows, zero, trt.ElementWiseOperation.GREATER
+    ).get_output(0)
+    states = network.add_select(is_padded, zero, encoder_states).get_output(0)
+    # The projections run in the decoder's dtype, as they did in the decoder.
+    if dtype == np.float16:
+        states = network.add_cast(states, trt.float16).get_output(0)
+
+    for layer_idx in range(dec_layers):
+        k_heads, v_heads = _add_cross_kv_heads(
+            network,
+            states,
+            weights=weights,
+            prefix=f"layer.{layer_idx}",
+            hidden_size=hidden_size,
+            num_heads=dec_heads,
+            head_dim=head_dim,
+            max_source_positions=max_source_positions,
+            dtype=dtype,
+            quant_ctx=quant_ctx,
+        )
+        k_heads.name = graph_ops.layer_tensor_name("cross_k", layer_idx)
+        v_heads.name = graph_ops.layer_tensor_name("cross_v", layer_idx)
+        network.mark_output(k_heads)
+        network.mark_output(v_heads)
+
+
 def _add_whisper_decoder_layer(
     *,
     network,
     hidden,
     cache_k,
     cache_v,
-    cross_k,
-    cross_v,
+    cross_k_heads,
+    cross_v_heads,
     attention_mask,
     eps_tensor,
     weights,
@@ -745,11 +910,13 @@ def _add_whisper_decoder_layer(
     head_dim,
     ffn_dim,
     max_cache_length,
-    max_source_positions,
     dtype=np.float32,
     activation_type="gelu",
     quant_ctx=None,
 ):
+    """One decoder layer. Its cross-attention K and V arrive already projected
+    and split into heads ([1, heads, positions, head_dim], _add_cross_kv_heads
+    in the encoder engine)."""
     attention_size = hidden_size
     attention_window = max_cache_length + 1
     matmul = graph_blocks.make_matmul_fn(network, dtype, quant_ctx)
@@ -818,7 +985,6 @@ def _add_whisper_decoder_layer(
     psa = network.add_elementwise(hidden, sa, trt.ElementWiseOperation.SUM).get_output(0)
 
     # Cross-attention
-    # [C3] Apply per-layer K/V projections to raw encoder output BEFORE multi-head reshape
     cn = graph_ops.add_layer_norm(
         network,
         psa,
@@ -836,51 +1002,23 @@ def _add_whisper_decoder_layer(
         dtype=dtype,
     )
 
-    # Project raw encoder output through per-layer K/V weights.
-    # Cross inputs are FP32 (from encoder output); cast to work dtype for matmul.
-    cross_k_typed = cross_k
-    cross_v_typed = cross_v
-    if dtype == np.float16:
-        cross_k_typed = network.add_cast(cross_k, trt.float16).get_output(0)
-        cross_v_typed = network.add_cast(cross_v, trt.float16).get_output(0)
-    ck_proj = graph_ops.add_bias_sum(
+    # The query of this step against the request's K/V heads: the attention
+    # core add_attention_from_rows runs (its default scale), without its K/V
+    # reshapes.
+    ccf = graph_ops.reshape_heads_4d_to_rows(
         network,
-        matmul(
-            cross_k_typed,
-            hidden_size,
-            attention_size,
-            weights[f"{prefix}.cross_w_k"],
-            f"{prefix}.cross_w_k",
+        graph_ops.add_attention_core(
+            network,
+            graph_ops.reshape_rows_to_heads_4d(
+                network, cq, num_heads, head_dim, sequence_length=1, tag=f"{prefix}.cross_attn.q"
+            ),
+            cross_k_heads,
+            cross_v_heads,
+            fp32_accumulation=True,
         ),
         attention_size,
-        weights[f"{prefix}.cross_b_k"],
-        dtype=dtype,
-    )
-    cv_proj = graph_ops.add_bias_sum(
-        network,
-        matmul(
-            cross_v_typed,
-            hidden_size,
-            attention_size,
-            weights[f"{prefix}.cross_w_v"],
-            f"{prefix}.cross_w_v",
-        ),
-        attention_size,
-        weights[f"{prefix}.cross_b_v"],
-        dtype=dtype,
-    )
-
-    ccf = graph_ops.add_attention_from_rows(
-        network,
-        cq,
-        ck_proj,
-        cv_proj,
-        num_heads=num_heads,
-        head_dim=head_dim,
-        q_seq=1,
-        kv_seq=max_source_positions,
-        fp32_accumulation=True,
-        tag=f"{prefix}.cross_attn",
+        sequence_length=1,
+        tag=f"{prefix}.cross_attn.ctx",
     )
     ca = graph_ops.add_bias_sum(
         network,
@@ -1043,6 +1181,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         precision=request.precision,
         quant_ctx=quant_ctx,
         verbose=request.verbose,
+        # Tensor-parallel decoders project their own head shards of the raw states.
+        project_cross_kv=not parallel.enabled,
     )
     if encoder is None:
         raise RuntimeError("Whisper encoder build returned no engine")
