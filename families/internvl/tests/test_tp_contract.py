@@ -166,7 +166,7 @@ def test_build_emits_one_dual_profile_plan_per_rank(monkeypatch, tmp_path) -> No
         hidden_size=8,
         raw={},
     )
-    ranks, roles = [], []
+    ranks, roles, attention = [], [], []
 
     class FakeModel:
         @staticmethod
@@ -178,6 +178,9 @@ def test_build_emits_one_dual_profile_plan_per_rank(monkeypatch, tmp_path) -> No
             parallel = kwargs["parallel_config"]
             ranks.append(parallel.rank)
             roles.append(_config.raw.get("_decoder_engine_role"))
+            attention.append(
+                (_config.raw.get("_valid_prefix_attention"), _config.raw.get("_opt_prefill_length"))
+            )
             return f"rank-{parallel.rank}".encode()
 
         @staticmethod
@@ -237,10 +240,13 @@ def test_build_emits_one_dual_profile_plan_per_rank(monkeypatch, tmp_path) -> No
     assert writer.sections["runtime.json"]["preprocessor_type"] == "simple_chw"
     assert writer.sections["runtime.json"]["max_image_tiles"] == 1
     assert writer.sections["runtime.json"]["decoder_engine_layout"] == "dual_profile"
+    assert writer.sections["runtime.json"]["kv_attention_window"] == "full"
+    assert attention == [(None, None), (None, None)]
     assert writer.sections["vision.plan"] == b"vision"
 
     ranks.clear()
     roles.clear()
+    attention.clear()
     request.tensor_parallel_size = 1
     writer = Writer()
     model.build(request, writer)
@@ -251,7 +257,11 @@ def test_build_emits_one_dual_profile_plan_per_rank(monkeypatch, tmp_path) -> No
     assert not any(name.startswith("engine.rank") for name in writer.sections)
     assert writer.sections["runtime.json"]["tensor_parallel_size"] == 1
     assert writer.sections["runtime.json"]["decoder_engine_layout"] == "dual_profile"
+    assert writer.sections["runtime.json"]["kv_attention_window"] == "valid_prefix"
+    assert attention == [(True, 16)]  # min(2048, max_sequence_length)
     assert "_decoder_engine_role" not in config.raw
+    assert "_valid_prefix_attention" not in config.raw
+    assert "_opt_prefill_length" not in config.raw
 
 
 def test_tp_manifests_remain_active() -> None:

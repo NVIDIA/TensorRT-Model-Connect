@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping, Sequence
 from . import absolute, aiperf_metrics, compat, edits, execution, geneval, intelligibility, judge, replay_parity, sweep, world_model
 from .aiperf_runner import AiperfRun, run_aiperf
 from .config import Environment
+from .gold_metrics import SandboxUnavailable
 from .report import write_report
 from .artifacts import recorded_path
 from .services import gpu_exclusive, gpu_identity, platform_fingerprint, platform_id, reference_python, serving
@@ -527,6 +528,9 @@ class _Phases:
             evidence_start = execution.checkpoint()
             try:
                 return call()
+            except SandboxUnavailable:
+                execution.supersede(evidence_start)
+                raise
             except Exception as error:  # noqa: BLE001 - reported per phase
                 execution.supersede(evidence_start)
                 self.errors[name] = f"{type(error).__name__}: {error}"[:1500]
@@ -535,6 +539,19 @@ class _Phases:
                 if reset is not None:
                     reset()
         return None
+
+
+def reported_reference(reference: Mapping[str, Any], performance: Sequence[Mapping[str, Any]],
+                       accuracy: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The report's native-reference summary. ``precision`` is the precision the native model ran at (as timed,
+    else as it answered the benchmarks, else the first it would be timed at); the configured fallback precision
+    is ``fallback_precision``, so a reader does not take the fallback for the precision that ran."""
+    ran = next((precision for precision in [*((item.get("reference") or {}).get("precision") for item in performance),
+                                            *((item.get("native") or {}).get("precision") for item in accuracy)]
+                if precision), None)
+    return {"backend": reference.get("backend"), "precision": ran or timing_precisions(reference)[0],
+            "fallback_precision": reference.get("precision"), "perf_precision": reference.get("perf_precision"),
+            "timing_precision": reference.get("timing_precision")}
 
 
 def timing_precisions(reference: Mapping[str, Any]) -> list[str]:
@@ -819,6 +836,9 @@ def qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict[
     environment = Environment({**environment.values, "native_replicas": 1, "candidate_replicas": 1,
                                "acc_mps": False, "acc_overlap": False})
     out.mkdir(parents=True, exist_ok=True)
+    from . import gold_metrics
+
+    gold_metrics.preflight_code_sandbox(model, environment.values, out)
     (out / "execution.jsonl").write_text("")
     evidence = execution_session(model, environment, out)
     with execution.session(evidence):
@@ -878,8 +898,7 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
     fingerprint = platform_fingerprint(environment, python)["fingerprint"]
     from . import gold_metrics
 
-    gold_metrics.protect([out.parent, *(environment.values.get(key) for key in (
-        "bundle_root", "hf_hub_cache", "hf_datasets_cache", "data_root", "reference_env_root", "runtime_root"))])
+    gold_metrics.protect(gold_metrics.protected_roots(environment.values, root))
     accuracy: list[dict[str, Any]] = []
     performance: list[dict[str, Any]] = []
     unstated = unstated_defaults(perf_suite.samples[0]["request"], model["operation"]) if perf_suite else []
@@ -958,8 +977,7 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
               "performance_source": "quality" if dataset_only else "fixed",
               **({"accuracy_note": model["accuracy_note"]} if model.get("accuracy_note") else {}),
               **({"coverage": model["coverage"]} if model.get("coverage") else {}),
-              "reference": {key: reference.get(key) for key in ("backend", "precision", "perf_precision",
-                                                                 "timing_precision")},
+              "reference": reported_reference(reference, performance, accuracy),
               "reference_python": python, "duration_s": time.time() - started, "accuracy": accuracy,
               "performance": performance, "service_metrics": service_metrics,
               "errors": phases.errors,

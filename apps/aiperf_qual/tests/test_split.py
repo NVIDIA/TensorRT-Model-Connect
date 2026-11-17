@@ -69,11 +69,40 @@ def test_a_rerun_sets_every_previous_result_aside_before_its_plan(tmp_path):
 
 def test_both_interpreters_count_among_the_campaign_inputs(monkeypatch):
     monkeypatch.setattr(split, "harness_digest", lambda: "h")
-    monkeypatch.setattr(split, "code_digests", lambda environment, model: {"serving": "s", "family": ""})
+    monkeypatch.setattr(split, "code_digests",
+                        lambda environment, model: {"serving": "s", "family": "", "runtime": "built"})
     monkeypatch.setattr(split, "dependencies_digest", lambda python: f"deps of {python}")
+    monkeypatch.setattr(split, "pinned_versions", lambda python: {"tensorrt": "11.4.0.106", "python": python})
     inputs = split.campaign_inputs(Environment({"serve_python": __file__}))
-    assert inputs["dependencies"] == {"harness": f"deps of {split.sys.executable}", "serving": f"deps of {__file__}"}
+    assert inputs["versions"] == {"harness": {"tensorrt": "11.4.0.106", "python": split.sys.executable},
+                                  "serving": {"tensorrt": "11.4.0.106", "python": __file__}}
     assert inputs["code"] == {"serving": "s"}
+    assert inputs["informational"] == {"runtime": "built", "dependencies": {
+        "harness": f"deps of {split.sys.executable}", "serving": f"deps of {__file__}"}}
+
+
+def test_pinned_versions_reads_tensorrt_torch_and_transformers(monkeypatch):
+    frozen = "numpy==2.5.4\ntensorrt==11.4.0.106\ntensorrt_cu13==11.4.0.106\ntorch==2.12.0+cu130\n" \
+             "Transformers==5.2.0\naiperf @ file:///tmp/x\n"
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: type("Done", (), {"stdout": frozen})())
+    assert split.pinned_versions("python3") == {"tensorrt": "11.4.0.106", "torch": "2.12.0+cu130",
+                                                 "transformers": "5.2.0"}
+
+
+def test_hosts_whose_only_differences_are_informational_still_merge(tmp_path):
+    assignment = split.assign(MODELS, LEDGER, ["h1", "h2"])
+    required = {"harness": "x", "code": {"core": "c"}, "versions": {"harness": {"tensorrt": "11.4.0.106"}}}
+    one = root(tmp_path, "one", assignment, "h1", {"a": "formal", "e": "formal"},
+               inputs={**required, "informational": {"runtime": "r1", "dependencies": {"harness": "d1"}}})
+    two = root(tmp_path, "two", assignment, "h2", {"b": "formal", "c": "formal", "d": "formal"},
+               inputs={**required, "informational": {"runtime": "r2", "dependencies": {"harness": "d1"}}})
+    assert split.merge_check(assignment, [one, two]) == []
+    assert split.informational_differences([one, two]) == [
+        "the hosts' runtime differ (informational: TensorRT, torch, transformers and the sources match)"]
+
+    newer = {**required, "versions": {"harness": {"tensorrt": "11.5.0.1"}}, "informational": {}}
+    three = root(tmp_path, "three", assignment, "h2", {"b": "formal", "c": "formal", "d": "formal"}, inputs=newer)
+    assert any("different campaign inputs" in problem for problem in split.merge_check(assignment, [one, three]))
 
 
 def root(tmp_path, name, assignment, host, results, inputs=None):
@@ -101,7 +130,8 @@ def test_the_roots_merge_only_when_disjoint_complete_formal_and_alike(tmp_path):
     other = root(tmp_path, "other", assignment, "h2", {"b": "formal", "c": "formal", "d": "smoke", "a": "formal"},
                  inputs={"harness": "y"})
     problems = split.merge_check(assignment, [one, other])
-    assert "the roots ran with different campaign inputs (harness, code, runtime, or dependencies)" in problems
+    assert ("the roots ran with different campaign inputs (harness, code, or the TensorRT, torch or transformers "
+            "version)") in problems
     assert any("a is assigned to another host" in problem for problem in problems)
     assert any("d is a smoke result" in problem for problem in problems)
     assert "d: no formal result" in problems

@@ -9,6 +9,7 @@ const path = require('path');
 const TASKS = {
   audio_generation: ['Text to speech', 'Audio', 'text-to-speech', 'generate-audio'],
   classification: ['Image classification', 'Computer Vision', 'image-classification', 'classify'],
+  document_layout: ['Document layout', 'Computer Vision', null, 'layout'],
   embedding: ['Embedding', 'Natural Language Processing', 'feature-extraction', 'embed'],
   encoding: ['Encoding', 'Natural Language Processing', 'feature-extraction', 'encode'],
   image_edit: ['Image editing', 'Computer Vision', 'image-to-image', 'generate-image'],

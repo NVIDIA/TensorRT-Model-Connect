@@ -6,6 +6,7 @@ from __future__ import annotations
 import inspect
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -746,12 +747,83 @@ def test_internal_bridge_waits_for_the_exact_run_until_the_job_timeout() -> None
         "\n  publish:", 1
     )[0]
     assert "while true; do" in wait
-    assert "sleep 15" in wait
+    assert "poll_seconds=120" in wait and 'sleep "$poll_seconds"' in wait
     assert "seq " not in wait
     assert "gh run download" not in source
     assert "tools.public_failure" not in source
     assert "policy_sha" not in source
     assert "Protected failure details are not transferred to the public repository." in source
+
+
+def _run_bridge_wait(
+    tmp_path: Path, responses: list[str]
+) -> tuple[subprocess.CompletedProcess, list[str], Path]:
+    """Run the bridge wait step against a fake gh that answers the run polls with ``responses``."""
+    path = Path(__file__).resolve().parents[2] / ".github/workflows/internal-ci-bridge.yml"
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    script = next(
+        step["run"]
+        for step in workflow["jobs"]["dispatch"]["steps"]
+        if step["name"] == "Wait for the exact Internal CI result"
+    )
+    queue, calls, output = tmp_path / "responses", tmp_path / "calls", tmp_path / "output"
+    queue.write_text("".join(f"{response}\n" for response in responses), encoding="utf-8")
+    (tmp_path / "gh").write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "gh $*" >> "$CALLS"\n'
+        'if [[ "$*" == *" /rate_limit "* ]]; then echo $(( $(date +%s) + 300 )); exit 0; fi\n'
+        'next=$(head -n 1 "$RESPONSES")\n'
+        'tail -n +2 "$RESPONSES" > "$RESPONSES.rest" && mv "$RESPONSES.rest" "$RESPONSES"\n'
+        'case "$next" in\n'
+        '  rate) echo "gh: API rate limit exceeded for user ID 1." >&2; exit 1 ;;\n'
+        '  missing) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;\n'
+        '  *) echo "$next" ;;\n'
+        "esac\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "sleep").write_text(
+        '#!/usr/bin/env bash\necho "sleep $*" >> "$CALLS"\n', encoding="utf-8"
+    )
+    for fake in ("gh", "sleep"):
+        (tmp_path / fake).chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            "CALLS": str(calls),
+            "RESPONSES": str(queue),
+            "RUN_ID": "7",
+            "PRIVATE_CI_OWNER": "owner",
+            "PRIVATE_CI_REPOSITORY": "repo",
+            "GITHUB_OUTPUT": str(output),
+            "RUNNER_TEMP": str(tmp_path),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return result, calls.read_text(encoding="utf-8").splitlines(), output
+
+
+def test_internal_bridge_waits_out_a_rate_limit_instead_of_failing_the_gate(tmp_path: Path) -> None:
+    result, calls, output = _run_bridge_wait(
+        tmp_path,
+        ["rate", '{"status": "queued"}', '{"status": "completed", "conclusion": "success"}'],
+    )
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == "conclusion=success\n"
+    assert "rate limit reached" in result.stdout
+    sleeps = [int(call.split()[1]) for call in calls if call.startswith("sleep ")]
+    # The first wait lasts until the token's reset instead of failing the gate.
+    assert len(sleeps) == 2 and 290 <= sleeps[0] <= 305
+    assert sleeps[1] == 120  # an ordinary poll
+
+
+def test_internal_bridge_still_fails_on_other_api_errors(tmp_path: Path) -> None:
+    result, calls, output = _run_bridge_wait(tmp_path, ["missing"])
+    assert result.returncode != 0 and "Not Found" in result.stderr
+    assert not output.exists() and not [call for call in calls if call.startswith("sleep ")]
 
 
 def test_internal_bridge_remains_a_one_shot_maintainer_label_trigger() -> None:

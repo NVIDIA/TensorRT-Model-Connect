@@ -19,6 +19,7 @@
       "premerge": true,
       "inputs": {
         "frame": "data/recorded_observation/ep0000_f000",
+        "cameras": {"observation.images.image": "image.png", "observation.images.image2": "wrist_image.png"},
         "noise": "data/noise_seed0.f32",
         "reference_fp32": "data/reference/ep0000_f000.fp32.f32",
         "reference_bf16": "data/reference/ep0000_f000.bf16.f32"
@@ -29,6 +30,7 @@
       "premerge": false,
       "inputs": {
         "frame": "data/recorded_observation/ep0379_f060",
+        "cameras": {"observation.images.image": "image.png", "observation.images.image2": "wrist_image.png"},
         "noise": "data/noise_seed0.f32",
         "reference_fp32": "data/reference/ep0379_f060.fp32.f32",
         "reference_bf16": "data/reference/ep0379_f060.bf16.f32"
@@ -39,6 +41,7 @@
       "premerge": false,
       "inputs": {
         "frame": "data/recorded_observation/ep0807_f070",
+        "cameras": {"observation.images.image": "image.png", "observation.images.image2": "wrist_image.png"},
         "noise": "data/noise_seed0.f32",
         "reference_fp32": "data/reference/ep0807_f070.fp32.f32",
         "reference_bf16": "data/reference/ep0807_f070.bf16.f32"

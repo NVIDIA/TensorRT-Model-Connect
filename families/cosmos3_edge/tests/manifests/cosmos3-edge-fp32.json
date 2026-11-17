@@ -13,6 +13,8 @@
     {
       "name": "cosmos3-edge-fp32",
       "premerge": true,
+      "prompt": "Explain in two sentences what a robot arm needs to grasp a cup.",
+      "max_new_tokens": 64,
       "reference_precision": "fp32",
       "reference_backend": "hf_transformers",
       "modalities": [

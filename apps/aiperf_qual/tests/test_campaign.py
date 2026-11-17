@@ -401,6 +401,46 @@ def test_run_cli_exit_codes_require_a_supported_success_outcome(tmp_path, monkey
     assert json.loads(capsys.readouterr().out) == {"report": str(tmp_path / "report.md"), **record}
 
 
+TIMED = {"reference": {"p50_ms": 9.0}}
+
+
+@pytest.mark.parametrize("accuracy, perf, expected", [
+    ([{"native": {"mode": "compile"}}], [{"reference_mode": "compile", "light": "green", **TIMED}], "compile"),
+    ([{"native": {"mode": "eager"}}], [], "eager"),  # configured or pinned
+    ([{"native": {"mode": "eager", "compile_fallback": "Dynamo recompile limit"}}], [], "eager (compile failed)"),
+    ([], [{"reference_mode": "eager", "configured_mode": "compile", "light": "green", **TIMED}],
+     "eager (compile failed)"),
+    ([{"native": {"mode": "compile"}}], [{"reference_mode": "compile+eager", "light": "green", **TIMED}],
+     "compile, eager"),
+    ([], [{"reference_mode": "eager", "light": "n/a", **TIMED}], "—"),
+    # Accuracy errored, but the natural-dataset Perf shows eager answering after a failed compile.
+    ([{"status": "error", "native": {"mode": "compile"}}],
+     [{"reference_mode": "eager", "light": "informational", "compile_fallback": "Dynamo recompile limit", **TIMED}],
+     "eager (compile failed)"),
+    # The native side never answered: an errored entry, or a Perf row without native timings.
+    ([{"status": "error", "native": {"mode": "eager"}}], [{"reference_mode": "eager", "light": "informational",
+                                                          "reference": {"p50_ms": None}}], "—"),
+])
+def test_native_mode_names_compile_eager_or_a_failed_compile(accuracy, perf, expected):
+    assert campaign.native_mode({"accuracy": accuracy, "perf": perf}) == expected
+
+
+def test_summary_counts_and_lists_the_native_mode_of_each_model(tmp_path):
+    from trtmc_aiperf_qual import report_html
+
+    for name, mode in (("a", "compile"), ("b", "compile"), ("c", "eager")):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "report.json").write_text(json.dumps({
+            "task": "t", "verdict": {"category": "pass"},
+            "accuracy": [{"suite": "s", "status": "pass", "native": {"mode": mode}}], "performance": []}))
+    text, _ = campaign.summary([tmp_path])
+    assert "Native mode (torch.compile by default; eager where pinned or where compile failed): compile 2, eager 1." in text
+    assert f"| Green | c | t | eager | {tmp_path.name} |" in text
+    rows, counts, rank = campaign.collect([tmp_path])
+    page = report_html.render(rows, counts, rank, tmp_path / "summary.html").read_text()
+    assert "<th>Native mode</th>" in page and "compile 2, eager 1" in page and "<td>eager</td>" in page
+
+
 def test_summary_merges_result_roots(tmp_path):
     first = tmp_path / "gb300-1/a"
     first.mkdir(parents=True)
@@ -415,8 +455,8 @@ def test_summary_merges_result_roots(tmp_path):
                                                    "reason": "error: checkpoint is gated"}))
     text, counts = campaign.summary([tmp_path / "gb300-1", tmp_path / "gb300-2"])
     assert counts == {"pass": 1, "build-failed": 1}
-    assert "| Green | a | text_generation | gb300-1 | mmlu: 10/10 within tolerance | eager: TRTMC 4.0 ms · native 10.0 ms |" in text
-    assert "| White | b | classification | gb300-2 |" in text and "checkpoint is gated" in text
+    assert "| Green | a | text_generation | eager | gb300-1 | mmlu: 10/10 within tolerance | eager: TRTMC 4.0 ms · native 10.0 ms |" in text
+    assert "| White | b | classification | — | gb300-2 |" in text and "checkpoint is gated" in text
     assert "1 pass (Green + conclusive Yellow)" in text and "| White | 1 |" in text
 
 
@@ -665,7 +705,7 @@ def test_summary_fetches_remote_result_roots_over_ssh(tmp_path):
     assert roots == [tmp_path / "fetched/gb300-1"] and not (roots[0] / "a/big.bin").exists()
     assert campaign.collect(roots)[0]["a"]["precision"]["trtmc"] == "fp16"  # the model's precision came along
     text, counts = campaign.summary(roots)
-    assert counts == {"pass": 1} and "| Green | a | classification | gb300-1 |" in text
+    assert counts == {"pass": 1} and "| Green | a | classification | — | gb300-1 |" in text
     local = tmp_path / "local-root"
     local.mkdir()
     assert campaign.fetch_roots([str(local)], str(fake_ssh), tmp_path / "fetched") == [local]
@@ -704,7 +744,7 @@ def test_summary_keeps_the_latest_result_of_a_profile_run_on_several_roots(tmp_p
             {"task": "image_generation", "started": started, "verdict": {"category": category}}))
     for order in ([tmp_path / "gb300-1", tmp_path / "gb300-2"], [tmp_path / "gb300-2", tmp_path / "gb300-1"]):
         text, counts = campaign.summary(order)
-        assert counts == {"acc-issue": 1} and "| Red | m | image_generation | gb300-1 |" in text
+        assert counts == {"acc-issue": 1} and "| Red | m | image_generation | — | gb300-1 |" in text
 
 
 def test_summary_counts_every_planned_profile(tmp_path):
@@ -715,7 +755,7 @@ def test_summary_counts_every_planned_profile(tmp_path):
     (root / "a/report.json").write_text(json.dumps({"task": "t", "started": 1.0, "verdict": {"category": "pass"}}))
     text, counts = campaign.summary([root])
     assert counts == {"pass": 1, "not-run": 1, "config-error": 1}
-    assert "| White | b | - | gb300-1 |" in text and "unknown benchmark 'typo'" in text
+    assert "| White | b | - | — | gb300-1 |" in text and "unknown benchmark 'typo'" in text
     assert "| White | c |" not in text and "no Task defaults" not in text
     assert len(json.loads((root / campaign.PLAN).read_text())["config_errors"]) == 2
 

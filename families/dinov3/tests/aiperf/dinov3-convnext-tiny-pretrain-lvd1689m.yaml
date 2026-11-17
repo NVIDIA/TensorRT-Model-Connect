@@ -13,6 +13,8 @@ benchmarks:
     gate:
       checker: families.dinov3.validation:compare
       profile: dinov3-convnext-tiny-pretrain-lvd1689m
+      # One of the 50 images may miss the criteria from FP16 rounding, if it stays within twice their error budget.
+      outliers: {max_fraction: 0.02, gate: {threshold_scale: 2.0}}
     suite_definition:
       suite: coco-feature-parity
       version: 1

@@ -389,7 +389,8 @@ set_target_properties(trtmc PROPERTIES
 # ~60s per-process engine-deserialization cost of `trtmc run` for each
 # prompt. Not part of the installed/shipped CLI surface.
 add_executable(mtp_batch_runner apps/cli/batch_runner.cpp)
-target_link_libraries(mtp_batch_runner PRIVATE trtmc_runtime nlohmann_json::nlohmann_json)
+target_include_directories(mtp_batch_runner PRIVATE ${PROJECT_SOURCE_DIR}/apps)
+target_link_libraries(mtp_batch_runner PRIVATE trtmc_c trtmc_runtime trtmc_core nlohmann_json::nlohmann_json)
 target_compile_options(mtp_batch_runner PRIVATE -Wall -Wextra -Wpedantic)
 set_target_properties(mtp_batch_runner PROPERTIES
   BUILD_RPATH "\$ORIGIN"
@@ -1017,10 +1018,11 @@ if(TRTMC_BUILD_TESTS)
     add_executable(test_dataset_benchmark_e2e apps/benchmark/tests/native/test_dataset_benchmark_e2e.cpp)
     target_link_libraries(test_dataset_benchmark_e2e PRIVATE nlohmann_json::nlohmann_json)
     target_compile_options(test_dataset_benchmark_e2e PRIVATE -Wall -Wextra -Wpedantic)
-    add_dependencies(test_dataset_benchmark_e2e trtmc_dataset_benchmark
+    add_dependencies(test_dataset_benchmark_e2e trtmc_dataset_benchmark mtp_batch_runner
       trtmc_api_test_backend trtmc_api_test_family trtmc_dataset_test_family)
     add_test(NAME dataset_benchmark_e2e COMMAND test_dataset_benchmark_e2e
-      $<TARGET_FILE:trtmc_dataset_benchmark> "${_trtmc_api_test_runtime_root}")
+      $<TARGET_FILE:trtmc_dataset_benchmark> "${_trtmc_api_test_runtime_root}"
+      $<TARGET_FILE:mtp_batch_runner>)
     set_tests_properties(dataset_benchmark_e2e PROPERTIES LABELS "cpu;e2e")
 
     add_executable(test_benchmark_worker_e2e

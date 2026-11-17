@@ -23,6 +23,8 @@ _MANIFEST_METADATA_FIELDS = {
     "trust_remote_code", "hf_dependencies", "reference_precision", "external_files",
     "base_reference_trust_remote_code", "build",
     "tensor_parallel_size", "context_parallel_size",
+    # Family E2E settings: the native reference's device placement and the Edge-path requirement.
+    "reference_device_map", "reference_max_memory", "require_edge_llm",
 }
 
 
@@ -331,6 +333,7 @@ def resolve_case(
     request = dict(resolution.request)
     if resolution.task in {
         "image_generation", "image_edit", "image_generation_batch", "world_model_generation",
+        "initial_image_text_to_video",
     }:
         for field, manifest_field in (
             ("height", "image_height"),

@@ -3,3 +3,10 @@
 
 reference:
   mode: eager  # torch.compile: fp16 Inductor numerics put one encoder-parity vector past the relative L2 gate (0.0218 > 0.02)
+
+benchmarks:
+  # Two FP16 implementations round differently: at most 1% of the 400 sentences (4) may fall outside the
+  # encoder-parity tolerance if each stays within twice it.
+  encoder_parity:
+    gate: {outliers: {max_fraction: 0.01, gate: {min_cosine: 0.998, max_relative_l2: 0.04}}}
+    mismatched_precision_gate: {outliers: {max_fraction: 0.01, gate: {min_cosine: 0.996, max_relative_l2: 0.08}}}

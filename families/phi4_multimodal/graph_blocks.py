@@ -146,8 +146,12 @@ def add_attention_block(
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
     sequence_length: int | None = 1,
+    dynamic_cache_rows: bool = False,
 ) -> dict[str, trt.ITensor]:
     """Pre-norm -> QKV -> RoPE -> cache concat -> attention -> output proj.
+
+    ``dynamic_cache_rows``: the cache inputs have a runtime row count, so the
+    attention reads ``rows + sequence_length`` keys instead of the whole window.
 
     Returns {"normed": ..., "attn_out": ..., "present_k": ..., "present_v": ...}.
     Does NOT apply residual -- callers compose the residual pattern.
@@ -253,7 +257,7 @@ def add_attention_block(
     # ------------------------------------------------------------------ #
     # Attention core — native IAttention                                  #
     # ------------------------------------------------------------------ #
-    kv_seq = None if sequence_length is None else attention_window
+    kv_seq = None if sequence_length is None or dynamic_cache_rows else attention_window
     if alibi_slopes_tensor is not None:
         if alibi_indices_tensor is None:
             raise ValueError("ALiBi attention requires cache position indices")

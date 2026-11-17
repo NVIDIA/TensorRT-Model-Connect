@@ -869,6 +869,64 @@ def _add_attention_core_with_logit_softcap(
     return _cast_back_to_trt_dtype(network, context, output_dtype)
 
 
+def _add_fp16_decode_attention(
+    network: trt.INetworkDefinition,
+    q: trt.ITensor,
+    k: trt.ITensor,
+    v: trt.ITensor,
+    mask: trt.ITensor,
+    *,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    kv_seq: int,
+    scale: float,
+) -> trt.ITensor:
+    """Compute masked single-token GQA with FP32 scores and compact K/V.
+
+    Explicit score and softmax operations avoid incorrect FP16 native attention
+    results for long KV caches and a TensorRT decode engine build failure.
+    """
+    if num_heads % num_kv_heads:
+        raise ValueError("query heads must be divisible by key/value heads")
+    groups = num_heads // num_kv_heads
+    grouped_q = network.add_shuffle(q)
+    grouped_q.reshape_dims = (num_kv_heads, groups, head_dim)
+    grouped_k = network.add_shuffle(k)
+    grouped_k.reshape_dims = (kv_seq, num_kv_heads, head_dim)
+    grouped_k.second_transpose = (1, 0, 2)
+    grouped_v = network.add_shuffle(v)
+    grouped_v.reshape_dims = (kv_seq, num_kv_heads, head_dim)
+    grouped_v.second_transpose = (1, 0, 2)
+
+    query_fp32 = network.add_cast(grouped_q.get_output(0), trt.float32).get_output(0)
+    key_fp32 = network.add_cast(grouped_k.get_output(0), trt.float32).get_output(0)
+    scores = network.add_matrix_multiply(
+        query_fp32, trt.MatrixOperation.NONE, key_fp32, trt.MatrixOperation.TRANSPOSE
+    ).get_output(0)
+    scale_tensor = add_constant(
+        network, (1, 1, 1), np.full((1, 1, 1), scale, dtype=np.float32), dtype=np.float32
+    )
+    scores = network.add_elementwise(
+        scores, scale_tensor, trt.ElementWiseOperation.PROD
+    ).get_output(0)
+    grouped_mask = network.add_shuffle(mask)
+    grouped_mask.reshape_dims = (1, 1, kv_seq)
+    mask_fp32 = network.add_cast(grouped_mask.get_output(0), trt.float32).get_output(0)
+    masked_scores = network.add_elementwise(
+        scores, mask_fp32, trt.ElementWiseOperation.SUM
+    ).get_output(0)
+    softmax = network.add_softmax(masked_scores)
+    softmax.axes = 1 << 2
+    probabilities = network.add_cast(softmax.get_output(0), trt.float16).get_output(0)
+    context = network.add_matrix_multiply(
+        probabilities, trt.MatrixOperation.NONE, grouped_v.get_output(0), trt.MatrixOperation.NONE
+    ).get_output(0)
+    rows = network.add_shuffle(context)
+    rows.reshape_dims = (1, num_heads * head_dim)
+    return rows.get_output(0)
+
+
 def add_attention_from_rows(
     network: trt.INetworkDefinition,
     q: trt.ITensor,
@@ -887,14 +945,31 @@ def add_attention_from_rows(
     fp32_accumulation: bool = False,
     tag: str | None = None,
 ) -> trt.ITensor:
-    """Native IAttention for row-major [S, H * D] Q/K/V tensors.
+    """Compute attention for row-major [S, H * D] Q/K/V tensors.
 
-    ``num_kv_heads`` can be smaller than ``num_heads`` for GQA/MQA. TRT
-    native IAttention supports this directly, so callers should not expand K/V
-    heads unless the model semantics require per-query-head K/V values.
+    Masked FP16 single-token decode uses explicit grouped attention; most other
+    cases use native IAttention. Both keep compact K/V heads for GQA/MQA.
     """
     attention_size = num_heads * head_dim
     kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+    if (
+        q_seq == 1
+        and kv_seq is not None
+        and q.dtype == trt.float16
+        and not causal
+        and mask is not None
+        and tuple(mask.shape[:3]) == (1, 1, 1)
+        and logit_softcap is None
+        and not fp32_accumulation
+    ):
+        return _add_fp16_decode_attention(
+            network, q, k, v, mask,
+            num_heads=num_heads,
+            num_kv_heads=kv_heads,
+            head_dim=head_dim,
+            kv_seq=kv_seq,
+            scale=float(1.0 / np.sqrt(head_dim)) if scale is None else scale,
+        )
     q_4d = reshape_rows_to_heads_4d(
         network, q, num_heads, head_dim, sequence_length=q_seq,
         tag=None if tag is None else tag + ".q")
