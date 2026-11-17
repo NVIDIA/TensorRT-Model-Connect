@@ -18,7 +18,9 @@ if(TRTMC_BUILD_TESTS)
   target_include_directories(flint_tokenizer_probe PRIVATE ${PROJECT_SOURCE_DIR})
   target_link_libraries(flint_tokenizer_probe PRIVATE trtmc_model_flint nlohmann_json::nlohmann_json)
   set_target_properties(flint_tokenizer_probe PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
-  add_test(NAME flint_tokenizer COMMAND ${Python3_EXECUTABLE} -m pytest
+  add_executable(test_flint_tokenizer ../tests/cpp/test_tokenizer.cpp)
+  set_target_properties(test_flint_tokenizer PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+  add_test(NAME flint_tokenizer COMMAND test_flint_tokenizer ${Python3_EXECUTABLE} -m pytest
     ${PROJECT_SOURCE_DIR}/families/flint/tests/test_tokenizer.py -q)
   set_tests_properties(flint_tokenizer PROPERTIES ENVIRONMENT
     "TRTMC_NATIVE_BUILD_DIR=${CMAKE_BINARY_DIR};PYTHONPATH=${PROJECT_SOURCE_DIR}/core/builder:${PROJECT_SOURCE_DIR}/apps/benchmark:${PROJECT_SOURCE_DIR}")
@@ -29,8 +31,8 @@ if(TRTMC_BUILD_TESTS)
     trtmc_runtime trtmc_model_flint nlohmann_json::nlohmann_json)
   set_target_properties(flint_logits_trace PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
   set_target_properties(flint_logits_trace PROPERTIES BUILD_RPATH "\$ORIGIN" INSTALL_RPATH "\$ORIGIN")
-  # CI builds the case-name target for this interpreted CTest. Include the
-  # helpers consumed by both the Python unit tests and the checkpoint E2E.
-  add_custom_target(test_flint_tokenizer DEPENDS flint_tokenizer_probe flint_logits_trace)
+  # Building the native CTest entry point also prepares the helpers used by
+  # the family Python tests and checkpoint E2E.
+  add_dependencies(test_flint_tokenizer flint_tokenizer_probe flint_logits_trace)
   install(TARGETS flint_logits_trace RUNTIME DESTINATION ${CMAKE_INSTALL_LIBDIR})
 endif()

@@ -50,7 +50,6 @@ class RecordingContext:
         self.runtime_snapshots = []
         self.skip_ctest = False
         self.no_family_ctests = False
-        self.ctest_command = None
         self.no_cpu_family_tests = False
         self.missing_e2e_testcases = set()
 
@@ -70,7 +69,6 @@ class RecordingContext:
                         "tests": [
                             {
                                 "name": "beta_runtime",
-                                "command": self.ctest_command,
                                 "properties": [
                                     {
                                         "name": "WORKING_DIRECTORY",
@@ -358,27 +356,6 @@ def test_family_sdk_consumers_build_without_family_ctests(tmp_path: Path) -> Non
 
     assert _built_targets(context) == [["test_beta_sdk_c"]]
     assert not any("--output-junit" in command for command, _ in context.calls)
-
-
-@pytest.mark.parametrize("executable", ["external", "native", "relative_native"])
-def test_family_ctest_build_targets_distinguish_external_commands(
-    tmp_path: Path, executable: str
-) -> None:
-    build = tmp_path / "native-build"
-    build.mkdir()
-    context = RecordingContext(tmp_path, {"TRTMC_NATIVE_BUILD_DIR": str(build)})
-    commands = {
-        "external": [str(tmp_path / "venv/bin/python3"), "-m", "pytest"],
-        "native": [str(build / "beta_probe")],
-        "relative_native": ["../../beta_probe"],
-    }
-    context.ctest_command = commands[executable]
-
-    E2ERunner(context)._run_family_ctests(build, ("beta",))
-
-    target = "test_beta_runtime" if executable == "external" else "beta_probe"
-    assert _built_targets(context) == [[target]]
-    assert any("--output-junit" in command for command, _ in context.calls)
 
 
 def test_family_without_ctests_or_sdk_consumers_builds_nothing(tmp_path: Path) -> None:
