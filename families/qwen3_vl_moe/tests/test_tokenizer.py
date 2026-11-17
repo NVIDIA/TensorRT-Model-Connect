@@ -11,6 +11,8 @@ import subprocess
 import pytest
 from tokenizers import Regex, Tokenizer, decoders, models, pre_tokenizers, trainers
 
+from families.qwen3_vl_moe.tests.native_tools import native_tool
+
 PATTERN = (
     r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}|"
     r" ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
@@ -61,8 +63,7 @@ NEWLINE_CASES = [
 @pytest.fixture(scope="module")
 def tokenizer_probe(tmp_path_factory):
     root = Path(__file__).resolve().parents[3]
-    runtime = Path(os.environ.get("TRTMC_RUNTIME_ROOT", root / "build"))
-    binary = runtime / "test_qwen3_vl_moe_tokenizer"
+    binary = native_tool("test_qwen3_vl_moe_tokenizer")
     if binary.is_file():
         return binary
     compiler = shutil.which(os.environ.get("CXX", "c++"))

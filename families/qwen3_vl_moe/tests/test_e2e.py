@@ -17,6 +17,8 @@ import shutil
 import pytest
 from tensorrt_model_connect import BuildRequest, build
 
+from families.qwen3_vl_moe.tests.native_tools import native_tool
+
 FAMILY = "qwen3_vl_moe"
 ROOT = Path(__file__).resolve().parent
 MANIFEST = json.loads((ROOT / "manifests/qwen3-vl-30b-a3b-instruct.json").read_text())
@@ -146,7 +148,7 @@ def artifacts(tmp_path_factory):
 def _verify_task_sdk(bundle, runtime, references, work):
     from PIL import Image
 
-    sdk = runtime / "test_qwen3_vl_moe_sdk"
+    sdk = native_tool("test_qwen3_vl_moe_sdk")
     if not sdk.is_file():
         compiler = shutil.which(os.environ.get("CXX", "c++"))
         assert compiler is not None, "Task SDK regression requires the C++ client compiler"

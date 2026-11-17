@@ -86,19 +86,30 @@ official reference modules.
 
 ```bash
 PYTHONPATH=core/builder:apps/benchmark:. \
-  TRTMC_QWEN3_VL_MOE_COMPONENTS=1 \
   python -m pytest families/qwen3_vl_moe/tests/test_components.py \
-    families/qwen3_vl_moe/tests/test_vision.py -q
+    families/qwen3_vl_moe/tests/test_vision.py -m 'gpu or trt' -q
 
 PYTHONPATH=core/builder:apps/benchmark:. \
   TRTMC_QWEN3_VL_MOE_MODEL_DIR=/path/to/checkpoint \
   TRTMC_BINARY="$PWD/build/trtmc" TRTMC_RUNTIME_ROOT="$PWD/build" \
+  TRTMC_NATIVE_BUILD_DIR="$PWD/build" \
   python -m pytest families/qwen3_vl_moe/tests \
     --e2e-model qwen3_vl_moe -q
 ```
 
 The E2E fixture builds a bundle unless `TRTMC_QWEN3_VL_MOE_BUNDLE` explicitly
 selects an existing bundle built from the current family source.
-Build the SDK test client with `TRTMC_BUILD_TESTS=ON` (the CMake default). When
-it is absent, the selected E2E fixture compiles the client using the public SDK
-headers and `libtrtmc_c` in `TRTMC_RUNTIME_ROOT`.
+Build the native tests with `TRTMC_BUILD_TESTS=ON` (the CMake default). On a
+CUDA-capable host, the clean-build CI path can be exercised with:
+
+```bash
+cmake --build build --target test_qwen3_vl_moe_kv_capacity \
+  test_qwen3_vl_moe_runtime test_qwen3_vl_moe_thread_unwind -j 8
+ctest --test-dir build -R '^qwen3_vl_moe_' --output-on-failure
+```
+
+These targets also build the tokenizer and SDK helpers. Tests find the helpers
+in `TRTMC_NATIVE_BUILD_DIR` while `TRTMC_RUNTIME_ROOT` supplies the runtime
+libraries. A combined local build directory remains supported. GPU component
+tests use the standard `gpu`/`trt` markers, so CI executes them in its hardware
+stage and rejects skips through its existing JUnit validator.

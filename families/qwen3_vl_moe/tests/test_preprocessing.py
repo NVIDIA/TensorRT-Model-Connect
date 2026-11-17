@@ -11,6 +11,8 @@ import subprocess
 import numpy as np
 import pytest
 
+from families.qwen3_vl_moe.tests.native_tools import native_tool
+
 
 def test_native_vision_rotary_tables_match_reference(tmp_path):
     import torch
@@ -18,8 +20,7 @@ def test_native_vision_rotary_tables_match_reference(tmp_path):
     from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeVisionModel
 
     root = Path(__file__).resolve().parents[3]
-    runtime = Path(os.environ.get("TRTMC_RUNTIME_ROOT", root / "build"))
-    binary = runtime / "test_qwen3_vl_moe_threads"
+    binary = native_tool("test_qwen3_vl_moe_threads")
     if not binary.is_file():
         compiler = shutil.which(os.environ.get("CXX", "c++"))
         if compiler is None:

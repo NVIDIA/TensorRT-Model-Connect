@@ -60,6 +60,8 @@ if(TRTMC_BUILD_TESTS)
   set_tests_properties(qwen3_vl_moe_runtime PROPERTIES LABELS cpu)
   add_test(NAME qwen3_vl_moe_kv_capacity COMMAND test_qwen3_vl_moe_runtime --gpu-cache)
   set_tests_properties(qwen3_vl_moe_kv_capacity PROPERTIES LABELS gpu)
+  # Fresh CTest discovery uses the case name before its executable exists.
+  add_custom_target(test_qwen3_vl_moe_kv_capacity DEPENDS test_qwen3_vl_moe_runtime)
 
   add_executable(test_qwen3_vl_moe_threads ../tests/cpp/test_preprocess_threads.cpp)
   target_include_directories(test_qwen3_vl_moe_threads PRIVATE
@@ -68,6 +70,7 @@ if(TRTMC_BUILD_TESTS)
   target_link_libraries(test_qwen3_vl_moe_threads PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
   add_test(NAME qwen3_vl_moe_thread_unwind COMMAND test_qwen3_vl_moe_threads)
   set_tests_properties(qwen3_vl_moe_thread_unwind PROPERTIES LABELS cpu)
+  add_custom_target(test_qwen3_vl_moe_thread_unwind DEPENDS test_qwen3_vl_moe_threads)
 
   add_executable(test_qwen3_vl_moe_tokenizer ../tests/cpp/tokenizer_probe.cpp)
   target_include_directories(test_qwen3_vl_moe_tokenizer PRIVATE ${PROJECT_SOURCE_DIR})
@@ -77,6 +80,8 @@ if(TRTMC_BUILD_TESTS)
   target_include_directories(test_qwen3_vl_moe_sdk PRIVATE ${PROJECT_SOURCE_DIR}/core/api/include)
   target_link_libraries(test_qwen3_vl_moe_sdk PRIVATE trtmc_c)
   add_dependencies(test_qwen3_vl_moe_sdk trtmc_model_qwen3_vl_moe trtmc_backend_trt)
+  add_dependencies(test_qwen3_vl_moe_runtime
+    test_qwen3_vl_moe_tokenizer test_qwen3_vl_moe_sdk)
   set_target_properties(test_qwen3_vl_moe_tokenizer test_qwen3_vl_moe_sdk
     test_qwen3_vl_moe_runtime test_qwen3_vl_moe_threads PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"

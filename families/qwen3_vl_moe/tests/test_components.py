@@ -2,17 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Small real TensorRT graphs against the official Qwen3-VL MoE modules."""
 
-import os
 import gc
 import ml_dtypes
 import numpy as np
 import pytest
 
+pytestmark = [pytest.mark.gpu, pytest.mark.trt]
+
 
 @pytest.mark.parametrize("per_head", [False, True])
 def test_bf16_rms_norm_rounds_before_gamma(per_head):
-    if os.environ.get("TRTMC_QWEN3_VL_MOE_COMPONENTS") != "1":
-        pytest.skip("explicit component GPU execution is required")
     import torch
     import tensorrt as trt
     from transformers.models.qwen3_vl_moe.modeling_qwen3_vl_moe import Qwen3VLMoeTextRMSNorm
@@ -55,8 +54,6 @@ def test_bf16_rms_norm_rounds_before_gamma(per_head):
 
 
 def test_bf16_constants_preserve_checkpoint_range_and_storage_lifetime():
-    if os.environ.get("TRTMC_QWEN3_VL_MOE_COMPONENTS") != "1":
-        pytest.skip("explicit component GPU execution is required")
     import torch
     import tensorrt as trt
     from families.qwen3_vl_moe.graph_ops import add_constant
@@ -89,8 +86,6 @@ def test_bf16_constants_preserve_checkpoint_range_and_storage_lifetime():
 @pytest.mark.parametrize("rows", [1, 3])
 @pytest.mark.parametrize("experts,top_k", [(4, 2), (12, 8)])
 def test_routed_experts_against_official_module(precision, rows, experts, top_k):
-    if os.environ.get("TRTMC_QWEN3_VL_MOE_COMPONENTS") != "1":
-        pytest.skip("explicit component GPU execution is required")
     import torch
     import tensorrt as trt
     from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import Qwen3VLMoeTextConfig
