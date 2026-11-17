@@ -11,7 +11,7 @@ static, so every call computes the full window.
 The CPU CTest target `mpnet_tokenizer` checks Unicode cleaning, lowercasing,
 normalizer flags and special-token framing through the native tokenizer factory.
 The lowercase table is generated from `tokenizers==0.23.3`; regenerate it with
-`python families/mpnet/tools/generate_lowercase.py` in an environment with that
+`python families/mpnet/tests/generate_lowercase.py` in an environment with that
 version installed. The runtime does not depend on Python or `tokenizers`.
 
 ## Quantization
