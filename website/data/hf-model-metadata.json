@@ -572,6 +572,17 @@
       "architecture_source": "model_index._class_name"
     },
     {
+      "hf_id": "black-forest-labs/flux-3-image-klein",
+      "revision": "09561231f44e41381c461caf53d5452005a60ac9",
+      "revision_source": "resolved",
+      "metadata_file": "modular_model_index.json",
+      "model_type": null,
+      "architectures": [
+        "Flux3DistilledModularPipeline"
+      ],
+      "architecture_source": "modular_model_index._class_name"
+    },
+    {
       "hf_id": "bytedance-research/Lance",
       "revision": "7395315758865e6f56ab87ad06a88c7ac172f056",
       "revision_source": "declared",

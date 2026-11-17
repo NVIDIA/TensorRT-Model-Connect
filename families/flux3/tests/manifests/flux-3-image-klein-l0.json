@@ -1,0 +1,22 @@
+{
+  "name": "flux-3-image-klein-l0",
+  "hf_id": "black-forest-labs/flux-3-image-klein",
+  "hf_revision": "09561231f44e41381c461caf53d5452005a60ac9",
+  "bundle": "flux-3-image-klein-l0.bundle",
+  "family": "flux3",
+  "task": "text_to_image",
+  "precision": "bf16",
+  "testcases": [
+    {
+      "name": "flux-3-image-klein-l0",
+      "premerge": true,
+      "reference_precision": "bf16",
+      "prompt": "Full-color outdoor photograph at sunrise, with a broad dawn sky <sky_1> above a green valley <valley_1>. On the left, a large hot-air balloon <obj_1> floats over the valley, while a smaller blue hot-air balloon <obj_2> hangs farther back on the right. Along the horizon, the rising sun <sun_1> appears between distant mountain ridges <mountain_1>, casting low orange light across the slopes and leaving the foreground meadow in cooler shadow. [{\"id\": \"obj_1\", \"bbox\": [80, 60, 480, 380], \"desc\": \"A large red and yellow striped hot-air balloon with alternating vertical fabric panels, a rounded envelope, dark suspension cables, and a small rectangular wicker basket hanging below; the lower edge of the envelope is partly shaded by the sunrise angle.\"}, {\"id\": \"obj_2\", \"bbox\": [200, 620, 420, 800], \"desc\": \"A small blue hot-air balloon with a rounded cobalt-blue envelope, narrow darker seams, fine suspension lines, and a tiny brown basket.\"}, {\"id\": \"sky_1\", \"bbox\": [0, 0, 650, 1000], \"desc\": \"A clear sunrise sky grading from pale orange near the horizon through peach to muted blue overhead, with several thin horizontal clouds catching warm light.\"}, {\"id\": \"sun_1\", \"bbox\": [470, 455, 535, 525], \"desc\": \"A low circular sunrise disk in bright yellow-orange, partially veiled by the distant ridge line.\"}, {\"id\": \"mountain_1\", \"bbox\": [430, 0, 690, 1000], \"desc\": \"Layered distant mountain ridges forming an uneven horizon, with blue-gray silhouettes in front and warmer brown-green slopes along their upper edges.\"}, {\"id\": \"valley_1\", \"bbox\": [560, 0, 1000, 1000], \"desc\": \"A broad green valley with rolling grassy slopes, scattered darker tree masses, and a winding river reflecting a narrow strip of orange morning light; the nearest meadow contains patches of deep green shadow and uneven vegetation.\"}]",
+      "seed": 1,
+      "num_inference_steps": 16
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "image_height": 512,
+  "image_width": 512
+}
