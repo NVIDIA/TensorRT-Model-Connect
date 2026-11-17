@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# The builder takes the transcription prompt framing from the checkpoint's own
+# Tekken tokenizer (mistral_common) and the mel filter bank from its
+# WhisperFeatureExtractor (transformers). The E2E reference is transformers'
+# VoxtralForConditionalGeneration and VoxtralProcessor, which loads audio
+# files through librosa.
+transformers==5.17.0
+mistral_common[audio]==1.13.1
+librosa==1.0.0

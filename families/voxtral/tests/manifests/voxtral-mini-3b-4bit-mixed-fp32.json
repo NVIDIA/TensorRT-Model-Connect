@@ -1,0 +1,37 @@
+{
+  "name": "voxtral-mini-3b-4bit-mixed-fp32",
+  "hf_id": "mzbac/voxtral-mini-3b-4bit-mixed",
+  "hf_revision": "d5803d1a8b3e75df4722fc721e3a7df9b57dc73d",
+  "bundle": "voxtral-mini-3b-4bit-mixed-fp32.bundle",
+  "family": "voxtral",
+  "task": "speech_transcription",
+  "precision": "fp32",
+  "max_sequence_length": 4096,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "voxtral-mini-3b-4bit-mixed-fp32-librispeech-en",
+      "premerge": true,
+      "test_input_audio": "data/librispeech-test-clean-6930-75918-0003.wav",
+      "source_language": "en",
+      "max_new_tokens": 256
+    },
+    {
+      "name": "voxtral-mini-3b-4bit-mixed-fp32-two-chunks",
+      "premerge": false,
+      "test_input_audio": [
+        "data/librispeech-test-clean-6930-75918-0003.wav",
+        "data/probe_02_clean_16k_mono_no_resample.wav",
+        "data/librispeech-test-clean-6930-75918-0003.wav"
+      ],
+      "max_new_tokens": 400
+    },
+    {
+      "name": "voxtral-mini-3b-4bit-mixed-fp32-token-budget",
+      "premerge": false,
+      "test_input_audio": "data/probe_02_clean_16k_mono_no_resample.wav",
+      "source_language": "en",
+      "max_new_tokens": 5
+    }
+  ]
+}
