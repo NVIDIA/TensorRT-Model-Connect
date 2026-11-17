@@ -54,8 +54,11 @@ the prefix. Runtime configuration accepts `max_new_tokens` and `seed`.
 Build `trtmc`, `trtmc_backend_trt`, `trtmc_model_diffusion_gemma`,
 `test_diffusion_gemma_diagnostic`, and `test_diffusion_gemma_sdk_cpp` with
 `TRTMC_BUILD_TESTS=ON`. The independent reference uses the official Transformers
-commit declared in [tests/requirements.txt](tests/requirements.txt), installed
-in a separate Python environment from the repository's pinned base environment.
+commit declared in [requirements.txt](requirements.txt). Prepare this family's
+optional dependencies in a dedicated environment; CI installs them in its
+family dependency image before running tests. The oracle imports the official
+implementation and checks its source revision independently of the family
+graph and runtime.
 
 ```bash
 PYTHONPATH=core/builder:apps/benchmark:. \

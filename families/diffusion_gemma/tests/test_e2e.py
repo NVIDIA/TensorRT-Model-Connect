@@ -174,7 +174,7 @@ def compare_observations(native: Path, reference: Path) -> dict:
 
 @pytest.mark.e2e
 @pytest.mark.gpu
-def test_checkpoint_native_and_reference(case_name: str, tmp_path: Path) -> None:
+def test_checkpoint_native_and_reference_e2e(case_name: str, tmp_path: Path) -> None:
     import numpy as np
     from transformers import AutoTokenizer
 

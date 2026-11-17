@@ -50,6 +50,9 @@ if(TRTMC_BUILD_TESTS)
   add_executable(test_diffusion_gemma_sdk_cpp
     ${PROJECT_SOURCE_DIR}/families/diffusion_gemma/tests/sdk_consumer.cpp)
   target_link_libraries(test_diffusion_gemma_sdk_cpp PRIVATE trtmc_c nlohmann_json::nlohmann_json)
+  # The selected checkpoint test runs both executables. CI builds SDK consumers
+  # explicitly, so retain the diagnostic in that target's dependency closure.
+  add_dependencies(test_diffusion_gemma_sdk_cpp test_diffusion_gemma_diagnostic)
   set_target_properties(test_diffusion_gemma_sdk_cpp PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 endif()
