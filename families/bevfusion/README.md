@@ -73,12 +73,21 @@ auto scores = result.view(); // Owned result; scores.values is contiguous [6,200
 
 ## FP8 quantization
 
-Use the same official checkpoint with `precision="fp16", quantization="fp8"`:
+Prepare the declared reference inputs as described below, then calibrate the
+official checkpoint once into a separate model directory:
+
+```bash
+PYTHONPATH=core/builder:. python -m families.bevfusion.calibrate_fp8_scales \
+  --model-dir artifacts/bevfusion/model \
+  --output artifacts/bevfusion/model-fp8/bevfusion-seg.pth
+```
+
+Build that calibrated checkpoint with `precision="fp16", quantization="fp8"`:
 
 ```python
 build(
     BuildRequest(
-        model_dir=Path("artifacts/bevfusion/model"),
+        model_dir=Path("artifacts/bevfusion/model-fp8"),
         output_path=Path("artifacts/bevfusion/bevfusion-bev-fp8.bundle"),
         family="bevfusion",
         task="spatial_features_to_class_scores",
@@ -89,8 +98,11 @@ build(
 ```
 
 The family converts original convolution weights to E4M3 at build time using
-per-output-channel scales. Static per-tensor activation scales come from
-`fp8_activation_scales.json`; ModelOpt is only needed to regenerate them.
+per-output-channel scales. ModelOpt max calibration saves static per-tensor
+activation scales together with all BEV-stage source weights in one checkpoint.
+The builder reads both from that artifact; raw checkpoints and external scale
+tables cannot enable FP8. Changing the original checkpoint requires preparing a
+new calibrated snapshot. ModelOpt is needed for preparation, not engine building.
 Explicit Q/DQ describes the computation and TensorRT chooses its GPU lowering.
 The qualified recipe quantizes the ordinary FPN convolution and the two large
 512-channel map-head convolutions. The fuser and SECOND backbone stay FP16 based
@@ -99,22 +111,11 @@ convolution also stay FP16; normalization, grid sampling and sigmoid preserve
 their FP32 boundaries. A null scale explicitly retains a convolution in FP16;
 missing/invalid scales are errors.
 
-The provided table uses the official weights and ModelOpt max calibration on
+The default recipe uses the official weights and ModelOpt max calibration on
 synthetic standard-normal BEV features, seeds 32..63, at the fixed shapes above.
 It is intended for the feature-input performance workload. It does not establish
 nuScenes dataset accuracy or calibration for real sensor feature distributions.
-Numeric checkpoint weight summaries select the matching table. Other weights
-require recalibration; a table beside the checkpoint overrides the provided one:
-
-```bash
-python -m pip install nvidia-modelopt==0.46.0
-PYTHONPATH=core/builder:. python -m families.bevfusion.calibrate_fp8_scales \
-  --model-dir artifacts/bevfusion/model \
-  --output artifacts/bevfusion/model/fp8_activation_scales.json
-```
-
-Prepare the declared reference inputs first as described below. By default the
-developer tool uses the qualified three-convolution recipe. Supplying `--exclude`
+By default the developer tool uses the qualified three-convolution recipe. Supplying `--exclude`
 replaces its exclusion list with the explicitly named FP16 convolutions.
 The bundle records the quantized layer list and calibration provenance.
 
@@ -126,6 +127,7 @@ plumbing with the corresponding PyTorch constructors. It loads every BEV-stage
 weight strictly. The test compares all output probabilities for seeds 0, 1 and 2
 against FP32 PyTorch with TF32 disabled: FP32 atol/rtol 0.0002; FP16 0.02.
 The FP8 testcase validates seeds 0..7 with the same 0.02 probability tolerances.
+It prepares its calibrated snapshot before building, outside the timing boundary.
 Seed 0 also exposed the initial full-FP8 recipe's error; seeds 1..7 were not used
 for recipe selection. Sensitivity tuning used separate seeds 16..19.
 The native helper exercises bundle loading and the public Task, including

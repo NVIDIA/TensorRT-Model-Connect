@@ -117,13 +117,22 @@ def test_bevfusion_e2e(case_name, request, tmp_path):
         },
     )
     case = manifest["testcases"][0]
-    limits = json.loads((ROOT / "thresholds" / f"{case_name}.json").read_text())["threshold_overrides"]
+    limits = json.loads((ROOT / "thresholds" / f"{case_name}.json").read_text())[
+        "threshold_overrides"
+    ]
     record_evidence("thresholds", limits)
+    build_model_dir = model_dir
+    if manifest.get("quantization") == "fp8":
+        from ..calibrate_fp8_scales import calibrate
+
+        build_model_dir = tmp_path / "calibrated-model"
+        with evidence_stage("calibration"):
+            calibrate(model_dir, build_model_dir / "bevfusion-seg.pth")
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
         build(
             BuildRequest(
-                model_dir=model_dir,
+                model_dir=build_model_dir,
                 output_path=bundle,
                 family="bevfusion",
                 task=manifest["task"],

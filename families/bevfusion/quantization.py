@@ -2,13 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """BEV-owned FP8 convolution weights and calibrated, static activation Q/DQ."""
 
-import json
-from pathlib import Path
-
 import numpy as np
 
 
-SCALES_FILE = "fp8_activation_scales.json"
 FP8_MAX = 448.0
 MIN_SCALE = 2.0**-14
 CONVOLUTIONS = (
@@ -25,28 +21,11 @@ DEFAULT_EXCLUSIONS = tuple(
 )
 
 
-def checkpoint_key(values):
-    """Select calibrated weights using numeric weight summaries, as for DenseNet."""
-    names = ("fuser.0.weight", "heads.map.classifier.6.weight")
-    sums = [np.abs(values[name].detach().float().numpy()).sum(dtype=np.float64) for name in names]
-    return "bevfusion-bev128-" + "-".join(f"{value:.8e}" for value in sums)
-
-
-def load_scales(checkpoint, values):
-    """Require a complete scale table for this checkpoint; null explicitly retains FP16."""
-    path = Path(checkpoint).parent / SCALES_FILE
-    if not path.is_file():
-        path = Path(__file__).with_name(SCALES_FILE)
-    try:
-        document = json.loads(path.read_text())
-    except FileNotFoundError as error:
-        raise ValueError("BEVFusion FP8 requires calibrate_fp8_scales.py output") from error
-    if (
-        not isinstance(document, dict)
-        or document.get("version") != 1
-        or document.get("checkpoint_key") != checkpoint_key(values)
-    ):
-        raise ValueError("BEVFusion FP8 scales do not match the checkpoint; recalibrate it")
+def load_scales(weights):
+    """Read scales from the same calibrated checkpoint snapshot as every BEV weight."""
+    document = weights.quantization
+    if not isinstance(document, dict) or document.get("version") != 1:
+        raise ValueError("BEVFusion FP8 requires a calibrate_fp8_scales.py checkpoint")
     scales = document.get("layers", {})
     if not isinstance(scales, dict) or set(scales) != set(CONVOLUTIONS):
         raise ValueError("BEVFusion FP8 scales must cover every selected convolution exactly")

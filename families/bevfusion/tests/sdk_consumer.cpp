@@ -208,7 +208,7 @@ int main(int argc, char** argv) {
             engine_only(argv[1], argv[3], argv[4], argv[5]);
             return 0;
         }
-        const auto camera = read(argv[3], 80 * 128 * 128), lidar = read(argv[4], 256 * 128 * 128);
+        auto camera = read(argv[3], 80 * 128 * 128), lidar = read(argv[4], 256 * 128 * 128);
         trtmc::LoadOptions options;
         options.runtime_root = argv[2];
         auto model = trtmc::Model::load(argv[1], options);
@@ -217,6 +217,9 @@ int main(int argc, char** argv) {
             {{"camera_bev", {camera.data(), camera.size()}, 80, 128, 128},
              {"lidar_bev", {lidar.data(), lidar.size()}, 256, 128, 128}}};
         auto result = task.run(request);
+        const auto original = result.view();
+        const std::vector<float> saved(original.values.data,
+                                       original.values.data + original.values.size);
         std::reverse(request.inputs.begin(), request.inputs.end());
         auto repeated = task.run(request);
         const auto view = result.view(), next = repeated.view();
@@ -228,6 +231,17 @@ int main(int argc, char** argv) {
             !std::equal(view.values.data, view.values.data + view.values.size, next.values.data))
             throw std::runtime_error(
                 "BEVFusion public Task result or independent-call contract failed");
+        for (auto& value : camera)
+            value = -value;
+        for (auto& value : lidar)
+            value = -value;
+        auto changed = task.run(request);
+        const auto different = changed.view();
+        require(different.values.size == saved.size() &&
+                    !std::equal(saved.begin(), saved.end(), different.values.data) &&
+                    std::equal(saved.begin(), saved.end(), result.view().values.data) &&
+                    std::equal(saved.begin(), saved.end(), repeated.view().values.data),
+                "BEVFusion later calls must preserve independently owned results");
         std::ofstream output(argv[5], std::ios::binary);
         for (size_t index = 0; index < names.size(); ++index)
             if (std::string_view(view.class_names.data[index].data,

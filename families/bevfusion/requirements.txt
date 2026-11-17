@@ -4,3 +4,4 @@
 numpy
 torch
 ml_dtypes
+nvidia-modelopt==0.46.0

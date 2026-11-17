@@ -7,13 +7,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from families.bevfusion.model import build_engine
-from families.bevfusion.calibrate_fp8_scales import calibrate
+from families.bevfusion.model import Weights, build_engine
+from families.bevfusion.calibrate_fp8_scales import FIRST_SEED, SAMPLES, calibrate, save_checkpoint
 from families.bevfusion.quantization import (
     CONVOLUTIONS,
     DEFAULT_EXCLUSIONS,
-    SCALES_FILE,
-    checkpoint_key,
     load_scales,
     quantize_weight,
 )
@@ -30,22 +28,14 @@ from families.bevfusion.quantization import (
 )
 def test_calibration_rejects_invalid_input_before_loading_modelopt(tmp_path, options):
     with pytest.raises(ValueError, match="calibration requires"):
-        calibrate(tmp_path, tmp_path / SCALES_FILE, **options)
+        calibrate(tmp_path, tmp_path / "calibrated/bevfusion-seg.pth", **options)
 
 
-def test_provided_recipe_has_disjoint_calibration_and_validation_seeds():
+def test_default_recipe_has_disjoint_calibration_and_validation_seeds():
     root = Path(__file__).parents[1]
-    document = json.loads((root / SCALES_FILE).read_text())
-    calibration = document["calibration"]
     manifest = json.loads((root / "tests/manifests/bevfusion-bev-fp8.json").read_text())
-    calibration_seeds = set(
-        range(calibration["first_seed"], calibration["first_seed"] + calibration["samples"])
-    )
+    calibration_seeds = set(range(FIRST_SEED, FIRST_SEED + SAMPLES))
     assert calibration_seeds.isdisjoint(manifest["testcases"][0]["seeds"])
-    assert set(calibration["excluded_layers"]) == set(DEFAULT_EXCLUSIONS)
-    assert {name for name, value in document["layers"].items() if value is None} == set(
-        DEFAULT_EXCLUSIONS
-    )
     assert len(CONVOLUTIONS) - len(DEFAULT_EXCLUSIONS) == 3
 
 
@@ -70,54 +60,63 @@ def test_fp8_weight_rejects_invalid_operands(weight):
 @pytest.fixture
 def calibration(tmp_path):
     torch = pytest.importorskip("torch")
-    weights = {"fuser.0.weight": torch.ones(2), "heads.map.classifier.6.weight": torch.ones(1)}
+    weights = {"fuser.0.weight": torch.ones(2), "decoder.backbone.blocks.0.0.weight": torch.ones(1)}
     document = {
         "version": 1,
-        "checkpoint_key": checkpoint_key(weights),
         "calibration": {},
         "layers": dict.fromkeys(CONVOLUTIONS, 0.1),
     }
     return tmp_path / "bevfusion-seg.pth", weights, document
 
 
-def save_scales(checkpoint, document):
-    (checkpoint.parent / SCALES_FILE).write_text(json.dumps(document))
-
-
-def test_fp8_scale_table_binds_checkpoint_and_explicit_exclusions(calibration):
+def test_fp8_snapshot_couples_decoder_weights_and_scales(calibration):
     checkpoint, weights, document = calibration
+    torch = pytest.importorskip("torch")
     document["layers"][CONVOLUTIONS[0]] = None
-    save_scales(checkpoint, document)
-    scales, _ = load_scales(checkpoint, weights)
+    save_checkpoint(checkpoint, weights, document)
+    scales, _ = load_scales(Weights(checkpoint))
     assert scales[CONVOLUTIONS[0]] is None and len(scales) == 16
-    weights["fuser.0.weight"] *= 2
-    with pytest.raises(ValueError, match="do not match"):
-        load_scales(checkpoint, weights)
+    # A decoder-only source mutation cannot pair new weights with cached scales.
+    name = "decoder.backbone.blocks.0.0.weight"
+    weights[name].neg_()
+    source = checkpoint.parent / "source.pth"
+    torch.save({"state_dict": weights}, source)
+    (source.parent / "fp8_activation_scales.json").write_text(json.dumps(document))
+    with pytest.raises(ValueError, match="calibrate_fp8_scales.py checkpoint"):
+        load_scales(Weights(source))
+    selected = Weights(checkpoint)
+    torch.testing.assert_close(selected.values[name], torch.ones(1))
+    assert load_scales(selected)[0] == scales
+
+
+def test_calibration_preserves_source_checkpoint(tmp_path):
+    with pytest.raises(ValueError, match="must differ"):
+        calibrate(tmp_path, tmp_path / "bevfusion-seg.pth")
 
 
 @pytest.mark.parametrize("invalid", [0, -1, float("nan"), float("inf"), True, "0.1", 1e-10, 1e10])
 def test_fp8_scale_table_rejects_invalid_scales(calibration, invalid):
     checkpoint, weights, document = calibration
     document["layers"][CONVOLUTIONS[0]] = invalid
-    save_scales(checkpoint, document)
+    save_checkpoint(checkpoint, weights, document)
     with pytest.raises(ValueError, match="representable"):
-        load_scales(checkpoint, weights)
+        load_scales(Weights(checkpoint))
 
 
 def test_fp8_scale_table_rejects_missing_extra_and_empty_recipes(calibration):
     checkpoint, weights, document = calibration
     del document["layers"][CONVOLUTIONS[0]]
-    save_scales(checkpoint, document)
+    save_checkpoint(checkpoint, weights, document)
     with pytest.raises(ValueError, match="exactly"):
-        load_scales(checkpoint, weights)
+        load_scales(Weights(checkpoint))
     document["layers"]["unexpected"] = 0.1
-    save_scales(checkpoint, document)
+    save_checkpoint(checkpoint, weights, document)
     with pytest.raises(ValueError, match="exactly"):
-        load_scales(checkpoint, weights)
+        load_scales(Weights(checkpoint))
     document["layers"] = dict.fromkeys(CONVOLUTIONS)
-    save_scales(checkpoint, document)
+    save_checkpoint(checkpoint, weights, document)
     with pytest.raises(ValueError, match="at least one"):
-        load_scales(checkpoint, weights)
+        load_scales(Weights(checkpoint))
 
 
 @pytest.mark.parametrize("precision,quantization", [("fp32", "fp8"), ("fp16", "int8")])

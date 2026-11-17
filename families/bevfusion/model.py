@@ -28,6 +28,7 @@ class Weights:
         import torch
 
         state = torch.load(checkpoint, map_location="cpu", weights_only=True)
+        self.quantization = state.get("bevfusion_quantization")
         state = state.get("state_dict", state)
         prefixes = ("fuser.", "decoder.", "heads.map.")
         self.values = {name: value for name, value in state.items() if name.startswith(prefixes)}
@@ -192,7 +193,7 @@ def build_engine(
     if quantization == "fp8":
         from .quantization import load_scales
 
-        fp8_scales, calibration = load_scales(checkpoint, weights.values)
+        fp8_scales, calibration = load_scales(weights)
     if metadata is not None:
         metadata.update(
             quantization=quantization or "none",

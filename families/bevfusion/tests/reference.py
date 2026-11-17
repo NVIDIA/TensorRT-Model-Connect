@@ -72,7 +72,7 @@ def _classes(source, relative, names):
 
 
 class Reference(nn.Module):
-    def __init__(self, source, checkpoint):
+    def __init__(self, source, checkpoint=None, *, state_dict=None):
         super().__init__()
         (fuser,) = _classes(source, "mmdet3d/models/fusers/conv.py", ["ConvFuser"])
         (backbone,) = _classes(source, "mmdet3d/models/backbones/second.py", ["SECOND"])
@@ -111,7 +111,11 @@ class Reference(nn.Module):
                 )
             )
         )
-        state = torch.load(checkpoint, map_location="cpu", weights_only=True)["state_dict"]
+        state = (
+            torch.load(checkpoint, map_location="cpu", weights_only=True)["state_dict"]
+            if state_dict is None
+            else state_dict
+        )
         state = {
             name: value
             for name, value in state.items()
