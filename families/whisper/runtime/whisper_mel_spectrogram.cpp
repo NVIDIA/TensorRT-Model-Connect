@@ -10,6 +10,7 @@
 #include <complex>
 #include <cstddef>
 #include <cstring>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -113,6 +114,319 @@ class Radix2Transform {
     std::vector<double> twiddles_imag_;
 };
 
+// exp(-2 pi i k / n) for k < n. The angle is folded into the first eighth of a
+// turn before the cosine and sine are taken, so their argument stays within
+// [0, pi / 4] and the roots at multiples of a quarter turn are exact.
+void unit_root(std::size_t k, std::size_t n, double& real, double& imag) {
+    constexpr double kQuarterPi = 0.78539816339744830962;
+    const std::size_t eighths = 8 * k;
+    const std::size_t octant = eighths / n;
+    const std::size_t rest = eighths % n;
+    const bool mirrored = (octant & 1U) != 0;
+    const double angle =
+        kQuarterPi * static_cast<double>(mirrored ? n - rest : rest) / static_cast<double>(n);
+    const double c = std::cos(angle);
+    const double s = std::sin(angle);
+    double cosine = c;
+    double sine = s;
+    switch (octant) {
+    case 0:
+        break;
+    case 1:
+        cosine = s;
+        sine = c;
+        break;
+    case 2:
+        cosine = -s;
+        sine = c;
+        break;
+    case 3:
+        cosine = -c;
+        sine = s;
+        break;
+    case 4:
+        cosine = -c;
+        sine = -s;
+        break;
+    case 5:
+        cosine = -s;
+        sine = -c;
+        break;
+    case 6:
+        cosine = s;
+        sine = -c;
+        break;
+    default:
+        cosine = c;
+        sine = -s;
+        break;
+    }
+    real = cosine;
+    imag = 0.0 - sine;
+}
+
+// The butterflies below work on (real, imaginary) pairs of doubles in place.
+// p0 .. p[radix - 1] point at one value of each of the stage's sub-blocks;
+// a1 .. are the values of sub-blocks 1 .. already multiplied by their twiddle
+// factors. Every product is written out on the real and imaginary parts, so
+// none goes through std::complex's operator*.
+
+inline void combine2(double* p0, double* p1, double a1r, double a1i) {
+    const double a0r = p0[0];
+    const double a0i = p0[1];
+    p0[0] = a0r + a1r;
+    p0[1] = a0i + a1i;
+    p1[0] = a0r - a1r;
+    p1[1] = a0i - a1i;
+}
+
+inline void combine3(double* p0, double* p1, double* p2, double a1r, double a1i, double a2r,
+                     double a2i) {
+    constexpr double kSin = 0.86602540378443864676; // sin(2 pi / 3)
+    const double a0r = p0[0];
+    const double a0i = p0[1];
+    const double t1r = a1r + a2r;
+    const double t1i = a1i + a2i;
+    const double t2r = a1r - a2r;
+    const double t2i = a1i - a2i;
+    p0[0] = a0r + t1r;
+    p0[1] = a0i + t1i;
+    const double mr = a0r - 0.5 * t1r;
+    const double mi = a0i - 0.5 * t1i;
+    const double ur = kSin * t2r;
+    const double ui = kSin * t2i;
+    p1[0] = mr + ui;
+    p1[1] = mi - ur;
+    p2[0] = mr - ui;
+    p2[1] = mi + ur;
+}
+
+inline void combine4(double* p0, double* p1, double* p2, double* p3, double a1r, double a1i,
+                     double a2r, double a2i, double a3r, double a3i) {
+    const double a0r = p0[0];
+    const double a0i = p0[1];
+    const double t0r = a0r + a2r;
+    const double t0i = a0i + a2i;
+    const double t1r = a0r - a2r;
+    const double t1i = a0i - a2i;
+    const double t2r = a1r + a3r;
+    const double t2i = a1i + a3i;
+    const double t3r = a1r - a3r;
+    const double t3i = a1i - a3i;
+    p0[0] = t0r + t2r;
+    p0[1] = t0i + t2i;
+    p2[0] = t0r - t2r;
+    p2[1] = t0i - t2i;
+    p1[0] = t1r + t3i;
+    p1[1] = t1i - t3r;
+    p3[0] = t1r - t3i;
+    p3[1] = t1i + t3r;
+}
+
+inline void combine5(double* p0, double* p1, double* p2, double* p3, double* p4, double a1r,
+                     double a1i, double a2r, double a2i, double a3r, double a3i, double a4r,
+                     double a4i) {
+    constexpr double kCos1 = 0.30901699437494742410;  // cos(2 pi / 5)
+    constexpr double kSin1 = 0.95105651629515357212;  // sin(2 pi / 5)
+    constexpr double kCos2 = -0.80901699437494742410; // cos(4 pi / 5)
+    constexpr double kSin2 = 0.58778525229247312917;  // sin(4 pi / 5)
+    const double a0r = p0[0];
+    const double a0i = p0[1];
+    const double t1r = a1r + a4r;
+    const double t1i = a1i + a4i;
+    const double t2r = a2r + a3r;
+    const double t2i = a2i + a3i;
+    const double t3r = a1r - a4r;
+    const double t3i = a1i - a4i;
+    const double t4r = a2r - a3r;
+    const double t4i = a2i - a3i;
+    p0[0] = a0r + t1r + t2r;
+    p0[1] = a0i + t1i + t2i;
+    const double br = a0r + kCos1 * t1r + kCos2 * t2r;
+    const double bi = a0i + kCos1 * t1i + kCos2 * t2i;
+    const double ur = kSin1 * t3r + kSin2 * t4r;
+    const double ui = kSin1 * t3i + kSin2 * t4i;
+    p1[0] = br + ui;
+    p1[1] = bi - ur;
+    p4[0] = br - ui;
+    p4[1] = bi + ur;
+    const double cr = a0r + kCos2 * t1r + kCos1 * t2r;
+    const double ci = a0i + kCos2 * t1i + kCos1 * t2i;
+    const double vr = kSin2 * t3r - kSin1 * t4r;
+    const double vi = kSin2 * t3i - kSin1 * t4i;
+    p2[0] = cr + vi;
+    p2[1] = ci - vr;
+    p3[0] = cr - vi;
+    p3[1] = ci + vr;
+}
+
+// In-place forward transform of one size whose prime factors are all in
+// {2, 3, 5}, in double precision, decimation in time: the values are loaded in
+// a digit-reversed order and each stage combines `radix` neighbouring
+// sub-blocks of `span` values. The stages run radix 4 first, then one radix 2,
+// then radix 3, then radix 5. Stage twiddles exp(-2 pi i q j / (radix * span))
+// (sub-block q in 1 .. radix - 1, position j in 1 .. span - 1) are tabulated
+// once per instance, each from its own angle; position 0 needs none.
+class MixedRadixTransform {
+  public:
+    explicit MixedRadixTransform(std::size_t size) : size_(size) {
+        if (size_ == 0) {
+            return;
+        }
+        std::size_t rest = size_;
+        std::size_t span = 1;
+        auto add_stages = [&](std::size_t radix, bool repeat) {
+            while (rest % radix == 0) {
+                Stage stage;
+                stage.radix = radix;
+                stage.span = span;
+                stage.twiddles = twiddles_.size();
+                const std::size_t block = radix * span;
+                for (std::size_t j = 1; j < span; ++j) {
+                    for (std::size_t q = 1; q < radix; ++q) {
+                        double real = 0.0;
+                        double imag = 0.0;
+                        unit_root(q * j, block, real, imag);
+                        twiddles_.push_back(real);
+                        twiddles_.push_back(imag);
+                    }
+                }
+                stages_.push_back(stage);
+                span = block;
+                rest /= radix;
+                if (!repeat) {
+                    break;
+                }
+            }
+        };
+        add_stages(4, true);
+        add_stages(2, false);
+        add_stages(3, true);
+        add_stages(5, true);
+        // rest is 1 here: the plan builds this transform for such sizes only.
+        sources_.resize(size_);
+        fill_sources(0, 0, 1, stages_.size());
+    }
+
+    std::size_t size() const { return size_; }
+
+    // The natural-order input index whose value slot i takes before the stages.
+    std::size_t source(std::size_t i) const { return sources_[i]; }
+
+    // All stages over `size` (real, imaginary) pairs loaded in source() order.
+    void butterflies(double* values) const {
+        for (const Stage& stage : stages_) {
+            const double* twiddles = twiddles_.data() + stage.twiddles;
+            const std::size_t span = stage.span;
+            const std::size_t step = 2 * span;
+            for (std::size_t block = 0; block < size_; block += stage.radix * span) {
+                double* p0 = values + 2 * block;
+                const double* w = twiddles;
+                if (stage.radix == 4) {
+                    double* p1 = p0 + step;
+                    double* p2 = p1 + step;
+                    double* p3 = p2 + step;
+                    combine4(p0, p1, p2, p3, p1[0], p1[1], p2[0], p2[1], p3[0], p3[1]);
+                    for (std::size_t j = 1; j < span; ++j, w += 6) {
+                        p0 += 2;
+                        p1 += 2;
+                        p2 += 2;
+                        p3 += 2;
+                        combine4(p0, p1, p2, p3, p1[0] * w[0] - p1[1] * w[1],
+                                 p1[0] * w[1] + p1[1] * w[0], p2[0] * w[2] - p2[1] * w[3],
+                                 p2[0] * w[3] + p2[1] * w[2], p3[0] * w[4] - p3[1] * w[5],
+                                 p3[0] * w[5] + p3[1] * w[4]);
+                    }
+                } else if (stage.radix == 5) {
+                    double* p1 = p0 + step;
+                    double* p2 = p1 + step;
+                    double* p3 = p2 + step;
+                    double* p4 = p3 + step;
+                    combine5(p0, p1, p2, p3, p4, p1[0], p1[1], p2[0], p2[1], p3[0], p3[1], p4[0],
+                             p4[1]);
+                    for (std::size_t j = 1; j < span; ++j, w += 8) {
+                        p0 += 2;
+                        p1 += 2;
+                        p2 += 2;
+                        p3 += 2;
+                        p4 += 2;
+                        combine5(p0, p1, p2, p3, p4, p1[0] * w[0] - p1[1] * w[1],
+                                 p1[0] * w[1] + p1[1] * w[0], p2[0] * w[2] - p2[1] * w[3],
+                                 p2[0] * w[3] + p2[1] * w[2], p3[0] * w[4] - p3[1] * w[5],
+                                 p3[0] * w[5] + p3[1] * w[4], p4[0] * w[6] - p4[1] * w[7],
+                                 p4[0] * w[7] + p4[1] * w[6]);
+                    }
+                } else if (stage.radix == 3) {
+                    double* p1 = p0 + step;
+                    double* p2 = p1 + step;
+                    combine3(p0, p1, p2, p1[0], p1[1], p2[0], p2[1]);
+                    for (std::size_t j = 1; j < span; ++j, w += 4) {
+                        p0 += 2;
+                        p1 += 2;
+                        p2 += 2;
+                        combine3(p0, p1, p2, p1[0] * w[0] - p1[1] * w[1],
+                                 p1[0] * w[1] + p1[1] * w[0], p2[0] * w[2] - p2[1] * w[3],
+                                 p2[0] * w[3] + p2[1] * w[2]);
+                    }
+                } else {
+                    double* p1 = p0 + step;
+                    combine2(p0, p1, p1[0], p1[1]);
+                    for (std::size_t j = 1; j < span; ++j, w += 2) {
+                        p0 += 2;
+                        p1 += 2;
+                        combine2(p0, p1, p1[0] * w[0] - p1[1] * w[1], p1[0] * w[1] + p1[1] * w[0]);
+                    }
+                }
+            }
+        }
+    }
+
+  private:
+    struct Stage {
+        std::size_t radix{0};
+        std::size_t span{0};     // values per sub-block
+        std::size_t twiddles{0}; // offset of the stage's table in twiddles_
+    };
+
+    // The block of `stages` stages at `slot` transforms the inputs
+    // source, source + stride, ...: its last stage splits them into `radix`
+    // interleaved sub-sequences, one per sub-block.
+    void fill_sources(std::size_t slot, std::size_t source, std::size_t stride,
+                      std::size_t stages) {
+        if (stages == 0) {
+            sources_[slot] = source;
+            return;
+        }
+        const Stage& stage = stages_[stages - 1];
+        for (std::size_t q = 0; q < stage.radix; ++q) {
+            fill_sources(slot + q * stage.span, source + q * stride, stride * stage.radix,
+                         stages - 1);
+        }
+    }
+
+    std::size_t size_;
+    std::vector<Stage> stages_;
+    std::vector<std::size_t> sources_;
+    std::vector<double> twiddles_;
+};
+
+// Size of the mixed-radix transform behind a frame of length n, or 0 when the
+// frame keeps a radix-2 path. The frame takes the mixed-radix path, with a
+// transform of half its length, when n is even, is not a power of two, and
+// n / 2 has no prime factor other than 2, 3 and 5.
+std::size_t mixed_radix_transform_size(int32_t n) {
+    if (n <= 0 || n % 2 != 0 || is_power_of_two(n)) {
+        return 0;
+    }
+    int32_t rest = n / 2;
+    for (const int32_t factor : {2, 3, 5}) {
+        while (rest % factor == 0) {
+            rest /= factor;
+        }
+    }
+    return rest == 1 ? static_cast<std::size_t>(n / 2) : 0;
+}
+
 // Size of the radix-2 transforms behind a frame of length n: n itself when it
 // is a power of two, else the next power of two that holds the 2n - 1 values
 // of Bluestein's algorithm.
@@ -133,9 +447,24 @@ std::size_t transform_size(int32_t n) {
 class RfftPowerPlan {
   public:
     explicit RfftPowerPlan(int32_t n)
-        : n_(n), fft_size_(transform_size(n)), forward_(fft_size_, false),
-          inverse_(is_power_of_two(n) ? 0 : fft_size_, true), workspace_(fft_size_) {
+        : n_(n), mixed_radix_(mixed_radix_transform_size(n)),
+          fft_size_(mixed_radix_.size() != 0 ? 0 : transform_size(n)), forward_(fft_size_, false),
+          inverse_(is_power_of_two(n) ? 0 : fft_size_, true), workspace_(fft_size_),
+          pair_values_(2 * mixed_radix_.size()) {
         if (n_ <= 0 || is_power_of_two(n_)) {
+            return;
+        }
+
+        if (mixed_radix_.size() != 0) {
+            const std::size_t half = mixed_radix_.size();
+            half_twiddles_.resize(2 * (half + 1));
+            for (std::size_t k = 0; k <= half; ++k) {
+                double real = 0.0;
+                double imag = 0.0;
+                unit_root(k, static_cast<std::size_t>(n_), real, imag);
+                half_twiddles_[2 * k] = imag;
+                half_twiddles_[2 * k + 1] = 0.0 - real;
+            }
             return;
         }
 
@@ -174,6 +503,12 @@ class RfftPowerPlan {
             return;
         }
 
+        if (mixed_radix_.size() != 0) {
+            write_mixed_radix_power(input, bins, power_out);
+            std::fill(power_out + bins, power_out + n_out, 0.0F);
+            return;
+        }
+
         std::fill(workspace_.begin(), workspace_.end(), std::complex<double>(0.0, 0.0));
         for (int32_t i = 0; i < n_; ++i) {
             workspace_[forward_.bit_reversed(static_cast<std::size_t>(i))] =
@@ -206,14 +541,70 @@ class RfftPowerPlan {
         std::fill(power_out + bins, power_out + n_out, 0.0F);
     }
 
+    // The mixed-radix path. The pairs z[j] = x[2j] + i x[2j + 1] are
+    // transformed at size n / 2 to Z. With C[k] = conj(Z[(n / 2 - k) mod n / 2])
+    // and E, O the spectra of the even and of the odd samples:
+    //   2 E[k] = Z[k] + C[k],  2i O[k] = Z[k] - C[k],
+    //   2 X[k] = 2 E[k] + (-i exp(-2 pi i k / n)) (2i O[k]),
+    // for k in 0 .. n / 2 (Z[n / 2] is Z[0]). The power takes the exact factor
+    // 1/4.
+    void write_mixed_radix_power(const float* input, int32_t bins, float* power_out) {
+        double* values = pair_values_.data();
+        const std::size_t size = mixed_radix_.size();
+        for (std::size_t i = 0; i < size; ++i) {
+            const std::size_t source = 2 * mixed_radix_.source(i);
+            values[2 * i] = static_cast<double>(input[source]);
+            values[2 * i + 1] = static_cast<double>(input[source + 1]);
+        }
+        mixed_radix_.butterflies(values);
+        // A frame that holds a sample that is not finite gives NaN in every
+        // bin. Z[0] tells exactly whether it does: its real and imaginary
+        // parts are the sums of the even and of the odd samples, reached by
+        // additions alone (position 0 of a stage takes no twiddle factor).
+        // Finite floats cannot overflow such a sum of doubles, and a term
+        // that is not finite leaves it not finite.
+        if (!std::isfinite(values[0]) || !std::isfinite(values[1])) {
+            std::fill(power_out, power_out + bins, std::numeric_limits<float>::quiet_NaN());
+            return;
+        }
+        const double* twiddles = half_twiddles_.data();
+        for (int32_t k = 0; k < bins; ++k) {
+            const std::size_t index = static_cast<std::size_t>(k);
+            const std::size_t at = index == size ? 0 : index;
+            const std::size_t mirror = index == 0 ? 0 : size - index;
+            const double zr = values[2 * at];
+            const double zi = values[2 * at + 1];
+            const double cr = values[2 * mirror];
+            const double ci = -values[2 * mirror + 1];
+            const double er = zr + cr;
+            const double ei = zi + ci;
+            const double dr = zr - cr;
+            const double di = zi - ci;
+            const double wr = twiddles[2 * index];
+            const double wi = twiddles[2 * index + 1];
+            const double real = er + (wr * dr - wi * di);
+            const double imag = ei + (wr * di + wi * dr);
+            power_out[k] = static_cast<float>(0.25 * (real * real + imag * imag));
+        }
+    }
+
     int32_t n_;
+    // The mixed-radix path's transform of the sample pairs; empty (size 0)
+    // for a length on a radix-2 path.
+    MixedRadixTransform mixed_radix_;
     std::size_t fft_size_;
     Radix2Transform forward_;
-    // Bluestein's second transform; empty for a power-of-two length.
+    // Bluestein's second transform; empty unless the length takes Bluestein's
+    // path.
     Radix2Transform inverse_;
     std::vector<std::complex<double>> chirp_;
     std::vector<std::complex<double>> kernel_fft_;
     std::vector<std::complex<double>> workspace_;
+    // The mixed-radix transform's (real, imaginary) pairs.
+    std::vector<double> pair_values_;
+    // -i exp(-2 pi i k / n) for k in 0 .. n / 2, as (real, imaginary) pairs;
+    // empty unless the length takes the mixed-radix path.
+    std::vector<double> half_twiddles_;
 };
 
 std::vector<float> build_center_padded_audio(const float* samples, int32_t n_samples,
