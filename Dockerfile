@@ -21,6 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ninja-build \
       nlohmann-json3-dev \
       libicu-dev \
+      libopencv-core-dev \
+      libopencv-imgproc-dev \
       openmpi-bin \
       patchelf \
       pkg-config \
@@ -59,6 +61,7 @@ RUN python3.12 -m venv "$VIRTUAL_ENV" \
       "ml_dtypes>=0.4" \
       "numpy>=1.24,<2.5" \
       "onnx>=1.16" \
+      "opencv-python-headless==4.13.0.92" \
       "Pillow" \
       "protobuf" \
       "pybind11==2.13.6" \
@@ -89,7 +92,7 @@ ENV TRT_INC_DIR=/usr/include/aarch64-linux-gnu
 ENV LD_LIBRARY_PATH=$TRT_LIB_DIR:$NCCL_LIB_DIR:$TVM_FFI_LIB_DIR:/usr/local/cuda/lib64
 
 RUN python3.12 -c \
-      "import importlib.metadata as m, tensorrt, torch, transformers, tvm_ffi; assert tensorrt.__version__ == '11.4.0.106'; assert torch.__version__ == '2.12.0+cu130'; assert transformers.__version__ == '5.2.0'; assert m.version('conan-py-build') == '0.4.3'; assert m.version('apache-tvm-ffi') == '0.1.12'; assert 80 <= int(m.version('setuptools').split('.', 1)[0]) < 82" \
+      "import cv2, importlib.metadata as m, tensorrt, torch, transformers, tvm_ffi; from transformers.utils import is_cv2_available; assert is_cv2_available(); assert m.version('opencv-python-headless') == '4.13.0.92'; assert tensorrt.__version__ == '11.4.0.106'; assert torch.__version__ == '2.12.0+cu130'; assert transformers.__version__ == '5.2.0'; assert m.version('conan-py-build') == '0.4.3'; assert m.version('apache-tvm-ffi') == '0.1.12'; assert 80 <= int(m.version('setuptools').split('.', 1)[0]) < 82" \
     && test -f "$TRT_INC_DIR/NvInferVersion.h" \
     && test -f "$TRT_LIB_DIR/libnvinfer.so.11" \
     && test -f "$TRT_LIB_DIR/libnvonnxparser.so.11" \
