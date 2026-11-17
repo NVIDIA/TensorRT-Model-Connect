@@ -1,0 +1,6 @@
+{
+  "threshold_overrides": {
+    "bf16_baseline_prefix_slack_tokens": 2,
+    "bf16_min_stable_requests": 3
+  }
+}
