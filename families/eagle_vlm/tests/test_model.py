@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 
@@ -20,6 +21,21 @@ except ModuleNotFoundError:
 
 from families.eagle_vlm import model  # noqa: E402
 from tensorrt_model_connect import BuildRequest  # noqa: E402
+
+
+@pytest.mark.parametrize("prefix", ["", "model."])
+def test_vision_loader_preserves_projector_and_indexed_readers(monkeypatch, tmp_path, prefix):
+    from families.eagle_vlm.checkpoint_mapper import _ReaderCollection
+
+    tensors = {
+        prefix + "vision_model.vision_model.post_layernorm.weight": np.array([1, 2], dtype=np.float32),
+        prefix + "mlp1.0.weight": np.array([3, 4], dtype=np.float32),
+    }
+    reader = SimpleNamespace(keys=lambda: tensors.keys(), get_tensor=lambda name: tensors[name])
+    monkeypatch.setattr(model, "_open_safetensors", lambda path: _ReaderCollection([reader]))
+    weights = model._load_vision_weights(str(tmp_path), model.ModelConfig())
+    np.testing.assert_array_equal(weights["vision_model.vision_model.post_layernorm.weight"], [1, 2])
+    np.testing.assert_array_equal(weights["mlp1.0.weight"], [3, 4])
 
 
 def _checkpoint(tmp_path: Path, reranker: bool = True) -> Path:

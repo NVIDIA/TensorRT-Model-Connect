@@ -44,11 +44,26 @@ class RecordingModule final : public trtmc::ITrtModule {
 
     trtmc::TensorMap forward(const trtmc::TensorMap& inputs) override {
         ++calls;
+        if (vision) {
+            const auto value = static_cast<const float*>(inputs.at("pixel_values").data)[0];
+            output_buffer = {value, value + 1, value + 2, value + 3};
+            return {{"vision_features", {output_buffer.data(), {2, 2}, trtmc::DType::kFloat32}}};
+        }
         const auto& ids_tensor = inputs.at("input_ids");
         last_shape = ids_tensor.shape;
         const auto* ids = static_cast<const std::int32_t*>(ids_tensor.data);
         last_input_ids.assign(ids, ids + ids_tensor.numel());
         shapes.push_back(ids_tensor.shape);
+
+        if (single_forward) {
+            const auto& embed = inputs.at("input_embed");
+            const auto* values = static_cast<const float*>(embed.data);
+            last_embeddings.assign(values, values + embed.numel());
+            const auto* selected = static_cast<const float*>(inputs.at("use_input_embed").data);
+            last_selector.assign(selected, selected + ids_tensor.numel());
+            output_buffer = {last_embeddings.at(2)};
+            return {{"score", {output_buffer.data(), {1, 1}, trtmc::DType::kFloat32}}};
+        }
 
         if (reranking_) {
             const auto batch = ids_tensor.shape.at(0);
@@ -99,7 +114,12 @@ class RecordingModule final : public trtmc::ITrtModule {
         return name == (reranking_ ? "logits" : "hidden_states");
     }
     trtmc::DType tensor_dtype(const std::string&) const override { return trtmc::DType::kFloat32; }
-    std::vector<int64_t> tensor_shape(const std::string&) const override { return {capacity}; }
+    std::vector<int64_t> tensor_shape(const std::string& name) const override {
+        if (vision)
+            return name == "pixel_values" ? std::vector<int64_t>{3, 2, 2}
+                                          : std::vector<int64_t>{2, 2};
+        return {capacity};
+    }
     std::vector<int64_t> input_profile_shape(const std::string&, int32_t,
                                              trtmc::ProfileShapeSelector) const override {
         return reranking_ ? std::vector<int64_t>{max_batch, capacity}
@@ -110,13 +130,18 @@ class RecordingModule final : public trtmc::ITrtModule {
     void bind_external(const std::string&, void*) override {}
     void bind_external(const std::string&, void*, const std::vector<int64_t>&) override {}
     int32_t input_rank(const std::string&) const override { return reranking_ ? 2 : 1; }
-    bool input_is_dynamic(const std::string&) const override { return true; }
+    bool input_is_dynamic(const std::string&) const override { return dynamic; }
     void reset_execution_context() override {}
     void set_timing_label(std::string) override {}
     bool ok() const override { return true; }
     void keep_alive(std::shared_ptr<void>) override {}
 
     int calls{0};
+    bool vision{false};
+    bool single_forward{false};
+    bool dynamic{true};
+    std::vector<float> last_embeddings;
+    std::vector<float> last_selector;
     std::int32_t hidden{2};
     // When non-negative, the hidden size the engine metadata claims.
     std::int32_t reported_hidden{-1};
@@ -497,6 +522,41 @@ void test_constructor_validates_its_dependencies() {
         "a non-positive vocabulary size must be rejected");
 }
 
+void test_single_forward_inserts_image_features_once() {
+    for (const bool reranking : {false, true}) {
+        auto encoder = std::make_unique<RecordingModule>(reranking);
+        auto* text = encoder.get();
+        text->single_forward = true;
+        text->dynamic = reranking;
+        text->capacity = 4;
+        auto vision = std::make_unique<RecordingModule>();
+        auto* image = vision.get();
+        image->vision = true;
+        trtmc::EncoderPipeline pipeline(std::move(encoder), "internal", nullptr, kVocabSize, "avg",
+                                        true, std::move(vision));
+        require(pipeline.task_bindings().empty(), "single forward pass must not advertise Tasks");
+        const std::vector<int32_t> ids{1, 2, 3, 4};
+        std::vector<float> pixels(12, 5.0f);
+        const auto first = pipeline.forward_image(ids, pixels, 1);
+        require(first == std::vector<float>{5.0f}, "image features must reach the text output");
+        require(text->calls == 1 && image->calls == 1, "each engine must execute exactly once");
+        require(text->last_embeddings == std::vector<float>({0, 0, 5, 6, 7, 8, 0, 0}),
+                "image insertion must preserve surrounding token positions");
+        require(text->last_selector == std::vector<float>({0, 1, 1, 0}),
+                "only image positions may bypass token embeddings");
+        pixels[0] = 9.0f;
+        const auto second = pipeline.forward_image(ids, pixels, 1);
+        require(second == std::vector<float>{9.0f} && first == std::vector<float>{5.0f},
+                "outputs must depend on images and own their storage");
+        rejects<std::invalid_argument>([&] { pipeline.forward_image(ids, pixels, 3); },
+                                       "an image span outside the sequence must fail");
+        if (!reranking)
+            rejects<std::invalid_argument>([&] { pipeline.forward_image({1, 2, 3}, pixels, 1); },
+                                           "a static engine requires the complete token shape");
+        require(text->calls == 2 && image->calls == 2, "invalid input must not execute engines");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -515,6 +575,7 @@ int main() {
         test_each_mode_rejects_the_other_tasks();
         test_unsupported_config_and_input_limits();
         test_constructor_validates_its_dependencies();
+        test_single_forward_inserts_image_features_once();
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
