@@ -250,6 +250,8 @@ def build_dual_profile_decoder_engine(
     from one row through the bundle capacity.
     """
     _supports_config(config, weights)
+    if single_forward and position_type == "alibi":
+        raise ValueError("single forward pass does not support ALiBi")
     if single_forward and (
         native_kv_cache or runtime_sized_kv_cache or quant_ctx is not None
         or profile_mode != "prefill"
