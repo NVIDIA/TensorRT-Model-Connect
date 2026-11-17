@@ -23,6 +23,10 @@
 
 namespace trtmc {
 
+namespace canary {
+class HostWorkers;
+} // namespace canary
+
 struct MelFilterbank;
 struct CanaryBatchSegment;
 struct CanaryBatchWorkGroup;
@@ -97,6 +101,12 @@ class CanaryPipeline final : public ITranscription, public IBatchTranscription {
     int32_t hidden_size_;
     int32_t num_decoder_layers_;
     std::unique_ptr<MelFilterbank> mel_fb_;
+    // The threads that share the resampling and mel passes of a segment that
+    // a batch chunk prepares alone, on its own task (canary_parallel.h). A
+    // segment prepared on the calling thread (transcribe_segment) is not
+    // shared: back to back under a load-following clock governor that thread
+    // is faster alone.
+    std::unique_ptr<canary::HostWorkers> host_workers_;
     int32_t mel_n_fft_;
     int32_t mel_win_length_;
     int32_t mel_hop_length_;

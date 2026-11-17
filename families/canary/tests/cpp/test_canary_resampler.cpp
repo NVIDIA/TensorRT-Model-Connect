@@ -9,13 +9,16 @@
 // weights per phase and filters several outputs per pass; its outputs must
 // equal the definition's bit for bit.
 
+#include "families/canary/runtime/canary_parallel.h"
 #include "families/canary/runtime/resampler.h"
+#include "families/canary/tests/cpp/canary_range_runners.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <random>
 #include <string>
@@ -201,11 +204,237 @@ void test_resampler_cancellation_inputs() {
     }
 }
 
+// The outputs (relative to output_start) at which the walk over a range's
+// outputs begins a step, from the per-output definition: an output is taken
+// alone unless it and the next three all read their full 2 * kHalfTaps taps,
+// in which case the four are one step. The count is a step start too (the
+// end of the walk).
+std::vector<bool> walk_step_starts(std::int32_t num_samples, std::int32_t source_rate,
+                                   std::int32_t target_rate, std::int32_t start,
+                                   std::int32_t count) {
+    const auto center = [&](std::int32_t local) {
+        return static_cast<std::int32_t>(static_cast<std::int64_t>(start + local) * source_rate /
+                                         target_rate);
+    };
+    const auto reads_all_taps = [&](std::int32_t local) {
+        return center(local) >= kHalfTaps - 1 && center(local) <= num_samples - 1 - kHalfTaps;
+    };
+    std::vector<bool> starts(static_cast<std::size_t>(count) + 1, false);
+    std::int32_t local = 0;
+    while (local < count) {
+        starts[static_cast<std::size_t>(local)] = true;
+        const bool group = local + 4 <= count && reads_all_taps(local) &&
+                           reads_all_taps(local + 1) && reads_all_taps(local + 2) &&
+                           reads_all_taps(local + 3);
+        local += group ? 4 : 1;
+    }
+    starts[static_cast<std::size_t>(count)] = true;
+    return starts;
+}
+
+struct Rates {
+    std::int32_t source;
+    std::int32_t target;
+};
+
+std::string describe(const Rates& rate, std::int32_t length, std::int32_t workers,
+                     std::int32_t min_outputs) {
+    return std::to_string(rate.source) + " to " + std::to_string(rate.target) + " Hz, " +
+           std::to_string(length) + " samples, " + std::to_string(workers) +
+           " workers, shares of " + std::to_string(min_outputs);
+}
+
+// The request's signal (4.16 s of 48 kHz) goes to the runner as one pass of
+// 32 ranges for eight workers, and a signal of fewer than sixteen shares does
+// not go to it at all. What the runner is handed is what runs.
+void test_resampler_shares_a_long_signal_only() {
+    const std::int32_t length = 199680;
+    const auto samples = seeded_audio(length, 20261117);
+    canary_test::RecordingRunner runner(8);
+    const auto shared = trtmc::resample_linear(samples.data(), length, 48000, 16000, &runner);
+    check(runner.passes.size() == 1 && runner.passes[0].size() == 32 &&
+              canary_test::covers_once(runner.passes[0], 66560),
+          "canary resampler shares the request's 66,560 outputs as 32 ranges for eight workers");
+    check(same_bits(shared, reference_resample_range(samples, 48000, 16000, 0, 66560)),
+          "canary resampler's shared outputs match the per-output definition");
+
+    canary_test::RecordingRunner two(2);
+    trtmc::resample_linear_range(samples.data(), length, 48000, 16000, 100, 40000, &two);
+    check(two.passes.size() == 1 && two.passes[0].size() == 8,
+          "canary resampler shares a range of the outputs as 8 ranges for two workers");
+
+    canary_test::RecordingRunner unused(8);
+    const std::int32_t short_length =
+        3 * (static_cast<std::int32_t>(trtmc::canary::kMinRangesToShare) *
+                 trtmc::kCanaryResamplerMinOutputsPerRange -
+             8);
+    trtmc::resample_linear(samples.data(), short_length, 48000, 16000, &unused);
+    trtmc::resample_linear(samples.data(), short_length, 16000, 16000, &unused);
+    check(unused.passes.empty(),
+          "canary resampler keeps fewer than sixteen shares, and an equal rate, off the runner");
+
+    // The per-output path (too many phases for the weight table) is shared too.
+    canary_test::RecordingRunner odd(4);
+    trtmc::resample_linear(samples.data(), 60000, 44100, 16001, &odd, 512);
+    check(odd.passes.size() == 1 &&
+              canary_test::covers_once(odd.passes[0], std::int64_t{60000} * 16001 / 44100),
+          "canary resampler shares the per-output path");
+}
+
+// A range must begin and end where the walk begins a step: then each output
+// is filtered in the same lane of the same group, or alone, however the walk
+// is cut, and no range writes another range's output.
+void test_resampler_ranges_lie_on_walk_steps() {
+    const Rates rates[] = {{48000, 16000}, {44100, 16000}, {96000, 16000}, {22050, 16000},
+                           {11025, 16000}, {8000, 16000},  {16000, 48000}, {8000, 44100}};
+    std::uint32_t seed = 31;
+    for (const auto& rate : rates) {
+        for (const std::int32_t length : {40, 97, 4801}) {
+            const auto samples = seeded_audio(length, seed++);
+            const auto full = static_cast<std::int32_t>(static_cast<std::int64_t>(length) *
+                                                        rate.target / rate.source);
+            for (const std::int32_t start : {0, 1, 2, 3, 5, 6, 7, full / 3, full - 9}) {
+                for (const std::int32_t count : {9, 70, 1000, full}) {
+                    const auto clamped_start = std::clamp(start, 0, full);
+                    const auto clamped_count = std::clamp(count, 0, full - clamped_start);
+                    const auto starts = walk_step_starts(length, rate.source, rate.target,
+                                                         clamped_start, clamped_count);
+                    for (const std::int32_t workers : {2, 8}) {
+                        for (const std::int32_t min_outputs : {1, 5, 64}) {
+                            canary_test::RecordingRunner runner(workers);
+                            trtmc::resample_linear_range(samples.data(), length, rate.source,
+                                                         rate.target, start, count, &runner,
+                                                         min_outputs);
+                            if (runner.passes.empty())
+                                continue;
+                            const auto& ranges = runner.passes[0];
+                            bool on_steps = true;
+                            for (const auto& [begin, end] : ranges) {
+                                on_steps = on_steps && starts[static_cast<std::size_t>(begin)] &&
+                                           starts[static_cast<std::size_t>(end)];
+                            }
+                            const std::string name = describe(rate, length, workers, min_outputs) +
+                                                     ", range " + std::to_string(start) + "+" +
+                                                     std::to_string(count);
+                            check(runner.passes.size() == 1 &&
+                                      canary_test::covers_once(ranges, clamped_count),
+                                  "canary resampler ranges cover the outputs once at " + name);
+                            check(on_steps,
+                                  "canary resampler ranges begin and end on walk steps at " + name);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// One range run alone writes its own outputs, with the values of the whole
+// walk, and no other output.
+void test_resampler_range_writes_only_its_outputs() {
+    const Rates rates[] = {{48000, 16000}, {44100, 16000}, {8000, 16000}, {44100, 16001}};
+    std::uint32_t seed = 900;
+    for (const auto& rate : rates) {
+        const std::int32_t length = 6000;
+        auto samples = seeded_audio(length, seed++);
+        for (float& sample : samples)
+            sample += 0.5F; // no exact zero among the outputs
+        const auto whole = trtmc::resample_linear(samples.data(), length, rate.source, rate.target);
+        canary_test::RecordingRunner plan(3);
+        trtmc::resample_linear(samples.data(), length, rate.source, rate.target, &plan, 16);
+        check(plan.passes.size() == 1 && plan.passes[0].size() == 12,
+              "canary resampler cuts the test signal into 12 ranges at " +
+                  describe(rate, length, 3, 16));
+        if (plan.passes.size() != 1)
+            continue;
+        const auto ranges = plan.passes[0];
+        for (std::size_t only = 0; only < ranges.size(); ++only) {
+            canary_test::RecordingRunner one(
+                3, [only](std::size_t, std::size_t range) { return range == only; });
+            const auto part =
+                trtmc::resample_linear(samples.data(), length, rate.source, rate.target, &one, 16);
+            bool own = part.size() == whole.size();
+            bool others_untouched = own;
+            for (std::size_t index = 0; own && index < part.size(); ++index) {
+                const bool inside = static_cast<std::int64_t>(index) >= ranges[only].first &&
+                                    static_cast<std::int64_t>(index) < ranges[only].second;
+                if (inside)
+                    own = std::memcmp(&part[index], &whole[index], sizeof(float)) == 0;
+                else if (part[index] != 0.0F || std::signbit(part[index]))
+                    others_untouched = false;
+            }
+            const std::string name =
+                "range " + std::to_string(only) + " at " + describe(rate, length, 3, 16);
+            check(own, "canary resampler range run alone gives the whole walk's outputs: " + name);
+            check(others_untouched, "canary resampler range writes no other output: " + name);
+        }
+    }
+}
+
+// The outputs must not depend on the runner, on its worker count or on a
+// range's smallest share: a cut only changes which thread writes an output.
+void test_resampler_does_not_depend_on_the_split() {
+    // The last two pairs have too many phases for the weight table and take
+    // the per-output path.
+    const Rates rates[] = {{48000, 16000}, {44100, 16000}, {22050, 16000}, {8000, 16000},
+                           {16000, 48000}, {44100, 16001}, {16001, 44100}};
+    trtmc::canary::HostWorkers team(8);
+    std::uint32_t seed = 4242;
+    for (const auto& rate : rates) {
+        // The per-output path computes every tap's weight: shorter signals.
+        const bool table = 16000 / std::gcd(rate.source, 16000) <= 2048 && rate.target != 16001 &&
+                           rate.target != 44100;
+        for (const std::int32_t length : {97, 4801, table ? 30000 : 1500}) {
+            auto samples = seeded_audio(length, seed++);
+            if (length == 4801) {
+                // Non-finite samples reach every output whose taps cover them.
+                samples[1000] = std::numeric_limits<float>::infinity();
+                samples[3000] = std::numeric_limits<float>::quiet_NaN();
+            }
+            const auto full = static_cast<std::int32_t>(static_cast<std::int64_t>(length) *
+                                                        rate.target / rate.source);
+            const auto serial =
+                trtmc::resample_linear(samples.data(), length, rate.source, rate.target);
+            const std::int32_t range_start = full / 3 + 1;
+            const std::int32_t range_count = full / 2;
+            const auto serial_range = trtmc::resample_linear_range(
+                samples.data(), length, rate.source, rate.target, range_start, range_count);
+            for (const std::int32_t min_outputs : {1, 5, 64, 2048}) {
+                for (const std::int32_t workers : {2, 5, 8}) {
+                    canary_test::RecordingRunner reversed(workers);
+                    const std::string name = describe(rate, length, workers, min_outputs);
+                    check(same_bits(trtmc::resample_linear(samples.data(), length, rate.source,
+                                                           rate.target, &reversed, min_outputs),
+                                    serial),
+                          "canary resampler output does not depend on the cut or the order at " +
+                              name);
+                    check(same_bits(trtmc::resample_linear_range(
+                                        samples.data(), length, rate.source, rate.target,
+                                        range_start, range_count, &reversed, min_outputs),
+                                    serial_range),
+                          "canary resampler range does not depend on the cut or the order at " +
+                              name);
+                }
+                const std::string name = describe(rate, length, team.workers(), min_outputs);
+                check(same_bits(trtmc::resample_linear(samples.data(), length, rate.source,
+                                                       rate.target, &team, min_outputs),
+                                serial),
+                      "canary resampler output on the team's threads equals one thread's at " +
+                          name);
+            }
+        }
+    }
+}
+
 } // namespace
 
 int main() {
     test_resampler_matches_per_output_definition();
     test_resampler_upsampling_and_identity();
     test_resampler_cancellation_inputs();
+    test_resampler_shares_a_long_signal_only();
+    test_resampler_ranges_lie_on_walk_steps();
+    test_resampler_range_writes_only_its_outputs();
+    test_resampler_does_not_depend_on_the_split();
     return failures;
 }

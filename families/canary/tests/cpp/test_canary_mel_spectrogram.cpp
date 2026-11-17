@@ -4,6 +4,8 @@
  */
 
 #include "families/canary/runtime/canary_mel_spectrogram.h"
+#include "families/canary/runtime/canary_parallel.h"
+#include "families/canary/tests/cpp/canary_range_runners.h"
 
 #include <algorithm>
 #include <cmath>
@@ -531,6 +533,200 @@ void test_canary_silence_padding_uses_valid_frame_statistics() {
     check(padded_tail_zero, "canary chunk padding uses NeMo's zero feature value");
 }
 
+trtmc::canary::MelResult shared_mel(const std::vector<float>& audio, const std::vector<float>& fb,
+                                    const MelCase& c, trtmc::canary::RangeRunner* runner,
+                                    int32_t min_frames, int32_t min_row_values) {
+    return trtmc::canary::extract_mel_spectrogram(
+        audio.data(), static_cast<int32_t>(audio.size()), fb.data(), c.n_fft / 2 + 1, c.n_mel_bins,
+        c.n_fft, c.win_length, c.hop_length, c.chunk_length_s, c.sample_rate, c.preemph,
+        c.normalize, runner, min_frames, min_row_values);
+}
+
+const MelCase kRequestCase{512, 400, 160, 30, 16000, 128, 0.97F, true};
+
+// The request's clip (4.16 s) goes to the runner as two passes for eight
+// workers: its 416 frames in 32 ranges, then its 128 mel rows in ranges of at
+// least 2,048 values. A clip of fewer than sixteen shares goes to it for
+// neither. What the runner is handed is what runs.
+void test_canary_mel_shares_a_long_clip_only() {
+    const auto fb = triangular_filterbank(257, 128, 16000);
+    const auto speech = seeded_speechlike(66560, 16000, 5);
+    canary_test::RecordingRunner runner(8);
+    const auto shared =
+        shared_mel(speech, fb, kRequestCase, &runner, trtmc::canary::kCanaryMelMinFramesPerRange,
+                   trtmc::canary::kCanaryMelMinRowValuesPerRange);
+    check(runner.passes.size() == 2,
+          "canary mel shares the request's frames and rows as two passes");
+    if (runner.passes.size() == 2) {
+        check(runner.passes[0].size() == 32 && canary_test::covers_once(runner.passes[0], 416),
+              "canary mel shares the request's 416 frames as 32 ranges for eight workers");
+        bool rows_hold_share = canary_test::covers_once(runner.passes[1], 128);
+        for (const auto& [begin, end] : runner.passes[1])
+            rows_hold_share = rows_hold_share && (end - begin) * 416 >= 2048;
+        check(rows_hold_share && runner.passes[1].size() == 25,
+              "canary mel shares the request's 128 rows as 25 ranges of at least 2,048 values");
+    }
+    check(same_bits(shared.data, definition_mel(speech, fb, kRequestCase)),
+          "canary mel's shared features equal the definition");
+
+    canary_test::RecordingRunner unused(8);
+    shared_mel(seeded_speechlike(127 * 160, 16000, 6), fb, kRequestCase, &unused,
+               trtmc::canary::kCanaryMelMinFramesPerRange,
+               trtmc::canary::kCanaryMelMinRowValuesPerRange);
+    check(unused.passes.empty(),
+          "canary mel keeps a clip of fewer than sixteen shares off the runner");
+}
+
+// One frame range run alone writes its own frames, with the values of the
+// whole pass, and no other frame.
+void test_canary_mel_frame_range_writes_only_its_frames() {
+    const auto fb = triangular_filterbank(257, 128, 16000);
+    const auto speech = seeded_speechlike(16000, 16000, 9);
+    MelCase c = kRequestCase;
+    c.normalize = false; // then a frame's values do not depend on other frames
+    const auto whole = shared_mel(speech, fb, c, nullptr, 4, 1 << 30);
+    canary_test::RecordingRunner plan(2);
+    shared_mel(speech, fb, c, &plan, 4, 1 << 30);
+    check(plan.passes.size() == 1 && plan.passes[0].size() == 8 &&
+              canary_test::covers_once(plan.passes[0], 100),
+          "canary mel cuts the test clip's 100 frames into 8 ranges");
+    if (plan.passes.size() != 1)
+        return;
+    const auto ranges = plan.passes[0];
+    // A frame no range computed keeps a zero energy, whose log this is.
+    const float untouched = std::log(0.0F + 5.960464477539063e-08F);
+    for (std::size_t only = 0; only < ranges.size(); ++only) {
+        canary_test::RecordingRunner one(
+            2, [only](std::size_t, std::size_t range) { return range == only; });
+        const auto part = shared_mel(speech, fb, c, &one, 4, 1 << 30);
+        bool own = part.data.size() == whole.data.size();
+        bool others_untouched = own;
+        for (int32_t m = 0; own && m < c.n_mel_bins; ++m) {
+            for (int32_t frame = 0; frame < 100; ++frame) {
+                const auto index = static_cast<std::size_t>(m) * whole.n_frames + frame;
+                if (frame >= ranges[only].first && frame < ranges[only].second)
+                    own = own &&
+                          std::memcmp(&part.data[index], &whole.data[index], sizeof(float)) == 0;
+                else
+                    others_untouched = others_untouched && part.data[index] == untouched;
+            }
+        }
+        check(own, "canary mel frame range run alone gives the whole pass's frames: range " +
+                       std::to_string(only));
+        check(others_untouched,
+              "canary mel frame range writes no other frame: range " + std::to_string(only));
+    }
+}
+
+// One row range run alone gives its own rows their final values and leaves
+// every other row as the frame pass left it.
+void test_canary_mel_row_range_writes_only_its_rows() {
+    const auto fb = triangular_filterbank(257, 128, 16000);
+    const auto speech = seeded_speechlike(16000, 16000, 10);
+    for (const bool normalize : {true, false}) {
+        MelCase c = kRequestCase;
+        c.normalize = normalize;
+        const auto whole = shared_mel(speech, fb, c, nullptr, 1 << 30, 500);
+        canary_test::RecordingRunner none(2, [](std::size_t, std::size_t) { return false; });
+        const auto raw = shared_mel(speech, fb, c, &none, 1 << 30, 500);
+        check(none.passes.size() == 1 && none.passes[0].size() == 8 &&
+                  canary_test::covers_once(none.passes[0], 128),
+              "canary mel cuts the test clip's 128 rows into 8 ranges");
+        if (none.passes.size() != 1)
+            continue;
+        const auto ranges = none.passes[0];
+        for (std::size_t only = 0; only < ranges.size(); ++only) {
+            canary_test::RecordingRunner one(
+                2, [only](std::size_t, std::size_t range) { return range == only; });
+            const auto part = shared_mel(speech, fb, c, &one, 1 << 30, 500);
+            bool own = part.data.size() == whole.data.size();
+            bool others_untouched = own;
+            for (int32_t m = 0; own && m < c.n_mel_bins; ++m) {
+                const bool inside = m >= ranges[only].first && m < ranges[only].second;
+                const auto* expected = inside ? &whole.data : &raw.data;
+                const bool same =
+                    std::memcmp(part.data.data() + static_cast<std::size_t>(m) * whole.n_frames,
+                                expected->data() + static_cast<std::size_t>(m) * whole.n_frames,
+                                static_cast<std::size_t>(whole.n_frames) * sizeof(float)) == 0;
+                if (inside)
+                    own = same;
+                else
+                    others_untouched = others_untouched && same;
+            }
+            const std::string name = std::string(normalize ? "normalized" : "unnormalized") +
+                                     ", range " + std::to_string(only);
+            check(own, "canary mel row range run alone gives the whole pass's rows: " + name);
+            check(others_untouched, "canary mel row range writes no other row: " + name);
+        }
+    }
+}
+
+// The features must not depend on the runner, on its worker count or on a
+// range's smallest share: a cut only changes which thread writes a value.
+void test_canary_mel_does_not_depend_on_the_split() {
+    const MelCase small{64, 50, 13, 1, 1000, 20, 0.97F, true};
+    const auto sparse = triangular_filterbank(33, small.n_mel_bins, small.sample_rate);
+    trtmc::canary::HostWorkers team(8);
+    for (const int32_t length : {0, 1, 13, 14, 500, 999, 1000, 1700}) {
+        auto audio = seeded_speechlike(length, small.sample_rate, 300U + length);
+        if (length == 999) {
+            // Non-finite samples reach the frames that cover them and, through
+            // the row statistics, every value of a normalized row.
+            audio[200] = std::numeric_limits<float>::infinity();
+            audio[700] = std::numeric_limits<float>::quiet_NaN();
+        }
+        for (const bool normalize : {true, false}) {
+            MelCase c = small;
+            c.normalize = normalize;
+            const auto serial = shared_mel(audio, sparse, c, nullptr, 1, 1);
+            for (const int32_t min_frames : {1, 3, 8}) {
+                for (const int32_t min_row_values : {1, 100, 4096}) {
+                    const std::string name = std::to_string(length) + " samples, " +
+                                             (normalize ? "normalized, " : "unnormalized, ") +
+                                             "shares of " + std::to_string(min_frames) +
+                                             " frames and " + std::to_string(min_row_values) +
+                                             " row values";
+                    for (const int32_t workers : {2, 5, 8}) {
+                        canary_test::RecordingRunner reversed(workers);
+                        const auto split =
+                            shared_mel(audio, sparse, c, &reversed, min_frames, min_row_values);
+                        check(same_bits(split.data, serial.data) &&
+                                  split.n_frames == serial.n_frames &&
+                                  split.valid_frames == serial.valid_frames,
+                              "canary mel does not depend on the cut or the order: " + name + ", " +
+                                  std::to_string(workers) + " workers");
+                    }
+                    const auto threaded =
+                        shared_mel(audio, sparse, c, &team, min_frames, min_row_values);
+                    check(same_bits(threaded.data, serial.data),
+                          "canary mel on the team's threads equals one thread's: " + name);
+                }
+            }
+        }
+    }
+}
+
+// The request's shape (4.16 s) and a full 30 s chunk at the shipped shares on
+// the team's threads, against the definition.
+void test_canary_request_shapes_match_definition_on_the_team() {
+    const auto slaney_like = triangular_filterbank(257, 128, 16000);
+    trtmc::canary::HostWorkers team(8);
+    for (const int32_t length : {66560, 480000}) {
+        const auto speech = seeded_speechlike(length, 16000, 77U + length);
+        for (const bool normalize : {true, false}) {
+            MelCase c = kRequestCase;
+            c.normalize = normalize;
+            const auto actual = shared_mel(speech, slaney_like, c, &team,
+                                           trtmc::canary::kCanaryMelMinFramesPerRange,
+                                           trtmc::canary::kCanaryMelMinRowValuesPerRange);
+            check(same_bits(actual.data, definition_mel(speech, slaney_like, c)),
+                  "canary mel on the team's threads equals the definition: " +
+                      std::to_string(length) +
+                      (normalize ? " samples, normalized" : " samples, unnormalized"));
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -541,5 +737,10 @@ int main() {
     test_canary_shape_and_empty_audio();
     test_canary_low_volume_uses_per_feature_normalization();
     test_canary_silence_padding_uses_valid_frame_statistics();
+    test_canary_mel_shares_a_long_clip_only();
+    test_canary_mel_frame_range_writes_only_its_frames();
+    test_canary_mel_row_range_writes_only_its_rows();
+    test_canary_mel_does_not_depend_on_the_split();
+    test_canary_request_shapes_match_definition_on_the_team();
     return failures;
 }

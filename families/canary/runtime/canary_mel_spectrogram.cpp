@@ -5,11 +5,14 @@
 
 #include "families/canary/runtime/canary_mel_spectrogram.h"
 
+#include "families/canary/runtime/canary_parallel.h"
+
 #include <algorithm>
 #include <cmath>
 #include <complex>
 #include <cstddef>
 #include <cstring>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -180,26 +183,49 @@ nonzero_filter_columns(const float* mel_filters, int32_t n_freq_bins, int32_t n_
     return columns;
 }
 
-std::vector<float> compute_mel_spectrogram(const std::vector<float>& padded,
-                                           const std::vector<float>& window,
-                                           const float* mel_filters, int32_t n_fft,
-                                           int32_t hop_length, int32_t n_freq_bins,
-                                           int32_t n_mel_bins, int32_t frames_to_compute,
-                                           int32_t& n_frames_raw) {
-    n_frames_raw = 1 + (static_cast<int32_t>(padded.size()) - n_fft) / hop_length;
-    std::vector<float> mel_spec(static_cast<std::size_t>(n_mel_bins) * n_frames_raw, 0.0F);
-    std::vector<float> windowed(n_fft);
-    std::vector<float> frame_power(n_freq_bins);
-    std::vector<float> frame_mel(n_mel_bins);
-    RfftPower rfft_power(n_fft);
-    const auto filter_columns = nonzero_filter_columns(mel_filters, n_freq_bins, n_mel_bins);
+// What every frame of one mel spectrogram reads.
+struct MelFramePlan {
+    const std::vector<float>& padded;
+    const std::vector<float>& window;
+    const float* mel_filters;
+    const std::vector<std::pair<int32_t, int32_t>>& filter_columns;
+    int32_t n_fft;
+    int32_t hop_length;
+    int32_t n_freq_bins;
+    int32_t n_mel_bins;
+    int32_t n_frames_raw;
+};
 
-    const int32_t computed_frames = std::clamp(frames_to_compute, 0, n_frames_raw);
-    for (int32_t t = 0; t < computed_frames; ++t) {
-        const int32_t start = t * hop_length;
+// The transform and the buffers one thread computes frames with.
+struct MelFrameScratch {
+    explicit MelFrameScratch(const MelFramePlan& plan)
+        : windowed(plan.n_fft), frame_power(plan.n_freq_bins), frame_mel(plan.n_mel_bins),
+          rfft_power(plan.n_fft) {}
+
+    std::vector<float> windowed;
+    std::vector<float> frame_power;
+    std::vector<float> frame_mel;
+    RfftPower rfft_power;
+};
+
+// Frames [begin, end): column t of mel_spec is frame t's mel energies. A call
+// writes its own frames' columns only.
+void compute_mel_frames(const MelFramePlan& plan, MelFrameScratch& scratch, int32_t begin,
+                        int32_t end, float* mel_spec) {
+    const int32_t n_fft = plan.n_fft;
+    const int32_t n_freq_bins = plan.n_freq_bins;
+    const int32_t n_mel_bins = plan.n_mel_bins;
+    std::vector<float>& windowed = scratch.windowed;
+    std::vector<float>& frame_power = scratch.frame_power;
+    std::vector<float>& frame_mel = scratch.frame_mel;
+    RfftPower& rfft_power = scratch.rfft_power;
+
+    for (int32_t t = begin; t < end; ++t) {
+        const int32_t start = t * plan.hop_length;
         for (int32_t i = 0; i < n_fft; ++i) {
             windowed[static_cast<std::size_t>(i)] =
-                padded[static_cast<std::size_t>(start + i)] * window[static_cast<std::size_t>(i)];
+                plan.padded[static_cast<std::size_t>(start + i)] *
+                plan.window[static_cast<std::size_t>(i)];
         }
 
         rfft_power(windowed.data(), n_freq_bins, frame_power.data());
@@ -210,11 +236,11 @@ std::vector<float> compute_mel_spectrogram(const std::vector<float>& padded,
             if (p == 0.0F) {
                 continue;
             }
-            const float* filter_row = mel_filters + static_cast<std::size_t>(f) * n_mel_bins;
+            const float* filter_row = plan.mel_filters + static_cast<std::size_t>(f) * n_mel_bins;
             // A finite power adds exactly +0 through a zero coefficient, so
             // only the row's nonzero column span changes frame_mel. A
             // non-finite power keeps the full row (inf * 0 is NaN).
-            const auto& [first, last] = filter_columns[static_cast<std::size_t>(f)];
+            const auto& [first, last] = plan.filter_columns[static_cast<std::size_t>(f)];
             const bool finite = std::isfinite(p);
             const int32_t column_end = finite ? last : n_mel_bins;
             for (int32_t m = finite ? first : 0; m < column_end; ++m) {
@@ -223,36 +249,65 @@ std::vector<float> compute_mel_spectrogram(const std::vector<float>& padded,
             }
         }
         for (int32_t m = 0; m < n_mel_bins; ++m) {
-            mel_spec[static_cast<std::size_t>(m) * n_frames_raw + t] =
+            mel_spec[static_cast<std::size_t>(m) * plan.n_frames_raw + t] =
                 frame_mel[static_cast<std::size_t>(m)];
         }
     }
+}
+
+std::vector<float>
+compute_mel_spectrogram(const std::vector<float>& padded, const std::vector<float>& window,
+                        const float* mel_filters, int32_t n_fft, int32_t hop_length,
+                        int32_t n_freq_bins, int32_t n_mel_bins, int32_t frames_to_compute,
+                        int32_t& n_frames_raw, RangeRunner* runner, int32_t min_frames_per_range) {
+    n_frames_raw = 1 + (static_cast<int32_t>(padded.size()) - n_fft) / hop_length;
+    std::vector<float> mel_spec(static_cast<std::size_t>(n_mel_bins) * n_frames_raw, 0.0F);
+    const auto filter_columns = nonzero_filter_columns(mel_filters, n_freq_bins, n_mel_bins);
+    const MelFramePlan plan{padded,     window,      mel_filters, filter_columns, n_fft,
+                            hop_length, n_freq_bins, n_mel_bins,  n_frames_raw};
+
+    const int32_t computed_frames = std::clamp(frames_to_compute, 0, n_frames_raw);
+    // Each worker builds its transform and buffers when it takes its first
+    // range, and no other thread touches them.
+    const int32_t workers = runner != nullptr ? runner->workers() : 1;
+    std::vector<std::optional<MelFrameScratch>> scratch(static_cast<std::size_t>(workers));
+    run_pass(pass_ranges(computed_frames, min_frames_per_range, workers), runner,
+             [&](int64_t begin, int64_t end, int32_t worker) {
+                 auto& own = scratch[static_cast<std::size_t>(worker)];
+                 if (!own)
+                     own.emplace(plan);
+                 compute_mel_frames(plan, *own, static_cast<int32_t>(begin),
+                                    static_cast<int32_t>(end), mel_spec.data());
+             });
     return mel_spec;
 }
 
-// Log of the first `log_frames` frames of every mel row. Callers zero the
-// frames past the valid audio afterwards, so those are left as they are.
-void nemo_log_mel_inplace(std::vector<float>& mel_spec, int32_t n_mel_bins, int32_t n_frames_raw,
-                          int32_t log_frames) {
+// Log of the first `log_frames` frames of mel rows [row_begin, row_end).
+// Callers zero the frames past the valid audio afterwards, so those are left
+// as they are.
+void nemo_log_mel_rows(std::vector<float>& mel_spec, int32_t n_frames_raw, int32_t log_frames,
+                       int32_t row_begin, int32_t row_end) {
     constexpr float kLogGuard = 5.960464477539063e-08F;
     log_frames = std::clamp(log_frames, 0, n_frames_raw);
-    for (int32_t m = 0; m < n_mel_bins; ++m) {
+    for (int32_t m = row_begin; m < row_end; ++m) {
         float* row = mel_spec.data() + static_cast<std::size_t>(m) * n_frames_raw;
         for (int32_t t = 0; t < log_frames; ++t)
             row[t] = std::log(row[t] + kLogGuard);
     }
 }
 
-void normalize_nemo_per_feature_inplace(std::vector<float>& mel_spec, int32_t n_mel_bins,
-                                        int32_t n_frames_raw, int32_t valid_frames) {
+// Mel rows [row_begin, row_end), each normalized over its own valid frames.
+void normalize_nemo_per_feature_rows(std::vector<float>& mel_spec, int32_t n_frames_raw,
+                                     int32_t valid_frames, int32_t row_begin, int32_t row_end) {
     valid_frames = std::clamp(valid_frames, 0, n_frames_raw);
     if (valid_frames <= 0) {
-        std::fill(mel_spec.begin(), mel_spec.end(), 0.0F);
+        std::fill(mel_spec.begin() + static_cast<std::ptrdiff_t>(row_begin) * n_frames_raw,
+                  mel_spec.begin() + static_cast<std::ptrdiff_t>(row_end) * n_frames_raw, 0.0F);
         return;
     }
 
     constexpr double kStdGuard = 1e-5;
-    for (int32_t m = 0; m < n_mel_bins; ++m) {
+    for (int32_t m = row_begin; m < row_end; ++m) {
         const std::size_t base = static_cast<std::size_t>(m) * n_frames_raw;
         double mean = 0.0;
         for (int32_t t = 0; t < valid_frames; ++t)
@@ -279,9 +334,9 @@ void normalize_nemo_per_feature_inplace(std::vector<float>& mel_spec, int32_t n_
     }
 }
 
-void zero_padded_frames(std::vector<float>& mel_spec, int32_t n_mel_bins, int32_t n_frames_raw,
-                        int32_t valid_frames) {
-    for (int32_t m = 0; m < n_mel_bins; ++m) {
+void zero_padded_frame_rows(std::vector<float>& mel_spec, int32_t n_frames_raw,
+                            int32_t valid_frames, int32_t row_begin, int32_t row_end) {
+    for (int32_t m = row_begin; m < row_end; ++m) {
         const std::size_t base = static_cast<std::size_t>(m) * n_frames_raw;
         std::fill(mel_spec.begin() + static_cast<std::ptrdiff_t>(base + valid_frames),
                   mel_spec.begin() + static_cast<std::ptrdiff_t>(base + n_frames_raw), 0.0F);
@@ -326,7 +381,9 @@ std::vector<float> rfft_power(const std::vector<float>& input) {
 MelResult extract_mel_spectrogram(const float* samples, int32_t n_samples, const float* mel_filters,
                                   int32_t n_freq_bins, int32_t n_mel_bins, int32_t n_fft,
                                   int32_t win_length, int32_t hop_length, int32_t chunk_length_s,
-                                  int32_t sample_rate, float preemph, bool normalize_per_feature) {
+                                  int32_t sample_rate, float preemph, bool normalize_per_feature,
+                                  RangeRunner* runner, int32_t min_frames_per_range,
+                                  int32_t min_row_values_per_range) {
     const int32_t expected_freq_bins = n_fft / 2 + 1;
     const int32_t freq_bins = n_freq_bins == expected_freq_bins ? n_freq_bins : expected_freq_bins;
     const int32_t chunk_samples = chunk_length_s * sample_rate;
@@ -340,13 +397,26 @@ MelResult extract_mel_spectrogram(const float* samples, int32_t n_samples, const
     int32_t n_frames_raw = 0;
     std::vector<float> mel_spec = compute_mel_spectrogram(
         padded, make_centered_stft_window(n_fft, win_length), mel_filters, n_fft, hop_length,
-        freq_bins, n_mel_bins, valid_frames, n_frames_raw);
-    // Both paths below zero every frame from valid_frames on.
-    nemo_log_mel_inplace(mel_spec, n_mel_bins, n_frames_raw, valid_frames);
-    if (normalize_per_feature)
-        normalize_nemo_per_feature_inplace(mel_spec, n_mel_bins, n_frames_raw, valid_frames);
-    else
-        zero_padded_frames(mel_spec, n_mel_bins, n_frames_raw, valid_frames);
+        freq_bins, n_mel_bins, valid_frames, n_frames_raw, runner, min_frames_per_range);
+    // Each mel row depends on its own values only: its log, then either its
+    // normalization or its padding (both zero every frame from valid_frames
+    // on). A range holds at least min_row_values_per_range valid values.
+    const int64_t row_values = std::max(std::min(valid_frames, n_frames_raw), 1);
+    const int64_t min_rows =
+        (std::max<int64_t>(min_row_values_per_range, 1) + row_values - 1) / row_values;
+    const int32_t workers = runner != nullptr ? runner->workers() : 1;
+    run_pass(pass_ranges(n_mel_bins, min_rows, workers), runner,
+             [&](int64_t begin, int64_t end, int32_t) {
+                 const auto row_begin = static_cast<int32_t>(begin);
+                 const auto row_end = static_cast<int32_t>(end);
+                 nemo_log_mel_rows(mel_spec, n_frames_raw, valid_frames, row_begin, row_end);
+                 if (normalize_per_feature)
+                     normalize_nemo_per_feature_rows(mel_spec, n_frames_raw, valid_frames,
+                                                     row_begin, row_end);
+                 else
+                     zero_padded_frame_rows(mel_spec, n_frames_raw, valid_frames, row_begin,
+                                            row_end);
+             });
 
     int32_t n_frames_out = 0;
     trim_last_frame(mel_spec, n_mel_bins, n_frames_raw, n_frames_out);
