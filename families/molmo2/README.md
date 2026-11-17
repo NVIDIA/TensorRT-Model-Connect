@@ -47,23 +47,36 @@ The native tokenizer applies the checkpoint's NFC normalizer and uses ICU's
 Unicode letter, number, and whitespace properties for Qwen3 pre-tokenization.
 
 To compare token IDs without downloading the model weights, build
-`test_molmo2_tokenizer`, set `TRTMC_MOLMO2_TOKENIZER_DIR` to the selected
-tokenizer snapshot and `TRTMC_RUNTIME_ROOT` to the native build directory, and run
+`test_molmo2_preprocess`, which also builds `test_molmo2_tokenizer` and
+`molmo2_qualification`. Set `TRTMC_NATIVE_BUILD_DIR` to that build directory and run
 `python -m pytest families/molmo2/tests/test_tokenizer.py -q`.
+The tests resolve the manifest's immutable checkpoint revision from the offline
+Hub cache by default. A tokenizer-only cached snapshot needs `config.json` and
+`tokenizer.json`; full E2E also needs the checkpoint weights and processor files.
+`TRTMC_MOLMO2_TOKENIZER_DIR` can select an explicit tokenizer-only directory.
+Invalid explicit paths fail instead of selecting another snapshot.
 
 For direct E2E:
 
 ```bash
-export TRTMC_MOLMO2_MODEL_DIR=/path/to/pinned/checkpoint
 export TRTMC_MOLMO2_REFERENCE_PYTHON=/path/to/reference/python
-export TRTMC_RUNTIME_ROOT=/path/to/native/build
+export TRTMC_NATIVE_BUILD_DIR=/path/to/native/build
+export TRTMC_RUNTIME_ROOT=/path/to/installed/tensorrt_model_connect/bin
 export TRTMC_BINARY="$TRTMC_RUNTIME_ROOT/trtmc"
+export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
 
 PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \
   families/molmo2/tests --e2e-model molmo2 -q
 ```
 
-Build `test_molmo2_preprocess` to include the native qualification executable.
+Provision the pinned checkpoint in `HF_HUB_CACHE` before offline execution, or
+set `TRTMC_MOLMO2_MODEL_DIR` to an explicit local checkpoint. Native test helpers
+come from `TRTMC_NATIVE_BUILD_DIR`; the CLI and model libraries come from
+`TRTMC_RUNTIME_ROOT`. A combined local build can use the same path for both.
+Prepare the separate reference environment before offline execution and make
+its interpreter available as `TRTMC_MOLMO2_REFERENCE_PYTHON` inside the test
+container. The ordinary builder image's Transformers 5.2.0 installation does
+not satisfy the upstream reference's 4.57.1 requirement.
 By default E2E builds a fresh bundle and runs the independent reference. For
 an explicitly prepared bundle/reference run, the test accepts
 `TRTMC_MOLMO2_BUNDLE` and `TRTMC_MOLMO2_REFERENCE_RESULTS`.

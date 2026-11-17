@@ -2,11 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
-import os
 from pathlib import Path
 import subprocess
 
 import pytest
+
+from families.molmo2.tests.inputs import native_tool, tokenizer_file
+
+MANIFEST = json.loads((Path(__file__).parent / "manifests/molmo2-8b.json").read_text())
 
 
 @pytest.mark.parametrize(
@@ -66,16 +69,9 @@ import pytest
 def test_native_tokenizer_matches_hugging_face(prompts):
     from tokenizers import Tokenizer
 
-    directory = os.environ.get(
-        "TRTMC_MOLMO2_TOKENIZER_DIR", os.environ.get("TRTMC_MOLMO2_MODEL_DIR")
-    )
-    if not directory:
-        pytest.skip(
-            "native tokenizer parity requires the pinned tokenizer assets and native target"
-        )
-    tokenizer_json = Path(directory) / "tokenizer.json"
+    tokenizer_json = tokenizer_file(MANIFEST["hf_id"], MANIFEST["hf_revision"])
     reference = Tokenizer.from_file(str(tokenizer_json))
-    binary = Path(os.environ["TRTMC_RUNTIME_ROOT"]) / "families/molmo2/test_molmo2_tokenizer"
+    binary = native_tool("test_molmo2_tokenizer")
     result = subprocess.run(
         [str(binary), str(tokenizer_json), *prompts], check=True, capture_output=True, text=True
     )

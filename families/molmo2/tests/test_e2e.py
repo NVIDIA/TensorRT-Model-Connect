@@ -12,6 +12,7 @@ import subprocess
 import numpy as np
 import pytest
 
+from families.molmo2.tests.inputs import checkpoint_directory, native_tool
 from tensorrt_model_connect import BuildRequest, build
 from tools.e2e_evidence import record_evidence
 
@@ -43,7 +44,7 @@ def _path(name):
 @pytest.fixture(scope="session")
 def artifacts(tmp_path_factory):
     root = tmp_path_factory.mktemp("molmo2")
-    checkpoint = _path("TRTMC_MOLMO2_MODEL_DIR")
+    checkpoint = checkpoint_directory(MANIFEST["hf_id"], MANIFEST["hf_revision"])
     runtime = _path("TRTMC_RUNTIME_ROOT")
     binary = _path("TRTMC_BINARY")
     bundle = Path(os.environ.get("TRTMC_MOLMO2_BUNDLE", root / MANIFEST["bundle"]))
@@ -87,8 +88,7 @@ def artifacts(tmp_path_factory):
     results = {
         case["name"]: case for case in json.loads((reference / "reference.json").read_text())
     }
-    qualifier = runtime / "families/molmo2/molmo2_qualification"
-    assert qualifier.is_file()
+    qualifier = native_tool("molmo2_qualification")
     completed = subprocess.run(
         [
             str(qualifier),
@@ -131,7 +131,7 @@ def artifacts(tmp_path_factory):
 
 @pytest.mark.e2e
 @pytest.mark.parametrize("case", MANIFEST["testcases"], ids=lambda case: case["name"])
-def test_upstream_and_native(case, request):
+def test_upstream_and_native_e2e(case, request):
     if not _selected(request.config, case):
         pytest.skip("Molmo2 E2E requires an explicit family or testcase selector")
     root, checkpoint, runtime, binary, bundle, reference, results = request.getfixturevalue(
@@ -151,8 +151,7 @@ def test_upstream_and_native(case, request):
         np.fromfile(reference / (name + ".f32"), dtype=np.float32),
         np.asarray(expected_image, dtype=np.float32).reshape(-1),
     )
-    helper = runtime / "families/molmo2/test_molmo2_preprocess"
-    assert helper.is_file()
+    helper = native_tool("test_molmo2_preprocess")
     stem = root / name
     subprocess.run(
         [
