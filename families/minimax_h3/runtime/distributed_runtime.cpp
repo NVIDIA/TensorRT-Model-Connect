@@ -8,9 +8,21 @@
 #include <chrono>
 #include <cstdlib>
 #include <cuda_runtime_api.h>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <dlfcn.h>
+#endif
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -40,16 +52,33 @@ int require_env_int(const char* name) {
     return static_cast<int>(value);
 }
 
+// Launcher environment, first match wins: TRTMC_* (any launcher, e.g. a plain
+// process-per-rank script on Windows), Open MPI, then PMI/MS-MPI (mpiexec on Windows).
+int env_int_first(std::initializer_list<const char*> names, const char* what, bool optional) {
+    for (const char* name : names) {
+        const char* raw = std::getenv(name);
+        if (raw != nullptr && *raw != '\0')
+            return require_env_int(name);
+    }
+    if (optional)
+        return -1;
+    throw std::runtime_error(std::string("MiniMax-H3 distributed runtime requires the launcher ") +
+                             what + " (TRTMC_" + what + ", OMPI_COMM_WORLD_*, or PMI_*)");
+}
+
 int detect_world_size() {
-    return require_env_int("OMPI_COMM_WORLD_SIZE");
+    return env_int_first({"TRTMC_WORLD_SIZE", "OMPI_COMM_WORLD_SIZE", "PMI_SIZE"}, "WORLD_SIZE", false);
 }
 
 int detect_rank() {
-    return require_env_int("OMPI_COMM_WORLD_RANK");
+    return env_int_first({"TRTMC_RANK", "OMPI_COMM_WORLD_RANK", "PMI_RANK"}, "RANK", false);
 }
 
 int detect_local_rank() {
-    return require_env_int("OMPI_COMM_WORLD_LOCAL_RANK");
+    // MS-MPI exposes no local rank; with one node the global rank is the device index.
+    const int local = env_int_first({"TRTMC_LOCAL_RANK", "OMPI_COMM_WORLD_LOCAL_RANK",
+                                     "MPI_LOCALRANKID"}, "LOCAL_RANK", true);
+    return local >= 0 ? local : detect_rank();
 }
 
 std::filesystem::path rendezvous_path() {
@@ -62,11 +91,22 @@ std::filesystem::path rendezvous_path() {
 class NcclRuntime {
   public:
     NcclRuntime() {
+#ifdef _WIN32
+        // TRTMC_NCCL_LIBRARY overrides the search; otherwise nccl.dll from the DLL search path.
+        const char* library = std::getenv("TRTMC_NCCL_LIBRARY");
+        handle_ = LoadLibraryA(library != nullptr && *library != '\0' ? library : "nccl.dll");
+        if (handle_ == nullptr) {
+            throw std::runtime_error("Failed to load nccl.dll for MiniMax-H3 runtime (Win32 error " +
+                                     std::to_string(GetLastError()) +
+                                     "); put it on PATH or set TRTMC_NCCL_LIBRARY");
+        }
+#else
         handle_ = dlopen("libnccl.so.2", RTLD_NOW | RTLD_LOCAL);
         if (handle_ == nullptr) {
             throw std::runtime_error(std::string("Failed to load NCCL for MiniMax-H3 runtime: ") +
                                      dlerror());
         }
+#endif
         get_unique_id_ = load<NcclGetUniqueIdFn>("ncclGetUniqueId");
         comm_init_rank_ = load<NcclCommInitRankFn>("ncclCommInitRank");
         comm_destroy_ = load<NcclCommDestroyFn>("ncclCommDestroy");
@@ -78,8 +118,13 @@ class NcclRuntime {
             comm_destroy_(comm_);
             comm_ = nullptr;
         }
-        if (handle_ != nullptr)
+        if (handle_ != nullptr) {
+#ifdef _WIN32
+            FreeLibrary(static_cast<HMODULE>(handle_));
+#else
             dlclose(handle_);
+#endif
+        }
     }
 
     void init(int size, int rank, const NcclUniqueId& id) {
@@ -97,10 +142,15 @@ class NcclRuntime {
   private:
     template <typename T>
     T load(const char* symbol) {
+#ifdef _WIN32
+        void* raw = reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(handle_), symbol));
+        if (raw == nullptr)
+#else
         dlerror();
         void* raw = dlsym(handle_, symbol);
         const char* error = dlerror();
         if (error != nullptr || raw == nullptr)
+#endif
             throw std::runtime_error(std::string("Failed to resolve NCCL symbol ") + symbol);
         return reinterpret_cast<T>(raw);
     }
