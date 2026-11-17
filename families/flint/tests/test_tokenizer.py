@@ -8,6 +8,8 @@ import subprocess
 
 import pytest
 
+from families.flint.tests.inputs import checkpoint_dir, native_binary
+
 PRETOKENIZER = {'type': 'Sequence', 'pretokenizers': [{'type': 'Split', 'pattern': {'Regex': '\\p{N}{1,3}'}, 'behavior': 'Isolated', 'invert': False}, {'type': 'Split', 'pattern': {'Regex': '[一-龥\u3040-ゟ゠-ヿ]+'}, 'behavior': 'Isolated', 'invert': False}, {'type': 'Split', 'pattern': {'Regex': "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]+[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?| ?[\\p{P}\\p{S}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"}, 'behavior': 'Isolated', 'invert': False}, {'type': 'ByteLevel', 'add_prefix_space': False, 'trim_offsets': True, 'use_regex': False}]}
 DECODER = {'type': 'ByteLevel', 'add_prefix_space': True, 'trim_offsets': True, 'use_regex': True}
 TEXTS = [
@@ -21,9 +23,8 @@ TEXTS = [
 @pytest.fixture(scope="module")
 def probe():
     path = os.environ.get("TRTMC_FLINT_TOKENIZER_PROBE")
-    if not path:
-        pytest.skip("requires the family-owned native tokenizer probe")
-    assert Path(path).is_file()
+    path = Path(path) if path is not None else native_binary("flint_tokenizer_probe")
+    assert path.is_file()
     return path
 
 
@@ -63,9 +64,8 @@ def test_unicode_regex_pipeline_matches_reference(probe, tokenizer_path):
 
 def test_pinned_checkpoint_tokenizer(probe):
     path = os.environ.get("TRTMC_FLINT_TOKENIZER")
-    if not path:
-        pytest.skip("requires the pinned checkpoint tokenizer metadata")
-    compare_tokenizers(probe, Path(path))
+    path = Path(path) if path is not None else checkpoint_dir() / "tokenizer.json"
+    compare_tokenizers(probe, path)
 
 
 def test_generated_partial_bytes_decode_like_reference(probe, tokenizer_path):

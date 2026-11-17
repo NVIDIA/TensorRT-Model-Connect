@@ -9,6 +9,8 @@ import subprocess
 import numpy as np
 import pytest
 
+from families.flint.tests.inputs import MANIFEST, checkpoint_dir, native_binary
+
 
 def logit_metrics(actual, expected):
     assert actual.shape == expected.shape
@@ -32,10 +34,10 @@ def assert_logit_metrics(metrics, thresholds):
     assert metrics["top1_agreement"] >= thresholds["min_top1_agreement"]
 
 
-def test_flint_bf16_logits(request, tmp_path):
+@pytest.mark.parametrize("case", MANIFEST["testcases"], ids=lambda case: case["name"])
+def test_flint_e2e(request, tmp_path, case):
     directory = Path(__file__).parent
-    manifest = json.loads((directory / "manifests/flint-bf16.json").read_text())
-    case = manifest["testcases"][0]
+    manifest = MANIFEST
     values = (request.config.getoption("--e2e-model", default=[]) or []) + (
         request.config.getoption("--e2e-testcase", default=[]) or []
     )
@@ -62,15 +64,7 @@ def test_flint_bf16_logits(request, tmp_path):
     thresholds = json.loads((directory / "thresholds" / (case["name"] + ".json")).read_text())[
         "threshold_overrides"
     ]
-    checkpoint_value = os.environ.get("TRTMC_FLINT_CHECKPOINT")
-    if checkpoint_value:
-        checkpoint = Path(checkpoint_value)
-    else:
-        from huggingface_hub import snapshot_download
-
-        checkpoint = Path(
-            snapshot_download(repo_id=manifest["hf_id"], revision=manifest["hf_revision"])
-        )
+    checkpoint = checkpoint_dir()
     # These local-dir download receipts identify every fetched shard's commit;
     # a manually supplied checkpoint must provide the same pinned receipts.
     if checkpoint.parent.name == "snapshots":
@@ -113,8 +107,7 @@ def test_flint_bf16_logits(request, tmp_path):
     assert info["provenance"]["build"]["precision"] == manifest["precision"]
     assert info["provenance"]["build"]["max_sequence_length"] == manifest["max_sequence_length"]
     assert info["provenance"]["build"]["tensor_parallel_size"] == manifest["tensor_parallel_size"]
-    trace_binary = runtime / "flint_logits_trace"
-    assert trace_binary.is_file()
+    trace_binary = native_binary("flint_logits_trace")
     prefix = tmp_path / "native"
     subprocess.run(
         [

@@ -453,9 +453,15 @@ class E2ERunner:
                 continue
             name = str(test["name"])
             selected.append(name)
+            executable = Path(str(command[0])) if command else None
+            if executable is not None and not executable.is_absolute():
+                executable = Path(location) / executable
+            # External interpreters are not CMake targets. Interpreted tests
+            # expose their native dependencies through the case-name target,
+            # just as tests whose executable has not been built yet do.
             targets.append(
-                Path(str(command[0])).name
-                if command
+                executable.name
+                if executable is not None and executable.resolve().is_relative_to(build.resolve())
                 else name
                 if name.startswith("test_")
                 else f"test_{name}"

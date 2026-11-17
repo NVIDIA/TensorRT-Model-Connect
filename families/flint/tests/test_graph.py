@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exact-checkpoint checks for dense/full and MoE/sliding Flint layers."""
 
-import os
-from pathlib import Path
 import numpy as np
 import pytest
+
+from families.flint.tests.inputs import checkpoint_dir
 
 
 def assert_layer_output(name, predicted, reference):
@@ -25,11 +25,9 @@ def assert_layer_output(name, predicted, reference):
         compare(name + " new position", predicted[:, -1:, :], reference[:, -1:, :])
 
 
+@pytest.mark.gpu
 @pytest.mark.parametrize("layer", [0, 2, 5])
 def test_checkpoint_layer(layer):
-    directory = os.environ.get("TRTMC_FLINT_CHECKPOINT")
-    if not directory:
-        pytest.skip("requires the pinned Flint checkpoint and a CUDA device")
     import ml_dtypes
     import torch
     from families.flint.config import Config
@@ -39,7 +37,7 @@ def test_checkpoint_layer(layer):
     from families.flint.tests.reference import Reference
 
     torch.set_num_threads(8)
-    root = Path(directory)
+    root = checkpoint_dir()
     config = Config.load(root)
     weights = Weights(root)
     plan = engine(weights, config, layer, 1024)
