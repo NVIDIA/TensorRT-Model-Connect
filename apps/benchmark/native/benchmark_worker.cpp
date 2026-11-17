@@ -2058,6 +2058,49 @@ Json run_token_scores(const trtmc::Model& model, const Json& request, const Timi
         });
 }
 
+Json run_score_spatial_features(const trtmc::Model& model, const Json& request,
+                                const Timing& timing, const std::string& task_id) {
+    const auto task = task_for_operation<trtmc::SpatialFeaturesToClassScores>(model, task_id);
+    const auto config = sdk_config(request, task.config_fields(), {"feature_maps"});
+    struct Assets {
+        std::vector<std::vector<float>> values;
+        trtmc::SpatialFeaturesToClassScoresRequest input;
+    };
+    auto load = [&]() {
+        Assets assets;
+        for (const auto& item : request.at("feature_maps"))
+            assets.values.push_back(read_float32(item.at("values_path").get<std::string>()));
+        for (size_t index = 0; index < assets.values.size(); ++index) {
+            const auto& item = request.at("feature_maps").at(index);
+            assets.input.inputs.push_back(
+                {item.at("name").get<std::string>(),
+                 {assets.values[index].data(), assets.values[index].size()},
+                 item.at("channels").get<uint64_t>(),
+                 item.at("height").get<uint64_t>(),
+                 item.at("width").get<uint64_t>()});
+        }
+        return assets;
+    };
+    std::optional<Assets> cached;
+    if (!timing.asset_loading_included)
+        cached = load();
+    return measure(
+        timing,
+        [&]() {
+            std::optional<Assets> loaded;
+            if (!cached)
+                loaded = load();
+            return task.run((cached ? *cached : *loaded).input, config);
+        },
+        [](const trtmc::SpatialClassScoresResult& result) {
+            const auto view = result.view();
+            return Json{{"scored_cells", view.height * view.width},
+                        {"classes", view.classes},
+                        {"score_shape", {view.classes, view.height, view.width}},
+                        {"score_kind", view.score_kind}};
+        });
+}
+
 // One point cloud (row-major float32 [num_points, input_dim]) to one class per point.
 Json run_segment_points(const trtmc::Model& model, const Json& request, const Timing& timing,
                         const std::string& task_id) {
@@ -4439,6 +4482,8 @@ Json dispatch(const Session& session, const Json& operation_request, const Timin
             measured = run_token_scores(model, operation_request, timing, selected);
         else if (operation == "segment_points")
             measured = run_segment_points(model, operation_request, timing, selected);
+        else if (operation == "score_spatial_features")
+            measured = run_score_spatial_features(model, operation_request, timing, selected);
         else if (operation == "detect")
             measured = run_detect(model, operation_request, timing, selected);
         else if (operation == "detect_prompted")

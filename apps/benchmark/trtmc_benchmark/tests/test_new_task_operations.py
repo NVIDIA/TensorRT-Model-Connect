@@ -14,6 +14,7 @@ from trtmc_benchmark.types import BenchmarkError
     ("masked_text_to_token_scores", "token_scores", "scored_sequences"),
     ("monocular_depth", "depth", "depth_images"),
     ("points_to_semantic_segmentation", "segment_points", "segmented_points"),
+    ("spatial_features_to_class_scores", "score_spatial_features", "scored_cells"),
     ("images_state_text_to_action_chunk", "control_chunk", "action_values"),
     ("initial_image_text_to_video", "generate_image", "generated_images"),
     ("structure_prediction", "predict_structure", "structures"),
@@ -22,6 +23,17 @@ from trtmc_benchmark.types import BenchmarkError
 def test_new_tasks_have_an_operation_and_its_rate(task, operation, observed):
     assert task in supported_tasks()
     assert operation_for_name(operation).rate_metrics[0].observation_field == observed
+
+
+def test_spatial_features_preserve_names_shapes_and_resolve_assets(tmp_path):
+    (tmp_path / "map.f32").write_bytes(bytes(8))
+    feature = {"name": "example", "channels": 1, "height": 1, "width": 2, "values_path": "map.f32"}
+    result = resolve_task_case("spatial_features_to_class_scores", {"feature_maps": [feature]}, tmp_path)
+    assert result.request == {"feature_maps": [{**feature, "values_path": str(tmp_path / "map.f32")}]}
+    with pytest.raises(BenchmarkError, match="unique"):
+        resolve_task_case("spatial_features_to_class_scores", {"feature_maps": [feature, feature]}, tmp_path)
+    with pytest.raises(BenchmarkError, match="positive integers"):
+        resolve_task_case("spatial_features_to_class_scores", {"feature_maps": [{**feature, "channels": True}]}, tmp_path)
 
 
 def test_relevance_scores_every_query_of_the_case_against_its_image(tmp_path):

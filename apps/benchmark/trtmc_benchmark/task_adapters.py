@@ -133,6 +133,7 @@ _DEFAULTS: dict[str, tuple[str, int, int]] = {
     "masked_text_to_token_scores": ("token_scores", 50, 500),
     "monocular_depth": ("depth", 50, 500),
     "points_to_semantic_segmentation": ("segment_points", 50, 500),
+    "spatial_features_to_class_scores": ("score_spatial_features", 20, 100),
     "images_state_text_to_action_chunk": ("control_chunk", 2, 10),
     "initial_image_text_to_video": ("generate_image", 1, 5),
     "structure_prediction": ("predict_structure", 1, 5),
@@ -353,6 +354,23 @@ def _request(task: str, case: Mapping[str, Any], root: Path) -> dict[str, Any]:
         if not all(isinstance(value, int) and value > 0 for value in sizes.values()):
             raise BenchmarkError("point-cloud segmentation requires positive integer num_points and input_dim")
         return {"points_path": _semantic_asset(case, root, "points_path", "points", "test_points"), **sizes}
+    if task == "spatial_features_to_class_scores":
+        maps = _explicit(case, "feature_maps")
+        if not isinstance(maps, list) or not maps:
+            raise BenchmarkError("spatial feature scoring requires feature_maps")
+        resolved, names = [], set()
+        for item in maps:
+            if not isinstance(item, Mapping):
+                raise BenchmarkError("each spatial feature map must be an object")
+            name = item.get("name")
+            dimensions = {key: item.get(key) for key in ("channels", "height", "width")}
+            if not isinstance(name, str) or not name or name in names:
+                raise BenchmarkError("spatial feature names must be nonempty and unique")
+            if not all(type(value) is int and value > 0 for value in dimensions.values()):
+                raise BenchmarkError("spatial feature CHW dimensions must be positive integers")
+            names.add(name)
+            resolved.append({"name": name, "values_path": _semantic_asset(item, root, "values_path"), **dimensions})
+        return {"feature_maps": resolved}
     if task == "image_to_boxes":
         if _explicit(case, "prompt", "test_prompt", "source_text") is not _MISSING:
             raise BenchmarkError("image-only detection has no prompt input")

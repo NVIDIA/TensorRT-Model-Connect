@@ -509,4 +509,27 @@ class IBatchImageToTokenAndPooledFeatures {
     run_batch(const BatchImageToTokenAndPooledFeaturesRequest&) = 0;
 };
 
+struct SpatialFeatureInput {
+    std::string_view name;
+    Span<const float> values; // Contiguous CHW; names and coordinate meaning are family-owned.
+    uint64_t channels{0}, height{0}, width{0};
+};
+struct SpatialFeaturesToClassScoresRequest {
+    std::vector<SpatialFeatureInput> inputs; // One example, with unique nonempty input names.
+};
+struct SpatialClassScoresResult {
+    std::vector<float> values; // Contiguous [class,height,width]; classes may overlap.
+    uint64_t classes{0}, height{0}, width{0};
+    std::vector<std::string> class_names; // Exactly one nonempty name per class, in score order.
+    ScoreKind kind{ScoreKind::Unbounded};
+};
+class ISpatialFeaturesToClassScores {
+  public:
+    using TaskInterface = ISpatialFeaturesToClassScores;
+    static constexpr std::string_view kTask = "spatial_features_to_class_scores";
+    virtual ~ISpatialFeaturesToClassScores() = default;
+    virtual SpatialClassScoresResult run(const SpatialFeaturesToClassScoresRequest&,
+                                         ConfigView) = 0;
+};
+
 } // namespace trtmc::internal

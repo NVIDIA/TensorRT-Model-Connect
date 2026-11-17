@@ -44,6 +44,13 @@ trtmc-bench run apps/benchmark/example.yaml -o results/example
 Use `trtmc-bench --help` and subcommand help as the authoritative option list
 for the installed version.
 
+The `spatial_features_to_class_scores` Task uses `score_spatial_features`.
+Its `feature_maps` request lists each input's `name`, `values_path` (raw FP32),
+and positive `channels`, `height`, `width`. File loading is excluded by default;
+the measured public Task call includes transfers and owned result creation.
+The BEVFusion family's README provides its checkpoint, deterministic fixture
+generation, correctness checks and repeatable benchmark commands.
+
 ## Timing boundary
 
 Candidate timing measures the public family task call. Bundle construction,

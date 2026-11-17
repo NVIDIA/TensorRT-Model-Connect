@@ -587,6 +587,34 @@ class FeaturesFixture final : public IModel,
     size_t query_document_calls_{0};
 };
 
+class SpatialModel final : public IModel, public ISpatialFeaturesToClassScores {
+  public:
+    explicit SpatialModel(std::string mode) : mode_(std::move(mode)) {}
+    const char* task() const noexcept override { return mode_.c_str(); }
+    std::vector<TaskInstance> task_bindings() override {
+        return {bind<ISpatialFeaturesToClassScores>(*this)};
+    }
+    SpatialClassScoresResult run(const SpatialFeaturesToClassScoresRequest& request,
+                                 ConfigView) override {
+        if (request.inputs.size() != 2 || request.inputs[0].name != "first" ||
+            request.inputs[1].name != "second")
+            throw std::invalid_argument("fixture expects two named operands in order");
+        SpatialClassScoresResult result{{}, 2, 1, 2, {"a", "b"}, ScoreKind::Probability};
+        for (const auto& item : request.inputs)
+            result.values.insert(result.values.end(), item.values.begin(), item.values.end());
+        if (mode_ == "spatial_bad_shape")
+            result.width = 3;
+        if (mode_ == "spatial_bad_names")
+            result.class_names.pop_back();
+        if (mode_ == "spatial_bad_probability")
+            result.values[0] = 2;
+        return result;
+    }
+
+  private:
+    std::string mode_;
+};
+
 class MissingFixture final : public IModel {
   public:
     const char* task() const noexcept override { return "missing"; }
@@ -598,6 +626,8 @@ class MissingFixture final : public IModel {
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.reader.info().family != "features_fixture")
         throw std::runtime_error("wrong feature fixture family");
+    if (context.reader.info().task.rfind("spatial_", 0) == 0)
+        return new SpatialModel(context.reader.info().task);
     if (context.reader.info().task == "missing")
         return new MissingFixture;
     return new FeaturesFixture(context.reader.info().task);
