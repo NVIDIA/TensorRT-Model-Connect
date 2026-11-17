@@ -43,7 +43,7 @@ From the repository root, in a working TRT MC development environment:
 mkdir -p artifacts/bevfusion/model
 curl -fL 'https://www.dropbox.com/scl/fi/8lgd1hkod2a15mwry0fvd/bevfusion-seg.pth?rlkey=2tmgw7mcrlwy9qoqeui63tay9&dl=1' \
   -o artifacts/bevfusion/model/bevfusion-seg.pth
-PYTHONPATH=core/builder:apps/benchmark:. python - <<'PY'
+PYTHONPATH=core/builder:. python - <<'PY'
 from pathlib import Path
 from tensorrt_model_connect import BuildRequest, build
 for precision in ("fp32", "fp16"):
@@ -54,8 +54,7 @@ for precision in ("fp32", "fp16"):
     ))
 PY
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DTRTMC_BUILD_TESTS=ON
-cmake --build build --target trtmc trtmc_backend_trt \
-  test_bevfusion_pipeline trtmc_benchmark_worker -j8
+cmake --build build --target trtmc trtmc_backend_trt test_bevfusion_pipeline -j8
 ```
 
 The public C++ call takes existing host feature buffers:
@@ -82,27 +81,12 @@ The native helper exercises bundle loading and the public Task, including
 reversed input order, repeated calls, class identity and result ownership.
 
 ```bash
-PYTHONPATH=core/builder:apps/benchmark:. python -m families.bevfusion.tests.reference \
+PYTHONPATH=core/builder:. python -m families.bevfusion.tests.reference \
   --prepare artifacts/bevfusion/model
 TRTMC_BEVFUSION_MODEL_DIR="$PWD/artifacts/bevfusion/model" \
-TRTMC_RUNTIME_ROOT="$PWD/build" TRTMC_NATIVE_BUILD_DIR="$PWD/build" PYTHONPATH=core/builder:apps/benchmark:. \
+TRTMC_RUNTIME_ROOT="$PWD/build" TRTMC_NATIVE_BUILD_DIR="$PWD/build" PYTHONPATH=core/builder:. \
 python -m pytest families/bevfusion/tests --e2e-model bevfusion -q
-
-PYTHONPATH=core/builder:apps/benchmark:. python -m families.bevfusion.tests.inputs \
-  --output artifacts/bevfusion/benchmark --seed 0
-PYTHONPATH=core/builder:apps/benchmark:. PATH="$PWD/build:$PATH" \
-python -m trtmc_benchmark run --manifest-root artifacts/bevfusion/benchmark \
-  --model bevfusion-bev-fp16 --case bevfusion-bev-fp16 \
-  --bundle artifacts/bevfusion/bevfusion-bev-fp16.bundle --no-build \
-  --runtime-root build --warmup 20 --iterations 100 \
-  --output artifacts/bevfusion/perf-fp16
 ```
-
-`trtmc-bench` writes machine-readable latency results, including the median.
-Its `public_task_call_wall` boundary includes Task validation, engine execution,
-transfers and owned output creation. Input-file loading, build/load, warmup and
-report generation stay outside the default boundary. A GPU-only engine timing
-must be reported separately and must not be described as Task latency.
 
 For a single TensorRT engine forward pass, the same qualification helper has an
 internal `--engine-only` option. It reads the exact qualified bundle, uploads the
@@ -115,12 +99,17 @@ are copied back after timing; the retained E2E requires them to match the public
 Task bit for bit.
 
 ```bash
+PYTHONPATH=core/builder:. python -m families.bevfusion.tests.inputs \
+  --output artifacts/bevfusion/inputs --seed 0
 build/test_bevfusion_sdk_cpp \
   artifacts/bevfusion/bevfusion-bev-fp16.bundle build \
-  artifacts/bevfusion/benchmark/bevfusion/tests/data/camera.f32 \
-  artifacts/bevfusion/benchmark/bevfusion/tests/data/lidar.f32 \
+  artifacts/bevfusion/inputs/bevfusion/tests/data/camera.f32 \
+  artifacts/bevfusion/inputs/bevfusion/tests/data/lidar.f32 \
   artifacts/bevfusion/engine-fp16.json --engine-only
 ```
+
+Read `median_ms` and `p95_ms` from the output JSON. Use the FP32 bundle instead
+to measure FP32 execution with the same inputs.
 
 The existing source-derived benchmark runner uses randomly initialized weights and a transposed 1x1 first
 FPN branch. This family follows the selected upstream config's ordinary 1x1
