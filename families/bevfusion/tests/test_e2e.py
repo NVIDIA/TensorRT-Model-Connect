@@ -76,13 +76,13 @@ def _inspect_fp8_engine(bundle, output):
 @pytest.mark.e2e
 @pytest.mark.gpu
 @pytest.mark.trt
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_official_bev_checkpoint(name, request, tmp_path):
-    if not _enabled(request.config, name):
+@pytest.mark.parametrize("case_name", sorted(CASES))
+def test_bevfusion_e2e(case_name, request, tmp_path):
+    if not _enabled(request.config, case_name):
         pytest.skip("BEVFusion E2E requires explicit --e2e-model or --e2e-testcase selection")
     import torch
 
-    manifest = CASES[name]
+    manifest = CASES[case_name]
     for variable in (
         "TRTMC_BEVFUSION_MODEL_DIR",
         "TRTMC_RUNTIME_ROOT",
@@ -117,7 +117,7 @@ def test_official_bev_checkpoint(name, request, tmp_path):
         },
     )
     case = manifest["testcases"][0]
-    limits = json.loads((ROOT / "thresholds" / f"{name}.json").read_text())["threshold_overrides"]
+    limits = json.loads((ROOT / "thresholds" / f"{case_name}.json").read_text())["threshold_overrides"]
     record_evidence("thresholds", limits)
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
