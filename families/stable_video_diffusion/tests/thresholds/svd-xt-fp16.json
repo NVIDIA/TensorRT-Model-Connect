@@ -1,0 +1,10 @@
+{
+  "threshold_overrides": {
+    "min_sdk_frame_psnr": 99.0,
+    "min_first_frame_psnr_vs_image": 20.0,
+    "min_mean_abs_motion": 5.0,
+    "min_frame_psnr_vs_official_fp32": 25.0,
+    "min_mean_psnr_vs_official_fp32": 35.0,
+    "max_mean_psnr_shortfall_vs_official_fp16_db": 1.5
+  }
+}

@@ -1504,6 +1504,17 @@
         "DeepseekV3ForCausalLM"
       ],
       "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "stabilityai/stable-video-diffusion-img2vid-xt",
+      "revision": "9e43909513c6714f1bc78bcb44d96e733cd242aa",
+      "revision_source": "declared",
+      "metadata_file": "model_index.json",
+      "model_type": null,
+      "architectures": [
+        "StableVideoDiffusionPipeline"
+      ],
+      "architecture_source": "model_index._class_name"
     }
   ]
 }
