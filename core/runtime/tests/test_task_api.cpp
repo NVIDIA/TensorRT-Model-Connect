@@ -36,6 +36,7 @@ static_assert(std::is_abstract_v<trtmc::ITextPromptedSegmentation>);
 static_assert(std::is_abstract_v<trtmc::IStereoDisparity>);
 static_assert(std::is_abstract_v<trtmc::IImageClassification>);
 static_assert(std::is_abstract_v<trtmc::IObjectDetection>);
+static_assert(std::is_abstract_v<trtmc::IDocumentLayout>);
 static_assert(std::is_abstract_v<trtmc::IPoseHypothesisRefinement>);
 static_assert(std::is_abstract_v<trtmc::IImageFeatureExtractor>);
 static_assert(std::is_abstract_v<trtmc::IVideoSegmentation>);
