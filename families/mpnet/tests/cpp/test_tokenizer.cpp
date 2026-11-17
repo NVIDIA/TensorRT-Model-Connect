@@ -20,12 +20,14 @@ std::unique_ptr<trtmc::ITokenizer> tokenizer(bool clean_text, bool add_special_t
         {"model",
          {{"type", "WordPiece"},
           {"unk_token", "<unk>"},
-          {"vocab", {{"<s>", 0},        {"<pad>", 1},      {"</s>", 2},  {"<unk>", 3},
-                     {"ab", 4},         {"a", 5},          {"b", 6},     {u8"a\uE000b", 7},
-                     {u8"a\u00ADb", 8}, {u8"a\u0378b", 9}, {u8"Σ", 10},  {u8"σ", 11},
-                     {u8"АБВ", 12},     {u8"абв", 13},     {"i", 14},    {u8"i\u0307", 15},
-                     {u8"İ", 16},       {u8"ΟΣ", 17},      {u8"οσ", 18}, {"cafe", 19},
-                     {u8"CAFÉ", 20}}}}},
+          {"vocab", {{"<s>", 0},          {"<pad>", 1},      {"</s>", 2},      {"<unk>", 3},
+                     {"ab", 4},           {"a", 5},          {"b", 6},         {u8"a\uE000b", 7},
+                     {u8"a\u00ADb", 8},   {u8"a\u0378b", 9}, {u8"Σ", 10},      {u8"σ", 11},
+                     {u8"АБВ", 12},       {u8"абв", 13},     {"i", 14},        {u8"i\u0307", 15},
+                     {u8"İ", 16},         {u8"ΟΣ", 17},      {u8"οσ", 18},     {"cafe", 19},
+                     {u8"CAFÉ", 20},      {u8"\u060C", 21},  {u8"\u00B7", 22}, {u8"a\u2044b", 23},
+                     {u8"a\u3012b", 24},  {"+", 25},         {",", 26},        {u8"a\u00A9b", 27},
+                     {u8"\U00010100", 28}}}}},
         {"normalizer",
          {{"type", "BertNormalizer"},
           {"clean_text", clean_text},
@@ -98,6 +100,27 @@ void test_lowercase(bool add_special_tokens) {
     check(*unchanged, u8"İ", {16}, add_special_tokens, "disabled lowercase preserves dotted I");
 }
 
+void test_punctuation(bool add_special_tokens) {
+    const auto subject = tokenizer(true, add_special_tokens);
+    check(*subject, u8"a\u060Cb", {5, 21, 6}, add_special_tokens,
+          "Arabic comma isolates a word boundary");
+    check(*subject, u8"a\u00B7b", {5, 22, 6}, add_special_tokens,
+          "middle dot isolates a word boundary");
+    check(*subject, u8"a\U00010100b", {5, 28, 6}, add_special_tokens,
+          "supplementary punctuation isolates a word boundary");
+    check(*subject, u8"a\u2044b", {23}, add_special_tokens,
+          "fraction slash symbol remains inside a word");
+    check(*subject, u8"a\u3012b", {24}, add_special_tokens, "postal symbol remains inside a word");
+    check(*subject, u8"a\u00A9b", {27}, add_special_tokens,
+          "copyright symbol remains inside a word");
+    check(*subject, "a+b", {5, 25, 6}, add_special_tokens,
+          "ASCII symbol keeps the reference punctuation boundary");
+    check(*subject, "a,b", {5, 26, 6}, add_special_tokens, "ASCII comma keeps its boundary");
+    const auto no_clean = tokenizer(false, add_special_tokens);
+    check(*no_clean, u8"a\u0085b", {5, 6}, add_special_tokens,
+          "next-line whitespace separates words when cleaning is disabled");
+}
+
 } // namespace
 
 int main() {
@@ -105,6 +128,7 @@ int main() {
         test_clean_text(add_special_tokens);
         test_clean_text_disabled(add_special_tokens);
         test_lowercase(add_special_tokens);
+        test_punctuation(add_special_tokens);
     }
     if (failures != 0) {
         std::cerr << "mpnet tokenizer: " << failures << " check(s) failed\n";

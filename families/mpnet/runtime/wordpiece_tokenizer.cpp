@@ -4,6 +4,7 @@
  */
 
 #include "families/mpnet/runtime/lowercase_data.h"
+#include "families/mpnet/runtime/punctuation_data.h"
 #include "families/mpnet/runtime/tokenizer.h"
 
 #include <algorithm>
@@ -106,8 +107,8 @@ inline bool is_control_char(char32_t cp) {
 
 constexpr UnicodeRange kWhitespaceRanges[] = {
     {' ', ' '},       {'\t', '\r'}, // space, tab, LF, VT, FF, CR
-    {0x00A0, 0x00A0}, {0x1680, 0x1680}, {0x2000, 0x200A}, {0x2028, 0x2029},
-    {0x202F, 0x202F}, {0x205F, 0x205F}, {0x3000, 0x3000},
+    {0x0085, 0x0085}, {0x00A0, 0x00A0}, {0x1680, 0x1680}, {0x2000, 0x200A},
+    {0x2028, 0x2029}, {0x202F, 0x202F}, {0x205F, 0x205F}, {0x3000, 0x3000},
 };
 
 inline bool is_whitespace(char32_t cp) {
@@ -115,19 +116,15 @@ inline bool is_whitespace(char32_t cp) {
                      sizeof(kWhitespaceRanges) / sizeof(kWhitespaceRanges[0]));
 }
 
-constexpr UnicodeRange kPunctuationRanges[] = {
-    {33, 47},         {58, 64},         {91, 96},         {123, 126}, // ASCII punctuation
-    {0x2000, 0x206F},                                                 // General Punctuation
-    {0x3000, 0x303F},                                                 // CJK Symbols and Punctuation
-    {0xFE30, 0xFE4F},                                                 // CJK Compatibility Forms
-    {0xFE50, 0xFE6F},                                                 // Small Form Variants
-    {0xFF00, 0xFF0F},                                                 // Fullwidth
-    {0xFF1A, 0xFF20}, {0xFF3B, 0xFF40}, {0xFF5B, 0xFF65},
-};
-
 inline bool is_punctuation(char32_t cp) {
-    return in_ranges(cp, kPunctuationRanges,
-                     sizeof(kPunctuationRanges) / sizeof(kPunctuationRanges[0]));
+    if (cp < 0x80)
+        return (cp >= 33 && cp <= 47) || (cp >= 58 && cp <= 64) || (cp >= 91 && cp <= 96) ||
+               (cp >= 123 && cp <= 126);
+    const auto* ranges = mpnet_unicode::kPunctuationRanges;
+    const auto* end = ranges + sizeof(mpnet_unicode::kPunctuationRanges) / sizeof(*ranges);
+    const auto* range = std::lower_bound(
+        ranges, end, cp, [](const auto& entry, char32_t point) { return entry.last < point; });
+    return range != end && cp >= range->first;
 }
 
 constexpr UnicodeRange kCjkRanges[] = {
