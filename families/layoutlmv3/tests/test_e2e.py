@@ -440,48 +440,49 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
             "native_process",
             {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
         )
-        assert actual.shape == expected.shape and np.isfinite(actual).all()
-        maximum = float(np.max(np.abs(actual - expected)))
-        cosine = np.sum(actual.astype(np.float64) * expected, axis=1) / (
-            np.linalg.norm(actual.astype(np.float64), axis=1)
-            * np.linalg.norm(expected.astype(np.float64), axis=1)
-        )
-        record_evidence(
-            "metrics",
-            {"sample": index, "max_abs_error": maximum, "min_cosine": float(cosine.min())},
-        )
-        pair = {}
-        for role, values in (("native", actual), ("reference", expected)):
-            path = tmp_path / f"{role}-document-{index}.npy"
-            np.save(path, values, allow_pickle=False)
-            pair[role] = path
-        record_evidence(
-            "reference_comparison",
-            {
-                "label": f"LayoutLMv3 document {index} full text features",
-                "scope": "independent_reference",
-                "enforced": True,
-                **pair,
-                "checks": [
-                    {
-                        "name": "max_abs_error",
-                        "scope": "independent_reference",
-                        "actual": maximum,
-                        "operator": "<=",
-                        "expected": case["max_abs_error"],
-                        "passed": maximum <= case["max_abs_error"],
-                    },
-                    {
-                        "name": "min_cosine",
-                        "scope": "independent_reference",
-                        "actual": float(cosine.min()),
-                        "operator": ">=",
-                        "expected": case["min_cosine"],
-                        "passed": float(cosine.min()) >= case["min_cosine"],
-                    },
-                ],
-            },
-        )
-        assert maximum <= case["max_abs_error"]
-        assert float(cosine.min()) >= case["min_cosine"]
+        with evidence_stage("comparison"):
+            assert actual.shape == expected.shape and np.isfinite(actual).all()
+            maximum = float(np.max(np.abs(actual - expected)))
+            cosine = np.sum(actual.astype(np.float64) * expected, axis=1) / (
+                np.linalg.norm(actual.astype(np.float64), axis=1)
+                * np.linalg.norm(expected.astype(np.float64), axis=1)
+            )
+            record_evidence(
+                "metrics",
+                {"sample": index, "max_abs_error": maximum, "min_cosine": float(cosine.min())},
+            )
+            pair = {}
+            for role, values in (("native", actual), ("reference", expected)):
+                path = tmp_path / f"{role}-document-{index}.npy"
+                np.save(path, values, allow_pickle=False)
+                pair[role] = path
+            record_evidence(
+                "reference_comparison",
+                {
+                    "label": f"LayoutLMv3 document {index} full text features",
+                    "scope": "independent_reference",
+                    "enforced": True,
+                    **pair,
+                    "checks": [
+                        {
+                            "name": "max_abs_error",
+                            "scope": "independent_reference",
+                            "actual": maximum,
+                            "operator": "<=",
+                            "expected": case["max_abs_error"],
+                            "passed": maximum <= case["max_abs_error"],
+                        },
+                        {
+                            "name": "min_cosine",
+                            "scope": "independent_reference",
+                            "actual": float(cosine.min()),
+                            "operator": ">=",
+                            "expected": case["min_cosine"],
+                            "passed": float(cosine.min()) >= case["min_cosine"],
+                        },
+                    ],
+                },
+            )
+            assert maximum <= case["max_abs_error"]
+            assert float(cosine.min()) >= case["min_cosine"]
         print(f"LayoutLMv3 document={index}: max_abs={maximum:.8g}, min_cosine={cosine.min():.9f}")
