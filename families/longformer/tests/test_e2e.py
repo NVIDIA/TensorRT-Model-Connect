@@ -95,10 +95,10 @@ def _required_path(value: str | None, label: str) -> Path:
     return path
 
 
-def _model_dir(manifest: dict) -> Path:
+def _model_dir(manifest: dict) -> tuple[Path, str | None]:
     explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
     if explicit:
-        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR"), None
     from huggingface_hub import snapshot_download
 
     try:
@@ -109,7 +109,7 @@ def _model_dir(manifest: dict) -> Path:
         raise AssertionError(
             f"selected {FAMILY} E2E requires the exact cached checkpoint {manifest['hf_id']}"
         ) from error
-    return Path(snapshot)
+    return Path(snapshot), manifest["hf_revision"]
 
 
 def _runtime() -> tuple[Path, Path]:
@@ -206,8 +206,10 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     record_evidence(
         "checkpoint",
         {
-            "repo_id": manifest["hf_id"],
-            "revision": manifest["hf_revision"],
+            "hf_id": manifest["hf_id"],
+            "expected_hf_revision": manifest["hf_revision"],
+            "hf_revision": None,
+            "revision_status": "unresolved",
             "precision": manifest["precision"],
         },
     )
@@ -226,7 +228,15 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
 
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
-        directory = _model_dir(manifest)
+        directory, checkpoint_revision = _model_dir(manifest)
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(directory),
+            "hf_revision": checkpoint_revision,
+            "revision_status": "unverified" if checkpoint_revision is None else "pinned_cache_lookup",
+        },
+    )
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
