@@ -693,11 +693,15 @@ typedef struct {
     uint64_t word_count;
 } trtmc_document_words_to_token_features_request_v1;
 typedef struct {
-    int64_t token_id, word_index;
+    int64_t token_id;
+    /* Zero-based input-word index; -1 denotes a special token, -2 padding. */
+    int64_t word_index;
+    /* Position in the model token sequence, which may differ from the returned row index. */
     uint64_t token_index;
 } trtmc_document_feature_token_v1;
 typedef struct {
     trtmc_f32_matrix_view_v1 features;
+    /* tokens[i] describes feature row i; token_count equals features.rows. */
     const trtmc_document_feature_token_v1* tokens;
     uint64_t token_count, source_word_count;
 } trtmc_document_token_features_view_v1;

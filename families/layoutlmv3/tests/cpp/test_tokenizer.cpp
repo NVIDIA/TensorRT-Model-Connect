@@ -39,10 +39,15 @@ int main() {
     const auto write = [&](const char* key, const auto& values) {
         std::ofstream out(input.at(key).template get<std::string>(), std::ios::binary);
         out.write(reinterpret_cast<const char*>(values.data()), values.size() * sizeof(values[0]));
+        out.close();
+        if (!out)
+            std::cerr << "Could not write LayoutLMv3 preprocessing output: " << input.at(key)
+                      << '\n';
+        return static_cast<bool>(out);
     };
-    write("pixels_path", processed);
-    write("relative_x_path", result.relative_x);
-    write("relative_y_path", result.relative_y);
+    if (!write("pixels_path", processed) || !write("relative_x_path", result.relative_x) ||
+        !write("relative_y_path", result.relative_y))
+        return 2;
     std::vector<int64_t> mapping;
     for (const auto& token : result.mapping)
         mapping.push_back(token.word_index);

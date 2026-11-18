@@ -45,13 +45,15 @@ def build(request, writer):
         or not cfg["has_spatial_attention_bias"]
         or preprocessing["image_mean"] != [0.5, 0.5, 0.5]
         or preprocessing["image_std"] != [0.5, 0.5, 0.5]
+        or not preprocessing.get("do_rescale", True)
+        or preprocessing.get("rescale_factor", 1 / 255) != 1 / 255
         or not preprocessing["do_normalize"]
         or not preprocessing["do_resize"]
         or preprocessing["resample"] != 2
     ):
         raise ValueError("Unsupported LayoutLMv3 model or image preprocessing")
     length = request.max_sequence_length or 128
-    if not 4 <= length <= cfg["max_position_embeddings"] - cfg["pad_token_id"] - 1:
+    if not 4 <= length <= min(512, cfg["max_position_embeddings"] - cfg["pad_token_id"] - 1):
         raise ValueError("LayoutLMv3 document word profile exceeds its position embeddings")
     from safetensors import safe_open
     from transformers import LayoutLMv3Tokenizer
@@ -87,10 +89,10 @@ def build(request, writer):
             .astype(np.int32)
         )
 
-    positions = torch.cat([torch.arange(length), torch.arange(visual)])
+    positions = torch.cat([torch.arange(length, device="cpu"), torch.arange(visual, device="cpu")])
     one_d = bucket(positions[None, :] - positions[:, None], cfg["rel_pos_bins"], cfg["max_rel_pos"])
     spatial_buckets = bucket(
-        torch.arange(-1000, 1001), cfg["rel_2d_pos_bins"], cfg["max_rel_2d_pos"]
+        torch.arange(-1000, 1001, device="cpu"), cfg["rel_2d_pos_bins"], cfg["max_rel_2d_pos"]
     )
     logger = trt.Logger(trt.Logger.VERBOSE if request.verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)

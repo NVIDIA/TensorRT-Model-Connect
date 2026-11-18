@@ -249,7 +249,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         {
             "model_dir": str(directory),
             "hf_revision": checkpoint_revision,
-            "revision_status": "unverified" if checkpoint_revision is None else "pinned_cache_lookup",
+            "revision_status": "unverified"
+            if checkpoint_revision is None
+            else "pinned_cache_lookup",
         },
     )
     _, runtime_root = _runtime()
@@ -320,7 +322,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         visual = processor(
             images=pixels * 255, input_data_format="channels_last", return_tensors="pt"
         ).pixel_values
-        request = dict(
+        preprocess_request = dict(
             height=image.height,
             width=image.width,
             image_path=str(source),
@@ -333,7 +335,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
             [str(_native_test_binary("test_layoutlmv3_tokenizer"))],
             input=json.dumps(
                 dict(
-                    **request,
+                    **preprocess_request,
                     tokenizer_path=str(tokenizer_path),
                     config=config,
                     pixels_path=str(native_pixels),
@@ -345,6 +347,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
             capture_output=True,
             text=True,
             check=False,
+            timeout=60,
         )
         assert completed.returncode == 0, completed.stderr
         encoded = json.loads(completed.stdout)
@@ -396,7 +399,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         target = tmp_path / f"features-{index}.f32"
         completed = subprocess.run(
             [str(_native_test_binary("test_layoutlmv3_runtime")), str(bundle), str(runtime_root)],
-            input=json.dumps(dict(**request, output_path=str(target)), ensure_ascii=False),
+            input=json.dumps(
+                dict(**preprocess_request, output_path=str(target)), ensure_ascii=False
+            ),
             capture_output=True,
             text=True,
             check=False,
@@ -430,6 +435,38 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         record_evidence(
             "metrics",
             {"sample": index, "max_abs_error": maximum, "min_cosine": float(cosine.min())},
+        )
+        pair = {}
+        for role, values in (("native", actual), ("reference", expected)):
+            path = tmp_path / f"{role}-document-{index}.npy"
+            np.save(path, values, allow_pickle=False)
+            pair[role] = path
+        record_evidence(
+            "reference_comparison",
+            {
+                "label": f"LayoutLMv3 document {index} full text features",
+                "scope": "independent_reference",
+                "enforced": True,
+                **pair,
+                "checks": [
+                    {
+                        "name": "max_abs_error",
+                        "scope": "independent_reference",
+                        "actual": maximum,
+                        "operator": "<=",
+                        "expected": case["max_abs_error"],
+                        "passed": maximum <= case["max_abs_error"],
+                    },
+                    {
+                        "name": "min_cosine",
+                        "scope": "independent_reference",
+                        "actual": float(cosine.min()),
+                        "operator": ">=",
+                        "expected": case["min_cosine"],
+                        "passed": float(cosine.min()) >= case["min_cosine"],
+                    },
+                ],
+            },
         )
         assert maximum <= case["max_abs_error"]
         assert float(cosine.min()) >= case["min_cosine"]

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""TensorRT graph operations for the Wav2Vec2Bert codec decoder."""
+"""TensorRT graph operations for the LayoutLMv3 joint document encoder."""
 
 from __future__ import annotations
 

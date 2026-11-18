@@ -32,6 +32,12 @@ int main(int argc, char** argv) {
     std::ofstream output(input.at("output_path").get<std::string>(), std::ios::binary);
     output.write(reinterpret_cast<const char*>(result.features().values.data()),
                  result.features().values.size() * sizeof(float));
+    output.close();
+    if (!output) {
+        std::cerr << "Could not write LayoutLMv3 feature output: " << input.at("output_path")
+                  << '\n';
+        return 2;
+    }
     nlohmann::json tokens = nlohmann::json::array();
     for (const auto& token : result.tokens())
         tokens.push_back({token.token_id, token.word_index, token.token_index});

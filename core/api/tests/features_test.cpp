@@ -183,11 +183,10 @@ void document_features(const std::filesystem::path& root, const trtmc::LoadOptio
     for (const char* mode : {"document_bad_word", "document_bad_source", "document_bad_count"}) {
         const auto file = root / (std::string(mode) + ".bundle");
         bundle(file, mode);
-        rejects(
-            [&] {
-                Model::load(file.string(), options).task<DocumentWordsToTokenFeatures>().run(input);
-            },
-            TRTMC_INTERNAL_ERROR, "invalid family document mapping rejected");
+        const auto bad_model = Model::load(file.string(), options);
+        const auto bad_task = bad_model.task<DocumentWordsToTokenFeatures>();
+        rejects([&] { bad_task.run(input); }, TRTMC_INTERNAL_ERROR,
+                "invalid family document mapping rejected");
         std::filesystem::remove(file);
     }
     auto moved = std::move(result);
