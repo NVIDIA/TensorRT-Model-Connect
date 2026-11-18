@@ -171,8 +171,10 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
 } // namespace trtmc::lfm2_moe
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("lfm2_moe does not support --kv-cache-size");
     using namespace trtmc;
-    if (context.kv_cache_size_bytes || context.reader.info().task != "text_continuation")
+    if (context.reader.info().task != "text_continuation")
         throw std::invalid_argument(
             "LFM2 MoE uses a family-owned fixed KV profile for text continuation");
     const auto raw = lfm2_moe::section(context.reader, "runtime.json");

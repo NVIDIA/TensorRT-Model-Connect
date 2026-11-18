@@ -269,6 +269,8 @@ class PlanWriter(trt.IStreamWriter):
 
 
 def build(request, writer):
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("lfm2_moe does not support dynamic_kv_cache")
     if request.task != "text_continuation" or request.backend != "trt":
         raise ValueError("Lfm2Moe requires text_continuation with backend=trt")
     if (
@@ -278,7 +280,6 @@ def build(request, writer):
         or request.max_batch_size != 1
         or request.quantization not in (None, "none")
         or request.fp32_layers
-        or request.dynamic_kv_cache
         or request.image_height is not None
         or request.image_width is not None
         or request.video_num_frames is not None
