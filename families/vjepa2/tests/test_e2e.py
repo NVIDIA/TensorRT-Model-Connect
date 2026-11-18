@@ -392,20 +392,21 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             "native_process",
             {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
         )
-        assert expected.shape == actual.shape and np.isfinite(actual).all()
-        cosine = np.sum(actual * expected, axis=1) / (
-            np.linalg.norm(actual, axis=1) * np.linalg.norm(expected, axis=1)
-        )
-        record_evidence(
-            "metrics",
-            {
-                "sample": label,
-                "max_abs_error": float(np.max(np.abs(actual - expected))),
-                "min_cosine": float(cosine.min()),
-            },
-        )
-        np.testing.assert_allclose(actual, expected, atol=case["max_abs_error"], rtol=0)
-        assert float(cosine.min()) >= case["min_cosine"]
+        with evidence_stage("comparison"):
+            assert expected.shape == actual.shape and np.isfinite(actual).all()
+            cosine = np.sum(actual * expected, axis=1) / (
+                np.linalg.norm(actual, axis=1) * np.linalg.norm(expected, axis=1)
+            )
+            record_evidence(
+                "metrics",
+                {
+                    "sample": label,
+                    "max_abs_error": float(np.max(np.abs(actual - expected))),
+                    "min_cosine": float(cosine.min()),
+                },
+            )
+            np.testing.assert_allclose(actual, expected, atol=case["max_abs_error"], rtol=0)
+            assert float(cosine.min()) >= case["min_cosine"]
         print(
             f"V-JEPA2 {label}: max_abs={np.max(np.abs(actual - expected)):.7g}, min_cosine={cosine.min():.8f}"
         )
