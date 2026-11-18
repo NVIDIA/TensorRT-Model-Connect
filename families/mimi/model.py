@@ -12,6 +12,8 @@ from . import graph as g
 
 
 def build(request, writer):
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("mimi does not support dynamic_kv_cache")
     if request.task != "audio_codebook_tokens_to_audio" or request.backend != "trt":
         raise ValueError("Mimi requires audio_codebook_tokens_to_audio with backend=trt")
     if (
@@ -21,7 +23,6 @@ def build(request, writer):
         or request.max_batch_size != 1
         or request.quantization not in (None, "none")
         or request.fp32_layers
-        or request.dynamic_kv_cache
         or request.image_height is not None
         or request.image_width is not None
         or request.video_num_frames is not None

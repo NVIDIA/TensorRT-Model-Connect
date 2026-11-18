@@ -7,3 +7,4 @@ def test_mimi_checkpoint_has_one_owner():
     family, support = resolve_family(ModelMetadata({"model_type": "mimi"}, {}))
     assert family == "mimi"
     assert support.tasks == ("audio_codebook_tokens_to_audio",)
+    assert support.default_task == "audio_codebook_tokens_to_audio"

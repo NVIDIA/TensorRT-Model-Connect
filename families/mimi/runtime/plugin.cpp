@@ -66,9 +66,10 @@ std::vector<char> section(const BundleReader& reader, const char* name) {
 } // namespace
 } // namespace trtmc::mimi
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("mimi does not support --kv-cache-size");
     using namespace trtmc;
-    if (context.kv_cache_size_bytes ||
-        context.reader.info().task != "audio_codebook_tokens_to_audio")
+    if (context.reader.info().task != "audio_codebook_tokens_to_audio")
         throw std::invalid_argument("Mimi requires codec token decoding without an external cache");
     const auto raw = mimi::section(context.reader, "runtime.json");
     const auto cfg = nlohmann::json::parse(raw.begin(), raw.end());
