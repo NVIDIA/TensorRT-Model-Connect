@@ -19,5 +19,6 @@
       "min_cosine": 0.99999,
       "pixel_atol": 2e-06
     }
-  ]
+  ],
+  "reference_environment": "isolated"
 }

@@ -1,5 +1,6 @@
+# The original Transformers5.20 reference is isolated via tests/requirements.txt.
 numpy
 torch
-transformers>=5.20
+transformers>=5.2
 safetensors
 Pillow
