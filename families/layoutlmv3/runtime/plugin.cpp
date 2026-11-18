@@ -73,9 +73,10 @@ std::vector<char> section(const BundleReader& reader, const char* name) {
 } // namespace
 } // namespace trtmc::layoutlmv3
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("layoutlmv3 does not support --kv-cache-size");
     using namespace trtmc;
-    if (context.kv_cache_size_bytes ||
-        context.reader.info().task != "document_words_to_token_features")
+    if (context.reader.info().task != "document_words_to_token_features")
         throw std::invalid_argument(
             "LayoutLMv3 requires document features without an external cache");
     const auto raw = layoutlmv3::section(context.reader, "runtime.json");

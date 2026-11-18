@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -90,6 +91,17 @@ def _required_path(value: str | None, label: str) -> Path:
     path = Path(value)
     assert path.exists(), f"selected {FAMILY} E2E {label} does not exist: {path}"
     return path
+
+
+@cache
+def _native_test_binary(name: str) -> Path:
+    build_dir = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    subprocess.run(
+        ["cmake", "--build", str(build_dir), "--parallel", "2", "--target", name],
+        check=True,
+        timeout=600,
+    )
+    return _required_path(str(build_dir / name), name)
 
 
 def _model_dir(manifest: dict) -> Path:
@@ -270,7 +282,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         rx = tmp_path / f"rx-{index}.i32"
         ry = tmp_path / f"ry-{index}.i32"
         completed = subprocess.run(
-            [str(runtime_root / "test_layoutlmv3_tokenizer")],
+            [str(_native_test_binary("test_layoutlmv3_tokenizer"))],
             input=json.dumps(
                 dict(
                     **request,
@@ -321,7 +333,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             )
         target = tmp_path / f"features-{index}.f32"
         completed = subprocess.run(
-            [str(runtime_root / "test_layoutlmv3_runtime"), str(bundle), str(runtime_root)],
+            [str(_native_test_binary("test_layoutlmv3_runtime")), str(bundle), str(runtime_root)],
             input=json.dumps(dict(**request, output_path=str(target)), ensure_ascii=False),
             capture_output=True,
             text=True,

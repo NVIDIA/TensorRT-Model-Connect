@@ -12,6 +12,8 @@ from . import graph as g
 
 
 def build(request, writer):
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("layoutlmv3 does not support dynamic_kv_cache")
     if request.task != "document_words_to_token_features" or request.backend != "trt":
         raise ValueError("LayoutLMv3 requires document_words_to_token_features with backend=trt")
     if (
@@ -21,7 +23,6 @@ def build(request, writer):
         or request.max_batch_size != 1
         or request.quantization not in (None, "none")
         or request.fp32_layers
-        or request.dynamic_kv_cache
         or request.image_height not in (None, 224)
         or request.image_width not in (None, 224)
         or request.video_num_frames is not None

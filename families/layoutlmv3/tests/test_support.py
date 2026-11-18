@@ -7,3 +7,4 @@ def test_layoutlmv3_checkpoint_has_one_owner():
     family, support = resolve_family(ModelMetadata({"model_type": "layoutlmv3"}, {}))
     assert family == "layoutlmv3"
     assert support.tasks == ("document_words_to_token_features",)
+    assert support.default_task == "document_words_to_token_features"
