@@ -289,7 +289,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         source = tmp_path / f"source-{index}.f32"
         source.write_bytes((np.asarray(page, dtype=np.float32) / 255).astype("<f4").tobytes())
         pixels = tmp_path / f"pixels-{index}.f32"
-        request = dict(
+        preprocess_request = dict(
             source=str(source),
             output=str(pixels),
             height=page.height,
@@ -309,7 +309,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         )
         completed = subprocess.run(
             [str(_native_test_binary("test_paddleocr_vl_preprocess"))],
-            input=json.dumps(request),
+            input=json.dumps(preprocess_request),
             capture_output=True,
             text=True,
             check=False,
