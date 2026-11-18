@@ -225,6 +225,11 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     import torch
     from tokenizers import Tokenizer
     from transformers import LongformerModel
+    from packaging.version import Version
+
+    assert Version(torch.__version__.split("+")[0]) >= Version("2.10.0"), (
+        "Longformer checkpoint parity requires patched torch>=2.10.0"
+    )
 
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
@@ -234,7 +239,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         {
             "model_dir": str(directory),
             "hf_revision": checkpoint_revision,
-            "revision_status": "unverified" if checkpoint_revision is None else "pinned_cache_lookup",
+            "revision_status": "unverified"
+            if checkpoint_revision is None
+            else "pinned_cache_lookup",
         },
     )
     binary, runtime_root = _runtime()
@@ -259,18 +266,19 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                 .cpu()
                 .numpy()
             )
-        payload = _run_json(
-            binary,
-            runtime_root,
-            bundle,
-            case,
-            "encode",
-            "--task",
-            manifest["task"],
-            "--text",
-            prompt,
-        )
         record_evidence("inputs", {"prompt": prompt})
+        with evidence_stage("native"):
+            payload = _run_json(
+                binary,
+                runtime_root,
+                bundle,
+                case,
+                "encode",
+                "--task",
+                manifest["task"],
+                "--text",
+                prompt,
+            )
         record_evidence(
             "native",
             {
@@ -324,3 +332,40 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                 },
             )
         print(f"Longformer rows={len(encoded.ids)}, maxabs={np.max(np.abs(actual - expected)):.6g}")
+
+    length = manifest["max_sequence_length"]
+    token = tokenizer.encode("x", add_special_tokens=False).ids[0]
+    record_evidence("inputs", {"boundary_token_id": token, "boundary_length": length})
+    with evidence_stage("native_boundary"):
+        full = _run_json(
+            binary,
+            runtime_root,
+            bundle,
+            case,
+            "encode",
+            "--task",
+            manifest["task"],
+            "--token-ids",
+            json.dumps([token] * length),
+        )
+        assert full["shape"] == [length, reference.config.hidden_size]
+        oversized = subprocess.run(
+            [
+                str(binary),
+                "encode",
+                str(bundle),
+                "--runtime-root",
+                str(runtime_root),
+                "--task",
+                manifest["task"],
+                "--token-ids",
+                json.dumps([token] * (length + 1)),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=int(case.get("runtime_timeout_s", 3600)),
+        )
+        record_evidence(
+            "oversized_request", {"returncode": oversized.returncode, "stderr": oversized.stderr}
+        )
+        assert oversized.returncode != 0 and "built sequence profile" in oversized.stderr

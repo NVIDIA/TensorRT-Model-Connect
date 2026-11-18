@@ -41,6 +41,8 @@ class Pipeline final : public internal::IModel, public internal::ITextToTokenFea
             ids = tokenizer_->encode(std::string(std::get<std::string_view>(request.text)));
         } else {
             const auto source = std::get<Span<const int32_t>>(request.text);
+            if (source.empty() || source.size() > static_cast<std::size_t>(length_))
+                throw std::invalid_argument("Longformer input exceeds the built sequence profile");
             ids.assign(source.begin(), source.end());
         }
         if (ids.empty() || ids.size() > static_cast<std::size_t>(length_))
@@ -98,16 +100,23 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
             "Longformer requires the token-feature task without a KV cache");
     const auto data = longformer::section(context.reader, "runtime.json");
     const auto cfg = nlohmann::json::parse(data.begin(), data.end());
-    const int32_t length = cfg.at("sequence_length"), width = cfg.at("hidden_size");
-    const int32_t vocab = cfg.at("vocab_size"), pad = cfg.at("pad_token_id");
-    if (length <= 0 || length > 4096 || width <= 0 || vocab <= 0 || pad < 0 || pad >= vocab)
-        throw std::runtime_error("Invalid Longformer runtime dimensions");
+    auto integer = [&](const char* name, int64_t minimum, int64_t maximum) {
+        const auto& value = cfg.at(name);
+        if (!value.is_number_integer() || value < minimum || value > maximum)
+            throw std::runtime_error(std::string("Invalid Longformer integer profile field: ") +
+                                     name);
+        return value.get<int32_t>();
+    };
+    const auto length = integer("sequence_length", 1, 4096);
+    const auto width = integer("hidden_size", 1, INT32_MAX);
+    const auto vocab = integer("vocab_size", 1, INT32_MAX);
+    const auto pad = integer("pad_token_id", 0, vocab - 1);
     const auto plan = longformer::section(context.reader, "model.plan");
     auto engine = context.backend.create_module(plan.data(), plan.size(), {});
     if (!engine || !engine->ok())
         throw std::runtime_error("Longformer engine failed to load");
     const auto tokenizer_json = longformer::section(context.reader, "tokenizer.json");
-    auto tokenizer = CreateBpeTokenizer(tokenizer_json.data(), tokenizer_json.size(), true);
+    auto tokenizer = CreateBpeTokenizer(tokenizer_json.data(), tokenizer_json.size(), true, vocab);
     return new longformer::Pipeline(std::move(engine), std::move(tokenizer), length, width, vocab,
                                     pad);
 }

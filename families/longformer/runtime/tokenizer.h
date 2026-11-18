@@ -25,7 +25,8 @@ class ITokenizer {
 
 std::unique_ptr<ITokenizer> CreateBpeTokenizer(const char* tokenizer_json_data,
                                                std::size_t tokenizer_json_size,
-                                               bool add_special_tokens = false);
+                                               bool add_special_tokens,
+                                               std::int32_t vocabulary_size);
 std::unique_ptr<ITokenizer> CreateUnigramTokenizer(const char* tokenizer_json_data,
                                                    std::size_t tokenizer_json_size,
                                                    bool add_special_tokens = true);

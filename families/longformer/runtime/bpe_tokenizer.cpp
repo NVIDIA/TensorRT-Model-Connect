@@ -86,20 +86,20 @@ inline char32_t read_utf8(const char*& p, const char* end) {
         ++p;
         return c;
     }
-    if ((c & 0xE0) == 0xC0 && p + 1 < end) {
+    if ((c & 0xE0) == 0xC0 && end - p >= 2) {
         char32_t cp =
             (static_cast<char32_t>(c & 0x1F) << 6) | (static_cast<unsigned char>(p[1]) & 0x3F);
         p += 2;
         return cp;
     }
-    if ((c & 0xF0) == 0xE0 && p + 2 < end) {
+    if ((c & 0xF0) == 0xE0 && end - p >= 3) {
         char32_t cp = (static_cast<char32_t>(c & 0x0F) << 12) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[1]) & 0x3F) << 6) |
                       (static_cast<unsigned char>(p[2]) & 0x3F);
         p += 3;
         return cp;
     }
-    if ((c & 0xF8) == 0xF0 && p + 3 < end) {
+    if ((c & 0xF8) == 0xF0 && end - p >= 4) {
         char32_t cp = (static_cast<char32_t>(c & 0x07) << 18) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[1]) & 0x3F) << 12) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[2]) & 0x3F) << 6) |
@@ -208,10 +208,10 @@ inline bool is_digit(char32_t cp) {
 }
 
 inline bool is_whitespace(char32_t cp) {
-    return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' || cp == 0x0B || cp == 0x0C // VT, FF
-           || cp == 0xA0                   // non-breaking space
-           || cp == 0x2000 || cp == 0x200A // en space through hair space
-           || cp == 0x3000;                // ideographic space
+    // Unicode White_Space, also used by the reference ByteLevel regex.
+    return (cp >= 0x09 && cp <= 0x0d) || cp == 0x20 || cp == 0x85 || cp == 0xa0 || cp == 0x1680 ||
+           (cp >= 0x2000 && cp <= 0x200a) || cp == 0x2028 || cp == 0x2029 || cp == 0x202f ||
+           cp == 0x205f || cp == 0x3000;
 }
 
 // BLOOM punctuation set: .,!?...
@@ -381,7 +381,7 @@ inline int match_contraction_suffix(const char* p, const char* end) {
     char c = *p;
     if (c == 's' || c == 't' || c == 'm' || c == 'd')
         return 1;
-    if (p + 1 < end && is_two_char_contraction(c, p[1]))
+    if (end - p >= 2 && is_two_char_contraction(c, p[1]))
         return 2;
     return 0;
 }
@@ -599,8 +599,11 @@ class BpeTokenizer final : public ITokenizer {
   public:
     static std::unique_ptr<BpeTokenizer> Create(const char* tokenizer_json_data,
                                                 std::size_t tokenizer_json_size,
-                                                bool add_special_tokens = false) {
+                                                bool add_special_tokens, int32_t vocabulary_size) {
         auto tokenizer = std::unique_ptr<BpeTokenizer>(new BpeTokenizer());
+        if (vocabulary_size <= 0)
+            throw std::runtime_error("Longformer tokenizer requires a positive vocabulary limit");
+        tokenizer->mVocabularySize = vocabulary_size;
         tokenizer->mAddSpecialTokens = add_special_tokens;
         tokenizer->parse_tokenizer_json(tokenizer_json_data, tokenizer_json_size);
         return tokenizer;
@@ -1107,6 +1110,9 @@ class BpeTokenizer final : public ITokenizer {
     void parse_vocab(const nlohmann::json& j) {
         auto& vocab_obj = j["model"]["vocab"];
         size_t vocab_size = vocab_obj.size();
+        if (vocab_size > static_cast<size_t>(mVocabularySize))
+            throw std::runtime_error(
+                "Longformer tokenizer base vocabulary exceeds engine vocabulary");
         mVocab.resize(vocab_size);
 
         for (auto& [token, id] : vocab_obj.items()) {
@@ -1154,8 +1160,11 @@ class BpeTokenizer final : public ITokenizer {
         if (!j.contains("added_tokens"))
             return;
         for (auto& tok : j["added_tokens"]) {
-            std::string content = tok["content"].get<std::string>();
-            int32_t id = tok["id"].get<int32_t>();
+            std::string content = tok.at("content").get<std::string>();
+            const auto& raw_id = tok.at("id");
+            if (!raw_id.is_number_integer() || raw_id < 0 || raw_id >= mVocabularySize)
+                throw std::runtime_error("Longformer added-token ID exceeds engine vocabulary");
+            int32_t id = raw_id.get<int32_t>();
 
             if (id >= 0 && static_cast<size_t>(id) >= mVocab.size()) {
                 mVocab.resize(static_cast<size_t>(id) + 1);
@@ -1476,6 +1485,10 @@ class BpeTokenizer final : public ITokenizer {
         if (!pp.contains("processors"))
             return;
         for (auto& sub : pp["processors"]) {
+            if (sub.value("type", "") == "RobertaProcessing") {
+                parse_longformer_post_processor(sub);
+                return;
+            }
             if (sub.value("type", "") == "TemplateProcessing") {
                 parse_template_post_processor(sub);
                 return; // first TemplateProcessing wins
@@ -1548,6 +1561,7 @@ class BpeTokenizer final : public ITokenizer {
     std::vector<std::pair<std::string, int32_t>> mAddedTokenPatterns;
     std::unordered_set<int32_t> mLstripAddedTokenIds;
 
+    int32_t mVocabularySize = 0;
     bool mAddSpecialTokens = false;
     bool mUsePreTokenizer = true;
     bool mIsMetaspace = false; // Set by detect_pre_tokenizer.
@@ -1583,8 +1597,9 @@ class BpeTokenizer final : public ITokenizer {
 
 std::unique_ptr<ITokenizer> CreateBpeTokenizer(const char* tokenizer_json_data,
                                                std::size_t tokenizer_json_size,
-                                               bool add_special_tokens) {
-    return BpeTokenizer::Create(tokenizer_json_data, tokenizer_json_size, add_special_tokens);
+                                               bool add_special_tokens, int32_t vocabulary_size) {
+    return BpeTokenizer::Create(tokenizer_json_data, tokenizer_json_size, add_special_tokens,
+                                vocabulary_size);
 }
 
 } // namespace trtmc

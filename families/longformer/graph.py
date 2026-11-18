@@ -3,10 +3,10 @@
 
 """TensorRT graph helpers for Longformer.
 
-A plain pre-norm ViT over a row tensor ``[seq, width]``, so every helper
-takes and returns that layout. The activation is the **exact** error-function
-GELU, which is what ``hidden_act: gelu`` means here and is a different
-function from the tanh approximation other vision towers use.
+The encoder normalizes after attention and feed-forward residual additions.
+Its public rows use ``[seq, width]``; attention reshapes them into rank-four
+head tensors internally. The activation is the exact error-function GELU
+selected by ``hidden_act: gelu``, rather than the tanh approximation.
 """
 
 from __future__ import annotations

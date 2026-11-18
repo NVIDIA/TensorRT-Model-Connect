@@ -49,7 +49,10 @@ def build_engine(weights, cfg, length, verbose=False):
     ).get_output(0)
     # Requests contain unpadded token sequences. Only trailing engine-profile
     # padding is inserted by the runtime, so valid positions are contiguous.
-    positions = weights["longformer.embeddings.position_embeddings.weight"][2 : length + 2]
+    offset = cfg["pad_token_id"] + 1
+    positions = weights["longformer.embeddings.position_embeddings.weight"][
+        offset : length + offset
+    ]
     hidden = g.add_sum(network, word, g.add_constant(network, positions.shape, positions))
     types = weights["longformer.embeddings.token_type_embeddings.weight"][:1]
     hidden = g.add_sum(network, hidden, g.add_constant(network, types.shape, types))
@@ -120,13 +123,27 @@ def build(request, writer):
     if cfg.get("model_type") != "longformer" or cfg.get("hidden_act") != "gelu":
         raise ValueError("Expected the GELU Longformer backbone")
     length = request.max_sequence_length or 512
-    if length < 1 or length > cfg["max_position_embeddings"] - 2:
+    offset = cfg["pad_token_id"] + 1
+    if offset < 1 or not 1 <= length <= min(4096, cfg["max_position_embeddings"] - offset):
         raise ValueError("Longformer sequence length exceeds its position table")
     windows = cfg["attention_window"]
-    if len(windows) != cfg["num_hidden_layers"]:
+    if type(windows) is int:
+        windows = [windows] * cfg["num_hidden_layers"]
+    if (
+        not isinstance(windows, list)
+        or len(windows) != cfg["num_hidden_layers"]
+        or any(type(window) is not int or window <= 0 or window % 2 for window in windows)
+    ):
         raise ValueError("Longformer requires one attention window per layer")
+    cfg["attention_window"] = windows
     import torch
 
+    from packaging.version import Version
+
+    if Version(torch.__version__.split("+")[0]) < Version("2.10.0"):
+        raise RuntimeError(
+            "Longformer checkpoint loading requires torch>=2.10.0 (GHSA-63cw-57p8-fm3p)"
+        )
     weights = {
         name: value.float().numpy()
         for name, value in torch.load(
