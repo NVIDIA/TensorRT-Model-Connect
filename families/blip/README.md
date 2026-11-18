@@ -71,6 +71,7 @@ ctest --test-dir build -R '^test_blip_tokenizer$' --output-on-failure
 curl --fail --location --output /tmp/blip-reference-demo.jpg \
   'https://storage.googleapis.com/sfr-vision-language-research/BLIP/demo.jpg?generation=1642901856234049'
 TRTMC_BLIP_REFERENCE_IMAGE=/tmp/blip-reference-demo.jpg \
+TRTMC_NATIVE_BUILD_DIR="$PWD/build" \
 TRTMC_BINARY="$PWD/build/trtmc" TRTMC_RUNTIME_ROOT="$PWD/build" \
   PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \
   families/blip/tests --e2e-model blip -q -s
