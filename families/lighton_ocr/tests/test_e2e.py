@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import struct
 import subprocess
+import sys
 
 import pytest
 
@@ -121,7 +122,11 @@ def test_lighton_ocr_native_e2e(case_name, tmp_path, request):
     binary = _path("TRTMC_BINARY")
     runtime_root = _path("TRTMC_RUNTIME_ROOT", directory=True)
     native_build = _path("TRTMC_NATIVE_BUILD_DIR", directory=True)
-    reference_python = _path("TRTMC_LIGHTON_OCR_REFERENCE_PYTHON")
+    reference_python = (
+        _path("TRTMC_LIGHTON_OCR_REFERENCE_PYTHON")
+        if os.environ.get("TRTMC_LIGHTON_OCR_REFERENCE_PYTHON")
+        else Path(sys.executable)
+    )
     image = ROOT / case["test_image"]
     assert image.is_file()
     for library in ("libtrtmc_backend_trt.so", "libtrtmc_model_lighton_ocr.so"):

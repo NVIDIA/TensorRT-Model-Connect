@@ -80,15 +80,17 @@ teacher-forced vocabulary-logit comparisons, and exact nonempty generated
 text/token IDs ending in EOS. The independent reference imports no family
 graph implementation.
 
-Use separate reference and build interpreters when their dependencies differ.
-The reference needs Transformers 5.2.0 and compatible PyTorch/torchvision,
-which the documented development environment provides. Run the declared
-checkpoint E2E with the matching native targets and a fresh artifact directory:
+The reference uses the active test interpreter by default, matching CI's pinned
+Transformers 5.2.0 and compatible PyTorch/torchvision environment. When build
+and reference dependencies differ, set the optional
+`TRTMC_LIGHTON_OCR_REFERENCE_PYTHON` to the separate reference interpreter.
+The reference still verifies its exact Transformers version and FP32 settings.
+Run the declared checkpoint E2E with the matching native targets and a fresh
+artifact directory:
 
 ```bash
 PYTHONPATH=core/builder:apps/benchmark:. \
 TRTMC_LIGHTON_OCR_MODEL_DIR=/absolute/pinned-checkpoint \
-TRTMC_LIGHTON_OCR_REFERENCE_PYTHON=/absolute/reference-environment/bin/python \
 TRTMC_BINARY="$BUILD/trtmc" \
 TRTMC_RUNTIME_ROOT="$BUILD" \
 TRTMC_NATIVE_BUILD_DIR="$BUILD" \
