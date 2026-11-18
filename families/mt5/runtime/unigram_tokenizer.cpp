@@ -200,6 +200,7 @@ struct ViterbiNode {
     float score;
     int token_id;
     size_t prev_pos; // byte position of previous node
+    bool unknown_fallback = false;
 };
 
 std::vector<int32_t> viterbi_encode(const std::string& text, const Trie& trie, int32_t unk_id,
@@ -226,6 +227,7 @@ std::vector<int32_t> viterbi_encode(const std::string& text, const Trie& trie, i
             if (new_score > best[end].score) {
                 best[end].score = new_score;
                 best[end].token_id = m.token_id;
+                best[end].unknown_fallback = false;
                 best[end].prev_pos = i;
             }
         }
@@ -238,6 +240,7 @@ std::vector<int32_t> viterbi_encode(const std::string& text, const Trie& trie, i
             if (new_score > best[end].score) {
                 best[end].score = new_score;
                 best[end].token_id = unk_id;
+                best[end].unknown_fallback = true;
                 best[end].prev_pos = i;
             }
         }
@@ -246,13 +249,18 @@ std::vector<int32_t> viterbi_encode(const std::string& text, const Trie& trie, i
     // Backtrack to find the best path
     std::vector<int32_t> ids;
     size_t pos = n;
+    bool previous_unknown = false;
     while (pos > 0) {
         if (best[pos].token_id < 0) {
             // Unreachable after emitting UNK.
             ids.push_back(unk_id);
             break;
         }
-        ids.push_back(best[pos].token_id);
+        // Unigram represents consecutive out-of-vocabulary characters as one
+        // unknown span. A literal vocabulary token with unk_id stays distinct.
+        if (!best[pos].unknown_fallback || !previous_unknown)
+            ids.push_back(best[pos].token_id);
+        previous_unknown = best[pos].unknown_fallback;
         pos = best[pos].prev_pos;
     }
 
@@ -476,6 +484,8 @@ class UnigramTokenizer final : public ITokenizer {
                 }
                 mIdToToken[tok_id] = content;
                 mTokenToId[content] = tok_id;
+                if (tok.value("special", false))
+                    mDecodeSkipIds.insert(tok_id);
             }
         }
     }
