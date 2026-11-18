@@ -62,6 +62,8 @@ distributed under the Apache License 2.0 with the rest of the project:
 
 - `families/deepseek_ocr/tests/data/orc_test_img.jpeg` — screenshot of
   project source text created for OCR regression testing
+- `families/lighton_ocr/tests/data/invoice.png` — synthetic invoice with
+  invented data rendered by the family-owned `generate_fixture.py`
 - `families/phi4_multimodal/tests/data/dynamic-hd/synthetic-*.png` (7 images) —
   synthetic test patterns written by the checked-in
   `families/phi4_multimodal/tests/data/dynamic-hd/generate.py` for Dynamic-HD
@@ -131,6 +133,10 @@ content in all three model families:
 - `probe_06_leading_trailing_silence_48k_stereo.wav`
 - `probe_08_noisy_48k_stereo_snr20.wav`
 
+`families/hubert/tests/data/speech_16k_mono.wav` is a byte-identical copy of
+`probe_02_clean_16k_mono_no_resample.wav` and is distributed under the same
+terms.
+
 The PersonaPlex fixture contains the same maintainer-owned spoken recording,
 converted to mono 24 kHz float32 for official-reference regression tests:
 
@@ -162,7 +168,9 @@ golden data.
 ## LibriSpeech accuracy fixture
 
 `families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav`
-is utterance `6930-75918-0003` from the LibriSpeech `test-clean` split,
+and its byte-identical copy
+`families/hubert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+are utterance `6930-75918-0003` from the LibriSpeech `test-clean` split,
 distributed by OpenSLR as SLR12 under the Creative Commons Attribution 4.0
 International license. LibriSpeech was prepared by Vassil Panayotov with the
 assistance of Daniel Povey and is derived from LibriVox public-domain
@@ -170,6 +178,9 @@ audiobooks.
 
 - Source and attribution: https://www.openslr.org/12/
 - License: https://creativecommons.org/licenses/by/4.0/
+
+A byte-identical copy is stored at
+`families/qwen3_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`.
 
 ## SANA world-model fixtures
 

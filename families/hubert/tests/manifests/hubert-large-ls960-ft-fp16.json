@@ -1,0 +1,17 @@
+{
+  "name": "hubert-large-ls960-ft-fp16",
+  "hf_id": "facebook/hubert-large-ls960-ft",
+  "hf_revision": "ece5fabbf034c1073acae96d5401b25be96709d8",
+  "bundle": "hubert-large-ls960-ft-fp16.bundle",
+  "family": "hubert",
+  "task": "speech_transcription",
+  "precision": "fp16",
+  "testcases": [
+    {
+      "name": "hubert-large-ls960-ft-fp16",
+      "premerge": true,
+      "test_input_audio": "data/librispeech-test-clean-6930-75918-0003.wav"
+    }
+  ],
+  "tensor_parallel_size": 1
+}
