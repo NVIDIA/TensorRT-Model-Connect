@@ -261,32 +261,33 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     _, runtime_root = _runtime()
     input_path = tmp_path / "reference-input.json"
     input_path.write_text(json.dumps([manifest, case]))
-    oracle = subprocess.run(
-        [
-            sys.executable,
-            str(TEST_ROOT / "reference.py"),
-            str(directory),
-            str(input_path),
-            str(tmp_path),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=case["runtime_timeout_s"],
-    )
-    reference_log = tmp_path / "reference-process.log"
-    reference_log.write_text(oracle.stderr)
-    record_evidence(
-        "reference_process",
-        {
-            "argv": oracle.args,
-            "stdout": oracle.stdout,
-            "stderr": reference_log,
-            "returncode": oracle.returncode,
-        },
-    )
-    assert oracle.returncode == 0, oracle.stderr + oracle.stdout
-    print(oracle.stdout, end="", flush=True)
+    with evidence_stage("reference"):
+        oracle = subprocess.run(
+            [
+                sys.executable,
+                str(TEST_ROOT / "reference.py"),
+                str(directory),
+                str(input_path),
+                str(tmp_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=case["runtime_timeout_s"],
+        )
+        reference_log = tmp_path / "reference-process.log"
+        reference_log.write_text(oracle.stderr)
+        record_evidence(
+            "reference_process",
+            {
+                "argv": oracle.args,
+                "stdout": oracle.stdout,
+                "stderr": reference_log,
+                "returncode": oracle.returncode,
+            },
+        )
+        assert oracle.returncode == 0, oracle.stderr + oracle.stdout
+        print(oracle.stdout, end="", flush=True)
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
         _build(directory, bundle, manifest)
@@ -302,172 +303,182 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         )
         for index, prompt in enumerate(case["prompts"])
     ]
-    native = subprocess.run(
-        [str(_native_test_binary("test_pika_h3_flex_runtime")), str(bundle), str(runtime_root)],
-        input=json.dumps(requests),
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=case["runtime_timeout_s"],
-    )
-    native_log = tmp_path / "native-process.log"
-    native_log.write_text(native.stderr)
-    record_evidence(
-        "native_process",
-        {
-            "argv": native.args,
-            "stdout": native.stdout,
-            "stderr": native_log,
-            "requests": requests,
-            "returncode": native.returncode,
-        },
-    )
-    assert native.returncode == 0, native.stderr + native.stdout
-    results = json.loads(native.stdout.splitlines()[-1])
-    assert len(results) == len(requests)
-    for index, result in enumerate(results):
-        record_evidence("inputs", {"prompt": case["prompts"][index], "seed": case["seed"] + index})
-        assert result["frames"] == 124 and result["height"] == 480 and result["width"] == 832
-        assert (
-            result["sample_rate"] == 32000
-            and result["channels"] == 2
-            and result["audio_count"] == 165333 * 2
+    with evidence_stage("runtime"):
+        native = subprocess.run(
+            [str(_native_test_binary("test_pika_h3_flex_runtime")), str(bundle), str(runtime_root)],
+            input=json.dumps(requests),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=case["runtime_timeout_s"],
         )
-        assert result["audio_start_seconds"] == 0 and result["conditioned_prefix_frames"] == 0
-        np.testing.assert_allclose(
-            result["timestamps"], np.arange(124, dtype=np.float64) / 24, atol=1e-12, rtol=0
-        )
-        expected_video = np.memmap(
-            tmp_path / f"reference-video-{index}.f32",
-            dtype="<f4",
-            mode="r",
-            shape=(124, 480, 832, 3),
-        )
-        actual_video = np.memmap(
-            requests[index]["video"], dtype="<f4", mode="r", shape=expected_video.shape
-        )
-        rmse, maximum, cosine = _video_metrics(actual_video, expected_video)
-        print(f"Pika video {index}: RMSE={rmse}, max_abs={maximum}, cosine={cosine}", flush=True)
-        assert (
-            rmse <= case["video_rmse_max"]
-            and maximum <= case["video_max_abs"]
-            and cosine >= case["video_cosine_min"]
-        )
-        video_metrics = {"rmse": rmse, "max_abs_error": maximum, "cosine": cosine}
-        expected_audio = np.fromfile(tmp_path / f"reference-audio-{index}.f32", dtype="<f4").astype(
-            np.float64
-        )
-        actual_audio = np.fromfile(requests[index]["audio"], dtype="<f4").astype(np.float64)
-        assert actual_audio.shape == expected_audio.shape and np.isfinite(actual_audio).all()
-        assert actual_audio.min() >= -1 and actual_audio.max() <= 1
-        difference = actual_audio - expected_audio
-        energy, error = float(expected_audio @ expected_audio), float(difference @ difference)
-        snr = float(10 * np.log10(energy / error)) if error else float("inf")
-        cosine = float(
-            actual_audio
-            @ expected_audio
-            / (np.linalg.norm(actual_audio) * np.linalg.norm(expected_audio))
-        )
-        maximum = float(np.abs(difference).max())
-        print(f"Pika audio {index}: SNR={snr} dB, max_abs={maximum}, cosine={cosine}", flush=True)
-        assert (
-            snr >= case["audio_snr_min_db"]
-            and cosine >= case["audio_cosine_min"]
-            and maximum <= case["audio_max_abs"]
-        )
+        native_log = tmp_path / "native-process.log"
+        native_log.write_text(native.stderr)
         record_evidence(
-            "metrics",
+            "native_process",
             {
-                "sample": index,
-                "video": video_metrics,
-                "audio": {"snr_db": snr, "cosine": cosine, "max_abs_error": maximum},
+                "argv": native.args,
+                "stdout": native.stdout,
+                "stderr": native_log,
+                "stdin": json.dumps(requests),
+                "returncode": native.returncode,
             },
         )
-        if evidence_enabled():
-            import struct
-            from PIL import Image
+        assert native.returncode == 0, native.stderr + native.stdout
+        results = json.loads(native.stdout.splitlines()[-1])
+        assert len(results) == len(requests)
+    with evidence_stage("comparison"):
+        for index, result in enumerate(results):
+            record_evidence(
+                "inputs", {"prompt": case["prompts"][index], "seed": case["seed"] + index}
+            )
+            assert result["frames"] == 124 and result["height"] == 480 and result["width"] == 832
+            assert (
+                result["sample_rate"] == 32000
+                and result["channels"] == 2
+                and result["audio_count"] == 165333 * 2
+            )
+            assert result["audio_start_seconds"] == 0 and result["conditioned_prefix_frames"] == 0
+            np.testing.assert_allclose(
+                result["timestamps"], np.arange(124, dtype=np.float64) / 24, atol=1e-12, rtol=0
+            )
+            expected_video = np.memmap(
+                tmp_path / f"reference-video-{index}.f32",
+                dtype="<f4",
+                mode="r",
+                shape=(124, 480, 832, 3),
+            )
+            actual_video = np.memmap(
+                requests[index]["video"], dtype="<f4", mode="r", shape=expected_video.shape
+            )
+            expected_audio = np.fromfile(
+                tmp_path / f"reference-audio-{index}.f32", dtype="<f4"
+            ).astype(np.float64)
+            actual_audio = np.fromfile(requests[index]["audio"], dtype="<f4").astype(np.float64)
+            if evidence_enabled():
+                import struct
+                from PIL import Image
 
-            views = []
-            selected = [0, 62, 123]
-            preview_indices = [0, 31, 62, 93, 123]
-            for role, video, audio in (
-                ("native", actual_video, actual_audio),
-                ("reference", expected_video, expected_audio),
-            ):
-                # The full-resolution oracle above still compares all 124 frames.
-                # Retain lossless representative tensors and label the GIF as a preview.
-                frames_path = tmp_path / f"{role}-{index}-selected-frames.npz"
-                np.savez_compressed(frames_path, frames=np.stack([video[i] for i in selected]))
-                frames = [
-                    Image.fromarray(np.rint(np.clip(video[i], 0, 1) * 255).astype(np.uint8)).resize(
-                        (416, 240)
-                    )
-                    for i in preview_indices
-                ]
-                preview = tmp_path / f"{role}-{index}-video-preview.gif"
-                frames[0].save(
-                    preview, save_all=True, append_images=frames[1:], duration=500, loop=0
-                )
-                audio_path = tmp_path / f"{role}-{index}-stereo.wav"
-                pcm = audio.astype("<f4").tobytes()
-                audio_path.write_bytes(
-                    struct.pack(
-                        "<4sI4s4sIHHIIHH4sI",
-                        b"RIFF",
-                        36 + len(pcm),
-                        b"WAVE",
-                        b"fmt ",
-                        16,
-                        3,
-                        2,
-                        32000,
-                        256000,
-                        8,
-                        32,
-                        b"data",
-                        len(pcm),
-                    )
-                    + pcm
-                )
-                record_evidence(
-                    role,
-                    {
-                        "sample": index,
-                        "prompt": case["prompts"][index],
-                        **({"mode": "official_diffusers"} if role == "reference" else {}),
-                        "metadata": result
-                        if role == "native"
-                        else {
-                            "video_shape": list(video.shape),
-                            "sample_rate": 32000,
-                            "channels": 2,
-                        },
-                        "selected_frames": frames_path,
-                        "retained_frame_indices": selected,
-                        "full_video_shape": list(video.shape),
-                        "waveform": audio.astype(np.float32),
-                        "video_preview_scope": {
-                            "frame_indices": preview_indices,
-                            "width": 416,
-                            "height": 240,
-                        },
-                    },
-                )
-                views.extend(
-                    [
-                        {
-                            "title": f"Sample {index} / {role}",
-                            "image": preview,
-                            "caption": "Half-resolution preview of frames 0,31,62,93,123; metrics cover all 124 frames.",
-                        },
-                        {
-                            "title": f"Sample {index} / {role}",
-                            "audio": audio_path,
-                            "caption": "Complete 32 kHz stereo waveform.",
-                        },
+                views = []
+                selected = [0, 62, 123]
+                preview_indices = [0, 31, 62, 93, 123]
+                for role, video, audio in (
+                    ("native", actual_video, actual_audio),
+                    ("reference", expected_video, expected_audio),
+                ):
+                    # The full-resolution oracle above still compares all 124 frames.
+                    # Retain lossless representative tensors and label the GIF as a preview.
+                    frames_path = tmp_path / f"{role}-{index}-selected-frames.npz"
+                    np.savez_compressed(frames_path, frames=np.stack([video[i] for i in selected]))
+                    frames = [
+                        Image.fromarray(
+                            np.rint(np.clip(video[i], 0, 1) * 255).astype(np.uint8)
+                        ).resize((416, 240))
+                        for i in preview_indices
                     ]
-                )
-            record_evidence("views", views)
+                    preview = tmp_path / f"{role}-{index}-video-preview.gif"
+                    frames[0].save(
+                        preview, save_all=True, append_images=frames[1:], duration=500, loop=0
+                    )
+                    audio_path = tmp_path / f"{role}-{index}-stereo.wav"
+                    pcm = audio.astype("<f4").tobytes()
+                    audio_path.write_bytes(
+                        struct.pack(
+                            "<4sI4s4sIHHIIHH4sI",
+                            b"RIFF",
+                            36 + len(pcm),
+                            b"WAVE",
+                            b"fmt ",
+                            16,
+                            3,
+                            2,
+                            32000,
+                            256000,
+                            8,
+                            32,
+                            b"data",
+                            len(pcm),
+                        )
+                        + pcm
+                    )
+                    record_evidence(
+                        role,
+                        {
+                            "sample": index,
+                            "prompt": case["prompts"][index],
+                            **({"mode": "official_diffusers"} if role == "reference" else {}),
+                            "metadata": result
+                            if role == "native"
+                            else {
+                                "video_shape": list(video.shape),
+                                "sample_rate": 32000,
+                                "channels": 2,
+                            },
+                            "selected_frames": frames_path,
+                            "retained_frame_indices": selected,
+                            "full_video_shape": list(video.shape),
+                            "waveform": audio.astype(np.float32),
+                            "video_preview_scope": {
+                                "frame_indices": preview_indices,
+                                "width": 416,
+                                "height": 240,
+                            },
+                        },
+                    )
+                    views.extend(
+                        [
+                            {
+                                "title": f"Sample {index} / {role}",
+                                "image": preview,
+                                "caption": "Half-resolution preview of frames 0,31,62,93,123; metrics cover all 124 frames.",
+                            },
+                            {
+                                "title": f"Sample {index} / {role}",
+                                "audio": audio_path,
+                                "caption": "Complete 32 kHz stereo waveform.",
+                            },
+                        ]
+                    )
+                record_evidence("views", views)
+
+            rmse, maximum, cosine = _video_metrics(actual_video, expected_video)
+            print(
+                f"Pika video {index}: RMSE={rmse}, max_abs={maximum}, cosine={cosine}", flush=True
+            )
+            video_metrics = {"rmse": rmse, "max_abs_error": maximum, "cosine": cosine}
+            record_evidence("metrics", {"sample": index, "video": video_metrics})
+            assert (
+                rmse <= case["video_rmse_max"]
+                and maximum <= case["video_max_abs"]
+                and cosine >= case["video_cosine_min"]
+            )
+            assert actual_audio.shape == expected_audio.shape and np.isfinite(actual_audio).all()
+            assert actual_audio.min() >= -1 and actual_audio.max() <= 1
+            difference = actual_audio - expected_audio
+            energy, error = float(expected_audio @ expected_audio), float(difference @ difference)
+            snr = float(10 * np.log10(energy / error)) if error else float("inf")
+            cosine = float(
+                actual_audio
+                @ expected_audio
+                / (np.linalg.norm(actual_audio) * np.linalg.norm(expected_audio))
+            )
+            maximum = float(np.abs(difference).max())
+            print(
+                f"Pika audio {index}: SNR={snr} dB, max_abs={maximum}, cosine={cosine}", flush=True
+            )
+            record_evidence(
+                "metrics",
+                {
+                    "sample": index,
+                    "video": video_metrics,
+                    "audio": {"snr_db": snr, "cosine": cosine, "max_abs_error": maximum},
+                },
+            )
+            assert (
+                snr >= case["audio_snr_min_db"]
+                and cosine >= case["audio_cosine_min"]
+                and maximum <= case["audio_max_abs"]
+            )
 
 
 @pytest.mark.parametrize("rotary_dim", [96, 128])
