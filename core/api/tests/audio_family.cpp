@@ -170,6 +170,9 @@ class AudioFixture final : public IModel,
                 throw std::invalid_argument("fixture codec token out of range");
         AudioResult result;
         result.samples.assign(input.codes.tokens.begin(), input.codes.tokens.end());
+        // Expose both dimensions separately so the codec fixture detects a transpose.
+        result.setup_ms = static_cast<double>(input.codes.codebooks);
+        result.inference_ms = static_cast<double>(input.codes.frames);
         result.sample_rate = 24000;
         result.channels = 1;
         return result;

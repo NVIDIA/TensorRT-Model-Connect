@@ -122,8 +122,7 @@ def _model_dir(manifest: dict) -> tuple[Path, str | None]:
     return Path(snapshot), manifest["hf_revision"]
 
 
-def _runtime() -> tuple[Path, Path]:
-    binary = _required_path(os.environ.get("TRTMC_BINARY"), "TRTMC_BINARY")
+def _runtime() -> Path:
     runtime_root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
     assert (runtime_root / "libtrtmc_backend_trt.so").is_file()
     assert (runtime_root / f"libtrtmc_model_{FAMILY}.so").is_file()
@@ -131,7 +130,7 @@ def _runtime() -> tuple[Path, Path]:
 
     assert torch.cuda.is_available(), f"selected {FAMILY} E2E requires CUDA"
     assert torch.cuda.device_count() >= 1, f"selected {FAMILY} E2E requires one GPU"
-    return (binary, runtime_root)
+    return runtime_root
 
 
 def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
@@ -238,10 +237,12 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         {
             "model_dir": str(directory),
             "hf_revision": checkpoint_revision,
-            "revision_status": "unverified" if checkpoint_revision is None else "pinned_cache_lookup",
+            "revision_status": "unverified"
+            if checkpoint_revision is None
+            else "pinned_cache_lookup",
         },
     )
-    _, runtime_root = _runtime()
+    runtime_root = _runtime()
     with wave.open(str(TEST_ROOT / "data" / case["audio"]), "rb") as audio:
         assert (
             audio.getframerate() == 16000
@@ -262,7 +263,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
     torch.set_float32_matmul_precision("highest")
     torch.backends.cudnn.allow_tf32 = False
     reference = (
-        MimiModel.from_pretrained(directory, dtype=torch.float32, attn_implementation="eager")
+        MimiModel.from_pretrained(directory, torch_dtype=torch.float32, attn_implementation="eager")
         .eval()
         .to("cuda")
     )

@@ -34,6 +34,7 @@ def build(request, writer):
     if (
         cfg["model_type"] != "mimi"
         or cfg["architectures"] != ["MimiModel"]
+        or cfg.get("audio_channels", 1) != 1
         or not cfg["use_causal_conv"]
         or cfg["pad_mode"] != "constant"
         or cfg["trim_right_ratio"] != 1
@@ -46,6 +47,9 @@ def build(request, writer):
     frames = request.max_sequence_length or 25
     if not 1 <= frames <= 125:
         raise ValueError("Mimi decode profile must contain 1 to 125 codec frames")
+    books = cfg.get("num_quantizers", 32)
+    if type(books) is not int or not 1 <= books <= 64:
+        raise ValueError("Mimi supports 1 to 64 codebooks")
     from safetensors import safe_open
     import torch
 
@@ -55,7 +59,6 @@ def build(request, writer):
             for name in handle.keys()
             if name.startswith(("quantizer.", "upsample.", "decoder_transformer.", "decoder."))
         }
-    books = cfg.get("num_quantizers", 32)
     semantic = cfg["num_semantic_quantizers"]
     if not 0 < semantic < books:
         raise ValueError("Mimi requires semantic and acoustic codebooks")

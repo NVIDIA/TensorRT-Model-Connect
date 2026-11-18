@@ -117,7 +117,8 @@ void test_codec(const std::filesystem::path& root, const trtmc::LoadOptions& opt
     std::int32_t values[]{11, 12, 21, 22, 31, 32};
     const AudioCodebookTokensToAudioRequest request{{{values, 6}, 3, 2}};
     auto result = task.run(request);
-    check(result.sample_rate() == 24000 && result.channels() == 1 &&
+    check(result.sample_rate() == 24000 && result.channels() == 1 && result.setup_ms() == 3 &&
+              result.inference_ms() == 2 &&
               std::vector<float>(result.samples().begin(), result.samples().end()) ==
                   std::vector<float>{11, 12, 21, 22, 31, 32},
           "codec Task preserves codebook-major order and actual output rate");
@@ -132,7 +133,7 @@ void test_codec(const std::filesystem::path& root, const trtmc::LoadOptions& opt
           "codec shape/count mismatch rejected");
     bad.codes = {{}, 3, 0};
     check(rejects([&] { task.run(bad); }, TRTMC_INVALID_ARGUMENT), "empty codec frames rejected");
-    bad.codes = {{values, 6}, UINT64_MAX, 2};
+    bad.codes = {{values, 6}, UINT64_MAX / 2 + 4, 2};
     check(rejects([&] { task.run(bad); }, TRTMC_INVALID_ARGUMENT), "codec shape overflow rejected");
     values[0] = -1;
     check(rejects([&] { task.run(request); }, TRTMC_INVALID_ARGUMENT),
