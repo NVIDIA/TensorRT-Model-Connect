@@ -20,14 +20,50 @@ std::unique_ptr<trtmc::ITokenizer> tokenizer(bool clean_text, bool add_special_t
         {"model",
          {{"type", "WordPiece"},
           {"unk_token", "<unk>"},
-          {"vocab", {{"<s>", 0},          {"<pad>", 1},      {"</s>", 2},      {"<unk>", 3},
-                     {"ab", 4},           {"a", 5},          {"b", 6},         {u8"a\uE000b", 7},
-                     {u8"a\u00ADb", 8},   {u8"a\u0378b", 9}, {u8"Σ", 10},      {u8"σ", 11},
-                     {u8"АБВ", 12},       {u8"абв", 13},     {"i", 14},        {u8"i\u0307", 15},
-                     {u8"İ", 16},         {u8"ΟΣ", 17},      {u8"οσ", 18},     {"cafe", 19},
-                     {u8"CAFÉ", 20},      {u8"\u060C", 21},  {u8"\u00B7", 22}, {u8"a\u2044b", 23},
-                     {u8"a\u3012b", 24},  {"+", 25},         {",", 26},        {u8"a\u00A9b", 27},
-                     {u8"\U00010100", 28}}}}},
+          {"vocab",
+           {{"<s>", 0},
+            {"<pad>", 1},
+            {"</s>", 2},
+            {"<unk>", 3},
+            {"ab", 4},
+            {"a", 5},
+            {"b", 6},
+            {u8"a\uE000b", 7},
+            {u8"a\u00ADb", 8},
+            {u8"a\u0378b", 9},
+            {u8"Σ", 10},
+            {u8"σ", 11},
+            {u8"АБВ", 12},
+            {u8"абв", 13},
+            {"i", 14},
+            {u8"i\u0307", 15},
+            {u8"İ", 16},
+            {u8"ΟΣ", 17},
+            {u8"οσ", 18},
+            {"cafe", 19},
+            {u8"CAFÉ", 20},
+            {u8"\u060C", 21},
+            {u8"\u00B7", 22},
+            {u8"a\u2044b", 23},
+            {u8"a\u3012b", 24},
+            {"+", 25},
+            {",", 26},
+            {u8"a\u00A9b", 27},
+            {u8"\U00010100", 28},
+            {";", 29},
+            {u8"\u3008", 30},
+            {u8"\u3009", 31},
+            {u8"\u03B1", 32},
+            {"viet", 33},
+            {u8"\u1100\u1161", 34},
+            {u8"\uAC00", 35},
+            {u8"\u1EBF", 36},
+            {"e", 37},
+            {u8"a\u1B44\u302Eb", 38},
+            {u8"a\u302E\u1B44b", 39},
+            {u8"a\u1AFFb", 40},
+            {u8"\u4E3D", 41},
+            {u8"\U0001D157\U0001D165", 42}}}}},
         {"normalizer",
          {{"type", "BertNormalizer"},
           {"clean_text", clean_text},
@@ -121,6 +157,34 @@ void test_punctuation(bool add_special_tokens) {
           "next-line whitespace separates words when cleaning is disabled");
 }
 
+void test_strip_accents(bool add_special_tokens) {
+    const auto strip = tokenizer(true, add_special_tokens, false, true);
+    check(*strip, u8"\u037E", {29}, add_special_tokens, "Greek question mark decomposes");
+    check(*strip, u8"\u0387", {22}, add_special_tokens, "Greek ano teleia decomposes");
+    check(*strip, u8"\u2329\u232A", {30, 31}, add_special_tokens,
+          "canonical angle brackets decompose before punctuation splitting");
+    check(*strip, u8"\u1F00", {32}, add_special_tokens, "Greek accent is removed");
+    check(*strip, u8"vi\u1EC7t", {33}, add_special_tokens, "Vietnamese accents are removed");
+    check(*strip, u8"\u1EBF", {37}, add_special_tokens, "recursive decomposition removes accents");
+    check(*strip, u8"\uAC00", {34}, add_special_tokens, "Hangul decomposes to Jamo");
+    check(*strip, u8"\U0002F800", {41}, add_special_tokens,
+          "supplementary compatibility ideograph decomposes");
+    check(*strip, u8"\U0001D15E", {42}, add_special_tokens,
+          "spacing marks survive musical symbol decomposition");
+    check(*strip, u8"a\u302Ab", {4}, add_special_tokens,
+          "nonspacing mark outside the original blocks is removed");
+    check(*strip, u8"a\u1AFFb", {40}, add_special_tokens, "unassigned character is retained");
+    check(*strip, u8"a\u302E\u1B44b", {38}, add_special_tokens,
+          "retained marks are canonically ordered");
+    check(*strip, u8"a\u302E\u034F\u1B44b", {39}, add_special_tokens,
+          "removed starter prevents reordering across its boundary");
+    check(*strip, u8"a\u302E\uFE0F\u1B44b", {39}, add_special_tokens,
+          "removed variation selector preserves its ordering boundary");
+    const auto unchanged = tokenizer(true, add_special_tokens, false, false);
+    check(*unchanged, u8"\uAC00", {35}, add_special_tokens, "disabled stripping keeps Hangul");
+    check(*unchanged, u8"\u1EBF", {36}, add_special_tokens, "disabled stripping keeps accents");
+}
+
 } // namespace
 
 int main() {
@@ -129,6 +193,7 @@ int main() {
         test_clean_text_disabled(add_special_tokens);
         test_lowercase(add_special_tokens);
         test_punctuation(add_special_tokens);
+        test_strip_accents(add_special_tokens);
     }
     if (failures != 0) {
         std::cerr << "mpnet tokenizer: " << failures << " check(s) failed\n";

@@ -9,12 +9,15 @@ static, so every call computes the full window.
 ## Tokenizer validation
 
 The CPU CTest target `mpnet_tokenizer` checks Unicode cleaning, lowercasing,
-punctuation boundaries, normalizer flags and special-token framing through the
-native tokenizer factory. The lowercase and punctuation tables are generated
-from `tokenizers==0.23.3`; regenerate them with
-`python families/mpnet/tests/generate_lowercase.py` and
-`python families/mpnet/tests/generate_punctuation.py` in an environment with that
-version installed. The runtime does not depend on Python or `tokenizers`.
+accent stripping, punctuation boundaries, normalizer flags and special-token
+framing through the native tokenizer factory. The tables are generated from
+`tokenizers==0.23.3`; regenerate them with
+`python families/mpnet/tests/generate_lowercase.py`,
+`python families/mpnet/tests/generate_punctuation.py` and
+`python families/mpnet/tests/generate_accents.py` in an environment with that
+version installed. Accent data preserves removed starter boundaries for
+canonical ordering; Hangul decomposes algorithmically. The runtime does not
+depend on Python or `tokenizers`.
 
 ## Quantization
 
