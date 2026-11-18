@@ -29,6 +29,10 @@ set_target_properties(trtmc_model_rt_detr PROPERTIES
   BUILD_RPATH "\$ORIGIN"
 )
 
+install(TARGETS trtmc_model_rt_detr
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+
 if(TRTMC_BUILD_TESTS)
   add_executable(test_rt_detr_preprocess_and_decode
     ${CMAKE_CURRENT_SOURCE_DIR}/../tests/cpp/test_preprocess_and_decode.cpp
