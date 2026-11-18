@@ -237,7 +237,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         {
             "model_dir": str(directory),
             "hf_revision": checkpoint_revision,
-            "revision_status": "unverified" if checkpoint_revision is None else "pinned_cache_lookup",
+            "revision_status": "unverified"
+            if checkpoint_revision is None
+            else "pinned_cache_lookup",
         },
     )
     binary, runtime_root = _runtime()

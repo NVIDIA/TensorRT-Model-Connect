@@ -75,15 +75,30 @@ def build(request, writer):
         or text.get("mlp_bias", False)
         or text["hidden_act"] != "silu"
         or vision["hidden_act"] != "gelu_pytorch_tanh"
+        or not preprocessing["do_resize"]
+        or not preprocessing["do_normalize"]
+        or not preprocessing["do_rescale"]
+        or preprocessing["rescale_factor"] != 1 / 255
+        or preprocessing["max_image_size"]["longest_edge"] != vision["image_size"]
         or not preprocessing["do_image_splitting"]
         or preprocessing["resample"] != 1
         or preprocessing["image_mean"] != [0.5, 0.5, 0.5]
         or preprocessing["image_std"] != [0.5, 0.5, 0.5]
     ):
         raise ValueError("Unsupported Idefics3 decoder or image preprocessing configuration")
+    image_size = vision["image_size"]
+    longest_edge = preprocessing["size"]["longest_edge"]
+    if not 0 < image_size <= 2048 or not 0 < longest_edge <= 4 * image_size:
+        raise ValueError("Idefics3 resize edge exceeds the native tiling profile")
+    image_sequence = (image_size // vision["patch_size"] // cfg["scale_factor"]) ** 2
+    minimum_tiles = (longest_edge + image_size - 1) // image_size
+    minimum_views = minimum_tiles + 1 if minimum_tiles > 1 else 1
+    # Even the narrowest image needs these image tokens, a nonempty question,
+    # and one generated token. Chat/template tokens require further space.
+    minimum_length = minimum_views * image_sequence + 2
     length = request.max_sequence_length or 1536
-    if not 2 <= length <= text["max_position_embeddings"]:
-        raise ValueError("Idefics3 sequence profile exceeds the decoder context")
+    if not minimum_length <= length <= text["max_position_embeddings"]:
+        raise ValueError("Idefics3 sequence profile cannot fit an image/question and generation")
     from safetensors import safe_open
 
     with safe_open(str(directory / "model.safetensors"), framework="pt", device="cpu") as handle:
@@ -105,8 +120,6 @@ def build(request, writer):
     generation = json.loads((directory / "generation_config.json").read_text())
     eos = generation["eos_token_id"]
     eos = eos if isinstance(eos, list) else [eos]
-    image_size = vision["image_size"]
-    image_sequence = (image_size // vision["patch_size"] // cfg["scale_factor"]) ** 2
     writer.set_header(family="idefics3", task=request.task, backend=request.backend)
     writer.add_bytes("vision.plan", build_vision(weights, cfg, request.verbose))
     writer.add_bytes("decoder.plan", build_decoder(weights, text, length, request.verbose))
@@ -122,7 +135,7 @@ def build(request, writer):
             image_id=cfg["image_token_id"],
             image_sequence=image_sequence,
             image_size=image_size,
-            longest_edge=preprocessing["size"]["longest_edge"],
+            longest_edge=longest_edge,
             chat_prefix=prefix,
             between_image_text=between,
             chat_suffix=suffix,
