@@ -84,11 +84,21 @@ def test_musicgen_e2e(case_name, tmp_path):
 
     record_evidence("inputs", {"manifest": MANIFEST, "case": CASE, "prompts": CASE["prompts"]})
     record_evidence(
-        "checkpoint", {"repo_id": MANIFEST["hf_id"], "revision": MANIFEST["hf_revision"]}
+        "checkpoint",
+        {"requested_repo_id": MANIFEST["hf_id"], "requested_revision": MANIFEST["hf_revision"]},
     )
     record_evidence("thresholds", THRESHOLDS)
     with evidence_stage("checkpoint"):
         model_dir = checkpoint_dir(MANIFEST["hf_id"], MANIFEST["hf_revision"])
+    overridden = "TRTMC_MUSICGEN_MODEL_DIR" in os.environ
+    record_evidence(
+        "checkpoint",
+        {
+            "resolved_directory": str(model_dir.resolve()),
+            "from_override": overridden,
+            "resolved_revision": None if overridden else MANIFEST["hf_revision"],
+        },
+    )
     binary = Path(os.environ["TRTMC_BINARY"])
     runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
     assert torch.cuda.is_available()
@@ -146,31 +156,37 @@ def test_musicgen_e2e(case_name, tmp_path):
             record = {"prompt": prompt, "sample_rate": 32000, "waveform": target}
             if evidence_enabled():
                 # Retain the oracle samples exactly as IEEE float32 WAV.
-                output = tmp_path / f"reference-{index}.wav"
-                pcm = target.astype("<f4").tobytes()
-                output.write_bytes(
-                    struct.pack(
-                        "<4sI4s4sIHHIIHH4sI",
-                        b"RIFF",
-                        36 + len(pcm),
-                        b"WAVE",
-                        b"fmt ",
-                        16,
-                        3,
-                        1,
-                        32000,
-                        128000,
-                        4,
-                        32,
-                        b"data",
-                        len(pcm),
+                try:
+                    output = tmp_path / f"reference-{index}.wav"
+                    pcm = target.astype("<f4").tobytes()
+                    output.write_bytes(
+                        struct.pack(
+                            "<4sI4s4sIHHIIHH4sI",
+                            b"RIFF",
+                            36 + len(pcm),
+                            b"WAVE",
+                            b"fmt ",
+                            16,
+                            3,
+                            1,
+                            32000,
+                            128000,
+                            4,
+                            32,
+                            b"data",
+                            len(pcm),
+                        )
+                        + pcm
                     )
-                    + pcm
-                )
-                record["audio"] = output
-                views.append(
-                    {"title": f"Sample {index} / reference", "audio": output, "caption": prompt}
-                )
+                    record["audio"] = output
+                    views.append(
+                        {"title": f"Sample {index} / reference", "audio": output, "caption": prompt}
+                    )
+                except (OSError, ValueError, struct.error) as error:
+                    record_evidence(
+                        "attachment_error",
+                        {"attachment": f"reference-{index}.wav", "error": str(error)},
+                    )
             reference_records.append(record)
             record_evidence("reference", {"mode": "hf_transformers", "samples": reference_records})
             record_evidence("views", views)

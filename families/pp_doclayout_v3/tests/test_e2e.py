@@ -133,12 +133,123 @@ def _polygon_iou(left, right, height, width):
     return float(np.logical_and(*masks).sum() / union) if union else 0
 
 
+def _geometry_check(checks, name, value, operator, limit):
+    checks.append(
+        {
+            "name": name,
+            "scope": "independent_reference",
+            "actual": value,
+            "operator": operator,
+            "expected": limit,
+            "passed": value == limit
+            if operator == "=="
+            else (value <= limit if operator == "<=" else value >= limit),
+        }
+    )
+
+
+def _compare_regions(actual, expected, image, index, metrics, checks):
+    regions = actual["regions"]
+    _geometry_check(checks, "region_count", len(regions), "==", len(expected["scores"]))
+    assert regions and len(regions) == len(expected["scores"])
+    _geometry_check(checks, "image_height", actual["image_height"], "==", image.height)
+    _geometry_check(checks, "image_width", actual["image_width"], "==", image.width)
+    assert actual["image_height"] == image.height and actual["image_width"] == image.width
+    # Compare by reading order. Matching only by score would miss an order-head defect.
+    for order, (region, score, label, box, polygon) in enumerate(
+        zip(
+            regions,
+            expected["scores"],
+            expected["labels"],
+            expected["boxes"],
+            expected["polygon_points"],
+            strict=True,
+        )
+    ):
+        measurement = {
+            "variant": index,
+            "region": order,
+            "score_absolute_error": abs(region["score"] - float(score)),
+            "box_iou": _iou(region["box"], box.tolist()),
+        }
+        metrics.append(measurement)
+        record_evidence("metrics", metrics)
+        _geometry_check(checks, f"region_{order}_class_id", region["class_id"], "==", int(label))
+        assert region["class_id"] == int(label)
+        _geometry_check(
+            checks, f"region_{order}_score_error", measurement["score_absolute_error"], "<=", 0.02
+        )
+        assert measurement["score_absolute_error"] <= 0.02
+        _geometry_check(checks, f"region_{order}_box_iou", measurement["box_iou"], ">=", 0.98)
+        assert measurement["box_iou"] >= 0.98
+        assert len(region["polygon"]) >= 4 and polygon is not None
+        assert np.isfinite(region["polygon"]).all()
+        measurement["polygon_iou"] = _polygon_iou(
+            region["polygon"], polygon, image.height, image.width
+        )
+        record_evidence("metrics", metrics)
+        _geometry_check(
+            checks, f"region_{order}_polygon_iou", measurement["polygon_iou"], ">=", 0.98
+        )
+        assert measurement["polygon_iou"] >= 0.98
+
+
+def _record_layout_evidence(tmp_path, index, image, actual, reference, checks, views):
+    from PIL import ImageDraw
+
+    paired = {}
+    for role, record in (("native", actual), ("reference", reference)):
+        try:
+            geometry = tmp_path / f"document-{index}-{role}.json"
+            geometry.write_text(json.dumps(record, indent=2))
+            paired[role] = geometry
+        except (OSError, TypeError, ValueError) as error:
+            record_evidence(
+                "attachment_error",
+                {"attachment": f"document-{index}-{role}.json", "error": str(error)},
+            )
+        try:
+            preview = image.copy()
+            drawing = ImageDraw.Draw(preview)
+            for order, region in enumerate(record["regions"]):
+                drawing.polygon(
+                    [tuple(point) for point in region["polygon"]], outline="red", width=2
+                )
+                drawing.text(tuple(region["box"][:2]), f"{order}: {region['class_id']}", fill="red")
+            preview_path = tmp_path / f"document-{index}-{role}.png"
+            preview.save(preview_path)
+            views.append(
+                {
+                    "title": f"Sample {index} / {role}",
+                    "image": preview_path,
+                    "caption": "Original" if index == 0 else "Mirrored",
+                }
+            )
+        except Exception as error:
+            record_evidence(
+                "attachment_error",
+                {"attachment": f"document-{index}-{role}.png", "error": str(error)},
+            )
+    record_evidence("views", views)
+    # Retain completed and failed checks even when later geometry is unavailable.
+    record_evidence(
+        "reference_comparison",
+        {
+            "label": f"Document {index}: regions in reading order",
+            "scope": "independent_reference",
+            "enforced": True,
+            **paired,
+            "checks": checks,
+        },
+    )
+
+
 @pytest.mark.parametrize("case_name", ["pp-doclayout-v3"])
 def test_official_checkpoint_e2e(request, tmp_path, case_name):
     if not _selected(request.config):
         pytest.skip("direct E2E requires an explicit model or testcase selector")
     import torch
-    from PIL import Image, ImageDraw, ImageOps
+    from PIL import Image, ImageOps
     from transformers import AutoImageProcessor, AutoModelForObjectDetection
     from transformers.utils import logging
 
@@ -242,107 +353,18 @@ def test_official_checkpoint_e2e(request, tmp_path, case_name):
             }
         )
         record_evidence("reference", {"mode": "hf_transformers", "variants": reference_records})
-        with evidence_stage("compare"):
-            regions = actual["regions"]
-            assert regions and len(regions) == len(expected["scores"])
-            assert actual["image_height"] == image.height and actual["image_width"] == image.width
-            # Compare by reading order. Matching only by score would miss an order-head defect.
-            for region, score, label, box, polygon in zip(
-                regions,
-                expected["scores"],
-                expected["labels"],
-                expected["boxes"],
-                expected["polygon_points"],
-                strict=True,
-            ):
-                measurement = {
-                    "variant": index,
-                    "region": len(metrics),
-                    "score_absolute_error": abs(region["score"] - float(score)),
-                    "box_iou": _iou(region["box"], box.tolist()),
-                }
-                metrics.append(measurement)
-                record_evidence("metrics", metrics)
-                assert region["class_id"] == int(label)
-                assert abs(region["score"] - float(score)) <= 0.02
-                assert _iou(region["box"], box.tolist()) >= 0.98
-                assert len(region["polygon"]) >= 4 and polygon is not None
-                assert np.isfinite(region["polygon"]).all()
-                measurement["polygon_iou"] = _polygon_iou(
-                    region["polygon"], polygon, image.height, image.width
-                )
-                record_evidence("metrics", metrics)
-                assert _polygon_iou(region["polygon"], polygon, image.height, image.width) >= 0.98
-        if evidence_enabled():
-            # Explicit comparison records retain the enforced geometry limits;
-            # report readers need not infer them from family helper names.
-            paired = {}
-            for role, record in (("native", actual), ("reference", reference_records[-1])):
-                geometry = tmp_path / f"document-{index}-{role}.json"
-                geometry.write_text(json.dumps(record, indent=2))
-                paired[role] = geometry
-                preview = image.copy()
-                drawing = ImageDraw.Draw(preview)
-                for order, region in enumerate(record["regions"]):
-                    drawing.polygon(
-                        [tuple(point) for point in region["polygon"]], outline="red", width=2
+        checks = []
+        try:
+            with evidence_stage("compare"):
+                _compare_regions(actual, expected, image, index, metrics, checks)
+        finally:
+            if evidence_enabled():
+                try:
+                    _record_layout_evidence(
+                        tmp_path, index, image, actual, reference_records[-1], checks, views
                     )
-                    drawing.text(
-                        tuple(region["box"][:2]), f"{order}: {region['class_id']}", fill="red"
+                except Exception as error:
+                    # Diagnostics must never replace the original comparison failure.
+                    record_evidence(
+                        "attachment_error", {"attachment": f"document-{index}", "error": str(error)}
                     )
-                preview_path = tmp_path / f"document-{index}-{role}.png"
-                preview.save(preview_path)
-                views.append(
-                    {
-                        "title": f"Sample {index} / {role}",
-                        "image": preview_path,
-                        "caption": "Original" if index == 0 else "Mirrored",
-                    }
-                )
-            record_evidence("views", views)
-            measured = [item for item in metrics if item["variant"] == index]
-            limits = [
-                ("score_error", max(item["score_absolute_error"] for item in measured), "<=", 0.02),
-                ("box_iou", min(item["box_iou"] for item in measured), ">=", 0.98),
-                ("polygon_iou", min(item["polygon_iou"] for item in measured), ">=", 0.98),
-            ]
-            record_evidence(
-                "reference_comparison",
-                {
-                    "label": f"Document {index}: regions in reading order",
-                    "scope": "independent_reference",
-                    "enforced": True,
-                    **paired,
-                    "checks": [
-                        {
-                            "name": "ordered_class_ids",
-                            "scope": "independent_reference",
-                            "actual": sum(
-                                left["class_id"] != right["class_id"]
-                                for left, right in zip(
-                                    actual["regions"], reference_regions, strict=True
-                                )
-                            ),
-                            "operator": "==",
-                            "expected": 0,
-                            "passed": all(
-                                left["class_id"] == right["class_id"]
-                                for left, right in zip(
-                                    actual["regions"], reference_regions, strict=True
-                                )
-                            ),
-                        }
-                    ]
-                    + [
-                        {
-                            "name": name,
-                            "scope": "independent_reference",
-                            "actual": value,
-                            "operator": operator,
-                            "expected": limit,
-                            "passed": value <= limit if operator == "<=" else value >= limit,
-                        }
-                        for name, value, operator, limit in limits
-                    ],
-                },
-            )

@@ -81,18 +81,18 @@ def test_flint_e2e(request, tmp_path, case_name):
     record_evidence("thresholds", thresholds)
     with evidence_stage("checkpoint"):
         checkpoint = checkpoint_dir()
-    # These local-dir download receipts identify every fetched shard's commit;
-    # a manually supplied checkpoint must provide the same pinned receipts.
-    if checkpoint.parent.name == "snapshots":
-        assert checkpoint.name == manifest["hf_revision"]
-    else:
-        for filename in [
-            "config.json",
-            "model.safetensors.index.json",
-            *sorted(path.name for path in checkpoint.glob("*.safetensors")),
-        ]:
-            receipt = checkpoint / ".cache/huggingface/download" / (filename + ".metadata")
-            assert receipt.read_text().splitlines()[0] == manifest["hf_revision"]
+        # These local-dir download receipts identify every fetched shard's commit;
+        # a manually supplied checkpoint must provide the same pinned receipts.
+        if checkpoint.parent.name == "snapshots":
+            assert checkpoint.name == manifest["hf_revision"]
+        else:
+            for filename in [
+                "config.json",
+                "model.safetensors.index.json",
+                *sorted(path.name for path in checkpoint.glob("*.safetensors")),
+            ]:
+                receipt = checkpoint / ".cache/huggingface/download" / (filename + ".metadata")
+                assert receipt.read_text().splitlines()[0] == manifest["hf_revision"]
     runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
     binary = Path(os.environ["TRTMC_BINARY"])
     assert binary.is_file()

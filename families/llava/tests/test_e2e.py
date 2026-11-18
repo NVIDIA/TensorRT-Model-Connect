@@ -5,7 +5,6 @@
 
 import json
 import os
-from functools import cache
 from pathlib import Path
 import re
 import shutil
@@ -53,14 +52,27 @@ def pytest_generate_tests(metafunc):
 @pytest.fixture(scope="module")
 def execution(tmp_path_factory):
     # Run shared preparation inside the selected test's evidence context.
-    @cache
+    outcome = {"stage": "preparation"}
+
     def prepare():
-        return _prepare_execution(tmp_path_factory.mktemp("llava-e2e"))
+        if "error" in outcome:
+            with evidence_stage(outcome["stage"]):
+                raise outcome["error"]
+        if "result" not in outcome:
+            try:
+                outcome["result"] = _prepare_execution(
+                    tmp_path_factory.mktemp("llava-e2e"), outcome
+                )
+            except Exception as error:
+                outcome["error"] = error
+                raise
+        return outcome["result"]
 
     return prepare
 
 
-def _prepare_execution(output):
+def _prepare_execution(output, outcome):
+    outcome["stage"] = "checkpoint"
     with evidence_stage("checkpoint"):
         explicit_model = os.environ.get("TRTMC_LLAVA_MODEL_DIR")
         if explicit_model:
@@ -99,6 +111,7 @@ def _prepare_execution(output):
     cases_path.write_text(json.dumps(reference_cases))
     bundle = output / MANIFEST["bundle"]
     started = time.monotonic()
+    outcome["stage"] = "build"
     with evidence_stage("build"):
         build(
             BuildRequest(
@@ -110,15 +123,24 @@ def _prepare_execution(output):
                 max_sequence_length=MANIFEST["max_sequence_length"],
             )
         )
-        inspected = subprocess.run(
-            [str(binary), "inspect", str(bundle)], check=True, capture_output=True, text=True
-        )
-        bundle_info = json.loads(inspected.stdout)
     build_seconds = time.monotonic() - started
+    bundle_info = None
+    if evidence_enabled():
+        try:
+            inspected = subprocess.run(
+                [str(binary), "inspect", str(bundle)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            bundle_info = json.loads(inspected.stdout)
+        except (OSError, subprocess.SubprocessError, ValueError) as error:
+            record_evidence("attachment_error", {"attachment": "bundle_info", "error": str(error)})
     python = os.environ.get("TRTMC_REFERENCE_PYTHON", sys.executable)
     reference_env = os.environ.copy()
     reference_env.pop("LD_LIBRARY_PATH", None)
     started = time.monotonic()
+    outcome["stage"] = "reference"
     with evidence_stage("reference"):
         process = subprocess.run(
             [
@@ -182,19 +204,30 @@ def test_official_checkpoint_e2e(case_name, execution, tmp_path):
     if evidence_enabled():
         # PNG preserves the reference's RGB pixels, including BMP color fixtures.
         # Native execution still receives the original source file below.
-        image = tmp_path / "input.png"
-        Image.open(expected["image"]).convert("RGB").save(image)
-        record_evidence("inputs", {"image": image})
-        reference_record["image"] = image
-        raw_reference = tmp_path / "reference-record.json"
-        raw_reference.write_text(json.dumps(expected, indent=2))
-        record_evidence("reference_record", raw_reference)
+        try:
+            image = tmp_path / "input.png"
+            Image.open(expected["image"]).convert("RGB").save(image)
+            record_evidence("inputs", {"image": image})
+            reference_record["image"] = image
+        except (OSError, ValueError) as error:
+            record_evidence("attachment_error", {"attachment": "input.png", "error": str(error)})
+        try:
+            raw_reference = tmp_path / "reference-record.json"
+            raw_reference.write_text(json.dumps(expected, indent=2))
+            record_evidence("reference_record", raw_reference)
+        except (OSError, TypeError, ValueError) as error:
+            record_evidence(
+                "attachment_error", {"attachment": "reference-record.json", "error": str(error)}
+            )
         intermediate = {}
         for name in ("pixels", "features"):
             source = Path(preparation["output_directory"]) / f"{case_name}-{name}.npy"
             snapshot = tmp_path / source.name
-            shutil.copyfile(source, snapshot)
-            intermediate[name] = snapshot
+            try:
+                shutil.copyfile(source, snapshot)
+                intermediate[name] = snapshot
+            except OSError as error:
+                record_evidence("attachment_error", {"attachment": name, "error": str(error)})
         record_evidence("reference_intermediates", intermediate)
     record_evidence("reference", reference_record)
     argv = [

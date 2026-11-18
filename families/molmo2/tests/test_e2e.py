@@ -15,7 +15,7 @@ import pytest
 
 from families.molmo2.tests.inputs import checkpoint_directory, native_tool
 from tensorrt_model_connect import BuildRequest, build
-from tools.e2e_evidence import evidence_stage, record_evidence
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 from tools.ci.environment import prepared_python
 
 ROOT = Path(__file__).resolve().parent
@@ -90,8 +90,30 @@ def _validate_bundle(inspection):
 
 @pytest.fixture(scope="session")
 def artifacts(tmp_path_factory):
+    # Keep both outcomes so a failed shared build is never retried per case.
+    outcome = {"stage": "preparation"}
+
+    def prepare():
+        if "error" in outcome:
+            if "qualification_results" in outcome:
+                record_evidence("qualification_results", outcome["qualification_results"])
+            with evidence_stage(outcome["stage"]):
+                raise outcome["error"]
+        if "result" not in outcome:
+            try:
+                outcome["result"] = _prepare_artifacts(tmp_path_factory, outcome)
+            except Exception as error:
+                outcome["error"] = error
+                raise
+        return outcome["result"]
+
+    return prepare
+
+
+def _prepare_artifacts(tmp_path_factory, outcome):
     started = time.monotonic()
     root = tmp_path_factory.mktemp("molmo2")
+    outcome["stage"] = "checkpoint"
     with evidence_stage("checkpoint"):
         checkpoint = checkpoint_directory(MANIFEST["hf_id"], MANIFEST["hf_revision"])
     runtime = _path("TRTMC_RUNTIME_ROOT")
@@ -101,7 +123,10 @@ def artifacts(tmp_path_factory):
     python = None
     if "TRTMC_MOLMO2_BUNDLE" not in os.environ:
         if not reference:
-            python = _reference_python()
+            outcome["stage"] = "reference"
+            with evidence_stage("reference"):
+                python = _reference_python()
+        outcome["stage"] = "build"
         with evidence_stage("build"):
             build(
                 BuildRequest(
@@ -114,18 +139,21 @@ def artifacts(tmp_path_factory):
                     tensor_parallel_size=MANIFEST["tensor_parallel_size"],
                 )
             )
+    outcome["stage"] = "build"
     with evidence_stage("build"):
         assert bundle.is_file()
         inspection = json.loads(
             subprocess.check_output([str(binary), "inspect", str(bundle)], text=True)
         )
         _validate_bundle(inspection)
+    outcome["stage"] = "reference"
     if reference:
         reference = Path(reference)
+        reference_source = {"source": "supplied", "directory": str(reference.absolute())}
     else:
         reference = root / "reference"
-        python = python or _reference_python()
         with evidence_stage("reference"):
+            python = python or _reference_python()
             subprocess.run(
                 [
                     str(python),
@@ -138,9 +166,18 @@ def artifacts(tmp_path_factory):
                 check=True,
                 timeout=1800,
             )
-    results = {
-        case["name"]: case for case in json.loads((reference / "reference.json").read_text())
-    }
+        # reference.py enforces this version before generating any results.
+        reference_source = {
+            "source": "generated",
+            "mode": "hf_transformers",
+            "transformers_version": "4.57.1",
+            "implementation": "families/molmo2/tests/reference.py",
+        }
+    with evidence_stage("reference"):
+        results = {
+            case["name"]: case for case in json.loads((reference / "reference.json").read_text())
+        }
+    outcome["stage"] = "native"
     qualifier = native_tool("molmo2_qualification")
     with evidence_stage("native"):
         completed = subprocess.run(
@@ -163,6 +200,19 @@ def artifacts(tmp_path_factory):
         "native_process",
         {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
     )
+    outcome["qualification_results"] = {
+        "reference_source": reference_source,
+        "pairs": [
+            {
+                "case_name": output.get("name"),
+                "native": output,
+                "reference": results.get(output.get("name")),
+            }
+            for output in native
+        ],
+    }
+    record_evidence("qualification_results", outcome["qualification_results"])
+    outcome["stage"] = "compare"
     with evidence_stage("compare"):
         assert len(native) == len(MANIFEST["testcases"]) + 1
         for output in native:
@@ -170,24 +220,19 @@ def artifacts(tmp_path_factory):
             assert output["token_ids"] == expected["tokens"]
             assert output["text"] == expected["text"]
         assert native[0]["token_ids"] == native[-1]["token_ids"]
-    (root / "native-results.json").write_text(json.dumps(native, indent=2) + "\n")
-    (root / "preparation.json").write_text(
-        json.dumps(
-            {
-                "shared": True,
-                "seconds": time.monotonic() - started,
-                "cases": [case["name"] for case in MANIFEST["testcases"]],
-                "bundle_info": inspection,
-                "native_process": {
-                    "argv": completed.args,
-                    "stdout": completed.stdout,
-                    "stderr": completed.stderr,
-                },
-                "replay": native[-1],
-            }
-        )
-    )
-    return root, checkpoint, runtime, binary, bundle, reference, results
+    preparation = {
+        "shared": True,
+        "seconds": time.monotonic() - started,
+        "cases": [case["name"] for case in MANIFEST["testcases"]],
+        "bundle_info": inspection,
+        "native_process": {
+            "argv": completed.args,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        },
+        "replay": native[-1],
+    }
+    return checkpoint, bundle, reference, results, native, preparation, reference_source
 
 
 @pytest.mark.e2e
@@ -211,24 +256,20 @@ def test_upstream_and_native_e2e(case_name, request, tmp_path):
             "pooling": "exact equality",
         },
     )
-    root, checkpoint, runtime, binary, bundle, reference, results = request.getfixturevalue(
-        "artifacts"
+    checkpoint, bundle, reference, results, outputs, preparation, reference_source = (
+        request.getfixturevalue("artifacts")()
     )
     name = case["name"]
     expected = results[name]
-    preparation = json.loads((root / "preparation.json").read_text())
     record_evidence("preparation", preparation)
     record_evidence("bundle", {"path": str(bundle), "info": preparation["bundle_info"]})
     record_evidence(
         "reference",
         {
-            "mode": "hf_transformers",
-            "transformers_version": "4.57.1",
-            "implementation": "families/molmo2/tests/reference.py",
             **expected,
+            **reference_source,
         },
     )
-    outputs = json.loads((root / "native-results.json").read_text())
     output = next(item for item in outputs if item["name"] == name)
     record_evidence("native", output)
     from PIL import Image
@@ -238,14 +279,19 @@ def test_upstream_and_native_e2e(case_name, request, tmp_path):
         if "test_image" in case
         else Image.new("RGB", tuple(case["size"]), tuple(case["color"]))
     )
-    image = tmp_path / "input.png"
-    expected_image.save(image)
-    record_evidence("inputs", {"image": image})
-    assert (expected["width"], expected["height"]) == expected_image.size
-    np.testing.assert_array_equal(
-        np.fromfile(reference / (name + ".f32"), dtype=np.float32),
-        np.asarray(expected_image, dtype=np.float32).reshape(-1),
-    )
+    if evidence_enabled():
+        try:
+            image = tmp_path / "input.png"
+            expected_image.save(image)
+            record_evidence("inputs", {"image": image})
+        except (OSError, ValueError) as error:
+            record_evidence("attachment_error", {"attachment": "input.png", "error": str(error)})
+    with evidence_stage("compare"):
+        assert (expected["width"], expected["height"]) == expected_image.size
+        np.testing.assert_array_equal(
+            np.fromfile(reference / (name + ".f32"), dtype=np.float32),
+            np.asarray(expected_image, dtype=np.float32).reshape(-1),
+        )
     helper = native_tool("test_molmo2_preprocess")
     stem = tmp_path / name
     with evidence_stage("native"):
@@ -262,26 +308,28 @@ def test_upstream_and_native_e2e(case_name, request, tmp_path):
             check=True,
             timeout=60,
         )
-    native = json.loads(stem.with_suffix(".json").read_text())
+        native = json.loads(stem.with_suffix(".json").read_text())
+        actual_pooling = np.fromfile(stem.with_suffix(".pooling"), np.int32)
+        actual_pixels = np.fromfile(stem.with_suffix(".pixels"), np.float32)
     record_evidence("native_preprocessing", native)
-    assert native["ids"] == expected["input_ids"]
-    actual_pooling = np.fromfile(stem.with_suffix(".pooling"), np.int32)
-    expected_pooling = np.load(reference / (name + "-image_token_pooling.npy")).reshape(-1)
+    with evidence_stage("reference"):
+        expected_pooling = np.load(reference / (name + "-image_token_pooling.npy")).reshape(-1)
+        expected_pixels = np.load(reference / (name + "-pixel_values.npy")).reshape(-1)
     record_evidence("native_pooling", actual_pooling)
     record_evidence("reference_pooling", expected_pooling)
-    np.testing.assert_array_equal(actual_pooling, expected_pooling)
-    actual_pixels = np.fromfile(stem.with_suffix(".pixels"), np.float32)
-    expected_pixels = np.load(reference / (name + "-pixel_values.npy")).reshape(-1)
     record_evidence("native_pixels", actual_pixels)
     record_evidence("reference_pixels", expected_pixels)
-    record_evidence(
-        "metrics",
-        {"pixel_max_absolute_error": float(np.max(np.abs(actual_pixels - expected_pixels)))},
-    )
-    # CPU half-pixel bilinear interpolation may round a uint8 halfway value
-    # differently. One uint8 step becomes 2/255 after SigLIP normalization.
-    np.testing.assert_allclose(actual_pixels, expected_pixels, atol=2 / 255 + 1e-6, rtol=0)
-    assert output["token_ids"] == expected["tokens"]
-    assert len(output["token_ids"]) <= case["max_new_tokens"]
-    assert output["text"] == expected["text"]
-    assert output["text"].strip()
+    with evidence_stage("compare"):
+        assert native["ids"] == expected["input_ids"]
+        np.testing.assert_array_equal(actual_pooling, expected_pooling)
+        record_evidence(
+            "metrics",
+            {"pixel_max_absolute_error": float(np.max(np.abs(actual_pixels - expected_pixels)))},
+        )
+        # CPU half-pixel bilinear interpolation may round a uint8 halfway value
+        # differently. One uint8 step becomes 2/255 after SigLIP normalization.
+        np.testing.assert_allclose(actual_pixels, expected_pixels, atol=2 / 255 + 1e-6, rtol=0)
+        assert output["token_ids"] == expected["tokens"]
+        assert len(output["token_ids"]) <= case["max_new_tokens"]
+        assert output["text"] == expected["text"]
+        assert output["text"].strip()
