@@ -504,17 +504,13 @@ void convert_flux_vae_output_to_image(const float* vae_output, int32_t h_out, in
 }
 
 // ---------------------------------------------------------------------------
-// FLUX.2 prompt preparation (Mistral chat template)
+// FLUX.2 prompt preparation (Mistral 3 or Qwen3 chat template)
 // ---------------------------------------------------------------------------
 
-std::string prepare_flux_prompt(const std::string& prompt, bool is_flux2) {
+std::string prepare_flux_prompt(const std::string& prompt, bool is_flux2,
+                                const std::string& text_template) {
     if (is_flux2) {
-        static const char* kSystemMsg =
-            "You are an AI that reasons about image descriptions. "
-            "You give structured responses focusing on object relationships, object\n"
-            "attribution and actions without speculation.";
-        return std::string("<s>[SYSTEM_PROMPT]") + kSystemMsg + "[/SYSTEM_PROMPT][INST]" + prompt +
-               "[/INST]";
+        return diffusion::flux_text::apply_flux2_template(prompt, text_template);
     }
     return prompt;
 }
@@ -683,7 +679,7 @@ bool FluxPipeline::run_t5_encoder(int32_t encoder_idx, const std::vector<int32_t
 
     const bool is_flux2 = !weights_.vae_bn_mean.empty();
     const int32_t pad_token_id =
-        diffusion::flux_text::resolve_pad_token_id(tokenizer_.get(), is_flux2);
+        diffusion::flux_text::resolve_pad_token_id(tokenizer_.get(), is_flux2, config_.pad_token);
     auto prepared = diffusion::flux_text::prepare_inputs(input_ids, seq_len, pad_token_id);
 
     TensorMap inputs;
@@ -780,7 +776,8 @@ bool FluxPipeline::run_flux2_denoiser(const std::vector<float>& hidden,
                {static_cast<int64_t>(text_seq), static_cast<int64_t>(t5_dim)},
                DType::kFloat32};
     inputs["timestep"] = Tensor{&ts_val, {1}, DType::kFloat32};
-    inputs["guidance"] = Tensor{&g_val, {1}, DType::kFloat32};
+    if (config_.guidance_embeds)
+        inputs["guidance"] = Tensor{&g_val, {1}, DType::kFloat32};
     inputs["rotary_cos"] = Tensor{const_cast<float*>(cos_vals.data()),
                                   {static_cast<int64_t>(total_seq), static_cast<int64_t>(head_dim)},
                                   DType::kFloat32};
@@ -818,7 +815,7 @@ bool FluxPipeline::run_t5_encoder_batch(int32_t encoder_idx,
 
     const bool is_flux2 = !weights_.vae_bn_mean.empty();
     const int32_t pad_token_id =
-        diffusion::flux_text::resolve_pad_token_id(tokenizer_.get(), is_flux2);
+        diffusion::flux_text::resolve_pad_token_id(tokenizer_.get(), is_flux2, config_.pad_token);
     std::vector<int32_t> padded_ids;
     std::vector<float> mask;
     std::vector<std::size_t> valid_tokens;
@@ -933,7 +930,8 @@ bool FluxPipeline::run_flux2_denoiser_batch(int32_t batch, const std::vector<flo
         {static_cast<int64_t>(batch), static_cast<int64_t>(text_seq), static_cast<int64_t>(t5_dim)},
         DType::kFloat32};
     inputs["timestep"] = Tensor{&ts_val, {1}, DType::kFloat32};
-    inputs["guidance"] = Tensor{&g_val, {1}, DType::kFloat32};
+    if (config_.guidance_embeds)
+        inputs["guidance"] = Tensor{&g_val, {1}, DType::kFloat32};
     inputs["rotary_cos"] = Tensor{const_cast<float*>(cos_vals.data()),
                                   {static_cast<int64_t>(batch), static_cast<int64_t>(total_seq),
                                    static_cast<int64_t>(head_dim)},
@@ -1116,7 +1114,7 @@ bool FluxPipeline::prepare_conditioning(const std::string& prompt, const ImageGe
     const bool is_flux2 = !weights_.vae_bn_mean.empty();
 
     // 1. Prepare prompt (FLUX.2 chat template)
-    const std::string prepared = prepare_flux_prompt(prompt, is_flux2);
+    const std::string prepared = prepare_flux_prompt(prompt, is_flux2, config_.text_template);
     raw_prompt_ = prepared;
 
     // 2. Tokenize with primary tokenizer (T5)
@@ -1148,6 +1146,20 @@ bool FluxPipeline::prepare_conditioning(const std::string& prompt, const ImageGe
         return false;
     }
 
+    return true;
+}
+
+bool FluxPipeline::encode_flux2_negative(const std::string& negative_prompt,
+                                         std::vector<float>& negative_hidden) {
+    if (!tokenizer_ || text_encoders_.empty()) {
+        std::cerr << "[flux] True CFG needs the FLUX.2 tokenizer and text encoder\n";
+        return false;
+    }
+    const std::string prepared = prepare_flux_prompt(negative_prompt, true, config_.text_template);
+    if (!run_t5_encoder(0, tokenizer_->encode(prepared), negative_hidden)) {
+        std::cerr << "[flux] Negative-prompt encoder failed\n";
+        return false;
+    }
     return true;
 }
 
@@ -1200,7 +1212,8 @@ void FluxPipeline::prepare_denoising_state(const diffusion::FluxGenerationPlan& 
 bool FluxPipeline::run_denoising(const diffusion::FluxGenerationPlan& plan,
                                  const std::vector<float>& pooled_output,
                                  std::vector<float>& encoder_hidden, std::vector<float>& cos_vals,
-                                 std::vector<float>& sin_vals, std::vector<float>& latents) {
+                                 std::vector<float>& sin_vals, std::vector<float>& latents,
+                                 const std::vector<float>& negative_hidden) {
     const bool is_flux2 = plan.is_flux2;
     const int32_t num_inference_steps = plan.num_inference_steps;
     const float guidance_scale = plan.guidance_scale;
@@ -1232,13 +1245,24 @@ bool FluxPipeline::run_denoising(const diffusion::FluxGenerationPlan& plan,
             compute_flux_timestep_embedding(t, guidance_scale, pooled_output, temb_out);
         }
     };
-    const auto run_denoiser_fn = [this, is_flux2, guidance_scale, &encoder_hidden, &cos_vals,
-                                  &sin_vals, &current_timestep](const std::vector<float>& hidden_in,
-                                                                const std::vector<float>& temb_in,
-                                                                std::vector<float>& output) {
+    const bool true_cfg = plan.true_cfg;
+    std::vector<float> negative_output;
+    const auto run_denoiser_fn = [this, is_flux2, true_cfg, guidance_scale, &encoder_hidden,
+                                  &negative_hidden, &negative_output, &cos_vals, &sin_vals,
+                                  &current_timestep](const std::vector<float>& hidden_in,
+                                                     const std::vector<float>& temb_in,
+                                                     std::vector<float>& output) {
         if (is_flux2) {
-            return run_flux2_denoiser(hidden_in, encoder_hidden, current_timestep, guidance_scale,
-                                      cos_vals, sin_vals, output);
+            if (!run_flux2_denoiser(hidden_in, encoder_hidden, current_timestep, guidance_scale,
+                                    cos_vals, sin_vals, output))
+                return false;
+            if (!true_cfg)
+                return true;
+            if (!run_flux2_denoiser(hidden_in, negative_hidden, current_timestep, guidance_scale,
+                                    cos_vals, sin_vals, negative_output))
+                return false;
+            diffusion::flux_text::combine_true_cfg(output, negative_output, guidance_scale);
+            return true;
         }
         return run_flux_denoiser(hidden_in, encoder_hidden, temb_in, cos_vals, sin_vals, output);
     };
@@ -1343,7 +1367,8 @@ ImageResult FluxPipeline::generate_image(const std::string& prompt,
 // ===========================================================================
 // generate_image_batch — Decisions B/D/E
 //
-// - One forward per step (FLUX is guidance-distilled; no cond/uncond fusion).
+// - One forward per step for guidance-distilled FLUX; FLUX.2-klein base adds an
+//   unconditional forward per step (true CFG, single-sample path only).
 // - VAE always sliced at B=1: B sequential VAE forwards per chunk.
 // - When total > max_batch_size.dit we chunk silently via plan_chunks().
 //
@@ -1373,6 +1398,9 @@ FluxPipeline::generate_image_batch(const std::vector<std::string>& prompts,
 
     const auto total = static_cast<int32_t>(prompts.size());
     const int32_t cap = std::max(1, config_.max_batch_size.dit);
+    if (config_.true_cfg && cap > 1) {
+        throw std::invalid_argument("FLUX.2-klein true CFG supports max_batch_size=1 only");
+    }
     const auto chunks = flux_batch::plan_chunks(total, cap);
 
     std::vector<ImageResult> results;
@@ -1528,7 +1556,8 @@ bool FluxPipeline::prepare_flux_batch_conditioning(
     std::vector<std::string> prepared_prompts;
     prepared_prompts.reserve(static_cast<std::size_t>(B));
     for (std::size_t i = chunk_begin; i < chunk_end; ++i) {
-        const std::string prepared = prepare_flux_prompt(prompts[i], is_flux2);
+        const std::string prepared =
+            prepare_flux_prompt(prompts[i], is_flux2, config_.text_template);
         prepared_prompts.push_back(prepared);
         std::vector<int32_t> ids;
         if (tokenizer_) {
@@ -1796,8 +1825,16 @@ ImageResult FluxPipeline::generate_one_for_batch(const std::string& prompt,
     }
     const auto t_prep = Clock::now();
 
+    // FLUX.2-klein true CFG: the unconditional branch encodes the empty prompt
+    // (or the caller's negative prompt) through the same template.
+    std::vector<float> negative_hidden;
+    if (plan.true_cfg && !encode_flux2_negative(cfg.negative_prompt, negative_hidden)) {
+        return result;
+    }
+
     // Step 10: Denoising loop
-    if (!run_denoising(plan, pooled_output, encoder_hidden, cos_vals, sin_vals, latents)) {
+    if (!run_denoising(plan, pooled_output, encoder_hidden, cos_vals, sin_vals, latents,
+                       negative_hidden)) {
         return result;
     }
     const auto t_denoise = Clock::now();

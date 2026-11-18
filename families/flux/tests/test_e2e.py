@@ -7,7 +7,10 @@ from __future__ import annotations
 
 from tools.e2e_evidence import evidence_stage, record_evidence
 from families.flux.tests.reporting import (
-    native_snapshot, record_native_preview, record_report_views, reference_snapshot,
+    native_snapshot,
+    record_native_preview,
+    record_report_views,
+    reference_snapshot,
 )
 import json
 import os
@@ -234,7 +237,13 @@ def _run_json(
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
     record_evidence("commands", {"argv": getattr(completed, "args", None)})
-    record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
+    record_evidence(
+        "native",
+        {
+            "stdout": getattr(completed, "stdout", None),
+            "stderr": getattr(completed, "stderr", None),
+        },
+    )
     return _select_json_payload(completed.stdout, parallel_size)
 
 
@@ -287,6 +296,15 @@ def _torch_dtype(precision: str):
 
 def _is_flux2(manifest: dict) -> bool:
     return Path(str(manifest["hf_id"])).name.startswith("FLUX.2")
+
+
+def _is_flux2_klein(manifest: dict) -> bool:
+    return Path(str(manifest["hf_id"])).name.startswith("FLUX.2-klein")
+
+
+def _psnr_db(actual: np.ndarray, expected: np.ndarray) -> float:
+    mse = float(np.mean((np.asarray(actual) - np.asarray(expected)) ** 2))
+    return float("inf") if mse == 0.0 else 10.0 * float(np.log10(1.0 / mse))
 
 
 def _initial_latents(manifest: dict, case: dict) -> np.ndarray:
@@ -395,10 +413,17 @@ def _official_reference(
     del tmp_path
     task = manifest["task"]
     import torch
-    from diffusers import Flux2Pipeline, FluxPipeline
+    from diffusers import Flux2KleinPipeline, Flux2Pipeline, FluxPipeline
 
     dtype = _torch_dtype(case["reference_precision"])
-    pipeline_class = Flux2Pipeline if _is_flux2(manifest) else FluxPipeline
+    if dtype == torch.float32:
+        # An FP32 reference must not run its matmuls in TF32.
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+    if _is_flux2_klein(manifest):
+        pipeline_class = Flux2KleinPipeline
+    else:
+        pipeline_class = Flux2Pipeline if _is_flux2(manifest) else FluxPipeline
     load_options = {"torch_dtype": dtype, "local_files_only": True}
     if _is_flux2(manifest):
         load_options["low_cpu_mem_usage"] = True
@@ -437,9 +462,13 @@ def _official_reference(
     if int(manifest.get("video_num_frames", 1)) > 1:
         kwargs["num_frames"] = int(manifest["video_num_frames"])
     if case.get("negative_prompt"):
+        # Flux2KleinPipeline always uses the empty prompt as its CFG negative.
+        assert not _is_flux2_klein(manifest), "FLUX.2-klein reference takes no negative prompt"
         kwargs["negative_prompt"] = case["negative_prompt"]
     if "guidance_scale" in case:
         kwargs["guidance_scale"] = float(case["guidance_scale"])
+    elif _is_flux2_klein(manifest):
+        kwargs["guidance_scale"] = 4.0
     elif _is_flux2(manifest):
         kwargs["guidance_scale"] = 3.5
     output = pipeline(**kwargs)
@@ -528,6 +557,14 @@ def _assert_contract(actual, expected, manifest: dict, case: dict, thresholds: d
     assert float(pixels.mean()) >= float(thresholds.get("min_pixel_mean", 0.15))
     assert float(pixels.mean()) <= float(thresholds.get("max_pixel_mean", 0.85))
     assert float(pixels.std()) >= float(thresholds.get("min_pixel_std", 0.05))
+    if "min_psnr_db" in thresholds:
+        # Opt-in pixel agreement with the official pipeline on shared initial
+        # latents; cases without the threshold keep the statistics contract.
+        assert len(actual_images) == len(expected_images)
+        for actual_image, expected_image in zip(actual_images, expected_images):
+            psnr = _psnr_db(actual_image, expected_image)
+            record_evidence("compare", {"psnr_db": psnr})
+            assert psnr >= float(thresholds["min_psnr_db"]), f"PSNR {psnr:.2f} dB"
     _write_semantic_artifacts(case, actual_images, expected_images)
 
 
@@ -568,7 +605,14 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     model_dir = _model_dir(manifest)
-    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
@@ -576,7 +620,18 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     initial_latents = (
         None if manifest["task"] == "image_generation_batch" else _initial_latents(manifest, case)
     )
-    record_evidence("inputs", {"initial_latents": None if initial_latents is None else {"shape": list(initial_latents.shape), "dtype": str(initial_latents.dtype), "note": "The native stage records the supplied raw latent file within the evidence bound."}})
+    record_evidence(
+        "inputs",
+        {
+            "initial_latents": None
+            if initial_latents is None
+            else {
+                "shape": list(initial_latents.shape),
+                "dtype": str(initial_latents.dtype),
+                "note": "The native stage records the supplied raw latent file within the evidence bound.",
+            }
+        },
+    )
     with evidence_stage("native"):
         actual = _native(
             binary, runtime_root, bundle, model_dir, manifest, case, tmp_path, initial_latents
@@ -587,4 +642,6 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     record_report_views(actual, expected, tmp_path / "paired-report-views")
     record_evidence("reference", reference_snapshot(expected))
     with evidence_stage("compare"):
-        _assert_contract(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+        _assert_contract(
+            actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name))
+        )
