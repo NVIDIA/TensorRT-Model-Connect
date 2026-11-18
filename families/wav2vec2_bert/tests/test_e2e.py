@@ -326,17 +326,22 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
             "metrics",
             {"sample": label, "max_abs_error": maximum, "min_cosine": float(cosine.min())},
         )
+        pair = {}
+        for role, values in (("native", actual), ("reference", expected)):
+            path = tmp_path / f"{role}-{label}.npy"
+            np.save(path, values, allow_pickle=False)
+            pair[role] = path
         record_evidence(
             "reference_comparison",
             {
                 "label": f"W2v-BERT {label} frame features",
                 "scope": "independent_reference",
                 "enforced": True,
-                "native": actual,
-                "reference": expected,
+                **pair,
                 "checks": [
                     {
                         "name": "max_abs_error",
+                        "scope": "independent_reference",
                         "actual": maximum,
                         "operator": "<=",
                         "expected": case["max_abs_error"],
@@ -344,6 +349,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
                     },
                     {
                         "name": "min_cosine",
+                        "scope": "independent_reference",
                         "actual": float(cosine.min()),
                         "operator": ">=",
                         "expected": case["min_cosine"],
