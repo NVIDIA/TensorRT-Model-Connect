@@ -5,21 +5,25 @@
 
 import json
 import os
+from functools import cache
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
+import time
 import pytest
 from PIL import Image
 from tensorrt_model_connect import BuildRequest, build
-from tools.e2e_evidence import record_evidence
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 ROOT = Path(__file__).parent
 MANIFEST = json.loads((ROOT / "manifests/llava-1.5-7b.json").read_text())
+CASES = {case["name"]: case for case in MANIFEST["testcases"]}
 
 
 def pytest_generate_tests(metafunc):
-    if "case" not in metafunc.fixturenames:
+    if "case_name" not in metafunc.fixturenames:
         return
     models = {x for raw in metafunc.config.getoption("--e2e-model") for x in raw.split(",")}
     tests = {x for raw in metafunc.config.getoption("--e2e-testcase") for x in raw.split(",")}
@@ -27,26 +31,52 @@ def pytest_generate_tests(metafunc):
     if models_file:
         models.update(Path(models_file).read_text().splitlines())
     enabled = bool(models or tests)
-    cases = [case for case in MANIFEST["testcases"]
-             if (not models or models & {"llava", MANIFEST["name"], case["name"]})
-             and (not tests or case["name"] in tests)]
-    metafunc.parametrize("case", [pytest.param(case, id=case["name"],
-        marks=[] if enabled else pytest.mark.skip(reason="select --e2e-model llava")) for case in cases])
+    cases = [
+        case
+        for case in MANIFEST["testcases"]
+        if (not models or models & {"llava", MANIFEST["name"], case["name"]})
+        and (not tests or case["name"] in tests)
+    ]
+    metafunc.parametrize(
+        "case_name",
+        [
+            pytest.param(
+                case["name"],
+                id=case["name"],
+                marks=[] if enabled else pytest.mark.skip(reason="select --e2e-model llava"),
+            )
+            for case in cases
+        ],
+    )
 
 
 @pytest.fixture(scope="module")
 def execution(tmp_path_factory):
-    explicit_model = os.environ.get("TRTMC_LLAVA_MODEL_DIR")
-    if explicit_model:
-        model = Path(explicit_model)
-    else:
-        from huggingface_hub import snapshot_download
-        model = Path(snapshot_download(MANIFEST["hf_id"], revision=MANIFEST["hf_revision"],
-                                       local_files_only=True))
+    # Run shared preparation inside the selected test's evidence context.
+    @cache
+    def prepare():
+        return _prepare_execution(tmp_path_factory.mktemp("llava-e2e"))
+
+    return prepare
+
+
+def _prepare_execution(output):
+    with evidence_stage("checkpoint"):
+        explicit_model = os.environ.get("TRTMC_LLAVA_MODEL_DIR")
+        if explicit_model:
+            model = Path(explicit_model)
+        else:
+            from huggingface_hub import snapshot_download
+
+            model = Path(
+                snapshot_download(
+                    MANIFEST["hf_id"], revision=MANIFEST["hf_revision"], local_files_only=True
+                )
+            )
+        assert (model / "config.json").is_file(), "LLaVA checkpoint requires config.json"
     assert MANIFEST["tensor_parallel_size"] == 1
     binary = Path(os.environ["TRTMC_BINARY"])
     runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
-    output = tmp_path_factory.mktemp("llava-e2e")
     reference_cases = []
     for case in MANIFEST["testcases"]:
         assert case["reference_backend"] == "hf_transformers"
@@ -57,36 +87,143 @@ def execution(tmp_path_factory):
         else:
             image_path = ROOT / case["test_image"]
         assert image_path.is_file()
-        reference_cases.append({"name": case["name"], "image": str(image_path),
-                                "prompt": case["prompt"], "max_new_tokens": case["max_new_tokens"]})
+        reference_cases.append(
+            {
+                "name": case["name"],
+                "image": str(image_path),
+                "prompt": case["prompt"],
+                "max_new_tokens": case["max_new_tokens"],
+            }
+        )
     cases_path = output / "reference-cases.json"
     cases_path.write_text(json.dumps(reference_cases))
     bundle = output / MANIFEST["bundle"]
-    build(BuildRequest(model_dir=model, output_path=bundle, family="llava",
-                       task=MANIFEST["task"], precision=MANIFEST["precision"],
-                       max_sequence_length=MANIFEST["max_sequence_length"]))
+    started = time.monotonic()
+    with evidence_stage("build"):
+        build(
+            BuildRequest(
+                model_dir=model,
+                output_path=bundle,
+                family="llava",
+                task=MANIFEST["task"],
+                precision=MANIFEST["precision"],
+                max_sequence_length=MANIFEST["max_sequence_length"],
+            )
+        )
+        inspected = subprocess.run(
+            [str(binary), "inspect", str(bundle)], check=True, capture_output=True, text=True
+        )
+        bundle_info = json.loads(inspected.stdout)
+    build_seconds = time.monotonic() - started
     python = os.environ.get("TRTMC_REFERENCE_PYTHON", sys.executable)
     reference_env = os.environ.copy()
     reference_env.pop("LD_LIBRARY_PATH", None)
-    process = subprocess.run([python, str(ROOT / "reference.py"), "--model-dir", str(model),
-                              "--output", str(output), "--cases", str(cases_path)],
-                             check=True, capture_output=True, text=True,
-                             env=reference_env)
-    record_evidence("reference_process", {"argv": process.args, "stdout": process.stdout, "stderr": process.stderr})
-    reference = json.loads((output / "reference.json").read_text())
-    return binary, runtime, bundle, reference
+    started = time.monotonic()
+    with evidence_stage("reference"):
+        process = subprocess.run(
+            [
+                python,
+                str(ROOT / "reference.py"),
+                "--model-dir",
+                str(model),
+                "--output",
+                str(output),
+                "--cases",
+                str(cases_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=reference_env,
+        )
+        reference = json.loads((output / "reference.json").read_text())
+    preparation = {
+        "shared": True,
+        "cases": [case["name"] for case in MANIFEST["testcases"]],
+        "build_seconds": build_seconds,
+        "reference_seconds": time.monotonic() - started,
+        "bundle_info": bundle_info,
+        "reference_process": {
+            "argv": process.args,
+            "stdout": process.stdout,
+            "stderr": process.stderr,
+        },
+        "output_directory": str(output),
+    }
+    return binary, runtime, bundle, reference, preparation
 
 
-def test_official_checkpoint_e2e(case, execution):
-    binary, runtime, bundle, reference = execution
-    expected = reference[case["name"]]
-    argv = [str(binary), "run", str(bundle), "--runtime-root", str(runtime),
-            "--prompt", case["prompt"], "--image", expected["image"],
-            "--max-new-tokens", str(case["max_new_tokens"]), "--temperature", "0"]
-    process = subprocess.run(argv, check=True, capture_output=True, text=True, timeout=180)
-    record_evidence("native_process", {"argv": argv, "stdout": process.stdout, "stderr": process.stderr})
-    native = json.loads(process.stdout.strip().splitlines()[-1])
+def test_official_checkpoint_e2e(case_name, execution, tmp_path):
+    case = CASES[case_name]
+    record_evidence("inputs", {"manifest": MANIFEST, "case": case, "prompt": case["prompt"]})
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": MANIFEST["hf_id"],
+            "revision": MANIFEST["hf_revision"],
+            "precision": MANIFEST["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds", {"expected_word": case["expected_word"], "token_ids": "exact equality"}
+    )
+    binary, runtime, bundle, reference, preparation = execution()
+    expected = reference[case_name]
+    record_evidence("preparation", preparation)
+    record_evidence(
+        "bundle", {"path": str(bundle), "info": preparation["bundle_info"], "shared": True}
+    )
+    reference_record = {
+        **expected,
+        "mode": case["reference_backend"],
+        "precision": case["reference_precision"],
+        "implementation": "families/llava/tests/reference.py",
+    }
+    if evidence_enabled():
+        # PNG preserves the reference's RGB pixels, including BMP color fixtures.
+        # Native execution still receives the original source file below.
+        image = tmp_path / "input.png"
+        Image.open(expected["image"]).convert("RGB").save(image)
+        record_evidence("inputs", {"image": image})
+        reference_record["image"] = image
+        raw_reference = tmp_path / "reference-record.json"
+        raw_reference.write_text(json.dumps(expected, indent=2))
+        record_evidence("reference_record", raw_reference)
+        intermediate = {}
+        for name in ("pixels", "features"):
+            source = Path(preparation["output_directory"]) / f"{case_name}-{name}.npy"
+            snapshot = tmp_path / source.name
+            shutil.copyfile(source, snapshot)
+            intermediate[name] = snapshot
+        record_evidence("reference_intermediates", intermediate)
+    record_evidence("reference", reference_record)
+    argv = [
+        str(binary),
+        "run",
+        str(bundle),
+        "--runtime-root",
+        str(runtime),
+        "--prompt",
+        case["prompt"],
+        "--image",
+        expected["image"],
+        "--max-new-tokens",
+        str(case["max_new_tokens"]),
+        "--temperature",
+        "0",
+    ]
+    with evidence_stage("native"):
+        process = subprocess.run(argv, check=True, capture_output=True, text=True, timeout=180)
+        native = json.loads(process.stdout.strip().splitlines()[-1])
+    record_evidence(
+        "native_process", {"argv": argv, "stdout": process.stdout, "stderr": process.stderr}
+    )
+    record_evidence("native", native)
     word = case["expected_word"]
-    assert word in re.findall(r"[a-z]+", expected["text"].lower()), expected
-    assert word in re.findall(r"[a-z]+", native["text"].lower()), native
-    assert native["token_ids"] == expected["token_ids"], {"native": native, "reference": expected}
+    with evidence_stage("compare"):
+        assert word in re.findall(r"[a-z]+", expected["text"].lower()), expected
+        assert word in re.findall(r"[a-z]+", native["text"].lower()), native
+        assert native["token_ids"] == expected["token_ids"], {
+            "native": native,
+            "reference": expected,
+        }
