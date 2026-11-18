@@ -56,7 +56,7 @@ def execution(tmp_path_factory):
 
     def prepare():
         if "error" in outcome:
-            for name in ("checkpoint", "reference_process"):
+            for name in ("checkpoint", "bundle_inspection", "reference_process"):
                 if name in outcome:
                     record_evidence(name, outcome[name])
             with evidence_stage(outcome["stage"]):
@@ -136,7 +136,9 @@ def _prepare_execution(output, outcome):
         )
     build_seconds = time.monotonic() - started
     bundle_info = None
-    if evidence_enabled():
+    inspection = {"enabled": evidence_enabled()}
+    outcome["bundle_inspection"] = inspection
+    if inspection["enabled"]:
         try:
             inspected = subprocess.run(
                 [str(binary), "inspect", str(bundle)],
@@ -145,13 +147,27 @@ def _prepare_execution(output, outcome):
                 text=True,
                 timeout=30,
             )
-            record_evidence(
-                "bundle_inspection_process",
-                {"argv": inspected.args, "stdout": inspected.stdout, "stderr": inspected.stderr},
-            )
+            inspection["process"] = {
+                "argv": inspected.args,
+                "stdout": inspected.stdout,
+                "stderr": inspected.stderr,
+            }
+            record_evidence("bundle_inspection_process", inspection["process"])
             bundle_info = json.loads(inspected.stdout)
         except (OSError, subprocess.SubprocessError, ValueError) as error:
+            inspection["error"] = {"type": type(error).__name__, "message": str(error)}
+            if isinstance(error, (subprocess.CalledProcessError, subprocess.TimeoutExpired)):
+                inspection["process"] = {
+                    "argv": error.cmd,
+                    "stdout": error.stdout.decode("utf-8", errors="replace")
+                    if isinstance(error.stdout, bytes)
+                    else error.stdout,
+                    "stderr": error.stderr.decode("utf-8", errors="replace")
+                    if isinstance(error.stderr, bytes)
+                    else error.stderr,
+                }
             record_evidence("attachment_error", {"attachment": "bundle_info", "error": str(error)})
+    record_evidence("bundle_inspection", inspection)
     python = os.environ.get("TRTMC_REFERENCE_PYTHON", sys.executable)
     reference_env = os.environ.copy()
     reference_env.pop("LD_LIBRARY_PATH", None)
@@ -187,6 +203,7 @@ def _prepare_execution(output, outcome):
         "build_seconds": build_seconds,
         "reference_seconds": time.monotonic() - started,
         "bundle_info": bundle_info,
+        "bundle_inspection": inspection,
         "checkpoint": outcome["checkpoint"],
         "reference_process": outcome["reference_process"],
         "output_directory": str(output),
@@ -209,13 +226,15 @@ def test_official_checkpoint_e2e(case_name, execution, tmp_path):
         "thresholds", {"expected_word": case["expected_word"], "token_ids": "exact equality"}
     )
     binary, runtime, bundle, reference, preparation = execution()
-    with evidence_stage("reference"):
-        expected = reference[case_name]
     record_evidence("checkpoint", preparation["checkpoint"])
     record_evidence("preparation", preparation)
+    record_evidence("bundle_inspection", preparation["bundle_inspection"])
+    record_evidence("reference_process", preparation["reference_process"])
     record_evidence(
         "bundle", {"path": str(bundle), "info": preparation["bundle_info"], "shared": True}
     )
+    with evidence_stage("reference"):
+        expected = reference[case_name]
     reference_record = {
         **expected,
         "mode": case["reference_backend"],

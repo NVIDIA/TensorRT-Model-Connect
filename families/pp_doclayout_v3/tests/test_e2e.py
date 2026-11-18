@@ -56,7 +56,7 @@ def _model_dir():
         path = _path(name)
         assert path.is_dir(), f"selected {FAMILY} E2E model path is not a directory: {path}"
         if (path / "config.json").is_file():
-            return path
+            return path, {"from_override": True, "resolved_revision": None}
         # Internal CI points MODEL_DIR at external_files, not the Hub snapshot.
         assert (path / DOCUMENT["path"]).is_file(), (
             f"{name} contains neither checkpoint config.json nor declared layout_demo.jpg: {path}"
@@ -70,14 +70,14 @@ def _model_dir():
                 revision=MANIFEST["hf_revision"],
                 local_files_only=True,
             )
-        )
+        ).resolve()
     except OSError as error:
         raise AssertionError(
             f"selected {FAMILY} E2E requires the exact cached checkpoint "
             f"{MANIFEST['hf_id']}@{MANIFEST['hf_revision']}"
         ) from error
     assert path.is_dir(), f"selected {FAMILY} E2E model path is not a directory: {path}"
-    return path
+    return path, {"from_override": False, "resolved_revision": MANIFEST["hf_revision"]}
 
 
 def _image_path(model_dir):
@@ -270,22 +270,15 @@ def test_official_checkpoint_e2e(request, tmp_path, case_name):
         },
     )
     with evidence_stage("checkpoint"):
-        model_dir = _model_dir()
-        image_path = _image_path(model_dir)
-        override = os.environ.get("TRTMC_PP_DOCLAYOUT_V3_MODEL_DIR")
-        overridden = (
-            bool(override)
-            and (Path(override) / "config.json").is_file()
-            and Path(override).resolve() == model_dir.resolve()
-        )
+        model_dir, checkpoint_source = _model_dir()
         record_evidence(
             "checkpoint",
             {
-                "resolved_directory": str(model_dir.resolve()),
-                "from_override": overridden,
-                "resolved_revision": None if overridden else MANIFEST["hf_revision"],
+                "resolved_directory": str(model_dir),
+                **checkpoint_source,
             },
         )
+        image_path = _image_path(model_dir)
     with evidence_stage("preparation"):
         binary, runtime = _path("TRTMC_BINARY"), _path("TRTMC_RUNTIME_ROOT")
         assert (runtime / "libtrtmc_model_pp_doclayout_v3.so").is_file()
