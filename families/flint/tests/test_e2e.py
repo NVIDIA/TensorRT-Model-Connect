@@ -10,6 +10,9 @@ import numpy as np
 import pytest
 
 from families.flint.tests.inputs import MANIFEST, checkpoint_dir, native_binary
+from tools.e2e_evidence import evidence_stage, record_evidence
+
+CASES = {case["name"]: case for case in MANIFEST["testcases"]}
 
 
 def logit_metrics(actual, expected):
@@ -34,10 +37,11 @@ def assert_logit_metrics(metrics, thresholds):
     assert metrics["top1_agreement"] >= thresholds["min_top1_agreement"]
 
 
-@pytest.mark.parametrize("case", MANIFEST["testcases"], ids=lambda case: case["name"])
-def test_flint_e2e(request, tmp_path, case):
+@pytest.mark.parametrize("case_name", sorted(CASES))
+def test_flint_e2e(request, tmp_path, case_name):
     directory = Path(__file__).parent
     manifest = MANIFEST
+    case = CASES[case_name]
     values = (request.config.getoption("--e2e-model", default=[]) or []) + (
         request.config.getoption("--e2e-testcase", default=[]) or []
     )
@@ -53,6 +57,16 @@ def test_flint_e2e(request, tmp_path, case):
         pytest.skip("Flint was not selected")
     if not selected and os.environ.get("TRTMC_E2E") != "1":
         pytest.skip("requires explicit Flint E2E selection")
+    record_evidence("inputs", {"manifest": manifest, "case": case, "prompt": case["prompt"]})
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+            "trust_remote_code": manifest["trust_remote_code"],
+        },
+    )
     from tokenizers import Tokenizer
     import torch
     from tensorrt_model_connect import BuildRequest, build
@@ -64,7 +78,9 @@ def test_flint_e2e(request, tmp_path, case):
     thresholds = json.loads((directory / "thresholds" / (case["name"] + ".json")).read_text())[
         "threshold_overrides"
     ]
-    checkpoint = checkpoint_dir()
+    record_evidence("thresholds", thresholds)
+    with evidence_stage("checkpoint"):
+        checkpoint = checkpoint_dir()
     # These local-dir download receipts identify every fetched shard's commit;
     # a manually supplied checkpoint must provide the same pinned receipts.
     if checkpoint.parent.name == "snapshots":
@@ -88,16 +104,17 @@ def test_flint_e2e(request, tmp_path, case):
     supplied = os.environ.get("TRTMC_FLINT_BUNDLE")
     bundle = Path(supplied) if supplied else tmp_path / manifest["bundle"]
     if not supplied:
-        build(
-            BuildRequest(
-                model_dir=checkpoint,
-                output_path=bundle,
-                family=family,
-                task=manifest["task"],
-                precision=manifest["precision"],
-                max_sequence_length=manifest["max_sequence_length"],
+        with evidence_stage("build"):
+            build(
+                BuildRequest(
+                    model_dir=checkpoint,
+                    output_path=bundle,
+                    family=family,
+                    task=manifest["task"],
+                    precision=manifest["precision"],
+                    max_sequence_length=manifest["max_sequence_length"],
+                )
             )
-        )
     assert bundle.is_file() and bundle.stat().st_size > 70_000_000_000
     inspected = subprocess.run(
         [str(binary), "inspect", str(bundle)], check=True, capture_output=True, text=True
@@ -107,45 +124,73 @@ def test_flint_e2e(request, tmp_path, case):
     assert info["provenance"]["build"]["precision"] == manifest["precision"]
     assert info["provenance"]["build"]["max_sequence_length"] == manifest["max_sequence_length"]
     assert info["provenance"]["build"]["tensor_parallel_size"] == manifest["tensor_parallel_size"]
+    record_evidence("bundle", {"path": str(bundle), "info": info, "prebuilt": bool(supplied)})
     trace_binary = native_binary("flint_logits_trace")
     prefix = tmp_path / "native"
-    subprocess.run(
-        [
-            str(trace_binary),
-            str(bundle),
-            str(runtime),
-            str(prefix),
-            case["prompt"],
-            str(case["max_new_tokens"]),
-        ],
-        check=True,
+    command = [
+        str(trace_binary),
+        str(bundle),
+        str(runtime),
+        str(prefix),
+        case["prompt"],
+        str(case["max_new_tokens"]),
+    ]
+    record_evidence("commands", {"native": command})
+    with evidence_stage("native"):
+        subprocess.run(command, check=True)
+        metadata = json.loads(prefix.with_suffix(".json").read_text())
+        actual = np.fromfile(prefix.with_suffix(".f32"), dtype=np.float32).reshape(
+            metadata["rows"], metadata["columns"]
+        )
+    record_evidence(
+        "native",
+        {
+            **metadata,
+            "token_ids": metadata["generated_ids"],
+            "logits": actual,
+        },
     )
-    metadata = json.loads(prefix.with_suffix(".json").read_text())
     assert metadata["request_replay"]
     tokenizer = Tokenizer.from_file(str(checkpoint / "tokenizer.json"))
     ids = tokenizer.encode(case["prompt"], add_special_tokens=False).ids
     assert ids == metadata["prompt_ids"], "native tokenization must match upstream exactly"
-    assert metadata["text"] == tokenizer.decode(metadata["generated_ids"], skip_special_tokens=True), (
-        "native generated text must match independent decoding"
-    )
-    actual = np.fromfile(prefix.with_suffix(".f32"), dtype=np.float32).reshape(
-        metadata["rows"], metadata["columns"]
-    )
+    assert metadata["text"] == tokenizer.decode(
+        metadata["generated_ids"], skip_special_tokens=True
+    ), "native generated text must match independent decoding"
     assert np.isfinite(actual).all()
     torch.set_num_threads(8)
-    reference = Reference(checkpoint)
     # Teacher forcing uses exactly the native prefix at every compared step.
     tokens = ids + metadata["generated_ids"][:-1]
-    expected = np.stack(
-        [row for i, row in enumerate(reference.logits_for_tokens(tokens)) if i >= len(ids) - 1]
+    with evidence_stage("reference"):
+        reference = Reference(checkpoint)
+        expected = np.stack(
+            [row for i, row in enumerate(reference.logits_for_tokens(tokens)) if i >= len(ids) - 1]
+        )
+    reference_ids = expected.argmax(-1).tolist()
+    record_evidence(
+        "reference",
+        {
+            "mode": "teacher_forced",
+            "implementation": "families/flint/tests/reference.py",
+            "precision": case["reference_precision"],
+            "prefix_token_ids": tokens,
+            "token_ids": reference_ids,
+            "text": tokenizer.decode(reference_ids, skip_special_tokens=True),
+            "logits": expected,
+        },
     )
-    metrics = logit_metrics(actual, expected)
+    with evidence_stage("compare"):
+        metrics = logit_metrics(actual, expected)
+    record_evidence("metrics", metrics)
     evidence = {
         "checkpoint": manifest["hf_id"],
         "revision": manifest["hf_revision"],
         **metrics,
         "native": metadata,
     }
-    (tmp_path / "comparison.json").write_text(json.dumps(evidence, indent=2))
+    comparison = tmp_path / "comparison.json"
+    comparison.write_text(json.dumps(evidence, indent=2))
+    record_evidence("comparison_json", comparison)
     print(json.dumps(evidence, indent=2), flush=True)
-    assert_logit_metrics(metrics, thresholds)
+    with evidence_stage("compare"):
+        assert_logit_metrics(metrics, thresholds)
