@@ -24,6 +24,11 @@ int main(int argc, char** argv) {
     std::ofstream output(argv[4], std::ios::binary);
     output.write(reinterpret_cast<const char*>(result.samples().data()),
                  result.samples().size() * sizeof(float));
+    output.close();
+    if (!output) {
+        std::cerr << "Could not write HiggsAudioV2Tokenizer PCM output\n";
+        return 2;
+    }
     std::cout << nlohmann::json{{"samples", result.samples().size()},
                                 {"rate", result.sample_rate()},
                                 {"channels", result.channels()}}

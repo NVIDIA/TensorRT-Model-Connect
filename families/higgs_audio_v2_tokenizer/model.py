@@ -32,13 +32,25 @@ def build(request, writer):
     directory = Path(request.model_dir)
     cfg = json.loads((directory / "config.json").read_text())
     if (
-        cfg["model_type"] != "higgs_audio_v2_tokenizer"
+        cfg.get(
+            "model_type",
+            "higgs_audio_v2_tokenizer"
+            if "HiggsAudioV2TokenizerModel" in cfg.get("architectures", [])
+            else None,
+        )
+        != "higgs_audio_v2_tokenizer"
         or cfg["acoustic_model_config"]["model_type"] != "dac"
     ):
         raise ValueError("Expected a Higgs Audio V2 tokenizer with a DAC decoder")
     frames = request.max_sequence_length or 50
     if not 1 <= frames <= 250:
         raise ValueError("Higgs Audio V2 supports 1 to 250 codec frames")
+    sample_rate = cfg.get("sample_rate", 24000)
+    vocabulary = cfg["codebook_size"]
+    if type(sample_rate) is not int or not 0 < sample_rate <= 2**32 - 1:
+        raise ValueError("Higgs Audio V2 requires a positive uint32 PCM sample rate")
+    if type(vocabulary) is not int or not 0 < vocabulary <= 2**31 - 1:
+        raise ValueError("Higgs Audio V2 requires a positive int32 codebook vocabulary")
     from safetensors import safe_open
 
     with safe_open(str(directory / "model.safetensors"), framework="np") as handle:
@@ -48,8 +60,12 @@ def build(request, writer):
             if name.startswith(("quantizer.", "fc2.", "acoustic_decoder."))
         }
     books = len([name for name in weights if name.endswith(".codebook.embed")])
-    if not books:
-        raise ValueError("Higgs Audio V2 checkpoint has no residual codebooks")
+    if not 1 <= books <= 64:
+        raise ValueError("Higgs Audio V2 requires 1 to 64 residual codebooks")
+    for index in range(books):
+        key = f"quantizer.quantizers.{index}.codebook.embed"
+        if weights[key].ndim != 2 or weights[key].shape[0] != vocabulary:
+            raise ValueError(f"Higgs Audio V2 codebook vocabulary disagrees with {key}")
     decoder = cfg["acoustic_model_config"]
     logger = trt.Logger(trt.Logger.VERBOSE if request.verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -148,8 +164,8 @@ def build(request, writer):
         dict(
             frames=frames,
             codebooks=books,
-            vocabulary_size=cfg["codebook_size"],
+            vocabulary_size=vocabulary,
             samples=frames * int(np.prod(decoder["upsampling_ratios"])),
-            sample_rate=cfg["sample_rate"],
+            sample_rate=sample_rate,
         ),
     )

@@ -8,6 +8,7 @@
 #include "trtmc/runtime/trt_backend.h"
 
 #include <cmath>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 
@@ -76,15 +77,31 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
             "HiggsAudioV2Tokenizer requires codec token decoding without an external cache");
     const auto raw = higgs_audio_v2_tokenizer::section(context.reader, "runtime.json");
     const auto cfg = nlohmann::json::parse(raw.begin(), raw.end());
-    const int64_t frames = cfg.at("frames"), books = cfg.at("codebooks"),
-                  samples = cfg.at("samples"), rate = cfg.at("sample_rate");
-    if (frames <= 0 || frames > 250 || books <= 0 || books > 64 ||
-        cfg.at("vocabulary_size").get<int64_t>() <= 0 || samples <= 0 || rate <= 0 ||
-        rate > UINT32_MAX)
-        throw std::runtime_error("Invalid HiggsAudioV2Tokenizer audio profile");
+    auto integer = [&](const char* name, uint64_t maximum) {
+        const auto& value = cfg.at(name);
+        if (!value.is_number_integer() || value < 1 || value > maximum)
+            throw std::runtime_error(
+                std::string("Invalid HiggsAudioV2Tokenizer integer profile field: ") + name);
+        return value.get<uint64_t>();
+    };
+    const auto frames = integer("frames", 250);
+    const auto books = integer("codebooks", 64);
+    const auto samples = integer("samples", std::numeric_limits<int64_t>::max() / sizeof(float));
+    const auto rate = integer("sample_rate", UINT32_MAX);
+    const auto vocabulary = integer("vocabulary_size", INT32_MAX);
+    const nlohmann::json profile{{"frames", frames},
+                                 {"codebooks", books},
+                                 {"samples", samples},
+                                 {"sample_rate", rate},
+                                 {"vocabulary_size", vocabulary}};
     const auto plan = higgs_audio_v2_tokenizer::section(context.reader, "model.plan");
     auto engine = context.backend.create_module(plan.data(), plan.size(), {});
     if (!engine || !engine->ok())
         throw std::runtime_error("HiggsAudioV2Tokenizer engine failed to load");
-    return new higgs_audio_v2_tokenizer::Pipeline(std::move(engine), cfg);
+    if (!engine->has_input("codes") || engine->tensor_dtype("codes") != DType::kInt32 ||
+        engine->tensor_shape("codes") !=
+            std::vector<int64_t>{static_cast<int64_t>(books), static_cast<int64_t>(frames)})
+        throw std::runtime_error(
+            "HiggsAudioV2Tokenizer codes binding differs from its runtime profile");
+    return new higgs_audio_v2_tokenizer::Pipeline(std::move(engine), profile);
 }
