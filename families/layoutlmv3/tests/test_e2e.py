@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "layoutlmv3"
 TASKS = frozenset({"document_words_to_token_features"})
@@ -208,16 +209,44 @@ def _bundle_section(path, name):
 
 
 def test_official_checkpoint_e2e(case_name, tmp_path):
+    _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    if evidence_enabled():
+        for key in ("image", "test_image", "audio"):
+            if key in case:
+                for source in (TEST_ROOT / case[key], TEST_ROOT / "data" / case[key]):
+                    if source.is_file():
+                        record_evidence("inputs", {key: source})
+                        break
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {
+            key: value
+            for key, value in case.items()
+            if any(word in key for word in ("error", "cosine", "atol", "rtol", "snr", "rmse"))
+        },
+    )
     import numpy as np
     import torch
     from PIL import Image
     from transformers import LayoutLMv3ImageProcessor, LayoutLMv3Model, LayoutLMv3Tokenizer
 
     _, manifest, case = CASES[case_name]
-    directory = _model_dir(manifest)
+    with evidence_stage("checkpoint"):
+        directory = _model_dir(manifest)
     _, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
-    _build(directory, bundle, manifest)
+    with evidence_stage("build"):
+        _build(directory, bundle, manifest)
+    record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
     config = json.loads(_bundle_section(bundle, "runtime.json"))
     tokenizer_path = tmp_path / "tokenizer.json"
     tokenizer_path.write_bytes(_bundle_section(bundle, "tokenizer.json"))
@@ -247,6 +276,11 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     length = manifest["max_sequence_length"]
     total = length + 197
     for index, (image, words, boxes) in enumerate(documents):
+        image_path = tmp_path / f"document-{index}.png"
+        image.save(image_path)
+        record_evidence(
+            "inputs", {"sample": index, "image": image_path, "words": words, "boxes": boxes}
+        )
         pixels = np.asarray(image, dtype=np.float32) / 255
         source = tmp_path / f"image-{index}.f32"
         source.write_bytes(pixels.astype("<f4").tobytes())
@@ -310,6 +344,20 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         assert encoded["word_indices"] == word_indices
         expected_pixels = visual[0].numpy()
         actual_pixels = np.fromfile(native_pixels, dtype="<f4").reshape(3, 224, 224)
+        record_evidence(
+            "native_preprocessing", {"sample": index, "pixels": actual_pixels, **encoded}
+        )
+        record_evidence(
+            "reference_preprocessing",
+            {
+                "sample": index,
+                "pixels": expected_pixels,
+                "input_ids": text.input_ids[0].tolist(),
+                "attention_mask": text.attention_mask[0].tolist(),
+                "bbox": text.bbox[0].numpy(),
+                "word_indices": word_indices,
+            },
+        )
         np.testing.assert_allclose(actual_pixels, expected_pixels, atol=case["pixel_atol"], rtol=0)
         all_boxes = torch.cat([text.bbox[0], reference.visual_bbox.cpu()], dim=0)
         for path, axis in [(rx, 0), (ry, 3)]:
@@ -351,11 +399,23 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             ],
         )
         actual = np.fromfile(target, dtype="<f4").reshape(length, 768)
+        record_evidence("native", {"sample": index, "features": actual, "metadata": payload})
+        record_evidence(
+            "reference", {"mode": "hf_transformers", "sample": index, "features": expected}
+        )
+        record_evidence(
+            "native_process",
+            {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+        )
         assert actual.shape == expected.shape and np.isfinite(actual).all()
         maximum = float(np.max(np.abs(actual - expected)))
         cosine = np.sum(actual.astype(np.float64) * expected, axis=1) / (
             np.linalg.norm(actual.astype(np.float64), axis=1)
             * np.linalg.norm(expected.astype(np.float64), axis=1)
+        )
+        record_evidence(
+            "metrics",
+            {"sample": index, "max_abs_error": maximum, "min_cosine": float(cosine.min())},
         )
         assert maximum <= case["max_abs_error"]
         assert float(cosine.min()) >= case["min_cosine"]
