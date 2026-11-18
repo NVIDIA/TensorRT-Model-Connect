@@ -11,11 +11,13 @@ import shutil
 import subprocess
 import tempfile
 import wave
+from itertools import zip_longest
 from pathlib import Path
 
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "wavlm"
 TASKS = frozenset({"speech_transcription"})
@@ -311,15 +313,125 @@ def _assert_parity(native: dict, reference_text: str, reference_ids: list[int],
     print(f"wavlm parity: {len(token_ids)} CTC tokens, transcript {text!r}")
 
 
+def _record_reference_comparison(
+    native: dict,
+    reference_text: str,
+    reference_ids: list[int],
+    thresholds: dict,
+    case: dict,
+    tmp_path: Path,
+) -> None:
+    """Record each check of `_assert_parity` with its values, without adding a gate.
+
+    Every check states the measured value, the operator and the limit that
+    `_assert_parity` applies; `passed` is the verdict that function reaches.
+    """
+    if not evidence_enabled():
+        return
+    try:
+        text = str(native["text"])
+        token_ids = [int(value) for value in native["token_ids"]]
+        native_path = tmp_path / "transcription-native.json"
+        reference_path = tmp_path / "transcription-reference.json"
+        native_path.write_text(
+            json.dumps({"text": text, "token_ids": token_ids}) + "\n", encoding="utf-8"
+        )
+        reference_path.write_text(
+            json.dumps({"text": reference_text, "token_ids": reference_ids}) + "\n",
+            encoding="utf-8",
+        )
+        checks = [
+            {
+                "name": "reference_characters",
+                "label": "Non-blank reference transcript characters",
+                "scope": "contract",
+                "actual": len(reference_text.strip()),
+                "operator": ">=",
+                "expected": 1,
+                "passed": bool(reference_text.strip()),
+            }
+        ]
+        bound = thresholds.get("max_character_error_rate")
+        if bound is not None:
+            rate = _character_edits(reference_text, text) / len(reference_text)
+            checks.append(
+                {
+                    "name": "character_error_rate",
+                    "label": "Character error rate against the reference transcript",
+                    "scope": "independent_reference",
+                    "actual": rate,
+                    "operator": "<=",
+                    "expected": float(bound),
+                    "passed": rate <= float(bound),
+                }
+            )
+        else:
+            checks += [
+                {
+                    "name": "transcript_character_edits",
+                    "label": "Character edits between the native and reference transcripts",
+                    "scope": "independent_reference",
+                    "actual": _character_edits(reference_text, text),
+                    "operator": "==",
+                    "expected": 0,
+                    "passed": text == reference_text,
+                },
+                {
+                    "name": "token_id_mismatches",
+                    "label": "CTC token IDs that differ from the reference",
+                    "scope": "independent_reference",
+                    "actual": sum(a != b for a, b in zip_longest(token_ids, reference_ids)),
+                    "operator": "==",
+                    "expected": 0,
+                    "passed": token_ids == reference_ids,
+                },
+            ]
+        record_evidence(
+            "reference_comparison",
+            {
+                "label": f"Transcription of {Path(str(case['test_input_audio'])).name}",
+                "scope": "independent_reference",
+                "enforced": True,
+                "native": native_path,
+                "reference": reference_path,
+                "checks": checks,
+            },
+        )
+    except Exception as error:
+        record_evidence("comparison_preview", {"error": f"{type(error).__name__}: {error}"})
+
+
 def test_e2e(tmp_path: Path, case_name: str) -> None:
     manifest_path, manifest, case = CASES[case_name]
     assert manifest_path.is_file()
+    record_evidence(
+        "inputs",
+        {"manifest": manifest, "case": case, "audio": TEST_ROOT / str(case["test_input_audio"])},
+    )
     binary, runtime_root = _runtime()
     model_dir = _model_dir(manifest)
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     bundle = tmp_path / str(manifest["bundle"])
-    _build(model_dir, bundle, manifest)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
     assert bundle.is_file(), f"{FAMILY} bundle was not produced: {bundle}"
 
-    native = _native(binary, runtime_root, bundle, case)
-    reference_text, reference_ids = _official_reference(model_dir, case)
-    _assert_parity(native, reference_text, reference_ids, _thresholds(case_name))
+    with evidence_stage("native"):
+        native = _native(binary, runtime_root, bundle, case)
+    record_evidence("native", native)
+    with evidence_stage("reference"):
+        reference_text, reference_ids = _official_reference(model_dir, case)
+    record_evidence("reference", {"text": reference_text, "token_ids": reference_ids})
+    with evidence_stage("compare"):
+        thresholds = record_evidence("thresholds", _thresholds(case_name))
+        _record_reference_comparison(
+            native, reference_text, reference_ids, thresholds, case, tmp_path
+        )
+        _assert_parity(native, reference_text, reference_ids, thresholds)
