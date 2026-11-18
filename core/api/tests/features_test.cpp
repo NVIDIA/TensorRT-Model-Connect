@@ -62,7 +62,8 @@ void video_features(const std::filesystem::path& root, const trtmc::LoadOptions&
         retained.features().rows == 3 && retained.features().columns == 2 &&
             retained.features().values[2] == 0.25F && retained.features().values[4] == 0.75F &&
             retained.features().values[3] == 2 && retained.features().values[5] == 2.5F &&
-            retained.tokens()[0].role == TRTMC_VIDEO_TOKEN_CLASS &&
+            retained.tokens().size() == 3 && retained.tokens()[0].role == TRTMC_VIDEO_TOKEN_CLASS &&
+            retained.tokens()[1].frame_begin == 0 && retained.tokens()[1].frame_end == 1 &&
             retained.tokens()[2].frame_begin == 1 && retained.tokens()[2].frame_end == 2 &&
             retained.grid_frames() == 2 && retained.source_frame_count() == 2,
         "video feature values, frame order, times and patch spans reach the correct owned result");
@@ -82,11 +83,10 @@ void video_features(const std::filesystem::path& root, const trtmc::LoadOptions&
     for (const auto* mode : {"video_bad_span", "video_bad_grid", "video_bad_count"}) {
         const auto bad = root / (std::string(mode) + ".bundle");
         bundle(bad, mode);
-        rejects(
-            [&] {
-                (void)Model::load(bad.string(), options).task<VideoToTokenFeatures>().run(input);
-            },
-            TRTMC_INTERNAL_ERROR, "invalid family video feature geometry rejected");
+        const auto bad_model = Model::load(bad.string(), options);
+        const auto bad_task = bad_model.task<VideoToTokenFeatures>();
+        rejects([&] { (void)bad_task.run(input); }, TRTMC_INTERNAL_ERROR,
+                "invalid family video feature geometry rejected");
         std::filesystem::remove(bad);
     }
     input.video.frames.clear();

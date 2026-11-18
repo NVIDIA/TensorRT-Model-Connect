@@ -49,6 +49,7 @@ def build(request, writer):
         or preprocessing["image_std"] != [0.229, 0.224, 0.225]
         or preprocessing["rescale_factor"] != 1 / 255
         or preprocessing["crop_size"] != dict(height=size, width=size)
+        or preprocessing["size"]["shortest_edge"] < size
     ):
         raise ValueError("Unsupported V-JEPA2 encoder or video preprocessing")
     patch, tubelet, width, heads = [
@@ -108,9 +109,9 @@ def build(request, writer):
         layer.second_transpose = (0, 2, 1, 3)
         return layer.get_output(0)
 
-    indices = torch.arange(length)
+    indices = torch.arange(length, device="cpu")
     positions = [indices // (grid * grid), indices // grid % grid, indices % grid]
-    omega = torch.arange(rotary_dim // 2, dtype=torch.float32) / (rotary_dim / 2)
+    omega = torch.arange(rotary_dim // 2, dtype=torch.float32, device="cpu") / (rotary_dim / 2)
     omega = 1.0 / 10000**omega
     tables = []
     for position in positions:

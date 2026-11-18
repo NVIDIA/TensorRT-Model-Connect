@@ -27,6 +27,11 @@ int main() {
             trtmc::vjepa2::preprocess(pixels.data() + frame * frame_size, h, w, 292, 256);
         result.write(reinterpret_cast<const char*>(output.data()), output.size() * sizeof(float));
     }
+    result.close();
+    if (!result) {
+        std::cerr << "Could not write V-JEPA2 pixels: " << input.at("output") << '\n';
+        return 2;
+    }
     std::cout << nlohmann::json{{"height", geometry.height},
                                 {"width", geometry.width},
                                 {"top", geometry.top},

@@ -31,17 +31,34 @@ int main(int argc, char** argv) {
     std::ofstream output(argv[4], std::ios::binary);
     output.write(reinterpret_cast<const char*>(features.values.data()),
                  features.values.size() * sizeof(float));
+    output.close();
+    if (!output) {
+        std::cerr << "Could not write V-JEPA2 features: " << argv[4] << '\n';
+        return 2;
+    }
     auto token = [](const trtmc::VideoFeatureToken& value) {
         return nlohmann::json{{"role", value.role},
                               {"grid", {value.grid_frame, value.grid_row, value.grid_column}},
                               {"span", {value.frame_begin, value.frame_end}},
                               {"box", {value.x_min, value.y_min, value.x_max, value.y_max}}};
     };
+    const auto tokens_path = std::string(argv[4]) + ".tokens.json";
+    std::ofstream tokens_file(tokens_path);
+    nlohmann::json tokens = nlohmann::json::array();
+    for (const auto& value : result.tokens())
+        tokens.push_back(token(value));
+    tokens_file << tokens.dump();
+    tokens_file.close();
+    if (!tokens_file) {
+        std::cerr << "Could not write V-JEPA2 token metadata: " << tokens_path << '\n';
+        return 2;
+    }
     std::cout << nlohmann::json{{"rows", features.rows},
                                 {"columns", features.columns},
                                 {"grid",
                                  {result.grid_frames(), result.grid_rows(), result.grid_columns()}},
                                 {"source_frames", result.source_frame_count()},
+                                {"tokens_path", tokens_path},
                                 {"first", token(result.tokens()[0])},
                                 {"last", token(result.tokens()[result.tokens().size() - 1])}}
                      .dump()

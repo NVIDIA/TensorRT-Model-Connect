@@ -129,5 +129,9 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     auto engine = context.backend.create_module(plan.data(), plan.size(), {});
     if (!engine || !engine->ok())
         throw std::runtime_error("V-JEPA2 encoder failed to load");
+    if (!engine->has_input("pixel_values") ||
+        engine->tensor_dtype("pixel_values") != DType::kFloat32 ||
+        engine->tensor_shape("pixel_values") != std::vector<int64_t>{1, 3, frames, size, size})
+        throw std::runtime_error("V-JEPA2 pixel_values binding differs from its runtime profile");
     return new vjepa2::Pipeline(std::move(engine), cfg);
 }

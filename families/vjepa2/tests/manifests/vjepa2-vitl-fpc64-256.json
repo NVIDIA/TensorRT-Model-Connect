@@ -18,5 +18,6 @@
       "max_abs_error": 0.0002,
       "min_cosine": 0.99999
     }
-  ]
+  ],
+  "reference_environment": "isolated"
 }

@@ -230,6 +230,20 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
     from torchvision.transforms import functional as vision
     from torchvision.transforms import InterpolationMode
     from transformers import AutoVideoProcessor, VJEPA2Model
+    import sys
+    import transformers
+
+    record_evidence(
+        "reference_environment",
+        {
+            "requested": manifest.get("reference_environment", "default"),
+            "python": sys.executable,
+            "transformers": transformers.__version__,
+        },
+    )
+    assert transformers.__version__ == "5.20.0", (
+        "V-JEPA2 parity requires the original pinned Transformers5.20.0 reference"
+    )
 
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
@@ -239,7 +253,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         {
             "model_dir": str(directory),
             "hf_revision": checkpoint_revision,
-            "revision_status": "unverified" if checkpoint_revision is None else "pinned_cache_lookup",
+            "revision_status": "unverified"
+            if checkpoint_revision is None
+            else "pinned_cache_lookup",
         },
     )
     _, runtime_root = _runtime()
@@ -321,6 +337,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
     )
     base = np.asarray(image, dtype=np.float32) / 255
     clip = np.stack([np.roll(base, 2 * index, axis=1) for index in range(64)])
+    comparison_failures = []
     for label, video in [("forward", clip), ("reversed", clip[::-1])]:
         video = np.ascontiguousarray(video)
         source = tmp_path / f"video-{label}.f32"
@@ -371,6 +388,29 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
             atol=1e-7,
             rtol=0,
         )
+        tokens_path = Path(metadata["tokens_path"])
+        tokens = json.loads(tokens_path.read_text())
+        record_evidence(
+            "token_geometry", {"sample": label, "all_tokens": tokens_path, "expected_rows": 8192}
+        )
+        assert len(tokens) == 8192
+        cells = np.arange(8192)
+        expected_grid = np.column_stack([cells // 256, cells // 16 % 16, cells % 16])
+        expected_span = np.column_stack([expected_grid[:, 0] * 2, (expected_grid[:, 0] + 1) * 2])
+        assert all(token["role"] == 1 for token in tokens)
+        assert np.array_equal(np.asarray([token["grid"] for token in tokens]), expected_grid)
+        assert np.array_equal(np.asarray([token["span"] for token in tokens]), expected_span)
+        expected_boxes = np.column_stack(
+            [
+                (left + expected_grid[:, 2] * 16) / rw,
+                (top + expected_grid[:, 1] * 16) / rh,
+                (left + (expected_grid[:, 2] + 1) * 16) / rw,
+                (top + (expected_grid[:, 1] + 1) * 16) / rh,
+            ]
+        )
+        np.testing.assert_allclose(
+            np.asarray([token["box"] for token in tokens]), expected_boxes, atol=1e-7, rtol=0
+        )
         actual = np.fromfile(target, dtype="<f4").reshape(8192, 1024)
         if evidence_enabled():
             pair = {}
@@ -407,7 +447,12 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
             {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
         )
         assert expected.shape == actual.shape and np.isfinite(actual).all()
-        np.testing.assert_allclose(actual, expected, atol=case["max_abs_error"], rtol=0)
+        absolute_passed = True
+        try:
+            np.testing.assert_allclose(actual, expected, atol=case["max_abs_error"], rtol=0)
+        except AssertionError as error:
+            absolute_passed = False
+            comparison_failures.append(f"{label} full-feature absolute error: {error}")
         cosine = np.sum(actual * expected, axis=1) / (
             np.linalg.norm(actual, axis=1) * np.linalg.norm(expected, axis=1)
         )
@@ -419,7 +464,43 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
                 "min_cosine": float(cosine.min()),
             },
         )
-        assert float(cosine.min()) >= case["min_cosine"]
+        cosine_passed = True
+        try:
+            assert float(cosine.min()) >= case["min_cosine"]
+        except AssertionError as error:
+            cosine_passed = False
+            comparison_failures.append(f"{label} full-feature cosine: {error}")
+        if evidence_enabled():
+            record_evidence(
+                "reference_comparison",
+                {
+                    "label": f"V-JEPA2 {label} full clip features",
+                    "scope": "independent_reference",
+                    "enforced": True,
+                    **pair,
+                    "checks": [
+                        {
+                            "name": "max_abs_error",
+                            "scope": "independent_reference",
+                            "actual": float(np.max(np.abs(actual - expected))),
+                            "operator": "<=",
+                            "expected": case["max_abs_error"],
+                            "passed": absolute_passed,
+                        },
+                        {
+                            "name": "min_cosine",
+                            "scope": "independent_reference",
+                            "actual": float(cosine.min()),
+                            "operator": ">=",
+                            "expected": case["min_cosine"],
+                            "passed": cosine_passed,
+                        },
+                    ],
+                },
+            )
         print(
             f"V-JEPA2 {label}: max_abs={np.max(np.abs(actual - expected)):.7g}, min_cosine={cosine.min():.8f}"
         )
+
+    if comparison_failures:
+        raise AssertionError("\n\n".join(comparison_failures))

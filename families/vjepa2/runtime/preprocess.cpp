@@ -15,14 +15,15 @@ struct SpanWeights {
     int32_t first;
     std::vector<float> values;
 };
-std::vector<SpanWeights> bilinear_plan(int32_t source, int32_t target) {
+std::vector<SpanWeights> bilinear_plan(int32_t source, int32_t target, int32_t offset,
+                                       int32_t count) {
     // The float input path of PyTorch's separable antialiased bilinear resize:
     // triangular filter, half-pixel centers and renormalized boundary support.
     const float scale = static_cast<float>(source) / target;
     const float support = std::max(scale, 1.0F), inverse = scale >= 1 ? 1.0 / scale : 1.0;
-    std::vector<SpanWeights> result(target);
-    for (int32_t i = 0; i < target; ++i) {
-        const float center = scale * (i + 0.5);
+    std::vector<SpanWeights> result(count);
+    for (int32_t i = 0; i < count; ++i) {
+        const float center = scale * (offset + i + 0.5);
         const int32_t first = std::max(static_cast<int32_t>(center - support + 0.5), 0);
         const int32_t end = std::min(static_cast<int32_t>(center + support + 0.5), source);
         auto& span = result[i];
@@ -63,10 +64,11 @@ std::vector<float> preprocess(const float* rgb, int32_t h, int32_t w, int32_t sh
     if (!rgb)
         throw std::invalid_argument("V-JEPA2 requires RGB pixels");
     const auto geometry = image_geometry(h, w, shortest, crop);
-    const auto xp = bilinear_plan(w, geometry.width), yp = bilinear_plan(h, geometry.height);
-    std::vector<float> horizontal(static_cast<std::size_t>(h) * geometry.width * 3);
+    const auto xp = bilinear_plan(w, geometry.width, geometry.left, crop);
+    const auto yp = bilinear_plan(h, geometry.height, geometry.top, crop);
+    std::vector<float> horizontal(static_cast<std::size_t>(h) * crop * 3);
     for (int32_t y = 0; y < h; ++y) {
-        for (int32_t x = 0; x < geometry.width; ++x) {
+        for (int32_t x = 0; x < crop; ++x) {
             const auto& span = xp[x];
             for (int32_t c = 0; c < 3; ++c) {
                 float value = 0;
@@ -77,7 +79,7 @@ std::vector<float> preprocess(const float* rgb, int32_t h, int32_t w, int32_t sh
                         throw std::invalid_argument("V-JEPA2 frame contains nonfinite RGB");
                     value += (source * 255.0F) * span.values[k];
                 }
-                horizontal[(static_cast<std::size_t>(y) * geometry.width + x) * 3 + c] = value;
+                horizontal[(static_cast<std::size_t>(y) * crop + x) * 3 + c] = value;
             }
         }
     }
@@ -86,15 +88,12 @@ std::vector<float> preprocess(const float* rgb, int32_t h, int32_t w, int32_t sh
     const auto plane = static_cast<std::size_t>(crop) * crop;
     std::vector<float> output(3 * plane);
     for (int32_t y = 0; y < crop; ++y) {
-        const auto& span = yp[y + geometry.top];
+        const auto& span = yp[y];
         for (int32_t x = 0; x < crop; ++x) {
             for (int32_t c = 0; c < 3; ++c) {
                 float value = 0;
                 for (std::size_t k = 0; k < span.values.size(); ++k)
-                    value +=
-                        horizontal[((span.first + k) * geometry.width + x + geometry.left) * 3 +
-                                   c] *
-                        span.values[k];
+                    value += horizontal[((span.first + k) * crop + x) * 3 + c] * span.values[k];
                 output[c * plane + y * crop + x] = (value - mean[c]) / deviation[c];
             }
         }
