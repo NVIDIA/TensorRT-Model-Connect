@@ -105,10 +105,10 @@ def _native_test_binary(name: str) -> Path:
     return _required_path(str(build_dir / name), name)
 
 
-def _model_dir(manifest: dict) -> Path:
+def _model_dir(manifest: dict) -> tuple[Path, str | None]:
     explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
     if explicit:
-        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR"), None
     from huggingface_hub import snapshot_download
 
     try:
@@ -119,7 +119,7 @@ def _model_dir(manifest: dict) -> Path:
         raise AssertionError(
             f"selected {FAMILY} E2E requires the exact cached checkpoint {manifest['hf_id']}"
         ) from error
-    return Path(snapshot)
+    return Path(snapshot), manifest["hf_revision"]
 
 
 def _runtime() -> tuple[Path, Path]:
@@ -196,7 +196,7 @@ def _run_json(
     return payloads[0]
 
 
-def test_official_checkpoint_e2e(case_name, tmp_path):
+def test_official_checkpoint_e2e(case_name, tmp_path, request):
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
     if evidence_enabled():
@@ -209,8 +209,10 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     record_evidence(
         "checkpoint",
         {
-            "repo_id": manifest["hf_id"],
-            "revision": manifest["hf_revision"],
+            "hf_id": manifest["hf_id"],
+            "expected_hf_revision": manifest["hf_revision"],
+            "hf_revision": None,
+            "revision_status": "unresolved",
             "precision": manifest["precision"],
         },
     )
@@ -230,7 +232,15 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
 
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
-        directory = _model_dir(manifest)
+        directory, checkpoint_revision = _model_dir(manifest)
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(directory),
+            "hf_revision": checkpoint_revision,
+            "revision_status": "unverified" if checkpoint_revision is None else "pinned_cache_lookup",
+        },
+    )
     _, runtime_root = _runtime()
     with wave.open(str(TEST_ROOT / "data" / case["audio"]), "rb") as audio:
         assert (
@@ -245,7 +255,11 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     with evidence_stage("build"):
         _build(directory, bundle, manifest)
     record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
-    torch.backends.cuda.matmul.allow_tf32 = False
+    matmul_precision = torch.get_float32_matmul_precision()
+    cudnn_tf32 = torch.backends.cudnn.allow_tf32
+    request.addfinalizer(lambda: torch.set_float32_matmul_precision(matmul_precision))
+    request.addfinalizer(lambda: setattr(torch.backends.cudnn, "allow_tf32", cudnn_tf32))
+    torch.set_float32_matmul_precision("highest")
     torch.backends.cudnn.allow_tf32 = False
     reference = (
         MimiModel.from_pretrained(directory, dtype=torch.float32, attn_implementation="eager")
@@ -338,8 +352,6 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         record_evidence(
             "metrics", {"gain": gain, "max_abs_error": float(maximum), "snr_db": float(snr)}
         )
-        assert maximum <= case["max_abs_error"]
-        assert snr >= case["min_snr_db"]
         if evidence_enabled():
             record_evidence(
                 "reference_comparison",
@@ -364,4 +376,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                     ],
                 },
             )
+
+        assert maximum <= case["max_abs_error"]
+        assert snr >= case["min_snr_db"]
         print(f"Mimi gain={gain}: max_abs={maximum:.8g}, SNR={snr:.3f} dB")
