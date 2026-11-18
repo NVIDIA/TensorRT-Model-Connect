@@ -1,6 +1,6 @@
 numpy
 safetensors
 torch
-transformers>=4.45
+transformers==5.20.0
 scipy
 torchaudio

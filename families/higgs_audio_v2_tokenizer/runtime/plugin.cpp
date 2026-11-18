@@ -68,9 +68,10 @@ std::vector<char> section(const BundleReader& reader, const char* name) {
 } // namespace
 } // namespace trtmc::higgs_audio_v2_tokenizer
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("higgs_audio_v2_tokenizer does not support --kv-cache-size");
     using namespace trtmc;
-    if (context.kv_cache_size_bytes ||
-        context.reader.info().task != "audio_codebook_tokens_to_audio")
+    if (context.reader.info().task != "audio_codebook_tokens_to_audio")
         throw std::invalid_argument(
             "HiggsAudioV2Tokenizer requires codec token decoding without an external cache");
     const auto raw = higgs_audio_v2_tokenizer::section(context.reader, "runtime.json");
