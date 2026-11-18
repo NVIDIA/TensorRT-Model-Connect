@@ -142,6 +142,7 @@ def _absolute(names: list[Any], definitions: Mapping[str, Any], testcase: Mappin
             item.update(gate=gates["sampled"] or item["gate"], seeds=list(seeds))
         elif quantized and gates["quantized"]:
             item["gate"] = gates["quantized"]
+            item.pop("mismatched_precision_gate", None)  # the quantization tolerance covers the precision too
         if item.get("window"):  # a forecast window (ETTh1): the model's columns, context, and horizon
             suite = item["suite_definition"]
             suite = load_suite(suite) if isinstance(suite, str) else dict(suite)
