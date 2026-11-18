@@ -90,8 +90,10 @@ class Pipeline final : public internal::IModel, public internal::ITextToTokenFea
 } // namespace trtmc::longformer
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("longformer does not support --kv-cache-size");
     using namespace trtmc;
-    if (context.kv_cache_size_bytes != 0 || context.reader.info().task != "text_to_token_features")
+    if (context.reader.info().task != "text_to_token_features")
         throw std::invalid_argument(
             "Longformer requires the token-feature task without a KV cache");
     const auto data = longformer::section(context.reader, "runtime.json");
