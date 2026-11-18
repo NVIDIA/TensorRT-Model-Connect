@@ -644,6 +644,13 @@ class BpeTokenizer final : public ITokenizer {
     }
 
     std::string decode(const std::vector<int32_t>& ids) const override {
+        if (mDecoderType == DecoderType::kSequence) {
+            std::vector<std::string> tokens;
+            for (const auto id : ids)
+                if (!mSpecialIds.count(id) && id >= 0 && static_cast<size_t>(id) < mVocab.size())
+                    tokens.push_back(mVocab[id]);
+            return decode_sequence(std::move(tokens));
+        }
         std::string joined = join_vocab_tokens(ids);
         switch (mDecoderType) {
         case DecoderType::kByteLevel:
@@ -651,7 +658,7 @@ class BpeTokenizer final : public ITokenizer {
         case DecoderType::kMetaspace:
             return decode_metaspace(joined);
         case DecoderType::kSequence:
-            return decode_sequence(joined);
+            throw std::logic_error("Sequence decoder requires token boundaries");
         }
         return byte_decode(joined);
     }
@@ -925,22 +932,59 @@ class BpeTokenizer final : public ITokenizer {
 
     // ─── Sequence decoder (SentencePiece BPE models: LLaMA, Mistral, Phi-3) ───
 
-    std::string decode_sequence(const std::string& joined) const {
-        std::string text = joined;
-        // Step 1: Apply Replace operations (e.g. ▁ → space)
-        for (const auto& rep : mSeqDecoderReplaces) {
-            text = string_replace_all(text, rep.pattern, rep.content);
+    std::string decode_sequence(std::vector<std::string> tokens) const {
+        for (auto& token : tokens)
+            for (const auto& rep : mSeqDecoderReplaces)
+                token = string_replace_all(token, rep.pattern, rep.content);
+        std::string text, bytes;
+        auto flush = [&] {
+            if (valid_utf8(bytes))
+                text += bytes;
+            else
+                for (size_t i = 0; i < bytes.size(); ++i)
+                    text += "\xef\xbf\xbd";
+            bytes.clear();
+        };
+        for (const auto& token : tokens) {
+            const auto byte =
+                mSeqDecoderByteFallback && token.size() == 6 ? try_parse_byte_token(token, 0) : -1;
+            if (byte >= 0)
+                bytes.push_back(static_cast<char>(byte));
+            else {
+                flush();
+                text += token;
+            }
         }
-        // Step 2: ByteFallback — convert <0xXX> tokens to raw bytes
-        if (mSeqDecoderByteFallback) {
-            text = apply_byte_fallback(text);
-        }
-        // Step 3: Fuse is implicit (tokens already joined)
-        // Step 4: Strip leading space
-        if (mSeqDecoderStripLeft && !text.empty() && text[0] == ' ') {
+        flush();
+        if (mSeqDecoderStripLeft && !text.empty() && text[0] == ' ')
             text.erase(0, 1);
-        }
         return text;
+    }
+
+    static bool valid_utf8(const std::string& text) {
+        for (size_t i = 0; i < text.size();) {
+            const auto lead = static_cast<unsigned char>(text[i++]);
+            if (lead < 0x80)
+                continue;
+            const int count = lead >= 0xc2 && lead <= 0xdf   ? 1
+                              : lead >= 0xe0 && lead <= 0xef ? 2
+                              : lead >= 0xf0 && lead <= 0xf4 ? 3
+                                                             : -1;
+            if (count < 0 || i + count > text.size())
+                return false;
+            uint32_t codepoint = lead & (0x7f >> (count + 1));
+            for (int j = 0; j < count; ++j) {
+                const auto next = static_cast<unsigned char>(text[i++]);
+                if ((next & 0xc0) != 0x80)
+                    return false;
+                codepoint = (codepoint << 6) | (next & 0x3f);
+            }
+            if ((count == 1 && codepoint < 0x80) || (count == 2 && codepoint < 0x800) ||
+                (count == 3 && codepoint < 0x10000) || codepoint > 0x10ffff ||
+                (codepoint >= 0xd800 && codepoint <= 0xdfff))
+                return false;
+        }
+        return true;
     }
 
     static std::string string_replace_all(const std::string& input, const std::string& from,
@@ -984,23 +1028,6 @@ class BpeTokenizer final : public ITokenizer {
         if (h < 0 || l < 0)
             return -1;
         return (h << 4) | l;
-    }
-
-    static std::string apply_byte_fallback(const std::string& text) {
-        std::string result;
-        result.reserve(text.size());
-        size_t pos = 0;
-        while (pos < text.size()) {
-            int byte_val = try_parse_byte_token(text, pos);
-            if (byte_val >= 0) {
-                result.push_back(static_cast<char>(byte_val));
-                pos += 6;
-            } else {
-                result.push_back(text[pos]);
-                ++pos;
-            }
-        }
-        return result;
     }
 
     // ─── Byte-level encoding ───
@@ -1154,8 +1181,8 @@ class BpeTokenizer final : public ITokenizer {
         if (!j.contains("added_tokens"))
             return;
         for (auto& tok : j["added_tokens"]) {
-            std::string content = tok["content"].get<std::string>();
-            int32_t id = tok["id"].get<int32_t>();
+            std::string content = tok.at("content").get<std::string>();
+            int32_t id = tok.at("id").get<int32_t>();
 
             if (id >= 0 && static_cast<size_t>(id) >= mVocab.size()) {
                 mVocab.resize(static_cast<size_t>(id) + 1);

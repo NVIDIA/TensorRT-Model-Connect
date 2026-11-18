@@ -25,5 +25,6 @@
       ],
       "question": "OCR:"
     }
-  ]
+  ],
+  "reference_environment": "isolated"
 }

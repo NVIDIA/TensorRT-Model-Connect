@@ -237,7 +237,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         {
             "model_dir": str(directory),
             "hf_revision": checkpoint_revision,
-            "revision_status": "unverified" if checkpoint_revision is None else "pinned_cache_lookup",
+            "revision_status": "unverified"
+            if checkpoint_revision is None
+            else "pinned_cache_lookup",
         },
     )
     binary, runtime_root = _runtime()
@@ -258,10 +260,14 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
     prefix, rest = framed.split(marker)
     between, suffix = rest.split(sentinel)
     raw_config = json.loads((directory / "preprocessor_config.json").read_text())
+    assert case["pages"] and len(case["pages"]) == len(case["expected_values"]), (
+        "Every invoice must have an expected value"
+    )
     pages = []
     batches = []
     for index, content in enumerate(case["pages"]):
-        page = Image.new("RGB", (manifest["image_width"], manifest["image_height"]), "white")
+        size = (manifest["image_width"], manifest["image_height"]) if index == 0 else (550, 270)
+        page = Image.new("RGB", size, "white")
         ImageDraw.Draw(page).multiline_text(
             (20, 25), content, fill="black", font=ImageFont.load_default(size=32), spacing=14
         )

@@ -44,8 +44,8 @@ class Pipeline final : public internal::IModel, public internal::IImagesTextToTe
              std::unique_ptr<ITokenizer> tokenizer, nlohmann::json cfg)
         : vision_(std::move(vision)), decoder_(std::move(decoder)),
           tokenizer_(std::move(tokenizer)), cfg_(std::move(cfg)),
-          fields_{{"max_new_tokens", internal::ConfigKind::I64, internal::ConfigValue{int64_t{64}},
-                   "Maximum generated tokens"},
+          fields_{{"max_new_tokens", internal::ConfigKind::I64, std::nullopt,
+                   "Maximum generated tokens (default: up to 64 within remaining capacity)"},
                   {"do_sample", internal::ConfigKind::Bool, internal::ConfigValue{false},
                    "Greedy decoding only"}} {}
     const char* task() const noexcept override { return "images_text_to_text"; }
@@ -57,15 +57,14 @@ class Pipeline final : public internal::IModel, public internal::IImagesTextToTe
                              internal::ConfigView config) override {
         const Span<const internal::ConfigField> fields{fields_.data(), fields_.size()};
         internal::validate_config(fields, config);
-        const auto max_new = *internal::config_get<int64_t>(config, fields, "max_new_tokens");
+        const auto requested_tokens =
+            internal::config_get<int64_t>(config, fields, "max_new_tokens");
         if (*internal::config_get<bool>(config, fields, "do_sample"))
             throw std::invalid_argument("PaddleOCR currently supports greedy decoding");
         const int32_t length = cfg_.at("sequence_length"), width = cfg_.at("hidden_size");
         const int32_t vocab = cfg_.at("vocab_size"), image_h = cfg_.at("image_height"),
                       image_w = cfg_.at("image_width");
         const int32_t image_sequence = cfg_.at("image_sequence"), image_id = cfg_.at("image_id");
-        if (max_new <= 0 || max_new > length)
-            throw std::invalid_argument("Invalid PaddleOCR generation length");
         if (request.messages.size() != 1 || !request.tools.empty() ||
             request.messages[0].role != internal::MessageRole::User ||
             request.messages[0].parts.size() != 2)
@@ -97,6 +96,12 @@ class Pipeline final : public internal::IModel, public internal::IImagesTextToTe
                                    cfg_.at("chat_suffix").get<std::string>();
         auto ids = tokenizer_->encode(prompt);
         const auto initial_count = ids.size();
+        const auto remaining = std::max<int64_t>(0, static_cast<int64_t>(length) -
+                                                        static_cast<int64_t>(initial_count));
+        const auto max_new = requested_tokens.value_or(std::min<int64_t>(64, remaining));
+        if (max_new <= 0 || max_new > remaining)
+            throw std::invalid_argument(
+                "Invalid PaddleOCR generation length for remaining profile");
         if (initial_count == 0 || initial_count + max_new > static_cast<std::size_t>(length))
             throw std::invalid_argument(
                 "PaddleOCR image/question and generation exceed the built sequence profile");

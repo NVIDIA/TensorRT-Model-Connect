@@ -38,6 +38,7 @@ def build(request, writer):
     length = request.max_sequence_length or 512
     if (
         config.model_type != "paddleocr_vl"
+        or config.text_config.rope_parameters.get("rope_type", "default") != "default"
         or cfg["use_bias"]
         or cfg["hidden_act"] != "silu"
         or config.vision_config.patch_size != 14
@@ -49,16 +50,35 @@ def build(request, writer):
     if height <= 0 or width <= 0 or height % 28 or width % 28:
         raise ValueError("PaddleOCR image profile axes must be divisible by 28")
     image_sequence = height // 28 * (width // 28)
-    if not image_sequence + 32 <= length <= cfg["max_position_embeddings"]:
+    # The native decoder materializes dense causal attention for this profile.
+    if not image_sequence + 32 <= length <= min(4096, cfg["max_position_embeddings"]):
         raise ValueError("PaddleOCR sequence profile needs room for image tokens and text")
     raw = json.loads((directory / "preprocessor_config.json").read_text())
     if (
-        raw["resample"] != 3
+        not raw.get("do_normalize", True)
+        or raw["resample"] != 3
         or raw["temporal_patch_size"] != 1
         or raw["image_mean"] != [0.5] * 3
         or raw["image_std"] != [0.5] * 3
     ):
         raise ValueError("Unsupported PaddleOCR image preprocessing")
+    area = height * width
+    minimum, maximum = raw["min_pixels"], raw["max_pixels"]
+    # Resize rounds each axis to 28 pixels. The ceil/floor branches can cross
+    # a pixel limit, so retain those boundary intervals as reachable profiles.
+    if not (
+        minimum <= area <= maximum
+        or area <= maximum < (height + 28) * (width + 28)
+        or (height - 28) * (width - 28) < minimum <= area
+    ):
+        raise ValueError("PaddleOCR image profile cannot be produced by checkpoint resize")
+    generation = json.loads((directory / "generation_config.json").read_text())
+    eos = generation["eos_token_id"]
+    eos = eos if isinstance(eos, list) else [eos]
+    if not eos or any(
+        type(value) is not int or not 0 <= value < cfg["vocab_size"] for value in eos
+    ):
+        raise ValueError("PaddleOCR requires a nonempty scalar or flat list of vocabulary EOS IDs")
     processor = AutoProcessor.from_pretrained(directory, use_fast=False)
     marker = "<|IMAGE_PLACEHOLDER|>"
     sentinel = "<|QUESTION_PLACEHOLDER|>"
@@ -78,7 +98,6 @@ def build(request, writer):
     )
     writer.add_bytes("decoder.plan", build_decoder(weights, cfg, length, request.verbose))
     writer.add_bytes("tokenizer.json", processor.tokenizer.backend_tokenizer.to_str().encode())
-    generation = json.loads((directory / "generation_config.json").read_text())
     writer.add_json(
         "runtime.json",
         dict(
@@ -86,7 +105,7 @@ def build(request, writer):
             hidden_size=cfg["hidden_size"],
             vocab_size=cfg["vocab_size"],
             pad_id=generation["pad_token_id"],
-            eos_ids=[generation["eos_token_id"]],
+            eos_ids=eos,
             image_id=config.image_token_id,
             image_sequence=image_sequence,
             image_height=height,
