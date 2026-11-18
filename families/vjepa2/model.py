@@ -64,7 +64,6 @@ def build(request, writer):
     if not rotary_dim:
         raise ValueError("V-JEPA2 requires nonempty rotary dimensions for all three axes")
     from safetensors import safe_open
-    import torch
 
     with safe_open(str(directory / "model.safetensors"), framework="pt", device="cpu") as handle:
         weights = {
@@ -108,21 +107,30 @@ def build(request, writer):
         layer.second_transpose = (0, 2, 1, 3)
         return layer.get_output(0)
 
-    indices = torch.arange(length)
+    indices = np.arange(length)
     positions = [indices // (grid * grid), indices // grid % grid, indices % grid]
-    omega = torch.arange(rotary_dim // 2, dtype=torch.float32) / (rotary_dim / 2)
-    omega = 1.0 / 10000**omega
+    # Keep the reference's FP32 frequency arithmetic and trigonometry in the
+    # graph. Host-generated lookup tables round the power and phase differently.
+    exponent = mul(
+        const(np.arange(rotary_dim // 2, dtype=np.float32).reshape(1, 1, 1, -1)),
+        const(np.full((1, 1, 1, 1), 2.0 / rotary_dim)),
+    )
+    power = net.add_elementwise(
+        const(np.full((1, 1, 1, 1), 10000)), exponent, trt.ElementWiseOperation.POW
+    ).get_output(0)
+    omega = net.add_unary(power, trt.UnaryOperation.RECIP).get_output(0)
     tables = []
     for position in positions:
-        frequency = position[:, None].float() * omega
+        frequency = mul(const(position.reshape(1, 1, length, 1)), omega)
         # The checkpoint repeats the frequency vector, while rotating adjacent
         # pairs. Retain that exact layout independently for depth, height and width.
-        tables.append(
-            tuple(
-                const(value.repeat(1, 2).numpy().reshape(1, 1, length, rotary_dim))
-                for value in (frequency.cos(), frequency.sin())
-            )
-        )
+        pair = []
+        for operation in (trt.UnaryOperation.COS, trt.UnaryOperation.SIN):
+            value = net.add_unary(frequency, operation).get_output(0)
+            repeated = net.add_concatenation([value, value])
+            repeated.axis = 3
+            pair.append(repeated.get_output(0))
+        tables.append(tuple(pair))
 
     def rope(x):
         pieces = []
