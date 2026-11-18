@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import shlex
 from functools import cache
 from pathlib import Path
 
@@ -390,7 +391,11 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             )
         record_evidence(
             "native_process",
-            {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+            {
+                "command": shlex.join(completed.args),
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+            },
         )
         with evidence_stage("comparison"):
             assert expected.shape == actual.shape and np.isfinite(actual).all()
