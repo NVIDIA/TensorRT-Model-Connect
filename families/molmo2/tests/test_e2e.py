@@ -95,8 +95,9 @@ def artifacts(tmp_path_factory):
 
     def prepare():
         if "error" in outcome:
-            if "qualification_results" in outcome:
-                record_evidence("qualification_results", outcome["qualification_results"])
+            for name in ("checkpoint", "native_process", "qualification_results"):
+                if name in outcome:
+                    record_evidence(name, outcome[name])
             with evidence_stage(outcome["stage"]):
                 raise outcome["error"]
         if "result" not in outcome:
@@ -112,12 +113,22 @@ def artifacts(tmp_path_factory):
 
 def _prepare_artifacts(tmp_path_factory, outcome):
     started = time.monotonic()
-    root = tmp_path_factory.mktemp("molmo2")
+    with evidence_stage("preparation"):
+        root = tmp_path_factory.mktemp("molmo2")
     outcome["stage"] = "checkpoint"
     with evidence_stage("checkpoint"):
         checkpoint = checkpoint_directory(MANIFEST["hf_id"], MANIFEST["hf_revision"])
-    runtime = _path("TRTMC_RUNTIME_ROOT")
-    binary = _path("TRTMC_BINARY")
+        overridden = "TRTMC_MOLMO2_MODEL_DIR" in os.environ
+        outcome["checkpoint"] = {
+            "resolved_directory": str(checkpoint.resolve()),
+            "from_override": overridden,
+            "resolved_revision": None if overridden else MANIFEST["hf_revision"],
+        }
+        record_evidence("checkpoint", outcome["checkpoint"])
+    outcome["stage"] = "preparation"
+    with evidence_stage("preparation"):
+        runtime = _path("TRTMC_RUNTIME_ROOT")
+        binary = _path("TRTMC_BINARY")
     bundle = Path(os.environ.get("TRTMC_MOLMO2_BUNDLE", root / MANIFEST["bundle"]))
     reference = os.environ.get("TRTMC_MOLMO2_REFERENCE_RESULTS")
     python = None
@@ -172,14 +183,15 @@ def _prepare_artifacts(tmp_path_factory, outcome):
             "mode": "hf_transformers",
             "transformers_version": "4.57.1",
             "implementation": "families/molmo2/tests/reference.py",
+            "checkpoint": outcome["checkpoint"],
         }
     with evidence_stage("reference"):
         results = {
             case["name"]: case for case in json.loads((reference / "reference.json").read_text())
         }
     outcome["stage"] = "native"
-    qualifier = native_tool("molmo2_qualification")
     with evidence_stage("native"):
+        qualifier = native_tool("molmo2_qualification")
         completed = subprocess.run(
             [
                 str(qualifier),
@@ -193,13 +205,15 @@ def _prepare_artifacts(tmp_path_factory, outcome):
             text=True,
             timeout=1800,
         )
+        outcome["native_process"] = {
+            "argv": completed.args,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        }
+        record_evidence("native_process", outcome["native_process"])
         native = [
             json.loads(line) for line in completed.stdout.splitlines() if line.startswith('[{"')
         ][-1]
-    record_evidence(
-        "native_process",
-        {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
-    )
     outcome["qualification_results"] = {
         "reference_source": reference_source,
         "pairs": [
@@ -225,11 +239,8 @@ def _prepare_artifacts(tmp_path_factory, outcome):
         "seconds": time.monotonic() - started,
         "cases": [case["name"] for case in MANIFEST["testcases"]],
         "bundle_info": inspection,
-        "native_process": {
-            "argv": completed.args,
-            "stdout": completed.stdout,
-            "stderr": completed.stderr,
-        },
+        "checkpoint": outcome["checkpoint"],
+        "native_process": outcome["native_process"],
         "replay": native[-1],
     }
     return checkpoint, bundle, reference, results, native, preparation, reference_source
@@ -243,7 +254,8 @@ def test_upstream_and_native_e2e(case_name, request, tmp_path):
         pytest.skip("Molmo2 E2E requires an explicit family or testcase selector")
     record_evidence("inputs", {"manifest": MANIFEST, "case": case, "prompt": case["prompt"]})
     record_evidence(
-        "checkpoint", {"repo_id": MANIFEST["hf_id"], "revision": MANIFEST["hf_revision"]}
+        "checkpoint",
+        {"requested_repo_id": MANIFEST["hf_id"], "requested_revision": MANIFEST["hf_revision"]},
     )
     record_evidence(
         "thresholds",
@@ -261,6 +273,7 @@ def test_upstream_and_native_e2e(case_name, request, tmp_path):
     )
     name = case["name"]
     expected = results[name]
+    record_evidence("checkpoint", preparation["checkpoint"])
     record_evidence("preparation", preparation)
     record_evidence("bundle", {"path": str(bundle), "info": preparation["bundle_info"]})
     record_evidence(
@@ -292,9 +305,9 @@ def test_upstream_and_native_e2e(case_name, request, tmp_path):
             np.fromfile(reference / (name + ".f32"), dtype=np.float32),
             np.asarray(expected_image, dtype=np.float32).reshape(-1),
         )
-    helper = native_tool("test_molmo2_preprocess")
     stem = tmp_path / name
     with evidence_stage("native"):
+        helper = native_tool("test_molmo2_preprocess")
         subprocess.run(
             [
                 str(helper),

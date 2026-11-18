@@ -56,13 +56,16 @@ def execution(tmp_path_factory):
 
     def prepare():
         if "error" in outcome:
+            for name in ("checkpoint", "reference_process"):
+                if name in outcome:
+                    record_evidence(name, outcome[name])
             with evidence_stage(outcome["stage"]):
                 raise outcome["error"]
         if "result" not in outcome:
             try:
-                outcome["result"] = _prepare_execution(
-                    tmp_path_factory.mktemp("llava-e2e"), outcome
-                )
+                with evidence_stage("preparation"):
+                    output = tmp_path_factory.mktemp("llava-e2e")
+                outcome["result"] = _prepare_execution(output, outcome)
             except Exception as error:
                 outcome["error"] = error
                 raise
@@ -86,30 +89,38 @@ def _prepare_execution(output, outcome):
                 )
             )
         assert (model / "config.json").is_file(), "LLaVA checkpoint requires config.json"
-    assert MANIFEST["tensor_parallel_size"] == 1
-    binary = Path(os.environ["TRTMC_BINARY"])
-    runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
-    reference_cases = []
-    for case in MANIFEST["testcases"]:
-        assert case["reference_backend"] == "hf_transformers"
-        assert case["reference_precision"] == MANIFEST["precision"]
-        if "solid_color" in case:
-            image_path = output / (case["name"] + ".bmp")
-            Image.new("RGB", tuple(case["image_size"]), case["solid_color"]).save(image_path)
-        else:
-            image_path = ROOT / case["test_image"]
-        assert image_path.is_file()
-        reference_cases.append(
-            {
-                "name": case["name"],
-                "image": str(image_path),
-                "prompt": case["prompt"],
-                "max_new_tokens": case["max_new_tokens"],
-            }
-        )
-    cases_path = output / "reference-cases.json"
-    cases_path.write_text(json.dumps(reference_cases))
-    bundle = output / MANIFEST["bundle"]
+        outcome["checkpoint"] = {
+            "resolved_directory": str(model.resolve()),
+            "from_override": bool(explicit_model),
+            "resolved_revision": None if explicit_model else MANIFEST["hf_revision"],
+        }
+        record_evidence("checkpoint", outcome["checkpoint"])
+    outcome["stage"] = "preparation"
+    with evidence_stage("preparation"):
+        assert MANIFEST["tensor_parallel_size"] == 1
+        binary = Path(os.environ["TRTMC_BINARY"])
+        runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
+        reference_cases = []
+        for case in MANIFEST["testcases"]:
+            assert case["reference_backend"] == "hf_transformers"
+            assert case["reference_precision"] == MANIFEST["precision"]
+            if "solid_color" in case:
+                image_path = output / (case["name"] + ".bmp")
+                Image.new("RGB", tuple(case["image_size"]), case["solid_color"]).save(image_path)
+            else:
+                image_path = ROOT / case["test_image"]
+            assert image_path.is_file()
+            reference_cases.append(
+                {
+                    "name": case["name"],
+                    "image": str(image_path),
+                    "prompt": case["prompt"],
+                    "max_new_tokens": case["max_new_tokens"],
+                }
+            )
+        cases_path = output / "reference-cases.json"
+        cases_path.write_text(json.dumps(reference_cases))
+        bundle = output / MANIFEST["bundle"]
     started = time.monotonic()
     outcome["stage"] = "build"
     with evidence_stage("build"):
@@ -132,6 +143,11 @@ def _prepare_execution(output, outcome):
                 check=True,
                 capture_output=True,
                 text=True,
+                timeout=30,
+            )
+            record_evidence(
+                "bundle_inspection_process",
+                {"argv": inspected.args, "stdout": inspected.stdout, "stderr": inspected.stderr},
             )
             bundle_info = json.loads(inspected.stdout)
         except (OSError, subprocess.SubprocessError, ValueError) as error:
@@ -158,6 +174,12 @@ def _prepare_execution(output, outcome):
             text=True,
             env=reference_env,
         )
+        outcome["reference_process"] = {
+            "argv": process.args,
+            "stdout": process.stdout,
+            "stderr": process.stderr,
+        }
+        record_evidence("reference_process", outcome["reference_process"])
         reference = json.loads((output / "reference.json").read_text())
     preparation = {
         "shared": True,
@@ -165,11 +187,8 @@ def _prepare_execution(output, outcome):
         "build_seconds": build_seconds,
         "reference_seconds": time.monotonic() - started,
         "bundle_info": bundle_info,
-        "reference_process": {
-            "argv": process.args,
-            "stdout": process.stdout,
-            "stderr": process.stderr,
-        },
+        "checkpoint": outcome["checkpoint"],
+        "reference_process": outcome["reference_process"],
         "output_directory": str(output),
     }
     return binary, runtime, bundle, reference, preparation
@@ -181,8 +200,8 @@ def test_official_checkpoint_e2e(case_name, execution, tmp_path):
     record_evidence(
         "checkpoint",
         {
-            "repo_id": MANIFEST["hf_id"],
-            "revision": MANIFEST["hf_revision"],
+            "requested_repo_id": MANIFEST["hf_id"],
+            "requested_revision": MANIFEST["hf_revision"],
             "precision": MANIFEST["precision"],
         },
     )
@@ -190,7 +209,9 @@ def test_official_checkpoint_e2e(case_name, execution, tmp_path):
         "thresholds", {"expected_word": case["expected_word"], "token_ids": "exact equality"}
     )
     binary, runtime, bundle, reference, preparation = execution()
-    expected = reference[case_name]
+    with evidence_stage("reference"):
+        expected = reference[case_name]
+    record_evidence("checkpoint", preparation["checkpoint"])
     record_evidence("preparation", preparation)
     record_evidence(
         "bundle", {"path": str(bundle), "info": preparation["bundle_info"], "shared": True}
@@ -247,10 +268,10 @@ def test_official_checkpoint_e2e(case_name, execution, tmp_path):
     ]
     with evidence_stage("native"):
         process = subprocess.run(argv, check=True, capture_output=True, text=True, timeout=180)
+        record_evidence(
+            "native_process", {"argv": argv, "stdout": process.stdout, "stderr": process.stderr}
+        )
         native = json.loads(process.stdout.strip().splitlines()[-1])
-    record_evidence(
-        "native_process", {"argv": argv, "stdout": process.stdout, "stderr": process.stderr}
-    )
     record_evidence("native", native)
     word = case["expected_word"]
     with evidence_stage("compare"):

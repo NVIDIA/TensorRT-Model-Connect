@@ -150,7 +150,9 @@ def _geometry_check(checks, name, value, operator, limit):
 
 def _compare_regions(actual, expected, image, index, metrics, checks):
     regions = actual["regions"]
-    _geometry_check(checks, "region_count", len(regions), "==", len(expected["scores"]))
+    region_count = len(regions) if regions else 0
+    _geometry_check(checks, "region_count", region_count, "==", len(expected["scores"]))
+    _geometry_check(checks, "nonempty_regions", region_count, ">=", 1)
     assert regions and len(regions) == len(expected["scores"])
     _geometry_check(checks, "image_height", actual["image_height"], "==", image.height)
     _geometry_check(checks, "image_width", actual["image_width"], "==", image.width)
@@ -173,7 +175,6 @@ def _compare_regions(actual, expected, image, index, metrics, checks):
             "box_iou": _iou(region["box"], box.tolist()),
         }
         metrics.append(measurement)
-        record_evidence("metrics", metrics)
         _geometry_check(checks, f"region_{order}_class_id", region["class_id"], "==", int(label))
         assert region["class_id"] == int(label)
         _geometry_check(
@@ -187,7 +188,6 @@ def _compare_regions(actual, expected, image, index, metrics, checks):
         measurement["polygon_iou"] = _polygon_iou(
             region["polygon"], polygon, image.height, image.width
         )
-        record_evidence("metrics", metrics)
         _geometry_check(
             checks, f"region_{order}_polygon_iou", measurement["polygon_iou"], ">=", 0.98
         )
@@ -257,7 +257,8 @@ def test_official_checkpoint_e2e(request, tmp_path, case_name):
     torch.set_num_threads(8)
     record_evidence("inputs", {"manifest": MANIFEST, "variants": ["original", "mirrored"]})
     record_evidence(
-        "checkpoint", {"repo_id": MANIFEST["hf_id"], "revision": MANIFEST["hf_revision"]}
+        "checkpoint",
+        {"requested_repo_id": MANIFEST["hf_id"], "requested_revision": MANIFEST["hf_revision"]},
     )
     record_evidence(
         "thresholds",
@@ -271,9 +272,24 @@ def test_official_checkpoint_e2e(request, tmp_path, case_name):
     with evidence_stage("checkpoint"):
         model_dir = _model_dir()
         image_path = _image_path(model_dir)
-    binary, runtime = _path("TRTMC_BINARY"), _path("TRTMC_RUNTIME_ROOT")
-    assert (runtime / "libtrtmc_model_pp_doclayout_v3.so").is_file()
-    assert (runtime / "libtrtmc_backend_trt.so").is_file()
+        override = os.environ.get("TRTMC_PP_DOCLAYOUT_V3_MODEL_DIR")
+        overridden = (
+            bool(override)
+            and (Path(override) / "config.json").is_file()
+            and Path(override).resolve() == model_dir.resolve()
+        )
+        record_evidence(
+            "checkpoint",
+            {
+                "resolved_directory": str(model_dir.resolve()),
+                "from_override": overridden,
+                "resolved_revision": None if overridden else MANIFEST["hf_revision"],
+            },
+        )
+    with evidence_stage("preparation"):
+        binary, runtime = _path("TRTMC_BINARY"), _path("TRTMC_RUNTIME_ROOT")
+        assert (runtime / "libtrtmc_model_pp_doclayout_v3.so").is_file()
+        assert (runtime / "libtrtmc_backend_trt.so").is_file()
     bundle = tmp_path / MANIFEST["bundle"]
     with evidence_stage("build"):
         build(
@@ -314,11 +330,11 @@ def test_official_checkpoint_e2e(request, tmp_path, case_name):
                 capture_output=True,
                 timeout=120,
             )
+            record_evidence(
+                f"native_process_{index}",
+                {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+            )
             actual = json.loads(completed.stdout)
-        record_evidence(
-            f"native_process_{index}",
-            {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
-        )
         native_records.append({"variant": index, **actual})
         record_evidence("native", {"variants": native_records})
         with evidence_stage("reference"):
@@ -358,6 +374,7 @@ def test_official_checkpoint_e2e(request, tmp_path, case_name):
             with evidence_stage("compare"):
                 _compare_regions(actual, expected, image, index, metrics, checks)
         finally:
+            record_evidence("metrics", metrics)
             if evidence_enabled():
                 try:
                     _record_layout_evidence(
