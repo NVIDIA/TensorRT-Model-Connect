@@ -198,6 +198,7 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     if (!engine || !engine->ok())
         throw std::runtime_error("LFM2 MoE engine failed to load");
     const auto raw_tokenizer = lfm2_moe::section(context.reader, "tokenizer.json");
-    auto tokenizer = CreateBpeTokenizer(raw_tokenizer.data(), raw_tokenizer.size(), false);
+    auto tokenizer =
+        lfm2_moe::CreateBpeTokenizer(raw_tokenizer.data(), raw_tokenizer.size(), false);
     return new lfm2_moe::Pipeline(std::move(engine), std::move(tokenizer), cfg);
 }

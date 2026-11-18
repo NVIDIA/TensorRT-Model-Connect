@@ -3,13 +3,45 @@
 """Native incremental LFM2 MoE decoder with short convolution and attention state."""
 
 import json
+import math
 from contextlib import ExitStack
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 import tensorrt as trt
 
 from .plan_stream import PlanWriter
+
+
+def _checkpoint_shard(directory: Path, name: str) -> Path:
+    if (
+        not isinstance(name, str)
+        or not name
+        or "\\" in name
+        or ":" in name
+        or PurePosixPath(name).is_absolute()
+        or any(part in {"", ".", ".."} for part in name.split("/"))
+    ):
+        raise ValueError(f"Invalid LFM2 MoE checkpoint shard name: {name!r}")
+    root = directory.resolve(strict=True)
+    candidate = root / name
+    resolved = candidate.resolve(strict=True)
+    if resolved.is_relative_to(root):
+        return candidate
+    # Hub snapshots use leaf symlinks to their own repository's blob store.
+    # Do not permit arbitrary sibling paths or a redirected blob directory.
+    blobs = root.parent.parent / "blobs"
+    if (
+        root.parent.name == "snapshots"
+        and root.parent.parent.name.startswith("models--")
+        and candidate.is_symlink()
+        and not blobs.is_symlink()
+        and resolved.parent == blobs.resolve(strict=True)
+        and len(resolved.name) in (40, 64)
+        and all(char in "0123456789abcdef" for char in resolved.name)
+    ):
+        return candidate
+    raise ValueError(f"LFM2 MoE checkpoint shard escapes the selected checkpoint: {name!r}")
 
 
 def load_weights(directory, cfg):
@@ -18,12 +50,11 @@ def load_weights(directory, cfg):
     index = json.loads((directory / "model.safetensors.index.json").read_text())["weight_map"]
     # Pack original expert tensors directly into their graph layout. Avoid a
     # second complete fp32 checkpoint while retaining every original tensor.
+    paths = {name: _checkpoint_shard(directory, name) for name in set(index.values())}
     with ExitStack() as stack:
         files = {
-            name: stack.enter_context(
-                safe_open(str(directory / name), framework="pt", device="cpu")
-            )
-            for name in set(index.values())
+            name: stack.enter_context(safe_open(str(path), framework="pt", device="cpu"))
+            for name, path in paths.items()
         }
 
         def read(key):
@@ -42,9 +73,18 @@ def load_weights(directory, cfg):
             up = np.empty((experts, 2 * middle, width), dtype=np.float32)
             down = np.empty((experts, width, middle), dtype=np.float32)
             for expert in range(experts):
-                up[expert, :middle] = read(f"{prefix}.{expert}.w1.weight")
-                up[expert, middle:] = read(f"{prefix}.{expert}.w3.weight")
-                down[expert] = read(f"{prefix}.{expert}.w2.weight")
+                for name, destination, shape in (
+                    ("w1", up[expert, :middle], (middle, width)),
+                    ("w3", up[expert, middle:], (middle, width)),
+                    ("w2", down[expert], (width, middle)),
+                ):
+                    key = f"{prefix}.{expert}.{name}.weight"
+                    value = read(key)
+                    if value.shape != shape:
+                        raise ValueError(
+                            f"LFM2 MoE {key} has shape {value.shape}, expected {shape}"
+                        )
+                    destination[...] = value
             weights[prefix + ".gate_up"] = up
             weights[prefix + ".down"] = down
     if "lm_head.weight" not in weights and cfg["tie_word_embeddings"]:
@@ -122,9 +162,12 @@ def build_engine(weights, cfg, length, stream, verbose=False):
         (1, 1, 1, 1, length),
     )
     hidden = net.add_gather(const(weights["model.embed_tokens.weight"]), token, 0).get_output(0)
-    rotary = Lfm2MoeRotaryEmbedding(Lfm2MoeConfig(**cfg))
-    with torch.no_grad():
-        cosine, sine = rotary(torch.empty(1, length, width), torch.arange(length)[None, :])
+    with torch.device("cpu"), torch.no_grad():
+        rotary = Lfm2MoeRotaryEmbedding(Lfm2MoeConfig(**cfg))
+        cosine, sine = rotary(
+            torch.empty(1, length, width, device="cpu", dtype=torch.float32),
+            torch.arange(length, device="cpu")[None, :],
+        )
     cosine, sine = tuple(
         reshape(net.add_gather(const(x.numpy()[0]), position, 0).get_output(0), (1, 1, 1, dim))
         for x in (cosine, sine)
@@ -284,6 +327,8 @@ def build(request, writer):
 
     reference_config = Lfm2MoeConfig.from_pretrained(directory)
     cfg = reference_config.to_dict()
+    if cfg.get("quantization_config") is not None:
+        raise ValueError("LFM2 MoE prequantized checkpoints are not supported")
     cfg["head_dim"] = cfg.get("head_dim") or cfg["hidden_size"] // cfg["num_attention_heads"]
     length = request.max_sequence_length or 128
     if (
@@ -303,6 +348,21 @@ def build(request, writer):
 
     tokenizer = AutoTokenizer.from_pretrained(directory)
     generation = json.loads((directory / "generation_config.json").read_text())
+    eos = cfg["eos_token_id"]
+    if isinstance(eos, list):
+        if len(eos) != 1:
+            raise ValueError("LFM2 MoE requires one EOS token ID")
+        eos = eos[0]
+    if type(eos) is not int or not 0 <= eos < cfg["vocab_size"]:
+        raise ValueError("LFM2 MoE EOS token ID lies outside the vocabulary")
+    repetition_penalty = generation.get("repetition_penalty")
+    repetition_penalty = 1.0 if repetition_penalty is None else repetition_penalty
+    if (
+        type(repetition_penalty) not in (int, float)
+        or not math.isfinite(repetition_penalty)
+        or repetition_penalty <= 0
+    ):
+        raise ValueError("LFM2 MoE repetition penalty must be finite and positive")
     writer.set_header(family="lfm2_moe", task=request.task, backend=request.backend)
     with writer.open_section("model.plan") as section:
         build_engine(load_weights(directory, cfg), cfg, length, section, request.verbose)
@@ -318,7 +378,7 @@ def build(request, writer):
             kv_heads=cfg["num_key_value_heads"],
             head_dim=cfg["head_dim"],
             vocab_size=cfg["vocab_size"],
-            eos_id=cfg["eos_token_id"],
-            repetition_penalty=generation.get("repetition_penalty", 1.0),
+            eos_id=eos,
+            repetition_penalty=repetition_penalty,
         ),
     )

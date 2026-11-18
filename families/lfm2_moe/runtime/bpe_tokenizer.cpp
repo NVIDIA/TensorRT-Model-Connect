@@ -21,7 +21,7 @@
 #include <utility>
 #include <vector>
 
-namespace trtmc {
+namespace trtmc::lfm2_moe {
 namespace {
 
 // ─── UTF-8 helpers ───
@@ -1420,19 +1420,30 @@ class BpeTokenizer final : public ITokenizer {
         parse_added_tokens(j);
         parse_post_processor(j);
         detect_normalizer(j);
-        detect_pre_tokenizer(j);
         const auto& pretokenizer = j.at("pre_tokenizer");
-        for (const auto& part : pretokenizer.at("pretokenizers")) {
-            if (part.value("type", "") == "Split") {
-                const auto pattern = part.at("pattern").at("Regex").get<std::string>();
-                UErrorCode status = U_ZERO_ERROR;
-                mRegex.reset(
-                    icu::RegexPattern::compile(icu::UnicodeString::fromUTF8(pattern), 0, status));
-                if (U_FAILURE(status))
-                    throw std::runtime_error("LFM2 MoE tokenizer regex compilation failed");
-                break;
-            }
-        }
+        if (pretokenizer.value("type", "") != "Sequence" ||
+            !pretokenizer.contains("pretokenizers") ||
+            !pretokenizer.at("pretokenizers").is_array() ||
+            pretokenizer.at("pretokenizers").size() != 2)
+            throw std::runtime_error(
+                "LFM2 MoE requires a Sequence of isolated regex Split and ByteLevel");
+        const auto& split = pretokenizer.at("pretokenizers").at(0);
+        const auto& bytes = pretokenizer.at("pretokenizers").at(1);
+        if (split.value("type", "") != "Split" || split.value("behavior", "") != "Isolated" ||
+            split.value("invert", true) || !split.contains("pattern") ||
+            !split.at("pattern").contains("Regex") || bytes.value("type", "") != "ByteLevel" ||
+            bytes.value("add_prefix_space", true) || bytes.value("use_regex", true))
+            throw std::runtime_error("LFM2 MoE requires isolated regex Split (invert=false) and "
+                                     "ByteLevel (add_prefix_space=false, use_regex=false)");
+        const auto pattern = split.at("pattern").at("Regex").get<std::string>();
+        if (pattern.empty())
+            throw std::runtime_error("LFM2 MoE tokenizer regex must not be empty");
+        UErrorCode status = U_ZERO_ERROR;
+        mRegex.reset(icu::RegexPattern::compile(icu::UnicodeString::fromUTF8(pattern), 0, status));
+        if (U_FAILURE(status) || !mRegex)
+            throw std::runtime_error("LFM2 MoE tokenizer regex compilation failed");
+        mIsSentencePiece = false;
+        mIsMetaspace = false;
         detect_decoder(j);
     }
 
@@ -1646,4 +1657,4 @@ std::unique_ptr<ITokenizer> CreateBpeTokenizer(const char* tokenizer_json_data,
     return BpeTokenizer::Create(tokenizer_json_data, tokenizer_json_size, add_special_tokens);
 }
 
-} // namespace trtmc
+} // namespace trtmc::lfm2_moe

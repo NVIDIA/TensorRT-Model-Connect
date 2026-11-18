@@ -14,6 +14,6 @@ int main(int argc, char** argv) {
         return 2;
     std::ifstream file(argv[1]);
     const std::string data((std::istreambuf_iterator<char>(file)), {});
-    const auto tokenizer = trtmc::CreateBpeTokenizer(data.data(), data.size(), false);
+    const auto tokenizer = trtmc::lfm2_moe::CreateBpeTokenizer(data.data(), data.size(), false);
     std::cout << nlohmann::json(tokenizer->encode(argv[2])).dump() << '\n';
 }
