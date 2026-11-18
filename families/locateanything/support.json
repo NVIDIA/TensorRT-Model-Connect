@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "locateanything"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "vision_language_generation"
+        ],
+        "default_task": "vision_language_generation"
+      }
+    }
+  ]
+}

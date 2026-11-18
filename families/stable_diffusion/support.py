@@ -1,13 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Family-owned model and task support for Stable Diffusion 1.5 and SDXL."""
+"""Family-owned model and task support for Stable Diffusion."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    pipeline_classes=("StableDiffusionPipeline", "StableDiffusionXLPipeline"),
-    tasks=("image_generation",),
-    default_task="image_generation",
-)
+describe = support_from_json(__file__)

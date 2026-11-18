@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "glmasr",
+            "glm_asr"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "transcription"
+        ],
+        "default_task": "transcription"
+      }
+    }
+  ]
+}

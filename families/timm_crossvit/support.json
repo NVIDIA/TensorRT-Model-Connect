@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "timm_crossvit",
+            "crossvit_9_240"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_class_scores"
+        ],
+        "default_task": "image_to_class_scores"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "crossvit_9_240"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_class_scores"
+        ],
+        "default_task": "image_to_class_scores"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "crossvit_9_240"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_class_scores"
+        ],
+        "default_task": "image_to_class_scores"
+      }
+    }
+  ]
+}

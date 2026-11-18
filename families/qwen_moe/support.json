@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "qwen2_moe",
+            "qwen3_moe",
+            "qwen_moe",
+            "qwenmoe"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "text_generation"
+        ],
+        "default_task": "text_generation"
+      }
+    }
+  ]
+}

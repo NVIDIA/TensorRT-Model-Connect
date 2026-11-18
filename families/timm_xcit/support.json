@@ -1,0 +1,132 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "timm_xcit",
+            "xcit_large_24_p16_224",
+            "xcit_large_24_p16_384",
+            "xcit_large_24_p8_224",
+            "xcit_large_24_p8_384",
+            "xcit_medium_24_p16_224",
+            "xcit_medium_24_p16_384",
+            "xcit_medium_24_p8_224",
+            "xcit_medium_24_p8_384",
+            "xcit_nano_12_p16_224",
+            "xcit_nano_12_p16_384",
+            "xcit_nano_12_p8_224",
+            "xcit_nano_12_p8_384",
+            "xcit_small_12_p16_224",
+            "xcit_small_12_p16_384",
+            "xcit_small_12_p8_224",
+            "xcit_small_12_p8_384",
+            "xcit_small_24_p16_224",
+            "xcit_small_24_p16_384",
+            "xcit_small_24_p8_224",
+            "xcit_small_24_p8_384",
+            "xcit_tiny_12_p16_224",
+            "xcit_tiny_12_p16_384",
+            "xcit_tiny_12_p8_224",
+            "xcit_tiny_12_p8_384",
+            "xcit_tiny_24_p16_224",
+            "xcit_tiny_24_p16_384",
+            "xcit_tiny_24_p8_224",
+            "xcit_tiny_24_p8_384"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_class_scores"
+        ],
+        "default_task": "image_to_class_scores"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "xcit_large_24_p16_224",
+            "xcit_large_24_p16_384",
+            "xcit_large_24_p8_224",
+            "xcit_large_24_p8_384",
+            "xcit_medium_24_p16_224",
+            "xcit_medium_24_p16_384",
+            "xcit_medium_24_p8_224",
+            "xcit_medium_24_p8_384",
+            "xcit_nano_12_p16_224",
+            "xcit_nano_12_p16_384",
+            "xcit_nano_12_p8_224",
+            "xcit_nano_12_p8_384",
+            "xcit_small_12_p16_224",
+            "xcit_small_12_p16_384",
+            "xcit_small_12_p8_224",
+            "xcit_small_12_p8_384",
+            "xcit_small_24_p16_224",
+            "xcit_small_24_p16_384",
+            "xcit_small_24_p8_224",
+            "xcit_small_24_p8_384",
+            "xcit_tiny_12_p16_224",
+            "xcit_tiny_12_p16_384",
+            "xcit_tiny_12_p8_224",
+            "xcit_tiny_12_p8_384",
+            "xcit_tiny_24_p16_224",
+            "xcit_tiny_24_p16_384",
+            "xcit_tiny_24_p8_224",
+            "xcit_tiny_24_p8_384"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_class_scores"
+        ],
+        "default_task": "image_to_class_scores"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "xcit_large_24_p16_224",
+            "xcit_large_24_p16_384",
+            "xcit_large_24_p8_224",
+            "xcit_large_24_p8_384",
+            "xcit_medium_24_p16_224",
+            "xcit_medium_24_p16_384",
+            "xcit_medium_24_p8_224",
+            "xcit_medium_24_p8_384",
+            "xcit_nano_12_p16_224",
+            "xcit_nano_12_p16_384",
+            "xcit_nano_12_p8_224",
+            "xcit_nano_12_p8_384",
+            "xcit_small_12_p16_224",
+            "xcit_small_12_p16_384",
+            "xcit_small_12_p8_224",
+            "xcit_small_12_p8_384",
+            "xcit_small_24_p16_224",
+            "xcit_small_24_p16_384",
+            "xcit_small_24_p8_224",
+            "xcit_small_24_p8_384",
+            "xcit_tiny_12_p16_224",
+            "xcit_tiny_12_p16_384",
+            "xcit_tiny_12_p8_224",
+            "xcit_tiny_12_p8_384",
+            "xcit_tiny_24_p16_224",
+            "xcit_tiny_24_p16_384",
+            "xcit_tiny_24_p8_224",
+            "xcit_tiny_24_p8_384"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_class_scores"
+        ],
+        "default_task": "image_to_class_scores"
+      }
+    }
+  ]
+}

@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "timm_dpn",
+            "dpn68",
+            "dpn68b",
+            "dpn92",
+            "dpn98",
+            "dpn107",
+            "dpn131"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "classification"
+        ],
+        "default_task": "classification"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "dpn68",
+            "dpn68b",
+            "dpn92",
+            "dpn98",
+            "dpn107",
+            "dpn131"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "classification"
+        ],
+        "default_task": "classification"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "dpn68",
+            "dpn68b",
+            "dpn92",
+            "dpn98",
+            "dpn107",
+            "dpn131"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "classification"
+        ],
+        "default_task": "classification"
+      }
+    }
+  ]
+}

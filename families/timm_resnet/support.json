@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "timm_resnet",
+            "timmresnet",
+            "resnet",
+            "resnet50"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_class_scores"
+        ],
+        "default_task": "image_to_class_scores"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "resnet50",
+            "resnext50_32x4d",
+            "wide_resnet50_2"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_class_scores"
+        ],
+        "default_task": "image_to_class_scores"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "resnet50",
+            "resnext50_32x4d",
+            "wide_resnet50_2"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_class_scores"
+        ],
+        "default_task": "image_to_class_scores"
+      }
+    }
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "deepseek_ocr",
+            "deepseek_vl_v2",
+            "deepseekocr"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "vision_language_generation"
+        ],
+        "default_task": "vision_language_generation"
+      }
+    }
+  ]
+}

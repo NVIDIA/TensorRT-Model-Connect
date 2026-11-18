@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "detr"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_boxes"
+        ],
+        "default_task": "image_to_boxes"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "DetrForObjectDetection"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_boxes"
+        ],
+        "default_task": "image_to_boxes"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "DetrForObjectDetection"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_boxes"
+        ],
+        "default_task": "image_to_boxes"
+      }
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "timm_senet",
+            "senet154"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "classification"
+        ],
+        "default_task": "classification"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "senet154"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "classification"
+        ],
+        "default_task": "classification"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "senet154"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "classification"
+        ],
+        "default_task": "classification"
+      }
+    }
+  ]
+}

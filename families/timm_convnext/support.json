@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "timm_convnext",
+            "convnext_tiny"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_class_scores"
+        ],
+        "default_task": "image_to_class_scores"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "convnext_tiny"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_class_scores"
+        ],
+        "default_task": "image_to_class_scores"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "convnext_tiny"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_class_scores"
+        ],
+        "default_task": "image_to_class_scores"
+      }
+    }
+  ]
+}

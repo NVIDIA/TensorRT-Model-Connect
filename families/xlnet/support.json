@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "xlnet"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "text_to_embedding",
+          "text_to_pooled_features"
+        ],
+        "default_task": "text_to_pooled_features"
+      }
+    }
+  ]
+}
