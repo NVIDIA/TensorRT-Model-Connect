@@ -378,6 +378,16 @@ def test_migrated_text_encoders_keep_their_benchmarks():
     assert tasks["text_to_token_features"] == {**tasks["encoding"], "reference": {"options": {"all_tokens": True}}}
 
 
+def test_migrated_decoder_language_models_keep_their_benchmarks():
+    """text_continuation (the qwen3 profiles migrated to the Task SDK) keeps text_generation's benchmarks."""
+    import yaml
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+
+    tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
+    assert tasks["text_continuation"] == tasks["text_generation"]
+
+
 def test_text_encoders_the_generic_references_cannot_serve_are_excluded_with_a_reason():
     from trtmc_aiperf_qual.selection import catalog
 

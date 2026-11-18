@@ -154,6 +154,18 @@ def test_the_near_capacity_prompt_shrinks_until_trtmc_accepts_it(monkeypatch):
         runner.near_capacity_request(None, model, greedy, 224, {"url": "u"})
 
 
+def test_the_near_capacity_request_covers_the_text_generation_task_under_either_name():
+    from trtmc_aiperf_qual import runner
+
+    def model(task):
+        return {"task": task, "candidate": {"max_sequence_length": 4096}}
+
+    assert runner.near_capacity_applies(model("text_generation"), {"prompt": "x"})
+    assert runner.near_capacity_applies(model("text_continuation"), {"prompt": "x"})
+    assert not runner.near_capacity_applies(model("text_continuation"), {"prompt": "x", "image": "i"})
+    assert not runner.near_capacity_applies(model("vision_language_generation"), {"prompt": "x"})
+
+
 def _order_check(tmp_path, monkeypatch, measurements):
     """The real order check and native timing (``_time_reference``) over stubbed servers; ``measurements`` are
     the four timed runs' stats in the order they run: native first, TRTMC second, TRTMC first, native second."""
