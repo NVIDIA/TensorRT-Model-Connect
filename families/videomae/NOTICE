@@ -1,0 +1,18 @@
+VideoMAE base checkpoint (not part of this repository; the E2E reads the pinned revision
+from the Hugging Face cache):
+https://huggingface.co/MCG-NJU/videomae-base
+Revision dc740ceda42fce44faed2ea03c6d447db72f6af9
+Licensed under the Creative Commons Attribution-NonCommercial 4.0 International
+License (CC BY-NC 4.0) by the Multimedia Computing Group, Nanjing University.
+
+The network in model.py and graph.py follows VideoMAEForPreTraining, and
+sinusoid_table in graph.py reproduces get_sinusoid_encoding_table, of the VideoMAE
+implementation in Hugging Face Transformers 5.2.0
+(src/transformers/models/videomae/modeling_videomae.py):
+https://github.com/huggingface/transformers/tree/v5.2.0
+Copyright 2022 Multimedia Computing Group, Nanjing University and The HuggingFace Inc. team.
+Licensed under Apache License 2.0.
+
+The restoration of predicted tubes in runtime/clip.cpp applies the method of the
+VideoMAE authors' visualization script, run_videomae_vis.py, without its code:
+https://github.com/MCG-NJU/VideoMAE/tree/14ef8d856287c94ef1f985fe30f958eb4ec2c55d

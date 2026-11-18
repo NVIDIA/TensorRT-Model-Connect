@@ -1,0 +1,24 @@
+{
+  "name": "videomae-base",
+  "hf_id": "MCG-NJU/videomae-base",
+  "hf_revision": "dc740ceda42fce44faed2ea03c6d447db72f6af9",
+  "bundle": "videomae-base.bundle",
+  "family": "videomae",
+  "task": "masked_video_text_to_video",
+  "precision": "fp32",
+  "testcases": [
+    {
+      "name": "videomae-base-tube-mask",
+      "premerge": true,
+      "clip_image": "data/test_img.jpeg",
+      "mask": {"kind": "tube", "ratio": 0.9, "seed": 0}
+    },
+    {
+      "name": "videomae-base-box-mask",
+      "premerge": true,
+      "clip_image": "data/test_img.jpeg",
+      "mask": {"kind": "box", "top": 64, "left": 96, "height": 96, "width": 80}
+    }
+  ],
+  "tensor_parallel_size": 1
+}
