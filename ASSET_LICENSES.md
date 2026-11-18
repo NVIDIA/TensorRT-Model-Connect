@@ -74,6 +74,7 @@ and saved losslessly as PNG (its pixels equal Pillow's decode of the
 
 Byte-identical copies of that PNG are stored at:
 
+- `families/mask2former/tests/data/test_img.png`
 - `families/minicpmv4_7/tests/data/test_img.png`
 
 `families/timm_resnet/tests/data/test_img_car.jpeg` is a crop of the same

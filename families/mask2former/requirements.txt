@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The runtime reproduces Pillow 13's bilinear resize, which the reference image processor runs.
+Pillow==13.0.0
+# The reference model class requires scipy when it is constructed (its training loss).
+scipy==1.18.1
+# scipy alone resolves numpy past the range the CI image installs.
+numpy>=1.24,<2.5
