@@ -103,7 +103,7 @@ def artifacts(tmp_path_factory):
     image_path = input_image()
     model_dir = checkpoint_dir()
     import torch
-    from transformers import BlipForConditionalGeneration, BlipProcessor
+    from transformers import BlipConfig, BlipForConditionalGeneration, BlipProcessor
 
     assert torch.cuda.is_available(), "selected blip E2E requires CUDA"
     binary, runtime = Path(os.environ["TRTMC_BINARY"]), Path(os.environ["TRTMC_RUNTIME_ROOT"])
@@ -121,9 +121,22 @@ def artifacts(tmp_path_factory):
             tensor_parallel_size=MANIFEST["tensor_parallel_size"],
         )
     )
-    model = (
-        BlipForConditionalGeneration.from_pretrained(model_dir, dtype=torch.float32).eval().cuda()
+    # This legacy state dict stores both decoder parameter pairs explicitly.
+    # Load every parameter strictly instead of inferring ties from serialization.
+    reference_config = BlipConfig.from_pretrained(model_dir, local_files_only=True)
+    reference_config.tie_word_embeddings = False
+    reference_config.text_config.tie_word_embeddings = False
+    model = BlipForConditionalGeneration(reference_config).float()
+    state = torch.load(model_dir / "pytorch_model.bin", map_location="cpu", weights_only=True)
+    # Modern Transformers regenerates this nonpersistent buffer. Verify the
+    # legacy table before removing it from the learned-parameter state dict.
+    position_ids = state.pop("text_decoder.bert.embeddings.position_ids")
+    assert torch.equal(position_ids, model.text_decoder.bert.embeddings.position_ids), (
+        "BLIP checkpoint position_ids differs from the reference position table"
     )
+    model.load_state_dict(state, strict=True)
+    del state
+    model = model.eval().cuda()
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     processor = BlipProcessor.from_pretrained(model_dir, use_fast=False)
