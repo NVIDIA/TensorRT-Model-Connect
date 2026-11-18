@@ -7,3 +7,4 @@ def test_idefics3_checkpoint_has_one_owner():
     family, support = resolve_family(ModelMetadata({"model_type": "idefics3"}, {}))
     assert family == "idefics3"
     assert support.tasks == ("images_text_to_text",)
+    assert support.default_task == "images_text_to_text"

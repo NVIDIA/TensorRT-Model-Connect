@@ -44,6 +44,8 @@ def build_vision(weights, cfg, verbose):
 
 
 def build(request, writer):
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("idefics3 does not support dynamic_kv_cache")
     if request.task != "images_text_to_text" or request.backend != "trt":
         raise ValueError("Idefics3 requires images_text_to_text with backend=trt")
     if (
@@ -53,7 +55,6 @@ def build(request, writer):
         or request.max_batch_size != 1
         or request.quantization not in (None, "none")
         or request.fp32_layers
-        or request.dynamic_kv_cache
         or request.image_height is not None
         or request.image_width is not None
         or request.video_num_frames is not None
