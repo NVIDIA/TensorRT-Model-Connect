@@ -235,6 +235,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     image = Image.open(TEST_ROOT / "data/test_img.jpeg").convert("RGB")
     image_path = tmp_path / "input.png"
     image.save(image_path)
+    record_evidence("inputs", {"image": image_path})
     source = tmp_path / "source.f32"
     source.write_bytes((np.asarray(image, dtype=np.float32) / 255).astype("<f4").tobytes())
     sentinel = "TRTMC_QUESTION_PLACEHOLDER"
@@ -275,11 +276,32 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         expected = inputs["pixel_values"][0].numpy()
         actual = np.fromfile(native_pixels, dtype="<f4").reshape(expected.shape)
         assert prepared["views"] == expected.shape[0]
-        record_evidence("native_preprocessing", {"sample": index, "pixels": actual, **prepared})
-        record_evidence(
-            "reference_preprocessing",
-            {"sample": index, "pixels": expected, "input_ids": inputs["input_ids"][0].tolist()},
-        )
+        if evidence_enabled():
+            # Thirteen full-resolution views exceed the recorder's per-file
+            # array bound. Retain each complete tensor with lossless compression.
+            pair = {}
+            for role, pixels in (("native", actual), ("reference", expected)):
+                archive = tmp_path / f"{role}-preprocessing-{index}.npz"
+                np.savez_compressed(archive, pixels=pixels)
+                pair[role] = archive
+            record_evidence(
+                "native_preprocessing",
+                {
+                    "sample": index,
+                    "pixels_archive": pair["native"],
+                    "pixel_shape": list(actual.shape),
+                    **prepared,
+                },
+            )
+            record_evidence(
+                "reference_preprocessing",
+                {
+                    "sample": index,
+                    "pixels_archive": pair["reference"],
+                    "pixel_shape": list(expected.shape),
+                    "input_ids": inputs["input_ids"][0].tolist(),
+                },
+            )
         np.testing.assert_allclose(actual, expected, atol=2e-7, rtol=0)
         print(
             f"SmolVLM preprocessing: {prepared['views']} views, {len(prepared['ids'])} prompt tokens"
