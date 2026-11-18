@@ -5,12 +5,15 @@
 #include "families/qwen2_5_omni/runtime/tokenizer.h"
 #include "trtmc/internal/model.h"
 #include "trtmc/internal/text.h"
+#include "trtmc/runtime/device_tensor.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <stdexcept>
 
 namespace trtmc::qwen2_5_omni {
@@ -21,19 +24,19 @@ std::vector<char> section(const BundleReader& reader, const char* name) {
         throw std::runtime_error(std::string("Qwen2.5 Omni Thinker bundle lacks ") + name);
     return reader.read_section(name);
 }
-Tensor tensor(void* data, std::initializer_list<int64_t> shape, DType dtype) {
-    Tensor result;
-    result.data = data;
-    result.shape = shape;
-    result.dtype = dtype;
-    return result;
+
+void require_tensor(ITrtModule& engine, const std::string& name, const std::vector<int64_t>& shape,
+                    DType dtype, bool output) {
+    if (!(output ? engine.has_output(name) : engine.has_input(name)) ||
+        engine.tensor_shape(name) != shape || engine.tensor_dtype(name) != dtype ||
+        !engine.device_ptr(name))
+        throw std::runtime_error("Invalid Qwen2.5 Omni Thinker tensor " + name);
 }
-const Tensor& output(const TensorMap& outputs, const std::string& name, std::size_t count) {
-    const auto found = outputs.find(name);
-    if (found == outputs.end() || !found->second.data || found->second.dtype != DType::kFloat32 ||
-        found->second.numel() != count)
-        throw std::runtime_error("Invalid Qwen2.5 Omni Thinker output " + name);
-    return found->second;
+
+void check_copy(cudaError_t status) {
+    if (status != cudaSuccess)
+        throw std::runtime_error(std::string("Qwen2.5 Omni Thinker CUDA copy failed: ") +
+                                 cudaGetErrorString(status));
 }
 
 class Pipeline final : public internal::IModel, public internal::ITextContinuation {
@@ -41,10 +44,26 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
     Pipeline(std::unique_ptr<ITrtModule> engine, std::unique_ptr<ITokenizer> tokenizer,
              nlohmann::json cfg)
         : engine_(std::move(engine)), tokenizer_(std::move(tokenizer)), cfg_(std::move(cfg)),
-          fields_{{"max_new_tokens", internal::ConfigKind::I64, internal::ConfigValue{int64_t{32}},
-                   "Maximum generated tokens"},
+          fields_{{"max_new_tokens", internal::ConfigKind::I64, std::nullopt,
+                   "Maximum generated tokens; defaults to min(32, remaining context)"},
                   {"do_sample", internal::ConfigKind::Bool, internal::ConfigValue{false},
-                   "Greedy decoding only"}} {}
+                   "Greedy decoding only"}} {
+        const int32_t length = cfg_.at("sequence_length"), vocab = cfg_.at("vocab_size"),
+                      layers = cfg_.at("layers"), heads = cfg_.at("kv_heads"),
+                      dim = cfg_.at("head_dim"), eos = cfg_.at("eos_id");
+        if (length < 2 || vocab <= 0 || layers <= 0 || heads <= 0 || dim <= 0 || eos < 0 ||
+            eos >= vocab)
+            throw std::runtime_error("Invalid Qwen2.5 Omni Thinker profile");
+        require_tensor(*engine_, "input_ids", {1}, DType::kInt32, false);
+        require_tensor(*engine_, "position", {1}, DType::kInt32, false);
+        require_tensor(*engine_, "logits", {1, vocab}, DType::kFloat32, true);
+        for (int32_t i = 0; i < layers; ++i) {
+            const auto suffix = std::to_string(i);
+            for (const auto* prefix : {"cache_k_", "cache_v_", "present_k_", "present_v_"})
+                require_tensor(*engine_, prefix + suffix, {1, heads, length, dim}, DType::kFloat32,
+                               prefix[0] == 'p');
+        }
+    }
     const char* task() const noexcept override { return "text_continuation"; }
     std::vector<internal::TaskInstance> task_bindings() override {
         return {
@@ -54,14 +73,12 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
                              internal::ConfigView config) override {
         const Span<const internal::ConfigField> fields{fields_.data(), fields_.size()};
         internal::validate_config(fields, config);
-        const auto max_new = *internal::config_get<int64_t>(config, fields, "max_new_tokens");
+        const auto requested_max = internal::config_get<int64_t>(config, fields, "max_new_tokens");
         if (*internal::config_get<bool>(config, fields, "do_sample"))
             throw std::invalid_argument("Qwen2.5 Omni Thinker currently supports greedy decoding");
         const int32_t length = cfg_.at("sequence_length"), vocab = cfg_.at("vocab_size");
         const int32_t layers = cfg_.at("layers"), heads = cfg_.at("kv_heads"),
                       dim = cfg_.at("head_dim");
-        if (max_new <= 0 || max_new > length)
-            throw std::invalid_argument("Invalid Qwen2.5 Omni Thinker generation length");
         std::vector<int32_t> ids;
         if (const auto* text = std::get_if<std::string_view>(&request.prefix))
             ids = tokenizer_->encode(std::string(*text));
@@ -69,48 +86,69 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
             const auto tokens = std::get<Span<const int32_t>>(request.prefix);
             ids.assign(tokens.begin(), tokens.end());
         }
-        if (ids.empty() || ids.size() + max_new > static_cast<std::size_t>(length))
+        if (ids.empty() || ids.size() >= static_cast<std::size_t>(length))
+            throw std::invalid_argument("Qwen2.5 Omni Thinker prefix does not fit its KV profile");
+        const auto remaining = static_cast<int64_t>(length - ids.size());
+        const auto max_new = requested_max.value_or(std::min<int64_t>(32, remaining));
+        if (max_new <= 0 || max_new > remaining)
             throw std::invalid_argument(
                 "Qwen2.5 Omni Thinker prefix and generation exceed the built KV profile");
         for (const auto id : ids)
             if (id < 0 || id >= vocab)
                 throw std::invalid_argument("Invalid Qwen2.5 Omni Thinker token ID");
+        const auto stream = engine_->stream();
         const auto cache_count = static_cast<std::size_t>(heads) * length * dim;
-        std::vector<std::vector<float>> keys(layers, std::vector<float>(cache_count, 0));
-        std::vector<std::vector<float>> values(layers, std::vector<float>(cache_count, 0));
-        std::vector<float> logits;
+        std::vector<DeviceTensor> keys, values;
+        keys.reserve(layers);
+        values.reserve(layers);
+        for (int32_t i = 0; i < layers; ++i) {
+            keys.push_back(DeviceTensor::zeros({1, heads, length, dim}, DType::kFloat32, stream));
+            values.push_back(DeviceTensor::zeros({1, heads, length, dim}, DType::kFloat32, stream));
+            if (!keys.back().ok() || !values.back().ok())
+                throw std::runtime_error("Qwen2.5 Omni Thinker could not allocate device KV state");
+        }
+        DeviceTensor token_input({1}, DType::kInt32, stream),
+            position_input({1}, DType::kInt32, stream);
+        std::vector<float> logits(vocab);
         int32_t position = 0;
         auto step = [&](int32_t token) {
             if (position >= length)
                 throw std::runtime_error("Qwen2.5 Omni Thinker exhausted its KV profile");
-            TensorMap inputs{{"input_ids", tensor(&token, {1}, DType::kInt32)},
-                             {"position", tensor(&position, {1}, DType::kInt32)}};
+            if (!token_input.copy_from_host(&token) || !position_input.copy_from_host(&position))
+                throw std::runtime_error("Qwen2.5 Omni Thinker could not upload token inputs");
+            DeviceTensorMap inputs{{"input_ids", &token_input}, {"position", &position_input}};
             for (int32_t i = 0; i < layers; ++i) {
-                inputs.emplace("cache_k_" + std::to_string(i),
-                               tensor(keys[i].data(), {1, heads, length, dim}, DType::kFloat32));
-                inputs.emplace("cache_v_" + std::to_string(i),
-                               tensor(values[i].data(), {1, heads, length, dim}, DType::kFloat32));
+                inputs.emplace("cache_k_" + std::to_string(i), &keys[i]);
+                inputs.emplace("cache_v_" + std::to_string(i), &values[i]);
             }
-            const auto predicted = engine_->forward(inputs);
-            const auto& scores = output(predicted, "logits", vocab);
-            const auto* data = static_cast<const float*>(scores.data);
-            logits.assign(data, data + vocab);
+            engine_->forward_device_async(inputs);
+            check_copy(cudaMemcpyAsync(logits.data(), engine_->device_ptr("logits"),
+                                       logits.size() * sizeof(float), cudaMemcpyDeviceToHost,
+                                       stream));
+            for (int32_t i = 0; i < layers; ++i) {
+                const auto suffix = std::to_string(i);
+                check_copy(
+                    cudaMemcpyAsync(keys[i].data(), engine_->device_ptr("present_k_" + suffix),
+                                    cache_count * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+                check_copy(
+                    cudaMemcpyAsync(values[i].data(), engine_->device_ptr("present_v_" + suffix),
+                                    cache_count * sizeof(float), cudaMemcpyDeviceToDevice, stream));
+            }
+            engine_->sync();
             for (const auto value : logits)
                 if (!std::isfinite(value))
                     throw std::runtime_error("Qwen2.5 Omni Thinker logit is nonfinite");
-            for (int32_t i = 0; i < layers; ++i) {
-                const auto& key = output(predicted, "present_k_" + std::to_string(i), cache_count);
-                const auto& value =
-                    output(predicted, "present_v_" + std::to_string(i), cache_count);
-                std::copy_n(static_cast<const float*>(key.data), cache_count, keys[i].data());
-                std::copy_n(static_cast<const float*>(value.data), cache_count, values[i].data());
-            }
             ++position;
         };
+        using Clock = std::chrono::steady_clock;
+        const auto prefill_start = Clock::now();
         for (const auto token : ids)
             step(token);
+        const auto decode_start = Clock::now();
         const int32_t eos = cfg_.at("eos_id");
         internal::TextResult result;
+        result.prefill_ms =
+            std::chrono::duration<double, std::milli>(decode_start - prefill_start).count();
         for (int64_t i = 0; i < max_new; ++i) {
             const auto next = static_cast<int32_t>(std::max_element(logits.begin(), logits.end()) -
                                                    logits.begin());
@@ -120,6 +158,8 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
             if (i + 1 < max_new)
                 step(next);
         }
+        result.decode_ms =
+            std::chrono::duration<double, std::milli>(Clock::now() - decode_start).count();
         result.text = tokenizer_->decode(result.token_ids);
         return result;
     }

@@ -15,6 +15,7 @@
 #include <queue>
 #include <stdexcept>
 #include <string>
+#include <unicode/normalizer2.h>
 #include <unicode/regex.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -676,6 +677,18 @@ class BpeTokenizer final : public ITokenizer {
 
     std::string normalize_text(const std::string& source) const {
         std::string text = source;
+        if (mNormalizeNfc) {
+            UErrorCode status = U_ZERO_ERROR;
+            const auto* normalizer = icu::Normalizer2::getNFCInstance(status);
+            if (U_FAILURE(status))
+                throw std::runtime_error("Qwen2.5 Omni tokenizer NFC initialization failed");
+            icu::UnicodeString normalized;
+            normalizer->normalize(icu::UnicodeString::fromUTF8(text), normalized, status);
+            if (U_FAILURE(status))
+                throw std::runtime_error("Qwen2.5 Omni tokenizer NFC normalization failed");
+            text.clear();
+            normalized.toUTF8String(text);
+        }
         for (const auto& replacement : mLiteralReplacements) {
             std::size_t offset = 0;
             while ((offset = text.find(replacement.first, offset)) != std::string::npos) {
@@ -1068,7 +1081,9 @@ class BpeTokenizer final : public ITokenizer {
                 result.append(text, start, pos - start);
             }
         }
-        return result;
+        std::string valid;
+        icu::UnicodeString::fromUTF8(result).toUTF8String(valid);
+        return valid;
     }
 
     // Generic pre-tokenizer used when no GPT-2 pattern is declared.
@@ -1420,20 +1435,24 @@ class BpeTokenizer final : public ITokenizer {
         parse_added_tokens(j);
         parse_post_processor(j);
         detect_normalizer(j);
-        detect_pre_tokenizer(j);
         const auto& pretokenizer = j.at("pre_tokenizer");
-        for (const auto& part : pretokenizer.at("pretokenizers")) {
-            if (part.value("type", "") == "Split") {
-                const auto pattern = part.at("pattern").at("Regex").get<std::string>();
-                UErrorCode status = U_ZERO_ERROR;
-                mRegex.reset(
-                    icu::RegexPattern::compile(icu::UnicodeString::fromUTF8(pattern), 0, status));
-                if (U_FAILURE(status))
-                    throw std::runtime_error("Qwen2.5 Omni tokenizer regex compilation failed");
-                break;
-            }
-        }
-        detect_decoder(j);
+        const auto parts = pretokenizer.value("pretokenizers", nlohmann::json::array());
+        if (pretokenizer.value("type", "") != "Sequence" || !parts.is_array() ||
+            parts.size() != 2 || parts[0].value("type", "") != "Split" ||
+            parts[0].value("behavior", "") != "Isolated" || parts[0].value("invert", false) ||
+            !parts[0].contains("pattern") || !parts[0]["pattern"].contains("Regex") ||
+            parts[1].value("type", "") != "ByteLevel" || parts[1].value("add_prefix_space", true) ||
+            parts[1].value("use_regex", true) || j.at("decoder").value("type", "") != "ByteLevel")
+            throw std::runtime_error(
+                "Qwen2.5 Omni tokenizer requires regex Split followed by ByteLevel");
+        const auto pattern = parts[0]["pattern"]["Regex"].get<std::string>();
+        if (pattern.empty())
+            throw std::runtime_error("Qwen2.5 Omni tokenizer regex cannot be empty");
+        UErrorCode status = U_ZERO_ERROR;
+        mRegex.reset(icu::RegexPattern::compile(icu::UnicodeString::fromUTF8(pattern), 0, status));
+        if (U_FAILURE(status))
+            throw std::runtime_error("Qwen2.5 Omni tokenizer regex compilation failed");
+        mDecoderType = DecoderType::kByteLevel;
     }
 
     // Detect normalizer: check for Prepend (always prepend ▁) vs none
@@ -1485,6 +1504,10 @@ class BpeTokenizer final : public ITokenizer {
 
     void detect_text_normalizers(const nlohmann::json& normalizer) {
         const std::string type = normalizer.value("type", "");
+        if (type == "NFC") {
+            mNormalizeNfc = true;
+            return;
+        }
         if (type == "Sequence" && normalizer.contains("normalizers")) {
             for (const auto& child : normalizer["normalizers"]) {
                 detect_text_normalizers(child);
@@ -1616,6 +1639,7 @@ class BpeTokenizer final : public ITokenizer {
     std::unique_ptr<icu::RegexPattern> mRegex;
     std::vector<std::pair<std::string, std::string>> mLiteralReplacements;
     bool mNormalizeLowercase = false;
+    bool mNormalizeNfc = false;
     bool mNormalizeWhitespace = false;
     std::string mEndOfWordSuffix;
 

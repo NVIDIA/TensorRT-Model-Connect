@@ -62,14 +62,14 @@ def build_engine(weights, cfg, length, stream, verbose=False):
         layer.reshape_dims = shape
         return layer.get_output(0)
 
-    def linear(x, key):
+    def linear(x, key, *, require_bias=False):
         result = net.add_matrix_multiply(
             x,
             trt.MatrixOperation.NONE,
             const(weights[key + ".weight"]),
             trt.MatrixOperation.TRANSPOSE,
         ).get_output(0)
-        if key + ".bias" in weights:
+        if require_bias or key + ".bias" in weights:
             result = add(result, const(weights[key + ".bias"].reshape(1, -1)))
         return result
 
@@ -100,9 +100,12 @@ def build_engine(weights, cfg, length, stream, verbose=False):
         (1, 1, 1, 1, length),
     )
     hidden = net.add_gather(const(weights["model.embed_tokens.weight"]), token, 0).get_output(0)
-    rotary = Qwen2_5OmniRotaryEmbedding(Qwen2_5OmniTextConfig(**cfg))
-    with torch.no_grad():
-        cosine, sine = rotary(torch.empty(1, length, width), torch.arange(length)[None, :])
+    with torch.device("cpu"), torch.no_grad():
+        rotary = Qwen2_5OmniRotaryEmbedding(Qwen2_5OmniTextConfig(**cfg))
+        cosine, sine = rotary(
+            torch.empty(1, length, width, device="cpu", dtype=torch.float32),
+            torch.arange(length, device="cpu")[None, :],
+        )
     cosine, sine = tuple(
         reshape(net.add_gather(const(x.numpy()[0]), position, 0).get_output(0), (1, 1, 1, dim))
         for x in (cosine, sine)
@@ -110,9 +113,9 @@ def build_engine(weights, cfg, length, stream, verbose=False):
     for layer in range(cfg["num_hidden_layers"]):
         prefix = f"model.layers.{layer}"
         normal = norm(hidden, prefix + ".input_layernorm")
-        query = reshape(linear(normal, prefix + ".self_attn.q_proj"), (1, heads, 1, dim))
-        key = reshape(linear(normal, prefix + ".self_attn.k_proj"), (1, kv, 1, dim))
-        value = reshape(linear(normal, prefix + ".self_attn.v_proj"), (1, kv, 1, dim))
+        query = reshape(linear(normal, prefix + ".self_attn.q_proj", require_bias=True), (1, heads, 1, dim))
+        key = reshape(linear(normal, prefix + ".self_attn.k_proj", require_bias=True), (1, kv, 1, dim))
+        value = reshape(linear(normal, prefix + ".self_attn.v_proj", require_bias=True), (1, kv, 1, dim))
 
         def rope(x, nheads):
             first = net.add_slice(
@@ -190,6 +193,8 @@ def build(request, writer):
     cfg = root_config.thinker_config.text_config.to_dict()
     cfg["head_dim"] = cfg.get("head_dim") or cfg["hidden_size"] // cfg["num_attention_heads"]
     cfg["eos_token_id"] = root_config.thinker_config.eos_token_id
+    if type(cfg["eos_token_id"]) is not int or not 0 <= cfg["eos_token_id"] < cfg["vocab_size"]:
+        raise ValueError("Qwen2.5 Omni Thinker requires one in-range integer EOS token ID")
     length = request.max_sequence_length or 128
     if (
         cfg["hidden_act"] != "silu"
