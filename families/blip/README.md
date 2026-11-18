@@ -86,3 +86,8 @@ valid and invalid requests, and numerical comparison of the vision features
 and teacher-forced decoder logits. The image-feature tolerance is
 `atol=5e-4, rtol=1e-4`; the decoder tolerance is `atol=1e-3, rtol=1e-4`.
 No performance or deployment qualification is implied by a correctness run.
+
+`TRTMC_NATIVE_BUILD_DIR` points to the configured native test build directory.
+Building the registered tokenizer test also builds `test_blip_native`, which
+E2E loads from that directory for preprocessing and request-lifecycle checks.
+`TRTMC_RUNTIME_ROOT` supplies the installed model and backend libraries.

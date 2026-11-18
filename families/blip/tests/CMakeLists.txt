@@ -16,6 +16,8 @@ target_link_libraries(test_blip_native PRIVATE
 target_compile_options(test_blip_native PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(test_blip_tokenizer cpp/test_tokenizer.cpp ../runtime/wordpiece_tokenizer.cpp)
+# The family E2E also uses the native probe for pixels and request reuse.
+add_dependencies(test_blip_tokenizer test_blip_native)
 set_target_properties(test_blip_tokenizer PROPERTIES
   RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" BUILD_RPATH "\$ORIGIN")
 target_include_directories(test_blip_tokenizer PRIVATE ${PROJECT_SOURCE_DIR})

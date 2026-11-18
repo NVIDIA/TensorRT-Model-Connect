@@ -214,7 +214,7 @@ def test_official_checkpoint_e2e(case_name, artifacts, case_inputs, tmp_path):
     assert payload["token_ids"] == continuation
     assert payload["text"] == processor.decode(continuation, skip_special_tokens=True)
 
-    helper = runtime / "test_blip_native"
+    helper = Path(os.environ["TRTMC_NATIVE_BUILD_DIR"]) / "test_blip_native"
     assert helper.is_file(), "selected blip E2E requires test_blip_native"
     pixel_dump = tmp_path / "native-pixels.bin"
     tokenizer_file = tmp_path / "tokenizer.json"
