@@ -8,6 +8,8 @@ from pathlib import Path
 import numpy as np
 import tensorrt as trt
 
+from .plan_stream import PlanWriter
+
 
 def load_weights(directory):
     from safetensors import safe_open
@@ -161,15 +163,6 @@ def build_engine(weights, cfg, length, stream, verbose=False):
     net.mark_output(logits)
     if not builder.build_serialized_network_to_stream(net, options, PlanWriter(stream)):
         raise RuntimeError("Qwen2.5 Omni Thinker engine build failed")
-
-
-class PlanWriter(trt.IStreamWriter):
-    def __init__(self, stream):
-        trt.IStreamWriter.__init__(self)
-        self.stream = stream
-
-    def write(self, data):
-        return self.stream.write(data)
 
 
 def build(request, writer):
