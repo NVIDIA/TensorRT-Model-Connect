@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "fast-foundation-stereo",
+            "fast_foundation_stereo",
+            "foundation_stereo_lite"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "stereo_disparity"
+        ],
+        "default_task": "stereo_disparity"
+      }
+    },
+    {
+      "if": {
+        "files_all": [
+          "weights/23-36-37/model_best_bp2_serialize.pth"
+        ]
+      },
+      "then": {
+        "tasks": [
+          "stereo_disparity"
+        ],
+        "default_task": "stereo_disparity"
+      }
+    }
+  ]
+}

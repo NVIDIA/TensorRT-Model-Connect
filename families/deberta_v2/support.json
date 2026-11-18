@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "deberta-v2",
+            "deberta_v2"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "text_to_token_features"
+        ],
+        "default_task": "text_to_token_features"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "DebertaV2Model"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "text_to_token_features"
+        ],
+        "default_task": "text_to_token_features"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "DebertaV2Model"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "text_to_token_features"
+        ],
+        "default_task": "text_to_token_features"
+      }
+    }
+  ]
+}

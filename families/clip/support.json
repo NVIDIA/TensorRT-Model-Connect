@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "clip"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_embedding",
+          "text_to_embedding",
+          "text_image_to_relevance"
+        ],
+        "default_task": "text_image_to_relevance"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "CLIPModel"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_embedding",
+          "text_to_embedding",
+          "text_image_to_relevance"
+        ],
+        "default_task": "text_image_to_relevance"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "CLIPModel"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_to_embedding",
+          "text_to_embedding",
+          "text_image_to_relevance"
+        ],
+        "default_task": "text_image_to_relevance"
+      }
+    }
+  ]
+}

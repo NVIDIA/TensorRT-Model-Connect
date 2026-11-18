@@ -81,9 +81,14 @@ set of exact sentinel files. When even that is too broad, list the exact
 validated checkpoints with `/repo_id`; never match a pattern in the repository
 name.
 
-Families that have not moved yet still declare support in Python with
-`family_support(...)` or a small `describe(metadata)` function. `support.py`
-may import only the shared support contract either way.
+Every new family declares support in `support.json`; a plain
+`family_support(...)` call is rejected by the architecture tests. Only support
+that the rule format cannot express yet may stay in a small
+`describe(metadata)` function, and that family must be listed with its reason
+in `HAND_WRITTEN_SUPPORT` in `tools/tests/test_support_rules.py`. Families
+without `support.json` are absent from the published `compatibility.json`, so
+the Hugging Face Hub does not tag their models. `support.py` may import only
+the shared support contract either way.
 
 `model.py` must expose exactly one plain function. Any helper it calls is
 implemented in this file or elsewhere in the same family directory:

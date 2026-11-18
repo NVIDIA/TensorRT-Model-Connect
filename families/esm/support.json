@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "esm"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "masked_text_to_token_scores"
+        ],
+        "default_task": "masked_text_to_token_scores"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "EsmForMaskedLM",
+            "EsmModel"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "masked_text_to_token_scores"
+        ],
+        "default_task": "masked_text_to_token_scores"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "EsmForMaskedLM",
+            "EsmModel"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "masked_text_to_token_scores"
+        ],
+        "default_task": "masked_text_to_token_scores"
+      }
+    }
+  ]
+}

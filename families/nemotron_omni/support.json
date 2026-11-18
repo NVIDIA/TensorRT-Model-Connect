@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "NemotronH_Nano_Omni_Reasoning_V3"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "text_generation",
+          "vision_language_generation",
+          "text_continuation",
+          "images_text_to_text",
+          "video_text_to_text",
+          "audio_text_to_text",
+          "image_audio_text_to_text",
+          "audio_video_text_to_text"
+        ],
+        "default_task": "vision_language_generation",
+        "default_precision": "fp16"
+      }
+    }
+  ]
+}

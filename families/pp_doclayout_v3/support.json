@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "pp_doclayout_v3"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "document_layout"
+        ],
+        "default_task": "document_layout"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "PPDocLayoutV3ForObjectDetection"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "document_layout"
+        ],
+        "default_task": "document_layout"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "PPDocLayoutV3ForObjectDetection"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "document_layout"
+        ],
+        "default_task": "document_layout"
+      }
+    }
+  ]
+}

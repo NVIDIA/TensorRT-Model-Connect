@@ -1,24 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Family-owned model and task support for Boltz-2."""
+"""Family-owned model and task support for boltz2."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    model_types=("boltz2", "boltz_2"),
-    architectures=("Boltz2ForStructurePrediction",),
-    required_files=(
-        "boltz2_conf.ckpt",
-        "boltz2_aff.ckpt",
-        "protein_monomer.yaml",
-        "protein_monomer.a3m",
-        "processed/structures/protein_monomer.npz",
-        "processed/records/protein_monomer.json",
-        "mols.tar",
-    ),
-    tasks=("structure_prediction",),
-    default_task="structure_prediction",
-    default_precision="bf16",
-)
+describe = support_from_json(__file__)

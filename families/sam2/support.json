@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "sam2",
+            "sam2_video_tracking",
+            "sam2_bbox_video_tracking"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "video_segmentation"
+        ],
+        "default_task": "video_segmentation",
+        "default_precision": "fp16"
+      }
+    },
+    {
+      "if": {
+        "files_all": [
+          "sam2.1_hiera_s.yaml",
+          "sam2.1_hiera_small.pt"
+        ]
+      },
+      "then": {
+        "tasks": [
+          "video_segmentation"
+        ],
+        "default_task": "video_segmentation",
+        "default_precision": "fp16"
+      }
+    }
+  ]
+}

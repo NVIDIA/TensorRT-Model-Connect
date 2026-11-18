@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "grounding-dino"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_text_to_boxes"
+        ],
+        "default_task": "image_text_to_boxes"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "GroundingDinoForObjectDetection"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_text_to_boxes"
+        ],
+        "default_task": "image_text_to_boxes"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "GroundingDinoForObjectDetection"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_text_to_boxes"
+        ],
+        "default_task": "image_text_to_boxes"
+      }
+    }
+  ]
+}

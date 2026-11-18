@@ -1,13 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Family-owned model and task support for Deformable DETR."""
+"""Family-owned model and task support for deformable_detr."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    architectures=("DeformableDetrForObjectDetection",),
-    tasks=("object_detection",),
-    default_task="object_detection",
-)
+describe = support_from_json(__file__)

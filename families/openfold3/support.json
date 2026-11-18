@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "files_all": [
+          "of3-ob-2025-06-30-174k.pt",
+          "components.bcif",
+          "query.json",
+          "openfold3_features.npz",
+          "openfold3_structure.json"
+        ]
+      },
+      "then": {
+        "tasks": [
+          "structure_prediction"
+        ],
+        "default_task": "structure_prediction",
+        "default_precision": "fp16"
+      }
+    }
+  ]
+}
