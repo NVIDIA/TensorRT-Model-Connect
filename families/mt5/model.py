@@ -320,9 +320,7 @@ class _MT5Model:
         verbose=False,
         precision="fp32",
     ):
-        return _build_mt5_encoder(
-            config, weights, verbose=verbose, precision=precision
-        )
+        return _build_mt5_encoder(config, weights, verbose=verbose, precision=precision)
 
     def get_vl_config(self, config):
         raw = config.raw
@@ -343,7 +341,8 @@ class _MT5Model:
 
 def _project(network, lhs, lhs_width, rhs_width, weights, name, dtype):
     return graph_ops.add_matmul_rhs_constant(
-        network, lhs, lhs_width, rhs_width, weights[name], dtype=dtype)
+        network, lhs, lhs_width, rhs_width, weights[name], dtype=dtype
+    )
 
 
 def _build_mt5_encoder(config, weights, *, verbose=False, precision="fp32"):
@@ -422,9 +421,7 @@ def _build_mt5_encoder(config, weights, *, verbose=False, precision="fp32"):
         a = graph_ops.add_gelu_new(network, f1, dtype=work_np_dtype)
         gate = _project(network, fn, h, dff, weights, f"{pfx}.w_gate", work_np_dtype)
         a = network.add_elementwise(a, gate, trt.ElementWiseOperation.PROD).get_output(0)
-        f2 = _project(
-            network, a, dff, h, weights, f"{pfx}.w_fc2", work_np_dtype
-        )
+        f2 = _project(network, a, dff, h, weights, f"{pfx}.w_fc2", work_np_dtype)
         hs = network.add_elementwise(hs, f2, trt.ElementWiseOperation.SUM).get_output(0)
     hs = graph_ops.add_rms_norm(network, hs, h, weights["enc_final_norm"], et, dtype=work_np_dtype)
     if hs.dtype != trt.float32:
@@ -600,9 +597,7 @@ def _add_mt5_decoder_layer(
     act = graph_ops.add_gelu_new(network, f1, dtype=dtype)
     gate = _project(network, fn, h, ffn_dim, weights, f"{prefix}.w_gate", dtype)
     act = network.add_elementwise(act, gate, trt.ElementWiseOperation.PROD).get_output(0)
-    f2 = _project(
-        network, act, ffn_dim, h, weights, f"{prefix}.w_fc2", dtype
-    )
+    f2 = _project(network, act, ffn_dim, h, weights, f"{prefix}.w_fc2", dtype)
     out = network.add_elementwise(pca, f2, trt.ElementWiseOperation.SUM).get_output(0)
     return {"hidden": out, "present_k": present_k, "present_v": present_v}
 
@@ -684,31 +679,60 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _MT5Model, **up
 
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build the gated encoder and cached decoder with the published mT5 weights."""
-    if request.task != 'text_generation' or request.backend != 'trt':
-        raise ValueError('mt5 requires task=text_generation and backend=trt')
-    if (request.tensor_parallel_size != 1 or request.context_parallel_size != 1
-        or request.max_batch_size != 1 or request.dynamic_kv_cache
-        or request.image_height is not None or request.image_width is not None
-        or request.video_num_frames is not None or request.quantization not in (None,'none')
-        or request.fp32_layers or request.mtp_seq_len is not None):
-        raise NotImplementedError('mt5 supports unquantized single-GPU text generation')
-    if request.precision != 'fp32':
-        raise NotImplementedError('mt5 supports precision=fp32')
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("mt5 does not support dynamic_kv_cache")
+    if request.task != "text_generation" or request.backend != "trt":
+        raise ValueError("mt5 requires task=text_generation and backend=trt")
+    if (
+        request.tensor_parallel_size != 1
+        or request.context_parallel_size != 1
+        or request.max_batch_size != 1
+        or request.image_height is not None
+        or request.image_width is not None
+        or request.video_num_frames is not None
+        or request.quantization not in (None, "none")
+        or request.fp32_layers
+        or request.mtp_seq_len is not None
+    ):
+        raise NotImplementedError("mt5 supports unquantized single-GPU text generation")
+    if request.precision != "fp32":
+        raise NotImplementedError("mt5 supports precision=fp32")
     directory = Path(request.model_dir)
     cfg = ModelConfig.from_dir(directory)
-    length = _positive_int(request.max_sequence_length or 256,'max_sequence_length')
+    length = _positive_int(request.max_sequence_length or 256, "max_sequence_length")
     model = _MT5Model()
-    weights = model.load_weights(directory,cfg)
-    tokenizer = directory/'tokenizer.json'
+    weights = model.load_weights(directory, cfg)
+    tokenizer = directory / "tokenizer.json"
     if not tokenizer.is_file():
         from transformers import AutoTokenizer
-        tokenizer_json = AutoTokenizer.from_pretrained(directory,use_fast=True).backend_tokenizer.to_str().encode()
+
+        tokenizer_json = (
+            AutoTokenizer.from_pretrained(directory, use_fast=True)
+            .backend_tokenizer.to_str()
+            .encode()
+        )
     else:
         tokenizer_json = tokenizer.read_bytes()
-    writer.set_header(family='mt5',task=request.task,backend=request.backend)
-    writer.add_bytes('engine.plan',model.build_engine(cfg,weights,length,verbose=request.verbose))
-    writer.add_bytes('encoder.plan',model.build_vision_engine(directory,cfg,weights,verbose=request.verbose))
-    writer.add_json('runtime.json',_runtime_config(directory,cfg,model,precision='fp32',
-        max_cache_length=length,max_source_positions=length,max_target_positions=length,
-        decoder_engine_layout='single',tensor_parallel_size=1,tensor_parallel_mode='single'))
-    writer.add_bytes('tokenizer.json',tokenizer_json)
+    writer.set_header(family="mt5", task=request.task, backend=request.backend)
+    writer.add_bytes(
+        "engine.plan", model.build_engine(cfg, weights, length, verbose=request.verbose)
+    )
+    writer.add_bytes(
+        "encoder.plan", model.build_vision_engine(directory, cfg, weights, verbose=request.verbose)
+    )
+    writer.add_json(
+        "runtime.json",
+        _runtime_config(
+            directory,
+            cfg,
+            model,
+            precision="fp32",
+            max_cache_length=length,
+            max_source_positions=length,
+            max_target_positions=length,
+            decoder_engine_layout="single",
+            tensor_parallel_size=1,
+            tensor_parallel_mode="single",
+        ),
+    )
+    writer.add_bytes("tokenizer.json", tokenizer_json)

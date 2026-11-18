@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+from functools import cache
 from pathlib import Path
 import pytest
 from tensorrt_model_connect import BuildRequest, build
@@ -90,6 +91,17 @@ def _required_path(value: str | None, label: str) -> Path:
     path = Path(value)
     assert path.exists(), f"selected {FAMILY} E2E {label} does not exist: {path}"
     return path
+
+
+@cache
+def _native_test_binary(name: str) -> Path:
+    build_dir = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    subprocess.run(
+        ["cmake", "--build", str(build_dir), "--parallel", "2", "--target", name],
+        check=True,
+        timeout=600,
+    )
+    return _required_path(str(build_dir / name), name)
 
 
 def _model_dir(manifest: dict) -> Path:
@@ -203,41 +215,68 @@ def _run_json(
 
 def test_official_checkpoint_e2e(case_name, tmp_path):
     import torch
-    from tokenizers import Tokenizer
-    from transformers import MT5ForConditionalGeneration
+    from transformers import AutoTokenizer, MT5ForConditionalGeneration
 
     _, manifest, case = CASES[case_name]
     directory = _model_dir(manifest)
     binary, runtime_root = _runtime(manifest)
-    bundle = tmp_path / manifest['bundle']
-    _build(directory,bundle,manifest)
-    model = MT5ForConditionalGeneration.from_pretrained(directory,dtype=torch.float32).eval().to('cuda')
-    # Use the checkpoint's published tokenizer, including its precompiled
-    # normalization map. Constructing a generic T5 tokenizer can replace it.
-    tokenizer = Tokenizer.from_file(str(directory/'tokenizer.json'))
-    for prompt in case['prompts']:
-        tokenizer_binary = runtime_root/'test_mt5_tokenizer'
-        completed = subprocess.run([str(tokenizer_binary),str(directory/'tokenizer.json'),prompt],
-                                    check=True,capture_output=True,text=True)
+    bundle = tmp_path / manifest["bundle"]
+    _build(directory, bundle, manifest)
+    model = (
+        MT5ForConditionalGeneration.from_pretrained(directory, dtype=torch.float32)
+        .eval()
+        .to("cuda")
+    )
+    # The checkpoint publishes SentencePiece assets rather than tokenizer.json.
+    # Use its AutoTokenizer conversion, including the original normalization map.
+    tokenizer = AutoTokenizer.from_pretrained(directory, use_fast=True).backend_tokenizer
+    tokenizer_path = tmp_path / "reference-tokenizer.json"
+    tokenizer.save(str(tokenizer_path))
+    for prompt in case["prompts"]:
+        tokenizer_binary = _native_test_binary("test_mt5_tokenizer")
+        completed = subprocess.run(
+            [str(tokenizer_binary), str(tokenizer_path), prompt],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
         native_tokens = json.loads(completed.stdout)
         ids = tokenizer.encode(prompt).ids
-        assert native_tokens['ids'] == ids
-        inputs = torch.tensor([ids],device='cuda')
+        assert native_tokens["ids"] == ids
+        inputs = torch.tensor([ids], device="cuda")
         with torch.no_grad():
-            generated = model.generate(input_ids=inputs,attention_mask=torch.ones_like(inputs),
-                                        max_new_tokens=case['max_new_tokens'],do_sample=False)
-        expected = generated[0,1:].cpu().tolist()
-        actual = _run_json(binary,runtime_root,bundle,manifest,case,'run','--prompt',prompt,
-                            '--max-new-tokens',str(case['max_new_tokens']),'--top-k','1')
-        assert actual['token_ids'] == expected
-        assert actual['text'] == tokenizer.decode(expected,skip_special_tokens=True)
+            generated = model.generate(
+                input_ids=inputs,
+                attention_mask=torch.ones_like(inputs),
+                max_new_tokens=case["max_new_tokens"],
+                do_sample=False,
+            )
+        expected = generated[0, 1:].cpu().tolist()
+        actual = _run_json(
+            binary,
+            runtime_root,
+            bundle,
+            manifest,
+            case,
+            "run",
+            "--prompt",
+            prompt,
+            "--max-new-tokens",
+            str(case["max_new_tokens"]),
+            "--top-k",
+            "1",
+        )
+        assert actual["token_ids"] == expected
+        assert actual["text"] == tokenizer.decode(expected, skip_special_tokens=True)
         print(f"mt5 native/reference token parity: {prompt!r}: {expected}")
 
     for prompt, arguments, message in (
-        ('hello', ['--max-new-tokens', '129'], 'decoder cache capacity'),
-        ('hello', ['--top-k', '2'], 'greedy generation only'),
-        ('hello ' * 150, ['--max-new-tokens', '4'], 'encoder capacity'),
+        ("hello", ["--max-new-tokens", "129"], "decoder cache capacity"),
+        ("hello", ["--top-k", "2"], "greedy generation only"),
+        ("hello " * 150, ["--max-new-tokens", "4"], "encoder capacity"),
     ):
         with pytest.raises(subprocess.CalledProcessError) as failure:
-            _run_json(binary, runtime_root, bundle, manifest, case, 'run', '--prompt', prompt, *arguments)
+            _run_json(
+                binary, runtime_root, bundle, manifest, case, "run", "--prompt", prompt, *arguments
+            )
         assert message in failure.value.stderr
