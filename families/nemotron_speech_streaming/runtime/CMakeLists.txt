@@ -79,4 +79,30 @@ if(TRTMC_BUILD_TESTS)
     )
     add_test(NAME ${test_name} COMMAND ${test_name})
   endforeach()
+
+  # The stream's CUDA calls are CPU stand-ins defined in the test. Exporting the
+  # executable's symbols lets the family library resolve them there, so the
+  # test needs no GPU.
+  add_executable(test_nemotron_speech_streaming_streaming_cache
+    ${PROJECT_SOURCE_DIR}/families/nemotron_speech_streaming/tests/cpp/test_streaming_cache.cpp
+  )
+  target_include_directories(test_nemotron_speech_streaming_streaming_cache PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_nemotron_speech_streaming_streaming_cache SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_link_libraries(test_nemotron_speech_streaming_streaming_cache PRIVATE
+    trtmc_model_nemotron_speech_streaming
+    ${CMAKE_DL_LIBS}
+  )
+  target_compile_options(test_nemotron_speech_streaming_streaming_cache PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  set_target_properties(test_nemotron_speech_streaming_streaming_cache PROPERTIES
+    ENABLE_EXPORTS ON
+  )
+  add_test(NAME test_nemotron_speech_streaming_streaming_cache
+    COMMAND test_nemotron_speech_streaming_streaming_cache)
 endif()
