@@ -4,39 +4,11 @@
  */
 #include "families/layoutlmv3/runtime/image_preprocess.h"
 
-#include <algorithm>
+#include <ATen/ATen.h>
 #include <cmath>
 #include <stdexcept>
+
 namespace trtmc::layoutlmv3 {
-namespace {
-struct SpanWeights {
-    int32_t first;
-    std::vector<float> weights;
-};
-std::vector<SpanWeights> plan(int32_t source, int32_t target) {
-    const float scale = static_cast<float>(source) / target;
-    const float support = std::max(scale, 1.0F), inverse = scale >= 1 ? 1.0 / scale : 1.0;
-    std::vector<SpanWeights> result(target);
-    for (int32_t i = 0; i < target; ++i) {
-        const float center = scale * (i + 0.5);
-        const int32_t first = std::max(static_cast<int32_t>(center - support + 0.5), 0);
-        const int32_t end = std::min(static_cast<int32_t>(center + support + 0.5), source);
-        auto& span = result[i];
-        span.first = first;
-        float total = 0;
-        for (int32_t j = first; j < end; ++j) {
-            const float value = std::max(0.0F, 1.0F - std::abs((j - center + 0.5F) * inverse));
-            span.weights.push_back(value);
-            total += value;
-        }
-        if (total <= 0)
-            throw std::runtime_error("LayoutLMv3 resize has empty support");
-        for (auto& value : span.weights)
-            value /= total;
-    }
-    return result;
-}
-} // namespace
 std::vector<float> image_pixels(const internal::ImageView& image) {
     if (!image.data || !image.height || !image.width || image.channels != 3 ||
         image.height > INT32_MAX || image.width > INT32_MAX)
@@ -46,35 +18,25 @@ std::vector<float> image_pixels(const internal::ImageView& image) {
         image.byte_size !=
             static_cast<uint64_t>(image.height) * image.width * 3 * (byte ? 1 : sizeof(float)))
         throw std::invalid_argument("Invalid LayoutLMv3 RGB storage");
-    const auto xp = plan(image.width, 224), yp = plan(image.height, 224);
-    std::vector<float> horizontal(static_cast<size_t>(image.height) * 224 * 3);
-    for (uint32_t y = 0; y < image.height; ++y)
-        for (uint32_t x = 0; x < 224; ++x)
-            for (uint32_t c = 0; c < 3; ++c) {
-                const auto& span = xp[x];
-                float sum = 0;
-                for (size_t k = 0; k < span.weights.size(); ++k) {
-                    const auto index =
-                        (static_cast<size_t>(y) * image.width + span.first + k) * 3 + c;
-                    const float value = byte
-                                            ? static_cast<const uint8_t*>(image.data)[index]
-                                            : static_cast<const float*>(image.data)[index] * 255.0F;
-                    if (!std::isfinite(value) || value < 0 || value > 255)
-                        throw std::invalid_argument("Invalid LayoutLMv3 RGB value");
-                    sum += value * span.weights[k];
-                }
-                horizontal[(static_cast<size_t>(y) * 224 + x) * 3 + c] = sum;
-            }
-    std::vector<float> output(3 * 224 * 224);
-    for (uint32_t y = 0; y < 224; ++y)
-        for (uint32_t x = 0; x < 224; ++x)
-            for (uint32_t c = 0; c < 3; ++c) {
-                const auto& span = yp[y];
-                float sum = 0;
-                for (size_t k = 0; k < span.weights.size(); ++k)
-                    sum += horizontal[((span.first + k) * 224 + x) * 3 + c] * span.weights[k];
-                output[(static_cast<size_t>(c) * 224 + y) * 224 + x] = (sum - 127.5F) / 127.5F;
-            }
-    return output;
+    if (!byte) {
+        const auto* pixels = static_cast<const float*>(image.data);
+        for (std::size_t i = 0; i < image.byte_size / sizeof(float); ++i)
+            if (!std::isfinite(pixels[i]) || pixels[i] < 0 || pixels[i] > 1)
+                throw std::invalid_argument("Invalid LayoutLMv3 RGB value");
+    }
+
+    const auto options = at::TensorOptions().device(at::kCPU).dtype(byte ? at::kByte : at::kFloat);
+    auto pixels =
+        at::from_blob(const_cast<void*>(image.data), {1, image.height, image.width, 3}, options)
+            .to(at::kFloat);
+    if (!byte)
+        pixels = pixels * 255.0F;
+    // Use the processor's separable antialiased bilinear operator. Its FP32
+    // accumulation order matters to the subsequent document transformer.
+    const auto channels = pixels.permute({0, 3, 1, 2}).contiguous();
+    auto resized = at::_upsample_bilinear2d_aa(channels, {224, 224}, false);
+    auto normalized = resized.sub(127.5F).div(127.5F).contiguous();
+    const auto* values = normalized.const_data_ptr<float>();
+    return {values, values + normalized.numel()};
 }
 } // namespace trtmc::layoutlmv3
