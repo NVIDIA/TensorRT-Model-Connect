@@ -164,8 +164,10 @@ class Pipeline final : public internal::IModel, public internal::IImagesTextToTe
 } // namespace trtmc::paddleocr_vl
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("paddleocr_vl does not support --kv-cache-size");
     using namespace trtmc;
-    if (context.kv_cache_size_bytes || context.reader.info().task != "images_text_to_text")
+    if (context.reader.info().task != "images_text_to_text")
         throw std::invalid_argument(
             "PaddleOCR requires image/text generation without an external KV cache");
     const auto raw = paddleocr_vl::section(context.reader, "runtime.json");
