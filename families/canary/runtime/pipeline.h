@@ -12,6 +12,8 @@
 #include "families/canary/runtime/inference_state.h"
 #include "families/canary/runtime/kv_cache.h"
 #include "families/canary/runtime/tokenizer.h"
+#include "trtmc/internal/audio.h"
+#include "trtmc/internal/model.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
 
@@ -27,9 +29,27 @@ struct MelFilterbank;
 struct CanaryBatchSegment;
 struct CanaryBatchWorkGroup;
 
-class CanaryPipeline final : public ITranscription, public IBatchTranscription {
+class CanaryPipeline final : public internal::IModel,
+                             public internal::ISpeechTranscription,
+                             public internal::ISpeechTranslation,
+                             public internal::IBatchSpeechTranscription,
+                             public internal::IBatchSpeechTranslation,
+                             public ITranscription,
+                             public IBatchTranscription {
   public:
-    const char* task() const noexcept override { return ITranscription::kTask; }
+    const char* task() const noexcept override {
+        return internal::ISpeechTranscription::kTask.data();
+    }
+
+    std::vector<internal::TaskInstance> task_bindings() override;
+
+    TextResult run(const internal::SpeechTranscriptionRequest& request,
+                   internal::ConfigView config) override;
+    TextResult run(const internal::SpeechTranslationRequest& request,
+                   internal::ConfigView config) override;
+
+    BatchTextResult run_batch(const internal::BatchSpeechTranscriptionRequest& request) override;
+    BatchTextResult run_batch(const internal::BatchSpeechTranslationRequest& request) override;
 
     CanaryPipeline(std::unique_ptr<ITrtModule> encoder, std::unique_ptr<ITrtModule> decoder,
                    std::unique_ptr<CanaryInferenceState> state, CanaryConfig canary_config,

@@ -32,6 +32,11 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     if (context.kv_cache_size_bytes != 0)
         throw std::invalid_argument("canary does not support --kv-cache-size");
     using namespace trtmc;
+    const auto& task = context.reader.info().task;
+    if (task != internal::ISpeechTranscription::kTask &&
+        task != internal::ISpeechTranslation::kTask && task != ITranscription::kTask) {
+        throw std::runtime_error("canary bundle declares an unsupported task: " + task);
+    }
     const auto& runtime_data = canary_factory::require_section(context.reader, "runtime.json");
     const auto config = nlohmann::json::parse(runtime_data.begin(), runtime_data.end());
     const auto tp_size = config.at("tensor_parallel_size").get<std::int32_t>();
