@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "mimi"
 TASKS = frozenset({"audio_codebook_tokens_to_audio"})
@@ -196,6 +197,31 @@ def _run_json(
 
 
 def test_official_checkpoint_e2e(case_name, tmp_path):
+    _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    if evidence_enabled():
+        for key in ("image", "test_image", "audio"):
+            if key in case:
+                for source in (TEST_ROOT / case[key], TEST_ROOT / "data" / case[key]):
+                    if source.is_file():
+                        record_evidence("inputs", {key: source})
+                        break
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {
+            key: value
+            for key, value in case.items()
+            if any(word in key for word in ("error", "cosine", "atol", "rtol", "snr", "rmse"))
+        },
+    )
     import wave
     import numpy as np
     import torch
@@ -203,7 +229,8 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     from transformers import MimiModel
 
     _, manifest, case = CASES[case_name]
-    directory = _model_dir(manifest)
+    with evidence_stage("checkpoint"):
+        directory = _model_dir(manifest)
     _, runtime_root = _runtime()
     with wave.open(str(TEST_ROOT / "data" / case["audio"]), "rb") as audio:
         assert (
@@ -215,7 +242,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     waveform = resample_poly(waveform, 3, 2).astype(np.float32)
     assert waveform.shape == (48000,)
     bundle = tmp_path / manifest["bundle"]
-    _build(directory, bundle, manifest)
+    with evidence_stage("build"):
+        _build(directory, bundle, manifest)
+    record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     reference = (
@@ -223,7 +252,8 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         .eval()
         .to("cuda")
     )
-    for gain in (1.0, 0.25):
+    views = []
+    for sample_index, gain in enumerate((1.0, 0.25)):
         # The encoder supplies real speech tokens to the decode-only native Task.
         with torch.no_grad():
             codes = reference.encode(
@@ -254,11 +284,84 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         payload = json.loads(completed.stdout.splitlines()[-1])
         assert payload == dict(samples=48000, rate=24000, channels=1)
         actual = np.fromfile(target, dtype="<f4")
+        record_evidence(
+            "inputs", {"gain": gain, "audio_codes": codes.cpu().numpy(), "sample_rate": 24000}
+        )
+        record_evidence("native", {"gain": gain, "waveform": actual, "metadata": payload})
+        record_evidence(
+            "reference", {"mode": "hf_transformers", "gain": gain, "waveform": expected}
+        )
+        record_evidence(
+            "native_process",
+            {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+        )
+        if evidence_enabled():
+            import struct
+
+            paired = {}
+            for role, samples in (("native", actual), ("reference", expected)):
+                audio_path = tmp_path / f"{role}-{sample_index}.wav"
+                paired[role] = audio_path
+                pcm = samples.astype("<f4").tobytes()
+                audio_path.write_bytes(
+                    struct.pack(
+                        "<4sI4s4sIHHIIHH4sI",
+                        b"RIFF",
+                        36 + len(pcm),
+                        b"WAVE",
+                        b"fmt ",
+                        16,
+                        3,
+                        1,
+                        24000,
+                        96000,
+                        4,
+                        32,
+                        b"data",
+                        len(pcm),
+                    )
+                    + pcm
+                )
+                views.append(
+                    {
+                        "title": f"Sample {sample_index} / {role}",
+                        "audio": audio_path,
+                        "caption": f"Input speech gain {gain}",
+                    }
+                )
+            record_evidence("views", views[-2:])
         assert actual.shape == expected.shape and np.isfinite(actual).all()
         error = actual.astype(np.float64) - expected.astype(np.float64)
         maximum = np.abs(error).max()
         snr = 10 * np.log10(np.sum(expected.astype(np.float64) ** 2) / max(np.sum(error**2), 1e-30))
         assert np.max(np.abs(expected)) > 0.01
+        record_evidence(
+            "metrics", {"gain": gain, "max_abs_error": float(maximum), "snr_db": float(snr)}
+        )
         assert maximum <= case["max_abs_error"]
         assert snr >= case["min_snr_db"]
+        if evidence_enabled():
+            record_evidence(
+                "reference_comparison",
+                {
+                    "label": f"Decoded speech at gain {gain}",
+                    "scope": "independent_reference",
+                    "enforced": True,
+                    **paired,
+                    "checks": [
+                        {
+                            "name": name,
+                            "scope": "independent_reference",
+                            "actual": value,
+                            "operator": operator,
+                            "expected": limit,
+                            "passed": value <= limit if operator == "<=" else value >= limit,
+                        }
+                        for name, value, operator, limit in [
+                            ("waveform_max_abs_error", float(maximum), "<=", case["max_abs_error"]),
+                            ("waveform_snr_db", float(snr), ">=", case["min_snr_db"]),
+                        ]
+                    ],
+                },
+            )
         print(f"Mimi gain={gain}: max_abs={maximum:.8g}, SNR={snr:.3f} dB")
