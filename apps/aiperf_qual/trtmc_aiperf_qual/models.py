@@ -10,6 +10,7 @@ reference is the generic Hugging Face adapter of the operation. Family-owned exc
 families/<family>/tests/aiperf/<profile>.yaml. Legacy config/models/<profile>.yaml remains supported;
 the family's definition is merged last. A quantized profile is qualified as its model's highest-precision
 configuration (``qualified_as``): the same benchmarks, requests and native reference, its own candidate.
+A precision variant without a configuration of its own takes its highest-precision sibling's the same way.
 """
 
 from __future__ import annotations
@@ -179,8 +180,15 @@ def _catalog_manifest(entry: Any) -> dict[str, Any]:
 
 def qualified_as(profile: str, entries: Mapping[str, Any]) -> str:
     """The configuration a quantized profile is qualified as: its model's ready profile of the highest precision
-    (``PRECISION_RANK``; the same family and Task, and the same name apart from precision and quantization,
-    so qwen35-9b for qwen35-9b-nvfp4), else the profile itself (not quantized, or nothing ranks higher)."""
+    (``highest_precision_sibling``), else the profile itself (not quantized, or nothing ranks higher)."""
+    if not _catalog_manifest(entries[profile]).get("quantization"):
+        return profile
+    return highest_precision_sibling(profile, entries)
+
+
+def highest_precision_sibling(profile: str, entries: Mapping[str, Any]) -> str:
+    """The model's ready profile of the highest precision (``PRECISION_RANK``; the same family and Task, and the
+    same name apart from precision and quantization, so qwen35-9b for qwen35-9b-nvfp4), else the profile itself."""
     def stem(name: str) -> str:
         return "-".join(part for part in name.split("-") if part not in PRECISION_NAME_PARTS)
 
@@ -188,8 +196,6 @@ def qualified_as(profile: str, entries: Mapping[str, Any]) -> str:
         return PRECISION_RANK.get(manifest.get("quantization") or manifest.get("precision"), 0)
 
     own, manifest = entries[profile].model, _catalog_manifest(entries[profile])
-    if not manifest.get("quantization"):
-        return profile
     best, best_rank = profile, rank(manifest)
     for name, entry in sorted(entries.items()):
         if name == profile or (entry.model.family, entry.model.task, stem(name)) != (own.family, own.task, stem(profile)):
@@ -215,10 +221,13 @@ def resolve_model(profile: str, environment: Environment, root: Path = CONFIG_RO
         raise ConfigError(f"no Task defaults for {catalog_model.task!r} ({profile})")
     override = profile_override(profile, catalog_model.family, repository, root)
     base = qualified_as(profile, entries)
-    if base != profile:  # the base's configuration under the profile's own; the candidate stays the profile's
-        inherited = profile_override(base, catalog_model.family, repository, root)
+    # A precision variant without a configuration of its own (an fp16 bundle of an fp32 model) takes its
+    # highest-precision sibling's, as a quantized profile takes its base's: the family adapter and benchmarks.
+    sibling = base if base != profile or override else highest_precision_sibling(profile, entries)
+    if sibling != profile:  # the sibling's configuration under the profile's own; the candidate stays the profile's
+        inherited = profile_override(sibling, catalog_model.family, repository, root)
         inherited.pop("candidate", None)
-        inherited.pop("capacity_limits", None)  # the base's build size, not the quantized candidate's
+        inherited.pop("capacity_limits", None)  # the sibling's build size, not this candidate's
         override = deep_merge(inherited, override)
     config = deep_merge(deep_merge(configuration(tasks["defaults"]),
                         configuration(tasks["tasks"][catalog_model.task])), override)

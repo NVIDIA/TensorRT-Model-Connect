@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The catalog has only this GPTQ INT4 export, which Transformers loads only through optimum and GPTQModel kernels:
+# the native reference is its BF16 original, and the candidate is held to the quantization gates.
+candidate:
+  quantization: int4
+reference:
+  model: Qwen/Qwen3.5-35B-A3B
+  revision: 59d61f3ce65a6d9863b86d2e96597125219dc754
