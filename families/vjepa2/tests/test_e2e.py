@@ -393,7 +393,6 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
         )
         assert expected.shape == actual.shape and np.isfinite(actual).all()
-        np.testing.assert_allclose(actual, expected, atol=case["max_abs_error"], rtol=0)
         cosine = np.sum(actual * expected, axis=1) / (
             np.linalg.norm(actual, axis=1) * np.linalg.norm(expected, axis=1)
         )
@@ -405,6 +404,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                 "min_cosine": float(cosine.min()),
             },
         )
+        np.testing.assert_allclose(actual, expected, atol=case["max_abs_error"], rtol=0)
         assert float(cosine.min()) >= case["min_cosine"]
         print(
             f"V-JEPA2 {label}: max_abs={np.max(np.abs(actual - expected)):.7g}, min_cosine={cosine.min():.8f}"
