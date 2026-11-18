@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "pika_h3_flex"
 TASKS = frozenset({"text_to_audio_video"})
@@ -224,13 +225,39 @@ def _video_metrics(actual, expected):
 
 
 def test_official_checkpoint_e2e(case_name, tmp_path):
+    _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    if evidence_enabled():
+        for key in ("image", "test_image", "audio"):
+            if key in case:
+                for source in (TEST_ROOT / case[key], TEST_ROOT / "data" / case[key]):
+                    if source.is_file():
+                        record_evidence("inputs", {key: source})
+                        break
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {
+            key: value
+            for key, value in case.items()
+            if any(word in key for word in ("error", "cosine", "atol", "rtol", "snr", "rmse"))
+        },
+    )
     import gc
     import sys
     import numpy as np
     import torch
 
     _, manifest, case = CASES[case_name]
-    directory = _model_dir(manifest)
+    with evidence_stage("checkpoint"):
+        directory = _model_dir(manifest)
     _, runtime_root = _runtime()
     input_path = tmp_path / "reference-input.json"
     input_path.write_text(json.dumps([manifest, case]))
@@ -247,10 +274,23 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         check=False,
         timeout=case["runtime_timeout_s"],
     )
+    reference_log = tmp_path / "reference-process.log"
+    reference_log.write_text(oracle.stderr)
+    record_evidence(
+        "reference_process",
+        {
+            "argv": oracle.args,
+            "stdout": oracle.stdout,
+            "stderr": reference_log,
+            "returncode": oracle.returncode,
+        },
+    )
     assert oracle.returncode == 0, oracle.stderr + oracle.stdout
     print(oracle.stdout, end="", flush=True)
     bundle = tmp_path / manifest["bundle"]
-    _build(directory, bundle, manifest)
+    with evidence_stage("build"):
+        _build(directory, bundle, manifest)
+    record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
     gc.collect()
     torch.cuda.empty_cache()
     requests = [
@@ -270,10 +310,23 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         check=False,
         timeout=case["runtime_timeout_s"],
     )
+    native_log = tmp_path / "native-process.log"
+    native_log.write_text(native.stderr)
+    record_evidence(
+        "native_process",
+        {
+            "argv": native.args,
+            "stdout": native.stdout,
+            "stderr": native_log,
+            "requests": requests,
+            "returncode": native.returncode,
+        },
+    )
     assert native.returncode == 0, native.stderr + native.stdout
     results = json.loads(native.stdout.splitlines()[-1])
     assert len(results) == len(requests)
     for index, result in enumerate(results):
+        record_evidence("inputs", {"prompt": case["prompts"][index], "seed": case["seed"] + index})
         assert result["frames"] == 124 and result["height"] == 480 and result["width"] == 832
         assert (
             result["sample_rate"] == 32000
@@ -300,6 +353,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             and maximum <= case["video_max_abs"]
             and cosine >= case["video_cosine_min"]
         )
+        video_metrics = {"rmse": rmse, "max_abs_error": maximum, "cosine": cosine}
         expected_audio = np.fromfile(tmp_path / f"reference-audio-{index}.f32", dtype="<f4").astype(
             np.float64
         )
@@ -321,6 +375,103 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             and cosine >= case["audio_cosine_min"]
             and maximum <= case["audio_max_abs"]
         )
+        record_evidence(
+            "metrics",
+            {
+                "sample": index,
+                "video": video_metrics,
+                "audio": {"snr_db": snr, "cosine": cosine, "max_abs_error": maximum},
+            },
+        )
+        if evidence_enabled():
+            import hashlib
+            import struct
+            from PIL import Image
+
+            views = []
+            selected = [0, 62, 123]
+            preview_indices = [0, 31, 62, 93, 123]
+            for role, video, audio in (
+                ("native", actual_video, actual_audio),
+                ("reference", expected_video, expected_audio),
+            ):
+                # The full-resolution oracle above still compares all 124 frames.
+                # Retain lossless representative tensors and label the GIF as a preview.
+                frames_path = tmp_path / f"{role}-{index}-selected-frames.npz"
+                np.savez_compressed(frames_path, frames=np.stack([video[i] for i in selected]))
+                digest = hashlib.sha256()
+                for frame in video:
+                    digest.update(np.asarray(frame, dtype="<f4").tobytes())
+                frames = [
+                    Image.fromarray(np.rint(np.clip(video[i], 0, 1) * 255).astype(np.uint8)).resize(
+                        (416, 240)
+                    )
+                    for i in preview_indices
+                ]
+                preview = tmp_path / f"{role}-{index}-video-preview.gif"
+                frames[0].save(
+                    preview, save_all=True, append_images=frames[1:], duration=500, loop=0
+                )
+                audio_path = tmp_path / f"{role}-{index}-stereo.wav"
+                pcm = audio.astype("<f4").tobytes()
+                audio_path.write_bytes(
+                    struct.pack(
+                        "<4sI4s4sIHHIIHH4sI",
+                        b"RIFF",
+                        36 + len(pcm),
+                        b"WAVE",
+                        b"fmt ",
+                        16,
+                        3,
+                        2,
+                        32000,
+                        256000,
+                        8,
+                        32,
+                        b"data",
+                        len(pcm),
+                    )
+                    + pcm
+                )
+                record_evidence(
+                    role,
+                    {
+                        "sample": index,
+                        "prompt": case["prompts"][index],
+                        **({"mode": "official_diffusers"} if role == "reference" else {}),
+                        "metadata": result
+                        if role == "native"
+                        else {
+                            "video_shape": list(video.shape),
+                            "sample_rate": 32000,
+                            "channels": 2,
+                        },
+                        "selected_frames": frames_path,
+                        "retained_frame_indices": selected,
+                        "full_video_sha256": digest.hexdigest(),
+                        "waveform": audio.astype(np.float32),
+                        "video_preview_scope": {
+                            "frame_indices": preview_indices,
+                            "width": 416,
+                            "height": 240,
+                        },
+                    },
+                )
+                views.extend(
+                    [
+                        {
+                            "title": f"Sample {index} / {role}",
+                            "image": preview,
+                            "caption": "Half-resolution preview of frames 0,31,62,93,123; metrics cover all 124 frames.",
+                        },
+                        {
+                            "title": f"Sample {index} / {role}",
+                            "audio": audio_path,
+                            "caption": "Complete 32 kHz stereo waveform.",
+                        },
+                    ]
+                )
+            record_evidence("views", views)
 
 
 @pytest.mark.parametrize("rotary_dim", [96, 128])
