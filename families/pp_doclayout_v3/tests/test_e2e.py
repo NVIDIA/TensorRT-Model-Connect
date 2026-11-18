@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
-from tools.e2e_evidence import evidence_stage, record_evidence
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "pp_doclayout_v3"
 TASKS = frozenset({"document_layout"})
@@ -138,7 +138,7 @@ def test_official_checkpoint_e2e(request, tmp_path, case_name):
     if not _selected(request.config):
         pytest.skip("direct E2E requires an explicit model or testcase selector")
     import torch
-    from PIL import Image, ImageOps
+    from PIL import Image, ImageDraw, ImageOps
     from transformers import AutoImageProcessor, AutoModelForObjectDetection
     from transformers.utils import logging
 
@@ -182,7 +182,7 @@ def test_official_checkpoint_e2e(request, tmp_path, case_name):
         model = AutoModelForObjectDetection.from_pretrained(model_dir, local_files_only=True).eval()
         processor = AutoImageProcessor.from_pretrained(model_dir, local_files_only=True)
     original = Image.open(image_path).convert("RGB")
-    native_records, reference_records, metrics = [], [], []
+    native_records, reference_records, metrics, views = [], [], [], []
     for index, image in enumerate((original, ImageOps.mirror(original))):
         path = tmp_path / f"document-{index}.png"
         image.save(path)
@@ -273,3 +273,76 @@ def test_official_checkpoint_e2e(request, tmp_path, case_name):
                 )
                 record_evidence("metrics", metrics)
                 assert _polygon_iou(region["polygon"], polygon, image.height, image.width) >= 0.98
+        if evidence_enabled():
+            # Explicit comparison records retain the enforced geometry limits;
+            # report readers need not infer them from family helper names.
+            paired = {}
+            for role, record in (("native", actual), ("reference", reference_records[-1])):
+                geometry = tmp_path / f"document-{index}-{role}.json"
+                geometry.write_text(json.dumps(record, indent=2))
+                paired[role] = geometry
+                preview = image.copy()
+                drawing = ImageDraw.Draw(preview)
+                for order, region in enumerate(record["regions"]):
+                    drawing.polygon(
+                        [tuple(point) for point in region["polygon"]], outline="red", width=2
+                    )
+                    drawing.text(
+                        tuple(region["box"][:2]), f"{order}: {region['class_id']}", fill="red"
+                    )
+                preview_path = tmp_path / f"document-{index}-{role}.png"
+                preview.save(preview_path)
+                views.append(
+                    {
+                        "title": f"Sample {index} / {role}",
+                        "image": preview_path,
+                        "caption": "Original" if index == 0 else "Mirrored",
+                    }
+                )
+            record_evidence("views", views)
+            measured = [item for item in metrics if item["variant"] == index]
+            limits = [
+                ("score_error", max(item["score_absolute_error"] for item in measured), "<=", 0.02),
+                ("box_iou", min(item["box_iou"] for item in measured), ">=", 0.98),
+                ("polygon_iou", min(item["polygon_iou"] for item in measured), ">=", 0.98),
+            ]
+            record_evidence(
+                "reference_comparison",
+                {
+                    "label": f"Document {index}: regions in reading order",
+                    "scope": "independent_reference",
+                    "enforced": True,
+                    **paired,
+                    "checks": [
+                        {
+                            "name": "ordered_class_ids",
+                            "scope": "independent_reference",
+                            "actual": sum(
+                                left["class_id"] != right["class_id"]
+                                for left, right in zip(
+                                    actual["regions"], reference_regions, strict=True
+                                )
+                            ),
+                            "operator": "==",
+                            "expected": 0,
+                            "passed": all(
+                                left["class_id"] == right["class_id"]
+                                for left, right in zip(
+                                    actual["regions"], reference_regions, strict=True
+                                )
+                            ),
+                        }
+                    ]
+                    + [
+                        {
+                            "name": name,
+                            "scope": "independent_reference",
+                            "actual": value,
+                            "operator": operator,
+                            "expected": limit,
+                            "passed": value <= limit if operator == "<=" else value >= limit,
+                        }
+                        for name, value, operator, limit in limits
+                    ],
+                },
+            )
