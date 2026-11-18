@@ -145,9 +145,11 @@ class Pipeline final : public internal::IModel, public internal::ITextToAudioVid
         const auto knots = cfg_.at("knots").get<std::vector<int>>();
         std::array<float, 7> vs{}, as{};
         for (int i = 0; i < 7; ++i) {
-            const float value = static_cast<float>(knots[i]) / 1000;
-            vs[i] = (12 * value) / (1 + 11 * value);
-            as[i] = (3 * value) / (1 + 2 * value);
+            // The released schedules shift the supplied grid in FP64 before
+            // rounding each sigma to FP32 for the denoising updates.
+            const double value = static_cast<double>(knots[i]) / 1000;
+            vs[i] = static_cast<float>((12 * value) / (1 + 11 * value));
+            as[i] = static_cast<float>((3 * value) / (1 + 2 * value));
         }
         std::vector<int32_t> time_indices(total), adaln_indices(total);
         for (int step = 0; step < 6; ++step) {
