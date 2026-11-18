@@ -67,9 +67,10 @@ std::vector<char> section(const BundleReader& reader, const char* name) {
 } // namespace
 } // namespace trtmc::wav2vec2_bert
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("wav2vec2_bert does not support --kv-cache-size");
     using namespace trtmc;
-    if (context.kv_cache_size_bytes ||
-        context.reader.info().task != "spectrogram_to_frame_features")
+    if (context.reader.info().task != "spectrogram_to_frame_features")
         throw std::invalid_argument(
             "W2v-BERT requires spectral frame features without an external cache");
     const auto raw = wav2vec2_bert::section(context.reader, "runtime.json");

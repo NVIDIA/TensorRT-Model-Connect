@@ -12,6 +12,8 @@ from . import graph as g
 
 
 def build(request, writer):
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("wav2vec2_bert does not support dynamic_kv_cache")
     if request.task != "spectrogram_to_frame_features" or request.backend != "trt":
         raise ValueError("W2v-BERT requires spectrogram_to_frame_features with backend=trt")
     if (
@@ -21,7 +23,6 @@ def build(request, writer):
         or request.max_batch_size != 1
         or request.quantization not in (None, "none")
         or request.fp32_layers
-        or request.dynamic_kv_cache
         or request.image_height is not None
         or request.image_width is not None
         or request.video_num_frames is not None
