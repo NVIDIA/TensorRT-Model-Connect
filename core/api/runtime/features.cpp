@@ -10,6 +10,7 @@
 
 #include <cmath>
 #include <limits>
+#include <set>
 #include <type_traits>
 
 namespace trtmc::api {
@@ -724,7 +725,99 @@ const trtmc_batch_image_to_token_and_pooled_features_api_v1
                                 trtmc_image_token_and_pooled_features_view_v1>};
 static_assert(offsetof(trtmc_batch_image_to_token_and_pooled_features_api_v1, header) == 0);
 
+uint64_t spatial_count(uint64_t channels, uint64_t height, uint64_t width) {
+    constexpr auto limit =
+        static_cast<uint64_t>(std::numeric_limits<std::ptrdiff_t>::max()) / sizeof(float);
+    require(channels && height && width && channels <= limit / height &&
+                channels * height <= limit / width,
+            "spatial feature shape is empty or overflows host storage");
+    return channels * height * width;
+}
+
+struct SpatialStorage final : ResultStorage {
+    explicit SpatialStorage(internal::SpatialClassScoresResult result) : value(std::move(result)) {
+        const auto invalid = [&] {
+            throw ApiFailure{TRTMC_INTERNAL_ERROR, "family returned invalid spatial class scores"};
+        };
+        uint64_t count = 0;
+        try {
+            count = spatial_count(value.classes, value.height, value.width);
+        } catch (const ApiFailure&) {
+            invalid();
+        }
+        if (value.values.size() != count || value.class_names.size() != value.classes)
+            invalid();
+        if (value.kind != internal::ScoreKind::Logit &&
+            value.kind != internal::ScoreKind::Probability &&
+            value.kind != internal::ScoreKind::Unbounded)
+            invalid();
+        for (const auto& name : value.class_names) {
+            if (name.empty())
+                invalid();
+            names.push_back(borrowed_string(name));
+        }
+        for (float score : value.values)
+            if (!std::isfinite(score) ||
+                (value.kind == internal::ScoreKind::Probability && (score < 0 || score > 1)))
+                invalid();
+    }
+    internal::SpatialClassScoresResult value;
+    std::vector<trtmc_string_view> names;
+};
+
+trtmc_status TRTMC_CALL run(trtmc_model* model,
+                            const trtmc_spatial_features_to_class_scores_request_v1* input,
+                            const trtmc_config_view_v1* config, trtmc_result** out,
+                            trtmc_error** error) noexcept {
+    if (out)
+        *out = nullptr;
+    return guarded(error, [&] {
+        require(input && out, "spatial feature input and result output are required");
+        const auto maps = checked_span(input->inputs, input->count);
+        require(!maps.empty(), "spatial feature inputs must not be empty");
+        internal::SpatialFeaturesToClassScoresRequest request;
+        std::set<std::string_view> names;
+        for (const auto& map : maps) {
+            const auto name = string_view(map.name);
+            require(!name.empty() && names.insert(name).second,
+                    "spatial feature names must be nonempty and unique");
+            require(map.values.size == spatial_count(map.channels, map.height, map.width),
+                    "spatial feature value count differs from CHW shape");
+            request.inputs.push_back({name, checked_span(map.values.data, map.values.size),
+                                      map.channels, map.height, map.width});
+        }
+        const ConvertedConfig options(config);
+        std::lock_guard<std::mutex> lock(model_mutex(model));
+        using Interface = internal::ISpatialFeaturesToClassScores;
+        auto& family = require_interface<Interface>(model, Interface::kTask);
+        validate_task_config(model_owner(model), internal::contract_key<Interface>(),
+                             options.view());
+        *out = make_result<SpatialStorage>(family.run(request, options.view()));
+    });
+}
+
+trtmc_status TRTMC_CALL view(const trtmc_result* result, trtmc_spatial_class_scores_view_v1* out,
+                             trtmc_error** error) noexcept {
+    if (out)
+        *out = {};
+    return guarded(error, [&] {
+        require(out != nullptr, "spatial class score view is required");
+        const auto& storage = require_result<SpatialStorage>(result);
+        const auto& value = storage.value;
+        *out = {{value.values.data(), value.values.size()},
+                value.classes,
+                value.height,
+                value.width,
+                {storage.names.data(), storage.names.size()},
+                static_cast<uint32_t>(value.kind)};
+    });
+}
+const trtmc_spatial_features_to_class_scores_api_v1 spatial_features_api = {
+    {1, 0, sizeof(spatial_features_api)}, run, view};
+static_assert(offsetof(trtmc_spatial_features_to_class_scores_api_v1, header) == 0);
+
 const TaskBinding bindings[] = {
+    {internal::ISpatialFeaturesToClassScores::kTask, 1, 0, &spatial_features_api.header},
     {internal::IBatchImageToTokenFeatures::kTask, 1, 0, &batch_image_to_token_features_api.header},
     {internal::IBatchImageToSpatialFeatures::kTask, 1, 0,
      &batch_image_to_spatial_features_api.header},

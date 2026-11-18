@@ -6,7 +6,9 @@
 #include "trtmc/features.h"
 #include "trtmc/trtmc.h"
 
+#include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 _Static_assert(TRTMC_IMAGE_TOKEN_PATCH == 1 && TRTMC_IMAGE_TOKEN_CLASS == 2 &&
@@ -450,6 +452,8 @@ static void head_score_contracts(const trtmc_core_api_v1* core, const char* root
     consume_error(core, &error);
 }
 
+static int spatial_contracts_main(int argc, char** argv);
+
 int main(int argc, char** argv) {
     if (argc != 2)
         return 2;
@@ -875,5 +879,125 @@ int main(int argc, char** argv) {
     core->result_release(b5_result);
 
     consume_error(core, &error);
+    check(spatial_contracts_main(argc, argv) == 0, "spatial feature C contracts");
     return failures == 0 ? 0 : 1;
+}
+
+_Static_assert(offsetof(trtmc_spatial_features_to_class_scores_api_v1, header) == 0,
+               "spatial table begins with the ABI header");
+
+static const trtmc_core_api_v1* spatial_core;
+static int spatial_failures;
+static trtmc_string_view spatial_text(const char* value) {
+    const trtmc_string_view out = {value, (uint64_t)strlen(value)};
+    return out;
+}
+static void spatial_check(int condition, const char* message) {
+    if (!condition) {
+        fprintf(stderr, "FAIL: %s\n", message);
+        ++spatial_failures;
+    }
+}
+static void spatial_checked(trtmc_status actual, trtmc_status expected, trtmc_error** error,
+                            const char* message) {
+    spatial_check(actual == expected, message);
+    spatial_check(actual == TRTMC_OK ? *error == NULL : *error != NULL,
+                  "C error ownership is consistent");
+    spatial_core->error_release(*error);
+    *error = NULL;
+}
+static trtmc_model* spatial_load(const char* root, const char* mode) {
+    const unsigned char magic[8] = {'B', 'U', 'N', 'D', 'L', 'E', 1, 0};
+    char path[4096], header[512];
+    int size;
+    unsigned shift;
+    FILE* file;
+    trtmc_model* model = NULL;
+    trtmc_error* error = NULL;
+    trtmc_load_options_v1 options = {0};
+    if (snprintf(path, sizeof(path), "%s/spatial-c-%s.bundle", root, mode) >= (int)sizeof(path))
+        exit(2);
+    size = snprintf(header, sizeof(header),
+                    "{\"format\":1,\"family\":\"features_fixture\",\"task\":\"%s\","
+                    "\"backend\":\"fake\",\"sections\":{}}",
+                    mode);
+    if (size < 0 || (size_t)size >= sizeof(header) || !(file = fopen(path, "wb")))
+        exit(2);
+    if (fwrite(magic, 1, sizeof(magic), file) != sizeof(magic))
+        exit(2);
+    for (shift = 0; shift < 64; shift += 8)
+        if (fputc((int)(((uint64_t)size >> shift) & 255), file) == EOF)
+            exit(2);
+    if (fwrite(header, 1, (size_t)size, file) != (size_t)size || fclose(file))
+        exit(2);
+    options.struct_size = sizeof(options);
+    options.runtime_root = spatial_text(root);
+    spatial_checked(spatial_core->model_load(spatial_text(path), &options, &model, &error),
+                    TRTMC_OK, &error, "C spatial fixture loads");
+    return model;
+}
+
+static int spatial_contracts_main(int argc, char** argv) {
+    float a[2] = {0.2F, 0.8F}, b[2] = {0.7F, 0.9F};
+    trtmc_model* model;
+    const trtmc_api_header* header = NULL;
+    const trtmc_spatial_features_to_class_scores_api_v1* task;
+    trtmc_error* error = NULL;
+    trtmc_result *result = NULL, *second = NULL;
+    trtmc_spatial_class_scores_view_v1 view = {0};
+    trtmc_spatial_feature_input_v1 maps[2] = {{spatial_text("first"), {a, 2}, 1, 1, 2},
+                                              {spatial_text("second"), {b, 2}, 1, 1, 2}};
+    const trtmc_spatial_feature_input_v1 original = maps[0];
+    trtmc_spatial_features_to_class_scores_request_v1 request = {maps, 2};
+    if (argc != 2 || trtmc_get_api(1, 0, &spatial_core) != TRTMC_OK)
+        return 2;
+    model = spatial_load(argv[1], TRTMC_TASK_SPATIAL_FEATURES_TO_CLASS_SCORES);
+    if (!model)
+        return 2;
+    spatial_checked(spatial_core->model_get_task_api(
+                        model, spatial_text(TRTMC_TASK_SPATIAL_FEATURES_TO_CLASS_SCORES), 1, 0,
+                        &header, &error),
+                    TRTMC_OK, &error, "C Task lookup");
+    if (!header)
+        return 2;
+    task = (const trtmc_spatial_features_to_class_scores_api_v1*)header;
+    spatial_check(header->major == 1 && header->minor == 0 && header->byte_size == sizeof(*task),
+                  "complete versioned spatial table");
+    spatial_checked(task->run(model, &request, NULL, &result, &error), TRTMC_OK, &error,
+                    "C spatial input");
+    spatial_checked(task->result_view(result, &view, &error), TRTMC_OK, &error, "C spatial view");
+    spatial_check(view.classes == 2 && view.height == 1 && view.width == 2 && view.values.size == 4,
+                  "C output shape");
+    spatial_check(view.values.data[1] + view.values.data[3] > 1,
+                  "overlapping class probabilities are preserved");
+    maps[0].width = 3;
+    spatial_checked(task->run(model, &request, NULL, &second, &error), TRTMC_INVALID_ARGUMENT,
+                    &error, "reject mismatched value count");
+    spatial_check(second == NULL, "failure clears result");
+    maps[0] = original;
+    maps[0].values.data = NULL;
+    spatial_checked(task->run(model, &request, NULL, &second, &error), TRTMC_INVALID_ARGUMENT,
+                    &error, "reject null nonempty value buffer");
+    maps[0] = original;
+    maps[0].channels = UINT64_MAX;
+    maps[0].height = 2;
+    spatial_checked(task->run(model, &request, NULL, &second, &error), TRTMC_INVALID_ARGUMENT,
+                    &error, "reject overflowing shape");
+    maps[0] = original;
+    maps[0].name = spatial_text("second");
+    spatial_checked(task->run(model, &request, NULL, &second, &error), TRTMC_INVALID_ARGUMENT,
+                    &error, "reject duplicate names");
+    maps[0] = original;
+    a[0] = 0.1F;
+    spatial_checked(task->run(model, &request, NULL, &second, &error), TRTMC_OK, &error,
+                    "second C call");
+    spatial_core->model_release(model);
+    spatial_checked(task->result_view(result, &view, &error), TRTMC_OK, &error,
+                    "result survives model release");
+    spatial_check(view.values.data[0] == 0.2F && view.class_names.size == 2 &&
+                      view.class_names.data[1].data[0] == 'b',
+                  "owned values and metadata survive calls and model release");
+    spatial_core->result_release(second);
+    spatial_core->result_release(result);
+    return spatial_failures ? 1 : 0;
 }

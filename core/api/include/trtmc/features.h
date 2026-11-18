@@ -585,6 +585,34 @@ typedef struct {
                                                trtmc_error**);
 } trtmc_batch_image_to_token_and_pooled_features_api_v1;
 
+/* One host float32 CHW feature map. Names and coordinate meaning are specified
+ * by the loaded family; Core performs no feature extraction or normalization. */
+typedef struct {
+    trtmc_string_view name;
+    trtmc_f32_view values;
+    uint64_t channels, height, width;
+} trtmc_spatial_feature_input_v1;
+typedef struct {
+    const trtmc_spatial_feature_input_v1* inputs;
+    uint64_t count; /* One example with unique, nonempty input names. */
+} trtmc_spatial_features_to_class_scores_request_v1;
+typedef struct {
+    trtmc_f32_view values; /* [class,height,width]; classes may overlap. */
+    uint64_t classes, height, width;
+    trtmc_strings_view class_names; /* Nonempty class names in score order. */
+    uint32_t score_kind;            /* Probability does not imply a sum of one across classes. */
+} trtmc_spatial_class_scores_view_v1;
+
+#define TRTMC_TASK_SPATIAL_FEATURES_TO_CLASS_SCORES "spatial_features_to_class_scores"
+typedef struct {
+    trtmc_api_header header;
+    trtmc_status(TRTMC_CALL* run)(trtmc_model*,
+                                  const trtmc_spatial_features_to_class_scores_request_v1*,
+                                  const trtmc_config_view_v1*, trtmc_result**, trtmc_error**);
+    trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_spatial_class_scores_view_v1*,
+                                          trtmc_error**);
+} trtmc_spatial_features_to_class_scores_api_v1;
+
 #ifdef __cplusplus
 }
 #endif

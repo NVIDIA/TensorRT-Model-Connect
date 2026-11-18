@@ -121,6 +121,13 @@ forecast horizon or probability-distribution parameters. It uses the existing
 `forecast --input` CLI and `regress` benchmark operation; independent-series
 batching is not implied by the scalar Task.
 
+`SpatialFeaturesToClassScores` in `trtmc/features.hpp` accepts named host FP32
+CHW feature maps and returns an owned class-major score grid with ordered class
+names and an explicit score kind. The loaded family defines input names, feature
+dimensions and coordinate meaning. Independent class probabilities may overlap;
+Core does not normalize them or reduce them to one label per cell. The C table
+is declared in `trtmc/features.h`.
+
 Family Runtime returns `IModel::task_bindings()` records built with
 `bind<SharedTaskInterface>(*this, fields)`. Core Runtime retains the correctly
 adjusted interface address and immutable metadata snapshot, rather than testing

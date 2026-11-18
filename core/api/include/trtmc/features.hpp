@@ -860,4 +860,57 @@ struct BatchImageToTokenAndPooledFeaturesTraits {
 using BatchImageToTokenAndPooledFeatures =
     detail::FeatureBatchTask<detail::BatchImageToTokenAndPooledFeaturesTraits>;
 
+struct SpatialFeatureInput {
+    std::string name;
+    Span<const float> values;
+    uint64_t channels{0}, height{0}, width{0};
+};
+struct SpatialFeaturesToClassScoresRequest {
+    std::vector<SpatialFeatureInput> inputs;
+};
+using SpatialClassScoresResult = detail::ViewResult<trtmc_spatial_class_scores_view_v1>;
+
+class SpatialFeaturesToClassScores {
+  public:
+    static constexpr std::string_view kTask = TRTMC_TASK_SPATIAL_FEATURES_TO_CLASS_SCORES;
+    static constexpr uint32_t kMajor = 1, kMinor = 0;
+    std::vector<ConfigField> config_fields() const {
+        return detail::config_fields(state_, kTask, kMajor, kMinor);
+    }
+    SpatialClassScoresResult run(const SpatialFeaturesToClassScoresRequest& input,
+                                 const Config& config = {}) const {
+        std::vector<trtmc_spatial_feature_input_v1> maps;
+        maps.reserve(input.inputs.size());
+        for (const auto& item : input.inputs)
+            maps.push_back({{item.name.data(), item.name.size()},
+                            {item.values.data(), item.values.size()},
+                            item.channels,
+                            item.height,
+                            item.width});
+        const trtmc_spatial_features_to_class_scores_request_v1 request{maps.data(), maps.size()};
+        const auto entries = config.c_entries();
+        const auto options = entries.view();
+        trtmc_result* raw = nullptr;
+        trtmc_error* error = nullptr;
+        const auto status = api_->run(state_->handle, &request, &options, &raw, &error);
+        detail::ResultOwner owner(state_, raw);
+        detail::check(state_->api, status, error);
+        return SpatialClassScoresResult(std::move(owner), api_->result_view);
+    }
+    static void validate_table(const trtmc_api_header* table) {
+        if (!table || table->major != 1 || table->minor != 0 ||
+            table->byte_size < sizeof(trtmc_spatial_features_to_class_scores_api_v1))
+            throw Error(TRTMC_VERSION_MISMATCH, "incompatible spatial feature Task table");
+    }
+
+  private:
+    friend class Model;
+    SpatialFeaturesToClassScores(std::shared_ptr<detail::ModelState> state,
+                                 const trtmc_api_header* table) noexcept
+        : state_(std::move(state)),
+          api_(reinterpret_cast<const trtmc_spatial_features_to_class_scores_api_v1*>(table)) {}
+    std::shared_ptr<detail::ModelState> state_;
+    const trtmc_spatial_features_to_class_scores_api_v1* api_;
+};
+
 } // namespace trtmc
