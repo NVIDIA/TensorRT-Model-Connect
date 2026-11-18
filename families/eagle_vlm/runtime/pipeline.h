@@ -37,7 +37,13 @@ class EncoderPipeline final : public internal::IModel,
   public:
     EncoderPipeline(std::unique_ptr<ITrtModule> encoder, std::string mode,
                     std::shared_ptr<ITokenizer> tokenizer, std::int64_t vocab_size,
-                    std::string reranking_pooling = "last");
+                    std::string reranking_pooling = "last", bool single_forward = false,
+                    std::unique_ptr<ITrtModule> vision = nullptr);
+
+    // Internal preprocessed, batch-one image/text single forward pass.
+    std::vector<float> forward_image(const std::vector<std::int32_t>& input_ids,
+                                     const std::vector<float>& pixels,
+                                     std::size_t image_token_start) const;
 
     const char* task() const noexcept override { return mode_.c_str(); }
     std::vector<internal::TaskInstance> task_bindings() override;
@@ -65,7 +71,8 @@ class EncoderPipeline final : public internal::IModel,
                                std::size_t batch_size, std::size_t sequence_length) const;
     EncodedOutput forward_ids(const std::vector<std::int32_t>& input_ids,
                               const std::vector<std::int32_t>& attention_mask,
-                              const std::vector<std::int64_t>& shape) const;
+                              const std::vector<std::int64_t>& shape,
+                              TensorMap extra_inputs = {}) const;
     float score_pair(const std::string& query, const std::string& document) const;
     std::vector<float> score_documents(const std::string& query,
                                        const std::vector<std::string>& documents) const;
@@ -75,6 +82,8 @@ class EncoderPipeline final : public internal::IModel,
     void require_relevance_mode() const;
 
     std::unique_ptr<ITrtModule> encoder_;
+    bool single_forward_;
+    std::unique_ptr<ITrtModule> vision_;
     // The bundle's single declared primary task: ITextToEmbedding::kTask,
     // ITextToPooledFeatures::kTask or ITextQueryDocumentsToRelevance::kTask.
     std::string mode_;

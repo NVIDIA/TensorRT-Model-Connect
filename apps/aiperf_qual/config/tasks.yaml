@@ -196,9 +196,10 @@ benchmarks:
          min_new_tokens: 64, gate: {margin: 2.0}}
 
 tasks:
-  text_generation:
+  text_generation: &generate_text
     absolute: [mmlu]
     performance: {output_grader: parity_token_exact, output_grader_params: {min_prefix: 8, accept_equal_text: true}}
+  text_continuation: *generate_text  # the Task SDK name of the migrated decoder LMs (qwen3, #1558)
 
   vision_language_generation:
     # OCRBench alone (the owner's choice, October 2026): it caught both VLM conversion defects MMStar caught

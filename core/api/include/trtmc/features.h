@@ -230,6 +230,13 @@ typedef struct {
     trtmc_string_view text;
 } trtmc_image_text_to_embedding_request_v1;
 typedef struct {
+    /* Row-major [num_points, input_dim] float32. The family defines the column
+     * meaning and validates the point counts and input_dim it supports. */
+    const float* points;
+    uint64_t num_points;
+    uint32_t input_dim;
+} trtmc_points_to_embedding_request_v1;
+typedef struct {
     trtmc_string_view query;
     trtmc_string_view document;
 } trtmc_text_pair_to_relevance_request_v1;
@@ -395,6 +402,15 @@ typedef struct {
     trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_semantic_embedding_view_v1*,
                                           trtmc_error**);
 } trtmc_image_text_to_embedding_api_v1;
+
+#define TRTMC_TASK_POINTS_TO_EMBEDDING "points_to_embedding"
+typedef struct {
+    trtmc_api_header header;
+    trtmc_status(TRTMC_CALL* run)(trtmc_model*, const trtmc_points_to_embedding_request_v1*,
+                                  const trtmc_config_view_v1*, trtmc_result**, trtmc_error**);
+    trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_semantic_embedding_view_v1*,
+                                          trtmc_error**);
+} trtmc_points_to_embedding_api_v1;
 
 #define TRTMC_TASK_TEXT_PAIR_TO_RELEVANCE "text_pair_to_relevance"
 typedef struct {
@@ -584,6 +600,34 @@ typedef struct {
                                                trtmc_image_token_and_pooled_features_view_v1*,
                                                trtmc_error**);
 } trtmc_batch_image_to_token_and_pooled_features_api_v1;
+
+/* One host float32 CHW feature map. Names and coordinate meaning are specified
+ * by the loaded family; Core performs no feature extraction or normalization. */
+typedef struct {
+    trtmc_string_view name;
+    trtmc_f32_view values;
+    uint64_t channels, height, width;
+} trtmc_spatial_feature_input_v1;
+typedef struct {
+    const trtmc_spatial_feature_input_v1* inputs;
+    uint64_t count; /* One example with unique, nonempty input names. */
+} trtmc_spatial_features_to_class_scores_request_v1;
+typedef struct {
+    trtmc_f32_view values; /* [class,height,width]; classes may overlap. */
+    uint64_t classes, height, width;
+    trtmc_strings_view class_names; /* Nonempty class names in score order. */
+    uint32_t score_kind;            /* Probability does not imply a sum of one across classes. */
+} trtmc_spatial_class_scores_view_v1;
+
+#define TRTMC_TASK_SPATIAL_FEATURES_TO_CLASS_SCORES "spatial_features_to_class_scores"
+typedef struct {
+    trtmc_api_header header;
+    trtmc_status(TRTMC_CALL* run)(trtmc_model*,
+                                  const trtmc_spatial_features_to_class_scores_request_v1*,
+                                  const trtmc_config_view_v1*, trtmc_result**, trtmc_error**);
+    trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_spatial_class_scores_view_v1*,
+                                          trtmc_error**);
+} trtmc_spatial_features_to_class_scores_api_v1;
 
 #ifdef __cplusplus
 }

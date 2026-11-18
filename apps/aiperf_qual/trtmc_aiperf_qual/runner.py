@@ -133,11 +133,15 @@ def near_capacity_request(environment: Environment, model: Mapping[str, Any], re
     return long, rendered_tokens(tokenizer, long)
 
 
+# The text generation Task under its legacy name and its Task SDK name (the migrated decoder LMs).
+TEXT_GENERATION_TASKS = frozenset({"text_generation", "text_continuation"})
+
+
 def near_capacity_applies(model: Mapping[str, Any], request: Mapping[str, Any]) -> bool:
     """The text generation Task's text-only requests (not vision-language models, whose image tokens share the
     bundle length) on a bundle long enough for a passage."""
     length = int(model["candidate"].get("max_sequence_length") or 0)
-    return (model.get("task") == "text_generation" and not any(key.startswith("image") for key in request)
+    return (model.get("task") in TEXT_GENERATION_TASKS and not any(key.startswith("image") for key in request)
             and length > 2 * NEAR_CAPACITY_NEW_TOKENS)
 
 

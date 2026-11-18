@@ -1,0 +1,22 @@
+{
+  "name": "qwen3-vl-30b-a3b-instruct",
+  "hf_id": "Qwen/Qwen3-VL-30B-A3B-Instruct",
+  "hf_revision": "9c4b90e1e4ba969fd3b5378b57d966d725f1b86c",
+  "bundle": "qwen3-vl-30b-a3b-bf16.bundle",
+  "family": "qwen3_vl_moe",
+  "task": "vision_language_generation",
+  "precision": "bf16",
+  "reference_precision": "bf16",
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 512,
+  "min_pixels": 65536,
+  "max_pixels": 200704,
+  "testcases": [
+    {"name": "qwen3-vl-moe-vehicle", "premerge": true, "test_image": "data/test_img.jpeg",
+     "prompt": "What color is the vehicle in this image? Answer in one word.",
+     "max_new_tokens": 10, "mirror": false},
+    {"name": "qwen3-vl-moe-vehicle-mirror", "premerge": true, "test_image": "data/test_img.jpeg",
+     "prompt": "What color is the vehicle in this image? Answer in one word.",
+     "max_new_tokens": 10, "mirror": true}
+  ]
+}

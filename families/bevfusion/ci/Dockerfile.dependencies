@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+COPY requirements.txt /opt/trtmc-ci/family-requirements.txt
+RUN python -m pip install --disable-pip-version-check --no-cache-dir \
+        --no-build-isolation -r /opt/trtmc-ci/family-requirements.txt \
+    && python -m pip check
+
+COPY tests /opt/trtmc-ci/bevfusion/tests
+RUN python /opt/trtmc-ci/bevfusion/tests/reference.py \
+        --prepare /opt/trtmc-ci/bevfusion/model
+ENV TRTMC_BEVFUSION_MODEL_DIR=/opt/trtmc-ci/bevfusion/model

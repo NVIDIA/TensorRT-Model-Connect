@@ -195,6 +195,14 @@ struct ImageTextToEmbeddingRequest {
     ImageView image;
     std::string_view text;
 };
+// Points are row-major [num_points, input_dim] float32. The family defines the
+// column meaning, owns any normalization or sampling and must reject point
+// counts and input dimensions it does not support.
+struct PointsToEmbeddingRequest {
+    Span<const float> points;
+    uint32_t num_points{0};
+    uint32_t input_dim{3};
+};
 struct TextPairToRelevanceRequest {
     std::string_view query;
     std::string_view document;
@@ -335,6 +343,14 @@ class IImageTextToEmbedding {
     static constexpr std::string_view kTask = "image_text_to_embedding";
     virtual ~IImageTextToEmbedding() = default;
     virtual SemanticEmbeddingResult run(const ImageTextToEmbeddingRequest&, ConfigView) = 0;
+};
+
+class IPointsToEmbedding {
+  public:
+    using TaskInterface = IPointsToEmbedding;
+    static constexpr std::string_view kTask = "points_to_embedding";
+    virtual ~IPointsToEmbedding() = default;
+    virtual SemanticEmbeddingResult run(const PointsToEmbeddingRequest&, ConfigView) = 0;
 };
 
 class ITextPairToRelevance {
@@ -507,6 +523,29 @@ class IBatchImageToTokenAndPooledFeatures {
     virtual ~IBatchImageToTokenAndPooledFeatures() = default;
     virtual std::vector<ImageTokenAndPooledFeaturesResult>
     run_batch(const BatchImageToTokenAndPooledFeaturesRequest&) = 0;
+};
+
+struct SpatialFeatureInput {
+    std::string_view name;
+    Span<const float> values; // Contiguous CHW; names and coordinate meaning are family-owned.
+    uint64_t channels{0}, height{0}, width{0};
+};
+struct SpatialFeaturesToClassScoresRequest {
+    std::vector<SpatialFeatureInput> inputs; // One example, with unique nonempty input names.
+};
+struct SpatialClassScoresResult {
+    std::vector<float> values; // Contiguous [class,height,width]; classes may overlap.
+    uint64_t classes{0}, height{0}, width{0};
+    std::vector<std::string> class_names; // Exactly one nonempty name per class, in score order.
+    ScoreKind kind{ScoreKind::Unbounded};
+};
+class ISpatialFeaturesToClassScores {
+  public:
+    using TaskInterface = ISpatialFeaturesToClassScores;
+    static constexpr std::string_view kTask = "spatial_features_to_class_scores";
+    virtual ~ISpatialFeaturesToClassScores() = default;
+    virtual SpatialClassScoresResult run(const SpatialFeaturesToClassScoresRequest&,
+                                         ConfigView) = 0;
 };
 
 } // namespace trtmc::internal

@@ -32,6 +32,7 @@ class FeaturesFixture final : public IModel,
                               public IImageToPooledFeatures,
                               public IImageToEmbedding,
                               public IImageTextToEmbedding,
+                              public IPointsToEmbedding,
                               public ITextPairToRelevance,
                               public ITextImageToRelevance,
                               public ITextImageTextToRelevance,
@@ -80,6 +81,7 @@ class FeaturesFixture final : public IModel,
             bind<IImageToPooledFeatures>(*this, fields_for(IImageToPooledFeatures::kTask)),
             bind<IImageToEmbedding>(*this, fields_for(IImageToEmbedding::kTask)),
             bind<IImageTextToEmbedding>(*this, fields_for(IImageTextToEmbedding::kTask)),
+            bind<IPointsToEmbedding>(*this, fields_for(IPointsToEmbedding::kTask)),
             bind<ITextPairToRelevance>(*this, fields_for(ITextPairToRelevance::kTask)),
             bind<ITextImageToRelevance>(*this, fields_for(ITextImageToRelevance::kTask)),
             bind<ITextImageTextToRelevance>(*this, fields_for(ITextImageTextToRelevance::kTask)),
@@ -298,6 +300,20 @@ class FeaturesFixture final : public IModel,
                                 ConfigView config) override {
         auto result = embedding(float(14 * scale(config)), pixel(request.image));
         result.values.push_back(float(request.text.size()));
+        return result;
+    }
+    // Returns the last point's first value plus both extents so tests can see
+    // exactly which floats Core handed to the family and how they were split.
+    SemanticEmbeddingResult run(const PointsToEmbeddingRequest& request,
+                                ConfigView config) override {
+        if (request.points.size() != static_cast<size_t>(request.num_points) * request.input_dim)
+            throw std::runtime_error("Core handed the family a mis-sized point span");
+        if (request.num_points == 0)
+            throw std::invalid_argument("fixture requires at least one point");
+        const auto last_point = static_cast<size_t>(request.num_points - 1) * request.input_dim;
+        auto result = embedding(float(19 * scale(config)), request.points[last_point]);
+        result.values.push_back(float(request.num_points));
+        result.values.push_back(float(request.input_dim));
         return result;
     }
     RelevanceResult run(const TextPairToRelevanceRequest& request, ConfigView config) override {
@@ -587,6 +603,34 @@ class FeaturesFixture final : public IModel,
     size_t query_document_calls_{0};
 };
 
+class SpatialModel final : public IModel, public ISpatialFeaturesToClassScores {
+  public:
+    explicit SpatialModel(std::string mode) : mode_(std::move(mode)) {}
+    const char* task() const noexcept override { return mode_.c_str(); }
+    std::vector<TaskInstance> task_bindings() override {
+        return {bind<ISpatialFeaturesToClassScores>(*this)};
+    }
+    SpatialClassScoresResult run(const SpatialFeaturesToClassScoresRequest& request,
+                                 ConfigView) override {
+        if (request.inputs.size() != 2 || request.inputs[0].name != "first" ||
+            request.inputs[1].name != "second")
+            throw std::invalid_argument("fixture expects two named operands in order");
+        SpatialClassScoresResult result{{}, 2, 1, 2, {"a", "b"}, ScoreKind::Probability};
+        for (const auto& item : request.inputs)
+            result.values.insert(result.values.end(), item.values.begin(), item.values.end());
+        if (mode_ == "spatial_bad_shape")
+            result.width = 3;
+        if (mode_ == "spatial_bad_names")
+            result.class_names.pop_back();
+        if (mode_ == "spatial_bad_probability")
+            result.values[0] = 2;
+        return result;
+    }
+
+  private:
+    std::string mode_;
+};
+
 class MissingFixture final : public IModel {
   public:
     const char* task() const noexcept override { return "missing"; }
@@ -598,6 +642,8 @@ class MissingFixture final : public IModel {
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
     if (context.reader.info().family != "features_fixture")
         throw std::runtime_error("wrong feature fixture family");
+    if (context.reader.info().task.rfind("spatial_", 0) == 0)
+        return new SpatialModel(context.reader.info().task);
     if (context.reader.info().task == "missing")
         return new MissingFixture;
     return new FeaturesFixture(context.reader.info().task);
