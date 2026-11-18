@@ -134,8 +134,10 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
 } // namespace trtmc::qwen2_5_omni
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("qwen2_5_omni does not support --kv-cache-size");
     using namespace trtmc;
-    if (context.kv_cache_size_bytes || context.reader.info().task != "text_continuation")
+    if (context.reader.info().task != "text_continuation")
         throw std::invalid_argument(
             "Qwen2.5 Omni Thinker uses a family-owned fixed KV profile for text continuation");
     const auto raw = qwen2_5_omni::section(context.reader, "runtime.json");
