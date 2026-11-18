@@ -74,41 +74,81 @@ bool is_power_of_two(int32_t value) {
     return value > 0 && (value & (value - 1)) == 0;
 }
 
-void rfft_power_radix2(const float* x, int32_t n, int32_t n_out, float* power_out,
-                       std::vector<std::complex<double>>& workspace) {
-    workspace.resize(static_cast<std::size_t>(n));
-    for (int32_t i = 0; i < n; ++i) {
-        workspace[static_cast<std::size_t>(i)] =
-            std::complex<double>(static_cast<double>(x[i]), 0.0);
-    }
+// The bit-reversed order and the twiddle factors of the radix-2 transform of
+// one power-of-two length n.
+struct Radix2Tables {
+    // Where natural-order sample i sits in bit-reversed order.
+    std::vector<int32_t> bit_reversed;
+    // Stage after stage (length 2, 4, ..., n), length / 2 factors each. The
+    // real and the imaginary parts are two arrays, and the butterfly puts the
+    // factor on the left of its product. Where the compiler fuses
+    // multiply-adds, which terms of a complex product it fuses followed these
+    // two choices: with them GCC 13.3 on aarch64 fuses, at -O2 and at -O3, the
+    // terms it fused in the out-of-line copy of a loop that updated the
+    // factor inline, the copy the mel paths called; with either one changed
+    // it fused others, and a power could differ in its last bits.
+    std::vector<double> twiddle_real;
+    std::vector<double> twiddle_imag;
+};
 
+// Stage `length` gets w_i = step^i (i < length / 2) from the recurrence
+// w_0 = 1, w_{i+1} = w_i * step: the complex operations, in the order, of a
+// butterfly loop that updates its twiddle factor after every butterfly. The
+// tables are built whole in a local and returned: a caller holds all of them
+// or, if an allocation fails, none.
+Radix2Tables make_radix2_tables(int32_t n) {
+    Radix2Tables tables;
+    const auto size = static_cast<std::size_t>(n);
+    tables.bit_reversed.resize(size, 0);
     for (int32_t i = 1, j = 0; i < n; ++i) {
         int32_t bit = n >> 1;
         for (; (j & bit) != 0; bit >>= 1) {
             j ^= bit;
         }
         j ^= bit;
-        if (i < j) {
-            std::swap(workspace[static_cast<std::size_t>(i)],
-                      workspace[static_cast<std::size_t>(j)]);
-        }
+        tables.bit_reversed[static_cast<std::size_t>(i)] = j;
     }
-
+    tables.twiddle_real.reserve(size - 1);
+    tables.twiddle_imag.reserve(size - 1);
     const double pi2 = 2.0 * 3.14159265358979323846;
-    for (int32_t length = 2; length <= n; length <<= 1) {
+    for (std::size_t length = 2; length <= size; length <<= 1) {
         const double angle = -pi2 / static_cast<double>(length);
         const std::complex<double> step(std::cos(angle), std::sin(angle));
+        std::complex<double> twiddle(1.0, 0.0);
+        for (std::size_t i = 0; i < length / 2; ++i) {
+            tables.twiddle_real.push_back(twiddle.real());
+            tables.twiddle_imag.push_back(twiddle.imag());
+            twiddle *= step;
+        }
+    }
+    return tables;
+}
+
+void rfft_power_radix2(const float* x, int32_t n, int32_t n_out, float* power_out,
+                       std::vector<std::complex<double>>& workspace, const Radix2Tables& tables) {
+    // Written in bit-reversed order, the frame needs the butterfly stages
+    // alone. Every value of the workspace is written here.
+    workspace.resize(static_cast<std::size_t>(n));
+    for (int32_t i = 0; i < n; ++i) {
+        workspace[static_cast<std::size_t>(tables.bit_reversed[static_cast<std::size_t>(i)])] =
+            std::complex<double>(static_cast<double>(x[i]), 0.0);
+    }
+
+    const double* stage_real = tables.twiddle_real.data();
+    const double* stage_imag = tables.twiddle_imag.data();
+    for (int32_t length = 2; length <= n; length <<= 1) {
         const int32_t half = length / 2;
         for (int32_t offset = 0; offset < n; offset += length) {
-            std::complex<double> twiddle(1.0, 0.0);
             for (int32_t i = 0; i < half; ++i) {
+                const std::complex<double> twiddle(stage_real[i], stage_imag[i]);
                 const auto even = workspace[static_cast<std::size_t>(offset + i)];
-                const auto odd = workspace[static_cast<std::size_t>(offset + i + half)] * twiddle;
+                const auto odd = twiddle * workspace[static_cast<std::size_t>(offset + i + half)];
                 workspace[static_cast<std::size_t>(offset + i)] = even + odd;
                 workspace[static_cast<std::size_t>(offset + i + half)] = even - odd;
-                twiddle *= step;
             }
         }
+        stage_real += half;
+        stage_imag += half;
     }
 
     const int32_t bins = std::min(n_out, n / 2 + 1);
@@ -120,11 +160,17 @@ void rfft_power_radix2(const float* x, int32_t n, int32_t n_out, float* power_ou
 
 class RfftPowerPlan {
   public:
-    explicit RfftPowerPlan(int32_t n) : n_(n) {}
+    explicit RfftPowerPlan(int32_t n)
+        : n_(n), tables_(is_power_of_two(n) ? make_radix2_tables(n) : Radix2Tables{}) {}
+
+    // A plan is used where it was built. A moved-from plan would keep its
+    // length and lose its tables, so it can be neither copied nor moved.
+    RfftPowerPlan(const RfftPowerPlan&) = delete;
+    RfftPowerPlan& operator=(const RfftPowerPlan&) = delete;
 
     void execute(const float* input, int32_t n_out, float* power_out) {
         if (is_power_of_two(n_)) {
-            rfft_power_radix2(input, n_, n_out, power_out, workspace_);
+            rfft_power_radix2(input, n_, n_out, power_out, workspace_, tables_);
             return;
         }
         rfft_power_direct(input, n_, n_out, power_out);
@@ -132,6 +178,7 @@ class RfftPowerPlan {
 
   private:
     int32_t n_{0};
+    Radix2Tables tables_;
     std::vector<std::complex<double>> workspace_;
 };
 

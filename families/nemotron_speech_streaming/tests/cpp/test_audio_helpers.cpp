@@ -966,6 +966,263 @@ void test_incremental_equals_one_shot_definition() {
     }
 }
 
+// The power spectrum against this file's copy of the transform, the loop that
+// updates its twiddle factor after every butterfly. Without fused
+// multiply-adds every operation rounds the same in the library's tables and
+// in that loop, and the powers must be equal bit for bit. Where the compiler
+// fuses multiply-adds (__FP_FAST_FMA) the test's copy is not the library's
+// object code, so a power may differ from it: by four float ulps, or, in a
+// bin far below the frame's largest, by 1e-21 of the frame's largest power.
+// Two fusings of this loop were seen to differ there by up to 8.3e-24 of
+// that power, so the floor leaves room for a hundred times that and no
+// more. A NaN matches any NaN and an infinity only itself.
+#if defined(__FP_FAST_FMA)
+bool same_power(const std::vector<float>& actual, const std::vector<float>& expected) {
+    if (actual.size() != expected.size()) {
+        return false;
+    }
+    float peak = 0.0F;
+    for (const float value : expected) {
+        if (std::isfinite(value)) {
+            peak = std::max(peak, value);
+        }
+    }
+    for (std::size_t i = 0; i < actual.size(); ++i) {
+        if (std::isnan(actual[i]) || std::isnan(expected[i])) {
+            if (!(std::isnan(actual[i]) && std::isnan(expected[i]))) {
+                return false;
+            }
+        } else if (std::isinf(actual[i]) || std::isinf(expected[i])) {
+            if (actual[i] != expected[i]) {
+                return false;
+            }
+        } else {
+            const float larger = std::max(std::abs(actual[i]), std::abs(expected[i]));
+            const float ulp =
+                std::nextafter(larger, std::numeric_limits<float>::infinity()) - larger;
+            if (std::abs(static_cast<double>(actual[i]) - static_cast<double>(expected[i])) >
+                std::max(4.0 * static_cast<double>(ulp), 1e-21 * static_cast<double>(peak))) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+#else
+bool same_power(const std::vector<float>& actual, const std::vector<float>& expected) {
+    return same_values(actual, expected);
+}
+#endif
+
+// Frames whose rounding shows in the output: a pure tone on a bin leaves the
+// other bins as rounding noise, so one differing double anywhere in the
+// transform changes a float there; sums that cancel do the same.
+std::vector<float> power_input(int size, int kind, std::mt19937& rng) {
+    std::uniform_real_distribution<float> uniform(-1.0F, 1.0F);
+    const double pi2 = 2.0 * definition::kPi;
+    const float infinity = std::numeric_limits<float>::infinity();
+    std::vector<float> x(static_cast<std::size_t>(size));
+    for (int i = 0; i < size; ++i) {
+        const double t = static_cast<double>(i);
+        float value = 0.0F;
+        switch (kind) {
+        case 0: // noise
+            value = uniform(rng);
+            break;
+        case 1: // a cosine on a bin
+            value = static_cast<float>(std::cos(pi2 * 3.0 * t / size));
+            break;
+        case 2: // a sine on a bin
+            value = static_cast<float>(std::sin(pi2 * 7.0 * t / size));
+            break;
+        case 3: // sums that cancel
+            value = (i % 3) == 0 ? 1.0F : -0.5F;
+            break;
+        case 4: // half silent
+            value = i < size / 2 ? uniform(rng) : 0.0F;
+            break;
+        case 5: // negative zeros
+            value = -0.0F;
+            break;
+        case 6: // a power past the float range
+            value = 1e30F * uniform(rng);
+            break;
+        case 7: // a power below it
+            value = 1e-30F * uniform(rng);
+            break;
+        case 8: // near the largest float
+            value = 3.0e38F * uniform(rng);
+            break;
+        case 9: // a tone on the bin a quarter of the way up, and one on bin 1
+            value = static_cast<float>(std::cos(pi2 * (size / 4) * t / size) +
+                                       0.5 * std::sin(pi2 * t / size));
+            break;
+        case 10: // one infinity
+            value = i == size / 3 ? infinity : uniform(rng);
+            break;
+        case 11: // two infinities of opposite sign
+            value = i == size / 3 ? -infinity : (i == size / 2 ? infinity : uniform(rng));
+            break;
+        case 12: // one NaN
+            value = i == size / 5 ? std::numeric_limits<float>::quiet_NaN() : uniform(rng);
+            break;
+        default: // every sample infinite
+            value = infinity;
+            break;
+        }
+        x[static_cast<std::size_t>(i)] = value;
+    }
+    return x;
+}
+
+void test_power_spectrum_equals_definition() {
+    std::mt19937 rng(20261118);
+    // 512 is the model's frame. The powers of two take the radix-2 transform
+    // and its tables, the other lengths the direct sum.
+    for (const int size :
+         {1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 3, 5, 6, 7, 12, 25, 100, 400}) {
+        for (int kind = 0; kind < 14; ++kind) {
+            const auto input = power_input(size, kind, rng);
+            if (!same_power(trtmc::rnnt::detail::rfft_power(input),
+                            definition::rfft_power(input))) {
+                std::cerr << "FAIL: power spectrum of " << size << " samples, input kind " << kind
+                          << '\n';
+                ++g_failures;
+            }
+        }
+    }
+    // A tone on every bin of the model's frame, in six phases. The bin that
+    // mirrors the tone's across the middle of the spectrum holds what is left
+    // when two large halves cancel, so one ulp of the factor that turns one
+    // of them moves it by about a float ulp.
+    for (int bin = 0; bin <= 256; ++bin) {
+        for (int turn = 0; turn < 6; ++turn) {
+            const double phase = 0.1 * bin + 1.047 * turn;
+            std::vector<float> input(512);
+            for (int i = 0; i < 512; ++i) {
+                input[static_cast<std::size_t>(i)] =
+                    static_cast<float>(std::cos(2.0 * definition::kPi * bin * i / 512.0 + phase));
+            }
+            if (!same_power(trtmc::rnnt::detail::rfft_power(input),
+                            definition::rfft_power(input))) {
+                std::cerr << "FAIL: power spectrum of a tone on bin " << bin << " of 512\n";
+                ++g_failures;
+            }
+        }
+    }
+}
+
+// Power spectra that are the same floats in every build, fused
+// multiply-adds or not: zeros stay zeros through every butterfly, the sums
+// of ones are small integers, and what rounding leaves of an impulse's unit
+// factors is far below a float's step at 1.
+void test_power_spectrum_exact_cases() {
+    check(trtmc::rnnt::detail::rfft_power({}) == std::vector<float>{0.0F},
+          "power spectrum of no samples is one zero bin");
+    check(trtmc::rnnt::detail::rfft_power({3.0F}) == std::vector<float>{9.0F},
+          "power spectrum of one sample is its square");
+    for (int size = 2; size <= 1024; size *= 2) {
+        const std::size_t bins = static_cast<std::size_t>(size / 2 + 1);
+        const float square = static_cast<float>(size) * static_cast<float>(size);
+        const std::string of = " of " + std::to_string(size) + " samples";
+
+        check(trtmc::rnnt::detail::rfft_power(std::vector<float>(
+                  static_cast<std::size_t>(size), 0.0F)) == std::vector<float>(bins, 0.0F),
+              ("power spectrum of silence" + of).c_str());
+
+        std::vector<float> expected(bins, 0.0F);
+        expected[0] = square;
+        check(trtmc::rnnt::detail::rfft_power(
+                  std::vector<float>(static_cast<std::size_t>(size), 1.0F)) == expected,
+              ("power spectrum of a constant is its sum squared in bin 0" + of).c_str());
+
+        std::vector<float> alternating(static_cast<std::size_t>(size));
+        for (int i = 0; i < size; ++i) {
+            alternating[static_cast<std::size_t>(i)] = (i % 2) != 0 ? -1.0F : 1.0F;
+        }
+        expected.assign(bins, 0.0F);
+        expected[bins - 1] = square;
+        check(trtmc::rnnt::detail::rfft_power(alternating) == expected,
+              ("power spectrum of alternating signs is in the last bin" + of).c_str());
+
+        // An impulse has the power 1 in every bin wherever it sits: its
+        // spectrum is a row of unit factors, and what rounding leaves of
+        // them is far below a float's step at 1.
+        bool impulses_flat = true;
+        for (int position = 0; position < size; ++position) {
+            std::vector<float> impulse(static_cast<std::size_t>(size), 0.0F);
+            impulse[static_cast<std::size_t>(position)] = position % 2 != 0 ? -1.0F : 1.0F;
+            impulses_flat = impulses_flat && trtmc::rnnt::detail::rfft_power(impulse) ==
+                                                 std::vector<float>(bins, 1.0F);
+        }
+        check(impulses_flat, ("power spectrum of an impulse at any position" + of).c_str());
+    }
+}
+
+// The transform's tables serve every frame of an object and every request it
+// is reset for. A frame's features depend on its own samples alone, so two
+// streams that end in the same audio must end in the same features, bit for
+// bit (the same code on both sides: nothing here depends on how the compiler
+// fuses), whatever each stream held before and however often the object was
+// used before.
+void test_transform_tables_are_reused() {
+    std::mt19937 rng(512);
+    const auto options = make_model_options();
+    const auto filters = triangular_filterbank(257, 80);
+    const auto tail = noise(rng, 2000);
+    const auto stream = [&](trtmc::rnnt::IncrementalMelSpectrogram& state,
+                            const std::vector<float>& head) {
+        // A head, a silence longer than a frame, then the shared tail.
+        std::vector<float> audio = head;
+        audio.insert(audio.end(), 1000, 0.0F);
+        audio.insert(audio.end(), tail.begin(), tail.end());
+        state.accept_audio(audio.data(), static_cast<int32_t>(audio.size()));
+        state.ensure_frames(state.available_frames(), true);
+        // The frames that lie wholly behind the head and its preemphasis.
+        const int32_t first =
+            (static_cast<int32_t>(head.size()) + 1 + options.n_fft / 2) / options.hop_length + 1;
+        std::vector<float> features;
+        for (int32_t frame = first; frame < state.frame_count(); ++frame) {
+            for (int32_t mel = 0; mel < state.n_mels(); ++mel) {
+                features.push_back(state.value(mel, frame));
+            }
+        }
+        return features;
+    };
+    trtmc::rnnt::IncrementalMelSpectrogram fresh(filters.data(), 257, 80, options,
+                                                 options.sample_rate);
+    const auto expected = stream(fresh, noise(rng, 2000));
+    check(expected.size() == static_cast<std::size_t>(80) * 16,
+          "the shared tail of a stream spans sixteen frames");
+
+    trtmc::rnnt::IncrementalMelSpectrogram reused(filters.data(), 257, 80, options,
+                                                  options.sample_rate);
+    for (int request = 0; request < 3; ++request) {
+        auto head = noise(rng, 2000, request == 1 ? 3.0e30F : 1.0F);
+        if (request == 2) {
+            head[700] = std::numeric_limits<float>::quiet_NaN();
+        }
+        const auto features = stream(reused, head);
+        check(features.size() == expected.size() &&
+                  std::memcmp(features.data(), expected.data(), expected.size() * sizeof(float)) ==
+                      0,
+              ("frames behind another head, request " + std::to_string(request) +
+               ", equal a fresh object's bit for bit")
+                  .c_str());
+        reused.reset();
+    }
+
+    // A one-frame transform repeats itself after other lengths were asked for.
+    const auto frame = noise(rng, 512);
+    const auto first = trtmc::rnnt::detail::rfft_power(frame);
+    (void)trtmc::rnnt::detail::rfft_power(noise(rng, 64));
+    (void)trtmc::rnnt::detail::rfft_power(noise(rng, 100));
+    const auto again = trtmc::rnnt::detail::rfft_power(frame);
+    check(first.size() == 257 &&
+              std::memcmp(first.data(), again.data(), first.size() * sizeof(float)) == 0,
+          "a frame's power spectrum repeats bit for bit");
+}
+
 template <class Call>
 bool throws_invalid_argument(Call&& call) {
     try {
@@ -1053,6 +1310,11 @@ void test_invalid_arguments_throw() {
           }),
           "incremental mel refuses a model rate of zero");
     bad_options = options;
+    bad_options.n_fft = 0;
+    check(throws_invalid_argument(
+              [&] { IncrementalMelSpectrogram state(filters.data(), 1, 128, bad_options, 16000); }),
+          "incremental mel refuses a frame length of zero");
+    bad_options = options;
     bad_options.hop_length = 0;
     check(throws_invalid_argument([&] {
               IncrementalMelSpectrogram state(filters.data(), 257, 128, bad_options, 16000);
@@ -1084,6 +1346,9 @@ int main() {
     test_mel_product_equals_definition();
     test_incremental_equals_one_shot_definition();
     test_invalid_arguments_throw();
+    test_power_spectrum_equals_definition();
+    test_power_spectrum_exact_cases();
+    test_transform_tables_are_reused();
 
     if (g_failures != 0) {
         std::cerr << g_failures << " rnnt audio helper test(s) failed\n";
