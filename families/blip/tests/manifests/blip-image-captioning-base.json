@@ -8,7 +8,12 @@
   "precision": "fp32",
   "max_sequence_length": 64,
   "tensor_parallel_size": 1,
-  "test_image_url": "https://storage.googleapis.com/sfr-vision-language-research/BLIP/demo.jpg?generation=1642901856234049",
+  "external_files": [
+    {
+      "path": "reference-demo.jpg",
+      "url": "https://storage.googleapis.com/sfr-vision-language-research/BLIP/demo.jpg?generation=1642901856234049"
+    }
+  ],
   "testcases": [
     {"name": "blip-base-caption", "premerge": true, "prompt": "", "mirror": false},
     {"name": "blip-base-prefix", "premerge": true, "prompt": "a photography of", "mirror": false},

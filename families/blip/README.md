@@ -49,21 +49,28 @@ are rejected. Image resizing uses Pillow-compatible bicubic filtering to
 
 ## Validation
 
-The family manifest pins the checkpoint revision and the immutable storage
-generation of the upstream example image. The tests compare an explicitly
-supplied input image byte for byte with that reference copy. The image is
-downloaded for selected E2E tests; it is not redistributed in this repository.
-For offline runs, set `TRTMC_BLIP_REFERENCE_IMAGE` to an existing verified copy
+The family manifest pins the checkpoint revision and declares the immutable
+storage generation of the upstream example image in `external_files`. CI
+downloads that image before the offline proof and supplies its directory as
+`TRTMC_BLIP_MODEL_DIR`. The checkpoint is then loaded from the separately
+staged Hugging Face cache with `local_files_only=True`. The E2E tests make no
+image download requests, and the image is not redistributed in this repository.
+
+For local runs, set `TRTMC_BLIP_REFERENCE_IMAGE` to an existing verified copy
 of the pinned image and `TRTMC_BLIP_MODEL_DIR` to the pinned local checkpoint.
-`TRTMC_BLIP_IMAGE` optionally supplies a separate input copy. Otherwise the
-test requires the pinned checkpoint in the Hugging Face cache and downloads
-the example image.
+The latter may be omitted when the checkpoint is already in the Hugging Face
+cache. `TRTMC_BLIP_IMAGE` optionally supplies a separate input copy, which the
+tests compare byte for byte with the reference. Missing staged assets fail
+before model loading.
 
 ```bash
 cmake -S . -B build -DTRTMC_BUILD_TESTS=ON
 cmake --build build --parallel 8 --target trtmc trtmc_backend_trt \
   trtmc_model_blip test_blip_native test_blip_tokenizer
 ctest --test-dir build -R '^test_blip_tokenizer$' --output-on-failure
+curl --fail --location --output /tmp/blip-reference-demo.jpg \
+  'https://storage.googleapis.com/sfr-vision-language-research/BLIP/demo.jpg?generation=1642901856234049'
+TRTMC_BLIP_REFERENCE_IMAGE=/tmp/blip-reference-demo.jpg \
 TRTMC_BINARY="$PWD/build/trtmc" TRTMC_RUNTIME_ROOT="$PWD/build" \
   PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \
   families/blip/tests --e2e-model blip -q -s

@@ -24,6 +24,46 @@ MANIFEST = json.loads((ROOT / "manifests/blip-image-captioning-base.json").read_
 CASES = {case["name"]: case for case in MANIFEST["testcases"]}
 
 
+def input_image():
+    reference = os.environ.get("TRTMC_BLIP_REFERENCE_IMAGE")
+    if reference:
+        reference = Path(reference)
+    else:
+        asset_dir = os.environ.get("TRTMC_BLIP_MODEL_DIR")
+        if not asset_dir:
+            raise FileNotFoundError(
+                "BLIP E2E requires the pinned image: set TRTMC_BLIP_REFERENCE_IMAGE "
+                "or stage the manifest external_files in TRTMC_BLIP_MODEL_DIR"
+            )
+        reference = Path(asset_dir) / MANIFEST["external_files"][0]["path"]
+    if not reference.is_file():
+        raise FileNotFoundError(f"BLIP reference image was not staged: {reference}")
+    image = Path(os.environ.get("TRTMC_BLIP_IMAGE", str(reference)))
+    assert image.read_bytes() == reference.read_bytes(), "BLIP input must match the pinned image"
+    return image
+
+
+def checkpoint_dir():
+    explicit = os.environ.get("TRTMC_BLIP_MODEL_DIR")
+    if explicit:
+        directory = Path(explicit)
+        if (directory / "config.json").is_file():
+            return directory
+        # CI uses MODEL_DIR for external_files, while Hub snapshots stay in
+        # the separately staged cache. An image-only directory is not a model.
+        if not (directory / MANIFEST["external_files"][0]["path"]).is_file():
+            raise FileNotFoundError(
+                f"BLIP directory contains neither config.json nor the staged image: {directory}"
+            )
+    from huggingface_hub import snapshot_download
+
+    return Path(
+        snapshot_download(
+            MANIFEST["hf_id"], revision=MANIFEST["hf_revision"], local_files_only=True
+        )
+    )
+
+
 def pytest_generate_tests(metafunc):
     if "case_name" not in metafunc.fixturenames:
         return
@@ -60,31 +100,15 @@ def pytest_generate_tests(metafunc):
 
 @pytest.fixture(scope="module")
 def artifacts(tmp_path_factory):
+    image_path = input_image()
+    model_dir = checkpoint_dir()
     import torch
     from transformers import BlipForConditionalGeneration, BlipProcessor
 
     assert torch.cuda.is_available(), "selected blip E2E requires CUDA"
-    model_dir = os.environ.get("TRTMC_BLIP_MODEL_DIR")
-    if not model_dir:
-        from huggingface_hub import snapshot_download
-
-        model_dir = snapshot_download(
-            MANIFEST["hf_id"], revision=MANIFEST["hf_revision"], local_files_only=True
-        )
-    model_dir = Path(model_dir)
     binary, runtime = Path(os.environ["TRTMC_BINARY"]), Path(os.environ["TRTMC_RUNTIME_ROOT"])
     assert binary.is_file() and (runtime / "libtrtmc_model_blip.so").is_file()
     work = tmp_path_factory.mktemp("blip-e2e")
-    reference_image = os.environ.get("TRTMC_BLIP_REFERENCE_IMAGE")
-    if reference_image:
-        reference_image = Path(reference_image)
-    else:
-        from urllib.request import urlretrieve
-
-        reference_image = work / "reference-demo.jpg"
-        urlretrieve(MANIFEST["test_image_url"], reference_image)
-    image_path = Path(os.environ.get("TRTMC_BLIP_IMAGE", str(reference_image)))
-    assert image_path.read_bytes() == reference_image.read_bytes()
     bundle = work / MANIFEST["bundle"]
     build(
         BuildRequest(
