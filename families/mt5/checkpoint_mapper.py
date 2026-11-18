@@ -10,16 +10,18 @@ class WeightDict(dict):
     pass
 
 
-def _open_safetensors(directory):
-    path = directory / "model.safetensors"
-    if path.is_file():
-        from safetensors.numpy import load_file
-
-        return load_file(str(path))
-    import torch
-
-    return {name: value.float().numpy() for name, value in
-            torch.load(directory / "pytorch_model.bin", map_location="cpu", weights_only=True).items()}
+def _open_torch_checkpoint(directory):
+    """Read the pinned checkpoint's published PyTorch state dictionary."""
+    try:
+        import torch
+    except ImportError as exc:
+        raise ImportError("mT5 checkpoint loading requires torch") from exc
+    return {
+        name: value.float().numpy()
+        for name, value in torch.load(
+            directory / "pytorch_model.bin", map_location="cpu", weights_only=True
+        ).items()
+    }
 
 
 def _load_tensor(weights, name):

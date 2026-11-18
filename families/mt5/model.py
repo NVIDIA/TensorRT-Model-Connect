@@ -13,7 +13,7 @@ import numpy as np
 import tensorrt as trt
 from .checkpoint_mapper import (
     WeightDict,
-    _open_safetensors,
+    _open_torch_checkpoint,
     _load_tensor,
     _has_tensor,
     _transpose_2d,
@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 class _MT5Model:
     def load_weights(self, model_dir, config):
         model_dir_path = Path(model_dir)
-        readers = _open_safetensors(model_dir_path)
+        readers = _open_torch_checkpoint(model_dir_path)
         raw = config.raw
         hidden = raw.get("d_model", config.hidden_size)
         num_heads = raw.get("num_heads", config.num_attention_heads)
