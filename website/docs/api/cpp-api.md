@@ -115,6 +115,15 @@ has no known space identifier. Its vectors, pooling and normalization are still
 available; two empty identifiers do not imply cross-model compatibility. Families
 must not fabricate identifiers or require a hash just to compute an embedding.
 
+`PointsToEmbedding` takes one point cloud as row-major `[num_points, input_dim]`
+float32 values and returns the same embedding result. The C++ wrapper rejects a
+span that does not hold exactly `num_points * input_dim` floats; the C request
+carries no float count, so a C caller must supply that many. The Core rejects a
+zero `input_dim`, a `num_points` beyond the uint32 range and a null pointer for
+a nonempty cloud. Which columns the model expects (for example XYZ plus color),
+which point counts it accepts and any normalization or sampling are the
+family's to define and validate.
+
 `SeriesToRegressionValues` consumes one `SeriesHistory` and returns finite
 predictions indexed by target, with optional target names and units. It has no
 forecast horizon or probability-distribution parameters. It uses the existing
