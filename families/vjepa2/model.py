@@ -12,6 +12,8 @@ from . import graph as g
 
 
 def build(request, writer):
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("vjepa2 does not support dynamic_kv_cache")
     if request.task != "video_to_token_features" or request.backend != "trt":
         raise ValueError("V-JEPA2 requires video_to_token_features with backend=trt")
     directory = Path(request.model_dir)
@@ -25,7 +27,6 @@ def build(request, writer):
         or request.max_batch_size != 1
         or request.quantization not in (None, "none")
         or request.fp32_layers
-        or request.dynamic_kv_cache
         or request.max_sequence_length is not None
         or request.image_height not in (None, size)
         or request.image_width not in (None, size)

@@ -109,8 +109,10 @@ class Pipeline final : public internal::IModel, public internal::IVideoToTokenFe
 } // namespace
 } // namespace trtmc::vjepa2
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("vjepa2 does not support --kv-cache-size");
     using namespace trtmc;
-    if (context.kv_cache_size_bytes || context.reader.info().task != "video_to_token_features")
+    if (context.reader.info().task != "video_to_token_features")
         throw std::invalid_argument(
             "V-JEPA2 requires video token features without an external cache");
     const auto raw = vjepa2::section(context.reader, "runtime.json");

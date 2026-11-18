@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -90,6 +91,17 @@ def _required_path(value: str | None, label: str) -> Path:
     path = Path(value)
     assert path.exists(), f"selected {FAMILY} E2E {label} does not exist: {path}"
     return path
+
+
+@cache
+def _native_test_binary(name: str) -> Path:
+    build_dir = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    subprocess.run(
+        ["cmake", "--build", str(build_dir), "--parallel", "2", "--target", name],
+        check=True,
+        timeout=600,
+    )
+    return _required_path(str(build_dir / name), name)
 
 
 def _model_dir(manifest: dict) -> Path:
@@ -205,7 +217,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         target = tmp_path / f"pixels-{index}.f32"
         source.write_bytes(frame.astype("<f4").tobytes())
         completed = subprocess.run(
-            [str(runtime_root / "test_vjepa2_preprocess")],
+            [str(_native_test_binary("test_vjepa2_preprocess"))],
             input=json.dumps(
                 dict(
                     source=str(source), output=str(target), height=sample.height, width=sample.width
@@ -265,7 +277,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             expected = reference(**inputs, skip_predictor=True).last_hidden_state[0].cpu().numpy()
         completed = subprocess.run(
             [
-                str(runtime_root / "test_vjepa2_runtime"),
+                str(_native_test_binary("test_vjepa2_runtime")),
                 str(bundle),
                 str(runtime_root),
                 str(source),
