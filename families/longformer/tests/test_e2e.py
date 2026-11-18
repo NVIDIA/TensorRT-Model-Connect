@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Pinned checkpoint parity through build, native DSO, and the image-feature API."""
+
 from __future__ import annotations
 
 import json
@@ -12,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "longformer"
 TASKS = frozenset({"text_to_token_features"})
@@ -191,30 +193,124 @@ def _asset(raw: str) -> Path:
     return path
 
 
-
-
 def test_official_checkpoint_e2e(case_name, tmp_path):
+    _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    if evidence_enabled():
+        for key in ("image", "test_image", "audio"):
+            if key in case:
+                for source in (TEST_ROOT / case[key], TEST_ROOT / "data" / case[key]):
+                    if source.is_file():
+                        record_evidence("inputs", {key: source})
+                        break
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {
+            key: value
+            for key, value in case.items()
+            if any(word in key for word in ("error", "cosine", "atol", "rtol", "snr", "rmse"))
+        },
+    )
     import numpy as np
     import torch
     from tokenizers import Tokenizer
     from transformers import LongformerModel
 
-    _,manifest,case = CASES[case_name]
-    directory = _model_dir(manifest)
-    binary,runtime_root = _runtime()
-    bundle = tmp_path/manifest['bundle']
-    _build(directory,bundle,manifest)
-    tokenizer = Tokenizer.from_file(str(directory/'tokenizer.json'))
-    reference = LongformerModel.from_pretrained(directory,dtype=torch.float32,add_pooling_layer=False).eval().to('cuda')
-    for prompt in case['prompts']:
+    _, manifest, case = CASES[case_name]
+    with evidence_stage("checkpoint"):
+        directory = _model_dir(manifest)
+    binary, runtime_root = _runtime()
+    bundle = tmp_path / manifest["bundle"]
+    with evidence_stage("build"):
+        _build(directory, bundle, manifest)
+    record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
+    tokenizer = Tokenizer.from_file(str(directory / "tokenizer.json"))
+    reference = (
+        LongformerModel.from_pretrained(directory, dtype=torch.float32, add_pooling_layer=False)
+        .eval()
+        .to("cuda")
+    )
+    record_evidence("thresholds", {"feature_atol": 5e-3, "feature_rtol": 0})
+    for prompt in case["prompts"]:
         encoded = tokenizer.encode(prompt)
-        ids = torch.tensor([encoded.ids],device='cuda')
+        ids = torch.tensor([encoded.ids], device="cuda")
         with torch.no_grad():
-            expected = reference(input_ids=ids,attention_mask=torch.ones_like(ids)).last_hidden_state[0].cpu().numpy()
-        payload = _run_json(binary,runtime_root,bundle,case,'encode','--task',manifest['task'],'--text',prompt)
-        assert payload['shape'] == list(expected.shape)
-        assert [token['token_id'] for token in payload['tokens']] == encoded.ids
-        actual = np.asarray(payload['values'],dtype=np.float32).reshape(expected.shape)
+            expected = (
+                reference(input_ids=ids, attention_mask=torch.ones_like(ids))
+                .last_hidden_state[0]
+                .cpu()
+                .numpy()
+            )
+        payload = _run_json(
+            binary,
+            runtime_root,
+            bundle,
+            case,
+            "encode",
+            "--task",
+            manifest["task"],
+            "--text",
+            prompt,
+        )
+        record_evidence("inputs", {"prompt": prompt})
+        record_evidence(
+            "native",
+            {
+                "prompt": prompt,
+                "shape": payload["shape"],
+                "features": np.asarray(payload["values"], dtype=np.float32).reshape(expected.shape),
+                "tokens": payload["tokens"],
+            },
+        )
+        record_evidence(
+            "reference",
+            {
+                "mode": "hf_transformers",
+                "prompt": prompt,
+                "token_ids": encoded.ids,
+                "features": expected,
+            },
+        )
+        assert payload["shape"] == list(expected.shape)
+        assert [token["token_id"] for token in payload["tokens"]] == encoded.ids
+        actual = np.asarray(payload["values"], dtype=np.float32).reshape(expected.shape)
         assert np.isfinite(actual).all()
-        np.testing.assert_allclose(actual,expected,atol=5e-3,rtol=0)
-        print(f"Longformer rows={len(encoded.ids)}, maxabs={np.max(np.abs(actual-expected)):.6g}")
+        np.testing.assert_allclose(actual, expected, atol=5e-3, rtol=0)
+        record_evidence(
+            "metrics", {"prompt": prompt, "max_abs_error": float(np.max(np.abs(actual - expected)))}
+        )
+        if evidence_enabled():
+            pair = {}
+            for role, values in (("native", actual), ("reference", expected)):
+                array_path = tmp_path / f"{role}-{len(encoded.ids)}.npy"
+                np.save(array_path, values, allow_pickle=False)
+                pair[role] = array_path
+            error = float(np.max(np.abs(actual - expected)))
+            record_evidence(
+                "reference_comparison",
+                {
+                    "label": f"All features for {len(encoded.ids)} tokens",
+                    "scope": "independent_reference",
+                    "enforced": True,
+                    **pair,
+                    "checks": [
+                        {
+                            "name": "feature_max_abs_error",
+                            "scope": "independent_reference",
+                            "actual": error,
+                            "operator": "<=",
+                            "expected": 5e-3,
+                            "passed": error <= 5e-3,
+                        }
+                    ],
+                },
+            )
+        print(f"Longformer rows={len(encoded.ids)}, maxabs={np.max(np.abs(actual - expected)):.6g}")
