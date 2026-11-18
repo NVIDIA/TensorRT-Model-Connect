@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -92,6 +93,17 @@ def _required_path(value: str | None, label: str) -> Path:
     return path
 
 
+@cache
+def _native_test_binary(name: str) -> Path:
+    build_dir = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    subprocess.run(
+        ["cmake", "--build", str(build_dir), "--parallel", "2", "--target", name],
+        check=True,
+        timeout=600,
+    )
+    return _required_path(str(build_dir / name), name)
+
+
 def _model_dir(manifest: dict) -> Path:
     explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
     if explicit:
@@ -147,7 +159,6 @@ def test_native_tokenizer(case_name):
     _, manifest, _ = CASES[case_name]
     directory = _model_dir(manifest)
     reference = AutoTokenizer.from_pretrained(directory / "tokenizer")
-    root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
     for text in (
         "",
         "A quiet mountain lake.",
@@ -159,7 +170,7 @@ def test_native_tokenizer(case_name):
     ):
         result = subprocess.run(
             [
-                str(root / "test_pika_h3_flex_tokenizer"),
+                str(_native_test_binary("test_pika_h3_flex_tokenizer")),
                 str(directory / "tokenizer/tokenizer.json"),
                 text,
             ],
@@ -176,12 +187,11 @@ def test_cpu_generator_stream(case_name, tmp_path):
     import torch
 
     _, _, case = CASES[case_name]
-    root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
     counts = [24 * 37 * 30 * 52, 414 * 32, 24 * 37 * 30 * 52, 414 * 32]
     for seed in (42, 43):
         path = tmp_path / f"noise-{seed}.f32"
         result = subprocess.run(
-            [str(root / "test_pika_h3_flex_random"), str(path)],
+            [str(_native_test_binary("test_pika_h3_flex_random")), str(path)],
             input=json.dumps(dict(seed=seed, counts=counts)),
             capture_output=True,
             text=True,
@@ -253,7 +263,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         for index, prompt in enumerate(case["prompts"])
     ]
     native = subprocess.run(
-        [str(runtime_root / "test_pika_h3_flex_runtime"), str(bundle), str(runtime_root)],
+        [str(_native_test_binary("test_pika_h3_flex_runtime")), str(bundle), str(runtime_root)],
         input=json.dumps(requests),
         capture_output=True,
         text=True,
