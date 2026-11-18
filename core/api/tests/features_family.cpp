@@ -659,7 +659,7 @@ class SpectralFeaturesFixture final : public IModel, public ISpectrogramToFrameF
         if (mode_ == "spectral_bad_count")
             result.input_frame_indices.pop_back();
         if (mode_ == "spectral_bad_shape")
-            ++result.features.rows;
+            result.features.values.pop_back();
         return result;
     }
 

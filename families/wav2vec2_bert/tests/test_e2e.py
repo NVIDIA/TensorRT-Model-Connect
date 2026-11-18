@@ -199,6 +199,14 @@ def _run_json(
 def test_official_checkpoint_e2e(case_name, tmp_path, request):
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence(
+        "reproduction_requirements",
+        {
+            "checkpoint": "Cache the exact manifest revision or set TRTMC_WAV2VEC2_BERT_MODEL_DIR (unverified local checkpoint).",
+            "environment": ["TRTMC_BINARY", "TRTMC_RUNTIME_ROOT", "TRTMC_NATIVE_BUILD_DIR"],
+            "native_build": "Configure CMake with TRTMC_BUILD_TESTS=ON; the test builds test_wav2vec2_bert_runtime in TRTMC_NATIVE_BUILD_DIR.",
+        },
+    )
     if evidence_enabled():
         for key in ("image", "test_image", "audio"):
             if key in case:
@@ -237,7 +245,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         {
             "model_dir": str(directory),
             "hf_revision": checkpoint_revision,
-            "revision_status": "unverified" if checkpoint_revision is None else "pinned_cache_lookup",
+            "revision_status": "unverified"
+            if checkpoint_revision is None
+            else "pinned_cache_lookup",
         },
     )
     _, runtime_root = _runtime()
@@ -260,7 +270,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
     torch.backends.cudnn.allow_tf32 = False
     reference = (
         Wav2Vec2BertModel.from_pretrained(
-            directory, dtype=torch.float32, attn_implementation="eager"
+            directory, torch_dtype=torch.float32, attn_implementation="eager"
         )
         .eval()
         .to("cuda")
@@ -315,6 +325,32 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         record_evidence(
             "metrics",
             {"sample": label, "max_abs_error": maximum, "min_cosine": float(cosine.min())},
+        )
+        record_evidence(
+            "reference_comparison",
+            {
+                "label": f"W2v-BERT {label} frame features",
+                "scope": "independent_reference",
+                "enforced": True,
+                "native": actual,
+                "reference": expected,
+                "checks": [
+                    {
+                        "name": "max_abs_error",
+                        "actual": maximum,
+                        "operator": "<=",
+                        "expected": case["max_abs_error"],
+                        "passed": maximum <= case["max_abs_error"],
+                    },
+                    {
+                        "name": "min_cosine",
+                        "actual": float(cosine.min()),
+                        "operator": ">=",
+                        "expected": case["min_cosine"],
+                        "passed": float(cosine.min()) >= case["min_cosine"],
+                    },
+                ],
+            },
         )
         assert maximum <= case["max_abs_error"]
         assert float(cosine.min()) >= case["min_cosine"]

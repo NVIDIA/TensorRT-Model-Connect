@@ -32,7 +32,7 @@ def build(request, writer):
     directory = Path(request.model_dir)
     cfg = json.loads((directory / "config.json").read_text())
     if (
-        cfg["model_type"] != "wav2vec2-bert"
+        cfg.get("model_type") != "wav2vec2-bert"
         or cfg["add_adapter"]
         or cfg["position_embeddings_type"] != "relative_key"
         or cfg["hidden_act"] not in ("swish", "silu")
@@ -111,6 +111,10 @@ def build(request, writer):
         )
         + cfg["left_max_position_embeddings"]
     )
+    relative_indices = np.ascontiguousarray(
+        np.broadcast_to(distance[:, None, :], (frames, heads, frames)), dtype=np.int32
+    )
+    relative_indices = net.add_constant(relative_indices.shape, relative_indices).get_output(0)
     scale = const(np.full((1, 1, 1, 1), dim**-0.5))
     half = const(np.full((1, 1), 0.5))
     for index in range(cfg["num_hidden_layers"]):
@@ -126,14 +130,17 @@ def build(request, writer):
         content = net.add_matrix_multiply(
             query, trt.MatrixOperation.NONE, key, trt.MatrixOperation.TRANSPOSE
         ).get_output(0)
-        # Relative-key vectors depend on (query frame, key frame). Treat query
-        # frames as the batch axis to contract the head dimension for all heads.
+        # Contract against the compact distance table, then select each pair's
+        # clipped distance. Share the integer indices across all encoder layers.
         by_frame = reshape(query, (frames, heads, dim), (0, 2, 1, 3))
-        table = const(weights[prefix + ".self_attn.distance_embedding.weight"][distance])
+        table = weights[prefix + ".self_attn.distance_embedding.weight"]
+        table = const(table[None, :, :])
         relative = net.add_matrix_multiply(
             by_frame, trt.MatrixOperation.NONE, table, trt.MatrixOperation.TRANSPOSE
         ).get_output(0)
-        relative = reshape(relative, (1, heads, frames, frames), (1, 0, 2))
+        selected = net.add_gather_v2(relative, relative_indices, trt.GatherMode.ELEMENT)
+        selected.axis = 2
+        relative = reshape(selected.get_output(0), (1, heads, frames, frames), (1, 0, 2))
         softmax = net.add_softmax(add(mul(content, scale), mul(relative, scale)))
         softmax.axes = 8
         context = net.add_matrix_multiply(

@@ -42,6 +42,8 @@ class Pipeline final : public internal::IModel, public internal::ISpectrogramToF
         const auto outputs = engine_->forward({{"spectrogram", tensor}});
         const auto found = outputs.find("features");
         if (found == outputs.end() || found->second.dtype != DType::kFloat32 ||
+            found->second.shape !=
+                std::vector<int64_t>{static_cast<int64_t>(frames), static_cast<int64_t>(width)} ||
             found->second.numel() != frames * width || !found->second.data)
             throw std::runtime_error("Invalid W2v-BERT frame feature output");
         const auto* values = static_cast<const float*>(found->second.data);
@@ -82,5 +84,9 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     auto engine = context.backend.create_module(plan.data(), plan.size(), {});
     if (!engine || !engine->ok())
         throw std::runtime_error("W2v-BERT engine failed to load");
+    if (!engine->has_input("spectrogram") ||
+        engine->tensor_dtype("spectrogram") != DType::kFloat32 ||
+        engine->tensor_shape("spectrogram") != std::vector<int64_t>{frames, bins})
+        throw std::runtime_error("W2v-BERT spectrogram binding differs from its runtime profile");
     return new wav2vec2_bert::Pipeline(std::move(engine), cfg);
 }

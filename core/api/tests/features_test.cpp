@@ -59,9 +59,15 @@ void spectral_features(const std::filesystem::path& root, const trtmc::LoadOptio
     const auto task = model.task<SpectrogramToFrameFeatures>();
     auto retained =
         Model::load(path.string(), options).task<SpectrogramToFrameFeatures>().run(input);
+    const std::vector<float> expected_values{-2, 3, 2, 6};
+    const std::vector<uint64_t> expected_indices{0, 2};
+    const auto actual_values = retained.features().values;
+    const auto actual_indices = retained.input_frame_indices();
     check(retained.features().rows == 2 && retained.features().columns == 2 &&
-              retained.features().values[0] == -2 && retained.features().values[3] == 6 &&
-              retained.input_frame_indices()[0] == 0 && retained.input_frame_indices()[1] == 2 &&
+              actual_values.size() == expected_values.size() &&
+              std::equal(actual_values.begin(), actual_values.end(), expected_values.begin()) &&
+              actual_indices.size() == expected_indices.size() &&
+              std::equal(actual_indices.begin(), actual_indices.end(), expected_indices.begin()) &&
               retained.source_frame_count() == 3,
           "spectral input values and temporal row mapping remain family-owned");
     check(model.tasks().size() == 1 && !model.supports<TextToTokenFeatures>() &&
