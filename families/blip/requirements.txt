@@ -1,4 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-torch>=2.12,<2.13
+# PyTorch is used to read the published checkpoint and by the test reference.
+# Native inference loads only CUDA math libraries.
+torch>=2.10
 Pillow>=10,<14

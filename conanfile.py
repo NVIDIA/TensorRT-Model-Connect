@@ -230,14 +230,11 @@ class TensorRTModelConnectConan(ConanFile):
             *module_bin.glob("libtrtmc_cli_*.so"),
         ):
             runpaths = ["$ORIGIN", "$ORIGIN/../../tensorrt_libs", "/usr/local/cuda/lib64"]
-            dependencies = _needed_libraries(library)
             if any(
                 dependency.startswith(("libtorch", "libc10"))
-                for dependency in dependencies
+                for dependency in _needed_libraries(library)
             ):
                 runpaths.append("$ORIGIN/../../torch/lib")
-            if "libtvm_ffi.so" in dependencies:
-                runpaths.append("$ORIGIN/../../tvm_ffi/lib")
             _set_runpath(
                 library,
                 ":".join(runpaths),

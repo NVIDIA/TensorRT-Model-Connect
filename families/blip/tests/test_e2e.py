@@ -18,6 +18,7 @@ import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_stage, record_evidence
 
 ROOT = Path(__file__).resolve().parent
 MANIFEST = json.loads((ROOT / "manifests/blip-image-captioning-base.json").read_text())
@@ -205,6 +206,38 @@ def test_official_checkpoint_e2e(case_name, artifacts, case_inputs, tmp_path):
     bundle, binary, runtime, _model, processor, _image_path = artifacts
     native_image, inputs, _expected, _vision, continuation = case_inputs
     case = CASES[case_name]
+    evidence_image = tmp_path / "input.png"
+    evidence_image.write_bytes(native_image.read_bytes())
+    record_evidence(
+        "inputs",
+        {
+            "image": evidence_image,
+            "prompt": case["prompt"],
+            "mirror": case["mirror"],
+            "task": MANIFEST["task"],
+        },
+    )
+    record_evidence(
+        "checkpoint",
+        {"hf_id": MANIFEST["hf_id"], "hf_revision": MANIFEST["hf_revision"], "precision": "fp32"},
+    )
+    record_evidence(
+        "thresholds",
+        {
+            "caption_tokens": "exact",
+            "caption_text": "exact",
+            "pixels": {"atol": 1e-6, "rtol": 0},
+            "vision": {"atol": 5e-4, "rtol": 1e-4},
+            "logits": {"atol": 1e-3, "rtol": 1e-4},
+        },
+    )
+    reference_evidence = {
+        "token_ids": continuation,
+        "text": processor.decode(continuation, skip_special_tokens=True),
+        "oracle": "transformers.BlipForConditionalGeneration",
+        "hf_revision": MANIFEST["hf_revision"],
+    }
+    record_evidence("reference", reference_evidence)
     env = dict(os.environ)
     env["LD_LIBRARY_PATH"] = str(runtime) + ":" + env.get("LD_LIBRARY_PATH", "")
     command = [
@@ -223,9 +256,13 @@ def test_official_checkpoint_e2e(case_name, artifacts, case_inputs, tmp_path):
     native = subprocess.run(
         command, env=env, check=True, text=True, capture_output=True, timeout=180
     )
-    payload = json.loads(native.stdout)
-    assert payload["token_ids"] == continuation
-    assert payload["text"] == processor.decode(continuation, skip_special_tokens=True)
+    native_payload = json.loads(native.stdout)
+    record_evidence("commands", {"argv": command})
+    record_evidence("native", native_payload)
+    expected_tokens = continuation
+    expected_text = reference_evidence["text"]
+    assert native_payload["token_ids"] == expected_tokens
+    assert native_payload["text"] == expected_text
 
     helper = Path(os.environ["TRTMC_NATIVE_BUILD_DIR"]) / "test_blip_native"
     assert helper.is_file(), "selected blip E2E requires test_blip_native"
@@ -240,8 +277,13 @@ def test_official_checkpoint_e2e(case_name, artifacts, case_inputs, tmp_path):
         text=True,
         timeout=30,
     )
+    native_pixels = np.fromfile(pixel_dump, np.float32).reshape(1, 3, 384, 384)
+    native_evidence = {**native_payload, "pixels": native_pixels}
+    reference_evidence["pixels"] = inputs["pixel_values"].cpu().numpy()
+    record_evidence("native", native_evidence)
+    record_evidence("reference", reference_evidence)
     np.testing.assert_allclose(
-        np.fromfile(pixel_dump, np.float32).reshape(1, 3, 384, 384),
+        native_pixels,
         inputs["pixel_values"].cpu().numpy(),
         atol=1e-6,
         rtol=0,
@@ -261,10 +303,12 @@ def test_official_checkpoint_e2e(case_name, artifacts, case_inputs, tmp_path):
     assert repeat_payload["token_ids"] == continuation
     assert repeat_payload["repeated_request"] == "passed"
     assert repeat_payload["invalid_requests"] == 4
-    print(json.dumps({"case": case_name, "tokens": continuation, "text": payload["text"]}))
+    native_evidence.update(request_reuse=repeat_payload, tokenizer=json.loads(probe.stdout))
+    _check_engine_tensors(case_name, artifacts, case_inputs, native_evidence, reference_evidence)
+    print(json.dumps({"case": case_name, "tokens": continuation, "text": native_payload["text"]}))
 
 
-def test_official_checkpoint_tensors(case_name, artifacts, case_inputs):
+def _check_engine_tensors(case_name, artifacts, case_inputs, native=None, reference=None):
     import torch
 
     bundle, _binary, _runtime, model, _processor, _image_path = artifacts
@@ -290,11 +334,28 @@ def test_official_checkpoint_tensors(case_name, artifacts, case_inputs):
         "causal_mask": mask,
         "last_index": np.array([length - 1], np.int32),
     }
+    native_evidence = {**(native or {}), "vision": actual_vision}
+    reference_evidence = {
+        **(reference or {}),
+        "vision": expected_vision,
+        "logits": expected_logits,
+        "oracle": "transformers.BlipForConditionalGeneration",
+        "hf_revision": MANIFEST["hf_revision"],
+    }
+    record_evidence("reference", reference_evidence)
+    logit_errors = []
     for embeddings in (expected_vision, actual_vision):
         actual_logits = engine_run(
             bundle, "decoder", {**decoder_inputs, "image_embeds": embeddings}
         )
-        np.testing.assert_allclose(actual_logits, expected_logits, atol=1e-3, rtol=1e-4)
+        native_evidence["logits"] = actual_logits
+        native_evidence["decoder_feature_source"] = (
+            "reference" if embeddings is expected_vision else "native"
+        )
+        record_evidence("native", native_evidence)
+        with evidence_stage("compare"):
+            np.testing.assert_allclose(actual_logits, expected_logits, atol=1e-3, rtol=1e-4)
+        logit_errors.append(float(np.max(np.abs(actual_logits - expected_logits))))
     print(
         json.dumps(
             {
@@ -306,4 +367,17 @@ def test_official_checkpoint_tensors(case_name, artifacts, case_inputs):
     )
     # Check the encoder after the decoder so its failure does not conceal the
     # independent decoder comparison. Both original numerical gates apply.
-    np.testing.assert_allclose(actual_vision, expected_vision, atol=5e-4, rtol=1e-4)
+    with evidence_stage("compare"):
+        np.testing.assert_allclose(actual_vision, expected_vision, atol=5e-4, rtol=1e-4)
+    record_evidence(
+        "metrics",
+        {
+            "vision_maxabs": float(np.max(np.abs(actual_vision - expected_vision))),
+            "decoder_with_reference_features_maxabs": logit_errors[0],
+            "decoder_with_native_features_maxabs": logit_errors[1],
+        },
+    )
+
+
+def test_official_checkpoint_tensors(case_name, artifacts, case_inputs):
+    _check_engine_tensors(case_name, artifacts, case_inputs)

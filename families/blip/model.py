@@ -143,7 +143,7 @@ def build(request, writer):
     writer.add_json(
         "runtime.json",
         {
-            "vision_kernel_backend": "tvm_ffi_fp32",
+            "vision_kernel_backend": "cuda_fp32",
             "image_size": size,
             "image_tokens": (size // cfg["vision_config"]["patch_size"]) ** 2 + 1,
             "vision_width": cfg["vision_config"]["hidden_size"],

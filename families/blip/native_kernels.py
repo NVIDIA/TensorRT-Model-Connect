@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Load BLIP's native FP32 primitives through the public TVM-FFI bridge."""
+"""Add family-owned FP32 CUDA primitives to BLIP's TensorRT graph."""
 
 import ctypes
 from importlib import metadata
 from pathlib import Path
 
-from tensorrt_model_connect.byok import add_kernel
+import numpy as np
+import tensorrt as trt
 
 
 _LIBRARIES: dict[Path, ctypes.CDLL] = {}
@@ -38,16 +39,30 @@ def load_native_kernels():
         if error:
             raise RuntimeError(error.decode("utf-8", errors="replace"))
         _LIBRARIES[path] = library
-    return path.parent / "libtrtmc_byok_tvm_ffi.so"
+    return path
 
 
-def add_fp32_kernel(network, name, inputs, shape, extra_args=None):
-    bridge = load_native_kernels()
-    return add_kernel(
-        network,
-        plugin_library=bridge,
-        kernel_name=f"blip.vision.{name}_fp32",
-        inputs=inputs,
-        output_specs=[{"dims": list(shape), "dtype": "float32"}],
-        extra_args=extra_args,
-    )[0]
+def add_fp32_kernel(network, name, inputs, shape, epsilon=1e-5):
+    load_native_kernels()
+    operations = {"norm": 0, "linear": 1, "softmax": 2, "gelu": 3}
+    creator = trt.get_plugin_registry().get_creator("BlipFp32", "1", "")
+    if creator is None:
+        raise RuntimeError("BLIP native CUDA plugin is not registered")
+    operation = np.array([operations[name]], dtype=np.int32)
+    epsilon_value = np.array([epsilon], dtype=np.float32)
+    fields = trt.PluginFieldCollection(
+        [
+            trt.PluginField("operation", operation, trt.PluginFieldType.INT32),
+            trt.PluginField("epsilon", epsilon_value, trt.PluginFieldType.FLOAT32),
+        ]
+    )
+    plugin = creator.create_plugin("blip_" + name, fields, trt.TensorRTPhase.BUILD)
+    if plugin is None:
+        raise RuntimeError(f"BLIP could not create its {name} CUDA plugin")
+    layer = network.add_plugin_v3(inputs, [], plugin)
+    if layer is None:
+        raise RuntimeError(f"BLIP could not add its {name} CUDA plugin")
+    output = layer.get_output(0)
+    if tuple(output.shape) != tuple(shape):
+        raise RuntimeError(f"BLIP {name} CUDA plugin returned an unexpected shape")
+    return output

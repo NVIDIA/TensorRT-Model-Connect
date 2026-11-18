@@ -23,7 +23,7 @@ class VisionGraph(Graph):
                 self.constant(self.w[prefix + ".bias"], shape),
             ],
             x.shape,
-            [{"type": "float", "value": eps}],
+            epsilon=eps,
         )
 
     def linear(self, x, prefix):

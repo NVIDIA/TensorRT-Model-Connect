@@ -2,59 +2,55 @@
 # SPDX-License-Identifier: Apache-2.0
 
 find_package(ICU REQUIRED COMPONENTS uc)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+execute_process(
+  COMMAND ${Python3_EXECUTABLE} -c "from importlib.metadata import PackageNotFoundError, distribution; from pathlib import Path\ntry: print(Path(distribution('nvidia-cublas').locate_file('nvidia/cu13/lib/libcublasLt.so.13')).resolve(), end='')\nexcept PackageNotFoundError: pass"
+  RESULT_VARIABLE _blip_math_result
+  OUTPUT_VARIABLE _blip_math_library
+  ERROR_VARIABLE _blip_math_error
+)
+if(NOT _blip_math_result EQUAL 0)
+  message(FATAL_ERROR "BLIP could not inspect the existing CUDA environment: ${_blip_math_error}")
+endif()
+if(NOT EXISTS "${_blip_math_library}")
+  find_library(_blip_math_library_toolkit NAMES cublasLt libcublasLt.so.13
+    HINTS ${CUDAToolkit_LIBRARY_DIR} ${CUDAToolkit_LIBRARY_ROOT}/lib64 REQUIRED)
+  set(_blip_math_library "${_blip_math_library_toolkit}")
+endif()
 
 add_library(trtmc_model_blip SHARED
   image_preprocess.cpp
   wordpiece_tokenizer.cpp
   pipeline.cpp
   plugin.cpp
+  fp32_kernels.cu
+  fp32_linear.cpp
+  fp32_plugin.cpp
   fp32_kernels_init.cpp
 )
 target_include_directories(trtmc_model_blip PRIVATE
   ${PROJECT_SOURCE_DIR}
   ${PROJECT_SOURCE_DIR}/core/runtime/include
 )
-target_include_directories(trtmc_model_blip SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
-target_link_libraries(trtmc_model_blip PRIVATE trtmc_core nlohmann_json::nlohmann_json ICU::uc ${TRTMC_CUDART_LIBRARY})
-set(_blip_build_rpath "\$ORIGIN")
-set(_blip_install_rpath "\$ORIGIN")
-if(TARGET trtmc_byok_tvm_ffi)
-  find_package(Python3 COMPONENTS Interpreter REQUIRED)
-  execute_process(
-    COMMAND ${Python3_EXECUTABLE} -c "import torch; print(torch.utils.cmake_prefix_path, end='')"
-    RESULT_VARIABLE _blip_torch_result
-    OUTPUT_VARIABLE _blip_torch_prefix
-    ERROR_VARIABLE _blip_torch_error
-  )
-  if(NOT _blip_torch_result EQUAL 0)
-    message(FATAL_ERROR "BLIP requires its CUDA PyTorch dependency: ${_blip_torch_error}")
-  endif()
-  list(PREPEND CMAKE_PREFIX_PATH "${_blip_torch_prefix}")
-  find_package(Torch 2.12 REQUIRED)
-  separate_arguments(_blip_torch_flags NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
-  target_sources(trtmc_model_blip PRIVATE fp32_kernels.cpp)
-  target_include_directories(trtmc_model_blip SYSTEM PRIVATE
-    ${TORCH_INCLUDE_DIRS}
-    ${TRTMC_TVM_FFI_INCLUDE_DIR}
-  )
-  target_link_libraries(trtmc_model_blip PRIVATE
-    trtmc_byok_tvm_ffi
-    ${TRTMC_TVM_FFI_LIBRARY}
-    ${TORCH_LIBRARIES}
-    ${CMAKE_DL_LIBS}
-  )
-  target_compile_options(trtmc_model_blip PRIVATE ${_blip_torch_flags})
-  target_compile_definitions(trtmc_model_blip PRIVATE TRTMC_BLIP_HAS_FP32_KERNELS=1)
-  list(APPEND _blip_build_rpath "${TORCH_INSTALL_PREFIX}/lib")
-  list(APPEND _blip_install_rpath "\$ORIGIN/../../torch/lib" "\$ORIGIN/../../tvm_ffi/lib")
-else()
-  target_compile_definitions(trtmc_model_blip PRIVATE TRTMC_BLIP_HAS_FP32_KERNELS=0)
-endif()
-target_compile_options(trtmc_model_blip PRIVATE -Wall -Wextra -Wpedantic)
+target_include_directories(trtmc_model_blip SYSTEM PRIVATE
+  ${TRTMC_CUDA_INCLUDE_DIR}
+  ${TRTMC_TRT_INCLUDE_DIR}
+)
+target_link_libraries(trtmc_model_blip PRIVATE
+  trtmc_core nlohmann_json::nlohmann_json ICU::uc
+  ${TRTMC_CUDART_LIBRARY} ${TRTMC_TRT_LIBRARY} ${CMAKE_DL_LIBS}
+)
+target_compile_definitions(trtmc_model_blip PRIVATE
+  TRTMC_BLIP_CUBLASLT_BUILD_LIBRARY="${_blip_math_library}"
+)
+target_compile_options(trtmc_model_blip PRIVATE
+  "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
+  "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=true;--prec-div=true;--prec-sqrt=true;--ftz=false>"
+)
 set_target_properties(trtmc_model_blip PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
-  BUILD_RPATH "${_blip_build_rpath}"
-  INSTALL_RPATH "${_blip_install_rpath}"
+  BUILD_RPATH "\$ORIGIN"
+  INSTALL_RPATH "\$ORIGIN"
 )
 install(TARGETS trtmc_model_blip LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
