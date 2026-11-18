@@ -269,7 +269,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     del reference, inputs, generated
     gc.collect()
     torch.cuda.empty_cache()
-    for prompt, (expected_ids, expected_text) in zip(case["prompts"], expected):
+    for sample_index, (prompt, (expected_ids, expected_text)) in enumerate(
+        zip(case["prompts"], expected)
+    ):
         payload = _run_json(
             binary,
             runtime_root,
@@ -298,4 +300,43 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         assert payload["token_ids"] == expected_ids
         assert payload["text"] == expected_text
         assert expected_text.strip()
+        if evidence_enabled():
+            # Persist the actual enforced equality checks so report readers do
+            # not have to infer the native/reference roles from local names.
+            pair = {}
+            for role, output in (
+                ("native", payload),
+                ("reference", {"token_ids": expected_ids, "text": expected_text}),
+            ):
+                path = tmp_path / f"{role}-comparison-{sample_index}.json"
+                path.write_text(json.dumps(output, ensure_ascii=False, indent=2))
+                pair[role] = path
+            mismatches = abs(len(payload["token_ids"]) - len(expected_ids)) + sum(
+                left != right for left, right in zip(payload["token_ids"], expected_ids)
+            )
+            text_mismatch = int(payload["text"] != expected_text)
+            record_evidence(
+                "reference_comparison",
+                {
+                    "label": f"Generated tokens and text for sample {sample_index}",
+                    "scope": "independent_reference",
+                    "enforced": True,
+                    **pair,
+                    "checks": [
+                        {
+                            "name": name,
+                            "scope": "independent_reference",
+                            "actual": value,
+                            "operator": "==",
+                            "expected": 0,
+                            "passed": value == 0,
+                        }
+                        for name, value in (
+                            ("token_mismatches", mismatches),
+                            ("text_mismatch", text_mismatch),
+                        )
+                    ],
+                },
+            )
+
         print(f"LFM2 MoE generated {len(expected_ids)} exact tokens: {expected_text!r}")
