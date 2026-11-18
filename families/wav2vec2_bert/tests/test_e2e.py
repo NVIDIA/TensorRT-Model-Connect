@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "wav2vec2_bert"
 TASKS = frozenset({"spectrogram_to_frame_features"})
@@ -196,13 +197,39 @@ def _run_json(
 
 
 def test_official_checkpoint_e2e(case_name, tmp_path):
+    _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    if evidence_enabled():
+        for key in ("image", "test_image", "audio"):
+            if key in case:
+                for source in (TEST_ROOT / case[key], TEST_ROOT / "data" / case[key]):
+                    if source.is_file():
+                        record_evidence("inputs", {key: source})
+                        break
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {
+            key: value
+            for key, value in case.items()
+            if any(word in key for word in ("error", "cosine", "atol", "rtol", "snr", "rmse"))
+        },
+    )
     import wave
     import numpy as np
     import torch
     from transformers import SeamlessM4TFeatureExtractor, Wav2Vec2BertModel
 
     _, manifest, case = CASES[case_name]
-    directory = _model_dir(manifest)
+    with evidence_stage("checkpoint"):
+        directory = _model_dir(manifest)
     _, runtime_root = _runtime()
     with wave.open(str(TEST_ROOT / "data" / case["audio"]), "rb") as audio:
         assert (
@@ -212,7 +239,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         )
         waveform = np.frombuffer(audio.readframes(32000), dtype="<i2").astype(np.float32) / 32768
     bundle = tmp_path / manifest["bundle"]
-    _build(directory, bundle, manifest)
+    with evidence_stage("build"):
+        _build(directory, bundle, manifest)
+    record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     reference = (
@@ -252,11 +281,26 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             rows=99, columns=1024, source_frames=99, input_frame_indices=list(range(99))
         )
         actual = np.fromfile(target, dtype="<f4").reshape(99, 1024)
+        record_evidence(
+            "inputs", {"sample": label, "features": features.numpy(), "waveform": samples}
+        )
+        record_evidence("native", {"sample": label, "features": actual, "metadata": payload})
+        record_evidence(
+            "reference", {"mode": "hf_transformers", "sample": label, "features": expected}
+        )
+        record_evidence(
+            "native_process",
+            {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+        )
         assert actual.shape == expected.shape and np.isfinite(actual).all()
         maximum = float(np.max(np.abs(actual - expected)))
         cosine = np.sum(actual.astype(np.float64) * expected, axis=1) / (
             np.linalg.norm(actual.astype(np.float64), axis=1)
             * np.linalg.norm(expected.astype(np.float64), axis=1)
+        )
+        record_evidence(
+            "metrics",
+            {"sample": label, "max_abs_error": maximum, "min_cosine": float(cosine.min())},
         )
         assert maximum <= case["max_abs_error"]
         assert float(cosine.min()) >= case["min_cosine"]
