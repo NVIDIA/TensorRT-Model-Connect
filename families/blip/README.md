@@ -10,19 +10,24 @@ The builder produces an FP32 vision encoder and an FP32 causal text decoder.
 The decoder recomputes the complete prefix at each step; it does not maintain
 a KV cache. The image encoder runs once per request. All topology,
 preprocessing, WordPiece tokenization, and generation behavior belong to this
-family. TensorRT owns GPU lowering.
+family. The vision graph binds FP32 normalization, affine projections, softmax,
+and exact GELU to native ATen primitives through TVM-FFI. These bindings preserve
+reference rounding in encoder layers that amplify small FP32 differences.
+TensorRT serializes and executes both engines and lowers the remaining math.
+Native inference loads the matching PyTorch 2.12 libraries and runs without a
+Python interpreter.
 
 ## Build and run
 
 Use the repository's [source build instructions](../../website/docs/getting-started/source-build.md)
 to prepare a matching CUDA/TensorRT environment. Install this family's
-`requirements.txt` (PyTorch 2.10 or newer), and install the ICU development
+`requirements.txt` (CUDA-enabled PyTorch 2.12), and install the ICU development
 library (`uc` component) for native Unicode normalization. Then build the
 selected native targets:
 
 ```bash
 cmake --build build --parallel 8 --target trtmc trtmc_backend_trt trtmc_model_blip
-PYTHONPATH=core/builder:. python -m tensorrt_model_connect build \
+TRTMC_RUNTIME_ROOT="$PWD/build" PYTHONPATH=core/builder:. python -m tensorrt_model_connect build \
   Salesforce/blip-image-captioning-base \
   --revision 82a37760796d32b1411fe092ab5d4e227313294b \
   --precision fp32 --max-sequence-length 64 -o blip-base.bundle
@@ -35,6 +40,10 @@ build/trtmc run blip-base.bundle --runtime-root build \
 The checkpoint publishes a PyTorch state dictionary, loaded with
 `torch.load(weights_only=True)` with a version above the affected range in
 [GHSA-63cw-57p8-fm3p](https://github.com/pytorch/pytorch/security/advisories/GHSA-63cw-57p8-fm3p).
+Build the native library and bundles with the same PyTorch environment. The
+TVM-FFI bridge must be enabled (`TRTMC_ENABLE_BYOK=ON`, the default). A native
+wheel supplies the required libraries; source builds locate them through
+`TRTMC_RUNTIME_ROOT`.
 The native tokenizer uses ICU for Unicode NFD, nonspacing-mark removal, and
 lowercasing, matching the reference's per-code-point normalization order.
 BLIP VQA, image-text retrieval, and BLIP-2 are
@@ -66,8 +75,8 @@ before model loading.
 ```bash
 cmake -S . -B build -DTRTMC_BUILD_TESTS=ON
 cmake --build build --parallel 8 --target trtmc trtmc_backend_trt \
-  trtmc_model_blip test_blip_native test_blip_tokenizer
-ctest --test-dir build -R '^test_blip_tokenizer$' --output-on-failure
+  trtmc_model_blip test_blip_native test_blip_tokenizer test_blip_fp32_kernels
+ctest --test-dir build -R '^test_blip_(tokenizer|fp32_kernels)$' --output-on-failure
 curl --fail --location --output /tmp/blip-reference-demo.jpg \
   'https://storage.googleapis.com/sfr-vision-language-research/BLIP/demo.jpg?generation=1642901856234049'
 TRTMC_BLIP_REFERENCE_IMAGE=/tmp/blip-reference-demo.jpg \

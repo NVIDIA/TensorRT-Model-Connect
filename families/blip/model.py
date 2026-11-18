@@ -10,6 +10,7 @@ import numpy as np
 import tensorrt as trt
 
 from .graph import Graph
+from .vision_graph import VisionGraph
 
 
 def resolve(model_dir):
@@ -84,7 +85,7 @@ def build_engine(weights, cfg, stage, max_length, verbose=False):
     config = builder.create_builder_config()
     config.builder_optimization_level = 3
     config.clear_flag(trt.BuilderFlag.TF32)
-    graph = Graph(network, weights)
+    graph = VisionGraph(network, weights) if stage == "vision" else Graph(network, weights)
     if stage == "vision":
         out = graph.vision(cfg["vision_config"])
         out.name = "image_embeds"
@@ -142,6 +143,7 @@ def build(request, writer):
     writer.add_json(
         "runtime.json",
         {
+            "vision_kernel_backend": "tvm_ffi_fp32",
             "image_size": size,
             "image_tokens": (size // cfg["vision_config"]["patch_size"]) ** 2 + 1,
             "vision_width": cfg["vision_config"]["hidden_size"],

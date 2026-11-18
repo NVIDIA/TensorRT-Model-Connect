@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
+#include "families/blip/runtime/fp32_kernels.h"
 #include "families/blip/runtime/pipeline.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
@@ -22,6 +23,11 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     };
     const auto data = section("runtime.json");
     const auto cfg = nlohmann::json::parse(data.begin(), data.end());
+    const auto vision_backend = cfg.value("vision_kernel_backend", std::string("trt"));
+    if (vision_backend == "tvm_ffi_fp32")
+        trtmc::blip::initialize_fp32_kernels();
+    else if (vision_backend != "trt")
+        throw std::invalid_argument("blip has an unsupported vision kernel backend");
     trtmc::blip::RuntimeConfig config;
     config.preprocess.input_image_h = cfg.at("image_size");
     config.preprocess.input_image_w = cfg.at("image_size");
