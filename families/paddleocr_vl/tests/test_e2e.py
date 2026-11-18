@@ -228,6 +228,20 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
     import torch
     from PIL import Image, ImageDraw, ImageFont
     from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor
+    import sys
+    import transformers
+
+    record_evidence(
+        "reference_environment",
+        {
+            "requested": manifest.get("reference_environment", "default"),
+            "python": sys.executable,
+            "transformers": transformers.__version__,
+        },
+    )
+    assert transformers.__version__ == "5.20.0", (
+        "PaddleOCR parity requires the pinned Transformers5.20.0 reference"
+    )
 
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
