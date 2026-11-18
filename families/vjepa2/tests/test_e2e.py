@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 from functools import cache
 from pathlib import Path
@@ -390,6 +391,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         )
         tokens_path = Path(metadata["tokens_path"])
         tokens = json.loads(tokens_path.read_text())
+        # Record this sidecar once. Retain its name in the output summary without
+        # asking the recorder to copy the same file again through metadata.
+        metadata["tokens_path"] = tokens_path.name
         record_evidence(
             "token_geometry", {"sample": label, "all_tokens": tokens_path, "expected_rows": 8192}
         )
@@ -426,8 +430,8 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
                     "sample": label,
                     "metadata": metadata,
                     "features": actual[:16],
-                    "features_scope": "First 16 rows; complete matrix in full_features",
-                    "full_features": pair["native"],
+                    "features_scope": "First 16 rows; complete matrix in reference_comparison",
+                    "full_features_file": pair["native"].name,
                     "full_shape": list(actual.shape),
                 },
             )
@@ -437,14 +441,18 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
                     "mode": "hf_transformers",
                     "sample": label,
                     "features": expected[:16],
-                    "features_scope": "First 16 rows; complete matrix in full_features",
-                    "full_features": pair["reference"],
+                    "features_scope": "First 16 rows; complete matrix in reference_comparison",
+                    "full_features_file": pair["reference"].name,
                     "full_shape": list(expected.shape),
                 },
             )
         record_evidence(
             "native_process",
-            {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+            {
+                "command": shlex.join(completed.args),
+                "stdout": completed.stdout,
+                "stderr": completed.stderr,
+            },
         )
         assert expected.shape == actual.shape and np.isfinite(actual).all()
         absolute_passed = True
