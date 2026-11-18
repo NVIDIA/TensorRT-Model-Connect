@@ -23,9 +23,18 @@ def resolve(model_dir: str | Path, *, image_size: int) -> dict:
     if raw.get("decoder_method", "default") != "default":
         raise NotImplementedError(
             "rt_detr supports only decoder_method=default")
+    if raw.get("learn_initial_query", False):
+        raise NotImplementedError("rt_detr does not support learned initial queries")
+    if raw.get("encoder_layers", 1) != 1:
+        raise NotImplementedError("rt_detr supports exactly one encoder layer")
 
     strides = [int(v) for v in raw.get("feat_strides", [8, 16, 32])]
+    if strides != [8, 16, 32]:
+        raise NotImplementedError("rt_detr requires feature strides [8, 16, 32] in backbone order")
     shapes = [(image_size // stride, image_size // stride) for stride in strides]
+    num_labels = raw.get("num_labels", len(raw.get("id2label", {})) or 80)
+    if type(num_labels) is not int or num_labels <= 0:
+        raise ValueError("rt_detr num_labels must be a positive integer")
     return {
         "image_size": int(image_size),
         "shapes": shapes,
@@ -42,7 +51,7 @@ def resolve(model_dir: str | Path, *, image_size: int) -> dict:
         "decoder_attention_heads": int(raw.get("decoder_attention_heads", 8)),
         "decoder_n_points": int(raw.get("decoder_n_points", 4)),
         "num_queries": int(raw.get("num_queries", 300)),
-        "num_labels": int(raw.get("num_labels", 80)),
+        "num_labels": num_labels,
         # The module's own constant, not a config field.
         "offset_scale": 0.5,
     }

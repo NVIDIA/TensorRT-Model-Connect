@@ -105,6 +105,12 @@ def build(request, writer) -> None:
     model_dir = Path(request.model_dir)
     cfg = config_module.resolve(model_dir, image_size=height)
     weights = _load_weights(model_dir)
+    for prefix in ["model.enc_score_head", *(
+        f"model.decoder.class_embed.{index}" for index in range(cfg["decoder_layers"])
+    )]:
+        if (weights[prefix + ".weight"].shape[0] != cfg["num_labels"]
+                or weights[prefix + ".bias"].shape != (cfg["num_labels"],)):
+            raise ValueError(f"rt_detr {prefix} does not match the configured number of labels")
 
     writer.set_header(family="rt_detr", task=request.task, backend=request.backend)
     writer.add_bytes("detector.plan", build_detector_engine(

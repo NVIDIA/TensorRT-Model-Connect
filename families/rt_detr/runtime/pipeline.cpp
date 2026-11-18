@@ -9,6 +9,7 @@
 #include <string>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 namespace trtmc {
 namespace {
@@ -43,6 +44,11 @@ ObjectDetectionResult RtDetrObjectDetectionPipeline::detect(const float* pixels,
 
     const Tensor& logits = require_output(outputs, "logits");
     const Tensor& boxes = require_output(outputs, "boxes");
+    if (logits.dtype != DType::kFloat32 || boxes.dtype != DType::kFloat32 ||
+        logits.shape != std::vector<std::int64_t>{1, config_.num_queries, config_.num_labels} ||
+        boxes.shape != std::vector<std::int64_t>{1, config_.num_queries, 4} ||
+        logits.data == nullptr || boxes.data == nullptr)
+        throw std::runtime_error("rt_detr engine outputs do not match the query/class profile");
 
     // Boxes come back normalised to the original image, not the square the
     // network ran on, so the source size is what scales them.
