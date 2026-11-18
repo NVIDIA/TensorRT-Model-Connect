@@ -15,6 +15,8 @@ from .text import _text_layer
 
 
 def build(request, writer):
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("pika_h3_flex does not support dynamic_kv_cache")
     if request.task != "text_to_audio_video" or request.backend != "trt":
         raise ValueError("Pika H3 Flex requires text_to_audio_video with backend=trt")
     if (
@@ -24,7 +26,6 @@ def build(request, writer):
         or request.context_parallel_size != 1
         or request.max_batch_size != 1
         or request.fp32_layers
-        or request.dynamic_kv_cache
         or request.mtp_seq_len is not None
     ):
         raise NotImplementedError("Pika H3 Flex supports one BF16 request with FP32 media decoders")

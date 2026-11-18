@@ -259,9 +259,11 @@ class Pipeline final : public internal::IModel, public internal::ITextToAudioVid
 } // namespace trtmc::pika_h3_flex
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("pika_h3_flex does not support --kv-cache-size");
     using namespace trtmc;
     using namespace pika_h3_flex;
-    if (context.kv_cache_size_bytes || context.reader.info().task != "text_to_audio_video")
+    if (context.reader.info().task != "text_to_audio_video")
         throw std::invalid_argument(
             "Pika H3 Flex requires text_to_audio_video without external state");
     Loader loader(context);
