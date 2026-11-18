@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "vjepa2"
 TASKS = frozenset({"video_to_token_features"})
@@ -196,6 +197,31 @@ def _run_json(
 
 
 def test_official_checkpoint_e2e(case_name, tmp_path):
+    _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    if evidence_enabled():
+        for key in ("image", "test_image", "audio"):
+            if key in case:
+                for source in (TEST_ROOT / case[key], TEST_ROOT / "data" / case[key]):
+                    if source.is_file():
+                        record_evidence("inputs", {key: source})
+                        break
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {
+            key: value
+            for key, value in case.items()
+            if any(word in key for word in ("error", "cosine", "atol", "rtol", "snr", "rmse"))
+        },
+    )
     import numpy as np
     import torch
     from PIL import Image
@@ -204,10 +230,18 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     from transformers import AutoVideoProcessor, VJEPA2Model
 
     _, manifest, case = CASES[case_name]
-    directory = _model_dir(manifest)
+    with evidence_stage("checkpoint"):
+        directory = _model_dir(manifest)
     _, runtime_root = _runtime()
     processor = AutoVideoProcessor.from_pretrained(directory)
     image = Image.open(TEST_ROOT / "data" / case["image"]).convert("RGB")
+    record_evidence(
+        "inputs",
+        {
+            "image": TEST_ROOT / "data" / case["image"],
+            "video_recipe": "64 frames; frame i rolls the image right by 2*i pixels; then forward/reversed order",
+        },
+    )
     geometry = None
     for index, sample in enumerate(
         [image, image.transpose(Image.Transpose.ROTATE_90), image.resize((302, 300))]
@@ -237,6 +271,16 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         )
         expected = inputs.pixel_values_videos[0, 0].numpy()
         actual = np.fromfile(target, dtype="<f4").reshape(3, 256, 256)
+        record_evidence(
+            "preprocessing",
+            {
+                "sample": index,
+                "native_pixels": actual,
+                "reference_pixels": expected,
+                "native_geometry": native_geometry,
+                "max_abs_error": float(np.max(np.abs(actual - expected))),
+            },
+        )
         np.testing.assert_allclose(actual, expected, atol=2e-6, rtol=0)
         resized = vision.resize(
             torch.from_numpy(frame * 255).permute(2, 0, 1),
@@ -251,7 +295,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         if index == 0:
             geometry = native_geometry
     bundle = tmp_path / manifest["bundle"]
-    _build(directory, bundle, manifest)
+    with evidence_stage("build"):
+        _build(directory, bundle, manifest)
+    record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     reference = (
@@ -312,10 +358,52 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             rtol=0,
         )
         actual = np.fromfile(target, dtype="<f4").reshape(8192, 1024)
+        if evidence_enabled():
+            pair = {}
+            for role, values in (("native", actual), ("reference", expected)):
+                archive = tmp_path / f"{role}-{label}-features.npz"
+                np.savez_compressed(archive, features=values)
+                pair[role] = archive
+            # Preserve both complete matrices losslessly within the recorder's
+            # file bound; the inline numeric view explicitly contains a prefix.
+            record_evidence(
+                "native",
+                {
+                    "sample": label,
+                    "metadata": metadata,
+                    "features": actual[:16],
+                    "features_scope": "First 16 rows; complete matrix in full_features",
+                    "full_features": pair["native"],
+                    "full_shape": list(actual.shape),
+                },
+            )
+            record_evidence(
+                "reference",
+                {
+                    "mode": "hf_transformers",
+                    "sample": label,
+                    "features": expected[:16],
+                    "features_scope": "First 16 rows; complete matrix in full_features",
+                    "full_features": pair["reference"],
+                    "full_shape": list(expected.shape),
+                },
+            )
+        record_evidence(
+            "native_process",
+            {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+        )
         assert expected.shape == actual.shape and np.isfinite(actual).all()
         np.testing.assert_allclose(actual, expected, atol=case["max_abs_error"], rtol=0)
         cosine = np.sum(actual * expected, axis=1) / (
             np.linalg.norm(actual, axis=1) * np.linalg.norm(expected, axis=1)
+        )
+        record_evidence(
+            "metrics",
+            {
+                "sample": label,
+                "max_abs_error": float(np.max(np.abs(actual - expected))),
+                "min_cosine": float(cosine.min()),
+            },
         )
         assert float(cosine.min()) >= case["min_cosine"]
         print(
