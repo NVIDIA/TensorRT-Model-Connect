@@ -71,6 +71,7 @@ const TASKS = {
   text_prediction_positions_to_token_scores: ['Selected-position token scores', 'Natural Language Processing', null, 'encode'],
   image_to_token_features: ['Image token features', 'Computer Vision', 'image-feature-extraction', 'extract-features'],
   image_to_spatial_features: ['Spatial image features', 'Computer Vision', 'image-feature-extraction', 'extract-features'],
+  spatial_features_to_class_scores: ['Spatial feature class scores', 'Computer Vision', null, null],
   image_to_pooled_features: ['Pooled image features', 'Computer Vision', 'image-feature-extraction', 'extract-features'],
   image_to_embedding: ['Image embedding', 'Computer Vision', 'image-feature-extraction', 'embed'],
   image_text_to_embedding: ['Image and text embedding', 'Multimodal', null, 'embed'],

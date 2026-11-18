@@ -1,0 +1,2 @@
+# The builder uses the base torch/onnx stack. Reference dependencies are in tests/requirements.txt.
+torch>=2.10

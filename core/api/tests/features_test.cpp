@@ -438,6 +438,61 @@ void exercise(const trtmc::Model& model) {
 }
 } // namespace
 
+static int spatial_contracts(int argc, char** argv) {
+    if (argc != 2)
+        return 2;
+    try {
+        const std::filesystem::path root(argv[1]);
+        auto load = [&](const char* mode) {
+            const auto path = root / (std::string("spatial-cpp-") + mode + ".bundle");
+            bundle(path, mode);
+            trtmc::LoadOptions options;
+            options.runtime_root = root.string();
+            return trtmc::Model::load(path.string(), options);
+        };
+        float a[2]{0.2F, 0.8F}, b[2]{0.7F, 0.9F};
+        trtmc::SpatialFeaturesToClassScoresRequest input{
+            {{"first", {a}, 1, 1, 2}, {"second", {b}, 1, 1, 2}}};
+        auto model = load("spatial_features_to_class_scores");
+        auto task = model.task<trtmc::SpatialFeaturesToClassScores>();
+        auto first = task.run(input);
+        auto view = first.view();
+        check(view.values.size == 4 && view.classes == 2 && view.height == 1 && view.width == 2,
+              "retain class-major output shape");
+        check(view.values.data[1] + view.values.data[3] > 1.0F,
+              "independent class probabilities are not normalized");
+        check(view.class_names.size == 2 && std::string_view(view.class_names.data[1].data,
+                                                             view.class_names.data[1].size) == "b",
+              "preserve class names in score order");
+        a[0] = 0.1F;
+        auto second = task.run(input);
+        check(first.view().values.data[0] == 0.2F && second.view().values.data[0] == 0.1F,
+              "results own storage across calls");
+        auto invalid = input;
+        invalid.inputs[0].width = 3;
+        rejects([&] { (void)task.run(invalid); }, TRTMC_INVALID_ARGUMENT,
+                "reject inconsistent CHW input sizes");
+        invalid = input;
+        invalid.inputs[1].name = "first";
+        rejects([&] { (void)task.run(invalid); }, TRTMC_INVALID_ARGUMENT,
+                "reject duplicate input names");
+        invalid = input;
+        invalid.inputs[0].channels = UINT64_MAX;
+        invalid.inputs[0].height = 2;
+        rejects([&] { (void)task.run(invalid); }, TRTMC_INVALID_ARGUMENT,
+                "reject overflowing shapes before reading input values");
+        for (const char* mode :
+             {"spatial_bad_shape", "spatial_bad_names", "spatial_bad_probability"})
+            rejects(
+                [&] { (void)load(mode).task<trtmc::SpatialFeaturesToClassScores>().run(input); },
+                TRTMC_INTERNAL_ERROR, "reject a malformed family result");
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
+    return failures ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
     if (argc != 2)
         return 2;
@@ -590,5 +645,6 @@ int main(int argc, char** argv) {
         std::cerr << "unexpected: " << error.what() << '\n';
         return 1;
     }
+    check(spatial_contracts(argc, argv) == 0, "spatial feature contracts");
     return failures == 0 ? 0 : 1;
 }
