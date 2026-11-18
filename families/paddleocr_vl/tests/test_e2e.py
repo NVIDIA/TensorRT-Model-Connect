@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "paddleocr_vl"
 TASKS = frozenset({"images_text_to_text"})
@@ -196,13 +197,39 @@ def _run_json(
 
 
 def test_official_checkpoint_e2e(case_name, tmp_path):
+    _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    if evidence_enabled():
+        for key in ("image", "test_image", "audio"):
+            if key in case:
+                for source in (TEST_ROOT / case[key], TEST_ROOT / "data" / case[key]):
+                    if source.is_file():
+                        record_evidence("inputs", {key: source})
+                        break
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {
+            key: value
+            for key, value in case.items()
+            if any(word in key for word in ("error", "cosine", "atol", "rtol", "snr", "rmse"))
+        },
+    )
     import numpy as np
     import torch
     from PIL import Image, ImageDraw, ImageFont
     from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor
 
     _, manifest, case = CASES[case_name]
-    directory = _model_dir(manifest)
+    with evidence_stage("checkpoint"):
+        directory = _model_dir(manifest)
     binary, runtime_root = _runtime()
     processor = AutoProcessor.from_pretrained(directory, use_fast=False)
     config = AutoConfig.from_pretrained(directory)
@@ -231,6 +258,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         path = tmp_path / f"page-{index}.png"
         page.save(path)
         pages.append(path)
+        record_evidence("inputs", {f"page_{index}": path})
         text = processor.apply_chat_template(
             [
                 dict(
@@ -294,10 +322,22 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             .reshape(3, gh * 14, gw * 14)
         )
         actual = np.fromfile(pixels, dtype="<f4").reshape(expected.shape)
+        record_evidence("native_preprocessing", {"page": index, "pixels": actual, **payload})
+        record_evidence(
+            "reference_preprocessing",
+            {
+                "page": index,
+                "pixels": expected,
+                "positions": expected_positions[:, 0].numpy(),
+                "input_ids": inputs["input_ids"][0].tolist(),
+            },
+        )
         np.testing.assert_allclose(actual, expected, atol=2e-7, rtol=0)
     del position_oracle
     bundle = tmp_path / manifest["bundle"]
-    _build(directory, bundle, manifest)
+    with evidence_stage("build"):
+        _build(directory, bundle, manifest)
+    record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     reference = (
@@ -307,7 +347,14 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         .eval()
         .to("cuda")
     )
+    record_evidence(
+        "thresholds", {"token_ids": "exact equality", "text": "exact equality", "pixel_atol": 2e-7}
+    )
     for inputs, path, expected_value in zip(batches, pages, case["expected_values"]):
+        record_evidence(
+            "inputs",
+            {"image": path, "question": case["question"], "expected_value": expected_value},
+        )
         inputs = inputs.to("cuda")
         with torch.no_grad():
             generated = reference.generate(
@@ -329,6 +376,16 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             case["question"],
             "--max-new-tokens",
             str(case["max_new_tokens"]),
+        )
+        record_evidence("native", payload)
+        record_evidence(
+            "reference",
+            {
+                "mode": "hf_transformers",
+                "precision": manifest["precision"],
+                "token_ids": expected_ids,
+                "text": expected_text,
+            },
         )
         assert payload["token_ids"] == expected_ids
         assert payload["text"] == expected_text
