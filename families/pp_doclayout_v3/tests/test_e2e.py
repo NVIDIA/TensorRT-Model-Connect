@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
-from tools.e2e_evidence import record_evidence
+from tools.e2e_evidence import evidence_stage, record_evidence
 
 FAMILY = "pp_doclayout_v3"
 TASKS = frozenset({"document_layout"})
@@ -99,7 +99,9 @@ def _image_path(model_dir):
                 with Image.open(path) as image:
                     image.verify()
             except OSError as error:
-                raise AssertionError(f"selected {FAMILY} E2E invalid layout document: {path}") from error
+                raise AssertionError(
+                    f"selected {FAMILY} E2E invalid layout document: {path}"
+                ) from error
             return path
     raise AssertionError(
         f"selected {FAMILY} E2E requires layout_demo.jpg; provision the official "
@@ -142,69 +144,132 @@ def test_official_checkpoint_e2e(request, tmp_path, case_name):
 
     logging.disable_progress_bar()
     torch.set_num_threads(8)
-    model_dir = _model_dir()
-    record_evidence("inputs", {"hf_id": MANIFEST["hf_id"], "hf_revision": MANIFEST["hf_revision"]})
-    image_path = _image_path(model_dir)
+    record_evidence("inputs", {"manifest": MANIFEST, "variants": ["original", "mirrored"]})
+    record_evidence(
+        "checkpoint", {"repo_id": MANIFEST["hf_id"], "revision": MANIFEST["hf_revision"]}
+    )
+    record_evidence(
+        "thresholds",
+        {
+            "score_absolute_error_max": 0.02,
+            "box_iou_min": 0.98,
+            "polygon_iou_min": 0.98,
+            "class_id": "exact reading order",
+        },
+    )
+    with evidence_stage("checkpoint"):
+        model_dir = _model_dir()
+        image_path = _image_path(model_dir)
     binary, runtime = _path("TRTMC_BINARY"), _path("TRTMC_RUNTIME_ROOT")
     assert (runtime / "libtrtmc_model_pp_doclayout_v3.so").is_file()
     assert (runtime / "libtrtmc_backend_trt.so").is_file()
     bundle = tmp_path / MANIFEST["bundle"]
-    build(
-        BuildRequest(
-            model_dir=model_dir,
-            output_path=bundle,
-            family=FAMILY,
-            task=MANIFEST["task"],
-            precision=MANIFEST["precision"],
-            image_height=MANIFEST["image_height"],
-            image_width=MANIFEST["image_width"],
-            tensor_parallel_size=MANIFEST["tensor_parallel_size"],
+    with evidence_stage("build"):
+        build(
+            BuildRequest(
+                model_dir=model_dir,
+                output_path=bundle,
+                family=FAMILY,
+                task=MANIFEST["task"],
+                precision=MANIFEST["precision"],
+                image_height=MANIFEST["image_height"],
+                image_width=MANIFEST["image_width"],
+                tensor_parallel_size=MANIFEST["tensor_parallel_size"],
+            )
         )
-    )
-    model = AutoModelForObjectDetection.from_pretrained(model_dir, local_files_only=True).eval()
-    processor = AutoImageProcessor.from_pretrained(model_dir, local_files_only=True)
+    record_evidence("bundle", {"path": str(bundle)})
+    with evidence_stage("reference"):
+        model = AutoModelForObjectDetection.from_pretrained(model_dir, local_files_only=True).eval()
+        processor = AutoImageProcessor.from_pretrained(model_dir, local_files_only=True)
     original = Image.open(image_path).convert("RGB")
+    native_records, reference_records, metrics = [], [], []
     for index, image in enumerate((original, ImageOps.mirror(original))):
         path = tmp_path / f"document-{index}.png"
         image.save(path)
-        completed = subprocess.run(
-            [
-                str(binary),
-                "layout",
-                str(bundle),
-                "--runtime-root",
-                str(runtime),
-                "--image",
-                str(path),
-            ],
-            check=True,
-            text=True,
-            capture_output=True,
-            timeout=120,
+        record_evidence("inputs", {f"document_{index}": path})
+        with evidence_stage("native"):
+            completed = subprocess.run(
+                [
+                    str(binary),
+                    "layout",
+                    str(bundle),
+                    "--runtime-root",
+                    str(runtime),
+                    "--image",
+                    str(path),
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=120,
+            )
+            actual = json.loads(completed.stdout)
+        record_evidence(
+            f"native_process_{index}",
+            {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
         )
-        actual = json.loads(completed.stdout)
-        with torch.inference_mode():
-            outputs = model(**processor(images=image, return_tensors="pt"))
-        for name in ("logits", "pred_boxes", "order_logits", "out_masks"):
-            assert torch.isfinite(getattr(outputs, name)).all(), name
-        expected = processor.post_process_object_detection(
-            outputs, target_sizes=[image.size[::-1]], threshold=0.5
-        )[0]
-        regions = actual["regions"]
-        assert regions and len(regions) == len(expected["scores"])
-        assert actual["image_height"] == image.height and actual["image_width"] == image.width
-        # Compare by reading order. Matching only by score would miss an order-head defect.
-        for region, score, label, box, polygon in zip(
-            regions,
-            expected["scores"],
-            expected["labels"],
-            expected["boxes"],
-            expected["polygon_points"],
-            strict=True,
-        ):
-            assert region["class_id"] == int(label)
-            assert abs(region["score"] - float(score)) <= 0.02
-            assert _iou(region["box"], box.tolist()) >= 0.98
-            assert len(region["polygon"]) >= 4 and polygon is not None
-            assert np.isfinite(region["polygon"]).all()
-            assert _polygon_iou(region["polygon"], polygon, image.height, image.width) >= 0.98
+        native_records.append({"variant": index, **actual})
+        record_evidence("native", {"variants": native_records})
+        with evidence_stage("reference"):
+            with torch.inference_mode():
+                outputs = model(**processor(images=image, return_tensors="pt"))
+            for name in ("logits", "pred_boxes", "order_logits", "out_masks"):
+                assert torch.isfinite(getattr(outputs, name)).all(), name
+            expected = processor.post_process_object_detection(
+                outputs, target_sizes=[image.size[::-1]], threshold=0.5
+            )[0]
+        reference_regions = [
+            {
+                "class_id": int(label),
+                "score": float(score),
+                "box": box.tolist(),
+                "polygon": np.asarray(polygon).tolist() if polygon is not None else None,
+            }
+            for score, label, box, polygon in zip(
+                expected["scores"],
+                expected["labels"],
+                expected["boxes"],
+                expected["polygon_points"],
+                strict=True,
+            )
+        ]
+        reference_records.append(
+            {
+                "variant": index,
+                "image_height": image.height,
+                "image_width": image.width,
+                "regions": reference_regions,
+            }
+        )
+        record_evidence("reference", {"mode": "hf_transformers", "variants": reference_records})
+        with evidence_stage("compare"):
+            regions = actual["regions"]
+            assert regions and len(regions) == len(expected["scores"])
+            assert actual["image_height"] == image.height and actual["image_width"] == image.width
+            # Compare by reading order. Matching only by score would miss an order-head defect.
+            for region, score, label, box, polygon in zip(
+                regions,
+                expected["scores"],
+                expected["labels"],
+                expected["boxes"],
+                expected["polygon_points"],
+                strict=True,
+            ):
+                measurement = {
+                    "variant": index,
+                    "region": len(metrics),
+                    "score_absolute_error": abs(region["score"] - float(score)),
+                    "box_iou": _iou(region["box"], box.tolist()),
+                }
+                metrics.append(measurement)
+                record_evidence("metrics", metrics)
+                assert region["class_id"] == int(label)
+                assert abs(region["score"] - float(score)) <= 0.02
+                assert _iou(region["box"], box.tolist()) >= 0.98
+                assert len(region["polygon"]) >= 4 and polygon is not None
+                assert np.isfinite(region["polygon"]).all()
+                measurement["polygon_iou"] = _polygon_iou(
+                    region["polygon"], polygon, image.height, image.width
+                )
+                record_evidence("metrics", metrics)
+                assert _polygon_iou(region["polygon"], polygon, image.height, image.width) >= 0.98
