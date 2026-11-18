@@ -3,11 +3,7 @@
 
 """Family-owned model and task support for timm_mnasnet."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    architectures=("mnasnet_100",),
-    tasks=("classification",),
-    default_task="classification",
-)
+describe = support_from_json(__file__)

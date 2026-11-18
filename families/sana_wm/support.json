@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "sana-wm",
+            "sana_wm",
+            "sanamsvideocamctrl_1600m_p1_d20"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "world_model_generation"
+        ],
+        "default_task": "world_model_generation"
+      }
+    },
+    {
+      "if": {
+        "files_all": [
+          "config.yaml",
+          "dit/sana_wm_1600m_720p.safetensors",
+          "refiner/transformer/config.json"
+        ]
+      },
+      "then": {
+        "tasks": [
+          "world_model_generation"
+        ],
+        "default_task": "world_model_generation"
+      }
+    }
+  ]
+}

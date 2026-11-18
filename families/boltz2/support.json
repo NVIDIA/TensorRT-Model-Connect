@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "boltz2",
+            "boltz_2"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "structure_prediction"
+        ],
+        "default_task": "structure_prediction",
+        "default_precision": "bf16"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "Boltz2ForStructurePrediction"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "structure_prediction"
+        ],
+        "default_task": "structure_prediction",
+        "default_precision": "bf16"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "Boltz2ForStructurePrediction"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "structure_prediction"
+        ],
+        "default_task": "structure_prediction",
+        "default_precision": "bf16"
+      }
+    },
+    {
+      "if": {
+        "files_all": [
+          "boltz2_conf.ckpt",
+          "boltz2_aff.ckpt",
+          "protein_monomer.yaml",
+          "protein_monomer.a3m",
+          "processed/structures/protein_monomer.npz",
+          "processed/records/protein_monomer.json",
+          "mols.tar"
+        ]
+      },
+      "then": {
+        "tasks": [
+          "structure_prediction"
+        ],
+        "default_task": "structure_prediction",
+        "default_precision": "bf16"
+      }
+    }
+  ]
+}

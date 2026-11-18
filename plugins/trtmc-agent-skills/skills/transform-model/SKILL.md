@@ -17,8 +17,12 @@ create one new `families/<family>/` directory.
 
 ## Implement one vertical slice
 
-- `support.py` recognizes exact model metadata and declares supported tasks
-  plus one meaningful default. Zero or multiple owners are errors.
+- `support.json` recognizes exact model metadata and declares supported tasks
+  plus one meaningful default; `support.py` is just
+  `describe = support_from_json(__file__)`. Do not write a plain
+  `family_support(...)` call: architecture tests reject it, and a family
+  without `support.json` is missing from `compatibility.json`. Zero or
+  multiple owners are errors.
 - `model.py` exposes one plain `build(request, writer)` function. It owns model
   config, weights, TensorRT graphs, precision, parallelism, and bundle section
   semantics. It must not inherit a builder or import another family.

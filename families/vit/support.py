@@ -1,17 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Family-owned model and task support for the transformers ViT."""
+"""Family-owned model and task support for vit."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    model_types=("vit",),
-    architectures=("ViTForImageClassification",),
-    tasks=("image_to_class_scores",),
-    default_task="image_to_class_scores",
-    # fp16 is faster than fp32 on every GPU measured and passes its own E2E
-    # gate (tests/test_e2e.py); --precision fp32 still builds the fp32 graph.
-    default_precision="fp16",
-)
+describe = support_from_json(__file__)

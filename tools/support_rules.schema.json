@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/NVIDIA/TensorRT-Model-Connect/tools/support_rules.schema.json",
+  "title": "TensorRT Model Connect family support rules",
+  "description": "One families/<family>/support.json. Rules are checked in order; the first rule whose conditions all hold decides. 'then' is either the supported tasks or \"reject\". If no rule holds, the family does not support the model.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "rules"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/rule" }
+    }
+  },
+  "$defs": {
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["if", "then"],
+      "properties": {
+        "if": { "$ref": "#/$defs/conditions" },
+        "then": {
+          "oneOf": [
+            { "const": "reject" },
+            { "$ref": "#/$defs/support" }
+          ]
+        }
+      }
+    },
+    "support": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tasks", "default_task"],
+      "properties": {
+        "tasks": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/task" }
+        },
+        "default_task": { "$ref": "#/$defs/task" },
+        "default_precision": { "enum": ["fp16", "bf16", "fp32"] }
+      }
+    },
+    "task": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+    "conditions": {
+      "description": "Every condition must hold. Keys are files_all, files_none, or a JSON Pointer (RFC 6901) into the model document: /repo_id, /revision, /config/..., /model_index/..., /adapter_config/...",
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "files_all": { "$ref": "#/$defs/paths" },
+        "files_none": { "$ref": "#/$defs/paths" }
+      },
+      "patternProperties": {
+        "^/(repo_id|revision)$": { "$ref": "#/$defs/test" },
+        "^/(config|model_index|adapter_config)(/.*)?$": { "$ref": "#/$defs/test" }
+      }
+    },
+    "paths": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "strings": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string" }
+    },
+    "test": {
+      "description": "Every listed test must pass. Strings compare exactly and are case-sensitive.",
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "in": { "$ref": "#/$defs/strings" },
+        "contains_any": { "$ref": "#/$defs/strings" },
+        "equals": {},
+        "exists": { "type": "boolean" },
+        "type": { "enum": ["object", "array", "string", "number", "boolean"] },
+        "nonempty": { "type": "boolean" },
+        "prefix": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

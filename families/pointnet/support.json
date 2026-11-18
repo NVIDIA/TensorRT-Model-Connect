@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "pointnet"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "points_to_semantic_segmentation"
+        ],
+        "default_task": "points_to_semantic_segmentation"
+      }
+    },
+    {
+      "if": {
+        "files_all": [
+          "pointnet.onnx"
+        ]
+      },
+      "then": {
+        "tasks": [
+          "points_to_semantic_segmentation"
+        ],
+        "default_task": "points_to_semantic_segmentation"
+      }
+    }
+  ]
+}

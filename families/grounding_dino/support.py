@@ -1,14 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Family-owned model and task support for Grounding DINO."""
+"""Family-owned model and task support for grounding_dino."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    model_types=("grounding-dino",),
-    architectures=("GroundingDinoForObjectDetection",),
-    tasks=("image_text_to_boxes",),
-    default_task="image_text_to_boxes",
-)
+describe = support_from_json(__file__)

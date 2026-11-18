@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "owlv2"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_text_to_boxes"
+        ],
+        "default_task": "image_text_to_boxes"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "Owlv2ForObjectDetection"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_text_to_boxes"
+        ],
+        "default_task": "image_text_to_boxes"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "Owlv2ForObjectDetection"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "image_text_to_boxes"
+        ],
+        "default_task": "image_text_to_boxes"
+      }
+    }
+  ]
+}

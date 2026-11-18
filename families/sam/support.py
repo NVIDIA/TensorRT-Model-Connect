@@ -3,12 +3,7 @@
 
 """Family-owned model and task support for sam."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    model_types=("sam",),
-    tasks=("prompted_segmentation",),
-    default_task="prompted_segmentation",
-    default_precision="fp16",
-)
+describe = support_from_json(__file__)

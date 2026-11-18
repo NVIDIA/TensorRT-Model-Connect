@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "files_all": [
+          "refine_model.onnx",
+          "score_model.onnx"
+        ]
+      },
+      "then": {
+        "tasks": [
+          "pose_hypothesis_refinement"
+        ],
+        "default_task": "pose_hypothesis_refinement"
+      }
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "times_fm",
+            "timesfm"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "series_to_point_forecast"
+        ],
+        "default_task": "series_to_point_forecast"
+      }
+    }
+  ]
+}

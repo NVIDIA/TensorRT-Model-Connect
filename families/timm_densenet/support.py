@@ -3,12 +3,7 @@
 
 """Family-owned model and task support for timm DenseNet."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    model_types=("timm_densenet", "densenet121", "densenet161", "densenet169", "densenet201"),
-    architectures=("densenet121", "densenet161", "densenet169", "densenet201"),
-    tasks=("image_to_class_scores",),
-    default_task="image_to_class_scores",
-)
+describe = support_from_json(__file__)

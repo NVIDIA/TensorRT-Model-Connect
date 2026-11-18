@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "new"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "text_to_embedding"
+        ],
+        "default_task": "text_to_embedding"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "NewModel"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "text_to_embedding"
+        ],
+        "default_task": "text_to_embedding"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "NewModel"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "text_to_embedding"
+        ],
+        "default_task": "text_to_embedding"
+      }
+    }
+  ]
+}

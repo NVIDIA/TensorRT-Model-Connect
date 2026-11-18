@@ -3,11 +3,7 @@
 
 """Family-owned model and task support for electra."""
 
-from tensorrt_model_connect.model_support import family_support
+from tensorrt_model_connect.model_support import support_from_json
 
 
-describe = family_support(
-    model_types=("electra",),
-    tasks=("text_to_embedding", "text_to_pooled_features"),
-    default_task="text_to_pooled_features",
-)
+describe = support_from_json(__file__)

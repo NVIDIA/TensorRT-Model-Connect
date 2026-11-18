@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "qwen3_omni",
+            "qwen3_omni_moe",
+            "qwen3omni"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "text_generation"
+        ],
+        "default_task": "text_generation"
+      }
+    }
+  ]
+}

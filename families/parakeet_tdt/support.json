@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "parakeet_tdt"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "speech_transcription"
+        ],
+        "default_task": "speech_transcription"
+      }
+    },
+    {
+      "if": {
+        "/config/architectures": {
+          "contains_any": [
+            "ParakeetForTDT"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "speech_transcription"
+        ],
+        "default_task": "speech_transcription"
+      }
+    },
+    {
+      "if": {
+        "/config/architecture": {
+          "in": [
+            "ParakeetForTDT"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "speech_transcription"
+        ],
+        "default_task": "speech_transcription"
+      }
+    }
+  ]
+}

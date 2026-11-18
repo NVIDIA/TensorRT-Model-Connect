@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "rules": [
+    {
+      "if": {
+        "/config/model_type": {
+          "in": [
+            "embedding_gemma2"
+          ]
+        }
+      },
+      "then": {
+        "tasks": [
+          "embedding"
+        ],
+        "default_task": "embedding",
+        "default_precision": "bf16"
+      }
+    }
+  ]
+}
