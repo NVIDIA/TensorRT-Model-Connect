@@ -138,8 +138,11 @@ def test_lighton_ocr_native_e2e(case_name, tmp_path, request):
     artifacts.mkdir(exist_ok=False)
     environment = os.environ.copy()
     environment["LD_LIBRARY_PATH"] = str(runtime_root) + ":" + environment.get("LD_LIBRARY_PATH", "")
-    record_evidence("request", {"manifest": MANIFEST, "case": case, "thresholds": limits,
-                                "image": image, "working_directory": str(artifacts)})
+    record_evidence("inputs", {"manifest": MANIFEST, "case": case,
+                               "image": image, "working_directory": str(artifacts)})
+    record_evidence("checkpoint", {"hf_id": MANIFEST["hf_id"], "hf_revision": MANIFEST["hf_revision"],
+                                   "model_dir": str(checkpoint)})
+    record_evidence("thresholds", limits)
     reference = artifacts / "reference"
     with evidence_stage("fresh_official_reference"):
         assert not reference.exists()
@@ -167,6 +170,10 @@ def test_lighton_ocr_native_e2e(case_name, tmp_path, request):
                             expected_fragments=case["expected_fragments"],
                             eos_token_ids=expected["generation"]["eos_token_ids"], vocab_size=vocab_size)
         record_evidence("official_reference", expected)
+        record_evidence("reference", {**expected["generation"],
+                                      "implementation": expected["model_class"],
+                                      "transformers_version": expected["transformers_version"],
+                                      "precision": expected["precision"]})
         record_evidence("official_observation_files", [reference / value["file"] for value in expected["tensors"].values()])
     with evidence_stage("public_bundle_build_and_inspection"):
         if os.environ.get("TRTMC_LIGHTON_OCR_BUNDLE"):
@@ -224,3 +231,5 @@ def test_lighton_ocr_native_e2e(case_name, tmp_path, request):
                 assert actual["repeat_matches"] is True and actual["rejection_recovery"] is True
             record_evidence(name + "_native_output", actual)
             record_evidence(name + "_native_output_file", output)
+            if name == "cli":
+                record_evidence("native", actual)
