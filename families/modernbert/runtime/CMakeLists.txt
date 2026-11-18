@@ -37,6 +37,16 @@ install(TARGETS trtmc_model_modernbert
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_modernbert_tokenizer
+    ${PROJECT_SOURCE_DIR}/families/modernbert/tests/cpp/test_tokenizer.cpp
+    bpe_tokenizer.cpp
+  )
+  target_include_directories(test_modernbert_tokenizer PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(test_modernbert_tokenizer PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_modernbert_tokenizer PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME modernbert_tokenizer COMMAND test_modernbert_tokenizer)
+  set_tests_properties(modernbert_tokenizer PROPERTIES LABELS "cpu")
+
   add_executable(test_modernbert_task_contract
     ${PROJECT_SOURCE_DIR}/families/modernbert/tests/cpp/test_task_contract.cpp
   )

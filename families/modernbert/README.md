@@ -28,6 +28,29 @@ invalid inputs and engine failures; CPU results do not establish GPU model parit
 Set `TRTMC_NATIVE_BUILD_DIR` to the CMake build root containing both SDK consumers,
 including when `TRTMC_BINARY` points to a CLI installed from a wheel.
 
+## Tokenizer NFC normalization
+
+The native tokenizer applies the top-level NFC normalizer used by ModernBERT
+and Granite embedding r2 before byte-level pre-tokenization. Canonically
+equivalent text such as `café` and `cafe\u0301`, including Hangul Jamo sequences,
+receives the same normalization. Compatibility characters are preserved.
+
+Family-owned decomposition, combining-order and composition tables are derived
+from `tokenizers==0.23.3`, whose normalization dependency uses Unicode 9.0 data.
+Hangul decomposition and composition are algorithmic. Unicode data attribution
+is retained in [UNICODE_LICENSE.txt](UNICODE_LICENSE.txt). Regenerate with:
+
+```bash
+python -m pip install tokenizers==0.23.3
+python families/modernbert/tests/generate_nfc.py
+```
+
+There is no new runtime dependency. This covers the checkpoint's top-level NFC
+configuration, not arbitrary normalizer sequences, newer Unicode normalization
+versions, invalid UTF-8, or all tokenizer behavior. Rebuild the ModernBERT runtime
+library to apply the correction to existing bundles; engine formats are unchanged.
+CPU tokenizer checks do not establish GPU embedding or performance qualification.
+
 ## FP8 (`quantization=fp8`)
 
 FP8 self-quantizes the original checkpoint at build time (TP1, `precision=fp16`

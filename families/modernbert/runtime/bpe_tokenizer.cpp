@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/modernbert/runtime/nfc_data.h"
 #include "families/modernbert/runtime/tokenizer.h"
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <climits>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <list>
 #include <nlohmann/json.hpp>
 #include <queue>
@@ -109,6 +111,100 @@ inline char32_t read_utf8(const char*& p, const char* end) {
     }
     ++p;
     return 0xFFFD;
+}
+
+std::uint8_t combining_order(char32_t point) {
+    using namespace modernbert_unicode;
+    const auto* found = std::lower_bound(
+        std::begin(kCombiningOrders), std::end(kCombiningOrders), point,
+        [](const CombiningOrder& entry, char32_t value) { return entry.point < value; });
+    return found != std::end(kCombiningOrders) && found->point == point ? found->rank : 0;
+}
+
+char32_t compose_pair(char32_t left, char32_t right) {
+    if (left >= 0x1100 && left < 0x1113 && right >= 0x1161 && right < 0x1176)
+        return 0xAC00 + (left - 0x1100) * 588 + (right - 0x1161) * 28;
+    if (left >= 0xAC00 && left <= 0xD7A3 && (left - 0xAC00) % 28 == 0 && right > 0x11A7 &&
+        right < 0x11C3)
+        return left + right - 0x11A7;
+    using namespace modernbert_unicode;
+    const auto key = (static_cast<std::uint64_t>(left) << 21) | right;
+    const auto* found = std::lower_bound(
+        std::begin(kCompositions), std::end(kCompositions), key,
+        [](const Composition& entry, std::uint64_t value) { return entry.pair < value; });
+    return found != std::end(kCompositions) && found->pair == key ? found->point : 0;
+}
+
+std::string normalize_nfc(const std::string& text) {
+    if (std::all_of(text.begin(), text.end(), [](unsigned char byte) { return byte < 0x80; }))
+        return text;
+
+    struct OrderedPoint {
+        char32_t point;
+        std::uint8_t order;
+    };
+    using namespace modernbert_unicode;
+    std::vector<OrderedPoint> decomposed;
+    decomposed.reserve(text.size());
+    const auto append = [&](char32_t point) {
+        decomposed.push_back({point, combining_order(point)});
+    };
+    std::size_t position = 0;
+    while (position < text.size()) {
+        const auto point = utf8_to_char32(text, position);
+        if (point >= 0xAC00 && point <= 0xD7A3) {
+            const auto index = point - 0xAC00;
+            append(0x1100 + index / 588);
+            append(0x1161 + index % 588 / 28);
+            if (index % 28)
+                append(0x11A7 + index % 28);
+            continue;
+        }
+        const auto* found = std::lower_bound(
+            std::begin(kDecompositions), std::end(kDecompositions), point,
+            [](const Decomposition& entry, char32_t value) { return entry.point < value; });
+        if (found != std::end(kDecompositions) && found->point == point) {
+            for (std::size_t i = 0; i < found->size; ++i)
+                append(kDecomposedValues[found->offset + i]);
+        } else {
+            append(point);
+        }
+    }
+
+    std::size_t run = 0;
+    for (std::size_t i = 0; i <= decomposed.size(); ++i) {
+        if (i == decomposed.size() || decomposed[i].order == 0) {
+            if (i - run > 1)
+                std::stable_sort(decomposed.begin() + run, decomposed.begin() + i,
+                                 [](const OrderedPoint& left, const OrderedPoint& right) {
+                                     return left.order < right.order;
+                                 });
+            run = i + 1;
+        }
+    }
+
+    std::vector<char32_t> composed;
+    composed.reserve(decomposed.size());
+    std::size_t starter = decomposed.size();
+    std::uint8_t previous_order = 0;
+    for (const auto& item : decomposed) {
+        if (starter < composed.size() && (previous_order == 0 || previous_order < item.order)) {
+            const auto replacement = compose_pair(composed[starter], item.point);
+            if (replacement) {
+                composed[starter] = replacement;
+                continue;
+            }
+        }
+        if (item.order == 0)
+            starter = composed.size();
+        composed.push_back(item.point);
+        previous_order = item.order;
+    }
+    std::string result;
+    result.reserve(text.size());
+    for (const auto point : composed)
+        result += utf32_to_utf8(point);
+    return result;
 }
 
 // ─── GPT-2 byte encoder: byte value <-> Unicode codepoint ───
@@ -674,6 +770,8 @@ class BpeTokenizer final : public ITokenizer {
     enum class DecoderType { kByteLevel, kMetaspace, kSequence };
 
     std::string normalize_text(const std::string& text) const {
+        if (mNormalizeNfc)
+            return normalize_nfc(text);
         if (!mNormalizeLowercase && !mNormalizeWhitespace) {
             return text;
         }
@@ -1399,6 +1497,7 @@ class BpeTokenizer final : public ITokenizer {
             return;
         auto& norm = j["normalizer"];
         std::string norm_type = norm.value("type", "");
+        mNormalizeNfc = norm_type == "NFC";
         detect_text_normalizers(norm);
         if (normalizer_sequence_prepends(norm, norm_type)) {
             mSentencePiecePrependAlways = true;
@@ -1532,6 +1631,7 @@ class BpeTokenizer final : public ITokenizer {
     bool mSentencePiecePrependIfMissing = true;
     bool mByteFallback = false;
     bool mNormalizeLowercase = false;
+    bool mNormalizeNfc = false;
     bool mNormalizeWhitespace = false;
     std::string mEndOfWordSuffix;
 
