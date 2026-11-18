@@ -91,7 +91,7 @@ def build(request, writer):
     from transformers import AutoProcessor
 
     processor = AutoProcessor.from_pretrained(directory, use_fast=False)
-    sentinel = "TRTMC_QUESTION_PLACEHOLDER"
+    sentinel = "<|QUESTION_PLACEHOLDER|>"
     template = processor.apply_chat_template(
         [dict(role="user", content=[dict(type="image"), dict(type="text", text=sentinel)])],
         add_generation_prompt=True,
