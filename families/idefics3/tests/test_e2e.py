@@ -89,7 +89,7 @@ def pytest_generate_tests(metafunc) -> None:
 
 def _required_path(value: str | None, label: str) -> Path:
     assert value, f"selected {FAMILY} E2E requires {label}"
-    path = Path(value)
+    path = Path(value).expanduser().absolute()
     assert path.exists(), f"selected {FAMILY} E2E {label} does not exist: {path}"
     return path
 
@@ -105,10 +105,10 @@ def _native_test_binary(name: str) -> Path:
     return _required_path(str(build_dir / name), name)
 
 
-def _model_dir(manifest: dict) -> Path:
+def _model_dir(manifest: dict) -> tuple[Path, str | None]:
     explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
     if explicit:
-        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR"), None
     from huggingface_hub import snapshot_download
 
     try:
@@ -119,7 +119,7 @@ def _model_dir(manifest: dict) -> Path:
         raise AssertionError(
             f"selected {FAMILY} E2E requires the exact cached checkpoint {manifest['hf_id']}"
         ) from error
-    return Path(snapshot)
+    return Path(snapshot), manifest["hf_revision"]
 
 
 def _runtime() -> tuple[Path, Path]:
@@ -196,7 +196,7 @@ def _run_json(
     return payloads[0]
 
 
-def test_official_checkpoint_e2e(case_name, tmp_path):
+def test_official_checkpoint_e2e(case_name, tmp_path, request):
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
     if evidence_enabled():
@@ -209,8 +209,10 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     record_evidence(
         "checkpoint",
         {
-            "repo_id": manifest["hf_id"],
-            "revision": manifest["hf_revision"],
+            "hf_id": manifest["hf_id"],
+            "expected_hf_revision": manifest["hf_revision"],
+            "hf_revision": None,
+            "revision_status": "unresolved",
             "precision": manifest["precision"],
         },
     )
@@ -229,7 +231,15 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
 
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
-        directory = _model_dir(manifest)
+        directory, checkpoint_revision = _model_dir(manifest)
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(directory),
+            "hf_revision": checkpoint_revision,
+            "revision_status": "unverified" if checkpoint_revision is None else "pinned_cache_lookup",
+        },
+    )
     binary, runtime_root = _runtime()
     processor = AutoProcessor.from_pretrained(directory, use_fast=False)
     image = Image.open(TEST_ROOT / "data/test_img.jpeg").convert("RGB")
@@ -272,6 +282,11 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         )
         assert completed.returncode == 0, completed.stderr
         prepared = json.loads(completed.stdout)
+        record_evidence("native_preprocessing", {"sample": index, "ids": prepared["ids"]})
+        record_evidence(
+            "reference_preprocessing",
+            {"sample": index, "input_ids": inputs["input_ids"][0].tolist()},
+        )
         assert prepared["ids"] == inputs["input_ids"][0].tolist()
         expected = inputs["pixel_values"][0].numpy()
         actual = np.fromfile(native_pixels, dtype="<f4").reshape(expected.shape)
@@ -311,7 +326,11 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     with evidence_stage("build"):
         _build(directory, bundle, manifest)
     record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
-    torch.backends.cuda.matmul.allow_tf32 = False
+    matmul_precision = torch.get_float32_matmul_precision()
+    cudnn_tf32 = torch.backends.cudnn.allow_tf32
+    request.addfinalizer(lambda: torch.set_float32_matmul_precision(matmul_precision))
+    request.addfinalizer(lambda: setattr(torch.backends.cudnn, "allow_tf32", cudnn_tf32))
+    torch.set_float32_matmul_precision("highest")
     torch.backends.cudnn.allow_tf32 = False
     reference = (
         AutoModelForImageTextToText.from_pretrained(
@@ -361,9 +380,6 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                 "text": expected_text,
             },
         )
-        assert payload["token_ids"] == expected_ids
-        assert payload["text"] == expected_text
-        assert expected_text.strip()
         if evidence_enabled():
             # Persist the actual enforced equality checks so report readers do
             # not have to infer the native/reference roles from local names.
@@ -402,6 +418,10 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                     ],
                 },
             )
+
+        assert payload["token_ids"] == expected_ids
+        assert payload["text"] == expected_text
+        assert expected_text.strip()
 
         print(
             f"SmolVLM question={question!r}, generated={expected_text!r}, tokens={len(expected_ids)}"
