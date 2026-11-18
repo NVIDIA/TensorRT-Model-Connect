@@ -4,6 +4,7 @@
  */
 #include "families/blip/runtime/fp32_kernels.h"
 
+#include <ATen/autocast_mode.h>
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -91,7 +92,8 @@ void test_math_and_contracts(cudaStream_t stream) {
     auto linear = Function::GetGlobalRequired("blip.vision.linear_fp32");
     auto softmax = Function::GetGlobalRequired("blip.vision.softmax_fp32");
     auto gelu = Function::GetGlobalRequired("blip.vision.gelu_fp32");
-    const std::vector<float> values{1, 2, 3, 4, -1, 1, -1, 1};
+    const std::vector<float> values{0.101F,  0.203F, 0.307F,  0.411F,
+                                    -0.113F, 0.217F, -0.319F, 0.423F};
     const std::vector<float> scales{1, 2, 1, 0.5F};
     const std::vector<float> biases{0.1F, 0.2F, -0.1F, 0};
     Buffer x({2, 4}, values, stream), gamma({4}, scales, stream), beta({4}, biases, stream);
@@ -186,6 +188,12 @@ int main() {
             throw std::runtime_error("failed to set the kernel stream");
         trtmc::blip::initialize_fp32_kernels();
         test_math_and_contracts(stream);
+        const auto original_autocast = at::autocast::is_autocast_enabled(at::kCUDA);
+        at::autocast::set_autocast_enabled(at::kCUDA, true);
+        test_math_and_contracts(stream);
+        check(at::autocast::is_autocast_enabled(at::kCUDA),
+              "kernels changed the caller's autocast setting");
+        at::autocast::set_autocast_enabled(at::kCUDA, original_autocast);
         if (TVMFFIEnvSetStream(kDLCUDA, device, previous, nullptr) != 0)
             throw std::runtime_error("failed to restore the kernel stream");
         require_cuda(cudaStreamDestroy(stream));

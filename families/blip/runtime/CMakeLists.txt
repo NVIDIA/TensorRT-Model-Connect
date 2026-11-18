@@ -18,7 +18,7 @@ target_include_directories(trtmc_model_blip SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_
 target_link_libraries(trtmc_model_blip PRIVATE trtmc_core nlohmann_json::nlohmann_json ICU::uc ${TRTMC_CUDART_LIBRARY})
 set(_blip_build_rpath "\$ORIGIN")
 set(_blip_install_rpath "\$ORIGIN")
-if(TRTMC_HAS_TVM_FFI)
+if(TARGET trtmc_byok_tvm_ffi)
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   execute_process(
     COMMAND ${Python3_EXECUTABLE} -c "import torch; print(torch.utils.cmake_prefix_path, end='')"

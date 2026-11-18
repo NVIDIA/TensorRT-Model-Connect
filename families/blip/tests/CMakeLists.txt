@@ -26,7 +26,7 @@ target_compile_options(test_blip_tokenizer PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME test_blip_tokenizer COMMAND test_blip_tokenizer)
 set_tests_properties(test_blip_tokenizer PROPERTIES TIMEOUT 15)
 
-if(TRTMC_HAS_TVM_FFI)
+if(TARGET trtmc_byok_tvm_ffi)
   add_executable(test_blip_fp32_kernels cpp/test_fp32_kernels.cpp)
   target_include_directories(test_blip_fp32_kernels PRIVATE
     ${PROJECT_SOURCE_DIR}
@@ -35,12 +35,15 @@ if(TRTMC_HAS_TVM_FFI)
   target_include_directories(test_blip_fp32_kernels SYSTEM PRIVATE
     ${TRTMC_CUDA_INCLUDE_DIR}
     ${TRTMC_TVM_FFI_INCLUDE_DIR}
+    ${TORCH_INCLUDE_DIRS}
   )
   target_link_libraries(test_blip_fp32_kernels PRIVATE
     trtmc_model_blip
     ${TRTMC_CUDART_LIBRARY}
     ${TRTMC_TVM_FFI_LIBRARY}
+    ${TORCH_LIBRARIES}
   )
+  target_compile_options(test_blip_fp32_kernels PRIVATE ${_blip_torch_flags})
   target_compile_options(test_blip_fp32_kernels PRIVATE -Wall -Wextra -Wpedantic)
   set_target_properties(test_blip_fp32_kernels PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}" BUILD_RPATH "\$ORIGIN")

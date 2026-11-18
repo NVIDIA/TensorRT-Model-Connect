@@ -5,7 +5,6 @@
 
 import ctypes
 from importlib import metadata
-import os
 from pathlib import Path
 
 from tensorrt_model_connect.byok import add_kernel
@@ -15,15 +14,11 @@ _LIBRARIES: dict[Path, ctypes.CDLL] = {}
 
 
 def _model_library():
-    runtime = os.environ.get("TRTMC_RUNTIME_ROOT")
-    if runtime:
-        path = Path(runtime) / "libtrtmc_model_blip.so"
-    else:
-        try:
-            distribution = metadata.distribution("tensorrt-model-connect")
-        except metadata.PackageNotFoundError as error:
-            raise RuntimeError("BLIP requires its native wheel or TRTMC_RUNTIME_ROOT") from error
-        path = Path(distribution.locate_file("tensorrt_model_connect/bin/libtrtmc_model_blip.so"))
+    try:
+        distribution = metadata.distribution("tensorrt-model-connect")
+    except metadata.PackageNotFoundError as error:
+        raise RuntimeError("Install BLIP's matching native package before building bundles") from error
+    path = Path(distribution.locate_file("tensorrt_model_connect/bin/libtrtmc_model_blip.so"))
     if not path.is_file():
         raise FileNotFoundError(f"BLIP native model library was not built: {path}")
     return path.resolve()

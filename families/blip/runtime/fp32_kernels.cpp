@@ -5,6 +5,7 @@
 #include <ATen/ATen.h>
 #include <ATen/Context.h>
 #include <c10/core/InferenceMode.h>
+#include <c10/core/impl/LocalDispatchKeySet.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
 #include <cmath>
@@ -57,6 +58,7 @@ void norm(Tensor x, Tensor scale, Tensor bias, Tensor output, double epsilon) {
     c10::cuda::CUDAStreamGuard stream(stream_for(x));
     c10::InferenceMode inference;
     at::NoTF32Guard precision;
+    c10::impl::ExcludeDispatchKeyGuard autocast(c10::DispatchKey::AutocastCUDA);
     if (!(std::isfinite(epsilon) && epsilon > 0))
         throw std::invalid_argument("BLIP normalization epsilon must be finite and positive");
     const auto device = x.device().device_id;
@@ -73,6 +75,7 @@ void linear(Tensor x, Tensor weight, Tensor bias, Tensor output) {
     c10::cuda::CUDAStreamGuard stream(stream_for(x));
     c10::InferenceMode inference;
     at::NoTF32Guard precision;
+    c10::impl::ExcludeDispatchKeyGuard autocast(c10::DispatchKey::AutocastCUDA);
     const auto device = x.device().device_id;
     auto input = wrap(x, device);
     auto matrix = wrap(weight, device);
@@ -87,6 +90,7 @@ void softmax(Tensor x, Tensor output) {
     c10::cuda::CUDAStreamGuard stream(stream_for(x));
     c10::InferenceMode inference;
     at::NoTF32Guard precision;
+    c10::impl::ExcludeDispatchKeyGuard autocast(c10::DispatchKey::AutocastCUDA);
     store(output, at::softmax(wrap(x, x.device().device_id), -1, at::kFloat));
 }
 
@@ -94,6 +98,7 @@ void gelu(Tensor x, Tensor output) {
     c10::cuda::CUDAStreamGuard stream(stream_for(x));
     c10::InferenceMode inference;
     at::NoTF32Guard precision;
+    c10::impl::ExcludeDispatchKeyGuard autocast(c10::DispatchKey::AutocastCUDA);
     store(output, at::gelu(wrap(x, x.device().device_id), "none"));
 }
 } // namespace

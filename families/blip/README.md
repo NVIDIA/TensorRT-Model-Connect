@@ -23,11 +23,12 @@ Use the repository's [source build instructions](../../website/docs/getting-star
 to prepare a matching CUDA/TensorRT environment. Install this family's
 `requirements.txt` (CUDA-enabled PyTorch 2.12), and install the ICU development
 library (`uc` component) for native Unicode normalization. Then build the
-selected native targets:
+selected native targets and install the matching native Python package:
 
 ```bash
 cmake --build build --parallel 8 --target trtmc trtmc_backend_trt trtmc_model_blip
-TRTMC_RUNTIME_ROOT="$PWD/build" PYTHONPATH=core/builder:. python -m tensorrt_model_connect build \
+python -m pip install . --no-build-isolation
+PYTHONPATH=core/builder:. python -m tensorrt_model_connect build \
   Salesforce/blip-image-captioning-base \
   --revision 82a37760796d32b1411fe092ab5d4e227313294b \
   --precision fp32 --max-sequence-length 64 -o blip-base.bundle
@@ -42,8 +43,9 @@ The checkpoint publishes a PyTorch state dictionary, loaded with
 [GHSA-63cw-57p8-fm3p](https://github.com/pytorch/pytorch/security/advisories/GHSA-63cw-57p8-fm3p).
 Build the native library and bundles with the same PyTorch environment. The
 TVM-FFI bridge must be enabled (`TRTMC_ENABLE_BYOK=ON`, the default). A native
-wheel supplies the required libraries; source builds locate them through
-`TRTMC_RUNTIME_ROOT`.
+package supplies the required libraries. The builder locates them through the
+installed package metadata, so source changes to native kernels require
+reinstalling the package before building bundles.
 The native tokenizer uses ICU for Unicode NFD, nonspacing-mark removal, and
 lowercasing, matching the reference's per-code-point normalization order.
 BLIP VQA, image-text retrieval, and BLIP-2 are
