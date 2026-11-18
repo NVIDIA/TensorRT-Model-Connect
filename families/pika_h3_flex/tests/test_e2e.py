@@ -384,7 +384,6 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             },
         )
         if evidence_enabled():
-            import hashlib
             import struct
             from PIL import Image
 
@@ -399,9 +398,6 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                 # Retain lossless representative tensors and label the GIF as a preview.
                 frames_path = tmp_path / f"{role}-{index}-selected-frames.npz"
                 np.savez_compressed(frames_path, frames=np.stack([video[i] for i in selected]))
-                digest = hashlib.sha256()
-                for frame in video:
-                    digest.update(np.asarray(frame, dtype="<f4").tobytes())
                 frames = [
                     Image.fromarray(np.rint(np.clip(video[i], 0, 1) * 255).astype(np.uint8)).resize(
                         (416, 240)
@@ -448,7 +444,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                         },
                         "selected_frames": frames_path,
                         "retained_frame_indices": selected,
-                        "full_video_sha256": digest.hexdigest(),
+                        "full_video_shape": list(video.shape),
                         "waveform": audio.astype(np.float32),
                         "video_preview_scope": {
                             "frame_indices": preview_indices,
