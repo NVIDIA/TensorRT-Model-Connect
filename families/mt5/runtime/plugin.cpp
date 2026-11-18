@@ -196,10 +196,6 @@ class MT5Pipeline final : public ITextGeneration {
             throw std::invalid_argument("mt5 output length exceeds decoder cache capacity");
         // 1. Tokenize input
         auto input_ids = tokenizer_->encode(prompt);
-        // MT5 tokenizer: ensure EOS (token 1) at end, no BOS at start
-        // Native Unigram may add EOS at both ends; strip leading one
-        if (!input_ids.empty() && input_ids.front() == eos_token_id_)
-            input_ids.erase(input_ids.begin());
         // Ensure EOS at end
         if (input_ids.empty() || input_ids.back() != eos_token_id_)
             input_ids.push_back(eos_token_id_);
@@ -264,27 +260,34 @@ class MT5Pipeline final : public ITextGeneration {
     }
 
     void setup_cross_attention() {
-        // Copy raw encoder output to all decoder layer cross_k/cross_v inputs.
-        // The per-layer K/V projections are baked into the decoder TRT graph.
-        for (int32_t i = 0; i < num_decoder_layers_; ++i) {
-            cudaMemcpyAsync(cross_k_ptrs_[static_cast<size_t>(i)].get(),
-                            encoder_output_host_.data(), cross_kv_bytes_, cudaMemcpyHostToDevice,
-                            stream_);
-            cudaMemcpyAsync(cross_v_ptrs_[static_cast<size_t>(i)].get(),
-                            encoder_output_host_.data(), cross_kv_bytes_, cudaMemcpyHostToDevice,
-                            stream_);
-        }
-        cudaStreamSynchronize(stream_);
-
-        // Build and upload encoder attention mask for cross-attention
+        // Keep both host sources alive until every queued upload has drained,
+        // including when a later upload fails.
         std::vector<float> enc_mask_host(static_cast<size_t>(max_enc_seq_len_), -1e9f);
         for (int32_t i = 0; i < actual_enc_len_; ++i)
             enc_mask_host[static_cast<size_t>(i)] = 0.0f;
-        size_t mask_bytes = static_cast<size_t>(max_enc_seq_len_) * sizeof(float);
-        mt5::ensure_encoder_mask(enc_mask_device_, mask_bytes);
-        cudaMemcpyAsync(enc_mask_device_.get(), enc_mask_host.data(), mask_bytes,
-                        cudaMemcpyHostToDevice, stream_);
-        cudaStreamSynchronize(stream_);
+        auto check = [](cudaError_t error) {
+            if (error != cudaSuccess)
+                throw std::runtime_error(std::string("mT5 cross-attention upload failed: ") +
+                                         cudaGetErrorString(error));
+        };
+        try {
+            for (int32_t i = 0; i < num_decoder_layers_; ++i) {
+                check(cudaMemcpyAsync(cross_k_ptrs_[static_cast<size_t>(i)].get(),
+                                      encoder_output_host_.data(), cross_kv_bytes_,
+                                      cudaMemcpyHostToDevice, stream_));
+                check(cudaMemcpyAsync(cross_v_ptrs_[static_cast<size_t>(i)].get(),
+                                      encoder_output_host_.data(), cross_kv_bytes_,
+                                      cudaMemcpyHostToDevice, stream_));
+            }
+            const auto mask_bytes = static_cast<size_t>(max_enc_seq_len_) * sizeof(float);
+            mt5::ensure_encoder_mask(enc_mask_device_, mask_bytes);
+            check(cudaMemcpyAsync(enc_mask_device_.get(), enc_mask_host.data(), mask_bytes,
+                                  cudaMemcpyHostToDevice, stream_));
+            check(cudaStreamSynchronize(stream_));
+        } catch (...) {
+            (void)cudaStreamSynchronize(stream_);
+            throw;
+        }
 
         // Bind cross-attention buffers to decoder
         for (int32_t i = 0; i < num_decoder_layers_; ++i) {

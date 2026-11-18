@@ -13,6 +13,16 @@
 #include <stdexcept>
 
 namespace trtmc {
+namespace {
+void checked_copy(void* destination, const void* source, size_t bytes, cudaMemcpyKind kind,
+                  cudaStream_t stream) {
+    const auto error = cudaMemcpyAsync(destination, source, bytes, kind, stream);
+    if (error != cudaSuccess) {
+        (void)cudaStreamSynchronize(stream);
+        throw std::runtime_error(std::string("mT5 KV copy failed: ") + cudaGetErrorString(error));
+    }
+}
+} // namespace
 
 MT5KvCache::MT5KvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim, cudaStream_t stream,
                        DType cache_dtype, MT5KvCacheNames names)
@@ -201,12 +211,14 @@ void MT5KvCache::write_prefill_kv(const std::vector<const void*>& prefill_k,
     }
     const auto row_bytes = static_cast<std::size_t>(kv_dim_) * cache_element_size_;
     const auto block_bytes = static_cast<std::size_t>(seq_len) * row_bytes;
+    // These writes replace the visible prefix; invalidate it before any copy.
+    position_ = 0;
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
-        cudaMemcpyAsync(cache_k_[li].data(), prefill_k[li], block_bytes, cudaMemcpyDeviceToDevice,
-                        stream_);
-        cudaMemcpyAsync(cache_v_[li].data(), prefill_v[li], block_bytes, cudaMemcpyDeviceToDevice,
-                        stream_);
+        checked_copy(cache_k_[li].data(), prefill_k[li], block_bytes, cudaMemcpyDeviceToDevice,
+                     stream_);
+        checked_copy(cache_v_[li].data(), prefill_v[li], block_bytes, cudaMemcpyDeviceToDevice,
+                     stream_);
     }
     position_ = seq_len;
 }
@@ -215,7 +227,7 @@ void MT5KvCache::append_prefill_kv(const std::vector<const void*>& prefill_k,
                                    const std::vector<const void*>& prefill_v, int32_t seq_len) {
     if (seq_len <= 0)
         return;
-    if (position_ + seq_len > max_length_)
+    if (seq_len > max_length_ - position_)
         throw std::runtime_error("MT5KvCache::append_prefill_kv: append exceeds max_length");
     if (static_cast<int32_t>(prefill_k.size()) != num_layers_ ||
         static_cast<int32_t>(prefill_v.size()) != num_layers_) {
@@ -226,10 +238,10 @@ void MT5KvCache::append_prefill_kv(const std::vector<const void*>& prefill_k,
     const auto offset = static_cast<std::size_t>(position_) * row_bytes;
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
-        cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset, prefill_k[li],
-                        block_bytes, cudaMemcpyDeviceToDevice, stream_);
-        cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset, prefill_v[li],
-                        block_bytes, cudaMemcpyDeviceToDevice, stream_);
+        checked_copy(static_cast<uint8_t*>(cache_k_[li].data()) + offset, prefill_k[li],
+                     block_bytes, cudaMemcpyDeviceToDevice, stream_);
+        checked_copy(static_cast<uint8_t*>(cache_v_[li].data()) + offset, prefill_v[li],
+                     block_bytes, cudaMemcpyDeviceToDevice, stream_);
     }
     position_ += seq_len;
 }
@@ -253,28 +265,29 @@ void MT5KvCache::advance(int32_t n_tokens) {
         auto offset = static_cast<std::size_t>(position_) * row_bytes;
         for (int32_t i = 0; i < num_layers_; ++i) {
             auto li = static_cast<std::size_t>(i);
-            cudaMemcpyAsync(static_cast<uint8_t*>(cache_k_[li].data()) + offset,
-                            present_k_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(static_cast<uint8_t*>(cache_v_[li].data()) + offset,
-                            present_v_[li].data(), row_bytes, cudaMemcpyDeviceToDevice, stream_);
+            checked_copy(static_cast<uint8_t*>(cache_k_[li].data()) + offset, present_k_[li].data(),
+                         row_bytes, cudaMemcpyDeviceToDevice, stream_);
+            checked_copy(static_cast<uint8_t*>(cache_v_[li].data()) + offset, present_v_[li].data(),
+                         row_bytes, cudaMemcpyDeviceToDevice, stream_);
         }
         ++position_;
     } else {
         // Cache full: shift [1..max) → [0..max-1), then write at tail
         auto shift_bytes = static_cast<std::size_t>(max_length_ - 1) * row_bytes;
         auto tail_offset = shift_bytes;
+        position_ = 0;
         for (int32_t i = 0; i < num_layers_; ++i) {
             auto li = static_cast<std::size_t>(i);
             auto* ck = static_cast<uint8_t*>(cache_k_[li].data());
             auto* cv = static_cast<uint8_t*>(cache_v_[li].data());
-            cudaMemcpyAsync(ck, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(ck + tail_offset, present_k_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
-            cudaMemcpyAsync(cv + tail_offset, present_v_[li].data(), row_bytes,
-                            cudaMemcpyDeviceToDevice, stream_);
+            checked_copy(ck, ck + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
+            checked_copy(cv, cv + row_bytes, shift_bytes, cudaMemcpyDeviceToDevice, stream_);
+            checked_copy(ck + tail_offset, present_k_[li].data(), row_bytes,
+                         cudaMemcpyDeviceToDevice, stream_);
+            checked_copy(cv + tail_offset, present_v_[li].data(), row_bytes,
+                         cudaMemcpyDeviceToDevice, stream_);
         }
-        // position_ stays at max_length_ (cache is full, all slots visible)
+        position_ = max_length_; // Publish only after every copy was accepted.
     }
 }
 

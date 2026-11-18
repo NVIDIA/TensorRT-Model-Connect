@@ -16,6 +16,10 @@ def _open_torch_checkpoint(directory):
         import torch
     except ImportError as exc:
         raise ImportError("mT5 checkpoint loading requires torch") from exc
+    from packaging.version import Version
+
+    if Version(torch.__version__.split("+")[0]) < Version("2.10.0"):
+        raise RuntimeError("mT5 checkpoint loading requires torch>=2.10.0 (GHSA-63cw-57p8-fm3p)")
     return {
         name: value.float().numpy()
         for name, value in torch.load(

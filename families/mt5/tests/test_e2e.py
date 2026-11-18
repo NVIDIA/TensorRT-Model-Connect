@@ -105,10 +105,10 @@ def _native_test_binary(name: str) -> Path:
     return _required_path(str(build_dir / name), name)
 
 
-def _model_dir(manifest: dict) -> Path:
+def _model_dir(manifest: dict) -> tuple[Path, str | None]:
     explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
     if explicit:
-        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR"), None
     from huggingface_hub import snapshot_download
 
     try:
@@ -119,7 +119,7 @@ def _model_dir(manifest: dict) -> Path:
         raise AssertionError(
             f"selected {FAMILY} E2E requires the exact cached checkpoint {manifest['hf_id']}"
         ) from error
-    return Path(snapshot)
+    return Path(snapshot), manifest["hf_revision"]
 
 
 def _runtime(manifest: dict) -> tuple[Path, Path]:
@@ -214,7 +214,7 @@ def _run_json(
     return payloads[0]
 
 
-def test_official_checkpoint_e2e(case_name, tmp_path):
+def test_official_checkpoint_e2e(case_name, tmp_path, request):
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": case})
     if evidence_enabled():
@@ -227,8 +227,10 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     record_evidence(
         "checkpoint",
         {
-            "repo_id": manifest["hf_id"],
-            "revision": manifest["hf_revision"],
+            "hf_id": manifest["hf_id"],
+            "expected_hf_revision": manifest["hf_revision"],
+            "hf_revision": None,
+            "revision_status": "unresolved",
             "precision": manifest["precision"],
         },
     )
@@ -245,30 +247,86 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
 
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
-        directory = _model_dir(manifest)
+        directory, checkpoint_revision = _model_dir(manifest)
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(directory),
+            "hf_revision": checkpoint_revision,
+            "revision_status": "unverified"
+            if checkpoint_revision is None
+            else "pinned_cache_lookup",
+        },
+    )
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
         _build(directory, bundle, manifest)
     record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
+    matmul_precision = torch.get_float32_matmul_precision()
+    cudnn_tf32 = torch.backends.cudnn.allow_tf32
+    request.addfinalizer(lambda: torch.set_float32_matmul_precision(matmul_precision))
+    request.addfinalizer(lambda: setattr(torch.backends.cudnn, "allow_tf32", cudnn_tf32))
+    torch.set_float32_matmul_precision("highest")
+    torch.backends.cudnn.allow_tf32 = False
     model = (
         MT5ForConditionalGeneration.from_pretrained(directory, dtype=torch.float32)
         .eval()
         .to("cuda")
     )
-    # The checkpoint publishes SentencePiece assets rather than tokenizer.json.
-    # Use its AutoTokenizer conversion, including the original normalization map.
+    # Compare native bytes from the built bundle with an independent reference.
+    # Transformers5.2 omits the original table when converting SentencePiece.
+    from sentencepiece import SentencePieceProcessor, sentencepiece_model_pb2
+    from tokenizers import normalizers
+
     tokenizer = AutoTokenizer.from_pretrained(directory, use_fast=True).backend_tokenizer
-    tokenizer_path = tmp_path / "reference-tokenizer.json"
-    tokenizer.save(str(tokenizer_path))
+    proto = sentencepiece_model_pb2.ModelProto()
+    proto.ParseFromString((directory / "spiece.model").read_bytes())
+    tokenizer.normalizer = normalizers.Precompiled(proto.normalizer_spec.precompiled_charsmap)
+    tokenizer.save(str(tmp_path / "reference-tokenizer.json"))
+    tokenizer_path = tmp_path / "bundled-tokenizer.json"
+    with bundle.open("rb") as stream:
+        assert stream.read(8) == b"BUNDLE\x01\x00"
+        header = json.loads(stream.read(int.from_bytes(stream.read(8), "little")))
+        payload_offset = stream.tell()
+        section = header["sections"]["tokenizer.json"]
+        stream.seek(payload_offset + section["offset"])
+        tokenizer_path.write_bytes(stream.read(section["length"]))
+    assert tokenizer_path.stat().st_size == section["length"]
+    original = SentencePieceProcessor(model_file=str(directory / "spiece.model"))
+    tokenizer_binary = _native_test_binary("test_mt5_tokenizer")
+    for prompt, expected_ids in [
+        ("ＡＢＣ ① ﬃ", original.encode("ＡＢＣ ① ﬃ") + [original.eos_id()]),
+        ("</s>", [original.eos_id(), original.eos_id()]),
+        ("", [original.eos_id()]),
+    ]:
+        completed = subprocess.run(
+            [str(tokenizer_binary), str(tokenizer_path), prompt],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        native_tokens = json.loads(completed.stdout)
+        record_evidence(
+            "tokenizer_checkpoint_comparison",
+            {
+                "prompt": prompt,
+                "native": native_tokens["ids"],
+                "original_sentencepiece": expected_ids,
+            },
+        )
+        assert native_tokens["ids"] == expected_ids
     record_evidence("thresholds", {"token_ids": "exact equality", "text": "exact equality"})
-    for prompt in case["prompts"]:
+    for prompt_index, prompt in enumerate(case["prompts"]):
+        record_evidence("inputs", {"prompt": prompt})
         tokenizer_binary = _native_test_binary("test_mt5_tokenizer")
         completed = subprocess.run(
             [str(tokenizer_binary), str(tokenizer_path), prompt],
             check=True,
             capture_output=True,
             text=True,
+            timeout=60,
         )
         native_tokens = json.loads(completed.stdout)
         ids = tokenizer.encode(prompt).ids
@@ -305,6 +363,43 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                 "prompt": prompt,
                 "token_ids": expected,
                 "text": tokenizer.decode(expected, skip_special_tokens=True),
+            },
+        )
+        pair = {}
+        expected_result = {
+            "token_ids": expected,
+            "text": tokenizer.decode(expected, skip_special_tokens=True),
+        }
+        for role, result in (("native", actual), ("reference", expected_result)):
+            path = tmp_path / f"{role}-comparison-{prompt_index}.json"
+            path.write_text(json.dumps(result, ensure_ascii=False, indent=2))
+            pair[role] = path
+        record_evidence(
+            "reference_comparison",
+            {
+                "label": f"mT5 generated tokens and text, prompt {prompt_index}",
+                "scope": "independent_reference",
+                "enforced": True,
+                **pair,
+                "checks": [
+                    {
+                        "name": "token_mismatch_count",
+                        "scope": "independent_reference",
+                        "actual": sum(a != b for a, b in zip(actual["token_ids"], expected))
+                        + abs(len(actual["token_ids"]) - len(expected)),
+                        "operator": "==",
+                        "expected": 0,
+                        "passed": actual["token_ids"] == expected,
+                    },
+                    {
+                        "name": "text_mismatch_count",
+                        "scope": "independent_reference",
+                        "actual": int(actual["text"] != expected_result["text"]),
+                        "operator": "==",
+                        "expected": 0,
+                        "passed": actual["text"] == expected_result["text"],
+                    },
+                ],
             },
         )
         assert actual["token_ids"] == expected

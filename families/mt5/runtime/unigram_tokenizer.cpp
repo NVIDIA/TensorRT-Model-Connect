@@ -285,20 +285,34 @@ class UnigramTokenizer final : public ITokenizer {
             return mAddSpecialTokens ? make_special_frame({}) : std::vector<int32_t>{};
         }
 
-        // Normalize
-        std::string normalized = mCharsMap.normalize(text);
-        if (mLowercase)
-            normalized = lowercase_ascii(std::move(normalized));
-
-        // Pre-tokenize: WhitespaceSplit → Metaspace
-        auto words = whitespace_split(normalized);
         std::vector<int32_t> ids;
-        for (size_t i = 0; i < words.size(); ++i) {
-            // Metaspace: prepend ▁ to each word
-            std::string processed = kMetaspaceChar + words[i];
-            auto word_ids = viterbi_encode(processed, mTrie, mUnkId, mUnkScore);
-            ids.insert(ids.end(), word_ids.begin(), word_ids.end());
+        auto ordinary = [&](const std::string& segment) {
+            std::string normalized = mCharsMap.normalize(segment);
+            if (mLowercase)
+                normalized = lowercase_ascii(std::move(normalized));
+            for (const auto& word : whitespace_split(normalized)) {
+                auto word_ids = viterbi_encode(kMetaspaceChar + word, mTrie, mUnkId, mUnkScore);
+                ids.insert(ids.end(), word_ids.begin(), word_ids.end());
+            }
+        };
+        // Added tokens match literal input before normalization or Metaspace.
+        size_t start = 0;
+        for (size_t position = 0; position < text.size();) {
+            bool matched = false;
+            for (const auto& [token, id] : mAddedTokenPatterns) {
+                if (text.compare(position, token.size(), token) != 0)
+                    continue;
+                ordinary(text.substr(start, position - start));
+                ids.push_back(id);
+                position += token.size();
+                start = position;
+                matched = true;
+                break;
+            }
+            if (!matched)
+                ++position;
         }
+        ordinary(text.substr(start));
 
         if (mAddSpecialTokens)
             ids = make_special_frame(ids);
@@ -484,10 +498,15 @@ class UnigramTokenizer final : public ITokenizer {
                 }
                 mIdToToken[tok_id] = content;
                 mTokenToId[content] = tok_id;
+                mAddedTokenPatterns.emplace_back(content, tok_id);
                 if (tok.value("special", false))
                     mDecodeSkipIds.insert(tok_id);
             }
         }
+        std::stable_sort(mAddedTokenPatterns.begin(), mAddedTokenPatterns.end(),
+                         [](const auto& left, const auto& right) {
+                             return left.first.size() > right.first.size();
+                         });
     }
 
     // Extract BOS/EOS from TemplateProcessing "single" array
@@ -563,6 +582,7 @@ class UnigramTokenizer final : public ITokenizer {
     std::vector<float> mScores;
     std::unordered_map<std::string, int32_t> mTokenToId;
     std::unordered_set<int32_t> mDecodeSkipIds;
+    std::vector<std::pair<std::string, int32_t>> mAddedTokenPatterns;
     Trie mTrie;
 
     int32_t mUnkId = 0;

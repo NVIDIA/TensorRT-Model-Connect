@@ -99,14 +99,6 @@ class _MT5Model:
                 np.float32
             )
 
-        dec_cross_rel_bias_key = (
-            "decoder.block.0.layer.1.EncDecAttention.relative_attention_bias.weight"
-        )
-        if _has_tensor(readers, dec_cross_rel_bias_key):
-            weights["dec_cross_rel_attn_bias"] = _load_tensor(
-                readers, dec_cross_rel_bias_key
-            ).astype(np.float32)
-
         for i in range(dec_layers):
             hf = f"decoder.block.{i}"
             pfx = f"layer.{i}"
@@ -244,7 +236,6 @@ class _MT5Model:
             else attn_mask
         )
         dsrb = weights.get("dec_self_rel_attn_bias")
-        dxrb = weights.get("dec_cross_rel_attn_bias")
         if debug_layer_outputs:
             _mark_debug_output(network, hs, "debug_embed")
         pk_out, pv_out = [], []
@@ -270,7 +261,6 @@ class _MT5Model:
                 max_cache_length=max_cache_length,
                 max_source_positions=msp,
                 dec_self_rel_bias=dsrb,
-                dec_cross_rel_bias=dxrb,
                 num_buckets=nb,
                 max_distance=md,
                 enc_mask=enc_mask_3d,
@@ -498,7 +488,6 @@ def _add_mt5_decoder_layer(
     max_cache_length,
     max_source_positions,
     dec_self_rel_bias,
-    dec_cross_rel_bias,
     num_buckets,
     max_distance,
     enc_mask=None,
@@ -557,20 +546,7 @@ def _add_mt5_decoder_layer(
     cq = _project(network, cn, h, asz, weights, f"{prefix}.cross_w_q", dtype)
     ckp = _project(network, cross_k, h, asz, weights, f"{prefix}.cross_w_k", dtype)
     cvp = _project(network, cross_v, h, asz, weights, f"{prefix}.cross_w_v", dtype)
-    if dec_cross_rel_bias is not None:
-        xbi = _make_mt5_cross_buckets(aw, msp, num_buckets, max_distance)
-        xbv = dec_cross_rel_bias[xbi.flatten()].reshape(aw, msp, nh).transpose(2, 0, 1)
-        xbc = graph_ops.add_constant(network, xbv.shape, xbv.astype(dtype), dtype=dtype)
-        xbr = network.add_gather(xbc, position_id, 1)
-        cross_mask = xbr.get_output(0)
-        if enc_mask is not None:
-            cross_mask = network.add_elementwise(
-                cross_mask, enc_mask, trt.ElementWiseOperation.SUM
-            ).get_output(0)
-        cross_mask_4d = network.add_shuffle(cross_mask)
-        cross_mask_4d.reshape_dims = (1, nh, 1, msp)
-        cross_mask = cross_mask_4d.get_output(0)
-    elif enc_mask is not None:
+    if enc_mask is not None:
         cross_mask_4d = network.add_shuffle(enc_mask)
         cross_mask_4d.reshape_dims = (1, 1, 1, msp)
         cross_mask = cross_mask_4d.get_output(0)
@@ -605,17 +581,6 @@ def _add_mt5_decoder_layer(
 def _make_mt5_causal_buckets(ml, nb=32, md=128):
     cp = np.arange(ml, dtype=np.int32)[:, None]
     mp = np.arange(ml, dtype=np.int32)[None, :]
-    n = np.maximum(-(mp - cp), 0)
-    me = nb // 2
-    is_s = n < me
-    nc = np.maximum(n.astype(np.float32), 1)
-    vl = me + (np.log(nc / me) / np.log(md / me) * (nb - me)).astype(np.int32)
-    return np.where(is_s, n, np.minimum(vl, nb - 1)).astype(np.int32)
-
-
-def _make_mt5_cross_buckets(ql, kl, nb=32, md=128):
-    cp = np.arange(ql, dtype=np.int32)[:, None]
-    mp = np.arange(kl, dtype=np.int32)[None, :]
     n = np.maximum(-(mp - cp), 0)
     me = nb // 2
     is_s = n < me
@@ -705,12 +670,15 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     tokenizer = directory / "tokenizer.json"
     if not tokenizer.is_file():
         from transformers import AutoTokenizer
+        from sentencepiece import sentencepiece_model_pb2
+        from tokenizers import normalizers
 
-        tokenizer_json = (
-            AutoTokenizer.from_pretrained(directory, use_fast=True)
-            .backend_tokenizer.to_str()
-            .encode()
-        )
+        backend = AutoTokenizer.from_pretrained(directory, use_fast=True).backend_tokenizer
+        proto = sentencepiece_model_pb2.ModelProto()
+        proto.ParseFromString((directory / "spiece.model").read_bytes())
+        if proto.normalizer_spec.precompiled_charsmap:
+            backend.normalizer = normalizers.Precompiled(proto.normalizer_spec.precompiled_charsmap)
+        tokenizer_json = backend.to_str().encode()
     else:
         tokenizer_json = tokenizer.read_bytes()
     writer.set_header(family="mt5", task=request.task, backend=request.backend)
