@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "rt_detr"
 TASKS = frozenset({"object_detection"})
@@ -248,7 +249,7 @@ def _box_iou(left: list[float], right: list[float]) -> float:
     return inter_area / union_area if union_area > 0.0 else 0.0
 
 
-def _assert_parity(actual: dict, expected: list[dict]) -> None:
+def _assert_parity(actual: dict, expected: list[dict]) -> list[dict]:
     boxes = actual.get("boxes", [])
     scores = actual.get("scores", [])
     classes = actual.get("classes", [])
@@ -272,6 +273,7 @@ def _assert_parity(actual: dict, expected: list[dict]) -> None:
         f"detection count mismatch: native={len(native)} reference={len(reference)}"
     )
     matched = set()
+    measurements = []
     for detection in native:
         best_match = None
         best_iou = 0.0
@@ -292,15 +294,118 @@ def _assert_parity(actual: dict, expected: list[dict]) -> None:
             f"does not overlap reference box={reference[best_match]['box']}"
         )
         assert abs(float(detection["score"]) - float(reference[best_match]["score"])) <= 0.05
+        measurements.append(
+            {
+                "native": detection,
+                "reference": reference[best_match],
+                "iou": best_iou,
+                "score_error": abs(
+                    float(detection["score"]) - float(reference[best_match]["score"])
+                ),
+            }
+        )
         matched.add(best_match)
+    return measurements
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
-    model_dir = _model_dir(manifest)
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    if evidence_enabled():
+        for key in ("image", "test_image", "audio"):
+            if key in case:
+                for source in (TEST_ROOT / case[key], TEST_ROOT / "data" / case[key]):
+                    if source.is_file():
+                        record_evidence("inputs", {key: source})
+                        break
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {
+            key: value
+            for key, value in case.items()
+            if any(word in key for word in ("error", "cosine", "atol", "rtol", "snr", "rmse"))
+        },
+    )
+    _, manifest, case = CASES[case_name]
+    with evidence_stage("checkpoint"):
+        model_dir = _model_dir(manifest)
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
-    actual = _native(binary, runtime_root, bundle, case, tmp_path)
-    expected = _official_reference(model_dir, case)
-    _assert_parity(actual, expected)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
+    record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
+    record_evidence(
+        "thresholds",
+        {"box_iou_min": 0.5, "score_error_max": 0.05, "score_threshold": case["score_threshold"]},
+    )
+    with evidence_stage("native"):
+        actual = _native(binary, runtime_root, bundle, case, tmp_path)
+    record_evidence("native", actual)
+    record_evidence("inputs", {"image": tmp_path / "native-input.png"})
+    with evidence_stage("reference"):
+        expected = _official_reference(model_dir, case)
+    record_evidence("reference", {"mode": "hf_transformers", "detections": expected})
+    with evidence_stage("compare"):
+        measurements = _assert_parity(actual, expected)
+    record_evidence("metrics", measurements)
+    if evidence_enabled():
+        from PIL import Image, ImageDraw
+
+        records = {
+            "native": [
+                {"box": actual["boxes"][4 * i : 4 * i + 4], "label": label}
+                for i, label in enumerate(actual["classes"])
+            ],
+            "reference": expected,
+        }
+        views, pair = [], {}
+        for role, detections in records.items():
+            raw = tmp_path / f"{role}-detections.json"
+            raw.write_text(json.dumps(actual if role == "native" else expected, indent=2))
+            pair[role] = raw
+            image = Image.open(tmp_path / "native-input.png").convert("RGB")
+            draw = ImageDraw.Draw(image)
+            for detection in detections:
+                draw.rectangle(detection["box"], outline="red", width=2)
+                draw.text(tuple(detection["box"][:2]), str(detection["label"]), fill="red")
+            preview = tmp_path / f"{role}-detections.png"
+            image.save(preview)
+            views.append({"title": f"Sample 0 / {role}", "image": preview})
+        record_evidence("views", views)
+        minimum = min(item["iou"] for item in measurements)
+        maximum = max(item["score_error"] for item in measurements)
+        record_evidence(
+            "reference_comparison",
+            {
+                "label": "Matched detection boxes and scores",
+                "scope": "independent_reference",
+                "enforced": True,
+                **pair,
+                "checks": [
+                    {
+                        "name": "box_iou",
+                        "scope": "independent_reference",
+                        "actual": minimum,
+                        "operator": ">=",
+                        "expected": 0.5,
+                        "passed": minimum >= 0.5,
+                    },
+                    {
+                        "name": "score_error",
+                        "scope": "independent_reference",
+                        "actual": maximum,
+                        "operator": "<=",
+                        "expected": 0.05,
+                        "passed": maximum <= 0.05,
+                    },
+                ],
+            },
+        )
