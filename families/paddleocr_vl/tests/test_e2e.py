@@ -350,7 +350,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     record_evidence(
         "thresholds", {"token_ids": "exact equality", "text": "exact equality", "pixel_atol": 2e-7}
     )
-    for inputs, path, expected_value in zip(batches, pages, case["expected_values"]):
+    for sample_index, (inputs, path, expected_value) in enumerate(
+        zip(batches, pages, case["expected_values"])
+    ):
         record_evidence(
             "inputs",
             {"image": path, "question": case["question"], "expected_value": expected_value},
@@ -390,4 +392,43 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         assert payload["token_ids"] == expected_ids
         assert payload["text"] == expected_text
         assert expected_value in payload["text"]
+        if evidence_enabled():
+            # Persist the actual enforced equality checks so report readers do
+            # not have to infer the native/reference roles from local names.
+            pair = {}
+            for role, output in (
+                ("native", payload),
+                ("reference", {"token_ids": expected_ids, "text": expected_text}),
+            ):
+                path = tmp_path / f"{role}-comparison-{sample_index}.json"
+                path.write_text(json.dumps(output, ensure_ascii=False, indent=2))
+                pair[role] = path
+            mismatches = abs(len(payload["token_ids"]) - len(expected_ids)) + sum(
+                left != right for left, right in zip(payload["token_ids"], expected_ids)
+            )
+            text_mismatch = int(payload["text"] != expected_text)
+            record_evidence(
+                "reference_comparison",
+                {
+                    "label": f"Generated tokens and text for sample {sample_index}",
+                    "scope": "independent_reference",
+                    "enforced": True,
+                    **pair,
+                    "checks": [
+                        {
+                            "name": name,
+                            "scope": "independent_reference",
+                            "actual": value,
+                            "operator": "==",
+                            "expected": 0,
+                            "passed": value == 0,
+                        }
+                        for name, value in (
+                            ("token_mismatches", mismatches),
+                            ("text_mismatch", text_mismatch),
+                        )
+                    ],
+                },
+            )
+
         print(f"PaddleOCR exact tokens={len(expected_ids)}, text={expected_text!r}")
