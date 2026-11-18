@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "qwen2_5_omni"
 TASKS = frozenset({"text_continuation"})
@@ -196,12 +197,38 @@ def _run_json(
 
 
 def test_official_checkpoint_e2e(case_name, tmp_path):
+    _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    if evidence_enabled():
+        for key in ("image", "test_image", "audio"):
+            if key in case:
+                for source in (TEST_ROOT / case[key], TEST_ROOT / "data" / case[key]):
+                    if source.is_file():
+                        record_evidence("inputs", {key: source})
+                        break
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {
+            key: value
+            for key, value in case.items()
+            if any(word in key for word in ("error", "cosine", "atol", "rtol", "snr", "rmse"))
+        },
+    )
     import gc
     import torch
     from transformers import AutoTokenizer, Qwen2_5OmniConfig, Qwen2_5OmniForConditionalGeneration
 
     _, manifest, case = CASES[case_name]
-    directory = _model_dir(manifest)
+    with evidence_stage("checkpoint"):
+        directory = _model_dir(manifest)
     binary, runtime_root = _runtime()
     tokenizer = AutoTokenizer.from_pretrained(directory)
     tokenizer_json = tmp_path / "tokenizer.json"
@@ -216,7 +243,9 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         assert completed.returncode == 0, completed.stderr
         assert json.loads(completed.stdout) == tokenizer.encode(prompt)
     bundle = tmp_path / manifest["bundle"]
-    _build(directory, bundle, manifest)
+    with evidence_stage("build"):
+        _build(directory, bundle, manifest)
+    record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     config = Qwen2_5OmniConfig.from_pretrained(directory)
@@ -229,6 +258,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         .to("cuda")
     )
     reference = complete.thinker
+    record_evidence("thresholds", {"token_ids": "exact equality", "text": "exact equality"})
     expected = []
     for prompt in case["prompts"]:
         inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
@@ -255,6 +285,18 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             prompt,
             "--max-new-tokens",
             str(case["max_new_tokens"]),
+        )
+        record_evidence("inputs", {"prompt": prompt})
+        record_evidence("native", {"prompt": prompt, **payload})
+        record_evidence(
+            "reference",
+            {
+                "mode": "hf_transformers",
+                "precision": manifest["precision"],
+                "prompt": prompt,
+                "token_ids": expected_ids,
+                "text": expected_text,
+            },
         )
         assert payload["token_ids"] == expected_ids
         assert payload["text"] == expected_text
