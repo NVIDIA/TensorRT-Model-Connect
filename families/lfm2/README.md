@@ -18,6 +18,34 @@ matmul run in fp32. The depthwise convolution, attention `out_proj`, embedding,
 norms and `lm_head` stay 16 bit. On TensorRT 11.4, B200, decode is 1.20x to
 1.38x faster than the unquantized engine.
 
+### INT4-AWQ
+
+`quantization=int4_awq` (W4A16) quantizes the original checkpoint at build time
+for `LiquidAI/LFM2-1.2B` @ `40f3da0d`, following the llama family recipe: the
+per-projection AWQ smoothing scales (ModelOpt `INT4_AWQ_CFG`, `awq_lite`) are
+committed in `awq_scales/` and selected by float64 sums of checkpoint values;
+the build recomputes group-128 block scales (`amax / 7`) and runs
+`INT4 constant -> Dequantize -> MatMul` at builder optimization level 3, where
+Ampere and Ada fuse the dequantization into the GEMM. The quantized projections
+are the FP8 set (conv-block `in_proj`/`out_proj`, attention q/k/v, `w1`/`w2`/`w3`).
+Another checkpoint needs its own scale file:
+`python -m families.lfm2.calibrate_awq_scales`.
+
+RTX 6000 Ada, TensorRT 11.4, fp16 engine, 512-token cache. Latency is plain
+`execute_async_v3`, prefill 128 tokens (two 64-token launches) and decode one
+token after them; 5 warmup + 50 timed runs, median of 3 measurements. KL and
+top-1 agreement are against Hugging Face fp32 on wikitext-2 (5,120 tokens).
+
+| Engine | Plan GB | Prefill ms | Decode ms | Fused INT4 GEMMs prefill / decode | KL | Top-1 | ARC-Easy (of 300) |
+|---|---|---|---|---|---|---|---|
+| fp16 | 2.34 | 6.65 | 3.20 | - | 0.0001 | 99.2% | 267 |
+| FP8 | 1.34 | 4.49 | 2.16 | - | 0.0146 | 92.3% | 269 |
+| INT4-AWQ | 1.00 | 4.93 | 1.86 | 70 / 74 of 86 | 0.126 | 77.4% | 262 |
+
+INT4-AWQ decodes 1.72x faster than fp16 and 1.16x faster than FP8 with a 25%
+smaller plan than FP8, and loses more quality than FP8. At optimization level 1
+no INT4 GEMM fuses and decode takes 6.29 ms.
+
 ### NVFP4
 
 NVFP4 was measured and is not shipped: it is faster than FP8, but the quality
