@@ -111,6 +111,23 @@ class _Graph:
         return self.network.add_matrix_multiply(probabilities, trt.MatrixOperation.NONE,
                                                 value, trt.MatrixOperation.NONE).get_output(0)
 
+    def fused_attention(self, query, key, value, heads, head_dim, mask=None):
+        """Attention of [heads, rows, head_dim] tensors through TensorRT's IAttention.
+
+        The fused layer never materializes the [heads, queries, keys] scores, which a frame at the family's
+        patch capacity, or a long prefill, cannot afford. IAttention does not scale the scores itself, so the
+        query is pre-scaled. ``mask`` is the additive [1, queries, keys] mask: 0 attends, the lowest float not.
+        """
+        q, k, v = [self.reshape(item, (1, heads, -1, head_dim)) for item in (query, key, value)]
+        q = self.mul(q, self.scalar(head_dim ** -0.5, 4))
+        layer = self.network.add_attention(q, k, v, trt.AttentionNormalizationOp.SOFTMAX, False)
+        layer.decomposable = True  # a primitive lowering where no fused kernel fits the shape or precision
+        if mask is not None:
+            allowed = self.binary(mask, self.scalar(-1.0, 3, trt.float32), trt.ElementWiseOperation.GREATER)
+            heads_axis = self.constant(np.array([1]), trt.int32)
+            layer.mask = self.network.add_unsqueeze(allowed, heads_axis).get_output(0)  # [1, 1, queries, keys]
+        return self.reshape(layer.get_output(0), (heads, -1, head_dim))
+
     def output(self, value, name, dtype=None):
         result = self.cast(value, dtype) if dtype is not None else value
         result.name = name
@@ -176,7 +193,10 @@ def build_decoder(config: ModelConfig, weights, max_cache_length: int, *,
             concat = n.add_concatenation([past, current])
             concat.axis = 1
             cached.append(n.add_gather(concat.get_output(0), repeat, 0).get_output(0))
-        attended = g.attention(q, cached[0], cached[1], d, mask)
+        if g.dtype == trt.float32:  # TensorRT has no fused FP32 kernel here; its masked lowering is far larger
+            attended = g.attention(q, cached[0], cached[1], d, mask)
+        else:
+            attended = g.fused_attention(q, cached[0], cached[1], config.num_attention_heads, d, mask)
         reorder = n.add_shuffle(attended)
         reorder.first_transpose = (1, 0, 2)
         reorder.reshape_dims = (-1, h)
@@ -225,7 +245,7 @@ def build_visual(config: ModelConfig, weights, max_patches: int, *, precision="f
         norm = g.norm(x, weights, prefix + ".layer_norm1", vision["layer_norm_eps"], True)
         q, k, v = [g.reshape(g.linear(norm, weights, prefix + ".self_attn." + kind + "_proj", True),
                              (-1, heads, width // heads), (1, 0, 2)) for kind in ("q", "k", "v")]
-        attended = g.attention(q, k, v, width // heads)
+        attended = g.fused_attention(q, k, v, heads, width // heads)
         shuffle = n.add_shuffle(attended)
         shuffle.first_transpose = (1, 0, 2)
         shuffle.reshape_dims = (-1, width)
