@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "families/layoutlmv3/runtime/document_input.h"
+#include "families/layoutlmv3/runtime/fp32_kernels.h"
 #include "families/layoutlmv3/runtime/image_preprocess.h"
 #include "trtmc/internal/model.h"
 #include "trtmc/runtime/family_factory.h"
@@ -86,6 +87,7 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     if (length < 4 || length > 512 || width <= 0 || width > 8192 || vocab <= 0 ||
         cfg.at("image_size") != 224 || cfg.at("spatial_buckets").size() != 2001)
         throw std::runtime_error("Invalid LayoutLMv3 document profile");
+    layoutlmv3::initialize_fp32_kernels();
     const auto plan = layoutlmv3::section(context.reader, "model.plan");
     auto engine = context.backend.create_module(plan.data(), plan.size(), {});
     if (!engine || !engine->ok())

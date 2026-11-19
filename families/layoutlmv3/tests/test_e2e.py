@@ -320,6 +320,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
             normalized,
             length,
             tmp_path / f"reference-document-{index}",
+            reference_environment=manifest["reference_environment"],
         )
         preprocess_request = dict(
             height=image.height,

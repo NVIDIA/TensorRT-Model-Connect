@@ -23,7 +23,7 @@ target_include_directories(trtmc_model_layoutlmv3 SYSTEM PRIVATE
 target_link_libraries(trtmc_model_layoutlmv3 PRIVATE trtmc_core nlohmann_json::nlohmann_json
   ${TRTMC_CUDART_LIBRARY} ICU::uc ICU::i18n torch_cpu c10)
 target_compile_options(trtmc_model_layoutlmv3 PRIVATE
-  ${_layoutlmv3_torch_cxx_flags} -Wall -Wextra -Wpedantic)
+  "$<$<COMPILE_LANGUAGE:CXX>:${_layoutlmv3_torch_cxx_flags};-Wall;-Wextra;-Wpedantic>")
 set_target_properties(trtmc_model_layoutlmv3 PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
   BUILD_RPATH "\$ORIGIN;${TORCH_INSTALL_PREFIX}/lib"
@@ -46,3 +46,32 @@ if(TRTMC_BUILD_TESTS)
   target_link_libraries(test_layoutlmv3_runtime PRIVATE trtmc_c nlohmann_json::nlohmann_json)
   set_target_properties(test_layoutlmv3_runtime PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 endif()
+
+target_sources(trtmc_model_layoutlmv3 PRIVATE fp32_kernels_init.cpp)
+if(TARGET trtmc_byok_tvm_ffi)
+  execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c "from importlib.metadata import PackageNotFoundError, distribution; from pathlib import Path\ntry: print(Path(distribution('nvidia-cublas').locate_file('nvidia/cu13/lib/libcublasLt.so.13')).resolve(), end='')\nexcept PackageNotFoundError: pass"
+    RESULT_VARIABLE _layoutlmv3_math_result OUTPUT_VARIABLE _layoutlmv3_math_library
+    ERROR_VARIABLE _layoutlmv3_math_error)
+  if(NOT _layoutlmv3_math_result EQUAL 0)
+    message(FATAL_ERROR "LayoutLMv3 could not inspect its CUDA math dependency: ${_layoutlmv3_math_error}")
+  endif()
+  if(NOT EXISTS "${_layoutlmv3_math_library}")
+    find_library(_layoutlmv3_math_toolkit NAMES cublasLt libcublasLt.so.13
+      HINTS ${CUDAToolkit_LIBRARY_DIR} ${CUDAToolkit_LIBRARY_ROOT}/lib64 REQUIRED)
+    set(_layoutlmv3_math_library "${_layoutlmv3_math_toolkit}")
+  endif()
+  target_sources(trtmc_model_layoutlmv3 PRIVATE fp32_kernels.cu fp32_kernels_ffi.cpp fp32_linear.cpp)
+  target_compile_definitions(trtmc_model_layoutlmv3 PRIVATE
+    TRTMC_LAYOUTLMV3_CUBLASLT_BUILD_LIBRARY="${_layoutlmv3_math_library}")
+  target_include_directories(trtmc_model_layoutlmv3 SYSTEM PRIVATE ${TRTMC_TVM_FFI_INCLUDE_DIR})
+  target_link_libraries(trtmc_model_layoutlmv3 PRIVATE
+    trtmc_byok_tvm_ffi ${TRTMC_TVM_FFI_LIBRARY} ${TRTMC_CUDART_LIBRARY} ${CMAKE_DL_LIBS})
+  target_compile_definitions(trtmc_model_layoutlmv3 PRIVATE TRTMC_LAYOUTLMV3_HAS_FP32_KERNELS=1)
+  target_compile_options(trtmc_model_layoutlmv3 PRIVATE
+    "$<$<COMPILE_LANGUAGE:CUDA>:--fmad=true;--prec-div=true;--prec-sqrt=true;--ftz=false>")
+else()
+  target_compile_definitions(trtmc_model_layoutlmv3 PRIVATE TRTMC_LAYOUTLMV3_HAS_FP32_KERNELS=0)
+endif()
+set_property(TARGET trtmc_model_layoutlmv3 APPEND PROPERTY
+  INSTALL_RPATH "\$ORIGIN/../../tvm_ffi/lib")

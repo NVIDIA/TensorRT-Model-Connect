@@ -32,25 +32,13 @@ def _restore_dtype(network, tensor, original):
 
 
 def add_layer_norm(network, inp, gamma, beta, eps):
+    from .native_kernels import add_norm
+
     source, original = _as_float32(network, inp)
-    axis = len(inp.shape) - 1
-    mean = network.add_reduce(source, trt.ReduceOperation.AVG, 1 << axis, True).get_output(0)
-    centred = network.add_elementwise(source, mean, trt.ElementWiseOperation.SUB).get_output(0)
-    square = network.add_elementwise(centred, centred, trt.ElementWiseOperation.PROD).get_output(0)
-    variance = network.add_reduce(square, trt.ReduceOperation.AVG, 1 << axis, True).get_output(0)
     width = int(inp.shape[-1])
-    epsilon = add_constant(network, tuple([1] * len(inp.shape)), np.full((1,), eps))
-    shifted = network.add_elementwise(variance, epsilon, trt.ElementWiseOperation.SUM).get_output(0)
-    deviation = network.add_unary(shifted, trt.UnaryOperation.SQRT).get_output(0)
-    normed = network.add_elementwise(centred, deviation, trt.ElementWiseOperation.DIV).get_output(0)
-    shape = tuple([1] * (len(inp.shape) - 1) + [width])
-    scaled = network.add_elementwise(
-        normed, add_constant(network, shape, gamma), trt.ElementWiseOperation.PROD
-    ).get_output(0)
-    affine = network.add_elementwise(
-        scaled, add_constant(network, shape, beta), trt.ElementWiseOperation.SUM
-    ).get_output(0)
-    return _restore_dtype(network, affine, original)
+    scale = add_constant(network, (width,), gamma)
+    bias = add_constant(network, (width,), beta)
+    return _restore_dtype(network, add_norm(network, source, scale, bias, eps), original)
 
 
 def add_linear(network, inp, weight, bias=None, dtype=np.float32, *, matmul=None):
@@ -60,6 +48,28 @@ def add_linear(network, inp, weight, bias=None, dtype=np.float32, *, matmul=None
     a quantized projection takes its place; the bias is added the same way either way.
     """
     rank = len(inp.shape)
+    if matmul is None and bias is not None and np.dtype(dtype) == np.dtype(np.float32):
+        from .native_kernels import add_fp32_kernel
+
+        shape = tuple(inp.shape)
+        rows = int(np.prod(shape[:-1]))
+        flatten = network.add_shuffle(inp)
+        flatten.reshape_dims = (rows, shape[-1])
+        weight = np.ascontiguousarray(weight, dtype=np.float32)
+        bias = np.ascontiguousarray(bias, dtype=np.float32)
+        result = add_fp32_kernel(
+            network,
+            "linear",
+            [
+                flatten.get_output(0),
+                add_constant(network, weight.shape, weight),
+                add_constant(network, bias.shape, bias),
+            ],
+            (rows, weight.shape[0]),
+        )
+        restore = network.add_shuffle(result)
+        restore.reshape_dims = shape[:-1] + (weight.shape[0],)
+        return restore.get_output(0)
     if matmul is not None:
         out = matmul(network, inp)
     else:

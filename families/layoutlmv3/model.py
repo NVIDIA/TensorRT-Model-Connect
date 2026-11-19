@@ -9,6 +9,7 @@ import numpy as np
 import tensorrt as trt
 
 from . import graph as g
+from .native_kernels import add_fp32_kernel
 
 
 def build(request, writer):
@@ -204,10 +205,9 @@ def build(request, writer):
         stabilized = mul(
             op(scaled, maximum, trt.ElementWiseOperation.SUB), const(np.full((1, 1, 1, 1), 32))
         )
-        softmax = net.add_softmax(stabilized)
-        softmax.axes = 8
+        probabilities = add_fp32_kernel(net, "softmax", [stabilized], stabilized.shape)
         context = net.add_matrix_multiply(
-            softmax.get_output(0), trt.MatrixOperation.NONE, value, trt.MatrixOperation.NONE
+            probabilities, trt.MatrixOperation.NONE, value, trt.MatrixOperation.NONE
         ).get_output(0)
         context = shuf(context, (total, width), (0, 2, 1, 3))
         hidden = norm(
@@ -215,7 +215,7 @@ def build(request, writer):
             prefix + ".attention.output.LayerNorm",
         )
         inner = linear(hidden, prefix + ".intermediate.dense")
-        inner = net.add_activation(inner, trt.ActivationType.GELU_ERF).get_output(0)
+        inner = add_fp32_kernel(net, "gelu", [inner], inner.shape)
         hidden = norm(
             add(hidden, linear(inner, prefix + ".output.dense")), prefix + ".output.LayerNorm"
         )
