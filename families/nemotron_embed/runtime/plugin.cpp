@@ -100,8 +100,10 @@ class Pipeline final : public internal::IModel, public internal::ITextToEmbeddin
 } // namespace trtmc::nemotron_embed
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("nemotron_embed does not support --kv-cache-size");
     using namespace trtmc;
-    if (context.kv_cache_size_bytes != 0 || context.reader.info().task != "text_to_embedding")
+    if (context.reader.info().task != "text_to_embedding")
         throw std::invalid_argument("Nemotron requires text embedding without a KV cache");
     const auto data = nemotron_embed::section(context.reader, "runtime.json");
     const auto cfg = nlohmann::json::parse(data.begin(), data.end());

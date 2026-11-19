@@ -16,6 +16,7 @@ def test_bidirectional_embed_checkpoint_has_one_owner():
     family, support = resolve_family(metadata)
     assert family == "nemotron_embed"
     assert support.tasks == ("text_to_embedding",)
+    assert support.default_task == "text_to_embedding"
 
 
 def test_generative_ministral_is_not_claimed():
