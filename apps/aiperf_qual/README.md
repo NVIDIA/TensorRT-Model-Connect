@@ -447,6 +447,12 @@ A suite with media and neither `media_root` nor `hf_datasets_cache` configured i
 - New machine: a new file under `config/environments/` (paths, Python interpreters, ports, lock, model list,
   retention); Docker or bare metal only differ in these paths. A run's own inputs (its ledger and multi-host
   assignment) stay with that run's results and are passed by path (`run-all --ledger`, `--assignment`).
+- Several hosts without a frozen assignment: a coordinator hands profiles (a checkpoint's profiles together) to
+  hosts as they free up. Each attempt is a fragment, `run-all --campaign ID --fragment ID --host NAME --profile ...`
+  in an `--out-root` of its own (it resumes only as the same fragment). The coordinator's manifest
+  (`{"campaign": ID, "expected": [profiles], "accepted": [fragments]}`) decides what merges: `merge-check
+  --manifest` and `summary --manifest` require exactly one result per expected profile among the accepted
+  fragments, run with the same campaign inputs, and leave fragments the manifest did not accept out.
 
 
 ## Native endpoint group coverage
