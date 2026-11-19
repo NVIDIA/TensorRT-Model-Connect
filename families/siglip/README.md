@@ -70,6 +70,10 @@ The one selected E2E builds the FP32 bundle and executes all three Tasks against
 the official Hugging Face FP32 reference with Pillow preprocessing. It uses
 `data/test_img.png` and the car/cat text pair from the unchanged manifest.
 Checkpoint/tokenizer revision: `75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2`.
+The same pinned identity is recorded in the documentation checkpoint snapshot
+`website/data/hf-model-metadata.json`. The publisher configuration has
+`model_type: siglip` and no `architectures` field; the snapshot retains that
+absence instead of inventing an architecture declaration.
 
 | Comparison | Maximum absolute error | Existing tolerance |
 | --- | ---: | ---: |
