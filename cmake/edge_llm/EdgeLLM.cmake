@@ -6,6 +6,20 @@ option(TRTMC_ENABLE_EDGELLM "Install the pinned native Edge-LLM SDK and builder"
 if(NOT TRTMC_ENABLE_EDGELLM)
   return()
 endif()
+# Temporary migration switch. Keep unported family adapters on the established
+# SDK by default. One Model Connect build links exactly one Edge release.
+if(NOT DEFINED TRTMC_EDGELLM_RELEASE)
+  set(TRTMC_EDGELLM_RELEASE "0.11.0")
+endif()
+# A Conan toolchain may provide a normal variable rather than a cache entry.
+set(TRTMC_EDGELLM_RELEASE "${TRTMC_EDGELLM_RELEASE}" CACHE STRING "Edge-LLM SDK release for this build" FORCE)
+set_property(CACHE TRTMC_EDGELLM_RELEASE PROPERTY STRINGS "0.11.0" "0.12.0")
+if(TRTMC_EDGELLM_RELEASE STREQUAL "0.12.0")
+  include("${CMAKE_CURRENT_LIST_DIR}/0.12/Provider.cmake")
+  return()
+elseif(NOT TRTMC_EDGELLM_RELEASE STREQUAL "0.11.0")
+  message(FATAL_ERROR "Unsupported TRTMC_EDGELLM_RELEASE: ${TRTMC_EDGELLM_RELEASE}")
+endif()
 if(CMAKE_CROSSCOMPILING)
   message(FATAL_ERROR "Edge-LLM cross compilation is not supported")
 endif()
