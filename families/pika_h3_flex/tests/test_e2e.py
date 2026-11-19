@@ -105,10 +105,10 @@ def _native_test_binary(name: str) -> Path:
     return _required_path(str(build_dir / name), name)
 
 
-def _model_dir(manifest: dict) -> Path:
+def _model_dir(manifest: dict) -> tuple[Path, str | None]:
     explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
     if explicit:
-        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR"), None
     from huggingface_hub import snapshot_download
 
     try:
@@ -119,7 +119,7 @@ def _model_dir(manifest: dict) -> Path:
         raise AssertionError(
             f"selected {FAMILY} E2E requires the exact cached checkpoint {manifest['hf_id']}"
         ) from error
-    return Path(snapshot)
+    return Path(snapshot), manifest["hf_revision"]
 
 
 def _runtime() -> tuple[Path, Path]:
@@ -158,7 +158,7 @@ def test_native_tokenizer(case_name):
     from transformers import AutoTokenizer
 
     _, manifest, _ = CASES[case_name]
-    directory = _model_dir(manifest)
+    directory, _ = _model_dir(manifest)
     reference = AutoTokenizer.from_pretrained(directory / "tokenizer")
     for text in (
         "",
@@ -237,8 +237,10 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     record_evidence(
         "checkpoint",
         {
-            "repo_id": manifest["hf_id"],
-            "revision": manifest["hf_revision"],
+            "hf_id": manifest["hf_id"],
+            "expected_hf_revision": manifest["hf_revision"],
+            "hf_revision": None,
+            "revision_status": "unresolved",
             "precision": manifest["precision"],
         },
     )
@@ -251,20 +253,37 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         },
     )
     import gc
-    import sys
     import numpy as np
     import torch
 
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
-        directory = _model_dir(manifest)
+        directory, checkpoint_revision = _model_dir(manifest)
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(directory),
+            "hf_revision": checkpoint_revision,
+            "revision_status": "unverified"
+            if checkpoint_revision is None
+            else "pinned_cache_lookup",
+        },
+    )
     _, runtime_root = _runtime()
+    runtime_binary = _native_test_binary("test_pika_h3_flex_runtime")
+    from tools.ci.environment import prepared_python
+
+    assert manifest["reference_environment"] == "isolated"
+    reference_python = prepared_python(TEST_ROOT.parents[2], FAMILY, dict(os.environ))
+    reference_environment = os.environ.copy()
+    reference_environment.pop("PYTHONPATH", None)
+    reference_environment.pop("PYTHONHOME", None)
     input_path = tmp_path / "reference-input.json"
     input_path.write_text(json.dumps([manifest, case]))
     with evidence_stage("reference"):
         oracle = subprocess.run(
             [
-                sys.executable,
+                str(reference_python),
                 str(TEST_ROOT / "reference.py"),
                 str(directory),
                 str(input_path),
@@ -274,7 +293,11 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             text=True,
             check=False,
             timeout=case["runtime_timeout_s"],
+            env=reference_environment,
         )
+        reference_metadata = tmp_path / "reference-environment.json"
+        if reference_metadata.is_file():
+            record_evidence("reference_environment", json.loads(reference_metadata.read_text()))
         reference_log = tmp_path / "reference-process.log"
         reference_log.write_text(oracle.stderr)
         record_evidence(
@@ -305,7 +328,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     ]
     with evidence_stage("runtime"):
         native = subprocess.run(
-            [str(_native_test_binary("test_pika_h3_flex_runtime")), str(bundle), str(runtime_root)],
+            [str(runtime_binary), str(bundle), str(runtime_root)],
             input=json.dumps(requests),
             capture_output=True,
             text=True,

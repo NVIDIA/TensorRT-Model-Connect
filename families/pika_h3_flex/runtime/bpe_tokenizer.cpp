@@ -1202,9 +1202,22 @@ class BpeTokenizer final : public ITokenizer {
     void parse_added_tokens(const nlohmann::json& j) {
         if (!j.contains("added_tokens"))
             return;
-        for (auto& tok : j["added_tokens"]) {
-            std::string content = tok["content"].get<std::string>();
-            int32_t id = tok["id"].get<int32_t>();
+        const auto& added = j.at("added_tokens");
+        if (!added.is_array())
+            throw std::runtime_error("Invalid tokenizer.json: added_tokens must be an array");
+        for (std::size_t index = 0; index < added.size(); ++index) {
+            const auto& tok = added.at(index);
+            if (!tok.is_object() || !tok.contains("content") || !tok.at("content").is_string() ||
+                !tok.contains("id") || !tok.at("id").is_number_integer())
+                throw std::runtime_error("Invalid tokenizer.json: added_tokens[" +
+                                         std::to_string(index) +
+                                         "] requires string content and integer id");
+            std::string content = tok.at("content").get<std::string>();
+            const auto token_id = tok.at("id").get<int64_t>();
+            if (token_id < 0 || token_id > INT32_MAX || content.empty())
+                throw std::runtime_error("Invalid tokenizer.json: added_tokens[" +
+                                         std::to_string(index) + "] has an invalid content or id");
+            const auto id = static_cast<int32_t>(token_id);
 
             if (id >= 0 && static_cast<size_t>(id) >= mVocab.size()) {
                 mVocab.resize(static_cast<size_t>(id) + 1);

@@ -24,9 +24,23 @@ It returns one completed synchronized clip per request.
 Keyframes, references, batching, quantization and larger profiles are outside
 this bring-up.
 
-The direct tests use the exact checkpoint and the Diffusers commit and package
-versions pinned by its published examples. Set `TRTMC_PIKA_H3_FLEX_MODEL_DIR`,
-`TRTMC_BINARY` and `TRTMC_RUNTIME_ROOT`, build the family test tools, then run:
+The direct tests use the pinned checkpoint and Diffusers commit from the manifest
+and requirements. The CPU-generator and operator comparisons use PyTorch 2.12.0;
+full generation accuracy remains unqualified. Native Torch must use the same C++
+ABI as the runtime toolchain; configuration rejects an incompatible distribution.
+The oracle uses Diffusers leaf-level CPU offloading so the complete transformer
+partition does not need to reside on the GPU. This requires sufficient host RAM
+for the checkpoint and trades transfer time for lower device memory use. The
+original model, dtypes, scheduler, prompts, seeds and comparison gates remain the
+same.
+
+Prepare the manifest's isolated reference environment through the repository's
+setup step; the original Diffusers and Transformers pins remain in
+`tests/requirements.txt` while the builder uses the normal package environment.
+
+Set `TRTMC_PIKA_H3_FLEX_MODEL_DIR`, `TRTMC_BINARY`, `TRTMC_RUNTIME_ROOT` and
+`TRTMC_NATIVE_BUILD_DIR` (the CMake build directory containing the family test
+tools), build those tools, then run:
 
 ```sh
 PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \

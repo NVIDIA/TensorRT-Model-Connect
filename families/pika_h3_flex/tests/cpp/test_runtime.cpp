@@ -34,8 +34,14 @@ int main(int argc, char** argv) {
             const auto audio = result.audio();
             wave.write(reinterpret_cast<const char*>(audio.samples.data()),
                        audio.samples.size() * sizeof(float));
-            if (!video || !wave)
-                return 2;
+            video.close();
+            wave.close();
+            if (!video)
+                throw std::runtime_error("Could not write Pika video: " +
+                                         request.at("video").get<std::string>());
+            if (!wave)
+                throw std::runtime_error("Could not write Pika audio: " +
+                                         request.at("audio").get<std::string>());
             const auto timestamps = result.timestamps_seconds();
             results.push_back(
                 {{"frames", result.frames().size()},

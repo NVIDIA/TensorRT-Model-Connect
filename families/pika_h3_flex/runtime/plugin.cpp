@@ -14,6 +14,19 @@
 
 namespace trtmc::pika_h3_flex {
 namespace {
+void validate_latent_statistics(const nlohmann::json& component, std::size_t channels,
+                                const char* label) {
+    for (const char* field : {"latents_mean", "latents_std"}) {
+        if (!component.contains(field) || !component.at(field).is_array() ||
+            component.at(field).size() != channels)
+            throw std::runtime_error(std::string("Invalid Pika ") + label + "." + field +
+                                     " latent statistics length");
+        for (const auto& value : component.at(field))
+            if (!value.is_number() || !std::isfinite(value.get<float>()))
+                throw std::runtime_error(std::string("Invalid Pika ") + label + "." + field +
+                                         " latent statistics value");
+    }
+}
 class Pipeline final : public internal::IModel, public internal::ITextToAudioVideo {
   public:
     Pipeline(Loader loader, std::unique_ptr<ITokenizer> tokenizer, nlohmann::json cfg)
@@ -281,6 +294,8 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         cfg.at("audio_vae").at("sampling_rate") != 32000 ||
         cfg.at("knots") != nlohmann::json::array({1000, 750, 500, 250, 100, 40, 0}))
         throw std::runtime_error("Invalid Pika H3 Flex runtime profile");
+    validate_latent_statistics(cfg.at("vae"), 24, "video");
+    validate_latent_statistics(cfg.at("audio_vae"), 32, "audio");
     const auto tokenizer = loader.section("tokenizer.json");
     return new Pipeline(std::move(loader),
                         CreateBpeTokenizer(tokenizer.data(), tokenizer.size(), false),
