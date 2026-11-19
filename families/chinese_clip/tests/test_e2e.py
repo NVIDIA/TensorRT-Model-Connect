@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_stage, record_evidence
 
 FAMILY = "chinese_clip"
 TASKS = frozenset({"image_to_embedding", "text_to_embedding", "text_image_to_relevance"})
@@ -155,37 +156,47 @@ def _run_json(
     command: str,
     *arguments: str,
 ) -> dict:
-    invocation = [
-        str(binary),
-        command,
-        str(bundle),
-        "--runtime-root",
-        str(runtime_root),
-        *arguments,
-    ]
-    env = os.environ.copy()
-    env["LD_LIBRARY_PATH"] = ":".join(
-        (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
-    )
-    completed = subprocess.run(
-        invocation,
-        check=True,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=int(case.get("runtime_timeout_s", 3600)),
-    )
-    payloads = []
-    for line in completed.stdout.splitlines():
-        start = line.find("{")
-        if start >= 0:
-            try:
-                payloads.append(json.loads(line[start:]))
-            except json.JSONDecodeError:
-                pass
-    assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
-    assert all((payload == payloads[0] for payload in payloads))
-    return payloads[0]
+    with evidence_stage("runtime"):
+        invocation = [
+            str(binary),
+            command,
+            str(bundle),
+            "--runtime-root",
+            str(runtime_root),
+            *arguments,
+        ]
+        env = os.environ.copy()
+        env["LD_LIBRARY_PATH"] = ":".join(
+            (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
+        )
+        completed = subprocess.run(
+            invocation,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=int(case.get("runtime_timeout_s", 3600)),
+        )
+        record_evidence(
+            "native_process",
+            {
+                "argv": completed.args,
+                "stdout": (completed.stdout or "")[-4096:],
+                "stderr": (completed.stderr or "")[-16384:],
+                "returncode": completed.returncode,
+            },
+        )
+        payloads = []
+        for line in completed.stdout.splitlines():
+            start = line.find("{")
+            if start >= 0:
+                try:
+                    payloads.append(json.loads(line[start:]))
+                except json.JSONDecodeError:
+                    pass
+        assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
+        assert all((payload == payloads[0] for payload in payloads))
+        return payloads[0]
 
 
 def _asset(raw: str) -> Path:
@@ -196,14 +207,13 @@ def _asset(raw: str) -> Path:
     return path
 
 
-
-
 _COSINE_FLOOR = 0.9995
 _SCORE_TOLERANCE = 0.1
 
 
-def _native_embedding(binary: Path, runtime_root: Path, bundle: Path, case: dict,
-                      *arguments: str) -> list[float]:
+def _native_embedding(
+    binary: Path, runtime_root: Path, bundle: Path, case: dict, *arguments: str
+) -> list[float]:
     payload = _run_json(binary, runtime_root, bundle, case, "embed", *arguments)
     values = [float(value) for value in payload["values"]]
     assert values, f"native {FAMILY} returned an empty embedding"
@@ -215,32 +225,35 @@ def _native_embedding(binary: Path, runtime_root: Path, bundle: Path, case: dict
 
 
 def _reference(model_dir: Path, case: dict):
-    import torch
-    from PIL import Image
-    from transformers import ChineseCLIPModel, ChineseCLIPProcessor
+    with evidence_stage("reference"):
+        import torch
+        from PIL import Image
+        from transformers import ChineseCLIPModel, ChineseCLIPProcessor
 
-    image = Image.open(_asset(case["test_image"])).convert("RGB")
-    model = ChineseCLIPModel.from_pretrained(str(model_dir)).eval()
-    processor = ChineseCLIPProcessor.from_pretrained(str(model_dir), use_fast=False)
-    texts = [str(case["query"]), str(case["negative_query"])]
-    batch = processor(text=texts, images=image, padding="max_length", max_length=64,
-                      return_tensors="pt")
-    with torch.no_grad():
-        image_features = model.get_image_features(pixel_values=batch["pixel_values"])
-        text_features = model.get_text_features(input_ids=batch["input_ids"],
-                                                attention_mask=batch["attention_mask"])
-    image_vector = getattr(image_features, "image_embeds", None)
-    if image_vector is None:
-        image_vector = image_features.pooler_output
-    text_vectors = getattr(text_features, "text_embeds", None)
-    if text_vectors is None:
-        text_vectors = text_features.pooler_output
-    scale = float(model.logit_scale.detach().exp())
+        image = Image.open(_asset(case["test_image"])).convert("RGB")
+        model = ChineseCLIPModel.from_pretrained(str(model_dir)).eval()
+        processor = ChineseCLIPProcessor.from_pretrained(str(model_dir), use_fast=False)
+        texts = [str(case["query"]), str(case["negative_query"])]
+        batch = processor(
+            text=texts, images=image, padding="max_length", max_length=64, return_tensors="pt"
+        )
+        with torch.no_grad():
+            image_features = model.get_image_features(pixel_values=batch["pixel_values"])
+            text_features = model.get_text_features(
+                input_ids=batch["input_ids"], attention_mask=batch["attention_mask"]
+            )
+        image_vector = getattr(image_features, "image_embeds", None)
+        if image_vector is None:
+            image_vector = image_features.pooler_output
+        text_vectors = getattr(text_features, "text_embeds", None)
+        if text_vectors is None:
+            text_vectors = text_features.pooler_output
+        scale = float(model.logit_scale.detach().exp())
 
-    def unit(vector):
-        return (vector / vector.norm()).tolist()
+        def unit(vector):
+            return (vector / vector.norm()).tolist()
 
-    return (unit(image_vector[0]), [unit(row) for row in text_vectors], scale)
+        return (unit(image_vector[0]), [unit(row) for row in text_vectors], scale)
 
 
 def _cosine(left: list[float], right: list[float]) -> float:
@@ -256,27 +269,88 @@ def _cosine(left: list[float], right: list[float]) -> float:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
-    model_dir = _model_dir(manifest)
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {
+            key: value
+            for key, value in case.items()
+            if any(
+                word in key
+                for word in ("error", "cosine", "atol", "rtol", "snr", "rmse", "max_abs")
+            )
+        },
+    )
+    for asset_key in ("image", "test_image", "audio"):
+        if asset_key in case:
+            for asset_path in (TEST_ROOT / case[asset_key], TEST_ROOT / "data" / case[asset_key]):
+                if asset_path.is_file():
+                    record_evidence("inputs", {asset_key: asset_path})
+                    break
+    _, manifest, case = CASES[case_name]
+    with evidence_stage("checkpoint"):
+        model_dir = _model_dir(manifest)
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
+    record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
 
     reference_image, reference_texts, scale = _reference(model_dir, case)
+    record_evidence(
+        "thresholds", {"embedding_cosine_min": _COSINE_FLOOR, "score_atol": _SCORE_TOLERANCE}
+    )
 
-    native_image = _native_embedding(binary, runtime_root, bundle, case, "--task",
-                                     "image_to_embedding", "--image",
-                                     str(_asset(case["test_image"])))
+    native_image = _native_embedding(
+        binary,
+        runtime_root,
+        bundle,
+        case,
+        "--task",
+        "image_to_embedding",
+        "--image",
+        str(_asset(case["test_image"])),
+    )
     image_cosine = _cosine(native_image, reference_image)
-    assert image_cosine >= _COSINE_FLOOR, f"image embedding cosine {image_cosine}"
+    record_evidence("native", {"task": "image_to_embedding", "values": native_image})
+    record_evidence(
+        "reference",
+        {"mode": "hf_transformers", "task": "image_to_embedding", "values": reference_image},
+    )
+    record_evidence("metrics", {"task": "image_to_embedding", "cosine": image_cosine})
+    with evidence_stage("comparison"):
+        assert image_cosine >= _COSINE_FLOOR, f"image embedding cosine {image_cosine}"
 
     text_cosines = []
     native_texts = []
     for text, expected in zip((case["query"], case["negative_query"]), reference_texts):
-        native = _native_embedding(binary, runtime_root, bundle, case, "--task",
-                                   "text_to_embedding", "--text", str(text))
+        native = _native_embedding(
+            binary, runtime_root, bundle, case, "--task", "text_to_embedding", "--text", str(text)
+        )
         native_texts.append(native)
         cosine = _cosine(native, expected)
-        assert cosine >= _COSINE_FLOOR, f"text embedding cosine {cosine} for {text!r}"
+        record_evidence("inputs", {"text": text})
+        record_evidence("native", {"task": "text_to_embedding", "text": text, "values": native})
+        record_evidence(
+            "reference",
+            {
+                "mode": "hf_transformers",
+                "task": "text_to_embedding",
+                "text": text,
+                "values": expected,
+            },
+        )
+        record_evidence("metrics", {"task": "text_to_embedding", "text": text, "cosine": cosine})
+        with evidence_stage("comparison"):
+            assert cosine >= _COSINE_FLOOR, f"text embedding cosine {cosine} for {text!r}"
         text_cosines.append(cosine)
 
     # The scored pair must agree with the reference in value, and the query
@@ -284,19 +358,46 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     # still rank the wrong way round, so the ordering is checked separately.
     scores = []
     for text, expected_text in zip((case["query"], case["negative_query"]), reference_texts):
-        payload = _run_json(binary, runtime_root, bundle, case, "rerank", "--task",
-                            "text_image_to_relevance", "--query", str(text), "--image",
-                            str(_asset(case["test_image"])))
-        assert payload["score_kind"] == "logit"
+        payload = _run_json(
+            binary,
+            runtime_root,
+            bundle,
+            case,
+            "rerank",
+            "--task",
+            "text_image_to_relevance",
+            "--query",
+            str(text),
+            "--image",
+            str(_asset(case["test_image"])),
+        )
+        with evidence_stage("comparison"):
+            assert payload["score_kind"] == "logit"
         score = float(payload["score"])
         expected_score = scale * sum(a * b for a, b in zip(reference_image, expected_text))
-        assert abs(score - expected_score) <= _SCORE_TOLERANCE, (
-            f"relevance {score} differs from reference {expected_score} for {text!r}"
+        record_evidence("inputs", {"query": text})
+        record_evidence(
+            "native", {"query": text, "score": score, "score_kind": payload["score_kind"]}
         )
+        record_evidence(
+            "reference",
+            {
+                "mode": "hf_transformers",
+                "query": text,
+                "score": expected_score,
+                "score_kind": "logit",
+            },
+        )
+        record_evidence("metrics", {"query": text, "score_abs_error": abs(score - expected_score)})
+        with evidence_stage("comparison"):
+            assert abs(score - expected_score) <= _SCORE_TOLERANCE, (
+                f"relevance {score} differs from reference {expected_score} for {text!r}"
+            )
         scores.append(score)
-    assert scores[0] > scores[1], (
-        f"{FAMILY} scored the negative text higher: {scores[0]} <= {scores[1]}"
-    )
+    with evidence_stage("comparison"):
+        assert scores[0] > scores[1], (
+            f"{FAMILY} scored the negative text higher: {scores[0]} <= {scores[1]}"
+        )
     print(
         f"{FAMILY} parity: image cosine {image_cosine:.6f}, "
         f"text cosines {text_cosines[0]:.6f}/{text_cosines[1]:.6f}, "
