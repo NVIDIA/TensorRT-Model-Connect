@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_stage, record_evidence
 
 
 FAMILY = "diffusion_gemma"
@@ -90,9 +91,19 @@ def normalized_answer(value: str) -> str:
 
 
 def _run(arguments: list[str], *, output: Path, environment: dict[str, str]) -> None:
-    with output.open("w", encoding="utf-8") as stream:
-        subprocess.run(arguments, check=True, stdout=stream, stderr=subprocess.STDOUT,
-                       env=environment, timeout=21600)
+    record_evidence("commands", {"argv": arguments, "log": str(output)})
+    with evidence_stage(output.stem), output.open("w", encoding="utf-8") as stream:
+        try:
+            subprocess.run(arguments, check=True, stdout=stream, stderr=subprocess.STDOUT,
+                           env=environment, timeout=21600)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            stream.flush()
+            with output.open("rb") as log:
+                log.seek(max(0, output.stat().st_size - 16000))
+                tail = log.read().decode("utf-8", errors="replace")
+            record_evidence("command_failure", {"argv": arguments, "log_tail": tail})
+            error.add_note(f"Command log: {output}\n{tail}")
+            raise
 
 
 def _read(directory: Path, metadata: dict, name: str):
@@ -180,7 +191,12 @@ def test_checkpoint_native_and_reference_e2e(case_name: str, tmp_path: Path) -> 
 
     case = CASES[case_name]
     manifest = MANIFEST
+    record_evidence("inputs", {"manifest": manifest, "case": case})
     checkpoint = _checkpoint(manifest)
+    record_evidence("checkpoint", {
+        "hf_id": manifest["hf_id"], "revision": manifest["hf_revision"],
+        "model_dir": str(checkpoint),
+    })
     native_binary = _path("TRTMC_BINARY")
     runtime_root = _path("TRTMC_RUNTIME_ROOT")
     native_build = _path("TRTMC_NATIVE_BUILD_DIR")
@@ -194,12 +210,16 @@ def test_checkpoint_native_and_reference_e2e(case_name: str, tmp_path: Path) -> 
         bundle = _path("TRTMC_DIFFUSION_GEMMA_BUNDLE")
     else:
         bundle = artifacts / manifest["bundle"]
-        build(BuildRequest(
-            model_dir=checkpoint, output_path=bundle, family=manifest["family"],
-            task=manifest["task"], precision=manifest["precision"],
-            max_sequence_length=manifest["max_sequence_length"],
-            tensor_parallel_size=manifest["tensor_parallel_size"],
-        ))
+        with evidence_stage("build"):
+            build(BuildRequest(
+                model_dir=checkpoint, output_path=bundle, family=manifest["family"],
+                task=manifest["task"], precision=manifest["precision"],
+                max_sequence_length=manifest["max_sequence_length"],
+                tensor_parallel_size=manifest["tensor_parallel_size"],
+            ))
+    record_evidence("bundle", {
+        "path": str(bundle), "reused": bool(os.environ.get("TRTMC_DIFFUSION_GEMMA_BUNDLE")),
+    })
     environment = os.environ.copy()
     environment["LD_LIBRARY_PATH"] = str(runtime_root) + ":" + environment.get("LD_LIBRARY_PATH", "")
     _run([str(native_binary), "inspect", str(bundle)], output=artifacts / "inspect.log",
@@ -247,7 +267,14 @@ def test_checkpoint_native_and_reference_e2e(case_name: str, tmp_path: Path) -> 
         request=json.loads(diagnostic_request.read_text()), precision=manifest["precision"],
         max_sequence_length=manifest["max_sequence_length"], canvas_length=config["canvas_length"],
     )
-    metrics = compare_observations(native, reference)
+    record_evidence("reference", {
+        "transformers_revision": recorded["transformers_revision"],
+        "precision": recorded["precision"], "decoder_steps": recorded["decoder_steps"],
+        "tensors": sorted(recorded["tensors"]), "reused": reuse,
+    })
+    with evidence_stage("compare"):
+        metrics = compare_observations(native, reference)
+    record_evidence("comparisons", metrics)
     (artifacts / "reference-metrics.json").write_text(json.dumps(metrics, indent=2))
     generation_request = artifacts / "generation-request.json"
     generation_request.write_text(json.dumps({
@@ -257,6 +284,7 @@ def test_checkpoint_native_and_reference_e2e(case_name: str, tmp_path: Path) -> 
     _run([str(consumer), str(bundle), str(runtime_root), str(generation_request), str(generation_output)],
          output=artifacts / "native-generation.log", environment=environment)
     result = json.loads(generation_output.read_text())
+    record_evidence("native", result)
     assert 0 < len(result["token_ids"]) <= case["max_new_tokens"]
     assert normalized_answer(result["text"]) == normalized_answer(case["expected_answer"])
     assert result["prefill_ms"] >= 0 and result["decode_ms"] > 0
