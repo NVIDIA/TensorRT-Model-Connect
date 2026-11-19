@@ -70,11 +70,15 @@ int main(int argc, char** argv) {
     }
     try {
         const std::string tokenizer_json = read_file(argv[1]);
+        const auto definition = nlohmann::json::parse(tokenizer_json);
+        // The model that would read these ids has one row per token of the fixture.
+        const auto token_count =
+            definition.at("model").at("vocab").size() + definition.at("added_tokens").size();
         const auto tokenizer =
-            trtmc::CreateBpeTokenizer(tokenizer_json.data(), tokenizer_json.size(), false);
+            trtmc::CreateBpeTokenizer(tokenizer_json.data(), tokenizer_json.size(), false,
+                                      static_cast<std::int32_t>(token_count));
         if (!tokenizer)
             throw std::runtime_error("the boundary tokenizer is not a BPE tokenizer");
-        const auto definition = nlohmann::json::parse(tokenizer_json);
         std::vector<std::string> added_tokens;
         for (const auto& token : definition.at("added_tokens"))
             added_tokens.push_back(token.at("content").get<std::string>());

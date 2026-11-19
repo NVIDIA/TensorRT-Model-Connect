@@ -43,6 +43,7 @@ nlohmann::json runtime_document(int height, int width) {
             {"text_hidden_size", 4096},
             {"prefix_tokens", 12},
             {"pad_token_id", 151643},
+            {"text_vocab_size", 151936},
             {"prompt_prefix", "<|im_start|>user\n"},
             {"prompt_suffix", "<|im_end|>\n"},
             {"num_train_timesteps", 1000},
@@ -58,6 +59,7 @@ void test_runtime_config() {
     const auto config = parse_runtime_config(runtime_document(1024, 768).dump());
     expect(config.latent_height() == 64 && config.latent_width() == 48, "latent grid");
     expect(config.image_tokens() == 3072 && config.latent_count() == 3072U * 64U, "token count");
+    expect(config.text_vocab_size == 151936 && config.pad_token_id == 151643, "token id range");
 
     auto parallel = runtime_document(1024, 1024);
     parallel["tensor_parallel_size"] = 2;
@@ -70,8 +72,20 @@ void test_runtime_config() {
     oversized["image_height"] = 1 << 20;
     auto rescaled = runtime_document(1024, 1024);
     rescaled["num_train_timesteps"] = 500;
+    // The padding id is fed to the text encoder like every other id: it must be a row of its
+    // token embedding, whose size the bundle has to state.
+    auto no_vocabulary = runtime_document(1024, 1024);
+    no_vocabulary.erase("text_vocab_size");
+    auto empty_vocabulary = runtime_document(1024, 1024);
+    empty_vocabulary["text_vocab_size"] = 0;
+    auto padding_past_the_table = runtime_document(1024, 1024);
+    padding_past_the_table["pad_token_id"] = 151936;
+    auto negative_padding = runtime_document(1024, 1024);
+    negative_padding["pad_token_id"] = -1;
     std::vector<std::string> documents{"{ not json"};
-    for (const auto& document : {parallel, misaligned, missing, mistyped, oversized, rescaled})
+    for (const auto& document :
+         {parallel, misaligned, missing, mistyped, oversized, rescaled, no_vocabulary,
+          empty_vocabulary, padding_past_the_table, negative_padding})
         documents.push_back(document.dump());
     for (const auto& document : documents) {
         bool rejected = false;

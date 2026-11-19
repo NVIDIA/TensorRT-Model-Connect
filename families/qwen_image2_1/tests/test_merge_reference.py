@@ -6,7 +6,8 @@
 The native tokenizer is checked against ``data/merge_cases.json`` by the C++ test
 ``qwen_image2_1_tokenizer``. These tests keep that file honest: its ids must be what the library
 produces today with ``data/merge_tokenizer.json``, and the cases must separate the reference
-merge order from the one that merges every occurrence of the best pair per pass.
+merge order from the one that merges every occurrence of the best pair per pass. Its
+``space_marker_cases`` must be the library's ids with ``space_marker_tokenizer``.
 """
 
 from __future__ import annotations
@@ -20,10 +21,9 @@ from families.qwen_image2_1.tests import pretokenizer_fixture as fixture
 
 tokenizers = pytest.importorskip("tokenizers")
 
-CASES = [
-    (case["text"], case["ids"])
-    for case in json.loads(fixture.MERGE_CASES_PATH.read_text(encoding="utf-8"))["cases"]
-]
+_DOCUMENT = json.loads(fixture.MERGE_CASES_PATH.read_text(encoding="utf-8"))
+CASES = [(case["text"], case["ids"]) for case in _DOCUMENT["cases"]]
+SPACE_MARKER_CASES = [(case["text"], case["ids"]) for case in _DOCUMENT["space_marker_cases"]]
 
 
 @pytest.fixture(scope="module")
@@ -99,4 +99,31 @@ def test_case_file_covers_what_it_claims() -> None:
 
 @pytest.mark.parametrize(("text", "expected"), CASES, ids=[text for text, _ in CASES])
 def test_case_ids_are_the_reference_ids(reference, text: str, expected: list[int]) -> None:
+    assert reference.encode(text, add_special_tokens=False).ids == expected
+
+
+def test_space_marker_cases_cover_text_with_and_without_the_marker() -> None:
+    definition = fixture.space_marker_tokenizer()
+    marker = definition["added_tokens"][-1]
+    assert marker["content"] == fixture.SPACE_MARKER == "\u2581"
+    # The marker is a token of this tokenizer only as an added token, after all other ids.
+    assert fixture.SPACE_MARKER not in definition["model"]["vocab"]
+    assert marker["id"] == len(definition["model"]["vocab"]) + len(definition["added_tokens"]) - 1
+    assert definition["pre_tokenizer"] == TOKENIZER_PRE_TOKENIZER
+    with_marker = [ids for text, ids in SPACE_MARKER_CASES if fixture.SPACE_MARKER in text]
+    without_marker = [ids for text, ids in SPACE_MARKER_CASES if fixture.SPACE_MARKER not in text]
+    assert len(with_marker) >= 4 and len(without_marker) >= 4
+    assert all(marker["id"] in ids for ids in with_marker)
+    assert not any(marker["id"] in ids for ids in without_marker)
+    # Text without the marker encodes as it does without the added token.
+    plain = dict(CASES)
+    shared = [(text, ids) for text, ids in SPACE_MARKER_CASES if text in plain]
+    assert len(shared) >= 2 and all(plain[text] == ids for text, ids in shared)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"), SPACE_MARKER_CASES, ids=[text for text, _ in SPACE_MARKER_CASES]
+)
+def test_space_marker_case_ids_are_the_reference_ids(text: str, expected: list[int]) -> None:
+    reference = tokenizers.Tokenizer.from_str(json.dumps(fixture.space_marker_tokenizer()))
     assert reference.encode(text, add_special_tokens=False).ids == expected

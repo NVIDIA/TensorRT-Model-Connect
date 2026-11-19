@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 from .bundle_config import (
     DEFAULT_NUM_STEPS,
     prompt_layout,
+    require_embedded_token_ids,
     require_supported_tokenizer,
     resolve_geometry,
     scheduler_settings,
@@ -70,7 +71,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if not tokenizer_path.is_file():
         raise FileNotFoundError(f"Qwen-Image 2.1 checkpoint is missing {tokenizer_path}")
     tokenizer_bytes = tokenizer_path.read_bytes()
-    require_supported_tokenizer(json.loads(tokenizer_bytes))
+    tokenizer = json.loads(tokenizer_bytes)
+    require_supported_tokenizer(tokenizer)
 
     vae_config, vae_weights = load_vae(model_dir / "vae")
     geometry = resolve_geometry(
@@ -85,8 +87,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     writer.set_header(family="qwen_image2_1", task=request.task, backend=request.backend)
 
     text_config, text_weights = load_text_encoder(model_dir / "text_encoder")
-    if not 0 <= prompt["pad_token_id"] < text_config.vocab_size:
-        raise ValueError("the tokenizer's padding token is outside the text encoder's vocabulary")
+    require_embedded_token_ids(tokenizer, prompt["pad_token_id"], text_config.vocab_size)
+    del tokenizer
     with writer.open_section("text_encoder.plan") as section:
         build_text_encoder_plan(
             text_config,
@@ -141,6 +143,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             "text_hidden_size": text_config.hidden,
             "prefix_tokens": prompt["prefix_tokens"],
             "pad_token_id": prompt["pad_token_id"],
+            "text_vocab_size": text_config.vocab_size,
             "prompt_prefix": prompt["prompt_prefix"],
             "prompt_suffix": prompt["prompt_suffix"],
             **scheduler,

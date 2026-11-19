@@ -20,11 +20,13 @@ struct RuntimeConfig {
     std::int32_t vae_scale_factor{0};
 
     // Text slots after the system turn, system-turn tokens dropped from the encoder output,
-    // and the id used to fill unused input slots.
+    // the id used to fill unused input slots, and the rows of the text encoder's token
+    // embedding: the encoder takes the ids [0, text_vocab_size).
     std::int32_t text_tokens{0};
     std::int32_t text_hidden_size{0};
     std::int32_t prefix_tokens{0};
     std::int32_t pad_token_id{0};
+    std::int32_t text_vocab_size{0};
     std::string prompt_prefix;
     std::string prompt_suffix;
 

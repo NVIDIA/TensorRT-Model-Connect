@@ -15,7 +15,7 @@ are listed in `NOTICE`.
 | `denoiser.plan` | `QwenImage21Transformer2DModel`: 32 single-stream blocks over text slots followed by the image's latent tokens. |
 | `vae.plan` | `AutoencoderKLQwenImage21` decoder for one image; de-normalises latents in the graph. |
 | `tokenizer.json` | The checkpoint's BPE tokenizer. |
-| `runtime.json` | Output size, text budget, prompt frame, scheduler constants. |
+| `runtime.json` | Output size, text budget, size of the text encoder's token embedding, prompt frame, scheduler constants. |
 
 Every plan is static. Floating-point engine I/O is FP32, and the two integer inputs are INT32: the text encoder's
 `input_ids` and the denoiser's `text_length`. Linear layers, convolutions and attention run in BF16; normalisation
@@ -35,7 +35,8 @@ vocabulary. Before the merges it splits the text with the checkpoint's pre-token
 
 alternative by alternative, with the full Unicode letter and number classes. Merges then apply as in the reference
 BPE model: one at a time, the lowest rank first and the leftmost pair among equal ranks. Added tokens are matched
-literally, the longest first.
+literally, the longest first. The encoding is byte-level because the tokenizer's pre-tokenizer is, whatever tokens
+its vocabulary holds.
 
 The build refuses a `tokenizer.json` that configures anything else: another pre-tokenizer or normalizer, the BPE
 model options `ignore_merges`, `dropout`, `unk_token`, `continuing_subword_prefix`, `end_of_word_suffix`, `fuse_unk`
@@ -43,9 +44,15 @@ or `byte_fallback`, or added tokens with `single_word`, `lstrip` or `rstrip`. Wh
 refuses the same added-token options and the same model options except `end_of_word_suffix`, which it implements,
 as well as incomplete added-token records and merge rules that name a token outside the vocabulary.
 
+Token ids index the text encoder's token embedding. The build refuses a tokenizer that gives a token of its
+vocabulary, an added token or the padding token an id outside that table, and records the table's size in
+`runtime.json`. The runtime refuses a bundle whose `tokenizer.json` or padding id does not fit that size, so the
+encoder is never fed an id it has no row for.
+
 The family tests compare the tokenizer with the Hugging Face `tokenizers` library: the split on text of many
 scripts, numbers of every kind, quotes, contractions, and whitespace and line-break runs; the merge order on a
-merge table for which merging every occurrence of the best pair per pass would give other ids.
+merge table for which merging every occurrence of the best pair per pass would give other ids; and the encoding
+of a byte-level tokenizer that has U+2581, the SentencePiece space marker, as an added token.
 
 The letter and number classes come from Unicode 16.0 data,
 [UnicodeData.txt](https://www.unicode.org/Public/16.0.0/ucd/UnicodeData.txt) (SHA-256

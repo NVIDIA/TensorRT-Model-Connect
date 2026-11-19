@@ -226,6 +226,42 @@ def require_supported_tokenizer(tokenizer: dict) -> None:
         raise ValueError("qwen_image2_1 supports only tokenizers without a normalizer or with NFC")
 
 
+def require_embedded_token_ids(tokenizer: dict, pad_token_id: int, vocab_size: int) -> None:
+    """Every id the runtime can feed the text encoder must be a row of its token embedding.
+
+    The runtime takes its ids from the vocabulary and the added tokens of ``tokenizer.json`` and
+    fills unused slots with ``pad_token_id``. The engine looks each id up in a table of
+    ``vocab_size`` rows; an id outside it would read past the table.
+    """
+
+    def embedded(token_id: object) -> bool:
+        return (
+            isinstance(token_id, int)
+            and not isinstance(token_id, bool)
+            and 0 <= token_id < vocab_size
+        )
+
+    model = tokenizer.get("model")
+    vocab = model.get("vocab") if isinstance(model, dict) else None
+    if not isinstance(vocab, dict):
+        raise ValueError("qwen_image2_1 requires model.vocab of tokenizer.json to be an object")
+    added_tokens = tokenizer.get("added_tokens")
+    _require_literal_added_tokens(added_tokens)
+    named = [(f"model.vocab entry {token!r}", token_id) for token, token_id in vocab.items()]
+    named += [
+        (f"added_tokens[{index}] ({token['content']!r})", token["id"])
+        for index, token in enumerate(added_tokens or [])
+    ]
+    for owner, token_id in named:
+        if not embedded(token_id):
+            raise ValueError(
+                f"qwen_image2_1 cannot feed the id of {owner} to the text encoder: {token_id!r} "
+                f"is not one of the {vocab_size} rows of its token embedding"
+            )
+    if not embedded(pad_token_id):
+        raise ValueError("the tokenizer's padding token is outside the text encoder's vocabulary")
+
+
 def prompt_layout(processor_dir: Path) -> dict:
     """Count the system-turn tokens the pipeline drops, with the checkpoint's own tokenizer.
 

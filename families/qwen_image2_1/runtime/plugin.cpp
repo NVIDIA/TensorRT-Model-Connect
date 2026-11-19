@@ -55,7 +55,8 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     auto config = parse_runtime_config(std::string(runtime.begin(), runtime.end()));
 
     const auto tokenizer_data = require_section(context.reader, "tokenizer.json");
-    auto tokenizer = trtmc::CreateBpeTokenizer(tokenizer_data.data(), tokenizer_data.size(), false);
+    auto tokenizer = trtmc::CreateBpeTokenizer(tokenizer_data.data(), tokenizer_data.size(), false,
+                                               config.text_vocab_size);
     if (!tokenizer)
         throw std::runtime_error("Qwen-Image 2.1 tokenizer.json is not a BPE tokenizer");
 

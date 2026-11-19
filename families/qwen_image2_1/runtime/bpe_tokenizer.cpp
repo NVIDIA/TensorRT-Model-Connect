@@ -82,29 +82,33 @@ inline std::string utf32_to_utf8(char32_t cp) {
     return r;
 }
 
-// Read one UTF-8 codepoint from raw bytes, advance ptr. Returns 0xFFFD on error.
+// Read one UTF-8 codepoint from raw bytes, advance ptr. Returns 0xFFFD on error; a sequence
+// cut off by the end of the text is one, and only its first byte is consumed.
 inline char32_t read_utf8(const char*& p, const char* end) {
     if (p >= end)
         return 0xFFFD;
+    // Sequence lengths are compared with the bytes left: p plus a length may not be formed
+    // when it lies more than one past the end.
+    const auto remaining = end - p;
     unsigned char c = static_cast<unsigned char>(*p);
     if (c < 0x80) {
         ++p;
         return c;
     }
-    if ((c & 0xE0) == 0xC0 && p + 1 < end) {
+    if ((c & 0xE0) == 0xC0 && remaining >= 2) {
         char32_t cp =
             (static_cast<char32_t>(c & 0x1F) << 6) | (static_cast<unsigned char>(p[1]) & 0x3F);
         p += 2;
         return cp;
     }
-    if ((c & 0xF0) == 0xE0 && p + 2 < end) {
+    if ((c & 0xF0) == 0xE0 && remaining >= 3) {
         char32_t cp = (static_cast<char32_t>(c & 0x0F) << 12) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[1]) & 0x3F) << 6) |
                       (static_cast<unsigned char>(p[2]) & 0x3F);
         p += 3;
         return cp;
     }
-    if ((c & 0xF8) == 0xF0 && p + 3 < end) {
+    if ((c & 0xF8) == 0xF0 && remaining >= 4) {
         char32_t cp = (static_cast<char32_t>(c & 0x07) << 18) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[1]) & 0x3F) << 12) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[2]) & 0x3F) << 6) |
@@ -625,9 +629,13 @@ class BpeTokenizer final : public ITokenizer {
   public:
     static std::unique_ptr<BpeTokenizer> Create(const char* tokenizer_json_data,
                                                 std::size_t tokenizer_json_size,
-                                                bool add_special_tokens = false) {
+                                                bool add_special_tokens,
+                                                std::int32_t token_id_limit) {
+        if (token_id_limit <= 0)
+            throw std::invalid_argument("the tokenizer needs a positive token id limit");
         auto tokenizer = std::unique_ptr<BpeTokenizer>(new BpeTokenizer());
         tokenizer->mAddSpecialTokens = add_special_tokens;
+        tokenizer->mTokenIdLimit = token_id_limit;
         tokenizer->parse_tokenizer_json(tokenizer_json_data, tokenizer_json_size);
         return tokenizer;
     }
@@ -1132,16 +1140,34 @@ class BpeTokenizer final : public ITokenizer {
         return s == "<|endoftext|>" || s == "</s>" || s == "<|end_of_text|>";
     }
 
+    // A token id as tokenizer.json may give it: a non-negative integer.
+    static bool is_token_id(const nlohmann::json& value) {
+        return value.is_number_unsigned() ||
+               (value.is_number_integer() && value.get<std::int64_t>() >= 0);
+    }
+
+    // The id of a token, which is_token_id accepted, as the model takes it. Every id the
+    // tokenizer can produce passes through here before it sizes the id-to-token table: an id
+    // at or past the limit would index outside the model's token embedding, and a large one
+    // would make that table as large.
+    std::int32_t id_within_limit(const nlohmann::json& value, const std::string& owner) const {
+        const auto id = value.get<std::uint64_t>();
+        if (id >= static_cast<std::uint64_t>(mTokenIdLimit))
+            throw std::runtime_error("Invalid tokenizer.json: " + owner + " has the id " +
+                                     std::to_string(id) + "; the model takes ids below " +
+                                     std::to_string(mTokenIdLimit));
+        return static_cast<std::int32_t>(id);
+    }
+
     void parse_vocab(const nlohmann::json& j) {
         auto& vocab_obj = j["model"]["vocab"];
         mVocab.resize(vocab_obj.size());
 
         for (auto& [token, id] : vocab_obj.items()) {
-            if (!id.is_number_integer() || id.get<std::int64_t>() < 0 ||
-                id.get<std::int64_t>() > std::numeric_limits<int32_t>::max())
+            if (!is_token_id(id))
                 throw std::runtime_error("Invalid tokenizer.json: model.vocab maps \"" + token +
                                          "\" to something other than a token id");
-            const auto token_id = id.get<int32_t>();
+            const auto token_id = id_within_limit(id, "model.vocab entry \"" + token + "\"");
             if (static_cast<size_t>(token_id) >= mVocab.size())
                 mVocab.resize(static_cast<size_t>(token_id) + 1);
             mVocab[static_cast<size_t>(token_id)] = token;
@@ -1207,8 +1233,7 @@ class BpeTokenizer final : public ITokenizer {
             const auto id_it = tok.is_object() ? tok.find("id") : tok.end();
             if (!tok.is_object() || content_it == tok.end() || !content_it->is_string() ||
                 content_it->get_ref<const std::string&>().empty() || id_it == tok.end() ||
-                !id_it->is_number_integer() || id_it->get<std::int64_t>() < 0 ||
-                id_it->get<std::int64_t>() > std::numeric_limits<int32_t>::max())
+                !is_token_id(*id_it))
                 throw std::runtime_error("Invalid tokenizer.json: " + where +
                                          " needs a non-empty string content and a token id");
             // Added tokens are matched literally wherever they occur. These options make the
@@ -1222,7 +1247,7 @@ class BpeTokenizer final : public ITokenizer {
                                              option + "; added tokens are matched literally");
             }
             std::string content = content_it->get<std::string>();
-            const auto id = id_it->get<int32_t>();
+            const auto id = id_within_limit(*id_it, where);
 
             if (static_cast<size_t>(id) >= mVocab.size()) {
                 mVocab.resize(static_cast<size_t>(id) + 1);
@@ -1326,6 +1351,15 @@ class BpeTokenizer final : public ITokenizer {
         return pretok::Variant::kGpt2;
     }
 
+    static bool sequence_has_byte_level(const nlohmann::json& pt) {
+        const auto steps = pt.find("pretokenizers");
+        if (steps == pt.end() || !steps->is_array())
+            return false;
+        return std::any_of(steps->begin(), steps->end(), [](const nlohmann::json& step) {
+            return step.is_object() && step.value("type", "") == "ByteLevel";
+        });
+    }
+
     static bool is_space_split_pre_tokenizer(const nlohmann::json& pt, const std::string& pt_type) {
         if (pt_type != "Split")
             return false;
@@ -1345,10 +1379,12 @@ class BpeTokenizer final : public ITokenizer {
 
         if (pt_type == "ByteLevel") {
             mPreTokenizerVariant = pretok::Variant::kGpt2;
+            mByteLevelPreTokenizer = true;
         } else if (pt_type == "Sequence") {
             int digit_group = 0;
             mPreTokenizerVariant = detect_split_variant(pt, digit_group);
             mPreTokenizerDigitGroup = digit_group;
+            mByteLevelPreTokenizer = sequence_has_byte_level(pt);
         } else if (is_space_split_pre_tokenizer(pt, pt_type)) {
             // Gemma SentencePiece-BPE tokenizers use a direct Split(" ")
             // pre-tokenizer with spaces already normalized to U+2581.
@@ -1382,10 +1418,13 @@ class BpeTokenizer final : public ITokenizer {
         if (mDecoderType == DecoderType::kSequence) {
             parse_sequence_decoder(j["decoder"]);
         }
-        // SentencePiece encode: vocab uses ▁ (U+2581) for spaces.
-        // Detect by: (1) ▁ in vocabulary, or (2) normalizer prepends ▁.
+        // A ByteLevel pre-tokenizer selects byte-level encoding, whatever the vocabulary
+        // holds: ▁ (U+2581) can be an added token of such a tokenizer and is then matched
+        // literally, like every added token. Without that pre-tokenizer, SentencePiece
+        // encoding is detected by ▁ in the vocabulary or a normalizer that prepends it.
         static const std::string spiece_marker = "\xe2\x96\x81"; // U+2581
-        mIsSentencePiece = mTokenToId.count(spiece_marker) > 0 || mSentencePiecePrependAlways;
+        mIsSentencePiece = !mByteLevelPreTokenizer &&
+                           (mTokenToId.count(spiece_marker) > 0 || mSentencePiecePrependAlways);
     }
 
     void parse_seq_decoder_replace(const nlohmann::json& sub) {
@@ -1572,14 +1611,17 @@ class BpeTokenizer final : public ITokenizer {
 
     // RobertaProcessing: {"type":"RobertaProcessing","cls":["<s>",0],"sep":["</s>",2],...}
     void parse_roberta_post_processor(const nlohmann::json& pp) {
-        if (pp.contains("cls") && pp["cls"].is_array() && pp["cls"].size() >= 2) {
-            int32_t cls_id = pp["cls"][1].get<int32_t>();
-            mPostBosIds.push_back(cls_id);
-        }
-        if (pp.contains("sep") && pp["sep"].is_array() && pp["sep"].size() >= 2) {
-            int32_t sep_id = pp["sep"][1].get<int32_t>();
-            mPostEosIds.push_back(sep_id);
-        }
+        const auto id_of = [&](const char* key) {
+            const auto& id = pp[key][1];
+            if (!is_token_id(id))
+                throw std::runtime_error(std::string("Invalid tokenizer.json: post_processor.") +
+                                         key + " needs a token id");
+            return id_within_limit(id, std::string("post_processor.") + key);
+        };
+        if (pp.contains("cls") && pp["cls"].is_array() && pp["cls"].size() >= 2)
+            mPostBosIds.push_back(id_of("cls"));
+        if (pp.contains("sep") && pp["sep"].is_array() && pp["sep"].size() >= 2)
+            mPostEosIds.push_back(id_of("sep"));
     }
 
     int32_t resolve_special_token_id(const nlohmann::json& entry) const {
@@ -1635,8 +1677,10 @@ class BpeTokenizer final : public ITokenizer {
     std::vector<std::pair<std::string, int32_t>> mAddedTokenPatterns;
 
     bool mAddSpecialTokens = false;
+    std::int32_t mTokenIdLimit = 0; // ids the model takes: [0, mTokenIdLimit)
     bool mUsePreTokenizer = true;
-    bool mIsMetaspace = false; // Set by detect_pre_tokenizer.
+    bool mByteLevelPreTokenizer = false; // Set by detect_pre_tokenizer.
+    bool mIsMetaspace = false;           // Set by detect_pre_tokenizer.
     bool mIsSentencePiece = false;
     bool mSentencePiecePrependAlways =
         false; // true for Normalizer Prepend, false for Metaspace first
@@ -1669,8 +1713,10 @@ class BpeTokenizer final : public ITokenizer {
 
 std::unique_ptr<ITokenizer> CreateBpeTokenizer(const char* tokenizer_json_data,
                                                std::size_t tokenizer_json_size,
-                                               bool add_special_tokens) {
-    return BpeTokenizer::Create(tokenizer_json_data, tokenizer_json_size, add_special_tokens);
+                                               bool add_special_tokens,
+                                               std::int32_t token_id_limit) {
+    return BpeTokenizer::Create(tokenizer_json_data, tokenizer_json_size, add_special_tokens,
+                                token_id_limit);
 }
 
 } // namespace trtmc

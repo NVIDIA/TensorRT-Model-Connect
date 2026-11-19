@@ -20,6 +20,7 @@ from families.qwen_image2_1.bundle_config import (
     DEFAULT_TEXT_TOKENS,
     TOKENIZER_NORMALIZER,
     TOKENIZER_PRE_TOKENIZER,
+    require_embedded_token_ids,
     require_supported_tokenizer,
     resolve_geometry,
     scheduler_settings,
@@ -319,6 +320,50 @@ def test_the_checkpoint_tokenizer_configuration_is_accepted() -> None:
 def test_other_tokenizer_configurations_are_rejected(overrides: dict, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         require_supported_tokenizer(_tokenizer_definition(**overrides))
+
+
+# The text encoder of the checkpoint embeds 151936 ids; its tokenizer uses the first 151669.
+_EMBEDDING_ROWS = 151936
+
+
+def _vocabulary(**ids) -> dict:
+    return _tokenizer_definition(model={**_CHECKPOINT_MODEL, "vocab": {"a": 0, "b": 1, **ids}})
+
+
+def test_token_ids_inside_the_embedding_table_are_accepted() -> None:
+    require_embedded_token_ids(_vocabulary(), 151643, _EMBEDDING_ROWS)
+    last = _EMBEDDING_ROWS - 1
+    require_embedded_token_ids(
+        _vocabulary(c=last) | _added_token(id=last), last, _EMBEDDING_ROWS
+    )
+    require_embedded_token_ids(_vocabulary() | {"added_tokens": None}, 0, _EMBEDDING_ROWS)
+
+
+@pytest.mark.parametrize(
+    ("definition", "pad_token_id", "message"),
+    [
+        (_vocabulary(c=_EMBEDDING_ROWS), 0, "model.vocab entry 'c'.*151936 is not one of the 151936"),
+        (_vocabulary(c=-1), 0, "model.vocab entry 'c'"),
+        (_vocabulary(c="2"), 0, "model.vocab entry 'c'"),
+        (_vocabulary(c=2.0), 0, "model.vocab entry 'c'"),
+        (_vocabulary(c=True), 0, "model.vocab entry 'c'"),
+        (
+            _vocabulary() | _added_token(id=_EMBEDDING_ROWS),
+            0,
+            r"added_tokens\[0\] \('<\|im_start\|>'\).*151936 is not one of the 151936",
+        ),
+        (_vocabulary() | _added_token(id=2**40), 0, r"added_tokens\[0\]"),
+        (_vocabulary(), _EMBEDDING_ROWS, "padding token is outside"),
+        (_vocabulary(), -1, "padding token is outside"),
+        (_tokenizer_definition(), 0, "model.vocab of tokenizer.json to be an object"),
+        (_vocabulary() | _added_token(id=...), 0, r"added_tokens\[0\].*a token id"),
+    ],
+)
+def test_token_ids_outside_the_embedding_table_are_rejected(
+    definition: dict, pad_token_id: int, message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        require_embedded_token_ids(definition, pad_token_id, _EMBEDDING_ROWS)
 
 
 def test_flat_images_have_no_spatial_deviation_whatever_their_colour() -> None:

@@ -23,8 +23,12 @@ class ITokenizer {
     virtual std::string token_for_id(std::int32_t id) const = 0;
 };
 
+// token_id_limit is the number of ids the model that reads the encoded text takes, the rows of
+// its token embedding. A tokenizer.json that gives a token an id outside [0, token_id_limit)
+// fails to load, so encode() never returns one.
 std::unique_ptr<ITokenizer> CreateBpeTokenizer(const char* tokenizer_json_data,
                                                std::size_t tokenizer_json_size,
-                                               bool add_special_tokens = false);
+                                               bool add_special_tokens,
+                                               std::int32_t token_id_limit);
 
 } // namespace trtmc

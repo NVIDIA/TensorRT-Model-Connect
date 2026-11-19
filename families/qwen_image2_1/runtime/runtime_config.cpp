@@ -15,6 +15,7 @@ namespace {
 // Sizes far beyond anything a bundle is built for; they keep every derived count inside int32.
 constexpr std::int32_t kMaxImageSide = 32768;
 constexpr std::int32_t kMaxTokens = 1 << 20;
+constexpr std::int32_t kMaxVocabulary = 1 << 22;
 
 void require(bool condition, const char* message) {
     if (!condition)
@@ -36,6 +37,7 @@ RuntimeConfig read_fields(const std::string& document) {
     config.text_hidden_size = json.at("text_hidden_size").get<std::int32_t>();
     config.prefix_tokens = json.at("prefix_tokens").get<std::int32_t>();
     config.pad_token_id = json.at("pad_token_id").get<std::int32_t>();
+    config.text_vocab_size = json.at("text_vocab_size").get<std::int32_t>();
     config.prompt_prefix = json.at("prompt_prefix").get<std::string>();
     config.prompt_suffix = json.at("prompt_suffix").get<std::string>();
     config.num_train_timesteps = json.at("num_train_timesteps").get<std::int32_t>();
@@ -69,9 +71,12 @@ RuntimeConfig parse_runtime_config(const std::string& document) {
             "image size must be a positive multiple of the VAE scale");
     require(config.text_tokens > 0 && config.text_tokens <= kMaxTokens &&
                 config.text_hidden_size > 0 && config.text_hidden_size <= kMaxTokens &&
-                config.prefix_tokens >= 0 && config.prefix_tokens <= kMaxTokens &&
-                config.pad_token_id >= 0,
+                config.prefix_tokens >= 0 && config.prefix_tokens <= kMaxTokens,
             "invalid text layout");
+    require(config.text_vocab_size > 0 && config.text_vocab_size <= kMaxVocabulary,
+            "text_vocab_size must be the row count of the text encoder's token embedding");
+    require(config.pad_token_id >= 0 && config.pad_token_id < config.text_vocab_size,
+            "pad_token_id must be an id the text encoder takes");
     // The pipeline divides the scheduler's timestep by the literal 1000; see reference_timestep.
     require(config.num_train_timesteps == 1000 &&
                 config.max_image_seq_len > config.base_image_seq_len &&

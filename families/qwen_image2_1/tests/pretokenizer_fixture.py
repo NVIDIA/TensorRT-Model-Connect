@@ -12,7 +12,8 @@ returned by ``encode`` spell out where the text was split; the cases in
 
 ``data/merge_tokenizer.json`` pins the order in which merges apply. It has the same frame, no
 end-of-word suffix and the merge table ``MERGE_RULES``; ``data/merge_cases.json`` holds the ids
-the library produces.
+the library produces. Its ``space_marker_cases`` are ids of ``space_marker_tokenizer``, the same
+tokenizer with ``SPACE_MARKER`` as one more added token.
 """
 
 from __future__ import annotations
@@ -120,6 +121,26 @@ def merge_tokenizer() -> dict:
     for first, second in MERGE_RULES:
         vocab.setdefault(first + second, len(vocab))
     return _tokenizer(vocab, [list(rule) for rule in MERGE_RULES], "")
+
+
+# U+2581, the character SentencePiece vocabularies write for a space. As an added token of a
+# byte-level tokenizer it is matched literally where the text has it, and changes nothing else.
+SPACE_MARKER = "\u2581"
+
+
+def space_marker_tokenizer() -> dict:
+    """The merge tokenizer with ``SPACE_MARKER`` as an added token after the existing ones."""
+    definition = merge_tokenizer()
+    added = definition["added_tokens"]
+    added.append(
+        {
+            **added[-1],
+            "id": added[-1]["id"] + 1,
+            "content": SPACE_MARKER,
+            "special": False,
+        }
+    )
+    return definition
 
 
 def pieces(ids: list[int]) -> list[str]:
