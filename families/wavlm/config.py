@@ -158,17 +158,27 @@ def _tokenizer_settings(tokenizer: dict, special_map: dict) -> dict:
     return {**tokenizer, **special_map}
 
 
-def _added_tokens(tokenizer: dict, added_file: dict) -> dict:
-    """Added tokens from ``added_tokens_decoder`` when the configuration has it,
-    otherwise from added_tokens.json, as Transformers' loader takes them."""
+def _added_tokens(tokenizer: dict, added_file: dict, tokenizer_file: dict | None) -> dict:
+    """Added tokens as Transformers' loader takes them.
+
+    With ``added_tokens_decoder`` the configuration is the only source. In the
+    legacy layout added_tokens.json names tokens by id, and the ``added_tokens``
+    of tokenizer.json, when that file exists, then replace them id by id.
+    """
     decoder = tokenizer.get("added_tokens_decoder")
     if decoder is None:
-        return added_file
+        decoder = {int(index): content for content, index in added_file.items()}
+        if tokenizer_file is not None:
+            entries = tokenizer_file.get("added_tokens")
+            _require(isinstance(entries, list), "needs an added_tokens list in tokenizer.json")
+            for entry in entries:
+                _require(isinstance(entry, dict) and type(entry.get("id")) is int,
+                         "needs integer ids in the added_tokens of tokenizer.json")
+                decoder[entry["id"]] = entry
     added = {}
     for index, token in decoder.items():
         content = token.get("content") if isinstance(token, dict) else token
-        _require(isinstance(content, str) and content != "",
-                 "needs string added tokens in tokenizer_config.json")
+        _require(isinstance(content, str) and content != "", "needs string added tokens")
         index = int(index)
         # Transformers decodes every id from this table, so one content under
         # two ids cannot be inverted into a single id per token.
@@ -202,11 +212,14 @@ def resolve(model_dir: Path, shapes: dict) -> dict:
     pre = _read_json(model_dir / "preprocessor_config.json", "preprocessor_config.json")
     vocab = _read_json(model_dir / "vocab.json", "vocab.json")
     tokenizer = _read_optional_json(model_dir / "tokenizer_config.json")
-    # With added_tokens_decoder the loader opens neither legacy file, so a stale
-    # or malformed copy next to the configuration does not stop the build.
+    # With added_tokens_decoder the loader opens none of the legacy files, so a
+    # stale or malformed copy next to the configuration does not stop the build.
     legacy = "added_tokens_decoder" not in tokenizer
     added = _added_tokens(
-        tokenizer, _read_optional_json(model_dir / "added_tokens.json") if legacy else {})
+        tokenizer,
+        _read_optional_json(model_dir / "added_tokens.json") if legacy else {},
+        _read_json(model_dir / "tokenizer.json", "tokenizer.json")
+        if legacy and (model_dir / "tokenizer.json").is_file() else None)
     settings = _tokenizer_settings(
         tokenizer, _read_optional_json(model_dir / "special_tokens_map.json") if legacy else {})
 

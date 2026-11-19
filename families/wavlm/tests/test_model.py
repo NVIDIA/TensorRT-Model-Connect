@@ -153,9 +153,30 @@ def test_added_tokens_decoder_does_not_open_the_legacy_files(tmp_path):
     # A stale, malformed legacy file next to a decoder-layout configuration does
     # not stop the build: the loader never opens it.
     _write(tmp_path, tokenizer={**_TOKENIZER, "added_tokens_decoder": _DECODER})
-    (tmp_path / "added_tokens.json").write_text("{not json")
-    (tmp_path / "special_tokens_map.json").write_text("{not json")
+    for name in ("added_tokens.json", "special_tokens_map.json", "tokenizer.json"):
+        (tmp_path / name).write_text("{not json")
     assert config_module.resolve(tmp_path, {})["tokens"][29:] == ["<s>", "</s>"]
+
+
+def test_tokenizer_json_replaces_legacy_added_tokens_by_id(tmp_path):
+    # In the legacy layout the loader reads added_tokens.json first and then lets
+    # the added_tokens of tokenizer.json replace it id by id: id 30 is <eos>.
+    _write(tmp_path)
+    (tmp_path / "tokenizer.json").write_text(json.dumps({"added_tokens": [
+        {"id": 30, "content": "<eos>", "special": True}]}))
+    assert config_module.resolve(tmp_path, {})["tokens"][29:] == ["<s>", "<eos>"]
+
+
+@pytest.mark.parametrize("document, fragment", [
+    ({}, "added_tokens list in tokenizer.json"),
+    ({"added_tokens": [{"id": "30", "content": "<eos>"}]}, "integer ids"),
+    ({"added_tokens": [{"id": 31, "content": "<s>"}]}, "'<s>' to two ids"),
+])
+def test_resolve_refuses_a_tokenizer_json_it_would_misread(tmp_path, document, fragment):
+    _write(tmp_path)
+    (tmp_path / "tokenizer.json").write_text(json.dumps(document))
+    with pytest.raises(NotImplementedError, match=fragment):
+        config_module.resolve(tmp_path, {})
 
 
 def test_the_legacy_layout_still_reports_a_malformed_legacy_file(tmp_path):

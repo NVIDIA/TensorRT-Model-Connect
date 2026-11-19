@@ -154,6 +154,33 @@ def test_special_tokens_follow_the_tokenizer_loader(tmp_path, layout):
     assert (resolved["tokens"][resolved["blank_token_id"]], resolved["word_delimiter_token"]) == expected
 
 
+def test_added_tokens_follow_the_tokenizer_loader_with_tokenizer_json(tmp_path):
+    # In the legacy layout tokenizer.json's added_tokens replace added_tokens.json
+    # id by id: Transformers decodes id 6 as C, not B, and so must the bundle.
+    vocab = {"|": 0, "a": 1, "b": 2, "<unk>": 3, "<pad>": 4}
+    (tmp_path / "vocab.json").write_text(json.dumps(vocab))
+    (tmp_path / "tokenizer_config.json").write_text(json.dumps(
+        {"tokenizer_class": "Wav2Vec2CTCTokenizer", "unk_token": "<unk>", "pad_token": "<pad>",
+         "bos_token": "<s>", "eos_token": "<s>", "word_delimiter_token": "|"}))
+    (tmp_path / "added_tokens.json").write_text(json.dumps({"<s>": 5, "B": 6}))
+    (tmp_path / "tokenizer.json").write_text(json.dumps({"added_tokens": [
+        {"id": 6, "content": "C", "special": False, "single_word": False, "lstrip": False,
+         "rstrip": False, "normalized": True}]}))
+    (tmp_path / "preprocessor_config.json").write_text(json.dumps({"sampling_rate": 16000}))
+    loaded = transformers.Wav2Vec2CTCTokenizer.from_pretrained(str(tmp_path))
+
+    cfg = transformers.WavLMConfig(
+        hidden_size=8, num_hidden_layers=1, num_attention_heads=2, intermediate_size=12,
+        conv_dim=(4, 8), conv_kernel=(3, 3), conv_stride=(2, 2), num_conv_pos_embeddings=4,
+        num_conv_pos_embedding_groups=2, num_buckets=8, max_bucket_distance=6,
+        vocab_size=7, pad_token_id=loaded.pad_token_id)
+    cfg.architectures = ["WavLMForCTC"]
+    cfg.to_json_file(tmp_path / "config.json")
+    resolved = config_module.resolve(tmp_path, {})
+    assert resolved["tokens"] == loaded.convert_ids_to_tokens(list(range(7)))
+    assert resolved["tokens"][6] == "C"
+
+
 def test_buckets_match_the_reference_for_the_released_geometry():
     attention = transformers.models.wavlm.modeling_wavlm.WavLMAttention(
         embed_dim=16, num_heads=2, num_buckets=320, max_distance=800)
@@ -345,7 +372,7 @@ def test_e2e_preparation_preserves_cached_checkpoint(tmp_path, monkeypatch):
     from families.wavlm.tests import test_e2e
 
     names = ("config.json", "preprocessor_config.json", "vocab.json", "added_tokens.json",
-             "tokenizer_config.json", "special_tokens_map.json")
+             "tokenizer_config.json", "special_tokens_map.json", "tokenizer.json")
     for name in names:
         (tmp_path / name).write_text("{}")
     torch.save({"weight": torch.arange(3, dtype=torch.float16)}, tmp_path / "pytorch_model.bin")

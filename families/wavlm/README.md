@@ -48,9 +48,10 @@ checkpoint without a CTC head, such as the pretrained `microsoft/wavlm-large`,
 resolves to this family through its `model_type` and is refused because it has
 no transcription to build. Special and added tokens are read as Transformers'
 tokenizer loader reads them: in the legacy layout `special_tokens_map.json`
-overrides `tokenizer_config.json` and added tokens come from `added_tokens.json`;
-a `tokenizer_config.json` with `added_tokens_decoder` replaces both files, which
-are then not read at all.
+overrides `tokenizer_config.json`, and added tokens come from `added_tokens.json`,
+replaced id by id by the `added_tokens` of `tokenizer.json` when that file
+exists; a `tokenizer_config.json` with `added_tokens_decoder` replaces all three
+files, which are then not read at all.
 
 ## Checkpoints
 
