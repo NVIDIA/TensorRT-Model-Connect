@@ -154,6 +154,11 @@ def build_decoder(config: ModelConfig, weights, max_cache_length: int, *,
     if not 1 <= max_input_length <= max_cache_length <= config.max_position_embeddings:
         raise ValueError("Cosmos3-Edge input/cache capacity exceeds checkpoint context")
     g = _Graph(precision, verbose)
+    if g.dtype == trt.float32:
+        # The explicit FP32 attention holds [heads, input, cache + input] FP32 scores and their softmax; TensorRT
+        # serves them from the workspace pool, so a pool below that size fails long prefills at enqueue.
+        scores = config.num_attention_heads * max_input_length * (max_cache_length + max_input_length) * 4
+        g.config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, max(2 << 30, 2 * scores))
     n, h, d = g.network, config.hidden_size, config.head_dim
     x = n.add_input("inputs_embeds", g.dtype, (-1, h))
     cos = n.add_input("rope_cos", trt.float32, (-1, d))
@@ -223,6 +228,10 @@ def build_visual(config: ModelConfig, weights, max_patches: int, *, precision="f
     if max_patches < merge or max_patches % merge:
         raise ValueError("Cosmos3-Edge visual profile must contain complete merge blocks")
     g = _Graph(precision, verbose)
+    if g.dtype == trt.float32:
+        # The explicit FP32 attention's [heads, patches, patches] scores and softmax come from the workspace pool.
+        scores = heads * max_patches * max_patches * 4
+        g.config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, max(2 << 30, 2 * scores))
     n = g.network
     patch_width = vision["num_channels"] * vision["patch_size"] ** 2
     pixels = n.add_input("pixel_values", g.dtype, (-1, patch_width))
@@ -245,7 +254,10 @@ def build_visual(config: ModelConfig, weights, max_patches: int, *, precision="f
         norm = g.norm(x, weights, prefix + ".layer_norm1", vision["layer_norm_eps"], True)
         q, k, v = [g.reshape(g.linear(norm, weights, prefix + ".self_attn." + kind + "_proj", True),
                              (-1, heads, width // heads), (1, 0, 2)) for kind in ("q", "k", "v")]
-        attended = g.fused_attention(q, k, v, heads, width // heads)
+        if g.dtype == trt.float32:  # as in the decoder: no fused FP32 kernel, and a far larger lowering
+            attended = g.attention(q, k, v, width // heads)
+        else:
+            attended = g.fused_attention(q, k, v, heads, width // heads)
         shuffle = n.add_shuffle(attended)
         shuffle.first_transpose = (1, 0, 2)
         shuffle.reshape_dims = (-1, width)
