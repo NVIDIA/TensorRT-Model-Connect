@@ -28,7 +28,7 @@ invalid inputs and engine failures; CPU results do not establish GPU model parit
 Set `TRTMC_NATIVE_BUILD_DIR` to the CMake build root containing both SDK consumers,
 including when `TRTMC_BINARY` points to a CLI installed from a wheel.
 
-## Tokenizer NFC normalization
+## Unicode tokenization
 
 The native tokenizer applies the top-level NFC normalizer used by ModernBERT
 and Granite embedding r2 before byte-level pre-tokenization. Canonically
@@ -44,6 +44,26 @@ is retained in [UNICODE_LICENSE.txt](UNICODE_LICENSE.txt). Regenerate with:
 python -m pip install tokenizers==0.23.3
 python families/modernbert/tests/generate_nfc.py
 ```
+
+Byte-level regex classification uses the complete Unicode 16.0 letter (`L*`),
+number (`N*`) and `White_Space` ranges. These match the pinned tokenizer's regex
+engine, independently of its Unicode 9 normalization tables. ASCII keeps direct
+classification. Arabic punctuation and combining marks are not classified as
+letters; non-ASCII numbers include decimal digits, letter numbers and other
+numbers. Supplementary-plane letters and all Unicode whitespace are included.
+
+Regenerate the classification header from the official
+[UnicodeData.txt](https://www.unicode.org/Public/16.0.0/ucd/UnicodeData.txt) and
+[PropList.txt](https://www.unicode.org/Public/16.0.0/ucd/PropList.txt):
+
+```bash
+python families/modernbert/tests/generate_categories.py UnicodeData.txt PropList.txt
+```
+
+The official input SHA-256 values are
+`ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f` and
+`53d614508e2a0b2305a8aa21cd60d993de9326cdf65993660dfcce4503548583`, respectively.
+Both generated headers retain Unicode attribution in the family license file.
 
 There is no new runtime dependency. This covers the checkpoint's top-level NFC
 configuration, not arbitrary normalizer sequences, newer Unicode normalization

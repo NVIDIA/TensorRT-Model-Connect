@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <iostream>
 #include <nlohmann/json.hpp>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -53,6 +54,65 @@ nlohmann::json fixture() {
                                       {{"SpecialToken", {{"id", "[SEP]"}, {"type_id", 0}}}}})},
               {"special_tokens", {{"[CLS]", {{"ids", {256}}}}, {"[SEP]", {{"ids", {257}}}}}}}}};
 }
+int boundary_cases(bool special) {
+    const std::vector<std::pair<std::string, std::vector<std::string>>> cases = {
+        {u8"aאb", {u8"aאb"}},
+        {u8"a،b", {"a", u8"،", "b"}},
+        {u8"1٢3", {u8"1٢3"}},
+        {u8"1²2", {u8"1²2"}},
+        {u8"1Ⅷ2", {u8"1Ⅷ2"}},
+        {u8"aिb", {"a", u8"ि", "b"}},
+        {u8"a𐐀b", {u8"a𐐀b"}},
+        {u8"aᾀb", {u8"aᾀb"}},
+        {u8"a\u2001!", {"a", u8"\u2001", "!"}},
+        {"a  b", {"a", " ", " b"}},
+        {u8"aあb", {u8"aあb"}},
+        {u8"a\uE000b", {"a", u8"\uE000", "b"}},
+    };
+    int failures = 0;
+    for (std::size_t i = 0; i < cases.size(); ++i) {
+        const auto& [input, pieces] = cases[i];
+        auto config = fixture();
+        config["normalizer"] = nullptr;
+        auto& vocab = config["model"]["vocab"];
+        auto& merges = config["model"]["merges"];
+        std::vector<std::string> bytes(256);
+        for (const auto& item : vocab.items()) {
+            const auto id = item.value().get<std::size_t>();
+            if (id < bytes.size())
+                bytes[id] = item.key();
+        }
+        std::set<std::pair<std::string, std::string>> seen;
+        const auto add_piece = [&](const std::string& text) {
+            std::string prefix;
+            for (const unsigned char byte : text) {
+                const auto& next = bytes[byte];
+                if (!prefix.empty() && seen.emplace(prefix, next).second)
+                    merges.push_back(nlohmann::json::array({prefix, next}));
+                prefix += next;
+                if (!vocab.contains(prefix))
+                    vocab[prefix] = vocab.size();
+            }
+            return vocab[prefix].get<int32_t>();
+        };
+        for (std::size_t start = 0; start < input.size(); ++start)
+            add_piece(input.substr(start));
+        std::vector<int32_t> expected;
+        if (special)
+            expected.push_back(256);
+        for (const auto& piece : pieces)
+            expected.push_back(add_piece(piece));
+        if (special)
+            expected.push_back(257);
+        const auto data = config.dump();
+        const auto tokenizer = trtmc::CreateBpeTokenizer(data.data(), data.size(), special);
+        if (tokenizer->encode(input) != expected || tokenizer->encode(input) != expected) {
+            std::cerr << "Boundary case " << i << ", special=" << special << " failed\n";
+            ++failures;
+        }
+    }
+    return failures;
+}
 } // namespace
 
 int main() {
@@ -73,6 +133,7 @@ int main() {
     };
     int failures = 0;
     for (bool special : {false, true}) {
+        failures += boundary_cases(special);
         auto config = fixture();
         auto data = config.dump();
         auto tokenizer = trtmc::CreateBpeTokenizer(data.data(), data.size(), special);
