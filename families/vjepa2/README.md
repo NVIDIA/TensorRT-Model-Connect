@@ -10,7 +10,7 @@ It does not expose the predictor or classification heads.
 
 The TensorRT graph uses family-owned FP32 normalization, linear, rotary,
 softmax and GELU operations through the public TVM-FFI BYOK bridge. Build with
-`TRTMC_BUILD_BYOK_TVM_FFI=ON` (the default) and install the matching native wheel
+`TRTMC_ENABLE_BYOK=ON` (the default) and install the matching native wheel
 before building or loading a bundle. TensorRT supplies each kernel's stream and
 workspace. This family uses CUDA runtime and cuBLASLt; it does not call native
 PyTorch GPU operators. The CPU resize computes only the columns needed by the
