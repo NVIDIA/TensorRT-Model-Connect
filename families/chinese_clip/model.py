@@ -179,6 +179,8 @@ def build(request, writer):
         raise ValueError(
             "Chinese-CLIP requires a supported embedding/relevance task and backend=trt"
         )
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("chinese_clip does not support dynamic_kv_cache")
     if (
         request.precision != "fp32"
         or request.tensor_parallel_size != 1
