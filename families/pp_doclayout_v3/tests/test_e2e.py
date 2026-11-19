@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
-from tools.e2e_evidence import record_evidence
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "pp_doclayout_v3"
 TASKS = frozenset({"document_layout"})
@@ -56,7 +56,7 @@ def _model_dir():
         path = _path(name)
         assert path.is_dir(), f"selected {FAMILY} E2E model path is not a directory: {path}"
         if (path / "config.json").is_file():
-            return path
+            return path, {"from_override": True, "resolved_revision": None}
         # Internal CI points MODEL_DIR at external_files, not the Hub snapshot.
         assert (path / DOCUMENT["path"]).is_file(), (
             f"{name} contains neither checkpoint config.json nor declared layout_demo.jpg: {path}"
@@ -70,14 +70,14 @@ def _model_dir():
                 revision=MANIFEST["hf_revision"],
                 local_files_only=True,
             )
-        )
+        ).resolve()
     except OSError as error:
         raise AssertionError(
             f"selected {FAMILY} E2E requires the exact cached checkpoint "
             f"{MANIFEST['hf_id']}@{MANIFEST['hf_revision']}"
         ) from error
     assert path.is_dir(), f"selected {FAMILY} E2E model path is not a directory: {path}"
-    return path
+    return path, {"from_override": False, "resolved_revision": MANIFEST["hf_revision"]}
 
 
 def _image_path(model_dir):
@@ -99,7 +99,9 @@ def _image_path(model_dir):
                 with Image.open(path) as image:
                     image.verify()
             except OSError as error:
-                raise AssertionError(f"selected {FAMILY} E2E invalid layout document: {path}") from error
+                raise AssertionError(
+                    f"selected {FAMILY} E2E invalid layout document: {path}"
+                ) from error
             return path
     raise AssertionError(
         f"selected {FAMILY} E2E requires layout_demo.jpg; provision the official "
@@ -131,6 +133,117 @@ def _polygon_iou(left, right, height, width):
     return float(np.logical_and(*masks).sum() / union) if union else 0
 
 
+def _geometry_check(checks, name, value, operator, limit):
+    checks.append(
+        {
+            "name": name,
+            "scope": "independent_reference",
+            "actual": value,
+            "operator": operator,
+            "expected": limit,
+            "passed": value == limit
+            if operator == "=="
+            else (value <= limit if operator == "<=" else value >= limit),
+        }
+    )
+
+
+def _compare_regions(actual, expected, image, index, metrics, checks):
+    regions = actual["regions"]
+    region_count = len(regions) if regions else 0
+    _geometry_check(checks, "region_count", region_count, "==", len(expected["scores"]))
+    _geometry_check(checks, "nonempty_regions", region_count, ">=", 1)
+    assert regions and len(regions) == len(expected["scores"])
+    _geometry_check(checks, "image_height", actual["image_height"], "==", image.height)
+    _geometry_check(checks, "image_width", actual["image_width"], "==", image.width)
+    assert actual["image_height"] == image.height and actual["image_width"] == image.width
+    # Compare by reading order. Matching only by score would miss an order-head defect.
+    for order, (region, score, label, box, polygon) in enumerate(
+        zip(
+            regions,
+            expected["scores"],
+            expected["labels"],
+            expected["boxes"],
+            expected["polygon_points"],
+            strict=True,
+        )
+    ):
+        measurement = {
+            "variant": index,
+            "region": order,
+            "score_absolute_error": abs(region["score"] - float(score)),
+            "box_iou": _iou(region["box"], box.tolist()),
+        }
+        metrics.append(measurement)
+        _geometry_check(checks, f"region_{order}_class_id", region["class_id"], "==", int(label))
+        assert region["class_id"] == int(label)
+        _geometry_check(
+            checks, f"region_{order}_score_error", measurement["score_absolute_error"], "<=", 0.02
+        )
+        assert measurement["score_absolute_error"] <= 0.02
+        _geometry_check(checks, f"region_{order}_box_iou", measurement["box_iou"], ">=", 0.98)
+        assert measurement["box_iou"] >= 0.98
+        assert len(region["polygon"]) >= 4 and polygon is not None
+        assert np.isfinite(region["polygon"]).all()
+        measurement["polygon_iou"] = _polygon_iou(
+            region["polygon"], polygon, image.height, image.width
+        )
+        _geometry_check(
+            checks, f"region_{order}_polygon_iou", measurement["polygon_iou"], ">=", 0.98
+        )
+        assert measurement["polygon_iou"] >= 0.98
+
+
+def _record_layout_evidence(tmp_path, index, image, actual, reference, checks, views):
+    from PIL import ImageDraw
+
+    paired = {}
+    for role, record in (("native", actual), ("reference", reference)):
+        try:
+            geometry = tmp_path / f"document-{index}-{role}.json"
+            geometry.write_text(json.dumps(record, indent=2))
+            paired[role] = geometry
+        except (OSError, TypeError, ValueError) as error:
+            record_evidence(
+                "attachment_error",
+                {"attachment": f"document-{index}-{role}.json", "error": str(error)},
+            )
+        try:
+            preview = image.copy()
+            drawing = ImageDraw.Draw(preview)
+            for order, region in enumerate(record["regions"]):
+                drawing.polygon(
+                    [tuple(point) for point in region["polygon"]], outline="red", width=2
+                )
+                drawing.text(tuple(region["box"][:2]), f"{order}: {region['class_id']}", fill="red")
+            preview_path = tmp_path / f"document-{index}-{role}.png"
+            preview.save(preview_path)
+            views.append(
+                {
+                    "title": f"Sample {index} / {role}",
+                    "image": preview_path,
+                    "caption": "Original" if index == 0 else "Mirrored",
+                }
+            )
+        except Exception as error:
+            record_evidence(
+                "attachment_error",
+                {"attachment": f"document-{index}-{role}.png", "error": str(error)},
+            )
+    record_evidence("views", views)
+    # Retain completed and failed checks even when later geometry is unavailable.
+    record_evidence(
+        "reference_comparison",
+        {
+            "label": f"Document {index}: regions in reading order",
+            "scope": "independent_reference",
+            "enforced": True,
+            **paired,
+            "checks": checks,
+        },
+    )
+
+
 @pytest.mark.parametrize("case_name", ["pp-doclayout-v3"])
 def test_official_checkpoint_e2e(request, tmp_path, case_name):
     if not _selected(request.config):
@@ -142,69 +255,126 @@ def test_official_checkpoint_e2e(request, tmp_path, case_name):
 
     logging.disable_progress_bar()
     torch.set_num_threads(8)
-    model_dir = _model_dir()
-    record_evidence("inputs", {"hf_id": MANIFEST["hf_id"], "hf_revision": MANIFEST["hf_revision"]})
-    image_path = _image_path(model_dir)
-    binary, runtime = _path("TRTMC_BINARY"), _path("TRTMC_RUNTIME_ROOT")
-    assert (runtime / "libtrtmc_model_pp_doclayout_v3.so").is_file()
-    assert (runtime / "libtrtmc_backend_trt.so").is_file()
-    bundle = tmp_path / MANIFEST["bundle"]
-    build(
-        BuildRequest(
-            model_dir=model_dir,
-            output_path=bundle,
-            family=FAMILY,
-            task=MANIFEST["task"],
-            precision=MANIFEST["precision"],
-            image_height=MANIFEST["image_height"],
-            image_width=MANIFEST["image_width"],
-            tensor_parallel_size=MANIFEST["tensor_parallel_size"],
-        )
+    record_evidence("inputs", {"manifest": MANIFEST, "variants": ["original", "mirrored"]})
+    record_evidence(
+        "checkpoint",
+        {"requested_repo_id": MANIFEST["hf_id"], "requested_revision": MANIFEST["hf_revision"]},
     )
-    model = AutoModelForObjectDetection.from_pretrained(model_dir, local_files_only=True).eval()
-    processor = AutoImageProcessor.from_pretrained(model_dir, local_files_only=True)
+    record_evidence(
+        "thresholds",
+        {
+            "score_absolute_error_max": 0.02,
+            "box_iou_min": 0.98,
+            "polygon_iou_min": 0.98,
+            "class_id": "exact reading order",
+        },
+    )
+    with evidence_stage("checkpoint"):
+        model_dir, checkpoint_source = _model_dir()
+        record_evidence(
+            "checkpoint",
+            {
+                "resolved_directory": str(model_dir),
+                **checkpoint_source,
+            },
+        )
+        image_path = _image_path(model_dir)
+    with evidence_stage("preparation"):
+        binary, runtime = _path("TRTMC_BINARY"), _path("TRTMC_RUNTIME_ROOT")
+        assert (runtime / "libtrtmc_model_pp_doclayout_v3.so").is_file()
+        assert (runtime / "libtrtmc_backend_trt.so").is_file()
+    bundle = tmp_path / MANIFEST["bundle"]
+    with evidence_stage("build"):
+        build(
+            BuildRequest(
+                model_dir=model_dir,
+                output_path=bundle,
+                family=FAMILY,
+                task=MANIFEST["task"],
+                precision=MANIFEST["precision"],
+                image_height=MANIFEST["image_height"],
+                image_width=MANIFEST["image_width"],
+                tensor_parallel_size=MANIFEST["tensor_parallel_size"],
+            )
+        )
+    record_evidence("bundle", {"path": str(bundle)})
+    with evidence_stage("reference"):
+        model = AutoModelForObjectDetection.from_pretrained(model_dir, local_files_only=True).eval()
+        processor = AutoImageProcessor.from_pretrained(model_dir, local_files_only=True)
     original = Image.open(image_path).convert("RGB")
+    native_records, reference_records, metrics, views = [], [], [], []
     for index, image in enumerate((original, ImageOps.mirror(original))):
         path = tmp_path / f"document-{index}.png"
         image.save(path)
-        completed = subprocess.run(
-            [
-                str(binary),
-                "layout",
-                str(bundle),
-                "--runtime-root",
-                str(runtime),
-                "--image",
-                str(path),
-            ],
-            check=True,
-            text=True,
-            capture_output=True,
-            timeout=120,
+        record_evidence("inputs", {f"document_{index}": path})
+        with evidence_stage("native"):
+            completed = subprocess.run(
+                [
+                    str(binary),
+                    "layout",
+                    str(bundle),
+                    "--runtime-root",
+                    str(runtime),
+                    "--image",
+                    str(path),
+                ],
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=120,
+            )
+            record_evidence(
+                f"native_process_{index}",
+                {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+            )
+            actual = json.loads(completed.stdout)
+        native_records.append({"variant": index, **actual})
+        record_evidence("native", {"variants": native_records})
+        with evidence_stage("reference"):
+            with torch.inference_mode():
+                outputs = model(**processor(images=image, return_tensors="pt"))
+            for name in ("logits", "pred_boxes", "order_logits", "out_masks"):
+                assert torch.isfinite(getattr(outputs, name)).all(), name
+            expected = processor.post_process_object_detection(
+                outputs, target_sizes=[image.size[::-1]], threshold=0.5
+            )[0]
+        reference_regions = [
+            {
+                "class_id": int(label),
+                "score": float(score),
+                "box": box.tolist(),
+                "polygon": np.asarray(polygon).tolist() if polygon is not None else None,
+            }
+            for score, label, box, polygon in zip(
+                expected["scores"],
+                expected["labels"],
+                expected["boxes"],
+                expected["polygon_points"],
+                strict=True,
+            )
+        ]
+        reference_records.append(
+            {
+                "variant": index,
+                "image_height": image.height,
+                "image_width": image.width,
+                "regions": reference_regions,
+            }
         )
-        actual = json.loads(completed.stdout)
-        with torch.inference_mode():
-            outputs = model(**processor(images=image, return_tensors="pt"))
-        for name in ("logits", "pred_boxes", "order_logits", "out_masks"):
-            assert torch.isfinite(getattr(outputs, name)).all(), name
-        expected = processor.post_process_object_detection(
-            outputs, target_sizes=[image.size[::-1]], threshold=0.5
-        )[0]
-        regions = actual["regions"]
-        assert regions and len(regions) == len(expected["scores"])
-        assert actual["image_height"] == image.height and actual["image_width"] == image.width
-        # Compare by reading order. Matching only by score would miss an order-head defect.
-        for region, score, label, box, polygon in zip(
-            regions,
-            expected["scores"],
-            expected["labels"],
-            expected["boxes"],
-            expected["polygon_points"],
-            strict=True,
-        ):
-            assert region["class_id"] == int(label)
-            assert abs(region["score"] - float(score)) <= 0.02
-            assert _iou(region["box"], box.tolist()) >= 0.98
-            assert len(region["polygon"]) >= 4 and polygon is not None
-            assert np.isfinite(region["polygon"]).all()
-            assert _polygon_iou(region["polygon"], polygon, image.height, image.width) >= 0.98
+        record_evidence("reference", {"mode": "hf_transformers", "variants": reference_records})
+        checks = []
+        try:
+            with evidence_stage("compare"):
+                _compare_regions(actual, expected, image, index, metrics, checks)
+        finally:
+            record_evidence("metrics", metrics)
+            if evidence_enabled():
+                try:
+                    _record_layout_evidence(
+                        tmp_path, index, image, actual, reference_records[-1], checks, views
+                    )
+                except Exception as error:
+                    # Diagnostics must never replace the original comparison failure.
+                    record_evidence(
+                        "attachment_error", {"attachment": f"document-{index}", "error": str(error)}
+                    )
