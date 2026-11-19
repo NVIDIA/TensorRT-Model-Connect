@@ -198,6 +198,11 @@ cmake --build "$TRTMC_BUILD_DIR" --parallel "$(nproc)" --target \
 export PATH="$PWD/$TRTMC_BUILD_DIR:$PATH"
 ```
 
+The command above builds the Qwen family. If you configured with
+`-DTRTMC_BUILD_FAMILIES=""`, omit `trtmc_model_qwen` from the target list. For a
+specific family selection, replace it with the corresponding selected targets,
+such as `trtmc_model_qwen2_5_omni` for `-DTRTMC_BUILD_FAMILIES=qwen2_5_omni`.
+
 To run the optional text server from this build, install its Python control
 plane dependencies with `python -m pip install -e '.[serve]' -C py-only=true`.
 

@@ -141,13 +141,6 @@ static const ByteEncoderTables& byte_tables() {
     return tables;
 }
 
-inline bool is_whitespace(char32_t cp) {
-    return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' || cp == 0x0B || cp == 0x0C // VT, FF
-           || cp == 0xA0                   // non-breaking space
-           || cp == 0x2000 || cp == 0x200A // en space through hair space
-           || cp == 0x3000;                // ideographic space
-}
-
 class BpeTokenizer final : public ITokenizer {
   public:
     static std::unique_ptr<BpeTokenizer> Create(const char* tokenizer_json_data,
@@ -211,53 +204,19 @@ class BpeTokenizer final : public ITokenizer {
     BpeTokenizer() = default;
 
     std::string normalize_text(const std::string& source) const {
-        std::string text = source;
-        if (mNormalizeNfc) {
-            UErrorCode status = U_ZERO_ERROR;
-            const auto* normalizer = icu::Normalizer2::getNFCInstance(status);
-            if (U_FAILURE(status))
-                throw std::runtime_error("Qwen2.5 Omni tokenizer NFC initialization failed");
-            icu::UnicodeString normalized;
-            normalizer->normalize(icu::UnicodeString::fromUTF8(text), normalized, status);
-            if (U_FAILURE(status))
-                throw std::runtime_error("Qwen2.5 Omni tokenizer NFC normalization failed");
-            text.clear();
-            normalized.toUTF8String(text);
-        }
-        for (const auto& replacement : mLiteralReplacements) {
-            std::size_t offset = 0;
-            while ((offset = text.find(replacement.first, offset)) != std::string::npos) {
-                text.replace(offset, replacement.first.size(), replacement.second);
-                offset += replacement.second.size();
-            }
-        }
-        if (!mNormalizeLowercase && !mNormalizeWhitespace) {
-            return text;
-        }
-
-        std::string normalized;
-        normalized.reserve(text.size());
-        const char* cursor = text.data();
-        const char* end = cursor + text.size();
-        bool previous_was_whitespace = false;
-        while (cursor < end) {
-            const char* char_start = cursor;
-            const char32_t cp = read_utf8(cursor, end);
-            if (mNormalizeWhitespace && is_whitespace(cp)) {
-                if (!previous_was_whitespace) {
-                    normalized.push_back(' ');
-                }
-                previous_was_whitespace = true;
-                continue;
-            }
-            previous_was_whitespace = false;
-            if (mNormalizeLowercase && cp >= 'A' && cp <= 'Z') {
-                normalized.push_back(static_cast<char>(cp - 'A' + 'a'));
-            } else {
-                normalized.append(char_start, cursor);
-            }
-        }
-        return normalized;
+        if (!mNormalizeNfc)
+            return source;
+        UErrorCode status = U_ZERO_ERROR;
+        const auto* normalizer = icu::Normalizer2::getNFCInstance(status);
+        if (U_FAILURE(status))
+            throw std::runtime_error("Qwen2.5 Omni tokenizer NFC initialization failed");
+        icu::UnicodeString normalized;
+        normalizer->normalize(icu::UnicodeString::fromUTF8(source), normalized, status);
+        if (U_FAILURE(status))
+            throw std::runtime_error("Qwen2.5 Omni tokenizer NFC normalization failed");
+        std::string text;
+        normalized.toUTF8String(text);
+        return text;
     }
 
     // ─── Added token segmentation ───
@@ -608,40 +567,12 @@ class BpeTokenizer final : public ITokenizer {
     }
 
     void detect_normalizer(const nlohmann::json& j) {
-        if (j.contains("normalizer") && !j["normalizer"].is_null())
-            detect_text_normalizers(j["normalizer"]);
-    }
-
-    void detect_text_normalizers(const nlohmann::json& normalizer) {
-        const std::string type = normalizer.value("type", "");
-        if (type == "NFC") {
-            mNormalizeNfc = true;
+        const auto found = j.find("normalizer");
+        if (found == j.end() || found->is_null())
             return;
-        }
-        if (type == "Sequence" && normalizer.contains("normalizers")) {
-            for (const auto& child : normalizer["normalizers"]) {
-                detect_text_normalizers(child);
-            }
-            return;
-        }
-        if (type == "Replace" && normalizer.contains("pattern") &&
-            normalizer["pattern"].contains("String")) {
-            const auto pattern = normalizer["pattern"]["String"].get<std::string>();
-            if (pattern.empty())
-                throw std::runtime_error("Qwen2.5 Omni tokenizer replacement cannot be empty");
-            mLiteralReplacements.emplace_back(pattern, normalizer.at("content").get<std::string>());
-            return;
-        }
-        if (type == "Lowercase") {
-            mNormalizeLowercase = true;
-            return;
-        }
-        if (type == "Replace" && normalizer.contains("pattern") &&
-            normalizer["pattern"].contains("Regex") &&
-            normalizer["pattern"]["Regex"].get<std::string>() == "\\s+" &&
-            normalizer.value("content", "") == " ") {
-            mNormalizeWhitespace = true;
-        }
+        if (!found->is_object() || found->value("type", "") != "NFC")
+            throw std::runtime_error("Qwen2.5 Omni tokenizer supports only NFC normalization");
+        mNormalizeNfc = true;
     }
 
     // Parse post_processor to extract BOS/EOS tokens for add_special_tokens
@@ -740,10 +671,7 @@ class BpeTokenizer final : public ITokenizer {
 
     bool mAddSpecialTokens = false;
     std::unique_ptr<icu::RegexPattern> mRegex;
-    std::vector<std::pair<std::string, std::string>> mLiteralReplacements;
-    bool mNormalizeLowercase = false;
     bool mNormalizeNfc = false;
-    bool mNormalizeWhitespace = false;
     std::string mEndOfWordSuffix;
 
     // Post-processor: BOS/EOS token IDs to add when add_special_tokens=true

@@ -11,6 +11,37 @@ import tensorrt as trt
 from .plan_stream import PlanWriter
 
 
+def _validate_tokenizer(tokenizer):
+    normalizer = tokenizer.get("normalizer")
+    if normalizer is not None and (
+        not isinstance(normalizer, dict) or normalizer.get("type") != "NFC"
+    ):
+        raise ValueError("Qwen2.5 Omni tokenizer supports only NFC normalization")
+    pretokenizer = tokenizer.get("pre_tokenizer", {})
+    parts = pretokenizer.get("pretokenizers") if isinstance(pretokenizer, dict) else None
+    if (
+        not isinstance(pretokenizer, dict)
+        or pretokenizer.get("type") != "Sequence"
+        or not isinstance(parts, list)
+        or len(parts) != 2
+        or not all(isinstance(part, dict) for part in parts)
+        or parts[0].get("type") != "Split"
+        or parts[0].get("behavior") != "Isolated"
+        or parts[0].get("invert", False) is not False
+        or not isinstance(parts[0].get("pattern"), dict)
+        or not isinstance(parts[0]["pattern"].get("Regex"), str)
+        or not parts[0]["pattern"]["Regex"]
+        or parts[1].get("type") != "ByteLevel"
+        or parts[1].get("add_prefix_space", True) is not False
+        or parts[1].get("use_regex", True) is not False
+        or not isinstance(tokenizer.get("decoder"), dict)
+        or tokenizer["decoder"].get("type") != "ByteLevel"
+    ):
+        raise ValueError(
+            "Qwen2.5 Omni tokenizer requires regex Split followed by ByteLevel without a prefix space"
+        )
+
+
 def load_weights(directory):
     from safetensors import safe_open
 
@@ -113,9 +144,15 @@ def build_engine(weights, cfg, length, stream, verbose=False):
     for layer in range(cfg["num_hidden_layers"]):
         prefix = f"model.layers.{layer}"
         normal = norm(hidden, prefix + ".input_layernorm")
-        query = reshape(linear(normal, prefix + ".self_attn.q_proj", require_bias=True), (1, heads, 1, dim))
-        key = reshape(linear(normal, prefix + ".self_attn.k_proj", require_bias=True), (1, kv, 1, dim))
-        value = reshape(linear(normal, prefix + ".self_attn.v_proj", require_bias=True), (1, kv, 1, dim))
+        query = reshape(
+            linear(normal, prefix + ".self_attn.q_proj", require_bias=True), (1, heads, 1, dim)
+        )
+        key = reshape(
+            linear(normal, prefix + ".self_attn.k_proj", require_bias=True), (1, kv, 1, dim)
+        )
+        value = reshape(
+            linear(normal, prefix + ".self_attn.v_proj", require_bias=True), (1, kv, 1, dim)
+        )
 
         def rope(x, nheads):
             first = net.add_slice(
@@ -208,10 +245,12 @@ def build(request, writer):
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(directory)
+    tokenizer_json = tokenizer.backend_tokenizer.to_str()
+    _validate_tokenizer(json.loads(tokenizer_json))
     writer.set_header(family="qwen2_5_omni", task=request.task, backend=request.backend)
     with writer.open_section("model.plan") as section:
         build_engine(load_weights(directory), cfg, length, section, request.verbose)
-    writer.add_bytes("tokenizer.json", tokenizer.backend_tokenizer.to_str().encode())
+    writer.add_bytes("tokenizer.json", tokenizer_json.encode())
     writer.add_json(
         "runtime.json",
         dict(
