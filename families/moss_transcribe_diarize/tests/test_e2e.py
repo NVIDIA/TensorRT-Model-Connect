@@ -45,6 +45,8 @@ import numpy as np
 import pytest
 from tensorrt_model_connect import BuildRequest, build
 
+from tools.e2e_evidence import record_evidence
+
 FAMILY = "moss_transcribe_diarize"
 TASKS = frozenset({"speech_transcription"})
 TEST_ROOT = Path(__file__).resolve().parent
@@ -472,6 +474,53 @@ def _assert_termination(tokens: list[int], argmax: list[int], eos: set[int],
         assert len(tokens) == max_new_tokens
 
 
+def _ids_file(path: Path, ids: list[int]) -> Path:
+    np.save(path, np.asarray(ids, dtype=np.int64))
+    return path
+
+
+def _token_exact_checks(native_ids: list[int], reference_ids: list[int]) -> list[dict]:
+    """The ``token_exact`` comparison as an evidence record (``tools.e2e_evidence``)."""
+    mismatches = sum(native != reference for native, reference in zip(native_ids, reference_ids))
+    mismatches += abs(len(native_ids) - len(reference_ids))
+    return [{
+        "name": "token_mismatches",
+        "label": "Native token IDs that differ from the FP32 reference's (with the length difference)",
+        "scope": "independent_reference", "actual": mismatches, "operator": "==", "expected": 0,
+        "passed": mismatches == 0,
+    }]
+
+
+def _teacher_forced_checks(tokens: list[int], gaps: list[float], peaks: list[float],
+                           argmax: list[int], eos: set[int], max_new_tokens: int,
+                           ulps: float) -> list[dict]:
+    """The ``teacher_forced`` oracle's checks as an evidence record, from the same values."""
+    widest = 0.0
+    for gap, peak in zip(gaps, peaks):
+        spacing = _bf16_spacing(peak)
+        widest = max(widest, gap / spacing if spacing else (0.0 if gap <= 0 else math.inf))
+    early = sum(1 for token in argmax[:-1] if token in eos)
+    unmatched_end = int(tokens[-1] in eos and argmax[-1] not in eos)
+    stop = int(tokens[-1] in eos or len(tokens) == max_new_tokens)
+    return [
+        {"name": "max_gap_bf16_spacings",
+         "label": "Largest gap of a native token to the FP32 argmax, in BF16 spacings at that step",
+         "scope": "independent_reference", "actual": widest, "operator": "<=", "expected": ulps,
+         "passed": widest <= ulps},
+        {"name": "reference_eos_before_native_end",
+         "label": "Steps before the native end at which the FP32 argmax is EOS",
+         "scope": "independent_reference", "actual": early, "operator": "==", "expected": 0,
+         "passed": early == 0},
+        {"name": "native_eos_without_reference_eos",
+         "label": "Native EOS at a step whose FP32 argmax is not EOS (1 = yes)",
+         "scope": "independent_reference", "actual": unmatched_end, "operator": "==", "expected": 0,
+         "passed": unmatched_end == 0},
+        {"name": "stops_at_eos_or_limit",
+         "label": "Native IDs end with EOS or at max_new_tokens (1 = yes)",
+         "scope": "contract", "actual": stop, "operator": "==", "expected": 1, "passed": stop == 1},
+    ]
+
+
 def test_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     model_dir = _model_dir(manifest)
@@ -479,10 +528,14 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
     bundle = tmp_path / manifest["bundle"]
     _build(model_dir, bundle, manifest)
     audio_path = _write_wav(tmp_path / "input.wav", _input_samples(case), SAMPLE_RATE)
-    native = _json_line(_cli(binary, runtime_root, bundle, audio_path,
-                             "--set", f"max_new_tokens={int(case['max_new_tokens'])}"))
-    tokens = [int(token) for token in native["token_ids"]]
     max_new_tokens = int(case["max_new_tokens"])
+    record_evidence("inputs", {"prompt": PROMPT, "audio": audio_path, "oracle": case["oracle"],
+                               "max_new_tokens": max_new_tokens})
+    native = _json_line(_cli(binary, runtime_root, bundle, audio_path,
+                             "--set", f"max_new_tokens={max_new_tokens}"))
+    tokens = [int(token) for token in native["token_ids"]]
+    record_evidence("native", {"transcript": native["text"], "token_ids": tokens,
+                               "segments": native["segments"]})
     assert 0 < len(tokens) <= max_new_tokens
     _assert_sdk_results(native, runtime_root, bundle, case, tmp_path)
     if case.get("input_contract"):
@@ -490,16 +543,33 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
 
     reference = _Reference(model_dir)
     inputs = reference.inputs(_input_samples(case))
+    reference_ids = reference.generate(inputs, max_new_tokens)
+    record_evidence("reference", {"reference_text": reference.decode(reference_ids),
+                                  "reference_ids": reference_ids})
     assert native["text"] == reference.decode(tokens)
     _assert_segments(native)
+    native_file = _ids_file(tmp_path / "native_ids.npy", tokens)
     if case["oracle"] == "token_exact":
-        assert tokens == reference.generate(inputs, max_new_tokens)
+        record_evidence("reference_comparison", {
+            "label": "FP32 reference token IDs", "scope": "independent_reference", "enforced": True,
+            "native": native_file,
+            "reference": _ids_file(tmp_path / "reference_ids.npy", reference_ids),
+            "checks": _token_exact_checks(tokens, reference_ids),
+        })
+        assert tokens == reference_ids
         return
     eos = set(reference.model.generation_config.eos_token_id
               if isinstance(reference.model.generation_config.eos_token_id, list)
               else [reference.model.generation_config.eos_token_id])
     ulps = float(_thresholds(case_name)["max_logit_gap_bf16_ulps"])
+    record_evidence("thresholds", {"max_logit_gap_bf16_ulps": ulps})
     gaps, peaks, argmax = reference.teacher_forced_gaps(inputs, tokens)
+    record_evidence("reference_comparison", {
+        "label": "FP32 teacher-forced scores of the native tokens", "scope": "independent_reference",
+        "enforced": True, "native": native_file,
+        "reference": _ids_file(tmp_path / "reference_argmax_ids.npy", argmax),
+        "checks": _teacher_forced_checks(tokens, gaps, peaks, argmax, eos, max_new_tokens, ulps),
+    })
     _assert_termination(tokens, argmax, eos, max_new_tokens)
     for step, (gap, peak) in enumerate(zip(gaps, peaks)):
         allowed = ulps * _bf16_spacing(peak)

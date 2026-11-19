@@ -262,3 +262,32 @@ def test_e2e_reference_runs_only_the_pinned_snapshot(tmp_path, monkeypatch):
     manifest = {"hf_id": "OpenMOSS-Team/MOSS-Transcribe-Diarize", "hf_revision": "0" * 40}
     with pytest.raises(AssertionError, match="cached checkpoint"):
         test_e2e._model_dir(manifest)
+
+
+def _consistent(check: dict) -> bool:
+    actual, expected = check["actual"], check["expected"]
+    assert type(actual) in (int, float) and type(expected) in (int, float)
+    holds = {"==": actual == expected, "<=": actual <= expected, ">=": actual >= expected}
+    return holds[check["operator"]] is check["passed"]
+
+
+def test_e2e_evidence_checks_restate_the_enforced_comparisons():
+    passed = test_e2e._token_exact_checks([1, 2, 3], [1, 2, 3])
+    failed = test_e2e._token_exact_checks([1, 2, 3], [1, 5])
+    assert [c["passed"] for c in passed] == [True] and failed[0]["actual"] == 2
+    assert all(_consistent(c) for c in passed + failed)
+
+    eos = {9}
+    # BF16 spacing at a largest logit of 8.0 is 0.0625: a 0.05 gap is 0.8 spacings.
+    ended = test_e2e._teacher_forced_checks([4, 5, 9], [0.0, 0.05, 0.0], [8.0, 8.0, 8.0],
+                                            [4, 6, 9], eos, 10, 1.0)
+    assert {c["name"]: c["passed"] for c in ended} == {
+        "max_gap_bf16_spacings": True, "reference_eos_before_native_end": True,
+        "native_eos_without_reference_eos": True, "stops_at_eos_or_limit": True}
+    assert ended[0]["actual"] == 0.8
+    early = test_e2e._teacher_forced_checks([4, 5, 9], [0.0, 0.1, 0.0], [8.0, 8.0, 8.0],
+                                            [4, 9, 6], eos, 10, 1.0)
+    assert {c["name"]: c["passed"] for c in early} == {
+        "max_gap_bf16_spacings": False, "reference_eos_before_native_end": False,
+        "native_eos_without_reference_eos": False, "stops_at_eos_or_limit": True}
+    assert all(_consistent(c) for c in ended + early)
