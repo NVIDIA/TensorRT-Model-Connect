@@ -7,3 +7,4 @@ def test_embedding_checkpoint_has_one_owner():
     family, support = resolve_family(ModelMetadata({"model_type": "jina_embeddings_v3"}, {}))
     assert family == "jina_embeddings_v3"
     assert support.tasks == ("text_to_embedding",)
+    assert support.default_task == "text_to_embedding"

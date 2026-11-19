@@ -180,6 +180,8 @@ def build_engine(weights, adapters, cfg, length, verbose=False):
 def build(request, writer):
     if request.task != "text_to_embedding" or request.backend != "trt":
         raise ValueError("Jina embeddings requires text_to_embedding and backend=trt")
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("jina_embeddings_v3 does not support dynamic_kv_cache")
     if (
         request.precision != "fp32"
         or request.tensor_parallel_size != 1

@@ -8,11 +8,13 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from functools import cache
 from pathlib import Path
 
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "jina_embeddings_v3"
 TASKS = frozenset({"text_to_embedding"})
@@ -92,6 +94,46 @@ def _required_path(value: str | None, label: str) -> Path:
     return path
 
 
+@cache
+def _native_test_binary(name: str) -> Path:
+    """Build source-only helpers in the configured native test tree."""
+    build_dir = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    subprocess.run(
+        ["cmake", "--build", str(build_dir), "--parallel", "2", "--target", name],
+        check=True,
+        timeout=600,
+    )
+    return _required_path(str(build_dir / name), name)
+
+
+def _record_comparison(tmp_path, label, native, reference, checks):
+    """Retain the output pair and the result of already enforced comparisons."""
+    if not evidence_enabled():
+        return
+    import numpy as np
+
+    paths = []
+    for role, value in (("native", native), ("reference", reference)):
+        if isinstance(value, np.ndarray):
+            path = tmp_path / f"{label}-{role}.npz"
+            np.savez_compressed(path, output=value)
+        else:
+            path = tmp_path / f"{label}-{role}.json"
+            path.write_text(json.dumps(value, ensure_ascii=False) + "\n", encoding="utf-8")
+        paths.append(path)
+    record_evidence(
+        "reference_comparison",
+        {
+            "label": label,
+            "scope": "independent_reference",
+            "enforced": True,
+            "native": paths[0],
+            "reference": paths[1],
+            "checks": [dict(check, scope="independent_reference") for check in checks],
+        },
+    )
+
+
 def _model_dir(manifest: dict) -> Path:
     explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
     if explicit:
@@ -149,49 +191,88 @@ def _run_json(
     command: str,
     *arguments: str,
 ) -> dict:
-    invocation = [
-        str(binary),
-        command,
-        str(bundle),
-        "--runtime-root",
-        str(runtime_root),
-        *arguments,
-    ]
-    env = os.environ.copy()
-    env["LD_LIBRARY_PATH"] = ":".join(
-        (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
-    )
-    completed = subprocess.run(
-        invocation,
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=int(case.get("runtime_timeout_s", 3600)),
-    )
-    assert completed.returncode == 0, completed.stderr + completed.stdout
-    payloads = []
-    for line in completed.stdout.splitlines():
-        start = line.find("{")
-        if start >= 0:
-            try:
-                payloads.append(json.loads(line[start:]))
-            except json.JSONDecodeError:
-                pass
-    assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
-    assert all((payload == payloads[0] for payload in payloads))
-    return payloads[0]
+    with evidence_stage("runtime"):
+        invocation = [
+            str(binary),
+            command,
+            str(bundle),
+            "--runtime-root",
+            str(runtime_root),
+            *arguments,
+        ]
+        env = os.environ.copy()
+        env["LD_LIBRARY_PATH"] = ":".join(
+            (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
+        )
+        completed = subprocess.run(
+            invocation,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=int(case.get("runtime_timeout_s", 3600)),
+        )
+        record_evidence(
+            "native_process",
+            {
+                "argv": completed.args,
+                "stdout": (completed.stdout or "")[-4096:],
+                "stderr": (completed.stderr or "")[-16384:],
+                "returncode": completed.returncode,
+            },
+        )
+        assert completed.returncode == 0, completed.stderr + completed.stdout
+        payloads = []
+        for line in completed.stdout.splitlines():
+            start = line.find("{")
+            if start >= 0:
+                try:
+                    payloads.append(json.loads(line[start:]))
+                except json.JSONDecodeError:
+                    pass
+        assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
+        assert all((payload == payloads[0] for payload in payloads))
+        return payloads[0]
 
 
 def test_official_checkpoint_e2e(case_name, tmp_path):
+    _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {
+            key: value
+            for key, value in case.items()
+            if any(
+                word in key
+                for word in ("error", "cosine", "atol", "rtol", "snr", "rmse", "max_abs")
+            )
+        },
+    )
+    for asset_key in ("image", "test_image", "audio"):
+        if asset_key in case:
+            for asset_path in (TEST_ROOT / case[asset_key], TEST_ROOT / "data" / case[asset_key]):
+                if asset_path.is_file():
+                    record_evidence("inputs", {asset_key: asset_path})
+                    break
     import numpy as np
     import torch
     from transformers import AutoModel, AutoTokenizer
 
     _, manifest, case = CASES[case_name]
-    directory = _model_dir(manifest)
+    with evidence_stage("checkpoint"):
+        directory = _model_dir(manifest)
     binary, runtime_root = _runtime()
-    tokenizer = AutoTokenizer.from_pretrained(directory)
+    with evidence_stage("reference"):
+        tokenizer = AutoTokenizer.from_pretrained(directory)
     for text in [
         "A small test.",
         "日本語の文章 中文 한국어",
@@ -201,7 +282,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     ]:
         completed = subprocess.run(
             [
-                str(runtime_root / "test_jina_embeddings_v3_tokenizer"),
+                str(_native_test_binary("test_jina_embeddings_v3_tokenizer")),
                 str(directory / "tokenizer.json"),
                 text,
             ],
@@ -209,18 +290,23 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             capture_output=True,
             text=True,
         )
-        assert completed.returncode == 0, completed.stderr
-        assert json.loads(completed.stdout) == tokenizer.encode(text), repr(text)
+        with evidence_stage("comparison"):
+            assert completed.returncode == 0, completed.stderr
+        with evidence_stage("comparison"):
+            assert json.loads(completed.stdout) == tokenizer.encode(text), repr(text)
 
     bundle = tmp_path / manifest["bundle"]
-    _build(directory, bundle, manifest)
+    with evidence_stage("build"):
+        _build(directory, bundle, manifest)
+    record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    model = (
-        AutoModel.from_pretrained(directory, dtype=torch.float32, attn_implementation="eager")
-        .eval()
-        .to("cuda")
-    )
+    with evidence_stage("reference"):
+        model = (
+            AutoModel.from_pretrained(directory, dtype=torch.float32, attn_implementation="eager")
+            .eval()
+            .to("cuda")
+        )
     for name in ("retrieval_query", "retrieval_passage"):
         model.load_adapter(str(directory / name), adapter_name=name)
     model.eval()
@@ -234,7 +320,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                 {"query": "retrieval_query", "document": "retrieval_passage"}[item["role"]]
             )
         inputs = tokenizer(item["text"], return_tensors="pt").to("cuda")
-        with torch.no_grad():
+        with evidence_stage("reference"), torch.no_grad():
             hidden = model(**inputs).last_hidden_state
             valid = inputs["attention_mask"].unsqueeze(-1)
             mean = (hidden * valid).sum(dim=1) / valid.sum(dim=1)
@@ -252,19 +338,74 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             "--role",
             item["role"],
         )
-        assert payload["embedding_space"] == "jina_embeddings_v3"
-        assert payload["pooling"] == "mean" and payload["normalization"] == "l2"
+        with evidence_stage("comparison"):
+            assert payload["embedding_space"] == "jina_embeddings_v3"
+        with evidence_stage("comparison"):
+            assert payload["pooling"] == "mean" and payload["normalization"] == "l2"
         actual = np.asarray(payload["values"], dtype=np.float32)
-        assert actual.shape == expected.shape == (1024,)
-        assert np.isfinite(actual).all()
-        assert abs(np.linalg.norm(actual) - 1) <= 1e-5
+        record_evidence("inputs", {"input": item, "token_ids": inputs["input_ids"].cpu().numpy()})
+        record_evidence(
+            "thresholds",
+            {"cosine_min": 0.99999, "embedding_atol": 1e-4, "embedding_rtol": 0, "norm_atol": 1e-5},
+        )
+        record_evidence("native", {"role": item["role"], "text": item["text"], "values": actual})
+        record_evidence(
+            "reference",
+            {
+                "mode": "hf_transformers",
+                "role": item["role"],
+                "text": item["text"],
+                "values": expected,
+            },
+        )
+        with evidence_stage("comparison"):
+            assert actual.shape == expected.shape == (1024,)
+        with evidence_stage("comparison"):
+            assert np.isfinite(actual).all()
+        with evidence_stage("comparison"):
+            assert abs(np.linalg.norm(actual) - 1) <= 1e-5
         cosine = np.dot(actual, expected) / (np.linalg.norm(actual) * np.linalg.norm(expected))
-        assert cosine >= 0.99999
-        np.testing.assert_allclose(actual, expected, atol=1e-4, rtol=0)
+        with evidence_stage("comparison"):
+            assert cosine >= 0.99999
+        with evidence_stage("comparison"):
+            np.testing.assert_allclose(actual, expected, atol=1e-4, rtol=0)
+        mismatch = int(np.count_nonzero(~np.isclose(actual, expected, atol=1e-4, rtol=0)))
+        record_evidence(
+            "metrics",
+            {
+                "role": item["role"],
+                "cosine": float(cosine),
+                "max_abs_error": float(np.max(np.abs(actual - expected))),
+            },
+        )
+        _record_comparison(
+            tmp_path,
+            f"embedding-{item['role']}-{len(item['text'])}",
+            actual,
+            expected,
+            [
+                {
+                    "name": "cosine",
+                    "actual": float(cosine),
+                    "operator": ">=",
+                    "expected": 0.99999,
+                    "passed": bool(cosine >= 0.99999),
+                },
+                {
+                    "name": "values_outside_tolerance",
+                    "actual": mismatch,
+                    "operator": "==",
+                    "expected": 0,
+                    "passed": mismatch == 0,
+                },
+            ],
+        )
         roles.setdefault(item["role"], actual)
         print(
             f"Jina role={item['role']}, cosine={cosine:.8f}, maxabs={np.max(np.abs(actual - expected)):.6g}"
         )
     # The adapters must affect the embedding even with identical input text.
-    assert np.linalg.norm(roles["default"] - roles["query"]) > 0.01
-    assert np.linalg.norm(roles["query"] - roles["document"]) > 0.01
+    with evidence_stage("comparison"):
+        assert np.linalg.norm(roles["default"] - roles["query"]) > 0.01
+    with evidence_stage("comparison"):
+        assert np.linalg.norm(roles["query"] - roles["document"]) > 0.01
