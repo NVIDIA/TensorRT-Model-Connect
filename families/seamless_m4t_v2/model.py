@@ -82,6 +82,8 @@ def build_engine(weights, cfg, length, *, decoder=False, verbose=False):
 def build(request, writer):
     if request.task != "text_translation" or request.backend != "trt":
         raise ValueError("SeamlessM4T v2 requires text_translation with backend=trt")
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("seamless_m4t_v2 does not support dynamic_kv_cache")
     if (
         request.precision != "fp32"
         or request.tensor_parallel_size != 1

@@ -7,3 +7,4 @@ def test_seamless_m4t_v2_checkpoint_has_one_owner():
     family, support = resolve_family(ModelMetadata({"model_type": "seamless_m4t_v2"}, {}))
     assert family == "seamless_m4t_v2"
     assert support.tasks == ("text_translation",)
+    assert support.default_task == "text_translation"

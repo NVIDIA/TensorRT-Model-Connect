@@ -141,8 +141,10 @@ class Pipeline final : public internal::IModel, public internal::ITextTranslatio
 } // namespace trtmc::seamless_m4t_v2
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("seamless_m4t_v2 does not support --kv-cache-size");
     using namespace trtmc;
-    if (context.kv_cache_size_bytes || context.reader.info().task != "text_translation")
+    if (context.reader.info().task != "text_translation")
         throw std::invalid_argument(
             "SeamlessM4T v2 requires speech transcription without an external KV cache");
     const auto raw = seamless_m4t_v2::section(context.reader, "runtime.json");
