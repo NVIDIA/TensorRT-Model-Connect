@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """Pinned checkpoint parity through build, native DSO, and the image-feature API."""
+
 from __future__ import annotations
 
 import json
@@ -13,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_stage, record_evidence
 
 FAMILY = "dinov2_with_registers"
 TASKS = frozenset({"image_to_token_and_pooled_features"})
@@ -151,37 +153,47 @@ def _run_json(
     command: str,
     *arguments: str,
 ) -> dict:
-    invocation = [
-        str(binary),
-        command,
-        str(bundle),
-        "--runtime-root",
-        str(runtime_root),
-        *arguments,
-    ]
-    env = os.environ.copy()
-    env["LD_LIBRARY_PATH"] = ":".join(
-        (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
-    )
-    completed = subprocess.run(
-        invocation,
-        check=True,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=int(case.get("runtime_timeout_s", 3600)),
-    )
-    payloads = []
-    for line in completed.stdout.splitlines():
-        start = line.find("{")
-        if start >= 0:
-            try:
-                payloads.append(json.loads(line[start:]))
-            except json.JSONDecodeError:
-                pass
-    assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
-    assert all((payload == payloads[0] for payload in payloads))
-    return payloads[0]
+    with evidence_stage("runtime"):
+        invocation = [
+            str(binary),
+            command,
+            str(bundle),
+            "--runtime-root",
+            str(runtime_root),
+            *arguments,
+        ]
+        env = os.environ.copy()
+        env["LD_LIBRARY_PATH"] = ":".join(
+            (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
+        )
+        completed = subprocess.run(
+            invocation,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=int(case.get("runtime_timeout_s", 3600)),
+        )
+        record_evidence(
+            "native_process",
+            {
+                "argv": completed.args,
+                "stdout": (completed.stdout or "")[-4096:],
+                "stderr": (completed.stderr or "")[-16384:],
+                "returncode": completed.returncode,
+            },
+        )
+        payloads = []
+        for line in completed.stdout.splitlines():
+            start = line.find("{")
+            if start >= 0:
+                try:
+                    payloads.append(json.loads(line[start:]))
+                except json.JSONDecodeError:
+                    pass
+        assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
+        assert all((payload == payloads[0] for payload in payloads))
+        return payloads[0]
 
 
 def _asset(raw: str) -> Path:
@@ -192,50 +204,133 @@ def _asset(raw: str) -> Path:
     return path
 
 
-
-
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
+    _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {
+            key: value
+            for key, value in case.items()
+            if any(
+                word in key
+                for word in ("error", "cosine", "atol", "rtol", "snr", "rmse", "max_abs")
+            )
+        },
+    )
+    for asset_key in ("image", "test_image", "audio"):
+        if asset_key in case:
+            for asset_path in (TEST_ROOT / case[asset_key], TEST_ROOT / "data" / case[asset_key]):
+                if asset_path.is_file():
+                    record_evidence("inputs", {asset_key: asset_path})
+                    break
     import numpy as np
     import torch
     from PIL import Image
     from transformers import AutoImageProcessor, Dinov2WithRegistersModel
 
     _, manifest, case = CASES[case_name]
-    directory = _model_dir(manifest)
+    with evidence_stage("checkpoint"):
+        directory = _model_dir(manifest)
     binary, runtime_root = _runtime()
-    bundle = tmp_path / manifest['bundle']
-    _build(directory, bundle, manifest)
+    bundle = tmp_path / manifest["bundle"]
+    with evidence_stage("build"):
+        _build(directory, bundle, manifest)
+    record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
     processor = AutoImageProcessor.from_pretrained(directory, use_fast=False)
     model = Dinov2WithRegistersModel.from_pretrained(directory, dtype=torch.float32).eval()
-    for image in (Image.open(_asset(case['test_image'])).convert('RGB'),
-                  Image.open(_asset(case['test_image'])).convert('RGB').transpose(Image.Transpose.FLIP_LEFT_RIGHT)):
-        image_path = tmp_path / 'input.png'
+    record_evidence("thresholds", {"feature_atol": 5e-3, "feature_rtol": 0})
+    for sample, image in enumerate(
+        (
+            Image.open(_asset(case["test_image"])).convert("RGB"),
+            Image.open(_asset(case["test_image"]))
+            .convert("RGB")
+            .transpose(Image.Transpose.FLIP_LEFT_RIGHT),
+        )
+    ):
+        image_path = tmp_path / "input.png"
         image.save(image_path)
-        with torch.no_grad():
-            reference = model(**processor(images=image, return_tensors='pt'))
-        payload = _run_json(binary, runtime_root, bundle, case, 'extract-features', '--task',
-                            manifest['task'], '--image', str(image_path))
-        shape = payload['last_hidden_state_shape']
+        record_evidence("inputs", {"sample": sample, "image": image_path})
+        with evidence_stage("reference"), torch.no_grad():
+            reference = model(**processor(images=image, return_tensors="pt"))
+        payload = _run_json(
+            binary,
+            runtime_root,
+            bundle,
+            case,
+            "extract-features",
+            "--task",
+            manifest["task"],
+            "--image",
+            str(image_path),
+        )
+        shape = payload["last_hidden_state_shape"]
         expected = reference.last_hidden_state.numpy()
-        assert shape == list(expected.shape)
-        native = np.asarray(payload['last_hidden_state'], dtype=np.float32).reshape(shape)
-        assert np.isfinite(native).all()
-        np.testing.assert_allclose(native, expected, atol=5e-3, rtol=0)
-        pooled = np.asarray(payload['pooler_output'], dtype=np.float32)
-        np.testing.assert_array_equal(pooled, native[0, 0])
-        np.testing.assert_allclose(pooled, reference.pooler_output[0].numpy(), atol=5e-3, rtol=0)
-        assert payload['pooling'] == 'class_token'
-        assert payload['normalization'] == 'none'
-        tokens = payload['tokens']
-        registers = case['num_register_tokens']
-        assert [token['role'] for token in tokens[:registers+1]] == ['class'] + ['register'] * registers
-        patches = tokens[registers+1:]
+        with evidence_stage("comparison"):
+            assert shape == list(expected.shape)
+        native = np.asarray(payload["last_hidden_state"], dtype=np.float32).reshape(shape)
+        record_evidence(
+            "native",
+            {
+                "sample": sample,
+                "features": native,
+                "pooler_output": np.asarray(payload["pooler_output"], dtype=np.float32),
+                "tokens": payload["tokens"],
+            },
+        )
+        record_evidence(
+            "reference",
+            {
+                "mode": "hf_transformers",
+                "sample": sample,
+                "features": expected,
+                "pooler_output": reference.pooler_output[0].numpy(),
+            },
+        )
+        record_evidence(
+            "metrics", {"sample": sample, "max_abs_error": float(np.max(np.abs(native - expected)))}
+        )
+        with evidence_stage("comparison"):
+            assert np.isfinite(native).all()
+        with evidence_stage("comparison"):
+            np.testing.assert_allclose(native, expected, atol=5e-3, rtol=0)
+        pooled = np.asarray(payload["pooler_output"], dtype=np.float32)
+        with evidence_stage("comparison"):
+            np.testing.assert_array_equal(pooled, native[0, 0])
+        with evidence_stage("comparison"):
+            np.testing.assert_allclose(
+                pooled, reference.pooler_output[0].numpy(), atol=5e-3, rtol=0
+            )
+        with evidence_stage("comparison"):
+            assert payload["pooling"] == "class_token"
+        with evidence_stage("comparison"):
+            assert payload["normalization"] == "none"
+        tokens = payload["tokens"]
+        registers = case["num_register_tokens"]
+        with evidence_stage("comparison"):
+            assert [token["role"] for token in tokens[: registers + 1]] == ["class"] + [
+                "register"
+            ] * registers
+        patches = tokens[registers + 1 :]
         grid = math.isqrt(len(patches))
-        assert grid * grid == len(patches)
-        assert all(token['role'] == 'patch' for token in patches)
-        assert [(token['grid_row'],token['grid_column']) for token in patches] == [
-            (row,column) for row in range(grid) for column in range(grid)]
+        with evidence_stage("comparison"):
+            assert grid * grid == len(patches)
+        with evidence_stage("comparison"):
+            assert all(token["role"] == "patch" for token in patches)
+        with evidence_stage("comparison"):
+            assert [(token["grid_row"], token["grid_column"]) for token in patches] == [
+                (row, column) for row in range(grid) for column in range(grid)
+            ]
         for token in patches:
-            x0,y0,x1,y1 = token['source_normalized_box']
-            assert 0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1
-        print(f"{FAMILY} maxabs={np.max(np.abs(native-expected)):.6g}, shape={shape}")
+            x0, y0, x1, y1 = token["source_normalized_box"]
+            with evidence_stage("comparison"):
+                assert 0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1
+        print(f"{FAMILY} maxabs={np.max(np.abs(native - expected)):.6g}, shape={shape}")
