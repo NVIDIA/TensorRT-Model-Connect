@@ -56,7 +56,9 @@ model in FP32, the native prompt token ids of every conversation (on the checkpo
 be the reference processor's, and the native text the reference tokenizer's decoding of the native
 tokens; FP32 bundles must reproduce the reference's greedy tokens exactly; BF16 bundles are checked teacher-forced against
 the FP32 reference within the logit margin in `tests/thresholds/`, which is the reference model's own
-BF16 error on the gap between its two best tokens along these conversations. `test_gemma3n_processing`
+BF16 error on the gap between its two best tokens along these conversations. Each conversation's checks
+are recorded as test evidence, so the E2E report shows the first conversation's image, prompt and texts,
+and each recorded comparison check with its value and limit. `test_gemma3n_processing`
 (CTest) checks the tokenizer, the image resize and the chat rendering against goldens recorded from
 the reference stack, and invariants of the sampler (greedy first maximum, top-k 1, seeded
 reproducibility, a tiny nucleus).

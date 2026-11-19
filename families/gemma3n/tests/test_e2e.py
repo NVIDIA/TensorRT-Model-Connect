@@ -215,6 +215,71 @@ def _reference(checkpoint, conversations, images, max_new_tokens, natives):
         torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = previous
 
 
+def _summary(name, messages):
+    """A conversation as readable evidence: roles, texts and image names."""
+    turns = []
+    for message in messages:
+        parts = [part["text"] if "text" in part
+                 else f"[image {part['image']}{', float32 pixels' if part.get('float32') else ''}]"
+                 for part in message["parts"]]
+        turns.append({"role": message["role"], "parts": parts})
+    return {"conversation": name, "messages": turns}
+
+
+def _mismatches(left, right) -> int:
+    """Positions where two sequences (ids or text) differ, a length difference included."""
+    return sum(a != b for a, b in zip(left, right)) + abs(len(left) - len(right))
+
+
+def _check(name, label, actual, operator, expected, scope="independent_reference"):
+    passed = actual == expected if operator == "==" else actual <= expected
+    return {"name": name, "label": label, "scope": scope, "actual": actual,
+            "operator": operator, "expected": expected, "passed": passed}
+
+
+def _record_comparisons(directory, conversations, natives, expected, prompt_ids, entry_points,
+                        margin):
+    """Record each conversation's comparison with the reference as evidence.
+
+    The test asserts every check recorded here; recording them first keeps the
+    evidence of a failed check.
+    """
+    for index, ((name, _), native, reference, prompt) in enumerate(
+            zip(conversations, natives, expected, prompt_ids)):
+        native_file = directory / f"comparison-{index}-native.json"
+        reference_file = directory / f"comparison-{index}-reference.json"
+        native_file.write_text(json.dumps({"prompt_ids": prompt, "token_ids": native["token_ids"],
+                                           "text": native["text"]}) + "\n", encoding="utf-8")
+        reference_file.write_text(json.dumps({key: reference[key] for key in (
+            "prompt_ids", "token_ids", "text", "native_decoded", "native_margins")}) + "\n",
+            encoding="utf-8")
+        checks = [
+            _check("prompt_ids", "Prompt token IDs that differ from the reference processor's",
+                   _mismatches(prompt, reference["prompt_ids"]), "==", 0),
+            _check("decoded_text",
+                   "Characters of the native text that differ from the reference tokenizer's "
+                   "decoding of the native tokens",
+                   _mismatches(native["text"], reference["native_decoded"]), "==", 0),
+        ]
+        if margin is None:
+            checks.append(_check("generated_tokens",
+                                 "Generated token IDs that differ from the reference's greedy tokens",
+                                 _mismatches(native["token_ids"], reference["token_ids"]), "==", 0))
+        else:
+            checks.append(_check("teacher_forced_margin",
+                                 "Largest teacher-forced logit margin of the native tokens",
+                                 float(max(reference["native_margins"])), "<=", float(margin)))
+        if index == 0:
+            for check_name, label, output in entry_points:
+                checks.append(_check(check_name, label,
+                                     _mismatches(output["token_ids"], native["token_ids"]), "==", 0,
+                                     scope="contract"))
+        record_evidence("reference_comparison", {
+            "label": f"Conversation {index + 1} ({name})", "scope": "independent_reference",
+            "enforced": True, "native": native_file, "reference": reference_file,
+            "checks": checks})
+
+
 @pytest.mark.parametrize("case_name", sorted(CASES))
 def test_e2e(case_name, request, tmp_path):
     manifest, case = CASES[case_name]
@@ -233,6 +298,14 @@ def test_e2e(case_name, request, tmp_path):
     max_new_tokens = int(case["max_new_tokens"])
     images = _images(tmp_path)
     conversations = _conversations(images, max_new_tokens)
+    record_evidence("inputs", {"prompt": PROMPTS["describe"], "image": ROOT / "data" / "test_img.jpeg",
+                               "conversations": [_summary(name, messages)
+                                                 for name, messages in conversations]})
+    margin = None
+    if manifest["precision"] != "fp32":
+        margin = json.loads((ROOT / "thresholds" / f"{case_name}.json").read_text())[
+            "threshold_overrides"]["teacher_forced_logit_margin"]
+        record_evidence("thresholds", {"teacher_forced_logit_margin": margin})
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
         build(BuildRequest(model_dir=checkpoint, output_path=bundle, family=FAMILY,
@@ -262,32 +335,40 @@ def test_e2e(case_name, request, tmp_path):
         cli_result = subprocess.run(cli_command, env=env, text=True, capture_output=True, timeout=1800)
         assert cli_result.returncode == 0, cli_result.stdout + cli_result.stderr
         cli_output = json.loads(cli_result.stdout)
-        record_evidence("native", {"sdk_cpp": natives, "sdk_c": c_output, "cli": cli_output})
-    # The three public entry points and both pixel formats agree on one request.
-    for output in (c_output, cli_output, natives[4]):
-        assert output["token_ids"] == natives[0]["token_ids"]
-        assert output["text"] == natives[0]["text"]
+        record_evidence("native", {"text": natives[0]["text"], "token_ids": natives[0]["token_ids"],
+                                   "sdk_cpp": natives, "sdk_c": c_output, "cli": cli_output})
     with evidence_stage("reference"):
         expected = _reference(checkpoint, conversations, images, max_new_tokens, natives)
         record_evidence("reference", {"backend": "hf_transformers", "precision": "fp32",
-                                      "results": expected})
+                                      "text": expected[0]["text"],
+                                      "token_ids": expected[0]["token_ids"], "results": expected})
     prompt_ids = _native_prompt_ids(native_dir, checkpoint, conversations, tmp_path)
     record_evidence("prompt_ids", {"native": prompt_ids})
-    assert prompt_ids == [reference["prompt_ids"] for reference in expected]
-    rows = []
-    for (name, _), actual, reference in zip(conversations, natives, expected):
-        assert actual["text"] and 0 < len(actual["token_ids"]) <= max_new_tokens
-        rows.append({"conversation": name, "native": actual["token_ids"],
-                     "reference": reference["token_ids"], "text": actual["text"],
-                     "native_decoded": reference["native_decoded"],
-                     "reference_text": reference["text"],
-                     "max_margin": max(reference["native_margins"])})
-    record_evidence("metrics", {"rows": rows})
-    # The native text is the checkpoint tokenizer's decoding of the native tokens.
-    assert all(row["text"] == row["native_decoded"] for row in rows), rows
-    if manifest["precision"] == "fp32":
-        assert all(row["native"] == row["reference"] for row in rows), rows
-    else:
-        margin = json.loads((ROOT / "thresholds" / f"{case_name}.json").read_text())[
-            "threshold_overrides"]["teacher_forced_logit_margin"]
-        assert all(row["max_margin"] <= margin for row in rows), rows
+    with evidence_stage("compare"):
+        _record_comparisons(tmp_path, conversations, natives, expected, prompt_ids, [
+            ("c_sdk_tokens", "C SDK: token IDs that differ from the C++ SDK's", c_output),
+            ("cli_tokens", "CLI: token IDs that differ from the C++ SDK's", cli_output),
+            ("float32_pixels_tokens",
+             "Float32 pixels: token IDs that differ from the same request with 8-bit pixels",
+             natives[4]),
+        ], margin)
+        # The three public entry points and both pixel formats agree on one request.
+        for output in (c_output, cli_output, natives[4]):
+            assert output["token_ids"] == natives[0]["token_ids"]
+            assert output["text"] == natives[0]["text"]
+        assert prompt_ids == [reference["prompt_ids"] for reference in expected]
+        rows = []
+        for (name, _), actual, reference in zip(conversations, natives, expected):
+            assert actual["text"] and 0 < len(actual["token_ids"]) <= max_new_tokens
+            rows.append({"conversation": name, "native": actual["token_ids"],
+                         "reference": reference["token_ids"], "text": actual["text"],
+                         "native_decoded": reference["native_decoded"],
+                         "reference_text": reference["text"],
+                         "max_margin": max(reference["native_margins"])})
+        record_evidence("metrics", {"rows": rows})
+        # The native text is the checkpoint tokenizer's decoding of the native tokens.
+        assert all(row["text"] == row["native_decoded"] for row in rows), rows
+        if margin is None:
+            assert all(row["native"] == row["reference"] for row in rows), rows
+        else:
+            assert all(row["max_margin"] <= margin for row in rows), rows

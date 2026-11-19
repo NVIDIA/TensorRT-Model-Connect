@@ -108,7 +108,7 @@ class VisionGraph:
         return self.b.add(x, value) if stride == 1 and in_channels == channels else x
 
     def universal_inverted(self, value, prefix: str, kernel_start, kernel_mid, stride,
-                           expansion, channels, layer_scale=True, skip=True):
+                           expansion, channels):
         in_channels = value.shape[1]
         x = value
         if kernel_start:
@@ -119,9 +119,42 @@ class VisionGraph:
         if kernel_mid:
             x = self.conv_norm(x, f"{prefix}.dw_mid", hidden, kernel_mid, stride, groups=hidden)
         x = self.conv_norm(x, f"{prefix}.pw_proj", channels, 1, act=False)
-        if layer_scale:
-            x = self.layer_scale(x, prefix)
-        return self.b.add(x, value) if skip and stride == 1 and in_channels == channels else x
+        x = self.layer_scale(x, prefix)
+        return self.b.add(x, value) if stride == 1 and in_channels == channels else x
+
+    def fusion_ffn(self, fine, coarse, prefix: str):
+        """The fusion adapter's inverted residual on both stages joined at the finer resolution.
+
+        The reference concatenates the fine stage with the nearest-upsampled
+        coarse stage along channels and expands the result with a pointwise
+        convolution. A pointwise convolution of a channel concatenation is the
+        sum of the convolutions of its parts, and nearest upsampling commutes
+        with a pointwise convolution, so the coarse part is expanded at its own
+        resolution and upsampled afterwards.
+        """
+        b = self.b
+        split = fine.shape[1]
+        channels = split + coarse.shape[1]
+        hidden = _make_divisible(channels * 2.0)
+        weight = b.checkpoint.get(f"{prefix}.pw_exp.conv.weight")
+        if tuple(weight.shape) != (hidden, channels, 1, 1):
+            raise ValueError(f"Gemma 3n {prefix}.pw_exp weight {weight.shape} differs from "
+                             f"{(hidden, channels, 1, 1)}")
+
+        def expand(value, part):
+            layer = b.net.add_convolution_nd(value, hidden, (1, 1), b.weights(part, value.dtype),
+                                             trt.Weights(value.dtype))
+            return layer.get_output(0)
+
+        upsample = b.net.add_resize(expand(coarse, weight[:, split:]))
+        upsample.shape = (1, hidden, fine.shape[2], fine.shape[3])
+        upsample.resize_mode = trt.InterpolationMode.NEAREST
+        # torch "nearest": source index floor(dst * in / out) (asymmetric, floor).
+        upsample.coordinate_transformation = trt.ResizeCoordinateTransformation.ASYMMETRIC
+        upsample.nearest_rounding = trt.ResizeRoundMode.FLOOR
+        x = b.add(expand(fine, weight[:, :split]), upsample.get_output(0))
+        x = self.norm(x, f"{prefix}.pw_exp.bn", act=True)
+        return self.conv_norm(x, f"{prefix}.pw_proj", OUTPUT_CHANNELS, 1, act=False)
 
     def mobile_attention(self, value, prefix: str, heads, kv_stride, key_dim, channels):
         b = self.b
@@ -176,18 +209,7 @@ class VisionGraph:
             stage_outputs.append(x)
         # Multi-scale fusion of the last two stages at the finer resolution.
         fine, coarse = stage_outputs[-2], stage_outputs[-1]
-        # Resize and concatenation only move values, so running them in FP32 is
-        # exact for every build precision; TensorRT 11.4 cannot build the BF16
-        # form of this concatenation.
-        resize = b.net.add_resize(b.cast(coarse, trt.float32))
-        resize.shape = (1, coarse.shape[1], fine.shape[2], fine.shape[3])
-        resize.resize_mode = trt.InterpolationMode.NEAREST
-        # torch "nearest": source index floor(dst * in / out) (asymmetric, floor).
-        resize.coordinate_transformation = trt.ResizeCoordinateTransformation.ASYMMETRIC
-        resize.nearest_rounding = trt.ResizeRoundMode.FLOOR
-        fused = b.cast(b.concat([b.cast(fine, trt.float32), resize.get_output(0)], axis=1), b.dtype)
-        fused = self.universal_inverted(fused, self.name("msfa.ffn"), 0, 0, 1,
-                                        2.0, OUTPUT_CHANNELS, layer_scale=False, skip=False)
+        fused = self.fusion_ffn(fine, coarse, self.name("msfa.ffn"))
         side = fused.shape[2]
         if side % OUTPUT_SIDE or fused.shape[3] != side:
             raise ValueError("Gemma 3n fusion resolution is not a multiple of the soft-token grid")
