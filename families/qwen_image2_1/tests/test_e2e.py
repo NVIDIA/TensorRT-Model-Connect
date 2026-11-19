@@ -7,6 +7,10 @@ One case builds a bundle from the pinned checkpoint, generates an image through 
 through the public C and C++ SDK consumers, and compares each against the official
 ``QwenImage21Pipeline`` started from the same initial latents. The same bundle then serves the CLI
 paths the comparison does not take: generation from a seed, and the requests the runtime rejects.
+
+With ``TRTMC_E2E_ARTIFACT_DIR`` set, the case also records what a reader of its report needs: the
+prompt and the initial latents, every native image and the reference image at full resolution, and
+one comparison record per native image with the measured values and limits the test enforces.
 """
 
 from __future__ import annotations
@@ -52,6 +56,15 @@ DEFAULT_THRESHOLDS = {
     "max_alpha_mean_abs_error": 0.02,
     "layout_block_size": 32,
 }
+
+# The limits _assert_parity enforces on every native image: metric, title, rule, threshold key.
+PARITY_CHECKS = (
+    ("psnr_db", "PSNR (dB)", ">=", "min_psnr_db"),
+    ("ssim", "Windowed SSIM", ">=", "min_ssim"),
+    ("layout_correlation", "Layout correlation of block means", ">=", "min_layout_correlation"),
+    ("alpha_mean_abs_error", "Alpha mean absolute error", "<=", "max_alpha_mean_abs_error"),
+)
+OUTPUT_TITLES = {"cli": "CLI image", "sdk_c": "C SDK image", "sdk_cpp": "C++ SDK image"}
 
 
 def _case_index() -> dict[str, tuple[Path, dict, dict]]:
@@ -470,7 +483,112 @@ def _metrics(actual: np.ndarray, expected: np.ndarray, block: int, window: int) 
     }
 
 
-def _assert_parity(label: str, actual: np.ndarray, expected: np.ndarray, thresholds: dict) -> None:
+def _save_png(image: np.ndarray, path: Path) -> Path:
+    """Write a float ``[H, W, 4]`` image in [0, 1] as an RGBA PNG of the same size."""
+    from PIL import Image
+
+    pixels = np.rint(np.clip(image, 0.0, 1.0) * 255.0).astype(np.uint8)
+    Image.fromarray(pixels, "RGBA").save(path, format="PNG")
+    return path
+
+
+def _record_native(images: dict[str, np.ndarray], cli_png: Path, directory: Path) -> dict:
+    """Record every native image as a file; returns the file of each compared output.
+
+    The CLI wrote its PNG itself. The SDK consumers return float pixels, saved here at full
+    resolution; the comparison keeps using the float arrays.
+    """
+    if not evidence_enabled():
+        return {}
+    files = {"cli": cli_png}
+    for label, image in images.items():
+        if label != "cli":
+            files[label] = _save_png(image, directory / f"{label.replace('_', '-')}.png")
+    record_evidence("native", dict(files))
+    return files
+
+
+def _record_reference(
+    expected: np.ndarray, manifest: dict, case: dict, native_files: dict, directory: Path
+) -> Path | None:
+    """Record the reference image as a file, and show it next to the CLI image."""
+    if not evidence_enabled():
+        return None
+    reference_file = _save_png(expected, directory / "reference.png")
+    record_evidence(
+        "reference",
+        {
+            "image": reference_file,
+            "pipeline": "diffusers QwenImage21Pipeline",
+            "torch_dtype": {"bf16": "bfloat16", "fp32": "float32"}[case["reference_precision"]],
+            "use_kv_cache": False,
+        },
+    )
+    request = (
+        f"{int(manifest['image_width'])} x {int(manifest['image_height'])}, "
+        f"{int(case['num_inference_steps'])} steps, seed {int(case['seed'])}"
+    )
+    if "cfg_scale" in case:
+        request += f", guidance scale {float(case['cfg_scale']):g}"
+    record_evidence(
+        "views",
+        [
+            {
+                "title": "Sample 1 / native",
+                "image": native_files["cli"],
+                "caption": f"Native CLI image: {request}.",
+            },
+            {
+                "title": "Sample 1 / reference",
+                "image": reference_file,
+                "caption": "Official pipeline from the same prompt and initial latents.",
+            },
+        ],
+    )
+    return reference_file
+
+
+def _record_comparison(
+    label: str, metrics: dict, thresholds: dict, native_file: Path | None, reference_file: Path | None
+) -> None:
+    """Record the comparison _assert_parity enforces: measured values, rules and limits."""
+    if native_file is None or reference_file is None:
+        return
+    checks = []
+    for name, title, rule, limit in PARITY_CHECKS:
+        actual, bound = float(metrics[name]), float(thresholds[limit])
+        checks.append(
+            {
+                "name": name,
+                "label": title,
+                "scope": "independent_reference",
+                "actual": actual,
+                "operator": rule,
+                "expected": bound,
+                "passed": actual >= bound if rule == ">=" else actual <= bound,
+            }
+        )
+    record_evidence(
+        "reference_comparison",
+        {
+            "label": f"{OUTPUT_TITLES[label]} against the official pipeline",
+            "scope": "independent_reference",
+            "enforced": True,
+            "native": native_file,
+            "reference": reference_file,
+            "checks": checks,
+        },
+    )
+
+
+def _assert_parity(
+    label: str,
+    actual: np.ndarray,
+    expected: np.ndarray,
+    thresholds: dict,
+    native_file: Path | None = None,
+    reference_file: Path | None = None,
+) -> None:
     assert actual.shape == expected.shape, f"{label}: {actual.shape} vs {expected.shape}"
     assert actual.shape[2] == IMAGE_CHANNELS
     assert np.isfinite(actual).all() and actual.min() >= 0.0 and actual.max() <= 1.0
@@ -478,29 +596,13 @@ def _assert_parity(label: str, actual: np.ndarray, expected: np.ndarray, thresho
         actual, expected, int(thresholds["layout_block_size"]), int(thresholds["ssim_window"])
     )
     record_evidence(f"metrics_{label}", metrics)
+    _record_comparison(label, metrics, thresholds, native_file, reference_file)
     print(f"{FAMILY} {label} parity: " + " ".join(f"{k}={v:.6f}" for k, v in metrics.items()))
     assert metrics["expected_std"] > 0.02, "the reference image is degenerate"
     assert metrics["psnr_db"] >= float(thresholds["min_psnr_db"])
     assert metrics["ssim"] >= float(thresholds["min_ssim"])
     assert metrics["layout_correlation"] >= float(thresholds["min_layout_correlation"])
     assert metrics["alpha_mean_abs_error"] <= float(thresholds["max_alpha_mean_abs_error"])
-
-
-def _record_views(images: dict[str, np.ndarray], directory: Path) -> None:
-    """Archive downscaled previews of the compared images; previews never enter the comparison."""
-    if not evidence_enabled():
-        return
-    from PIL import Image
-
-    directory.mkdir(parents=True, exist_ok=True)
-    views = []
-    for label, image in images.items():
-        path = directory / f"{label}.png"
-        preview = Image.fromarray(np.rint(np.clip(image, 0, 1) * 255).astype(np.uint8), "RGBA")
-        preview.thumbnail((768, 768), Image.Resampling.LANCZOS)
-        preview.save(path, format="PNG")
-        views.append({"title": label, "image": path, "caption": f"{label} output, downscaled"})
-    record_evidence("views", views)
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
@@ -522,28 +624,31 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     record_evidence("bundle", {"bytes": bundle.stat().st_size})
 
     initial_latents = _initial_latents(manifest, case)
+    record_evidence("inputs", {"initial_latents": initial_latents})
     latents_path = tmp_path / "initial-latents.raw"
     np.ascontiguousarray(initial_latents).tofile(latents_path)
+    cli_png = tmp_path / "native.png"
     with evidence_stage("native"):
         images = {
-            "cli": _native(
-                binary, runtime_root, bundle, manifest, case, latents_path, tmp_path / "native.png"
-            )
+            "cli": _native(binary, runtime_root, bundle, manifest, case, latents_path, cli_png)
         }
     with evidence_stage("sdk"):
         for language, image in _sdk_images(
             runtime_root, bundle, manifest, case, latents_path, tmp_path
         ).items():
             images[f"sdk_{language}"] = image
+    native_files = _record_native(images, cli_png, tmp_path)
     with evidence_stage("contract"):
         _assert_native_contract(
             binary, runtime_root, bundle, manifest, case, tmp_path / "contract"
         )
     with evidence_stage("reference"):
         expected = _official_reference(model_dir, manifest, case, initial_latents)
-    _record_views({**images, "reference": expected}, tmp_path / "report-views")
+    reference_file = _record_reference(expected, manifest, case, native_files, tmp_path)
 
     thresholds = record_evidence("thresholds", _thresholds(case_name))
     with evidence_stage("compare"):
         for label, image in images.items():
-            _assert_parity(label, image, expected, thresholds)
+            _assert_parity(
+                label, image, expected, thresholds, native_files.get(label), reference_file
+            )
