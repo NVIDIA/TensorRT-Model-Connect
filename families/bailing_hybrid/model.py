@@ -104,8 +104,8 @@ class Graph:
 
     def save(self, stream):
         options = self.builder.create_builder_config()
-        options.clear_flag(trt.BuilderFlag.TF32)
         options.builder_optimization_level = 3
+        options.clear_flag(trt.BuilderFlag.TF32)
         # Keep serialization bounded to the current engine. The caller releases
         # this graph before loading the next layer's weights.
         plan = self.builder.build_serialized_network(self.net, options)

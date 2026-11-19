@@ -1,4 +1,7 @@
 numpy
 safetensors
 torch
-transformers>=4.57.6
+transformers==4.57.6
+fla-core==0.6.0
+einops
+accelerate
