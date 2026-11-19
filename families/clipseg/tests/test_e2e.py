@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "clipseg"
 TASKS = frozenset({"text_prompted_segmentation"})
@@ -151,37 +152,47 @@ def _run_json(
     command: str,
     *arguments: str,
 ) -> dict:
-    invocation = [
-        str(binary),
-        command,
-        str(bundle),
-        "--runtime-root",
-        str(runtime_root),
-        *arguments,
-    ]
-    env = os.environ.copy()
-    env["LD_LIBRARY_PATH"] = ":".join(
-        (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
-    )
-    completed = subprocess.run(
-        invocation,
-        check=True,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=int(case.get("runtime_timeout_s", 3600)),
-    )
-    payloads = []
-    for line in completed.stdout.splitlines():
-        start = line.find("{")
-        if start >= 0:
-            try:
-                payloads.append(json.loads(line[start:]))
-            except json.JSONDecodeError:
-                pass
-    assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
-    assert all((payload == payloads[0] for payload in payloads))
-    return payloads[0]
+    with evidence_stage("runtime"):
+        invocation = [
+            str(binary),
+            command,
+            str(bundle),
+            "--runtime-root",
+            str(runtime_root),
+            *arguments,
+        ]
+        env = os.environ.copy()
+        env["LD_LIBRARY_PATH"] = ":".join(
+            (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
+        )
+        completed = subprocess.run(
+            invocation,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=int(case.get("runtime_timeout_s", 3600)),
+        )
+        record_evidence(
+            "native_process",
+            {
+                "argv": completed.args,
+                "stdout": (completed.stdout or "")[-4096:],
+                "stderr": (completed.stderr or "")[-16384:],
+                "returncode": completed.returncode,
+            },
+        )
+        payloads = []
+        for line in completed.stdout.splitlines():
+            start = line.find("{")
+            if start >= 0:
+                try:
+                    payloads.append(json.loads(line[start:]))
+                except json.JSONDecodeError:
+                    pass
+        assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
+        assert all((payload == payloads[0] for payload in payloads))
+        return payloads[0]
 
 
 def _asset(raw: str) -> Path:
@@ -193,27 +204,62 @@ def _asset(raw: str) -> Path:
 
 
 def test_official_checkpoint_e2e(case_name, tmp_path):
+    _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {
+            key: value
+            for key, value in case.items()
+            if any(
+                word in key
+                for word in ("error", "cosine", "atol", "rtol", "snr", "rmse", "max_abs")
+            )
+        },
+    )
+    for asset_key in ("image", "test_image", "audio"):
+        if asset_key in case:
+            for asset_path in (TEST_ROOT / case[asset_key], TEST_ROOT / "data" / case[asset_key]):
+                if asset_path.is_file():
+                    record_evidence("inputs", {asset_key: asset_path})
+                    break
     import numpy as np
     import torch
     from PIL import Image
     from transformers import AutoProcessor, CLIPSegForImageSegmentation
 
     _, manifest, case = CASES[case_name]
-    directory = _model_dir(manifest)
+    with evidence_stage("checkpoint"):
+        directory = _model_dir(manifest)
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
-    _build(directory, bundle, manifest)
+    with evidence_stage("build"):
+        _build(directory, bundle, manifest)
+    record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
     processor = AutoProcessor.from_pretrained(directory, use_fast=False)
     model = CLIPSegForImageSegmentation.from_pretrained(directory, dtype=torch.float32).eval()
     image = Image.open(_asset(case["test_image"])).convert("RGB")
     image_path = tmp_path / "native-input.png"
     image.save(image_path)
+    record_evidence(
+        "thresholds",
+        {"probability_atol": 5e-4, "probability_rtol": 1e-4, "prompt_separation_min": 0.001},
+    )
     masks = []
-    for prompt in case["prompts"]:
+    for sample, prompt in enumerate(case["prompts"]):
+        record_evidence("inputs", {"sample": sample, "prompt": prompt, "image": image_path})
         inputs = processor(
             text=[prompt], images=image, padding="max_length", max_length=77, return_tensors="pt"
         )
-        with torch.no_grad():
+        with evidence_stage("reference"), torch.no_grad():
             expected = model(**inputs).logits.sigmoid()[0].numpy()
         actual = _run_json(
             binary,
@@ -226,11 +272,37 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             "--prompt",
             prompt,
         )
-        assert actual["num_masks"] == 1
-        assert [actual["height"], actual["width"]] == list(expected.shape)
+        with evidence_stage("comparison"):
+            assert actual["num_masks"] == 1
+        with evidence_stage("comparison"):
+            assert [actual["height"], actual["width"]] == list(expected.shape)
         values = np.asarray(actual["masks"], dtype=np.float32).reshape(expected.shape)
-        assert np.isfinite(values).all() and values.min() >= 0 and values.max() <= 1
-        np.testing.assert_allclose(values, expected, atol=5e-4, rtol=1e-4)
+        record_evidence("native", {"sample": sample, "prompt": prompt, "masks": values})
+        record_evidence(
+            "reference",
+            {"mode": "hf_transformers", "sample": sample, "prompt": prompt, "masks": expected},
+        )
+        record_evidence(
+            "metrics", {"sample": sample, "max_abs_error": float(np.max(np.abs(values - expected)))}
+        )
+        if evidence_enabled():
+            views = []
+            for role, mask in (("native", values), ("reference", expected)):
+                output = tmp_path / f"{role}-mask-{sample}.png"
+                Image.fromarray(np.rint(np.clip(mask, 0, 1) * 255).astype(np.uint8)).save(output)
+                views.append(
+                    {
+                        "title": f"Sample {sample} / {role}",
+                        "image": output,
+                        "caption": f"{prompt}; shared probability scale 0–1",
+                    }
+                )
+            record_evidence("views", views)
+        with evidence_stage("comparison"):
+            assert np.isfinite(values).all() and values.min() >= 0 and values.max() <= 1
+        with evidence_stage("comparison"):
+            np.testing.assert_allclose(values, expected, atol=5e-4, rtol=1e-4)
         masks.append(values)
         print(f"CLIPSeg {prompt!r} probability maxabs={np.max(np.abs(values - expected)):.6g}")
-    assert np.mean(np.abs(masks[0] - masks[1])) > 0.001
+    with evidence_stage("comparison"):
+        assert np.mean(np.abs(masks[0] - masks[1])) > 0.001
