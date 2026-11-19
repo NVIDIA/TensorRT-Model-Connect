@@ -27,6 +27,7 @@ import os
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
@@ -343,13 +344,16 @@ def _check(name: str, label: str, actual: float, limit: float) -> dict:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
-    record_evidence("inputs", {"manifest": manifest, "case": case})
+    # What the model sees: the photograph and the crops the case names, and every text.
+    images = _images(case, tmp_path)
+    texts = [str(case["query"]), str(case["negative_query"]), *map(str, case.get("texts", []))]
+    record_evidence("inputs", {"manifest": manifest, "case": case, "images": images,
+                               "query": texts[0], "negative_query": texts[1], "texts": texts[2:]})
     model_dir = _model_dir(manifest)
     record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"),
                                    "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root, dump = _runtime()
 
-    images = _images(case, tmp_path)
     with evidence_stage("preprocess"):
         grids = [_check_preprocessing(dump, model_dir, path, tmp_path) for path in images]
     assert len({tuple(grid) for grid in grids}) == len(grids), f"image grids repeat: {grids}"
@@ -359,9 +363,18 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     with evidence_stage("build"):
         _build(model_dir, bundle, manifest)
 
-    texts = [str(case["query"]), str(case["negative_query"]), *map(str, case.get("texts", []))]
     with evidence_stage("reference"):
         reference_images, reference_texts, scale, bias = _reference(model_dir, images, texts)
+        expected_logits = [
+            scale * sum(a * b for a, b in zip(reference_images[0], vector)) + bias
+            for vector in reference_texts[:2]
+        ]
+    record_evidence("reference", {
+        "image_embeddings": np.asarray(reference_images, dtype=np.float32),
+        "text_embeddings": np.asarray(reference_texts, dtype=np.float32),
+        "relevance_probabilities": np.asarray([1.0 / (1.0 + math.exp(-value))
+                                               for value in expected_logits]),
+    })
 
     with evidence_stage("native"):
         native_images = [
@@ -383,14 +396,18 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
                                 str(images[0]))
             assert payload["score_kind"] == "probability"
             scores.append(float(payload["score"]))
+    record_evidence("native", {
+        "image_embeddings": np.asarray(native_images, dtype=np.float32),
+        "text_embeddings": np.asarray(native_texts, dtype=np.float32),
+        "relevance_probabilities": np.asarray(scores),
+    })
+    record_evidence("thresholds", {"embedding_max_abs": _EMBEDDING_TOLERANCE,
+                                   "embedding_cosine_min": _COSINE_FLOOR,
+                                   "relevance_logit_abs": _LOGIT_TOLERANCE})
 
     with evidence_stage("compare"):
         image_deltas = [_max_abs(n, r) for n, r in zip(native_images, reference_images)]
         text_deltas = [_max_abs(n, r) for n, r in zip(native_texts, reference_texts)]
-        expected_logits = [
-            scale * sum(a * b for a, b in zip(reference_images[0], vector)) + bias
-            for vector in reference_texts[:2]
-        ]
         logit_deltas = [abs(_logit(score) - expected)
                         for score, expected in zip(scores, expected_logits)]
         checks = [_check(f"image_{index}_maxabs", f"Image {path.name} embedding max |diff|",
