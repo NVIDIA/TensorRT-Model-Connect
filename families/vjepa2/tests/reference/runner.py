@@ -10,12 +10,14 @@ import subprocess
 import sys
 
 
-def run_reference(model_dir, video, work, *, inference):
+def run_reference(model_dir, video, work, *, inference, reference_environment):
     import numpy as np
 
     from tools.ci.environment import prepared_python
     from tools.e2e_evidence import record_evidence
 
+    if reference_environment != "isolated":
+        raise ValueError("This reference requires its declared isolated environment")
     source = Path(__file__).resolve().parents[4]
     python = prepared_python(source, "vjepa2", dict(os.environ))
     work.mkdir()
@@ -44,7 +46,7 @@ def run_reference(model_dir, video, work, *, inference):
     assert completed.returncode == 0, completed.stderr + completed.stdout
     metadata = json.loads((work / "environment.json").read_text())
     assert metadata["transformers"] == "5.20.0"
-    record_evidence("reference_environment", {"requested": "isolated", **metadata})
+    record_evidence("reference_environment", {"requested": reference_environment, **metadata})
     with np.load(work / "result.npz", allow_pickle=False) as archive:
         return {key: archive[key] for key in archive.files}, metadata
 

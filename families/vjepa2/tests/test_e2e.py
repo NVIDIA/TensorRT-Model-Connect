@@ -280,6 +280,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
             frame[None, ...] * 255,
             tmp_path / f"reference-pixels-{index}",
             inference=False,
+            reference_environment=manifest["reference_environment"],
         )
         expected = reference_outputs["pixels"]
         actual = np.fromfile(target, dtype="<f4").reshape(3, 256, 256)
@@ -329,6 +330,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
             video * 255,
             tmp_path / f"reference-{label}",
             inference=True,
+            reference_environment=manifest["reference_environment"],
         )
         assert reference_metadata["pixel_shape"] == [1, 64, 3, 256, 256]
         expected = reference_outputs["features"]

@@ -77,7 +77,7 @@ std::vector<float> preprocess(const float* rgb, int32_t h, int32_t w, int32_t sh
                         rgb[(static_cast<std::size_t>(y) * w + span.first + k) * 3 + c];
                     if (!std::isfinite(source))
                         throw std::invalid_argument("V-JEPA2 frame contains nonfinite RGB");
-                    value += (source * 255.0F) * span.values[k];
+                    value = std::fma(source * 255.0F, span.values[k], value);
                 }
                 horizontal[(static_cast<std::size_t>(y) * crop + x) * 3 + c] = value;
             }
@@ -93,7 +93,8 @@ std::vector<float> preprocess(const float* rgb, int32_t h, int32_t w, int32_t sh
             for (int32_t c = 0; c < 3; ++c) {
                 float value = 0;
                 for (std::size_t k = 0; k < span.values.size(); ++k)
-                    value += horizontal[((span.first + k) * crop + x) * 3 + c] * span.values[k];
+                    value = std::fma(horizontal[((span.first + k) * crop + x) * 3 + c],
+                                     span.values[k], value);
                 output[c * plane + y * crop + x] = (value - mean[c]) / deviation[c];
             }
         }
