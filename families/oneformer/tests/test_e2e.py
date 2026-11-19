@@ -21,6 +21,10 @@ precision's margin of its winning score. The public C (float32 pixels) and C++
 The same selection also checks the family graph stage by stage: an engine with
 the backbone, pixel-decoder, mask-feature and logit tensors as extra outputs
 must reproduce the reference's tensors on the processor's own pixel values.
+
+With ``TRTMC_E2E_ARTIFACT_DIR`` set, the E2E records its evidence for the
+report: every input image, native and reference label overlays, the label
+maps, and one reference comparison per image with both oracle checks.
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "oneformer"
 TASKS = frozenset({"image_to_semantic_segmentation"})
@@ -278,10 +283,10 @@ def _official(model_dir: Path, image_path: Path, info_path: Path):
     return labels.numpy(), resized.numpy(), model.config.id2label
 
 
-def _assert_parity(native: dict, reference, precision: str) -> dict:
+def _parity(native: dict, reference) -> dict:
+    """The native label map, its agreement with the reference, and the worst margin where they differ."""
     import numpy as np
 
-    min_agreement, near_tie = ORACLE[precision]
     expected, scores, id2label = reference
     height, width = expected.shape
     assert (native["height"], native["width"]) == (height, width)
@@ -292,15 +297,93 @@ def _assert_parity(native: dict, reference, precision: str) -> dict:
     )
     labels = np.asarray(native["mask"], dtype=np.int64).reshape(height, width)
     differ = labels != expected
-    agreement = 1.0 - float(differ.mean())
     rows, cols = np.nonzero(differ)
     margins = scores[expected[rows, cols], rows, cols] - scores[labels[rows, cols], rows, cols]
-    worst = float(margins.max()) if margins.size else 0.0
-    assert agreement >= min_agreement, f"label agreement {agreement:.6f} < {min_agreement}"
-    assert worst <= near_tie, (
-        f"a differing pixel is not a reference near tie: margin {worst:.4g} > {near_tie}"
+    return {
+        "labels": labels,
+        "agreement": 1.0 - float(differ.mean()),
+        "differing_pixels": int(differ.sum()),
+        "worst_margin": float(margins.max()) if margins.size else 0.0,
+    }
+
+
+def _palette(count: int):
+    """Distinct overlay colours per class id (golden-ratio hue steps)."""
+    import colorsys
+
+    import numpy as np
+
+    colours = [
+        colorsys.hsv_to_rgb((index * 0.618033988749895) % 1.0, 0.75, 0.95) for index in range(count)
+    ]
+    return np.asarray(
+        [[round(channel * 255) for channel in colour] for colour in colours], np.uint8
     )
-    return {"agreement": agreement, "differing_pixels": int(differ.sum()), "worst_margin": worst}
+
+
+def _overlay(image_path: Path, labels, classes: int, path: Path) -> Path:
+    import numpy as np
+    from PIL import Image
+
+    with Image.open(image_path) as opened:
+        base = np.asarray(opened.convert("RGB"), dtype=np.float32)
+    blended = 0.45 * _palette(classes)[labels].astype(np.float32) + 0.55 * base
+    Image.fromarray(np.clip(np.rint(blended), 0, 255).astype(np.uint8)).save(path, quality=90)
+    return path
+
+
+def _record_segmentation_evidence(
+    tmp_path: Path, index: int, name: str, image: Path, parity: dict, reference, oracle
+) -> None:
+    """Overlays, label maps and the reference comparison of one input image for the E2E report."""
+    import numpy as np
+
+    min_agreement, near_tie = oracle
+    expected, _, id2label = reference
+    height, width = expected.shape
+    paired, views = {}, []
+    for role, labels in (("native", parity["labels"]), ("reference", expected)):
+        array = tmp_path / f"{name}-{role}-labels.npy"
+        np.save(array, np.asarray(labels, dtype=np.uint8))
+        paired[role] = array
+        overlay = _overlay(image, labels, len(id2label), tmp_path / f"{name}-{role}.jpg")
+        views.append(
+            {
+                "title": f"Sample {index} / {role}",
+                "image": overlay,
+                "caption": f"{name}, {height} x {width}: label map over the input",
+            }
+        )
+    record_evidence("views", views)
+    record_evidence(
+        "reference_comparison",
+        {
+            "label": f"{name}, {height} x {width}: label map against the official pipeline",
+            "scope": "independent_reference",
+            "enforced": True,
+            **paired,
+            "checks": [
+                {
+                    "name": "label_agreement",
+                    "label": "Share of pixels with the reference label",
+                    "scope": "independent_reference",
+                    "actual": parity["agreement"],
+                    "operator": ">=",
+                    "expected": min_agreement,
+                    "passed": parity["agreement"] >= min_agreement,
+                },
+                {
+                    "name": "near_tie_margin",
+                    "label": "Largest reference score margin at a differing pixel",
+                    "scope": "independent_reference",
+                    "actual": parity["worst_margin"],
+                    "operator": "<=",
+                    "expected": near_tie,
+                    "passed": parity["worst_margin"] <= near_tie,
+                },
+            ],
+        },
+    )
 
 
 def _digest(labels) -> str:
@@ -381,23 +464,88 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     import numpy as np
 
     _, manifest, case = CASES[case_name]
+    min_agreement, near_tie = ORACLE[manifest["precision"]]
+    record_evidence(
+        "checkpoint",
+        {
+            "hf_id": manifest["hf_id"],
+            "hf_revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {"min_label_agreement": min_agreement, "max_near_tie_margin": near_tie},
+    )
     model_dir = _model_dir(manifest)
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
-    _build(model_dir, bundle, manifest)
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
     images = _variants(TEST_ROOT / case["test_image"], tmp_path)
-    report = {}
-    for name, image in images.items():
-        native = _native(binary, runtime_root, bundle, image)
-        report[name] = _assert_parity(
-            native, _official(model_dir, image, tmp_path / "class_info.json"), manifest["precision"]
+    report, native_records, reference_records = {}, [], []
+    for index, (name, image) in enumerate(images.items()):
+        record_evidence("inputs", {f"image_{name}": image})
+        with evidence_stage("native"):
+            native = _native(binary, runtime_root, bundle, image)
+        with evidence_stage("reference"):
+            reference = _official(model_dir, image, tmp_path / "class_info.json")
+        with evidence_stage("compare"):
+            parity = _parity(native, reference)
+        summary = {
+            "variant": name,
+            "height": native["height"],
+            "width": native["width"],
+            "class_pixels": np.bincount(
+                parity["labels"].ravel(), minlength=len(native["class_ids"])
+            ).tolist(),
+        }
+        native_records.append({**summary, "differing_pixels": parity["differing_pixels"]})
+        reference_records.append(
+            {
+                "variant": name,
+                "class_pixels": np.bincount(
+                    reference[0].ravel(), minlength=len(native["class_ids"])
+                ).tolist(),
+            }
+        )
+        record_evidence(
+            "native", {"class_names": native["class_names"], "variants": native_records}
+        )
+        record_evidence("reference", {"mode": "hf_transformers", "variants": reference_records})
+        if evidence_enabled():
+            try:
+                _record_segmentation_evidence(
+                    tmp_path,
+                    index,
+                    name,
+                    image,
+                    parity,
+                    reference,
+                    (min_agreement, near_tie),
+                )
+            except Exception as error:
+                # Diagnostics must never replace the comparison's own result.
+                record_evidence("attachment_error", {"attachment": name, "error": str(error)})
+        report[name] = {
+            key: parity[key] for key in ("agreement", "differing_pixels", "worst_margin")
+        }
+        assert parity["agreement"] >= min_agreement, (
+            f"{name}: label agreement {parity['agreement']:.6f} < {min_agreement}"
+        )
+        assert parity["worst_margin"] <= near_tie, (
+            f"{name}: a differing pixel is not a reference near tie: "
+            f"margin {parity['worst_margin']:.4g} > {near_tie}"
         )
         if name == "fixture":
             digest = _digest(native["mask"])
             counts = np.bincount(
                 np.asarray(native["mask"]), minlength=len(native["class_ids"])
             ).tolist()
-            for sdk in _sdk(runtime_root, bundle, image, tmp_path):
+            with evidence_stage("sdk"):
+                consumers = _sdk(runtime_root, bundle, image, tmp_path)
+            record_evidence("sdk", {"cli_fnv1a64": digest, "consumers": consumers})
+            for sdk in consumers:
                 assert sdk["task"] == "image_to_semantic_segmentation" and not sdk["has_scores"]
                 assert (sdk["height"], sdk["width"]) == (native["height"], native["width"])
                 assert sdk["class_names"] == native["class_names"]
