@@ -25,6 +25,11 @@ graph built from this checkpoint (``test_gate_rejects_known_breaks``):
 The tolerances and the measurements behind them are next to their constants.
 The case text, the token ids the native tokenizer produces and the selected
 positions are checked exactly.
+
+With ``TRTMC_E2E_ARTIFACT_DIR`` set, every case also records its input, the
+native and reference outputs (the five best tokens of each selected position,
+or the two next-sentence logits) and the comparison the gate enforces, for the
+E2E report (``tools/e2e_evidence.py``).
 """
 
 from __future__ import annotations
@@ -38,6 +43,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "mobilebert"
 TASKS = frozenset({"masked_text_to_token_scores", "text_pair_to_pretraining_relation_scores"})
@@ -45,17 +51,18 @@ TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 MASK_ID = 103
 
-# Measured on a B300 (TensorRT 11.4): a correct float32 engine is within 6.5e-05
-# of the reference on every case of the manifest (37 rows of the Unicode case the
-# widest); the weakest break of test_gate_rejects_known_breaks moves the masked
-# rows by 1.1e+01. 1e-3 sits 15x above the first and four orders of magnitude
-# below the second.
+# Measured on a B300 SXM6 and a B300 PCIe (TensorRT 11.4): a correct float32
+# engine is within 7.8e-05 of the reference on every case of the manifest (37 rows
+# of the Unicode case the widest; 6.5e-05 on the SXM6); the weakest break of
+# test_gate_rejects_known_breaks moves the masked rows by 1.1e+01. 1e-3 sits 12x
+# above the first and four orders of magnitude below the second.
 _LOGIT_TOLERANCE = 1e-3
 # Next sentence, same engines. The logits are near 3e8, where one float32 step is
-# 32: a correct engine is within 2.1e-07 of each logit, relative, and within one
-# step of their difference (2.6e-03 of a 1.2e4 difference). The weakest breaks
-# move the logits by 1.4e-02 relative and their difference by 2.8e-01 of itself.
-# 1e-5 and 5e-2 leave room for a few float32 steps and stay well below both.
+# 32: a correct engine is within 3.2e-07 of each logit, relative (2.1e-07 on the
+# SXM6), and within one step of their difference (2.6e-03 of a 1.2e4 difference;
+# 0 on the PCIe). The weakest breaks move the logits by 1.4e-02 relative and their
+# difference by 2.8e-01 of itself. 1e-5 and 5e-2 leave room for a few float32
+# steps and stay well below both.
 _RELATION_RTOL = 1e-5
 _MARGIN_RTOL = 5e-2
 
@@ -261,15 +268,20 @@ def _top(row: list[float], k: int = 5) -> list[int]:
     return sorted(range(len(row)), key=lambda index: -row[index])[:k]
 
 
-def _check_masked(native: list[list[float]], reference: list[list[float]]) -> float:
-    """Assert the masked-LM gate; return the largest absolute difference."""
+def _masked_difference(native: list[list[float]], reference: list[list[float]]) -> float:
+    """The largest absolute logit difference, once shapes and finite values are checked."""
     assert len(native) == len(reference) and native
     assert all(len(row) == len(want) for row, want in zip(native, reference))
     # max() keeps a finite difference over a NaN one, so non-finite values are refused first.
     assert all(math.isfinite(value) for rows in (native, reference) for row in rows
                for value in row), f"{FAMILY} logits are not all finite"
-    worst = max(max(abs(a - b) for a, b in zip(row, want))
-                for row, want in zip(native, reference))
+    return max(max(abs(a - b) for a, b in zip(row, want))
+               for row, want in zip(native, reference))
+
+
+def _check_masked(native: list[list[float]], reference: list[list[float]]) -> float:
+    """Assert the masked-LM gate; return the largest absolute difference."""
+    worst = _masked_difference(native, reference)
     # Every logit within the tolerance also bounds the ranking: two tokens can
     # change places only if their reference logits are within twice the
     # tolerance. Comparing top-k lists exactly would fail on such near-ties.
@@ -277,14 +289,19 @@ def _check_masked(native: list[list[float]], reference: list[list[float]]) -> fl
     return worst
 
 
-def _check_relation(native: list[float], reference: list[float]) -> tuple[float, float]:
-    """Assert the next-sentence gate; return (relative logit error, margin error)."""
+def _relation_errors(native: list[float], reference: list[float]) -> tuple[float, float]:
+    """(relative logit error, margin error), once shapes and finite values are checked."""
     assert len(native) == len(reference) == 2
     assert all(math.isfinite(value) for value in (*native, *reference)), (
         f"{FAMILY} relation logits are not all finite")
     relative = max(abs(a - b) / abs(b) for a, b in zip(native, reference))
     margin = reference[0] - reference[1]
-    margin_error = abs((native[0] - native[1]) - margin) / abs(margin)
+    return relative, abs((native[0] - native[1]) - margin) / abs(margin)
+
+
+def _check_relation(native: list[float], reference: list[float]) -> tuple[float, float]:
+    """Assert the next-sentence gate; return (relative logit error, margin error)."""
+    relative, margin_error = _relation_errors(native, reference)
     assert relative <= _RELATION_RTOL, f"{FAMILY} relation logits differ by {relative} relative"
     assert margin_error <= _MARGIN_RTOL, f"{FAMILY} relation margin differs by {margin_error}"
     assert (native[0] >= native[1]) == (reference[0] >= reference[1]), "relation label differs"
@@ -298,63 +315,150 @@ def _masked_rows(payload: dict) -> list[list[float]]:
     return [values[row * columns:(row + 1) * columns] for row in range(rows)]
 
 
-def test_official_checkpoint_e2e(case_name: str, bundles) -> None:
+def _top_lines(reference: Reference, tokens: list[str], selected: list[int],
+               rows: list[list[float]]) -> str:
+    """One line per selected position: its input token, then the five best tokens and logits."""
+    lines = []
+    for index, row in zip(selected, rows):
+        best = " | ".join(f"{reference.tokenizer.id_to_token(token)} {row[token]:.3f}"
+                          for token in _top(row))
+        lines.append(f"{index} {tokens[index]}: {best}")
+    return "\n".join(lines)
+
+
+def _check_row(name: str, label: str, actual, operator: str, expected) -> dict:
+    """One check of a reference_comparison record; passed is the check itself."""
+    passed = actual <= expected if operator == "<=" else actual == expected
+    return {"name": name, "label": label, "scope": "independent_reference", "actual": actual,
+            "operator": operator, "expected": expected, "passed": passed}
+
+
+def _record_comparison(tmp_path: Path, label: str, stem: str, native, reference,
+                       checks: list[dict]) -> None:
+    """Record a comparison with the reference: both value sets as files, and its checks.
+
+    The checks are the gate's own values, recorded before the gate asserts them, so
+    the E2E report shows the comparison even when the gate then fails.
+    """
+    if not evidence_enabled():
+        return
+    import numpy as np
+
+    files = {}
+    for role, values in (("native", native), ("reference", reference)):
+        path = tmp_path / f"{stem}-{role}.npy"
+        np.save(path, np.asarray(values, dtype=np.float32), allow_pickle=False)
+        files[role] = path
+    record_evidence("reference_comparison", {"label": label, "scope": "independent_reference",
+                                             "enforced": True, **files, "checks": checks})
+
+
+def test_official_checkpoint_e2e(case_name: str, bundles, tmp_path) -> None:
     _, manifest, case = CASES[case_name]
     model_dir = _model_dir(manifest)
     binary, runtime_root = _runtime()
     bundle = bundles(manifest)
     reference = _reference(model_dir)
+    record_evidence("checkpoint", {"hf_id": manifest["hf_id"],
+                                   "hf_revision": manifest.get("hf_revision")})
 
     if "first" in case:
         first, second = str(case["first"]), str(case["second"])
-        payload = _cli_json(binary, runtime_root, bundle, "--task",
-                            "text_pair_to_pretraining_relation_scores", "--text", first,
-                            "--text-pair", second)
-        assert payload["labels"] == ["next", "not_next"]
-        assert payload["score_kind"] == "logit"
         encoding = reference.tokenizer.encode(first, second)
-        _, want = reference.run(encoding.ids, encoding.type_ids)
+        record_evidence("inputs", {"text": f"Text A: {first}\nText B: {second}", "first": first,
+                                   "second": second, "token_ids": encoding.ids,
+                                   "token_type_ids": encoding.type_ids})
+        with evidence_stage("native"):
+            payload = _cli_json(binary, runtime_root, bundle, "--task",
+                                "text_pair_to_pretraining_relation_scores", "--text", first,
+                                "--text-pair", second)
         native = [float(value) for value in payload["scores"]]
-        relative, margin = _check_relation(native, want)
-        assert payload["top_class"] == (0 if want[0] >= want[1] else 1), (
-            f"{FAMILY} relation top_class differs from the reference")
+        record_evidence("native", {"logits": native, "labels": payload["labels"],
+                                   "top_class": payload["top_class"]})
+        with evidence_stage("reference"):
+            _, want = reference.run(encoding.ids, encoding.type_ids)
+        want_class = 0 if want[0] >= want[1] else 1
+        record_evidence("reference", {"logits": want, "labels": ["next", "not_next"],
+                                      "top_class": want_class})
+        record_evidence("thresholds", {"relative_logit_error": _RELATION_RTOL,
+                                       "margin_error": _MARGIN_RTOL})
+        with evidence_stage("compare"):
+            assert payload["labels"] == ["next", "not_next"]
+            assert payload["score_kind"] == "logit"
+            relative, margin = _relation_errors(native, want)
+            _record_comparison(tmp_path, "Next-sentence logits", "relation", [native], [want], [
+                _check_row("relative_logit_error", "Largest relative logit error", relative,
+                           "<=", _RELATION_RTOL),
+                _check_row("margin_error", "Error of the logit difference, relative to it",
+                           margin, "<=", _MARGIN_RTOL),
+                _check_row("top_class_mismatch", "Top class differs from the reference",
+                           int(payload["top_class"] != want_class), "==", 0),
+            ])
+            _check_relation(native, want)
+            assert payload["top_class"] == want_class, (
+                f"{FAMILY} relation top_class differs from the reference")
         print(f"{case_name}: native {native}, reference {want}; relative {relative:.2e}, "
               f"margin error {margin:.2e}, label {payload['labels'][payload['top_class']]}")
         return
 
     if "token_ids" in case:
         ids = [int(value) for value in case["token_ids"]]
-        payload = _cli_json(binary, runtime_root, bundle, "--task",
-                            "masked_text_to_token_scores", "--token-ids", json.dumps(ids))
-        framed_here = False
+        text, arguments, framed_here = None, ("--token-ids", json.dumps(ids)), False
     else:
         text = (str(case["text"]) if "text" in case else
                 _fill_window(reference, str(case["fill_window"]),
                              int(manifest["max_sequence_length"])))
         ids = reference.tokenizer.encode(text).ids
-        payload = _cli_json(binary, runtime_root, bundle, "--task",
-                            "masked_text_to_token_scores", "--text", text)
-        framed_here = True
-
-    assert payload["score_kind"] == "logit"
-    assert payload["axes"] == ["selected_position", "vocabulary_id"]
-    assert payload["vocabulary_id"] == FAMILY
+        arguments, framed_here = ("--text", text), True
     masked = [index for index, value in enumerate(ids) if value == MASK_ID]
     selected = masked or list(range(len(ids)))
-    positions = payload["positions"]
-    # The native tokenizer is checked through the ids it reports for every row.
-    assert [int(token["token_index"]) for token in positions] == selected
-    assert [int(token["token_id"]) for token in positions] == [ids[i] for i in selected]
-    for token in positions:
-        index = int(token["token_index"])
-        inserted = framed_here and index in (0, len(ids) - 1)
-        assert int(token["input_index"]) == (-1 if inserted else 0)
-        assert token["byte_offsets"] is None
+    tokens = [reference.tokenizer.id_to_token(value) for value in ids]
+    # Caller ids have no text: the input pane shows their tokens instead.
+    record_evidence("inputs", {"text": text if text is not None else " ".join(tokens),
+                               "input": "text" if text is not None else "token ids",
+                               "token_ids": ids, "selected_positions": selected})
 
+    with evidence_stage("native"):
+        payload = _cli_json(binary, runtime_root, bundle, "--task",
+                            "masked_text_to_token_scores", *arguments)
     native = _masked_rows(payload)
-    rows, _ = reference.run(ids)
+    positions = payload["positions"]
+    if evidence_enabled():
+        record_evidence("native", {"text": _top_lines(reference, tokens, selected, native),
+                                   "token_ids": [int(token["token_id"]) for token in positions]})
+    with evidence_stage("reference"):
+        rows, _ = reference.run(ids)
     want = [rows[index] for index in selected]
-    worst = _check_masked(native, want)
+    if evidence_enabled():
+        record_evidence("reference", {"reference_text": _top_lines(reference, tokens, selected, want),
+                                      "reference_ids": [ids[index] for index in selected]})
+    record_evidence("thresholds", {"max_abs_logit_difference": _LOGIT_TOLERANCE})
+
+    with evidence_stage("compare"):
+        assert payload["score_kind"] == "logit"
+        assert payload["axes"] == ["selected_position", "vocabulary_id"]
+        assert payload["vocabulary_id"] == FAMILY
+        mismatched = sum(int(token["token_id"]) != ids[index]
+                         for token, index in zip(positions, selected))
+        worst = _masked_difference(native, want)
+        _record_comparison(tmp_path, "Masked-LM logits of the selected positions", "masked",
+                           native, want, [
+                               _check_row("max_abs_logit_difference",
+                                          "Largest absolute logit difference", worst, "<=",
+                                          _LOGIT_TOLERANCE),
+                               _check_row("token_id_mismatches",
+                                          "Selected positions whose token id differs from the "
+                                          "reference tokenizer", mismatched, "==", 0),
+                           ])
+        # The native tokenizer is checked through the ids it reports for every row.
+        assert [int(token["token_index"]) for token in positions] == selected
+        assert [int(token["token_id"]) for token in positions] == [ids[i] for i in selected]
+        for token in positions:
+            index = int(token["token_index"])
+            inserted = framed_here and index in (0, len(ids) - 1)
+            assert int(token["input_index"]) == (-1 if inserted else 0)
+            assert token["byte_offsets"] is None
+        _check_masked(native, want)
     top = [_top(row, 1)[0] for row in native[:4]]
     print(f"{case_name}: {len(ids)} ids, {len(selected)} rows x {len(native[0])} vocabulary, "
           f"logit max |d| {worst:.3e}, cosine "
