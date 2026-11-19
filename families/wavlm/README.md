@@ -175,8 +175,9 @@ encoder's hidden states are not built.
   with a fake engine (an oversized clip is refused from its length, unread).
 - `tests/test_e2e_contract.py`: the E2E's own rules on CPU. The
   `TRTMC_WAVLM_MODEL_DIR` override stands for one checkpoint and is refused for
-  a selection that spans both; CTC ids must be JSON integers; and the recorded
-  evidence follows the parity gate, a blank reference included. For human
+  a selection that spans both; a relative `TRTMC_BINARY` is launched by its
+  absolute path, not looked up on `PATH`; CTC ids must be JSON integers; and the
+  recorded evidence follows the parity gate, a blank reference included. For human
   review the evidence report plays the input clip, captioned with the text the
   speaker read (LibriSpeech's transcript), next to the native and reference
   transcripts.

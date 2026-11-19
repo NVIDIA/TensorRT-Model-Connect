@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from tools import e2e_evidence
@@ -60,6 +63,26 @@ def test_every_checkpoint_resolves_by_itself_without_the_override(monkeypatch):
     monkeypatch.delenv(e2e.MODEL_DIR_OVERRIDE, raising=False)
     selected = _generate(**{"--e2e-model": ["wavlm"]})
     assert selected == [("case_name", [_BASE_PLUS, _LARGE, _LARGE_FP16])]
+
+
+def test_a_relative_binary_is_launched_by_its_absolute_path(monkeypatch, tmp_path):
+    # Path("./trtmc") is the bare name "trtmc", which subprocess would look up on
+    # PATH instead of launching the file that was checked.
+    (tmp_path / "trtmc").write_bytes(b"")
+    monkeypatch.chdir(tmp_path)
+    launched = []
+
+    def run(invocation, **kwargs):
+        launched.append(invocation)
+        return subprocess.CompletedProcess(invocation, 0, stdout='{"text": "a"}\n', stderr="")
+
+    monkeypatch.setattr(e2e.subprocess, "run", run)
+    binary = e2e._required_path("./trtmc", "TRTMC_BINARY")
+    runtime_root = e2e._required_path(".", "TRTMC_RUNTIME_ROOT")
+    assert e2e._run_json(binary, runtime_root, tmp_path / "bundle", {}, "transcribe") == {"text": "a"}
+    program = Path(launched[0][0])
+    assert program.is_absolute() and program.samefile(tmp_path / "trtmc")
+    assert Path(launched[0][launched[0].index("--runtime-root") + 1]).is_absolute()
 
 
 @pytest.mark.parametrize("ids", [[1.9, 2], [1.0, 2.0], [True, 2], "12", (1, 2), None])

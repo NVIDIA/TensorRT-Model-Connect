@@ -121,7 +121,9 @@ def pytest_generate_tests(metafunc) -> None:
 
 def _required_path(value: str | None, label: str) -> Path:
     assert value, f"selected {FAMILY} E2E requires {label}"
-    path = Path(value)
+    # Absolute, so that a relative TRTMC_BINARY such as ./trtmc launches the
+    # checked file: Path drops the "./", and subprocess looks a bare name up on PATH.
+    path = Path(value).absolute()
     assert path.exists(), f"selected {FAMILY} E2E {label} does not exist: {path}"
     return path
 
