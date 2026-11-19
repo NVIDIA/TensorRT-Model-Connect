@@ -13,6 +13,10 @@ environment named by ``TRTMC_MINICPMV47_REFERENCE_PYTHON``):
    (``thresholds/<case>.json``);
 3. ``expected_answers`` when the case lists them.
 
+With ``TRTMC_E2E_ARTIFACT_DIR`` set, each case records its prompt and image, the native and the
+reference text and token ids, and the checks of 1 and 2 as a reference comparison
+(``tools.e2e_evidence``).
+
 ``near_tie_logit`` = 0.85 comes from a four-prompt calibration of the official BF16 model against the
 official FP32 model on this image: three prompts gave identical tokens, and on the fourth the BF16 model
 first left the FP32 greedy choice at an FP32 gap of 0.811, rounded up to 0.85. The value bounds that
@@ -35,9 +39,11 @@ import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_stage, record_evidence
 
 TEST_DIR = Path(__file__).resolve().parent
 MANIFEST = json.loads((TEST_DIR / "manifests/minicpm-v-4.7-35b-a3b.json").read_text(encoding="utf-8"))
+CASES = {case["name"]: case for case in MANIFEST["testcases"]}
 _FAMILY = "minicpmv4_7"
 
 
@@ -106,6 +112,43 @@ def _request(case: dict, directory: Path) -> Path:
     return path
 
 
+def _differing(ours, theirs) -> int:
+    return sum(a != b for a, b in zip(ours, theirs)) + abs(len(ours) - len(theirs))
+
+
+def _check(name: str, label: str, actual, operator: str, expected) -> dict:
+    passed = actual == expected if operator == "==" else actual <= expected
+    return {"name": name, "label": label, "scope": "independent_reference", "actual": actual,
+            "operator": operator, "expected": expected, "passed": passed}
+
+
+def _record_comparison(case: dict, work: Path, native_dump: dict, reference: dict, tolerance: float) -> None:
+    """The checks the assertions below enforce, against the provider and the FP32 official model."""
+    ours = np.fromfile(work / "native" / "patches.f32", dtype="<f4")
+    theirs = np.fromfile((work / "reference.json").with_suffix(".patches.f32"), dtype="<f4")
+    pixels = int(np.count_nonzero(ours != theirs)) if ours.shape == theirs.shape else max(ours.size, theirs.size)
+    layout = _differing(
+        [[crop["grid"] for crop in native_dump["crops"]],
+         [crop["position_ids"] for crop in native_dump["crops"]],
+         native_dump["positions"], native_dump["decode_position"]],
+        [reference["crop_grids"], reference["crop_position_ids"], reference["positions"],
+         reference["decode_position"]])
+    gap = float(max(reference["teacher_forced"]["candidate_gap"], default=0.0))
+    record_evidence("reference_comparison", {
+        "label": case["prompt"], "scope": "independent_reference", "enforced": True,
+        "native": work / "native.json", "reference": work / "reference.json",
+        "checks": [
+            _check("prompt_token_ids", "Prompt token ids unlike the provider's",
+                   _differing(native_dump["input_ids"], reference["input_ids"]), "==", 0),
+            _check("image_layout", "Crop grids, vision position ids and M-RoPE positions unlike the provider's",
+                   layout, "==", 0),
+            _check("normalized_pixels", "Normalized pixel values unlike the provider's", pixels, "==", 0),
+            _check("max_teacher_forced_gap", "Largest FP32 logit gap below the argmax, native tokens forced",
+                   gap, "<=", tolerance),
+        ],
+    })
+
+
 def _check_host_contract(native: dict, reference: dict, patches: Path, reference_patches: Path) -> None:
     assert native["input_ids"] == reference["input_ids"], "prompt token ids differ from the provider"
     assert [crop["grid"] for crop in native["crops"]] == reference["crop_grids"], "crop grids differ"
@@ -140,51 +183,59 @@ def built(tmp_path_factory) -> tuple[Path, Path]:
     return checkpoint, bundle
 
 
-@pytest.mark.parametrize("case", MANIFEST["testcases"], ids=lambda case: case["name"])
-def test_official_checkpoint_e2e(case: dict, tmp_path: Path, request) -> None:
-    if not _selected(request.config, case["name"]):
+@pytest.mark.parametrize("case_name", list(CASES))
+def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, request) -> None:
+    case = CASES[case_name]
+    if not _selected(request.config, case_name):
         pytest.skip("real family E2E requires explicit selection or TRTMC_E2E=1")
     binary, runtime, native, reference_python = _environment()
     checkpoint, bundle = request.getfixturevalue("built")
-    work = tmp_path / case["name"]
+    work = tmp_path / case_name
     work.mkdir()
     request_path = _request(case, work)
     root = TEST_DIR.parents[2]
     environment = {**os.environ, "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
                    "PYTHONPATH": os.pathsep.join(filter(None, [str(root), os.environ.get("PYTHONPATH")]))}
 
-    _run([str(native / "minicpmv4_7_preprocess_dump"), str(bundle), str(request_path), str(work / "native")],
-         work / "preprocess.log")
-    cli = _run([str(binary), "run", str(bundle), "--runtime-root", str(runtime), "--image",
-                str(TEST_DIR / case["image"]), "--prompt", case["prompt"], "--max-new-tokens",
-                str(case["max_new_tokens"])], work / "cli.log", timeout=3600)
+    record_evidence("inputs", {"prompt": case["prompt"], "image": TEST_DIR / case["image"],
+                               "max_new_tokens": case["max_new_tokens"]})
+    with evidence_stage("native"):
+        _run([str(native / "minicpmv4_7_preprocess_dump"), str(bundle), str(request_path), str(work / "native")],
+             work / "preprocess.log")
+        cli = _run([str(binary), "run", str(bundle), "--runtime-root", str(runtime), "--image",
+                    str(TEST_DIR / case["image"]), "--prompt", case["prompt"], "--max-new-tokens",
+                    str(case["max_new_tokens"])], work / "cli.log", timeout=3600)
     result = json.loads(cli.stdout)
     tokens = [int(token) for token in result["token_ids"]]
+    output = {"text": result["text"], "token_ids": tokens}
+    (work / "native.json").write_text(json.dumps(output), encoding="utf-8")
     (work / "candidate.json").write_text(json.dumps(tokens))
-    _run([str(reference_python), "-m", "families.minicpmv4_7.tests.hf_reference", "--checkpoint",
-          str(checkpoint), "--request", str(request_path), "--output", str(work / "reference.json"),
-          "--dtype", MANIFEST["reference_precision"], "--candidate", str(work / "candidate.json"),
-          "--max-new-tokens", str(case["max_new_tokens"])], work / "reference.log", env=environment,
-         timeout=7200, cwd=root)
-
+    record_evidence("native", output)
+    with evidence_stage("reference"):
+        _run([str(reference_python), "-m", "families.minicpmv4_7.tests.hf_reference", "--checkpoint",
+              str(checkpoint), "--request", str(request_path), "--output", str(work / "reference.json"),
+              "--dtype", MANIFEST["reference_precision"], "--candidate", str(work / "candidate.json"),
+              "--max-new-tokens", str(case["max_new_tokens"])], work / "reference.log", env=environment,
+             timeout=7200, cwd=root)
     reference = json.loads((work / "reference.json").read_text())
+    record_evidence("reference", {"backend": "hf_transformers", "precision": MANIFEST["reference_precision"],
+                                  "reference_text": reference["generated_text"],
+                                  "reference_ids": reference["generated_ids"]})
     native_dump = json.loads((work / "native" / "dump.json").read_text())
-    _check_host_contract(native_dump, reference, work / "native" / "patches.f32",
-                         (work / "reference.json").with_suffix(".patches.f32"))
+    tolerance = float(_thresholds(case_name).get("near_tie_logit", 0.0))
+    record_evidence("thresholds", {"near_tie_logit": tolerance})
+    _record_comparison(case, work, native_dump, reference, tolerance)
 
-    teacher = reference["teacher_forced"]
-    tolerance = float(_thresholds(case["name"]).get("near_tie_logit", 0.0))
-    assert teacher["candidate"] == tokens and len(tokens) <= case["max_new_tokens"]
-    # Generation stops at an end-of-sequence id (kept in the ids) or at the budget, never early without one.
-    assert tokens and (tokens[-1] in _eos_ids(checkpoint) or len(tokens) == case["max_new_tokens"]), tokens
-    for index, (token, gap) in enumerate(zip(teacher["candidate"], teacher["candidate_gap"])):
-        assert gap <= tolerance, (
-            f"token {index} ({token}) is {gap:.4f} below the FP32 reference maximum; "
-            f"reference argmax {teacher['argmax'][index]}")
-    for answer in case.get("expected_answers", []):
-        assert answer.lower() in result["text"].lower(), result["text"]
-    (work / "evidence.json").write_text(json.dumps({
-        "case": case["name"], "native_tokens": tokens, "native_text": result["text"],
-        "reference_tokens": reference["generated_ids"], "reference_text": reference["generated_text"],
-        "max_candidate_gap": max(teacher["candidate_gap"]), "near_tie_logit": tolerance,
-        "token_exact": tokens == reference["generated_ids"][:len(tokens)]}, indent=2))
+    with evidence_stage("compare"):
+        _check_host_contract(native_dump, reference, work / "native" / "patches.f32",
+                             (work / "reference.json").with_suffix(".patches.f32"))
+        teacher = reference["teacher_forced"]
+        assert teacher["candidate"] == tokens and len(tokens) <= case["max_new_tokens"]
+        # Generation stops at an end-of-sequence id (kept in the ids) or at the budget, never early without one.
+        assert tokens and (tokens[-1] in _eos_ids(checkpoint) or len(tokens) == case["max_new_tokens"]), tokens
+        for index, (token, gap) in enumerate(zip(teacher["candidate"], teacher["candidate_gap"])):
+            assert gap <= tolerance, (
+                f"token {index} ({token}) is {gap:.4f} below the FP32 reference maximum; "
+                f"reference argmax {teacher['argmax'][index]}")
+        for answer in case.get("expected_answers", []):
+            assert answer.lower() in result["text"].lower(), result["text"]
