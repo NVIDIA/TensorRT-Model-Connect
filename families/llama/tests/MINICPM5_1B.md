@@ -157,3 +157,15 @@ The copied configuration's publisher, revision and license are recorded in
 `families/llama/NOTICE`. The pinned checkpoint also has a documentation-only
 entry in `website/data/hf-model-metadata.json`, as required by the contributor
 guide; that inventory does not control support ownership or qualification.
+
+## Current-main integration recheck
+
+After merging NVIDIA `main` at `b1db0296`, the same strict three-case E2E was
+rerun at `c76e393b544c9fbb560034fd0630d7bdf714a610`: 3 passed, 11 unselected
+skipped. Both raw prompt-ID receipts and all 22 generated IDs matched, and the
+chat control emitted no ID trace. Four native CTests and 27 focused Python
+tests passed. Source-quality passed 322 tool tests, and the documentation
+inventory's 15 tests and full website build passed on Linux with Node 22.23.2.
+The metadata conflict resolution retained every upstream checkpoint plus this
+pinned 1B entry. The final evidence-only documentation update changes no tested
+runtime, builder, test or snapshot record.
