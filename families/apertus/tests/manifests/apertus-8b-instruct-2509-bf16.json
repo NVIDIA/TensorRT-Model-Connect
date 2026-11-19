@@ -1,0 +1,58 @@
+{
+  "name": "apertus-8b-instruct-2509-bf16",
+  "bundle": "apertus-8b-instruct-2509-bf16.bundle",
+  "hf_id": "swiss-ai/Apertus-8B-Instruct-2509",
+  "hf_revision": "b946d40447b2b597999b9c86d44bee0b452c919f",
+  "family": "apertus",
+  "task": "text_continuation",
+  "precision": "bf16",
+  "max_sequence_length": 16384,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "apertus-8b-bf16-chat",
+      "premerge": true,
+      "input": "chat_token_ids",
+      "oracle": "teacher_forced_near_tie",
+      "system_prompt": "You are Apertus, a helpful assistant created by the SwissAI initiative.\nKnowledge cutoff: 2024-04\nCurrent date: 2026-11-12",
+      "prompt": "What is the capital of Switzerland? Answer in one sentence, then name its four national languages.",
+      "max_new_tokens": 64,
+      "determinism_reruns": 1
+    },
+    {
+      "name": "apertus-8b-bf16-text",
+      "premerge": true,
+      "input": "text",
+      "oracle": "teacher_forced_near_tie",
+      "prompt": "The Swiss Alps are a major mountain range. Their highest peak is",
+      "max_new_tokens": 48
+    },
+    {
+      "name": "apertus-8b-bf16-long-context",
+      "input": "text",
+      "oracle": "teacher_forced_near_tie",
+      "filler": {
+        "sentence": "Note {index}: shelf {index} of the Alpine archive holds folders of weather records.",
+        "count": 480,
+        "needle": "Important: the access code for the Alpine archive is 4721.",
+        "insert_at": 37
+      },
+      "prompt": "Question: What is the access code for the Alpine archive? Answer: The access code is",
+      "min_prompt_tokens": 9000,
+      "max_new_tokens": 16
+    },
+    {
+      "name": "apertus-8b-bf16-sampling",
+      "input": "chat_token_ids",
+      "oracle": "sampling_contract",
+      "system_prompt": "You are Apertus, a helpful assistant created by the SwissAI initiative.\nKnowledge cutoff: 2024-04\nCurrent date: 2026-11-12",
+      "prompt": "Write one sentence about a lake in the mountains.",
+      "max_new_tokens": 32,
+      "temperature": 0.7,
+      "top_k": 50,
+      "top_p": 0.9,
+      "seed": 7,
+      "determinism_reruns": 1
+    }
+  ]
+}

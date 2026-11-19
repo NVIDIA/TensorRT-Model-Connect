@@ -748,6 +748,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "facebook/hubert-large-ls960-ft",
+      "revision": "ece5fabbf034c1073acae96d5401b25be96709d8",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "hubert",
+      "architectures": [
+        "HubertForCTC"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "facebook/nllb-200-distilled-600M",
       "revision": "f8d333a098d19b4fd9a8b18f94170487ad3f821d",
       "revision_source": "resolved",
@@ -1407,6 +1418,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "swiss-ai/Apertus-8B-Instruct-2509",
+      "revision": "b946d40447b2b597999b9c86d44bee0b452c919f",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "apertus",
+      "architectures": [
+        "ApertusForCausalLM"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "tiiuae/Falcon3-1B-Base",
       "revision": "cb37ef3559b157b5c9d9226296ba01a5162da1f7",
       "revision_source": "resolved",
@@ -1568,6 +1590,28 @@
       "model_type": "table-transformer",
       "architectures": [
         "TableTransformerForObjectDetection"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "lightonai/LightOnOCR-2-1B",
+      "revision": "be7c41313c30e940fe5571de59e5fabc779e00c8",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "mistral3",
+      "architectures": [
+        "LightOnOCRForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
+      "revision": "7b375e1b73b11138ff12fe22c8f2822d8fe03467",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "smolvlm",
+      "architectures": [
+        "SmolVLMForConditionalGeneration"
       ],
       "architecture_source": "config.architectures"
     }

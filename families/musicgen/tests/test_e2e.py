@@ -13,14 +13,16 @@ import numpy as np
 import pytest
 from tensorrt_model_connect import BuildRequest, build
 from tensorrt_model_connect.model_support import load_model_metadata, resolve_family
-from tools.e2e_evidence import evidence_stage, record_evidence
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 from families.musicgen.tests.inputs import checkpoint_dir
 
 ROOT = Path(__file__).parent
 MANIFEST = json.loads((ROOT / "manifests/musicgen-medium-fp32.json").read_text())
 CASE = MANIFEST["testcases"][0]
-THRESHOLDS = json.loads((ROOT / "thresholds/musicgen-medium-fp32.json").read_text())["threshold_overrides"]
+THRESHOLDS = json.loads((ROOT / "thresholds/musicgen-medium-fp32.json").read_text())[
+    "threshold_overrides"
+]
 
 
 def pytest_generate_tests(metafunc):
@@ -80,7 +82,23 @@ def test_musicgen_e2e(case_name, tmp_path):
 
     disable_progress_bar()
 
-    model_dir = checkpoint_dir(MANIFEST["hf_id"], MANIFEST["hf_revision"])
+    record_evidence("inputs", {"manifest": MANIFEST, "case": CASE, "prompts": CASE["prompts"]})
+    record_evidence(
+        "checkpoint",
+        {"requested_repo_id": MANIFEST["hf_id"], "requested_revision": MANIFEST["hf_revision"]},
+    )
+    record_evidence("thresholds", THRESHOLDS)
+    with evidence_stage("checkpoint"):
+        model_dir = checkpoint_dir(MANIFEST["hf_id"], MANIFEST["hf_revision"])
+    overridden = "TRTMC_MUSICGEN_MODEL_DIR" in os.environ
+    record_evidence(
+        "checkpoint",
+        {
+            "resolved_directory": str(model_dir.resolve()),
+            "from_override": overridden,
+            "resolved_revision": None if overridden else MANIFEST["hf_revision"],
+        },
+    )
     binary = Path(os.environ["TRTMC_BINARY"])
     runtime = Path(os.environ["TRTMC_RUNTIME_ROOT"])
     assert torch.cuda.is_available()
@@ -102,7 +120,9 @@ def test_musicgen_e2e(case_name, tmp_path):
         assert bundle.is_file()
         record_evidence("manifest", MANIFEST)
         record_evidence("thresholds", THRESHOLDS)
-    with evidence_stage("official_reference"):
+    record_evidence("bundle", {"path": str(bundle)})
+    reference_records, native_records, views = [], [], []
+    with evidence_stage("reference"):
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
         tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True)
@@ -122,7 +142,7 @@ def test_musicgen_e2e(case_name, tmp_path):
             .eval()
         )
         expected = []
-        for prompt in CASE["prompts"]:
+        for index, prompt in enumerate(CASE["prompts"]):
             inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
             with torch.inference_mode():
                 audio = reference.generate(
@@ -131,11 +151,49 @@ def test_musicgen_e2e(case_name, tmp_path):
                     guidance_scale=CASE["guidance_scale"],
                     max_new_tokens=MANIFEST["max_sequence_length"] - 1,
                 )
-            expected.append(audio[0, 0].float().cpu().numpy())
+            target = audio[0, 0].float().cpu().numpy()
+            expected.append(target)
+            record = {"prompt": prompt, "sample_rate": 32000, "waveform": target}
+            if evidence_enabled():
+                # Retain the oracle samples exactly as IEEE float32 WAV.
+                try:
+                    output = tmp_path / f"reference-{index}.wav"
+                    pcm = target.astype("<f4").tobytes()
+                    output.write_bytes(
+                        struct.pack(
+                            "<4sI4s4sIHHIIHH4sI",
+                            b"RIFF",
+                            36 + len(pcm),
+                            b"WAVE",
+                            b"fmt ",
+                            16,
+                            3,
+                            1,
+                            32000,
+                            128000,
+                            4,
+                            32,
+                            b"data",
+                            len(pcm),
+                        )
+                        + pcm
+                    )
+                    record["audio"] = output
+                    views.append(
+                        {"title": f"Sample {index} / reference", "audio": output, "caption": prompt}
+                    )
+                except (OSError, ValueError, struct.error) as error:
+                    record_evidence(
+                        "attachment_error",
+                        {"attachment": f"reference-{index}.wav", "error": str(error)},
+                    )
+            reference_records.append(record)
+            record_evidence("reference", {"mode": "hf_transformers", "samples": reference_records})
+            record_evidence("views", views)
         del reference
         torch.cuda.empty_cache()
     actual = []
-    with evidence_stage("native_task_runtime"):
+    with evidence_stage("native"):
         for index, prompt in enumerate(CASE["prompts"]):
             output = tmp_path / f"native-{index}.wav"
             command = [
@@ -158,12 +216,23 @@ def test_musicgen_e2e(case_name, tmp_path):
             )
             record_evidence(f"native_command_{index}", command)
             record_evidence(f"native_result_{index}", result.stdout)
-            record_evidence(f"native_audio_{index}", output)
             samples, rate, channels = read_float_wav(output)
+            native_records.append(
+                {
+                    "prompt": prompt,
+                    "audio": output,
+                    "waveform": samples,
+                    "sample_rate": rate,
+                    "channels": channels,
+                }
+            )
+            record_evidence("native", {"samples": native_records})
+            views.append({"title": f"Sample {index} / native", "audio": output, "caption": prompt})
+            record_evidence("views", views)
             assert rate == 32000 and channels == 1 and samples.shape == (32000,)
             assert np.isfinite(samples).all()
             actual.append(samples)
-    with evidence_stage("waveform_oracle"):
+    with evidence_stage("compare"):
         for index, (samples, target) in enumerate(zip(actual, expected, strict=True)):
             assert samples.shape == target.shape
             observed, expected_pcm = samples.astype(np.float64), target.astype(np.float64)
