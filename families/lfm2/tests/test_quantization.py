@@ -743,7 +743,11 @@ def test_awq_calibration_config_leaves_the_short_convolution_unquantized() -> No
 def test_committed_awq_scales_are_complete() -> None:
     """Every committed table names its checkpoint and covers each projection of its layers."""
     paths = sorted(quantization.AWQ_SCALES_DIR.glob("*.npz"))
-    assert [path.name for path in paths] == ["lfm2-1.2b-40f3da0d.npz"]
+    # Conv and attention layer counts of each table's checkpoint.
+    expected_layers = {"lfm2-1.2b-40f3da0d.npz": (10, 6)}
+    assert [path.name for path in paths] == sorted(expected_layers)
+    conv_names = {"conv_in", "conv_out", "w1", "w2", "w3"}
+    attention_names = {"w_q", "w_k", "w_v", "w_o", "w1", "w2", "w3"}
     for path in paths:
         with np.load(path, allow_pickle=False) as table:
             for key in ("hf_id", "hf_revision", "algorithm"):
@@ -754,18 +758,21 @@ def test_committed_awq_scales_are_complete() -> None:
             for name in table.files:
                 if name.startswith("identity."):
                     assert table[name].dtype == np.float64 and table[name].shape == (2,), name
+            num_conv, num_attention = expected_layers[path.name]
             layers = {int(name.split(".")[1]) for name in table.files if name.startswith("layer.")}
-            for layer in layers:
+            assert layers == set(range(num_conv + num_attention)), path.name
+            kinds = []
+            for layer in sorted(layers):
                 names = {
                     name.split(".", 2)[2] for name in table.files if name.startswith(f"layer.{layer}.")
                 }
-                assert names - {"w1", "w2", "w3"} in (
-                    {"conv_in", "conv_out"}, {"w_q", "w_k", "w_v", "w_o"}
-                ), (path.name, layer)
+                assert names in (conv_names, attention_names), (path.name, layer)
+                kinds.append(names == conv_names)
                 for stem in names:
                     smooth = table[f"layer.{layer}.{stem}"]
                     assert smooth.dtype == np.float16 and smooth.ndim == 1
                     assert np.isfinite(smooth).all() and np.all(smooth > 0)
+            assert (sum(kinds), len(kinds) - sum(kinds)) == (num_conv, num_attention), path.name
 
 
 @pytest.mark.gpu
