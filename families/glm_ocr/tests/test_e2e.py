@@ -12,6 +12,10 @@ same lossless PNG to both sides):
 * bf16: teacher-forced against the official FP32 model, every native token scores within
   ``_BF16_LOGIT_TOLERANCE`` of the FP32 maximum at its step (see the measurement below).
 
+Each case records its input (prompt and image), the native output and the reference output
+for the E2E evidence report (``tools.e2e_evidence``); the bf16 comparison is recorded as a
+``reference_comparison`` with the teacher-forced arrays.
+
 The host-parity tests compare the native host steps, run through the host probe of the
 native ``test_glm_ocr_runtime`` (the family's CTest executable), with the processor and the
 tokenizers library: image preprocessing to the bit, tokenization, the pre-tokenizer on every
@@ -30,6 +34,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_stage, record_evidence
 
 FAMILY = "glm_ocr"
 TASKS = frozenset({"images_text_to_text"})
@@ -243,9 +248,10 @@ def _official_generation(model_dir: Path, image: Path, case: dict, dtype_name: s
     return ids, processor.decode(ids, skip_special_tokens=True)
 
 
-def _teacher_forced_deficits(model_dir: Path, image: Path, case: dict, tokens: list[int],
-                             dtype_name: str) -> list[float]:
-    """Per step, the official model's maximum logit minus the logit of ``tokens[step]``."""
+def _teacher_forced_reference(model_dir: Path, image: Path, case: dict, tokens: list[int],
+                              dtype_name: str) -> tuple[list[float], list[int]]:
+    """Teacher-forced along ``tokens``: per step, the official model's maximum logit minus the
+    logit of ``tokens[step]``, and the token the official model ranks first at that step."""
     import torch
 
     processor, model = _official(str(model_dir), dtype_name)
@@ -260,47 +266,88 @@ def _teacher_forced_deficits(model_dir: Path, image: Path, case: dict, tokens: l
     with torch.inference_mode():
         logits = model(**inputs).logits[0, prompt_length - 1:].float()
     chosen = logits.gather(1, torch.tensor(tokens, device="cuda")[:, None])[:, 0]
-    return (logits.max(dim=1).values - chosen).tolist()
+    maxima = logits.max(dim=1)
+    return (maxima.values - chosen).tolist(), maxima.indices.tolist()
 
 
-def test_official_checkpoint_e2e(case_name: str, tmp_path_factory) -> None:
+def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, tmp_path_factory) -> None:
     _, manifest, case = CASES[case_name]
+    record_evidence("checkpoint", {"hf_id": manifest["hf_id"], "hf_revision": manifest["hf_revision"],
+                                   "precision": manifest["precision"]})
+    record_evidence("inputs", {"prompt": case["prompt"], "image": TEST_ROOT / case["image"],
+                               "max_new_tokens": int(case["max_new_tokens"])})
     model_dir = _model_dir(manifest)
     binary, runtime_root = _runtime()
+    import numpy as np
     import torch
 
     assert torch.cuda.is_available(), f"selected {FAMILY} E2E requires CUDA"
     bundles = tmp_path_factory.getbasetemp() / "glm_ocr_bundles"
     bundles.mkdir(exist_ok=True)
-    bundle = _bundle(model_dir, manifest, bundles)
-    image = _image(case, tmp_path_factory.mktemp(case_name))
-    payload = _run_native(binary, runtime_root, bundle, image, case)
-    tokens = [int(token) for token in payload["token_ids"]]
-    assert 0 < len(tokens) <= int(case["max_new_tokens"])
+    with evidence_stage("build"):
+        bundle = _bundle(model_dir, manifest, bundles)
+    image = _image(case, tmp_path)
+    with evidence_stage("native"):
+        payload = _run_native(binary, runtime_root, bundle, image, case)
+    native_ids = [int(token) for token in payload["token_ids"]]
+    native_text = payload["text"]
+    record_evidence("native", {"text": native_text, "token_ids": native_ids})
+    assert 0 < len(native_ids) <= int(case["max_new_tokens"])
 
     if manifest["precision"] == "fp32":
-        reference, text = _official_generation(model_dir, image, case, "float32")
-        first = next((i for i, (a, b) in enumerate(zip(tokens, reference)) if a != b), None)
-        assert tokens == reference, (
-            f"{FAMILY} fp32 tokens differ from the official FP32 run at step {first}: "
-            f"native {tokens[first or 0:][:8]} official {reference[first or 0:][:8]}")
-        assert payload["text"] == text
-        print(f"{FAMILY} fp32 {case_name}: {len(tokens)} tokens identical to the official model")
+        with evidence_stage("reference"):
+            reference_ids, reference_text = _official_generation(model_dir, image, case, "float32")
+        record_evidence("reference", {
+            "reference_text": reference_text, "reference_ids": reference_ids,
+            "source": "Transformers GlmOcrForConditionalGeneration, FP32 with TF32 off, greedy"})
+        first = next(
+            (i for i, (a, b) in enumerate(zip(native_ids, reference_ids)) if a != b), None)
+        with evidence_stage("compare"):
+            assert native_ids == reference_ids, (
+                f"{FAMILY} fp32 tokens differ from the official FP32 run at step {first}: "
+                f"native {native_ids[first or 0:][:8]} official {reference_ids[first or 0:][:8]}")
+            assert native_text == reference_text
+        print(f"{FAMILY} fp32 {case_name}: {len(native_ids)} tokens identical to the official model")
         return
 
     assert manifest["precision"] == "bf16"
-    deficits = _teacher_forced_deficits(model_dir, image, case, tokens, "float32")
+    with evidence_stage("reference"):
+        deficits, reference_argmax_ids = _teacher_forced_reference(
+            model_dir, image, case, native_ids, "float32")
+        reference_ids, reference_text = _official_generation(model_dir, image, case, "float32")
     worst = max(deficits)
-    assert worst <= _BF16_LOGIT_TOLERANCE, (
-        f"{FAMILY} bf16 token at step {deficits.index(worst)} is {worst:.3f} logits below the "
-        f"official FP32 maximum")
-    # The bf16 tokens may differ from FP32's; the native text must be the reference decoding of
-    # the native tokens.
-    processor, _ = _official(str(model_dir), "float32")
-    assert payload["text"] == processor.decode(tokens, skip_special_tokens=True)
-    reference, text = _official_generation(model_dir, image, case, "float32")
-    print(f"{FAMILY} bf16 {case_name}: {len(tokens)} tokens, largest FP32 deficit {worst:.4f}, "
-          f"identical to the FP32 tokens: {tokens == reference}")
+    record_evidence("reference", {
+        "reference_text": reference_text, "reference_ids": reference_ids,
+        "teacher_forced_argmax_ids": reference_argmax_ids,
+        "source": ("Transformers GlmOcrForConditionalGeneration, FP32 with TF32 off: the greedy "
+                   "generation, and the logits teacher-forced along the native tokens")})
+    record_evidence("thresholds", {"max_logit_deficit": _BF16_LOGIT_TOLERANCE})
+    native_file = tmp_path / "native_token_ids.npy"
+    reference_file = tmp_path / "reference_fp32_teacher_forced.npz"
+    np.save(native_file, np.asarray(native_ids, dtype=np.int64))
+    np.savez(reference_file, argmax_ids=np.asarray(reference_argmax_ids, dtype=np.int64),
+             logit_deficits=np.asarray(deficits, dtype=np.float32))
+    record_evidence("reference_comparison", {
+        "label": "Native BF16 tokens scored by the official FP32 model (teacher forcing)",
+        "scope": "independent_reference", "enforced": True,
+        "native": native_file, "reference": reference_file,
+        "checks": [{
+            "name": "max_logit_deficit",
+            "label": "Largest FP32 logit deficit of a native token (FP32 maximum minus its logit)",
+            "scope": "independent_reference", "actual": float(worst), "operator": "<=",
+            "expected": _BF16_LOGIT_TOLERANCE, "passed": worst <= _BF16_LOGIT_TOLERANCE,
+        }],
+    })
+    with evidence_stage("compare"):
+        assert worst <= _BF16_LOGIT_TOLERANCE, (
+            f"{FAMILY} bf16 token at step {deficits.index(worst)} is {worst:.3f} logits below the "
+            f"official FP32 maximum")
+        # The bf16 tokens may differ from FP32's; the native text must be the reference decoding
+        # of the native tokens.
+        processor, _ = _official(str(model_dir), "float32")
+        assert native_text == processor.decode(native_ids, skip_special_tokens=True)
+    print(f"{FAMILY} bf16 {case_name}: {len(native_ids)} tokens, largest FP32 deficit {worst:.4f}, "
+          f"identical to the FP32 tokens: {native_ids == reference_ids}")
 
 
 # --------------------------------------------------------------------------------------
