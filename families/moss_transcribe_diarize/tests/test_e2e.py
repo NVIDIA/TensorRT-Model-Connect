@@ -39,6 +39,7 @@ import math
 import os
 import subprocess
 import wave
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -294,6 +295,31 @@ def _assert_input_contract(binary: Path, runtime_root: Path, bundle: Path, case:
         assert completed.returncode != 0 and message in completed.stderr, completed.stderr[-500:]
 
 
+@contextmanager
+def _fp32_reference_precision():
+    """TF32 off and the highest FP32 matmul precision while the reference runs; the
+    process-wide settings are restored afterwards, also when the reference fails."""
+    import torch
+
+    saved = (torch.get_float32_matmul_precision(), torch.backends.cuda.matmul.allow_tf32,
+             torch.backends.cudnn.allow_tf32)
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+    torch.set_float32_matmul_precision("highest")
+    try:
+        yield
+    finally:
+        torch.set_float32_matmul_precision(saved[0])
+        torch.backends.cuda.matmul.allow_tf32 = saved[1]
+        torch.backends.cudnn.allow_tf32 = saved[2]
+
+
+@pytest.fixture
+def fp32_reference():
+    with _fp32_reference_precision():
+        yield
+
+
 class _Reference:
     """The checkpoint's own processor and model, run as the official utilities run them."""
 
@@ -301,9 +327,6 @@ class _Reference:
         import torch
         from transformers import AutoModelForCausalLM, AutoProcessor
 
-        torch.backends.cuda.matmul.allow_tf32 = False
-        torch.backends.cudnn.allow_tf32 = False
-        torch.set_float32_matmul_precision("highest")
         self.torch = torch
         self.processor = AutoProcessor.from_pretrained(
             str(model_dir), trust_remote_code=True, local_files_only=True)
@@ -457,21 +480,52 @@ def _assert_segments(native: dict) -> None:
     assert actual, "the transcript has no [start][Sxx]text[end] segment"
 
 
+def _check(name: str, label: str, scope: str, actual: int | float, operator: str,
+           expected: int | float) -> dict:
+    """One evidence check row (``tools.e2e_evidence``); its verdict follows from its values."""
+    holds = {"==": actual == expected, "<=": actual <= expected, ">=": actual >= expected}
+    return {"name": name, "label": label, "scope": scope, "actual": actual,
+            "operator": operator, "expected": expected, "passed": holds[operator]}
+
+
+def _termination_checks(tokens: list[int], argmax: list[int], eos: set[int],
+                        max_new_tokens: int) -> list[dict]:
+    """How the native ids end, against the teacher-forced reference argmax at every step."""
+    return [
+        _check("native_eos_before_end", "Native EOS IDs before the last position", "contract",
+               sum(1 for token in tokens[:-1] if token in eos), "==", 0),
+        _check("stops_at_eos_or_limit", "Native IDs end with EOS or at max_new_tokens (1 = yes)",
+               "contract", int(tokens[-1] in eos or len(tokens) == max_new_tokens), "==", 1),
+        _check("reference_eos_before_native_end",
+               "Steps before the native end at which the FP32 argmax is EOS",
+               "independent_reference", sum(1 for token in argmax[:-1] if token in eos), "==", 0),
+        _check("native_eos_without_reference_eos",
+               "Native EOS at a step whose FP32 argmax is not EOS (1 = yes)",
+               "independent_reference", int(tokens[-1] in eos and argmax[-1] not in eos), "==", 0),
+    ]
+
+
 def _assert_termination(tokens: list[int], argmax: list[int], eos: set[int],
                         max_new_tokens: int) -> None:
     """The native ids end where the teacher-forced reference would end them.
 
     ``argmax`` is the reference argmax at every native step. The ids stop at an
     EOS that is also the reference argmax there, or at the token limit; the
-    reference argmax is no EOS at any earlier step.
+    reference argmax is no EOS at any earlier step. The evidence record uses the
+    same ``_termination_checks``.
     """
     assert len(argmax) == len(tokens)
-    assert not eos.intersection(tokens[:-1])
-    assert not eos.intersection(argmax[:-1]), "the reference ends the transcript earlier"
-    if tokens[-1] in eos:
-        assert argmax[-1] in eos, "the native EOS is not the reference argmax"
-    else:
-        assert len(tokens) == max_new_tokens
+    failed = [check["label"] for check in _termination_checks(tokens, argmax, eos, max_new_tokens)
+              if not check["passed"]]
+    assert not failed, f"termination checks failed: {failed}"
+
+
+def _steps_beyond_tolerance(gaps: list[float], peaks: list[float], ulps: float) -> list[int]:
+    """Steps whose native token trails the FP32 argmax by more than ``ulps`` BF16
+    spacings at that step's largest logit; a step with a non-finite score never passes."""
+    return [step for step, (gap, peak) in enumerate(zip(gaps, peaks))
+            if not (math.isfinite(gap) and math.isfinite(peak)
+                    and gap <= ulps * _bf16_spacing(peak))]
 
 
 def _ids_file(path: Path, ids: list[int]) -> Path:
@@ -494,33 +548,20 @@ def _token_exact_checks(native_ids: list[int], reference_ids: list[int]) -> list
 def _teacher_forced_checks(tokens: list[int], gaps: list[float], peaks: list[float],
                            argmax: list[int], eos: set[int], max_new_tokens: int,
                            ulps: float) -> list[dict]:
-    """The ``teacher_forced`` oracle's checks as an evidence record, from the same values."""
-    widest = 0.0
-    for gap, peak in zip(gaps, peaks):
-        spacing = _bf16_spacing(peak)
-        widest = max(widest, gap / spacing if spacing else (0.0 if gap <= 0 else math.inf))
-    early = sum(1 for token in argmax[:-1] if token in eos)
-    unmatched_end = int(tokens[-1] in eos and argmax[-1] not in eos)
-    stop = int(tokens[-1] in eos or len(tokens) == max_new_tokens)
-    return [
-        {"name": "max_gap_bf16_spacings",
-         "label": "Largest gap of a native token to the FP32 argmax, in BF16 spacings at that step",
-         "scope": "independent_reference", "actual": widest, "operator": "<=", "expected": ulps,
-         "passed": widest <= ulps},
-        {"name": "reference_eos_before_native_end",
-         "label": "Steps before the native end at which the FP32 argmax is EOS",
-         "scope": "independent_reference", "actual": early, "operator": "==", "expected": 0,
-         "passed": early == 0},
-        {"name": "native_eos_without_reference_eos",
-         "label": "Native EOS at a step whose FP32 argmax is not EOS (1 = yes)",
-         "scope": "independent_reference", "actual": unmatched_end, "operator": "==", "expected": 0,
-         "passed": unmatched_end == 0},
-        {"name": "stops_at_eos_or_limit",
-         "label": "Native IDs end with EOS or at max_new_tokens (1 = yes)",
-         "scope": "contract", "actual": stop, "operator": "==", "expected": 1, "passed": stop == 1},
-    ]
+    """The ``teacher_forced`` oracle's checks as an evidence record, from the same values
+    as its assertions."""
+    widest = max((gap / _bf16_spacing(peak) for gap, peak in zip(gaps, peaks)
+                  if math.isfinite(gap) and math.isfinite(peak) and _bf16_spacing(peak) > 0),
+                 default=0.0)
+    beyond = _steps_beyond_tolerance(gaps, peaks, ulps)
+    return [_check("steps_beyond_bf16_tolerance",
+                   f"Steps whose native token trails the FP32 argmax by more than {ulps:g} BF16 "
+                   f"spacings, or with a non-finite score (largest finite gap: {widest:.4g})",
+                   "independent_reference", len(beyond), "==", 0),
+            *_termination_checks(tokens, argmax, eos, max_new_tokens)]
 
 
+@pytest.mark.usefixtures("fp32_reference")
 def test_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     model_dir = _model_dir(manifest)
@@ -571,8 +612,7 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
         "checks": _teacher_forced_checks(tokens, gaps, peaks, argmax, eos, max_new_tokens, ulps),
     })
     _assert_termination(tokens, argmax, eos, max_new_tokens)
-    for step, (gap, peak) in enumerate(zip(gaps, peaks)):
-        allowed = ulps * _bf16_spacing(peak)
-        assert gap <= allowed, (
-            f"native token {step} ({tokens[step]}) trails the reference argmax by "
-            f"{gap:.4f} > {allowed:.4f}")
+    beyond = _steps_beyond_tolerance(gaps, peaks, ulps)
+    assert not beyond, "native tokens trail the reference argmax beyond the tolerance: " + ", ".join(
+        f"step {step} ({tokens[step]}) by {gaps[step]:.4f} at largest logit {peaks[step]:.4f}"
+        for step in beyond[:5])

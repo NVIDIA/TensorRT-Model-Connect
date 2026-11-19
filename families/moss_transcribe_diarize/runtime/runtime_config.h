@@ -6,6 +6,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -47,5 +48,13 @@ struct RuntimeConfig {
 };
 
 RuntimeConfig parse_runtime_config(const std::vector<char>& json_bytes);
+
+// Tokens the KV cache leaves for generation after a prompt: it holds
+// max_sequence_length rows, and the last generated token is never fed back.
+std::int64_t generation_room(const RuntimeConfig& config, std::size_t prompt_tokens);
+
+// Generated-token limit of a request that names none: the bundle's default,
+// bounded by generation_room.
+std::int32_t default_token_limit(const RuntimeConfig& config, std::size_t prompt_tokens);
 
 } // namespace trtmc::moss_transcribe_diarize

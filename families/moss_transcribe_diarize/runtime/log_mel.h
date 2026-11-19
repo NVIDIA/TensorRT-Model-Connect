@@ -61,6 +61,7 @@ class LogMelExtractor {
                           std::vector<std::complex<double>>& work, double* power_first,
                           double* power_second) const;
 
+    // Declared first: its initializer checks the geometry before dft_ allocates.
     MelFilterBank bank_;
     std::int32_t n_fft_;
     std::int32_t hop_length_;

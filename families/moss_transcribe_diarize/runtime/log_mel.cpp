@@ -45,6 +45,21 @@ std::size_t bluestein_size(std::size_t length) {
     return next_power_of_two(2 * length - 1);
 }
 
+// Checks the geometry and the filter bank; the extractor runs it in the
+// initializer of its first member, before the DFT allocates its buffers.
+MelFilterBank checked_bank(MelFilterBank bank, std::int32_t n_fft, std::int32_t hop_length,
+                           std::int32_t chunk_samples, std::int32_t mel_frames) {
+    if (n_fft <= 0 || n_fft % 2 != 0 || hop_length <= 0 || chunk_samples <= n_fft)
+        throw std::invalid_argument("invalid log-mel geometry");
+    if (bank.freq_bins != n_fft / 2 + 1 || bank.mel_bins <= 0 ||
+        bank.weights.size() != static_cast<std::size_t>(bank.freq_bins) * bank.mel_bins)
+        throw std::invalid_argument("mel filter bank does not match n_fft");
+    // The centred STFT yields chunk_samples / hop + 1 frames; the last is dropped.
+    if (mel_frames != chunk_samples / hop_length)
+        throw std::invalid_argument("mel frame count does not match the chunk length");
+    return bank;
+}
+
 } // namespace
 
 MelFilterBank parse_mel_filter_bank(const std::vector<char>& bytes) {
@@ -131,17 +146,9 @@ void Dft::forward(std::vector<std::complex<double>>& values) const {
 
 LogMelExtractor::LogMelExtractor(MelFilterBank bank, std::int32_t n_fft, std::int32_t hop_length,
                                  std::int32_t chunk_samples, std::int32_t mel_frames)
-    : bank_(std::move(bank)), n_fft_(n_fft), hop_length_(hop_length), chunk_samples_(chunk_samples),
-      mel_frames_(mel_frames), dft_(n_fft > 0 ? static_cast<std::size_t>(n_fft) : 1) {
-    if (n_fft <= 0 || n_fft % 2 != 0 || hop_length <= 0 || chunk_samples <= n_fft)
-        throw std::invalid_argument("invalid log-mel geometry");
-    if (bank_.freq_bins != n_fft / 2 + 1 || bank_.mel_bins <= 0 ||
-        bank_.weights.size() != static_cast<std::size_t>(bank_.freq_bins) * bank_.mel_bins)
-        throw std::invalid_argument("mel filter bank does not match n_fft");
-    // The centred STFT yields chunk_samples / hop + 1 frames; the last is dropped.
-    if (mel_frames != chunk_samples / hop_length)
-        throw std::invalid_argument("mel frame count does not match the chunk length");
-
+    : bank_(checked_bank(std::move(bank), n_fft, hop_length, chunk_samples, mel_frames)),
+      n_fft_(n_fft), hop_length_(hop_length), chunk_samples_(chunk_samples),
+      mel_frames_(mel_frames), dft_(static_cast<std::size_t>(n_fft)) {
     window_.resize(static_cast<std::size_t>(n_fft));
     for (std::int32_t n = 0; n < n_fft; ++n)
         window_[n] = 0.5 - 0.5 * std::cos(2.0 * kPi * n / static_cast<double>(n_fft));
