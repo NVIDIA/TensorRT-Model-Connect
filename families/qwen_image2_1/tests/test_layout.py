@@ -18,6 +18,9 @@ import pytest
 from families.qwen_image2_1 import rope
 from families.qwen_image2_1.bundle_config import (
     DEFAULT_TEXT_TOKENS,
+    TOKENIZER_NORMALIZER,
+    TOKENIZER_PRE_TOKENIZER,
+    require_supported_tokenizer,
     resolve_geometry,
     scheduler_settings,
 )
@@ -207,3 +210,56 @@ def test_scheduler_settings_come_from_the_checkpoint(tmp_path) -> None:
 def test_unsupported_schedules_are_rejected(tmp_path, overrides, message) -> None:
     with pytest.raises(ValueError, match=message):
         scheduler_settings(_write_checkpoint(tmp_path, **overrides))
+
+
+def _tokenizer_definition(**overrides) -> dict:
+    return {
+        "normalizer": TOKENIZER_NORMALIZER,
+        "pre_tokenizer": TOKENIZER_PRE_TOKENIZER,
+        "model": {"type": "BPE"},
+        **overrides,
+    }
+
+
+def _pre_tokenizer(split: dict | None = None, byte_level: dict | None = None) -> dict:
+    steps = TOKENIZER_PRE_TOKENIZER["pretokenizers"]
+    return {
+        "type": "Sequence",
+        "pretokenizers": [{**steps[0], **(split or {})}, {**steps[1], **(byte_level or {})}],
+    }
+
+
+def test_the_checkpoint_tokenizer_configuration_is_accepted() -> None:
+    require_supported_tokenizer(_tokenizer_definition())
+    require_supported_tokenizer(_tokenizer_definition(normalizer=None))
+    # Offsets are not part of the ids.
+    require_supported_tokenizer(
+        _tokenizer_definition(pre_tokenizer=_pre_tokenizer(byte_level={"trim_offsets": True}))
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"model": {"type": "WordPiece"}}, "requires a BPE"),
+        ({"model": None}, "requires a BPE"),
+        ({"pre_tokenizer": None}, "pre-tokenizer"),
+        ({"pre_tokenizer": TOKENIZER_PRE_TOKENIZER["pretokenizers"][1]}, "pre-tokenizer"),
+        (
+            {"pre_tokenizer": _pre_tokenizer(split={"pattern": {"Regex": r"\p{N}{1,3}|\s+"}})},
+            "pre-tokenizer",
+        ),
+        ({"pre_tokenizer": _pre_tokenizer(split={"behavior": "Removed"})}, "pre-tokenizer"),
+        ({"pre_tokenizer": _pre_tokenizer(split={"invert": True})}, "pre-tokenizer"),
+        ({"pre_tokenizer": _pre_tokenizer(byte_level={"use_regex": True})}, "pre-tokenizer"),
+        (
+            {"pre_tokenizer": _pre_tokenizer(byte_level={"add_prefix_space": True})},
+            "pre-tokenizer",
+        ),
+        ({"normalizer": {"type": "NFKC"}}, "normalizer"),
+        ({"normalizer": {"type": "Lowercase"}}, "normalizer"),
+    ],
+)
+def test_other_tokenizer_configurations_are_rejected(overrides: dict, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        require_supported_tokenizer(_tokenizer_definition(**overrides))

@@ -22,6 +22,28 @@ SYSTEM_PROMPT = "Comprehend and analyze the provided prompt."
 PROMPT_PREFIX = f"<|im_start|>system\n{SYSTEM_PROMPT}<|im_end|>\n<|im_start|>user\n"
 PROMPT_SUFFIX = "<|im_end|>\n<|im_start|>assistant\n"
 
+# The text splitting the native tokenizer reproduces: the checkpoint's own normalizer and
+# pre-tokenizer. The runtime matches the Split pattern alternative by alternative with the
+# Unicode letter and number classes of runtime/unicode_categories.h.
+TOKENIZER_NORMALIZER = {"type": "NFC"}
+TOKENIZER_PRE_TOKENIZER = {
+    "type": "Sequence",
+    "pretokenizers": [
+        {
+            "type": "Split",
+            "pattern": {
+                "Regex": (
+                    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}"
+                    r"| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
+                )
+            },
+            "behavior": "Isolated",
+            "invert": False,
+        },
+        {"type": "ByteLevel", "add_prefix_space": False, "trim_offsets": False, "use_regex": False},
+    ],
+}
+
 DEFAULT_IMAGE_SIZE = 1024
 MIN_IMAGE_SIZE = 256
 DEFAULT_TEXT_TOKENS = 512
@@ -117,6 +139,47 @@ def scheduler_settings(model_dir: Path) -> dict:
         "max_image_seq_len": int(raw["max_image_seq_len"]),
         "shift_terminal": float(raw["shift_terminal"] or 0.0),
     }
+
+
+def _without_offset_options(pre_tokenizer: object) -> object:
+    """``trim_offsets`` changes reported character offsets only, never the pieces or the ids."""
+    if not isinstance(pre_tokenizer, dict):
+        return pre_tokenizer
+    steps = pre_tokenizer.get("pretokenizers")
+    if not isinstance(steps, list):
+        return pre_tokenizer
+    return {
+        **pre_tokenizer,
+        "pretokenizers": [
+            {key: value for key, value in step.items() if key != "trim_offsets"}
+            if isinstance(step, dict)
+            else step
+            for step in steps
+        ],
+    }
+
+
+def require_supported_tokenizer(tokenizer: dict) -> None:
+    """Reject a ``tokenizer.json`` whose text splitting the native tokenizer does not reproduce.
+
+    The runtime implements one configuration, the checkpoint's: byte-level BPE behind the Split
+    pattern of ``TOKENIZER_PRE_TOKENIZER``. A different pattern, behavior or byte-level option
+    would silently produce other token ids, so the build refuses it. The NFC normalizer is
+    accepted although the runtime does not normalize (see the family README).
+    """
+    model = tokenizer.get("model")
+    if not isinstance(model, dict) or model.get("type") != "BPE":
+        raise ValueError("qwen_image2_1 requires a BPE tokenizer.json")
+    if _without_offset_options(tokenizer.get("pre_tokenizer")) != _without_offset_options(
+        TOKENIZER_PRE_TOKENIZER
+    ):
+        raise ValueError(
+            "qwen_image2_1 supports only the Qwen3-VL pre-tokenizer (Split pattern, isolated "
+            "matches, byte-level encoding without a prefix space); this checkpoint's "
+            "tokenizer.json configures another"
+        )
+    if tokenizer.get("normalizer") not in (None, TOKENIZER_NORMALIZER):
+        raise ValueError("qwen_image2_1 supports only tokenizers without a normalizer or with NFC")
 
 
 def prompt_layout(processor_dir: Path) -> dict:

@@ -4,12 +4,15 @@
  */
 
 #include "families/qwen_image2_1/runtime/tokenizer.h"
+#include "families/qwen_image2_1/runtime/unicode_categories.h"
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <climits>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <list>
 #include <nlohmann/json.hpp>
 #include <queue>
@@ -156,7 +159,9 @@ static const ByteEncoderTables& byte_tables() {
 //   ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
 //
 // Key differences: Qwen3 allows any non-CR/LF/letter/digit as optional prefix before
-// letters, matches single digits, and has explicit newline handling.
+// letters, matches single digits, and has explicit newline handling. It is matched
+// alternative by alternative in qwen3_match_end; the other variants share the
+// dispatch helpers below.
 
 namespace pretok {
 
@@ -164,47 +169,26 @@ enum class Variant { kGpt2, kQwen3, kBloom, kDeepSeek, kClip };
 
 // ── Character classification ──
 
-struct UnicodeRange {
-    char32_t lo, hi;
-};
-
-constexpr UnicodeRange kLetterRanges[] = {
-    {'A', 'Z'},         {'a', 'z'},       {0xB5, 0xB5},   // µ (micro sign, treated as letter)
-    {0xC0, 0xD6},       {0xD8, 0xF6},     {0xF8, 0x1BA},  // Latin-1 + Extended A/B
-    {0x1BC, 0x1BF},     {0x1C4, 0x293},   {0x295, 0x2AF}, // Latin Extended B cont.
-    {0x370, 0x373},     {0x376, 0x377},   {0x37B, 0x37D},   {0x37F, 0x37F}, // Greek
-    {0x386, 0x386},     {0x388, 0x38A},   {0x38C, 0x38C},   {0x38E, 0x3A1},
-    {0x3A3, 0x3F5},     {0x3F7, 0x481},   {0x48A, 0x52F},   // Greek + Cyrillic
-    {0x531, 0x556},     {0x559, 0x559},                     // Armenian
-    {0x560, 0x588},                                         // Armenian lowercase
-    {0x600, 0x6FF},                                         // Arabic
-    {0x900, 0x97F},                                         // Devanagari
-    {0xE00, 0xE7F},                                         // Thai
-    {0x10A0, 0x10C5},                                       // Georgian
-    {0x13A0, 0x13F5},                                       // Cherokee
-    {0x1C90, 0x1CBA},   {0x1CBD, 0x1CBF},                   // Georgian Extended
-    {0x1D00, 0x1D2B},   {0x1D6B, 0x1D77}, {0x1D79, 0x1D9A}, // Phonetic Extensions
-    {0x1E00, 0x1F15},   {0x1F18, 0x1F1D}, {0x1F20, 0x1F45}, // Latin Ext. Additional + Greek Ext.
-    {0x2C00, 0x2C5F},                                       // Glagolitic
-    {0x3040, 0x309F},                                       // Hiragana
-    {0x30A0, 0x30FF},                                       // Katakana
-    {0x3400, 0x4DBF},                                       // CJK Extension A
-    {0x4E00, 0x9FFF},                                       // CJK Unified Ideographs
-    {0xAC00, 0xD7AF},                                       // Hangul Syllables
-    {0xFB00, 0xFDFF},   // Alphabetic Presentation Forms + Arabic Forms
-    {0x10000, 0x1007F}, // Linear B Syllabary
-};
-
-inline bool is_letter(char32_t cp) {
-    for (const auto& r : kLetterRanges) {
-        if (cp >= r.lo && cp <= r.hi)
-            return true;
-    }
-    return false;
+// Is `cp` inside one of the sorted, disjoint `ranges`?
+template <std::size_t N>
+inline bool in_ranges(char32_t cp,
+                      const std::array<qwen_image2_1::unicode::CodePointRange, N>& ranges) {
+    const auto after =
+        std::upper_bound(ranges.begin(), ranges.end(), cp,
+                         [](char32_t value, const qwen_image2_1::unicode::CodePointRange& range) {
+                             return value < range.first;
+                         });
+    return after != ranges.begin() && cp <= std::prev(after)->last;
 }
 
+// \p{L}: every letter category.
+inline bool is_letter(char32_t cp) {
+    return in_ranges(cp, qwen_image2_1::unicode::kLetterRanges);
+}
+
+// \p{N}: decimal digits, letter numbers and other numbers.
 inline bool is_digit(char32_t cp) {
-    return (cp >= '0' && cp <= '9');
+    return in_ranges(cp, qwen_image2_1::unicode::kNumberRanges);
 }
 
 inline bool is_whitespace(char32_t cp) {
@@ -244,14 +228,10 @@ inline bool is_newline(char32_t cp) {
 
 // Is this char a valid optional prefix before a word?
 // GPT-2/BLOOM: only space (0x20)
-// Qwen3: any char except CR, LF, letter, digit
 // DeepSeek: any whitespace (\s?)
 inline bool is_prefix(char32_t cp, Variant v) {
     if (v == Variant::kClip) {
         return false;
-    }
-    if (v == Variant::kQwen3) {
-        return !is_newline(cp) && !is_letter(cp) && !is_digit(cp);
     }
     if (v == Variant::kDeepSeek) {
         return is_whitespace(cp);
@@ -318,33 +298,6 @@ inline void scan_all_whitespace(const char*& p, const char* end) {
     }
 }
 
-// Qwen3 regex branch: \s*[\r\n]+
-// Consume any leading whitespace up to the first newline, then consume the
-// contiguous newline run itself, but stop before whitespace that follows the
-// last newline.
-inline void scan_qwen3_newline_chunk(char32_t first_cp, const char*& p, const char* end) {
-    bool saw_newline = is_newline(first_cp);
-    while (p < end) {
-        const char* peek = p;
-        char32_t nc = read_utf8(peek, end);
-        if (!saw_newline) {
-            if (is_newline(nc)) {
-                saw_newline = true;
-                p = peek;
-                continue;
-            }
-            if (is_whitespace(nc)) {
-                p = peek;
-                continue;
-            }
-            break;
-        }
-        if (!is_newline(nc))
-            break;
-        p = peek;
-    }
-}
-
 inline void scan_bloom_words(const char*& p, const char* end) {
     while (p < end) {
         const char* peek = p;
@@ -378,6 +331,10 @@ inline bool is_two_char_contraction(char c1, char c2) {
     return (c1 == 'r' && c2 == 'e') || (c1 == 'v' && c2 == 'e') || (c1 == 'l' && c2 == 'l');
 }
 
+inline char ascii_lower(char c) {
+    return c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+}
+
 // Returns length of contraction suffix after apostrophe ('s 't 'm 'd 're 've 'll)
 inline int match_contraction_suffix(const char* p, const char* end) {
     if (p >= end)
@@ -390,7 +347,24 @@ inline int match_contraction_suffix(const char* p, const char* end) {
     return 0;
 }
 
-// ── GPT-2/Qwen3 pre-tokenize dispatch helpers ──
+// The same suffixes under the Qwen3 pattern's (?i:...): any letter case, and U+017F
+// (long s), which case-folds to "s".
+inline int match_contraction_suffix_ignoring_case(const char* p, const char* end) {
+    if (p >= end)
+        return 0;
+    const char c = ascii_lower(*p);
+    if (c == 's' || c == 't' || c == 'm' || c == 'd')
+        return 1;
+    if (p + 1 < end) {
+        if (is_two_char_contraction(c, ascii_lower(p[1])))
+            return 2;
+        if (static_cast<unsigned char>(p[0]) == 0xC5 && static_cast<unsigned char>(p[1]) == 0xBF)
+            return 2;
+    }
+    return 0;
+}
+
+// ── GPT-2 pre-tokenize dispatch helpers ──
 
 // Handle apostrophe: either contraction or "other" chars run
 inline bool try_contraction(char32_t cp, const char*& p, const char* end, const char* start,
@@ -421,21 +395,12 @@ inline bool try_prefix_run(char32_t cp, const char*& p, const char* end, const c
         return true;
     }
     if (is_digit(next_cp)) {
-        // The regex prefix [^\r\n\p{L}\p{N}]? only applies before \p{L}+ (letters).
-        // Digits are matched by standalone \p{N} — no prefix. Back up so the
-        // digit is handled by try_simple_run instead.
-        if (variant == Variant::kQwen3) {
-            p = after_prefix;
-            return false;
-        }
         scan_digits(p, end);
         result.emplace_back(start, p);
         return true;
     }
     if (!is_whitespace(next_cp)) {
         scan_others(p, end);
-        if (variant == Variant::kQwen3)
-            scan_newlines(p, end);
         result.emplace_back(start, p);
         return true;
     }
@@ -444,24 +409,7 @@ inline bool try_prefix_run(char32_t cp, const char*& p, const char* end, const c
     return false;
 }
 
-// Check if a whitespace run contains any newline character
-inline bool has_newline_in_ws(char32_t first_cp, const char* p, const char* end) {
-    if (is_newline(first_cp))
-        return true;
-    const char* scan = p;
-    while (scan < end) {
-        const char* peek = scan;
-        char32_t nc = read_utf8(peek, end);
-        if (!is_whitespace(nc))
-            break;
-        if (is_newline(nc))
-            return true;
-        scan = peek;
-    }
-    return false;
-}
-
-// Handle whitespace (Qwen3 newline sequences + general whitespace)
+// Handle whitespace
 inline bool try_whitespace_run(char32_t cp, const char*& p, const char* end, const char* start,
                                Variant variant, std::vector<std::string>& result) {
     if (!is_whitespace(cp))
@@ -475,13 +423,6 @@ inline bool try_whitespace_run(char32_t cp, const char*& p, const char* end, con
         return true;
     }
 
-    // Qwen3: \s*[\r\n]+ — newline sequences take priority
-    if (variant == Variant::kQwen3 && has_newline_in_ws(cp, p, end)) {
-        scan_qwen3_newline_chunk(cp, p, end);
-        result.emplace_back(start, p);
-        return true;
-    }
-
     // General whitespace: leave last ws char for next token's prefix
     emit_whitespace_leave_last(p, end, start, result);
     return true;
@@ -489,23 +430,98 @@ inline bool try_whitespace_run(char32_t cp, const char*& p, const char* end, con
 
 // Handle letter or digit run (no prefix)
 inline bool try_simple_run(char32_t cp, const char*& p, const char* end, const char* start,
-                           Variant variant, std::vector<std::string>& result, int digit_group = 0) {
+                           Variant variant, std::vector<std::string>& result) {
     if (is_letter(cp)) {
         scan_letters(p, end);
         result.emplace_back(start, p);
         return true;
     }
     if (is_digit(cp)) {
-        if (variant == Variant::kQwen3) {
-            if (digit_group > 1)
-                scan_digits(p, end, digit_group - 1);
-        } else if (variant != Variant::kClip) {
+        if (variant != Variant::kClip)
             scan_digits(p, end);
-        }
         result.emplace_back(start, p);
         return true;
     }
     return false;
+}
+
+// ── Qwen3 pattern ──
+
+// End of the match of the Qwen3 pattern that starts at `start` (start < end):
+//   (?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}|
+//   ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+// The alternatives are tried in the pattern's order, as a regex engine does; every
+// character starts a match of one of them. `digit_group` above 1 stands for the
+// \p{N}{1,digit_group} form of the number alternative.
+inline const char* qwen3_match_end(const char* start, const char* end, int digit_group) {
+    const char* after_first = start;
+    const char32_t first = read_utf8(after_first, end);
+
+    // (?i:'s|'t|'re|'ve|'m|'ll|'d)
+    if (first == '\'') {
+        const int suffix = match_contraction_suffix_ignoring_case(after_first, end);
+        if (suffix > 0)
+            return after_first + suffix;
+    }
+
+    // [^\r\n\p{L}\p{N}]?\p{L}+
+    if (is_letter(first)) {
+        const char* p = after_first;
+        scan_letters(p, end);
+        return p;
+    }
+    if (!is_newline(first) && !is_digit(first) && after_first < end) {
+        const char* p = after_first;
+        if (is_letter(read_utf8(p, end))) {
+            scan_letters(p, end);
+            return p;
+        }
+    }
+
+    // \p{N}
+    if (is_digit(first)) {
+        const char* p = after_first;
+        if (digit_group > 1)
+            scan_digits(p, end, digit_group - 1);
+        return p;
+    }
+
+    //  ?[^\s\p{L}\p{N}]+[\r\n]*  — only an ASCII space may precede the run.
+    if (!is_whitespace(first) || first == ' ') {
+        const char* p = first == ' ' ? after_first : start;
+        const char* run_start = p;
+        scan_others(p, end);
+        if (p > run_start) {
+            scan_newlines(p, end);
+            return p;
+        }
+    }
+
+    // What is left starts a whitespace run.
+    const char* run_end = after_first;
+    const char* last_start = start; // start of the run's last character
+    const char* after_last_newline = is_newline(first) ? after_first : nullptr;
+    while (run_end < end) {
+        const char* peek = run_end;
+        const char32_t cp = read_utf8(peek, end);
+        if (!is_whitespace(cp))
+            break;
+        last_start = run_end;
+        run_end = peek;
+        if (is_newline(cp))
+            after_last_newline = run_end;
+    }
+    // \s*[\r\n]+  — through the last CR or LF of the run.
+    if (after_last_newline != nullptr)
+        return after_last_newline;
+    // \s+(?!\S)  — the whole run at the end of the text; otherwise all but its last
+    // character, which the next match may take as a prefix.
+    if (run_end == end)
+        return run_end;
+    if (last_start > start)
+        return last_start;
+    // \s+
+    return run_end;
 }
 
 // ── Main pre-tokenize functions ──
@@ -519,6 +535,15 @@ std::vector<std::string> pre_tokenize(const std::string& text, Variant variant,
     const char* p = text.data();
     const char* end = p + text.size();
 
+    if (variant == Variant::kQwen3) {
+        while (p < end) {
+            const char* start = p;
+            p = qwen3_match_end(start, end, digit_group);
+            result.emplace_back(start, p);
+        }
+        return result;
+    }
+
     while (p < end) {
         const char* start = p;
         char32_t cp = read_utf8(p, end);
@@ -529,16 +554,11 @@ std::vector<std::string> pre_tokenize(const std::string& text, Variant variant,
             continue;
         if (try_whitespace_run(cp, p, end, start, variant, result))
             continue;
-        if (try_simple_run(cp, p, end, start, variant, result, digit_group))
+        if (try_simple_run(cp, p, end, start, variant, result))
             continue;
 
         // Other chars (punctuation/symbols)
         scan_others(p, end);
-        if (variant == pretok::Variant::kQwen3) {
-            // Qwen3's ` ?[^\s\p{L}\p{N}]+[\r\n]*` keeps trailing newlines
-            // attached to punctuation/symbol runs even without an optional prefix.
-            scan_newlines(p, end);
-        }
         result.emplace_back(start, p);
     }
 

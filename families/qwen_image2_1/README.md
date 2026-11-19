@@ -23,6 +23,31 @@ statistics and the transformer's rotary rotation run in FP32, as in the referenc
 The graph builders take the compute type as a parameter. Bundles are always built in BF16; the parity tests also
 build the graphs in FP32, where they reproduce the reference modules to FP32 accuracy.
 
+## Prompt tokenization
+
+The runtime frames the prompt as the reference pipeline does and tokenizes it with the checkpoint's byte-level BPE
+vocabulary. Before the merges it splits the text with the checkpoint's pre-tokenizer pattern,
+
+```text
+(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+
+```
+
+alternative by alternative, with the full Unicode letter and number classes. The build refuses a `tokenizer.json`
+that configures another pre-tokenizer. The family tests compare the split with the Hugging Face `tokenizers`
+library on text of many scripts, numbers of every kind, quotes, contractions, and whitespace and line-break
+runs.
+
+The letter and number classes come from Unicode 16.0 data,
+[UnicodeData.txt](https://www.unicode.org/Public/16.0.0/ucd/UnicodeData.txt) (SHA-256
+`ff58e5823bd095166564a006e47d111130813dcf8bf234ef79fa51a870edb48f`), used under the Unicode License v3 in
+`UNICODE_LICENSE.txt`, which is installed with the family. They are the classes of the regular-expression engine
+in `tokenizers` 0.22.2. Regenerate the table with:
+
+```bash
+python families/qwen_image2_1/tools/generate_unicode_categories.py \
+  UnicodeData.txt families/qwen_image2_1/runtime/unicode_categories.h
+```
+
 ## Build geometry
 
 - `image_height` / `image_width`: the output size, default 1024 x 1024. Multiples of 32, at least 256, and at most
@@ -97,8 +122,4 @@ and land elsewhere in the spread above.
   VAE encoder and condition-image blocks in the denoiser.
 - Unicode normalisation of the prompt. The checkpoint's tokenizer normalises text to NFC before tokenizing; the
   runtime tokenizes the prompt as given, so text that is not already NFC is tokenized differently from the reference.
-- Exact pre-tokenization of uncommon text. The pre-tokenizer, copied from the `qwen_image` family, approximates the
-  reference's Unicode letter and number classes (for example, fullwidth digits are not treated as digits) and two of
-  its quote rules: a quote directly before letters that do not form a contraction, and upper-case contractions such
-  as `DON'T`. Prompts with such text can be tokenized differently from the reference.
 - Checkpoints whose scheduler does not use `num_train_timesteps = 1000`, or that configure `sample_sigmas`.

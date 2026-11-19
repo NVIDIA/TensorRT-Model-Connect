@@ -34,6 +34,10 @@ set_target_properties(trtmc_model_qwen_image2_1 PROPERTIES
 install(TARGETS trtmc_model_qwen_image2_1
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+# The Unicode category tables of the tokenizer are derived from Unicode data files.
+install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../UNICODE_LICENSE.txt
+  DESTINATION ${CMAKE_INSTALL_DATADIR}/trtmc/families/qwen_image2_1
+)
 
 if(TRTMC_BUILD_TESTS)
   add_executable(test_qwen_image2_1_sampling
@@ -55,6 +59,26 @@ if(TRTMC_BUILD_TESTS)
   )
   add_test(NAME qwen_image2_1_sampling COMMAND test_qwen_image2_1_sampling)
   set_tests_properties(qwen_image2_1_sampling PROPERTIES LABELS "cpu")
+
+  add_executable(test_qwen_image2_1_pretokenizer
+    ${PROJECT_SOURCE_DIR}/families/qwen_image2_1/tests/cpp/test_pretokenizer.cpp
+  )
+  target_include_directories(test_qwen_image2_1_pretokenizer PRIVATE
+    ${PROJECT_SOURCE_DIR}
+  )
+  target_link_libraries(test_qwen_image2_1_pretokenizer PRIVATE
+    trtmc_model_qwen_image2_1
+    nlohmann_json::nlohmann_json
+  )
+  target_compile_options(test_qwen_image2_1_pretokenizer PRIVATE
+    -Wall -Wextra -Wpedantic -Werror
+  )
+  add_test(NAME qwen_image2_1_pretokenizer
+    COMMAND test_qwen_image2_1_pretokenizer
+      ${PROJECT_SOURCE_DIR}/families/qwen_image2_1/tests/data/boundary_tokenizer.json
+      ${PROJECT_SOURCE_DIR}/families/qwen_image2_1/tests/data/pretokenizer_cases.json
+  )
+  set_tests_properties(qwen_image2_1_pretokenizer PROPERTIES LABELS "cpu")
 
   # Public SDK consumers for the family E2E. They link only the public C runtime.
   foreach(_language IN ITEMS c cpp)

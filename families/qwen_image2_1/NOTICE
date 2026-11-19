@@ -26,3 +26,9 @@ Licensed under Apache License 2.0.
 Qwen3-VL reference implementation in Hugging Face Transformers 5.2.0:
 Copyright 2025 The Qwen Team and The HuggingFace Inc. team.
 Licensed under Apache License 2.0.
+
+The letter and number tables of the prompt tokenizer (runtime/unicode_categories.h)
+are derived from the Unicode Character Database 16.0.0, UnicodeData.txt:
+https://www.unicode.org/Public/16.0.0/ucd/UnicodeData.txt
+Copyright 1991-2026 Unicode, Inc.
+Licensed under the Unicode License v3; see UNICODE_LICENSE.txt.

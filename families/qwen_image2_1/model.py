@@ -14,12 +14,14 @@ A bundle is built for one output size and one text budget; every plan is static.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .bundle_config import (
     DEFAULT_NUM_STEPS,
     prompt_layout,
+    require_supported_tokenizer,
     resolve_geometry,
     scheduler_settings,
 )
@@ -67,6 +69,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     tokenizer_path = model_dir / "processor" / "tokenizer.json"
     if not tokenizer_path.is_file():
         raise FileNotFoundError(f"Qwen-Image 2.1 checkpoint is missing {tokenizer_path}")
+    tokenizer_bytes = tokenizer_path.read_bytes()
+    require_supported_tokenizer(json.loads(tokenizer_bytes))
 
     vae_config, vae_weights = load_vae(model_dir / "vae")
     geometry = resolve_geometry(
@@ -123,7 +127,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             verbose=verbose,
         )
 
-    writer.add_bytes("tokenizer.json", tokenizer_path.read_bytes())
+    writer.add_bytes("tokenizer.json", tokenizer_bytes)
     writer.add_json(
         "runtime.json",
         {
