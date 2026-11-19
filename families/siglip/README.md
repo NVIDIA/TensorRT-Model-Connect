@@ -24,7 +24,7 @@ PYTHONPATH=core/builder:apps/benchmark:. python -m pytest families/siglip/tests 
 
 This requires the native runtime, TensorRT, CUDA, and model weights. CPU tokenizer
 and preprocessing tests do not establish engine, embedding, score, or performance
-parity. SigLIP 2 GPU validation is still required; its new manifest selects FP32
+parity. The recorded H200 run below qualifies the pinned SigLIP 2 FP32 case
 without quantization. BPE checkpoints reject FP8 because the existing SigLIP
 activation scales are not calibrated for them.
 
@@ -55,6 +55,43 @@ for the `image_to_embedding`, `text_to_embedding` and
 `text_image_to_relevance` tasks (`google/siglip-base-patch16-224` in the
 manifests). Batch is 1. The family builds fp32 only: an all-fp16 engine moves
 the embeddings by more than the family's E2E tolerance.
+
+### Recorded SigLIP 2 H200 validation
+
+On 2026-11-19, source `e737300a66a4f9ea6d969148515bf295ba09fd80` passed:
+
+```sh
+PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \
+  families/siglip/tests/test_e2e.py --e2e-testcase siglip2-base-patch16-224 \
+  -vv -s -p no:cacheprovider --tb=short
+```
+
+The one selected E2E builds the FP32 bundle and executes all three Tasks against
+the official Hugging Face FP32 reference with Pillow preprocessing. It uses
+`data/test_img.png` and the car/cat text pair from the unchanged manifest.
+Checkpoint/tokenizer revision: `75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2`.
+
+| Comparison | Maximum absolute error | Existing tolerance |
+| --- | ---: | ---: |
+| Image embedding | 2.682e-7 | 1e-4 |
+| Car text embedding | 5.588e-8 | 1e-4 |
+| Cat text embedding | 6.100e-8 | 1e-4 |
+| Relevance logit | 5.908e-6 | 0.002 |
+
+The native car/cat probabilities were 0.00528349 and 0.00000012; the existing
+ranking and cosine checks also passed. No gate or threshold was changed.
+
+Environment: one NVIDIA H200, TP1/batch1, x86_64 Ubuntu 24.04, driver 595.71.05,
+CUDA 13.4.3, TensorRT 11.4.0.106, PyTorch 2.12.0+cu130,
+Transformers 5.2.0 and Tokenizers 0.22.2. The development image uses the repository
+Dockerfile with x86_64 TensorRT include paths and Hopper architecture settings.
+Production CLI, backend and SigLIP DSO compiled; both native tokenizer and
+preprocessing CTests passed. The reference model uses CPU FP32; native engines
+execute on H200. The documentation-only evidence commit leaves the tested
+runtime, builder and test source blobs unchanged.
+
+This qualifies this image/text case only. Other resolutions, checkpoints,
+platforms, batches, FP16, BPE FP8/NVFP4 and performance remain outside the evidence.
 
 ## Quantization
 
