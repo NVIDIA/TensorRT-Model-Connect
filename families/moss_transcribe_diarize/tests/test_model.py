@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Checkpoint contract, weight reading and build-request policy, without a GPU or checkpoint."""
+"""Checkpoint contract, weight reading, build-request policy and the E2E's own oracles,
+without a GPU or checkpoint."""
 
 from __future__ import annotations
 
@@ -20,6 +21,11 @@ from families.moss_transcribe_diarize.config import load_config  # noqa: E402
 from families.moss_transcribe_diarize.graph import float32_to_bfloat16_bits  # noqa: E402
 from families.moss_transcribe_diarize.model import build  # noqa: E402
 from families.moss_transcribe_diarize.tests import test_e2e  # noqa: E402
+from families.moss_transcribe_diarize.tests.test_e2e import (  # noqa: E402
+    _assert_segments,
+    _assert_termination,
+    _transcript_segments,
+)
 from families.moss_transcribe_diarize.tokens import token_bytes  # noqa: E402
 from tensorrt_model_connect.build import BuildRequest  # noqa: E402
 
@@ -193,6 +199,57 @@ def _request(**overrides) -> BuildRequest:
 def test_build_options_are_consumed_or_refused(overrides, error):
     with pytest.raises(error):
         build(_request(**overrides), writer=None)
+
+
+# The E2E's oracles on fixed inputs: a wrong oracle would reject a correct
+# runtime, or pass a wrong one, without any GPU run showing it.
+@pytest.mark.parametrize("text, segments", [
+    ("[0.48][S01]Welcome[1.66][12.26][S02]Ready[13.81]",
+     [(0.48, 1.66, "[S01]Welcome"), (12.26, 13.81, "[S02]Ready")]),
+    # A bracketed number followed by more text stays in the text.
+    ("[0][S01]x[2024]y, z[001]w[4]", [(0.0, 4.0, "[S01]x[2024]y, z[001]w")]),
+    ("noise [bad][0.1][S01]hello[0.9]", [(0.1, 0.9, "[S01]hello")]),
+    ("[0][S01]a[1]\n [2][S02]b[3]", [(0.0, 1.0, "[S01]a"), (2.0, 3.0, "[S02]b")]),
+    ("[1]　[S03]x[2]", [(1.0, 2.0, "[S03]x")]),
+    # An end before the start stays text, and a later end closes the segment.
+    ("[5][S01]a[3] [6]", [(5.0, 6.0, "[S01]a[3]")]),
+    ("[5][S01]late[3]tail", []),
+    ("[1][S01]  [2]", []),
+])
+def test_e2e_segments_follow_the_official_parser(text, segments):
+    assert _transcript_segments(text) == segments
+    if segments:
+        _assert_segments({"text": text, "segments": [
+            {"start_seconds": start, "end_seconds": end, "text": body}
+            for start, end, body in segments]})
+
+
+EOS = {151645}
+
+
+@pytest.mark.parametrize("tokens, argmax, max_new_tokens", [
+    ([5, 6, 151645], [5, 6, 151645], 8),
+    # Stopped by the token limit; how close each token is, is the gap check's.
+    ([5, 6, 7], [5, 9, 7], 3),
+    ([5, 6, 7], [5, 6, 151645], 3),
+])
+def test_e2e_termination_accepts_the_reference_end(tokens, argmax, max_new_tokens):
+    _assert_termination(tokens, argmax, EOS, max_new_tokens)
+
+
+@pytest.mark.parametrize("tokens, argmax, max_new_tokens", [
+    # A native EOS where the reference argmax goes on.
+    ([5, 6, 151645], [5, 6, 7], 8),
+    # The reference would have ended earlier.
+    ([5, 6, 151645], [5, 151645, 151645], 8),
+    ([5, 6, 7], [151645, 6, 7], 3),
+    # Neither an EOS nor the token limit.
+    ([5, 6], [5, 6], 3),
+    ([5, 151645, 7], [5, 151645, 7], 3),
+])
+def test_e2e_termination_rejects_another_end(tokens, argmax, max_new_tokens):
+    with pytest.raises(AssertionError):
+        _assert_termination(tokens, argmax, EOS, max_new_tokens)
 
 
 def test_e2e_reference_runs_only_the_pinned_snapshot(tmp_path, monkeypatch):

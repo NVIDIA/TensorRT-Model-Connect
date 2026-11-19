@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -45,6 +46,19 @@ void expect_throw(Callable&& callable, const std::string& what) {
         return;
     }
     check(false, what + " did not throw");
+}
+
+// Folds one compared value into the largest error so far. std::max keeps its
+// first argument when the second is NaN, so a non-finite output or error makes
+// the result infinite and the threshold check fails.
+double fold_error(double worst, bool finite_output, double error) {
+    if (!finite_output || !std::isfinite(error))
+        return std::numeric_limits<double>::infinity();
+    return std::max(worst, error);
+}
+
+bool finite(std::complex<double> value) {
+    return std::isfinite(value.real()) && std::isfinite(value.imag());
 }
 
 std::vector<char> bytes_of(const std::string& text) {
@@ -242,7 +256,7 @@ void test_timestamps_ignore_the_locale() {
 }
 
 void test_dft() {
-    for (const std::size_t length : {7U, 400U}) {
+    for (const std::size_t length : {1U, 7U, 400U}) {
         std::vector<std::complex<double>> signal(length);
         for (std::size_t n = 0; n < length; ++n)
             signal[n] = {std::sin(0.37 * n) + 0.1 * n, std::cos(1.3 * n)};
@@ -257,10 +271,15 @@ void test_dft() {
                                      static_cast<double>(length);
                 exact += signal[n] * std::complex<double>(std::cos(angle), std::sin(angle));
             }
-            worst = std::max(worst, std::abs(fast[k] - exact) / (1.0 + std::abs(exact)));
+            worst = fold_error(worst, finite(fast[k]),
+                               std::abs(fast[k] - exact) / (1.0 + std::abs(exact)));
         }
         check(worst < 1e-9, "Bluestein DFT of length " + std::to_string(length));
     }
+    // Both lengths used to wrap 2N - 1 and never return; they are refused first.
+    expect_throw([] { mtd::Dft(0); }, "zero-length DFT");
+    expect_throw([] { mtd::Dft(std::numeric_limits<std::size_t>::max()); },
+                 "DFT length whose padded size is not representable");
 }
 
 // Straightforward reference of the Whisper log-mel recipe on a small geometry.
@@ -315,11 +334,12 @@ void test_log_mel() {
             samples[static_cast<std::size_t>(i)] = static_cast<float>(std::sin(0.7 * i) * 0.3);
         const auto actual = extractor.chunk(samples.data(), count);
         const auto expected = naive_log_mel(samples, 8, 2, 32, bank);
+        const bool same_size = actual.size() == expected.size();
         double worst = 0.0;
-        for (std::size_t i = 0; i < expected.size(); ++i)
-            worst = std::max(worst, std::abs(static_cast<double>(actual[i]) - expected[i]));
-        check(actual.size() == expected.size() && worst < 1e-6,
-              "log-mel of " + std::to_string(count) + " samples");
+        for (std::size_t i = 0; same_size && i < expected.size(); ++i)
+            worst = fold_error(worst, std::isfinite(actual[i]),
+                               std::abs(static_cast<double>(actual[i]) - expected[i]));
+        check(same_size && worst < 1e-6, "log-mel of " + std::to_string(count) + " samples");
     }
     expect_throw(
         [&] {

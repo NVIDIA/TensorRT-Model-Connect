@@ -16,11 +16,14 @@ Oracles, chosen per testcase:
   it by at most ``max_logit_gap_bf16_ulps`` units of the BF16 spacing at that
   step's largest logit: candidates that close are not ordered reliably once the
   logits are BF16, and the official BF16 pipeline itself picks such runners-up.
-  The transcript must also end where the reference would end it.
+  The transcript must also end where the reference would end it: the reference
+  argmax is EOS at a native EOS and at no earlier step.
 
 Both oracles also check that the native text is the official tokenizer's
 decoding of the native ids, that the segments are the transcript's
-``[start][Sxx]text[end]`` spans, and that direct C and C++ SDK calls return
+``[start][Sxx]text[end]`` spans as the official transcript parser finds them
+(a bracketed time closes a segment only before the next ``[`` or the end of
+the transcript), and that direct C and C++ SDK calls return
 the CLI's result. Cases with ``input_contract`` also check that two different
 channels are averaged, the default token limit and the refused requests.
 
@@ -34,7 +37,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import re
 import subprocess
 import wave
 from pathlib import Path
@@ -55,7 +57,8 @@ PROMPT = (
     "（[S01]、[S02]、[S03]…）开头，正文为对应的语音内容，"
     "并在段末标注结束时间戳，以清晰标明该段语音范围。"
 )
-SEGMENT = re.compile(r"\[(\d+(?:\.\d+)?)\]\[(S\d+)\](.*?)\[(\d+(?:\.\d+)?)\]", re.S)
+STAMP_CHARS = frozenset("0123456789.")
+SPEAKER_CHARS = frozenset("S0123456789")
 SAMPLE_RATE = 16000
 # The silence the clips already have between their utterances.
 JOIN_SILENCE_SECONDS = 0.8
@@ -330,8 +333,11 @@ class _Reference:
             )
         return output[0, inputs["input_ids"].shape[1]:].tolist()
 
-    def teacher_forced_gaps(self, inputs, tokens: list[int]) -> tuple[list[float], list[float]]:
-        """Per step: reference max logit minus the given token's logit, and the max logit."""
+    def teacher_forced_gaps(
+        self, inputs, tokens: list[int]
+    ) -> tuple[list[float], list[float], list[int]]:
+        """Per step: reference max logit minus the given token's logit, the max logit
+        and the argmax."""
         torch = self.torch
         prompt = inputs["input_ids"]
         forced = torch.tensor([tokens[:-1]], dtype=prompt.dtype, device=prompt.device)
@@ -344,8 +350,8 @@ class _Reference:
                 audio_chunk_mapping=inputs["audio_chunk_mapping"],
             ).logits[0, prompt.shape[1] - 1:].float()
         chosen = logits[torch.arange(len(tokens)), torch.tensor(tokens, device=logits.device)]
-        peaks = logits.max(dim=-1).values
-        return (peaks - chosen).tolist(), peaks.tolist()
+        peaks, argmax = logits.max(dim=-1)
+        return (peaks - chosen).tolist(), peaks.tolist(), argmax.tolist()
 
     def decode(self, tokens: list[int]) -> str:
         return self.processor.tokenizer.decode(tokens, skip_special_tokens=True).strip()
@@ -363,15 +369,107 @@ def _bf16_spacing(value: float) -> float:
     return math.ldexp(1.0, math.frexp(abs(value))[1] - 8) if value else 0.0
 
 
+def _stamp(token: str) -> float | None:
+    # The token holds only STAMP_CHARS: a time needs a digit and at most one dot.
+    return float(token) if token.count(".") <= 1 and token.strip(".") else None
+
+
+def _transcript_segments(text: str) -> list[tuple[float, float, str]]:
+    """``(start, end, "[Sxx]text")`` per segment, as the official transcript
+    parser (stripped text, empty segments skipped) reads ``[start][Sxx]text[end]``.
+
+    Spaces may precede ``[Sxx]``. In the text, ``[end]`` at or after the start
+    closes the segment only when the next character that is not a space is
+    ``[`` or the transcript ends; every other bracket stays text. Times hold at
+    most 32 characters and speaker labels at most 16.
+    """
+    segments: list[tuple[float, float, str]] = []
+    state, token, body, pending, speaker, end_token = "seek", "", "", "", "", ""
+    start = end = None
+
+    def emit() -> None:
+        if start is not None and end is not None and speaker and body.strip():
+            segments.append((start, end, f"[{speaker}]{body.strip()}"))
+
+    for char in text:
+        if state == "seek":
+            if char == "[":
+                state, token = "start", ""
+        elif state == "start":
+            if char == "]":
+                start, token = _stamp(token), ""
+                state = "speaker_open" if start is not None else "seek"
+            elif char in STAMP_CHARS and len(token) < 32:
+                token += char
+            else:
+                state, token = ("start" if char == "[" else "seek"), ""
+        elif state == "speaker_open":
+            if char == "[":
+                state, token = "speaker", ""
+            elif not char.isspace():
+                state = "seek"
+        elif state == "speaker":
+            if char == "]":
+                valid = len(token) >= 2 and token[0] == "S" and token[1:].isdigit()
+                state, speaker, body = ("text", token, "") if valid else ("seek", "", "")
+            elif char in SPEAKER_CHARS and len(token) < 16:
+                token += char
+            else:
+                state, token = ("start" if char == "[" else "seek"), ""
+        elif state == "text":
+            if char == "[":
+                state, token = "end", ""
+            else:
+                body += char
+        elif state == "end":
+            if char == "]":
+                value = _stamp(token)
+                if value is not None and value >= start:
+                    end, end_token, pending, state = value, token, "", "after"
+                else:
+                    body, state = body + f"[{token}]", "text"
+                token = ""
+            elif char in STAMP_CHARS and len(token) < 32:
+                token += char
+            else:
+                # Like the official parser, a 33rd time character is kept twice.
+                body += "[" + token + (char * 2 if char in STAMP_CHARS else char)
+                state, token = "text", ""
+        else:  # after an end
+            if char == "[":
+                emit()
+                state, token = "start", ""
+            elif char.isspace():
+                pending += char
+            else:
+                body += f"[{end_token}]{pending}{char}"
+                state, pending, end = "text", "", None
+    if state == "after":
+        emit()
+    return segments
+
+
 def _assert_segments(native: dict) -> None:
-    expected = [
-        (float(start), float(end), f"[{speaker}]{text.strip()}")
-        for start, speaker, text, end in SEGMENT.findall(native["text"])
-        if text.strip() and float(end) >= float(start)
-    ]
     actual = [(s["start_seconds"], s["end_seconds"], s["text"]) for s in native["segments"]]
-    assert actual == expected
+    assert actual == _transcript_segments(native["text"])
     assert actual, "the transcript has no [start][Sxx]text[end] segment"
+
+
+def _assert_termination(tokens: list[int], argmax: list[int], eos: set[int],
+                        max_new_tokens: int) -> None:
+    """The native ids end where the teacher-forced reference would end them.
+
+    ``argmax`` is the reference argmax at every native step. The ids stop at an
+    EOS that is also the reference argmax there, or at the token limit; the
+    reference argmax is no EOS at any earlier step.
+    """
+    assert len(argmax) == len(tokens)
+    assert not eos.intersection(tokens[:-1])
+    assert not eos.intersection(argmax[:-1]), "the reference ends the transcript earlier"
+    if tokens[-1] in eos:
+        assert argmax[-1] in eos, "the native EOS is not the reference argmax"
+    else:
+        assert len(tokens) == max_new_tokens
 
 
 def test_e2e(case_name: str, tmp_path: Path) -> None:
@@ -400,10 +498,9 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
     eos = set(reference.model.generation_config.eos_token_id
               if isinstance(reference.model.generation_config.eos_token_id, list)
               else [reference.model.generation_config.eos_token_id])
-    assert tokens[-1] in eos or len(tokens) == max_new_tokens
-    assert not eos.intersection(tokens[:-1])
     ulps = float(_thresholds(case_name)["max_logit_gap_bf16_ulps"])
-    gaps, peaks = reference.teacher_forced_gaps(inputs, tokens)
+    gaps, peaks, argmax = reference.teacher_forced_gaps(inputs, tokens)
+    _assert_termination(tokens, argmax, eos, max_new_tokens)
     for step, (gap, peak) in enumerate(zip(gaps, peaks)):
         allowed = ulps * _bf16_spacing(peak)
         assert gap <= allowed, (
