@@ -41,6 +41,7 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 - `families/sam/tests/data/test_img.jpeg`
 - `families/sam3/tests/data/test_img.jpeg`
 - `families/segformer/tests/data/test_img.jpeg`
+- `families/smolvlm/tests/data/test_img.jpeg`
 - `families/timm_densenet/tests/data/test_img.jpeg`
 - `families/timm_efficientnet/tests/data/test_img.jpeg`
 - `families/timm_inception/tests/data/test_img.jpeg`
@@ -62,6 +63,8 @@ distributed under the Apache License 2.0 with the rest of the project:
 
 - `families/deepseek_ocr/tests/data/orc_test_img.jpeg` — screenshot of
   project source text created for OCR regression testing
+- `families/lighton_ocr/tests/data/invoice.png` — synthetic invoice with
+  invented data rendered by the family-owned `generate_fixture.py`
 - `families/phi4_multimodal/tests/data/dynamic-hd/synthetic-*.png` (7 images) —
   synthetic test patterns written by the checked-in
   `families/phi4_multimodal/tests/data/dynamic-hd/generate.py` for Dynamic-HD
@@ -130,6 +133,10 @@ content in all three model families:
 - `probe_05_low_volume_48k_stereo.wav`
 - `probe_06_leading_trailing_silence_48k_stereo.wav`
 - `probe_08_noisy_48k_stereo_snr20.wav`
+
+`families/hubert/tests/data/speech_16k_mono.wav` is a byte-identical copy of
+`probe_02_clean_16k_mono_no_resample.wav` and is distributed under the same
+terms.
 
 The PersonaPlex fixture contains the same maintainer-owned spoken recording,
 converted to mono 24 kHz float32 for official-reference regression tests:
