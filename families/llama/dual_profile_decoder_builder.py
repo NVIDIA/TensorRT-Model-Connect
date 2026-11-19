@@ -356,14 +356,18 @@ def build_dual_profile_decoder_engine(
         cache_shape = (-1, kv_attention_size)
     else:
         cache_shape = (max_cache_length, kv_attention_size)
+    packed_cache = bool(weights.get("_fp8_kv_cache", False))
+    if packed_cache and (native_kv_cache or single_forward):
+        raise ValueError("Packed Llama KV requires the prepared dual-profile cache layout")
+    cache_dtype = trt.DataType.FP8 if packed_cache else work_trt_dtype
     cache_k_inputs: list[trt.ITensor] = []
     cache_v_inputs: list[trt.ITensor] = []
     for i in range(0 if single_forward else num_layers):
         ck = network.add_input(
-            graph_ops.layer_tensor_name("cache_k", i), work_trt_dtype, cache_shape
+            graph_ops.layer_tensor_name("cache_k", i), cache_dtype, cache_shape
         )
         cv = network.add_input(
-            graph_ops.layer_tensor_name("cache_v", i), work_trt_dtype, cache_shape
+            graph_ops.layer_tensor_name("cache_v", i), cache_dtype, cache_shape
         )
         cache_k_inputs.append(ck)
         cache_v_inputs.append(cv)
@@ -665,7 +669,7 @@ def build_dual_profile_decoder_engine(
             )
 
         from .prepared_quantization import quantize_cache_value
-        if f"{prefix}.kv_k_scale" in weights:
+        if not packed_cache and f"{prefix}.kv_k_scale" in weights:
             k = quantize_cache_value(network, k, weights[f"{prefix}.kv_k_scale"])
             v = quantize_cache_value(network, v, weights[f"{prefix}.kv_v_scale"])
 
@@ -701,11 +705,23 @@ def build_dual_profile_decoder_engine(
         else:
             # Fixed-Sq contract: export only this step's raw K/V and materialize
             # cache + update with concatenation for attention.
-            present_k_outs.append(k)
-            present_v_outs.append(v)
-            all_k_cat = network.add_concatenation([cache_k_inputs[layer_idx], k])
+            past_k, past_v = cache_k_inputs[layer_idx], cache_v_inputs[layer_idx]
+            if packed_cache:
+                from .prepared_quantization import packed_cache_rows
+
+                present_k, past_k, k = packed_cache_rows(
+                    network, k, past_k, weights[f"{prefix}.kv_k_scale"]
+                )
+                present_v, past_v, v = packed_cache_rows(
+                    network, v, past_v, weights[f"{prefix}.kv_v_scale"]
+                )
+            else:
+                present_k, present_v = k, v
+            present_k_outs.append(present_k)
+            present_v_outs.append(present_v)
+            all_k_cat = network.add_concatenation([past_k, k])
             all_k_cat.axis = 0
-            all_v_cat = network.add_concatenation([cache_v_inputs[layer_idx], v])
+            all_v_cat = network.add_concatenation([past_v, v])
             all_v_cat.axis = 0
             context = graph_ops.add_attention_from_rows(
                 network,

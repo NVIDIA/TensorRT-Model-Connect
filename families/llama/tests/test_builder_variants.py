@@ -552,30 +552,65 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
         # An installed wheel supplies Python tooling, never the native C++ SDK.
         from types import SimpleNamespace
 
-        package = {"python": "/sdk/private/python"}
+        # An externally installed 0.12 native SDK declares its release but
+        # cannot attest a source commit. An absent field is not an attestation.
+        if weight_format == "fp16":
+            target.update(cuda_version="13.3", tensorrt_version="11.4.0.106")
+            (prefix / "plugin.so").touch()
+            (prefix / "python").touch()
+            for version, (schema, key, pin, _) in builder._RELEASES.items():
+                metadata = dict(version=version, schema_version=schema, arch=target["arch"],
+                                cuda_version=target["cuda_version"], architectures=[target["sm"]],
+                                tensorrt_version=target["tensorrt_version"],
+                                plugin="plugin.so", python="python")
+                for value in (pin, None, "unknown"):
+                    manifest.write_text(json.dumps({**metadata, key: value}))
+                    if value == pin or (version == "0.12.0" and value is None):
+                        assert builder.installed_package(target)[key] == value
+                    else:
+                        with pytest.raises(ValueError, match="source revision"):
+                            builder.installed_package(target)
+                manifest.write_text(json.dumps(metadata))
+                with pytest.raises(ValueError, match="source revision"):
+                    builder.installed_package(target)
+
+        monkeypatch.delenv("TRTMC_EDGELLM_PYTHON", raising=False)
         platform = {"tensorrt_version": "11.1.0.106"}
-        responses = iter([
-            '["0.11.0", "11.1.0.106"]',
-            '["0.10.1", "11.1.0.106"]',
-            '["0.11.0", "11.0.0.114"]',
-            "not JSON",
-        ])
-        def probe(command, **kwargs):
-            assert command[0] == builder.sys.executable
-            assert command[1:3] == ["-I", "-c"]
-            assert kwargs == dict(check=True, capture_output=True, text=True, timeout=30)
-            return SimpleNamespace(stdout=next(responses))
+        for release in ("0.11.0", "0.12.0"):
+            package = {"version": release}
+            if release == "0.11.0":
+                package["python"] = "/sdk/private/python"
+            responses = iter([
+                f'["{release}", "11.1.0.106"]',
+                '["0.10.1", "11.1.0.106"]',
+                f'["{release}", "11.0.0.114"]',
+                "not JSON",
+            ])
 
-        monkeypatch.setattr(builder.subprocess, "run", probe)
-        assert builder.builder_python(package, platform) == builder.sys.executable
-        for _ in range(3):
-            assert builder.builder_python(package, platform) == package["python"]
+            def probe(command, **kwargs):
+                assert command[:3] == [builder.sys.executable, "-I", "-c"]
+                assert ("5.17.0" in command[3]) == (release == "0.12.0")
+                assert kwargs == dict(check=True, capture_output=True, text=True, timeout=30)
+                return SimpleNamespace(stdout=next(responses))
 
-        def unavailable(*args, **kwargs):
-            raise builder.subprocess.TimeoutExpired("python", 30)
+            monkeypatch.setattr(builder.subprocess, "run", probe)
+            assert builder.builder_python(package, platform) == builder.sys.executable
 
-        monkeypatch.setattr(builder.subprocess, "run", unavailable)
-        assert builder.builder_python(package, platform) == package["python"]
+            def check_incompatible_tool():
+                if release == "0.11.0":
+                    assert builder.builder_python(package, platform) == package["python"]
+                else:
+                    with pytest.raises(ValueError, match="TRTMC_EDGELLM_PYTHON"):
+                        builder.builder_python(package, platform)
+
+            for _ in range(3):
+                check_incompatible_tool()
+
+            def unavailable(*args, **kwargs):
+                raise builder.subprocess.TimeoutExpired("python", 30)
+
+            monkeypatch.setattr(builder.subprocess, "run", unavailable)
+            check_incompatible_tool()
 
 
 def test_edge_windows_nonmatch_does_not_probe_compiler(tmp_path, monkeypatch, caplog):

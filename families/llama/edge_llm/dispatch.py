@@ -61,7 +61,7 @@ def candidate(request, raw: dict) -> bool:
         and request.backend == "trt"
         and request.task == "text_generation"
         and request.precision.lower() == "fp16"
-        and request.quantization in {None, "none"}
+        and request.quantization in {None, "none", "fp8", "nvfp4"}
         and request.max_batch_size
         == request.tensor_parallel_size
         == request.context_parallel_size
@@ -128,7 +128,11 @@ def build(request, writer, native, *, draft_dir: Path | None = None) -> None:
             packed = weight_format != "fp16"
             if target["sm"] != (120 if draft_dir is not None or packed else 80):
                 adapter = None
-            if packed and (draft_dir is not None or raw.get("hidden_size") != 4096):
+            small_calibrated_fp8 = (
+                weight_format == "fp8" and raw.get("hidden_size") == 2048
+                and (raw.get("quantization_config") or {}).get("quant_method") == "compressed-tensors"
+            )
+            if packed and (draft_dir is not None or (raw.get("hidden_size") != 4096 and not small_calibrated_fp8)):
                 adapter = None
             if adapter is not None:
                 if draft_dir is None:

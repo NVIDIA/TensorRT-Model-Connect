@@ -398,6 +398,10 @@ void LlamaKvCache::bind_to(ITrtModule& module) {
             (!dynamic_binding_enabled_ &&
              (module.tensor_shape(names_.cache_k[layer]) != cache_shape ||
               module.tensor_shape(names_.cache_v[layer]) != cache_shape)) ||
+            module.tensor_dtype(names_.cache_k[layer]) != cache_dtype_ ||
+            module.tensor_dtype(names_.cache_v[layer]) != cache_dtype_ ||
+            module.tensor_dtype(names_.present_k[layer]) != cache_dtype_ ||
+            module.tensor_dtype(names_.present_v[layer]) != cache_dtype_ ||
             module.tensor_shape(names_.present_k[layer]) != present_shape ||
             module.tensor_shape(names_.present_v[layer]) != present_shape) {
             throw std::runtime_error("Llama standard decoder has an invalid KV contract");
