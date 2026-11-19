@@ -58,7 +58,8 @@ the embeddings by more than the family's E2E tolerance.
 
 ### Recorded SigLIP 2 H200 validation
 
-On 2026-11-19, source `e737300a66a4f9ea6d969148515bf295ba09fd80` passed:
+On 2026-11-19, source `98c79235993ba44a48dae02b5a6a51e080f6b72f` passed after
+merging NVIDIA `main` at `b1db0296`:
 
 ```sh
 PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \
@@ -92,7 +93,7 @@ Dockerfile with x86_64 TensorRT include paths and Hopper architecture settings.
 Production CLI, backend and SigLIP DSO compiled; both native tokenizer and
 preprocessing CTests passed. The reference model uses CPU FP32; native engines
 execute on H200. The documentation-only evidence commit leaves the tested
-runtime, builder and test source blobs unchanged.
+runtime, builder, test and snapshot source blobs unchanged.
 
 This qualifies this image/text case only. Other resolutions, checkpoints,
 platforms, batches, FP16, BPE FP8/NVFP4 and performance remain outside the evidence.
