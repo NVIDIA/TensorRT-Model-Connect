@@ -21,6 +21,8 @@ from pathlib import Path
 
 from tensorrt_model_connect import BuildRequest, build
 
+from tools.e2e_evidence import evidence_stage, record_evidence
+
 from . import graph_parity
 from .common import (CASES, FAMILY, Reference, asset, model_dir, parametrize_cases,
                      required_path)
@@ -118,24 +120,48 @@ def _sdk(runtime_root: Path, bundle: Path, images: list[Path], max_new_tokens: i
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     checkpoint = model_dir(manifest["hf_id"], manifest.get("hf_revision"))
+    record_evidence("checkpoint", {"hf_id": manifest["hf_id"],
+                                   "hf_revision": manifest.get("hf_revision")})
     binary, runtime_root = _runtime()
     bundle = tmp_path / manifest["bundle"]
-    _build(checkpoint, bundle, manifest)
+    with evidence_stage("build"):
+        _build(checkpoint, bundle, manifest)
     reference = Reference(checkpoint)
     end = reference.model.generation_config.eos_token_id
     # The capacity of the bundle bounds both sides; every line ends well before it.
     capacity = int(manifest.get("max_sequence_length") or 512)
 
     expected = {}
+    native_lines, reference_lines, views = [], [], []
     for raw in case["test_images"]:
         image = asset(raw)
-        ids = reference.generate(image, max_new_tokens=capacity)
-        assert ids and ids[-1] == end, f"the reference did not finish {raw}: {ids}"
-        native = _payload(_cli(binary, runtime_root, bundle, image))
-        assert native["token_ids"] == ids, f"{raw}: native {native['token_ids']} vs {ids}"
-        assert native["text"] == reference.decode(ids), raw
-        expected[raw] = ids
-        print(f"{FAMILY} {raw}: {len(ids)} tokens, {native['text']!r}, prefill "
+        record_evidence("inputs", {"prompt": "", raw: image})
+        with evidence_stage("reference"):
+            reference_ids = reference.generate(image, max_new_tokens=capacity)
+            reference_text = reference.decode(reference_ids)
+        assert reference_ids and reference_ids[-1] == end, (
+            f"the reference did not finish {raw}: {reference_ids}")
+        with evidence_stage("native"):
+            native = _payload(_cli(binary, runtime_root, bundle, image))
+        native_ids, native_text = native["token_ids"], native["text"]
+        native_lines.append({"image": raw, "text": native_text, "token_ids": native_ids})
+        reference_lines.append({"image": raw, "reference_text": reference_text,
+                                "reference_ids": reference_ids})
+        views.append({"title": raw, "image": image,
+                      "caption": f"native {native_text!r}, reference {reference_text!r}"})
+        # One line of text per image, in the order of the inputs.
+        record_evidence("native", {"text": "\n".join(line["text"] for line in native_lines),
+                                   "lines": native_lines})
+        record_evidence("reference", {
+            "mode": "hf_transformers",
+            "reference_text": "\n".join(line["reference_text"] for line in reference_lines),
+            "lines": reference_lines})
+        record_evidence("views", views)
+        with evidence_stage("compare"):
+            assert native_ids == reference_ids, f"{raw}: native {native_ids} vs {reference_ids}"
+            assert native_text == reference_text, raw
+        expected[raw] = reference_ids
+        print(f"{FAMILY} {raw}: {len(native_ids)} tokens, {native_text!r}, prefill "
               f"{native['prefill_ms']:.2f} ms, decode {native['decode_ms']:.2f} ms")
 
     # The lines whose ground truth the checkpoint reads correctly: the
