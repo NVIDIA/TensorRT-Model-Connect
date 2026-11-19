@@ -18,9 +18,10 @@ struct ImageNormalization {
     std::array<float, 3> std{0.5F, 0.5F, 0.5F};
 };
 
-// Pillow's bicubic resize of 8-bit interleaved RGB, reproduced coefficient for
-// coefficient (two separable passes, 22-bit fixed point, 8-bit rounding after
-// each pass): the reference processor resamples with PIL (resample=3).
+// Pillow 13's bicubic resize of 8-bit interleaved RGB, reproduced coefficient
+// for coefficient (two separable passes in Pillow 13's order, 22-bit fixed
+// point, 8-bit rounding after each pass): the reference processor resamples
+// with PIL (resample=3).
 std::vector<std::uint8_t> resize_pillow_bicubic(const std::uint8_t* rgb, std::int32_t height,
                                                 std::int32_t width, std::int32_t output_height,
                                                 std::int32_t output_width);

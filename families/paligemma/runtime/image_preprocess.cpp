@@ -83,6 +83,34 @@ std::uint8_t apply(const std::uint8_t* source, std::int32_t stride, const Span& 
     return static_cast<std::uint8_t>(std::min<std::int64_t>(sum >> kPrecisionBits, 255));
 }
 
+// One 8-bit pass along the width: height x width -> height x output_width.
+std::vector<std::uint8_t> resize_rows(const std::uint8_t* rgb, std::int32_t height,
+                                      std::int32_t width, std::int32_t output_width) {
+    const auto spans = plan(width, output_width);
+    std::vector<std::uint8_t> output(static_cast<std::size_t>(height) * output_width * 3U);
+    for (std::int32_t y = 0; y < height; ++y)
+        for (std::int32_t x = 0; x < output_width; ++x)
+            for (std::int32_t c = 0; c < 3; ++c)
+                output[(static_cast<std::size_t>(y) * output_width + x) * 3U + c] =
+                    apply(rgb + static_cast<std::size_t>(y) * width * 3U + c, 3,
+                          spans[static_cast<std::size_t>(x)]);
+    return output;
+}
+
+// One 8-bit pass along the height: height x width -> output_height x width.
+std::vector<std::uint8_t> resize_columns(const std::uint8_t* rgb, std::int32_t height,
+                                         std::int32_t width, std::int32_t output_height) {
+    const auto spans = plan(height, output_height);
+    std::vector<std::uint8_t> output(static_cast<std::size_t>(output_height) * width * 3U);
+    for (std::int32_t y = 0; y < output_height; ++y)
+        for (std::int32_t x = 0; x < width; ++x)
+            for (std::int32_t c = 0; c < 3; ++c)
+                output[(static_cast<std::size_t>(y) * width + x) * 3U + c] =
+                    apply(rgb + static_cast<std::size_t>(x) * 3U + c, width * 3,
+                          spans[static_cast<std::size_t>(y)]);
+    return output;
+}
+
 } // namespace
 
 std::vector<std::uint8_t> resize_pillow_bicubic(const std::uint8_t* rgb, std::int32_t height,
@@ -90,33 +118,26 @@ std::vector<std::uint8_t> resize_pillow_bicubic(const std::uint8_t* rgb, std::in
                                                 std::int32_t output_width) {
     if (rgb == nullptr || height <= 0 || width <= 0 || output_height <= 0 || output_width <= 0)
         throw std::invalid_argument("PaliGemma resize requires non-empty images");
-    // Pillow skips a pass whose size does not change.
-    std::vector<std::uint8_t> horizontal;
-    const std::uint8_t* rows = rgb;
-    if (output_width != width) {
-        const auto spans = plan(width, output_width);
-        horizontal.resize(static_cast<std::size_t>(height) * output_width * 3U);
-        for (std::int32_t y = 0; y < height; ++y)
-            for (std::int32_t x = 0; x < output_width; ++x)
-                for (std::int32_t c = 0; c < 3; ++c)
-                    horizontal[(static_cast<std::size_t>(y) * output_width + x) * 3U + c] =
-                        apply(rgb + static_cast<std::size_t>(y) * width * 3U + c, 3,
-                              spans[static_cast<std::size_t>(x)]);
-        rows = horizontal.data();
+    // Pillow skips a pass whose size does not change, and runs the height pass
+    // first when the height shrinks by more than twice as much as the width.
+    // Each pass rounds to 8 bits, so the order changes the result.
+    const bool need_rows = output_width != width;
+    const bool need_columns = output_height != height;
+    const std::int64_t shrink_height = std::int64_t{height} - output_height;
+    const std::int64_t shrink_width = std::int64_t{width} - output_width;
+    const bool rows_first = !(shrink_height > 0 && shrink_height > shrink_width * 2);
+    if (!need_rows && !need_columns)
+        return std::vector<std::uint8_t>(rgb, rgb + static_cast<std::size_t>(height) * width * 3U);
+    if (!need_columns)
+        return resize_rows(rgb, height, width, output_width);
+    if (!need_rows)
+        return resize_columns(rgb, height, width, output_height);
+    if (rows_first) {
+        const auto rows = resize_rows(rgb, height, width, output_width);
+        return resize_columns(rows.data(), height, output_width, output_height);
     }
-    std::vector<std::uint8_t> output(static_cast<std::size_t>(output_height) * output_width * 3U);
-    if (output_height == height) {
-        std::copy_n(rows, output.size(), output.begin());
-        return output;
-    }
-    const auto spans = plan(height, output_height);
-    for (std::int32_t y = 0; y < output_height; ++y)
-        for (std::int32_t x = 0; x < output_width; ++x)
-            for (std::int32_t c = 0; c < 3; ++c)
-                output[(static_cast<std::size_t>(y) * output_width + x) * 3U + c] =
-                    apply(rows + static_cast<std::size_t>(x) * 3U + c, output_width * 3,
-                          spans[static_cast<std::size_t>(y)]);
-    return output;
+    const auto columns = resize_columns(rgb, height, width, output_height);
+    return resize_rows(columns.data(), output_height, width, output_width);
 }
 
 std::vector<float> preprocess_image(const std::uint8_t* rgb, std::int32_t height,

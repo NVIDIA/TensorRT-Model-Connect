@@ -45,8 +45,11 @@ transformers 4.x and 5.x checkpoint layouts are accepted.
 The runtime follows the transformers 5.2.0 model and the checkpoint's saved
 processor, `SiglipImageProcessor`:
 
-- Each image is squashed onto the 224x224 square with Pillow's bicubic filter
-  (reproduced exactly), rescaled by 1/255 and normalized with mean and std 0.5.
+- Each image is squashed onto the 224x224 square with Pillow 13's bicubic
+  filter, reproduced exactly, including its choice of which 8-bit pass runs
+  first (the height pass when the height shrinks by more than twice as much as
+  the width; Pillow 12 always starts with the width). The image is then
+  rescaled by 1/255 and normalized with mean and std 0.5.
   No aspect ratio is preserved and nothing is cropped. When torchvision is
   installed, `AutoProcessor.from_pretrained` in transformers 5.2.0 selects the
   fast image processor instead, which resamples with torchvision and can

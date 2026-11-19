@@ -7,5 +7,6 @@ torch==2.12.0
 # Reference implementation this family is measured against.
 transformers==5.2.0
 # Upper bounds follow the repository's own constraints (pyproject, CI image).
-Pillow>=12,<14
+# The runtime reproduces Pillow 13's resize; Pillow 12 orders the two passes differently.
+Pillow>=13,<14
 numpy>=1.26,<2.5
