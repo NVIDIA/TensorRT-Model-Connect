@@ -454,61 +454,63 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
                 "stderr": completed.stderr,
             },
         )
-        assert expected.shape == actual.shape and np.isfinite(actual).all()
-        absolute_passed = True
-        try:
-            np.testing.assert_allclose(actual, expected, atol=case["max_abs_error"], rtol=0)
-        except AssertionError as error:
-            absolute_passed = False
-            comparison_failures.append(f"{label} full-feature absolute error: {error}")
-        cosine = np.sum(actual * expected, axis=1) / (
-            np.linalg.norm(actual, axis=1) * np.linalg.norm(expected, axis=1)
-        )
-        record_evidence(
-            "metrics",
-            {
-                "sample": label,
-                "max_abs_error": float(np.max(np.abs(actual - expected))),
-                "min_cosine": float(cosine.min()),
-            },
-        )
-        cosine_passed = True
-        try:
-            assert float(cosine.min()) >= case["min_cosine"]
-        except AssertionError as error:
-            cosine_passed = False
-            comparison_failures.append(f"{label} full-feature cosine: {error}")
-        if evidence_enabled():
+        with evidence_stage("comparison"):
+            assert expected.shape == actual.shape and np.isfinite(actual).all()
+            absolute_passed = True
+            try:
+                np.testing.assert_allclose(actual, expected, atol=case["max_abs_error"], rtol=0)
+            except AssertionError as error:
+                absolute_passed = False
+                comparison_failures.append(f"{label} full-feature absolute error: {error}")
+            cosine = np.sum(actual * expected, axis=1) / (
+                np.linalg.norm(actual, axis=1) * np.linalg.norm(expected, axis=1)
+            )
             record_evidence(
-                "reference_comparison",
+                "metrics",
                 {
-                    "label": f"V-JEPA2 {label} full clip features",
-                    "scope": "independent_reference",
-                    "enforced": True,
-                    **pair,
-                    "checks": [
-                        {
-                            "name": "max_abs_error",
-                            "scope": "independent_reference",
-                            "actual": float(np.max(np.abs(actual - expected))),
-                            "operator": "<=",
-                            "expected": case["max_abs_error"],
-                            "passed": absolute_passed,
-                        },
-                        {
-                            "name": "min_cosine",
-                            "scope": "independent_reference",
-                            "actual": float(cosine.min()),
-                            "operator": ">=",
-                            "expected": case["min_cosine"],
-                            "passed": cosine_passed,
-                        },
-                    ],
+                    "sample": label,
+                    "max_abs_error": float(np.max(np.abs(actual - expected))),
+                    "min_cosine": float(cosine.min()),
                 },
             )
+            cosine_passed = True
+            try:
+                assert float(cosine.min()) >= case["min_cosine"]
+            except AssertionError as error:
+                cosine_passed = False
+                comparison_failures.append(f"{label} full-feature cosine: {error}")
+            if evidence_enabled():
+                record_evidence(
+                    "reference_comparison",
+                    {
+                        "label": f"V-JEPA2 {label} full clip features",
+                        "scope": "independent_reference",
+                        "enforced": True,
+                        **pair,
+                        "checks": [
+                            {
+                                "name": "max_abs_error",
+                                "scope": "independent_reference",
+                                "actual": float(np.max(np.abs(actual - expected))),
+                                "operator": "<=",
+                                "expected": case["max_abs_error"],
+                                "passed": absolute_passed,
+                            },
+                            {
+                                "name": "min_cosine",
+                                "scope": "independent_reference",
+                                "actual": float(cosine.min()),
+                                "operator": ">=",
+                                "expected": case["min_cosine"],
+                                "passed": cosine_passed,
+                            },
+                        ],
+                    },
+                )
         print(
             f"V-JEPA2 {label}: max_abs={np.max(np.abs(actual - expected)):.7g}, min_cosine={cosine.min():.8f}"
         )
 
-    if comparison_failures:
-        raise AssertionError("\n\n".join(comparison_failures))
+    with evidence_stage("comparison"):
+        if comparison_failures:
+            raise AssertionError("\n\n".join(comparison_failures))
