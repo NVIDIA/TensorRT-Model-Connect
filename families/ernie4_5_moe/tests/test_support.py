@@ -7,3 +7,4 @@ def test_ernie4_5_moe_checkpoint_has_one_owner():
     family, support = resolve_family(ModelMetadata({"model_type": "ernie4_5_moe"}, {}))
     assert family == "ernie4_5_moe"
     assert support.tasks == ("text_continuation",)
+    assert support.default_task == "text_continuation"

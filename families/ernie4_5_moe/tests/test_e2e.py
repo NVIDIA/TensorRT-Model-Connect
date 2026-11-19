@@ -8,11 +8,13 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from functools import cache
 from pathlib import Path
 
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "ernie4_5_moe"
 TASKS = frozenset({"text_continuation"})
@@ -92,6 +94,46 @@ def _required_path(value: str | None, label: str) -> Path:
     return path
 
 
+@cache
+def _native_test_binary(name: str) -> Path:
+    """Build source-only helpers in the configured native test tree."""
+    build_dir = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    subprocess.run(
+        ["cmake", "--build", str(build_dir), "--parallel", "2", "--target", name],
+        check=True,
+        timeout=600,
+    )
+    return _required_path(str(build_dir / name), name)
+
+
+def _record_comparison(tmp_path, label, native, reference, checks):
+    """Retain the output pair and the result of already enforced comparisons."""
+    if not evidence_enabled():
+        return
+    import numpy as np
+
+    paths = []
+    for role, value in (("native", native), ("reference", reference)):
+        if isinstance(value, np.ndarray):
+            path = tmp_path / f"{label}-{role}.npz"
+            np.savez_compressed(path, output=value)
+        else:
+            path = tmp_path / f"{label}-{role}.json"
+            path.write_text(json.dumps(value, ensure_ascii=False) + "\n", encoding="utf-8")
+        paths.append(path)
+    record_evidence(
+        "reference_comparison",
+        {
+            "label": label,
+            "scope": "independent_reference",
+            "enforced": True,
+            "native": paths[0],
+            "reference": paths[1],
+            "checks": [dict(check, scope="independent_reference") for check in checks],
+        },
+    )
+
+
 def _model_dir(manifest: dict) -> Path:
     explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
     if explicit:
@@ -149,75 +191,119 @@ def _run_json(
     command: str,
     *arguments: str,
 ) -> dict:
-    invocation = [
-        str(binary),
-        command,
-        str(bundle),
-        "--runtime-root",
-        str(runtime_root),
-        *arguments,
-    ]
-    env = os.environ.copy()
-    env["LD_LIBRARY_PATH"] = ":".join(
-        (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
-    )
-    completed = subprocess.run(
-        invocation,
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=int(case.get("runtime_timeout_s", 3600)),
-    )
-    assert completed.returncode == 0, completed.stderr + completed.stdout
-    payloads = []
-    for line in completed.stdout.splitlines():
-        start = line.find("{")
-        if start >= 0:
-            try:
-                payloads.append(json.loads(line[start:]))
-            except json.JSONDecodeError:
-                pass
-    assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
-    assert all((payload == payloads[0] for payload in payloads))
-    return payloads[0]
+    with evidence_stage("runtime"):
+        invocation = [
+            str(binary),
+            command,
+            str(bundle),
+            "--runtime-root",
+            str(runtime_root),
+            *arguments,
+        ]
+        env = os.environ.copy()
+        env["LD_LIBRARY_PATH"] = ":".join(
+            (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
+        )
+        completed = subprocess.run(
+            invocation,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=int(case.get("runtime_timeout_s", 3600)),
+        )
+        record_evidence(
+            "native_process",
+            {
+                "argv": completed.args,
+                "stdout": (completed.stdout or "")[-4096:],
+                "stderr": (completed.stderr or "")[-16384:],
+                "returncode": completed.returncode,
+            },
+        )
+        assert completed.returncode == 0, completed.stderr + completed.stdout
+        payloads = []
+        for line in completed.stdout.splitlines():
+            start = line.find("{")
+            if start >= 0:
+                try:
+                    payloads.append(json.loads(line[start:]))
+                except json.JSONDecodeError:
+                    pass
+        assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
+        assert all((payload == payloads[0] for payload in payloads))
+        return payloads[0]
 
 
 def test_official_checkpoint_e2e(case_name, tmp_path):
+    _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {
+            key: value
+            for key, value in case.items()
+            if any(
+                word in key
+                for word in ("error", "cosine", "atol", "rtol", "snr", "rmse", "max_abs")
+            )
+        },
+    )
+    for asset_key in ("image", "test_image", "audio"):
+        if asset_key in case:
+            for asset_path in (TEST_ROOT / case[asset_key], TEST_ROOT / "data" / case[asset_key]):
+                if asset_path.is_file():
+                    record_evidence("inputs", {asset_key: asset_path})
+                    break
     import gc
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     _, manifest, case = CASES[case_name]
-    directory = _model_dir(manifest)
+    with evidence_stage("checkpoint"):
+        directory = _model_dir(manifest)
     binary, runtime_root = _runtime()
-    tokenizer = AutoTokenizer.from_pretrained(directory)
+    with evidence_stage("reference"):
+        tokenizer = AutoTokenizer.from_pretrained(directory)
     tokenizer_json = tmp_path / "tokenizer.json"
     tokenizer_json.write_text(tokenizer.backend_tokenizer.to_str())
     for prompt in [*case["prompts"], "A small test. 中文 café １２３."]:
         completed = subprocess.run(
-            [str(runtime_root / "test_ernie4_5_moe_tokenizer"), str(tokenizer_json), prompt],
+            [str(_native_test_binary("test_ernie4_5_moe_tokenizer")), str(tokenizer_json), prompt],
             capture_output=True,
             text=True,
             check=False,
         )
-        assert completed.returncode == 0, completed.stderr
-        assert json.loads(completed.stdout) == tokenizer.encode(prompt)
+        with evidence_stage("comparison"):
+            assert completed.returncode == 0, completed.stderr
+        with evidence_stage("comparison"):
+            assert json.loads(completed.stdout) == tokenizer.encode(prompt)
     bundle = tmp_path / manifest["bundle"]
-    _build(directory, bundle, manifest)
+    with evidence_stage("build"):
+        _build(directory, bundle, manifest)
+    record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    reference = (
-        AutoModelForCausalLM.from_pretrained(
-            directory, dtype=torch.float32, attn_implementation="eager"
+    with evidence_stage("reference"):
+        reference = (
+            AutoModelForCausalLM.from_pretrained(
+                directory, dtype=torch.float32, attn_implementation="eager"
+            )
+            .eval()
+            .to("cuda")
         )
-        .eval()
-        .to("cuda")
-    )
     expected = []
     for prompt in case["prompts"]:
         inputs = tokenizer(prompt, return_tensors="pt").to("cuda")
-        with torch.no_grad():
+        with evidence_stage("reference"), torch.no_grad():
             generated = reference.generate(
                 **inputs, do_sample=False, max_new_tokens=case["max_new_tokens"]
             )
@@ -241,7 +327,41 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             "--max-new-tokens",
             str(case["max_new_tokens"]),
         )
-        assert payload["token_ids"] == expected_ids
-        assert payload["text"] == expected_text
-        assert expected_text.strip()
+        record_evidence("inputs", {"prompt": prompt})
+        record_evidence("thresholds", {"token_ids": "exact equality", "text": "exact equality"})
+        record_evidence("native", payload)
+        record_evidence(
+            "reference",
+            {"mode": "hf_transformers", "token_ids": expected_ids, "text": expected_text},
+        )
+        with evidence_stage("comparison"):
+            assert payload["token_ids"] == expected_ids
+        with evidence_stage("comparison"):
+            assert payload["text"] == expected_text
+        with evidence_stage("comparison"):
+            assert expected_text.strip()
+        token_mismatch = int(payload["token_ids"] != expected_ids)
+        text_mismatch = int(payload["text"] != expected_text)
+        _record_comparison(
+            tmp_path,
+            f"generation-{len(expected_ids)}-{len(expected_text)}",
+            payload,
+            {"token_ids": expected_ids, "text": expected_text},
+            [
+                {
+                    "name": "token_mismatch",
+                    "actual": token_mismatch,
+                    "operator": "==",
+                    "expected": 0,
+                    "passed": token_mismatch == 0,
+                },
+                {
+                    "name": "text_mismatch",
+                    "actual": text_mismatch,
+                    "operator": "==",
+                    "expected": 0,
+                    "passed": text_mismatch == 0,
+                },
+            ],
+        )
         print(f"ERNIE generated {len(expected_ids)} exact tokens: {expected_text!r}")

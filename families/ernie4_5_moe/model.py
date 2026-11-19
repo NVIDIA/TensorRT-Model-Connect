@@ -251,6 +251,8 @@ class PlanWriter(trt.IStreamWriter):
 def build(request, writer):
     if request.task != "text_continuation" or request.backend != "trt":
         raise ValueError("Ernie4_5_Moe requires text_continuation with backend=trt")
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("ernie4_5_moe does not support dynamic_kv_cache")
     if (
         request.precision != "fp32"
         or request.tensor_parallel_size != 1
