@@ -73,8 +73,10 @@ class Pipeline final : public ITextPromptedSegmentation {
 } // namespace
 } // namespace trtmc::clipseg
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("clipseg does not support --kv-cache-size");
     using namespace trtmc;
-    if (context.kv_cache_size_bytes || context.reader.info().task != "text_prompted_segmentation")
+    if (context.reader.info().task != "text_prompted_segmentation")
         throw std::invalid_argument(
             "CLIPSeg requires text-prompted segmentation without a KV cache");
     auto data = clipseg::section(context.reader, "runtime.json");

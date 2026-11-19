@@ -95,6 +95,34 @@ def _required_path(value: str | None, label: str) -> Path:
     return path
 
 
+def _record_comparison(tmp_path, label, native, reference, checks):
+    """Retain the output pair and the result of already enforced comparisons."""
+    if not evidence_enabled():
+        return
+    import numpy as np
+
+    paths = []
+    for role, value in (("native", native), ("reference", reference)):
+        if isinstance(value, np.ndarray):
+            path = tmp_path / f"{label}-{role}.npz"
+            np.savez_compressed(path, output=value)
+        else:
+            path = tmp_path / f"{label}-{role}.json"
+            path.write_text(json.dumps(value, ensure_ascii=False) + "\n", encoding="utf-8")
+        paths.append(path)
+    record_evidence(
+        "reference_comparison",
+        {
+            "label": label,
+            "scope": "independent_reference",
+            "enforced": True,
+            "native": paths[0],
+            "reference": paths[1],
+            "checks": [dict(check, scope="independent_reference") for check in checks],
+        },
+    )
+
+
 def _model_dir(manifest: dict) -> Path:
     explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
     if explicit:
@@ -302,6 +330,22 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             assert np.isfinite(values).all() and values.min() >= 0 and values.max() <= 1
         with evidence_stage("comparison"):
             np.testing.assert_allclose(values, expected, atol=5e-4, rtol=1e-4)
+        mismatch = int(np.count_nonzero(~np.isclose(values, expected, atol=5e-4, rtol=1e-4)))
+        _record_comparison(
+            tmp_path,
+            f"mask-{sample}",
+            values,
+            expected,
+            [
+                {
+                    "name": "probabilities_outside_tolerance",
+                    "actual": mismatch,
+                    "operator": "==",
+                    "expected": 0,
+                    "passed": mismatch == 0,
+                },
+            ],
+        )
         masks.append(values)
         print(f"CLIPSeg {prompt!r} probability maxabs={np.max(np.abs(values - expected)):.6g}")
     with evidence_stage("comparison"):
