@@ -120,7 +120,9 @@ class Graph:
     def rope(self, x, cosine, sine):
         shape = tuple(x.shape)
         half_shape = (*shape[:-1], shape[-1] // 2)
-        first = self.net.add_slice(x, (0,) * len(shape), half_shape, (1,) * len(shape)).get_output(0)
+        first = self.net.add_slice(x, (0,) * len(shape), half_shape, (1,) * len(shape)).get_output(
+            0
+        )
         second = self.net.add_slice(
             x, (*((0,) * (len(shape) - 1)), shape[-1] // 2), half_shape, (1,) * len(shape)
         ).get_output(0)
@@ -131,12 +133,12 @@ class Graph:
         # PyTorch rounds both FP16 products before summation. Explicit FP32
         # opmath and casts retain those boundaries through TensorRT fusion.
         products = [
-            self.cast(self.mul(self.cast(value, trt.float32), self.cast(angle, trt.float32)), x.dtype)
+            self.cast(
+                self.mul(self.cast(value, trt.float32), self.cast(angle, trt.float32)), x.dtype
+            )
             for value, angle in ((x, cosine), (rotated.get_output(0), sine))
         ]
-        return self.cast(
-            self.add(*(self.cast(value, trt.float32) for value in products)), x.dtype
-        )
+        return self.cast(self.add(*(self.cast(value, trt.float32) for value in products)), x.dtype)
 
     def output(self, value, name):
         value.name = name
@@ -307,6 +309,8 @@ class Graph:
 def build(request, writer):
     if request.task != "text_continuation" or request.backend != "trt":
         raise ValueError("Kolibri1 requires text_continuation with backend=trt")
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("kolibri1 does not support dynamic_kv_cache")
     if (
         request.precision != "fp16"
         or request.tensor_parallel_size != 1

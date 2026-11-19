@@ -162,8 +162,10 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
 } // namespace trtmc::kolibri1
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("kolibri1 does not support --kv-cache-size");
     using namespace trtmc;
-    if (context.kv_cache_size_bytes || context.reader.info().task != "text_continuation")
+    if (context.reader.info().task != "text_continuation")
         throw std::invalid_argument(
             "Kolibri1 uses a family-owned fixed KV profile for text continuation");
     const auto raw = kolibri1::section(context.reader, "runtime.json");
