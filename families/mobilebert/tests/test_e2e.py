@@ -183,10 +183,14 @@ def _run(command: list[str], runtime_root: Path, timeout: int = 600) -> str:
     env = os.environ.copy()
     env["LD_LIBRARY_PATH"] = ":".join(
         value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
-    completed = subprocess.run(command, check=False, capture_output=True, text=True, env=env,
-                               timeout=timeout)
-    assert completed.returncode == 0, (
-        f"{command[0]} failed ({completed.returncode}): {completed.stderr[-2000:]}")
+    try:
+        completed = subprocess.run(command, check=True, capture_output=True, text=True, env=env,
+                                   timeout=timeout)
+    except subprocess.CalledProcessError as error:
+        # The exception carries stdout and stderr into the E2E evidence; the note
+        # keeps the end of stderr in the test report as well.
+        error.add_note(f"{command[0]} stderr: {(error.stderr or '')[-2000:]}")
+        raise
     return completed.stdout
 
 
