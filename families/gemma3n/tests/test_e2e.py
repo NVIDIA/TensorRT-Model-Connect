@@ -31,6 +31,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from families.gemma3n.config import ModelConfig
+from families.gemma3n.processing import validate_processing
 from tensorrt_model_connect import BuildRequest, build
 from tools.e2e_evidence import evidence_stage, record_evidence
 
@@ -237,8 +239,13 @@ def _check(name, label, actual, operator, expected, scope="independent_reference
             "operator": operator, "expected": expected, "passed": passed}
 
 
+def _stopped(token_ids, stop_ids, max_new_tokens) -> bool:
+    """A generation ends at an end-of-sequence token (kept as its last id) or at the token budget."""
+    return len(token_ids) == max_new_tokens or (bool(token_ids) and token_ids[-1] in stop_ids)
+
+
 def _record_comparisons(directory, conversations, natives, expected, prompt_ids, entry_points,
-                        margin):
+                        margin, stop_ids, max_new_tokens):
     """Record each conversation's comparison with the reference as evidence.
 
     The test asserts every check recorded here; recording them first keeps the
@@ -269,6 +276,10 @@ def _record_comparisons(directory, conversations, natives, expected, prompt_ids,
             checks.append(_check("teacher_forced_margin",
                                  "Largest teacher-forced logit margin of the native tokens",
                                  float(max(reference["native_margins"])), "<=", float(margin)))
+        checks.append(_check("stopping_condition",
+                             "Generation ended at an end-of-sequence token or at max_new_tokens",
+                             _stopped(native["token_ids"], stop_ids, max_new_tokens), "==", True,
+                             scope="contract"))
         if index == 0:
             for check_name, label, output in entry_points:
                 checks.append(_check(check_name, label,
@@ -295,6 +306,8 @@ def test_e2e(case_name, request, tmp_path):
     assert (runtime / "libtrtmc_model_gemma3n.so").is_file()
     native_dir = _native_build_dir()
     checkpoint = _checkpoint(manifest)
+    # The end-of-sequence ids the builder writes into the bundle.
+    stop_ids = validate_processing(checkpoint, ModelConfig.from_dir(checkpoint))["eos_token_ids"]
     max_new_tokens = int(case["max_new_tokens"])
     images = _images(tmp_path)
     conversations = _conversations(images, max_new_tokens)
@@ -351,7 +364,7 @@ def test_e2e(case_name, request, tmp_path):
             ("float32_pixels_tokens",
              "Float32 pixels: token IDs that differ from the same request with 8-bit pixels",
              natives[4]),
-        ], margin)
+        ], margin, stop_ids, max_new_tokens)
         # The three public entry points and both pixel formats agree on one request.
         for output in (c_output, cli_output, natives[4]):
             assert output["token_ids"] == natives[0]["token_ids"]
@@ -360,6 +373,7 @@ def test_e2e(case_name, request, tmp_path):
         rows = []
         for (name, _), actual, reference in zip(conversations, natives, expected):
             assert actual["text"] and 0 < len(actual["token_ids"]) <= max_new_tokens
+            assert _stopped(actual["token_ids"], stop_ids, max_new_tokens), actual["token_ids"]
             rows.append({"conversation": name, "native": actual["token_ids"],
                          "reference": reference["token_ids"], "text": actual["text"],
                          "native_decoded": reference["native_decoded"],
