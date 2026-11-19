@@ -107,7 +107,7 @@ def _native_test_binary(name: str) -> Path:
 
 
 def _record_comparison(tmp_path, label, native, reference, checks):
-    """Retain the output pair and the result of already enforced comparisons."""
+    """Retain the output pair and results of the original comparison rules."""
     if not evidence_enabled():
         return
     import numpy as np
@@ -372,12 +372,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                     }
                 )
             record_evidence("views", views)
-        with evidence_stage("comparison"):
-            assert rmse <= case["rmse_max"]
-        with evidence_stage("comparison"):
-            assert maximum <= case["max_abs_error"]
-        with evidence_stage("comparison"):
-            assert cosine >= case["cosine_min"]
+        # Retain the output pair even when the following accuracy checks fail.
         _record_comparison(
             tmp_path,
             f"pixels-{index}",
@@ -407,6 +402,12 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                 },
             ],
         )
+        with evidence_stage("comparison"):
+            assert rmse <= case["rmse_max"]
+        with evidence_stage("comparison"):
+            assert maximum <= case["max_abs_error"]
+        with evidence_stage("comparison"):
+            assert cosine >= case["cosine_min"]
 
 
 @pytest.mark.parametrize("rotary_dim", [96, 128])
