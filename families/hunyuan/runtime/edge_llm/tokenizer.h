@@ -4,7 +4,11 @@
  */
 #pragma once
 
+#ifdef TRTMC_HUNYUAN_EDGE_012
+#include <tensorrt_edgellm/tokenizer/tokenizer.h>
+#else
 #include <edgellm/cpp/tokenizer/tokenizer.h>
+#endif
 #include <filesystem>
 #include <memory>
 #include <nlohmann/json.hpp>
