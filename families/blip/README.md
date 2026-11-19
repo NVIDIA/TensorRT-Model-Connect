@@ -10,10 +10,14 @@ The builder produces an FP32 vision encoder and an FP32 causal text decoder.
 The decoder recomputes the complete prefix at each step; it does not maintain
 a KV cache. The image encoder runs once per request. All topology,
 preprocessing, WordPiece tokenization, and generation behavior belong to this
-family. Both engines express normalization, affine projections, softmax, and
-exact GELU with TensorRT graph operations. TensorRT owns fusion, tactics, and
-GPU execution; the family does not load custom primitive kernels or cuBLASLt.
-Native inference runs without Python, ATen, or TVM-FFI.
+family. The vision engine uses family-owned TensorRT IPluginV3 operations for FP32
+normalization, affine projections, softmax, and exact GELU. Fixed reduction
+ordering and an explicit erf approximation prevent small rounding differences
+from accumulating through the vision residual blocks. Affine projections use
+the existing CUDA cuBLASLt library; convolution and attention matrix products
+remain TensorRT graph operations. The decoder remains a TensorRT graph.
+Native inference runs without Python, ATen, or TVM-FFI. No additional Python
+package is required for these operations.
 
 ## Build and run
 
@@ -45,8 +49,9 @@ The checkpoint publishes a PyTorch state dictionary, loaded with
 PyTorch is used to read that checkpoint and run the official test reference.
 It is not linked or loaded by native inference. The loader checks the installed
 PyTorch version before deserializing the state dictionary. BLIP supports
-`TRTMC_ENABLE_BYOK=OFF`. Rebuild bundles created with the removed custom
-vision-kernel backend before loading them with this version.
+`TRTMC_ENABLE_BYOK=OFF`. Build and install the matching native package before
+building bundles so its TensorRT plugin creators are available. Existing pure
+TensorRT vision bundles remain loadable; rebuild them to use the FP32 plugins.
 The native tokenizer uses ICU for Unicode NFD, nonspacing-mark removal, and
 lowercasing, matching the reference's per-code-point normalization order.
 BLIP VQA, image-text retrieval, and BLIP-2 are
@@ -78,8 +83,8 @@ before model loading.
 ```bash
 cmake -S . -B build -DTRTMC_BUILD_TESTS=ON -DTRTMC_BUILD_FAMILIES=blip
 cmake --build build --parallel 8 --target trtmc trtmc_backend_trt \
-  trtmc_model_blip test_blip_native test_blip_tokenizer
-ctest --test-dir build -R '^test_blip_tokenizer$' --output-on-failure
+  trtmc_model_blip test_blip_native test_blip_tokenizer test_blip_fp32_kernels
+ctest --test-dir build -R '^test_blip_(tokenizer|fp32_kernels)$' --output-on-failure
 curl --fail --location --output /tmp/blip-reference-demo.jpg \
   'https://storage.googleapis.com/sfr-vision-language-research/BLIP/demo.jpg?generation=1642901856234049'
 TRTMC_BLIP_REFERENCE_IMAGE=/tmp/blip-reference-demo.jpg \
