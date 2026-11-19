@@ -227,21 +227,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
     import numpy as np
     import torch
     from PIL import Image, ImageDraw, ImageFont
-    from transformers import AutoConfig, AutoModelForImageTextToText, AutoProcessor
-    import sys
-    import transformers
-
-    record_evidence(
-        "reference_environment",
-        {
-            "requested": manifest.get("reference_environment", "default"),
-            "python": sys.executable,
-            "transformers": transformers.__version__,
-        },
-    )
-    assert transformers.__version__ == "5.20.0", (
-        "PaddleOCR parity requires the pinned Transformers5.20.0 reference"
-    )
+    from families.paddleocr_vl.tests.reference.runner import run_reference
 
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
@@ -257,22 +243,16 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         },
     )
     binary, runtime_root = _runtime()
-    processor = AutoProcessor.from_pretrained(directory, use_fast=False)
-    config = AutoConfig.from_pretrained(directory)
-    tokenizer_json = tmp_path / "tokenizer.json"
-    tokenizer_json.write_text(processor.tokenizer.backend_tokenizer.to_str())
-    with torch.device("meta"):
-        position_oracle = AutoModelForImageTextToText.from_config(
-            config, attn_implementation="eager"
-        )
-    marker = "<|IMAGE_PLACEHOLDER|>"
-    sentinel = "TRTMC_QUESTION_PLACEHOLDER"
-    framed = processor.apply_chat_template(
-        [dict(role="user", content=[dict(type="image"), dict(type="text", text=sentinel)])],
-        add_generation_prompt=True,
+    _, reference_fields = run_reference(
+        directory,
+        tmp_path / "reference-metadata",
+        reference_environment=manifest["reference_environment"],
+        mode="metadata",
     )
-    prefix, rest = framed.split(marker)
-    between, suffix = rest.split(sentinel)
+    tokenizer_json = tmp_path / "tokenizer.json"
+    tokenizer_json.write_text(reference_fields["tokenizer_json"])
+    marker = "<|IMAGE_PLACEHOLDER|>"
+    prefix, between, suffix = [reference_fields[key] for key in ("prefix", "between", "suffix")]
     raw_config = json.loads((directory / "preprocessor_config.json").read_text())
     assert case["pages"] and len(case["pages"]) == len(case["expected_values"]), (
         "Every invoice must have an expected value"
@@ -289,16 +269,14 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         page.save(path)
         pages.append(path)
         record_evidence("inputs", {f"page_{index}": path})
-        text = processor.apply_chat_template(
-            [
-                dict(
-                    role="user",
-                    content=[dict(type="image"), dict(type="text", text=case["question"])],
-                )
-            ],
-            add_generation_prompt=True,
+        inputs, _ = run_reference(
+            directory,
+            tmp_path / f"reference-preprocessing-{index}",
+            reference_environment=manifest["reference_environment"],
+            mode="preprocess",
+            image=str(path),
+            question=case["question"],
         )
-        inputs = processor(text=text, images=page, return_tensors="pt")
         batches.append(inputs)
         source = tmp_path / f"source-{index}.f32"
         source.write_bytes((np.asarray(page, dtype=np.float32) / 255).astype("<f4").tobytes())
@@ -319,7 +297,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
             suffix=suffix,
             question=case["question"],
             image_token=marker,
-            image_id=config.image_token_id,
+            image_id=reference_fields["image_id"],
         )
         completed = subprocess.run(
             [str(_native_test_binary("test_paddleocr_vl_preprocess"))],
@@ -331,26 +309,14 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         assert completed.returncode == 0, completed.stderr
         payload = json.loads(completed.stdout)
         assert payload["ids"] == inputs["input_ids"][0].tolist()
-        expected_positions, _ = position_oracle.model.get_rope_index(
-            input_ids=inputs["input_ids"],
-            image_grid_thw=inputs["image_grid_thw"],
-            attention_mask=inputs["attention_mask"],
-            mm_token_type_ids=inputs["mm_token_type_ids"],
-        )
+        expected_positions = inputs["positions"]
         actual_positions = np.array(payload["positions"]).reshape(
             3, manifest["max_sequence_length"]
         )
         np.testing.assert_array_equal(
-            actual_positions[:, : inputs["input_ids"].shape[1]], expected_positions[:, 0].numpy()
+            actual_positions[:, : inputs["input_ids"].shape[1]], expected_positions
         )
-        _, gh, gw = inputs["image_grid_thw"][0].tolist()
-        expected = (
-            inputs["pixel_values"]
-            .numpy()
-            .reshape(gh, gw, 3, 14, 14)
-            .transpose(2, 0, 3, 1, 4)
-            .reshape(3, gh * 14, gw * 14)
-        )
+        expected = inputs["pixels"]
         actual = np.fromfile(pixels, dtype="<f4").reshape(expected.shape)
         record_evidence("native_preprocessing", {"page": index, "pixels": actual, **payload})
         record_evidence(
@@ -358,12 +324,11 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
             {
                 "page": index,
                 "pixels": expected,
-                "positions": expected_positions[:, 0].numpy(),
+                "positions": expected_positions,
                 "input_ids": inputs["input_ids"][0].tolist(),
             },
         )
         np.testing.assert_allclose(actual, expected, atol=2e-7, rtol=0)
-    del position_oracle
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
         _build(directory, bundle, manifest)
@@ -374,13 +339,6 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
     request.addfinalizer(lambda: setattr(torch.backends.cudnn, "allow_tf32", cudnn_tf32))
     torch.set_float32_matmul_precision("highest")
     torch.backends.cudnn.allow_tf32 = False
-    reference = (
-        AutoModelForImageTextToText.from_pretrained(
-            directory, dtype=torch.float32, attn_implementation="eager"
-        )
-        .eval()
-        .to("cuda")
-    )
     record_evidence(
         "thresholds", {"token_ids": "exact equality", "text": "exact equality", "pixel_atol": 2e-7}
     )
@@ -391,13 +349,18 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
             "inputs",
             {"image": path, "question": case["question"], "expected_value": expected_value},
         )
-        inputs = inputs.to("cuda")
-        with torch.no_grad():
-            generated = reference.generate(
-                **inputs, do_sample=False, max_new_tokens=case["max_new_tokens"]
-            )
-        expected_ids = generated[0, inputs["input_ids"].shape[1] :].tolist()
-        expected_text = processor.batch_decode([expected_ids], skip_special_tokens=True)[0]
+        generation_inputs, generation = run_reference(
+            directory,
+            tmp_path / f"reference-generation-{sample_index}",
+            reference_environment=manifest["reference_environment"],
+            mode="generate",
+            image=str(path),
+            question=case["question"],
+            max_new_tokens=case["max_new_tokens"],
+        )
+        np.testing.assert_array_equal(generation_inputs["input_ids"], inputs["input_ids"])
+        expected_ids = generation["token_ids"]
+        expected_text = generation["text"]
         payload = _run_json(
             binary,
             runtime_root,
