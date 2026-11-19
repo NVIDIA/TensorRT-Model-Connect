@@ -28,10 +28,12 @@ def build(request, writer):
             "PaddleOCR supports one fp32 image/question with a fixed image profile"
         )
     directory = Path(request.model_dir)
+    raw_config = json.loads((directory / "config.json").read_text())
+    if not isinstance(raw_config, dict) or raw_config.get("model_type") != "paddleocr_vl":
+        raise ValueError("PaddleOCR requires model_type=paddleocr_vl")
     from transformers import AutoConfig, AutoProcessor
 
-    config = AutoConfig.from_pretrained(directory)
-    raw_config = json.loads((directory / "config.json").read_text())
+    config = AutoConfig.from_pretrained(directory, trust_remote_code=False)
     vision_raw = raw_config.get("vision_config", {})
     vision_rope = vision_raw.get("rope_parameters")
     if vision_rope is None:
@@ -100,7 +102,7 @@ def build(request, writer):
         type(value) is not int or not 0 <= value < cfg["vocab_size"] for value in eos
     ):
         raise ValueError("PaddleOCR requires a nonempty scalar or flat list of vocabulary EOS IDs")
-    processor = AutoProcessor.from_pretrained(directory, use_fast=False)
+    processor = AutoProcessor.from_pretrained(directory, use_fast=False, trust_remote_code=False)
     marker = "<|IMAGE_PLACEHOLDER|>"
     sentinel = "<|QUESTION_PLACEHOLDER|>"
     template = processor.apply_chat_template(

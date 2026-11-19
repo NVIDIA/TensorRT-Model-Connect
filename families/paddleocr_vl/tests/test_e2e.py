@@ -376,57 +376,58 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
             "--max-new-tokens",
             str(case["max_new_tokens"]),
         )
-        record_evidence("native", payload)
-        record_evidence(
-            "reference",
-            {
-                "mode": "hf_transformers",
-                "precision": manifest["precision"],
-                "token_ids": expected_ids,
-                "text": expected_text,
-            },
-        )
-        if evidence_enabled():
-            # Persist the actual enforced equality checks so report readers do
-            # not have to infer the native/reference roles from local names.
-            pair = {}
-            for role, output in (
-                ("native", payload),
-                ("reference", {"token_ids": expected_ids, "text": expected_text}),
-            ):
-                path = tmp_path / f"{role}-comparison-{sample_index}.json"
-                path.write_text(json.dumps(output, ensure_ascii=False, indent=2))
-                pair[role] = path
-            mismatches = abs(len(payload["token_ids"]) - len(expected_ids)) + sum(
-                left != right for left, right in zip(payload["token_ids"], expected_ids)
-            )
-            text_mismatch = int(payload["text"] != expected_text)
+        try:
+            record_evidence("native", payload)
             record_evidence(
-                "reference_comparison",
+                "reference",
                 {
-                    "label": f"Generated tokens and text for sample {sample_index}",
-                    "scope": "independent_reference",
-                    "enforced": True,
-                    **pair,
-                    "checks": [
-                        {
-                            "name": name,
-                            "scope": "independent_reference",
-                            "actual": value,
-                            "operator": "==",
-                            "expected": 0,
-                            "passed": value == 0,
-                        }
-                        for name, value in (
-                            ("token_mismatches", mismatches),
-                            ("text_mismatch", text_mismatch),
-                        )
-                    ],
+                    "mode": "hf_transformers",
+                    "precision": manifest["precision"],
+                    "token_ids": expected_ids,
+                    "text": expected_text,
                 },
             )
-
-        assert payload["token_ids"] == expected_ids
-        assert payload["text"] == expected_text
-        assert expected_value in payload["text"]
+            if evidence_enabled():
+                # Persist the actual enforced equality checks so report readers do
+                # not have to infer the native/reference roles from local names.
+                pair = {}
+                for role, output in (
+                    ("native", payload),
+                    ("reference", {"token_ids": expected_ids, "text": expected_text}),
+                ):
+                    path = tmp_path / f"{role}-comparison-{sample_index}.json"
+                    path.write_text(json.dumps(output, ensure_ascii=False, indent=2))
+                    pair[role] = path
+                mismatches = abs(len(payload["token_ids"]) - len(expected_ids)) + sum(
+                    left != right for left, right in zip(payload["token_ids"], expected_ids)
+                )
+                text_mismatch = int(payload["text"] != expected_text)
+                record_evidence(
+                    "reference_comparison",
+                    {
+                        "label": f"Generated tokens and text for sample {sample_index}",
+                        "scope": "independent_reference",
+                        "enforced": True,
+                        **pair,
+                        "checks": [
+                            {
+                                "name": name,
+                                "scope": "independent_reference",
+                                "actual": value,
+                                "operator": "==",
+                                "expected": 0,
+                                "passed": value == 0,
+                            }
+                            for name, value in (
+                                ("token_mismatches", mismatches),
+                                ("text_mismatch", text_mismatch),
+                            )
+                        ],
+                    },
+                )
+        finally:
+            assert payload["token_ids"] == expected_ids
+            assert payload["text"] == expected_text
+            assert expected_value in payload["text"]
 
         print(f"PaddleOCR exact tokens={len(expected_ids)}, text={expected_text!r}")
