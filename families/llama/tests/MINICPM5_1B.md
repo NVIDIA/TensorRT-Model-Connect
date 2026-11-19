@@ -46,8 +46,8 @@ For example, `1234567890` encodes as `[5645, 12740, 17371, 37]` without special
 tokens in the pinned tokenizer. The initial PR runtime instead produced
 `[5645, 12740, 1877, 1609]`. The dependency fixes that discrepancy. The branch now includes the original #1423 commit as a history-preserving
 dependency merge. The tokenizer implementation retains its original author and
-commit; this change does not reimplement it. The combined branch still requires
-target-GPU validation before the checkpoint is qualified.
+commit; this change does not reimplement it. The scoped target-GPU results are
+recorded below.
 
 ## Staged checkpoint prerequisite
 
