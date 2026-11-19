@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# The native pi0.5 reference (tests/fixture-source.json): LeRobot's pi05 policy and the LIBERO frames.
+lerobot[pi]==0.6.1
+pyarrow

@@ -73,6 +73,32 @@ def test_a_relative_frobenius_failure_reports_its_value() -> None:
         )
 
 
+def test_non_finite_features_say_which_side_and_how_many() -> None:
+    expected = np.random.default_rng(3).standard_normal((1, 1 + 4 + 16, 8))
+    actual = expected.copy()
+    actual[0, 7, :2] = np.nan  # two patch values, CLS untouched
+    with pytest.raises(AssertionError, match=r"^candidate features have 2 non-finite values$"):
+        _assert_parity(
+            _features(actual),
+            {**_features(expected), "num_register_tokens": 4},
+            {"task": "image_features"},
+            {"num_register_tokens": 4},
+            THRESHOLDS,
+        )
+
+
+def test_a_shape_mismatch_names_both_shapes() -> None:
+    expected = np.random.default_rng(4).standard_normal((1, 1 + 4 + 16, 8))
+    with pytest.raises(AssertionError, match=r"hidden-state shape \(1, 20, 8\) != reference \(1, 21, 8\)"):
+        _assert_parity(
+            _features(expected[:, :-1, :]),
+            {**_features(expected), "num_register_tokens": 4},
+            {"task": "image_features"},
+            {"num_register_tokens": 4},
+            THRESHOLDS,
+        )
+
+
 def test_a_value_just_below_its_limit_is_reported_without_rounding() -> None:
     with pytest.raises(AssertionError, match=r"^full cosine 0\.9989999 < 0\.999$"):
         _assert_at_least("full cosine", 0.9989999, THRESHOLDS, "full_cosine")

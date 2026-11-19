@@ -507,9 +507,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.command == "merge-check":
             from .split import merge_check
 
+            from .split import informational_differences
+
             problems = merge_check(json.loads(arguments.assignment.read_text()), arguments.roots,
                                    "smoke" if arguments.smoke else "formal")
             print("\n".join(problems) if problems else "the roots form the assignment's matrix")
+            for note in informational_differences(arguments.roots):
+                print(f"note: {note}")
             return 1 if problems else 0
         if arguments.command == "summary":
             import tempfile
@@ -527,6 +531,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if problems:
                         print("\n".join(["trtmc-aiperf-qual: the roots do not merge:", *problems]), file=sys.stderr)
                         return 1
+                    from .split import informational_differences
+
+                    for note in informational_differences(roots):
+                        print(f"trtmc-aiperf-qual: note: {note}", file=sys.stderr)
                 baseline = fetch_roots(arguments.baseline, arguments.ssh, Path(fetched) / "baseline")
                 text, counts = summary(roots, baseline)
                 if arguments.html:

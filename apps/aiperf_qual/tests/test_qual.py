@@ -378,6 +378,16 @@ def test_migrated_text_encoders_keep_their_benchmarks():
     assert tasks["text_to_token_features"] == {**tasks["encoding"], "reference": {"options": {"all_tokens": True}}}
 
 
+def test_migrated_decoder_language_models_keep_their_benchmarks():
+    """text_continuation (the qwen3 profiles migrated to the Task SDK) keeps text_generation's benchmarks."""
+    import yaml
+
+    from trtmc_aiperf_qual.config import CONFIG_ROOT
+
+    tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
+    assert tasks["text_continuation"] == tasks["text_generation"]
+
+
 def test_text_encoders_the_generic_references_cannot_serve_are_excluded_with_a_reason():
     from trtmc_aiperf_qual.selection import catalog
 
@@ -396,12 +406,7 @@ def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():
     from trtmc_aiperf_qual.config import CONFIG_ROOT
     from trtmc_aiperf_qual.selection import catalog
 
-    not_qualified = {  # Tasks no generic native reference or benchmark serves yet
-        "structured_decision": "no generic native adapter for decide",
-        "image_text_to_boxes": "no generic native adapter for detect_prompted",
-        "image_to_token_and_pooled_features": "no image feature benchmark outside the families that state one",
-        "speech_transcription": "the generic transcribe reference loads Whisper-style speech-seq2seq models only",
-    }
+    not_qualified: dict[str, str] = {}  # Task -> why no generic native reference or benchmark serves it yet
     tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
     assert {profile.task for profile in catalog(REPOSITORY)} - set(tasks) == set(not_qualified)
 
@@ -657,6 +662,23 @@ def test_a_quantized_profile_is_qualified_as_its_models_highest_precision_profil
     assert qualified_as("m", entries) == "m"  # not quantized: its own configuration
     assert qualified_as("x-fp8", entries) == "x-fp8"  # nothing ranks higher
     assert qualified_as("y-nvfp4", entries) == "y-fp8"  # the highest precision there is, quantized too
+    entries["m-int4-awq"] = entry("m-int4-awq", precision="fp16", quantization="int4_awq")
+    assert qualified_as("m-int4-awq", entries) == "m-bf16"  # both name parts name the quantization
+    from trtmc_aiperf_qual.models import highest_precision_sibling
+
+    # An unquantized precision variant is not qualified as its sibling, but can take its sibling's configuration.
+    assert highest_precision_sibling("m", entries) == "m-bf16"
+    assert highest_precision_sibling("m-bf16", entries) == "m-bf16"  # nothing ranks higher
+
+
+def test_only_the_profiles_own_suffix_marks_an_l0_or_regression_variant():
+    from trtmc_aiperf_qual.models import smoke_variant
+
+    assert smoke_variant("qwen3-0.6b-regression-native-kv-chunked-prefill", "Qwen/Qwen3-0.6B")
+    assert smoke_variant("cosmos3-nano-l0", "nvidia/Cosmos3-Nano") and smoke_variant("ltx-video-fp8-l0", "")
+    # A regression model, not a regression variant: the word is its checkpoint's name.
+    assert not smoke_variant("patchtst-etth1-regression-distribution",
+                             "ibm-research/patchtst-etth1-regression-distribution")
 
 
 def test_quantized_profiles_take_their_bases_native_reference_and_benchmarks():
@@ -742,6 +764,18 @@ def test_timing_reference_precision_can_differ_from_the_candidate_precision():
     z_image = resolve_model("z-image-turbo", _environment())["reference"]
     assert z_image["perf_precision"] == "fp16" and timing_precisions(z_image) == ["bf16"]
     assert timing_precisions({"perf_precision": "fp16", "precision": "fp32"}) == ["fp16", "fp32"]
+
+
+def test_report_reference_names_the_precision_the_native_model_ran_at():
+    from trtmc_aiperf_qual.runner import reported_reference
+
+    reference = {"backend": "reference", "perf_precision": "fp16", "precision": "fp32", "timing_precision": None}
+    accuracy = [{"suite": "encoder-parity", "native": {"backend": "reference", "precision": "fp16", "mode": "eager"}}]
+    reported = reported_reference(reference, [], accuracy)
+    assert reported["precision"] == "fp16" and reported["fallback_precision"] == "fp32"
+    timed = [{"reference": {"precision": "fp32", "precision_fallback": "fp16 failed"}}]
+    assert reported_reference(reference, timed, accuracy)["precision"] == "fp32"  # as timed, after a fallback
+    assert reported_reference(reference, [], [])["precision"] == "fp16"  # nothing ran: the first it would time at
 
 
 def test_always_sampling_tts_models_compare_duration_in_perf():

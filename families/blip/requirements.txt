@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# PyTorch is used to read the published checkpoint and by the test reference.
+# Native inference executes TensorRT plans without Python.
+torch>=2.10
+Pillow>=10,<14

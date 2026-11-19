@@ -13,7 +13,10 @@
 
 #include "families/opt/runtime/inference_state.h"
 #include "families/opt/runtime/sampler.h"
+#include "families/opt/runtime/task_config.h"
 #include "families/opt/runtime/tokenizer.h"
+#include "trtmc/internal/model.h"
+#include "trtmc/internal/text.h"
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
 
@@ -40,7 +43,8 @@ struct OptTextGenConfig {
     int32_t num_layers{0};
 };
 
-class OptTextGenerationPipeline final : public ITextGeneration {
+class OptTextGenerationPipeline final : public internal::IModel,
+                                        public internal::ITextContinuation {
   public:
     OptTextGenerationPipeline(std::unique_ptr<ITrtModule> decoder,
                               std::unique_ptr<OptInferenceState> state, OptTextGenConfig config,
@@ -48,9 +52,12 @@ class OptTextGenerationPipeline final : public ITextGeneration {
                               std::unique_ptr<ITrtModule> prefill,
                               std::shared_ptr<void> distributed_owner = nullptr);
 
-    // Public API: takes raw text, returns typed result.
-    TextResult generate(const std::string& prompt, const TextGenerationConfig& cfg = {}) override;
-    int32_t default_max_new_tokens() const override { return 128; }
+    const char* task() const noexcept override { return ITextContinuation::kTask.data(); }
+    std::vector<internal::TaskInstance> task_bindings() override {
+        return {internal::bind<internal::ITextContinuation>(*this, opt::text_config_fields())};
+    }
+    TextResult run(const internal::TextContinuationRequest& request,
+                   internal::ConfigView config) override;
 
     // Token-ID-based generation (for unit tests and internal callers).
     struct GenerationResult {

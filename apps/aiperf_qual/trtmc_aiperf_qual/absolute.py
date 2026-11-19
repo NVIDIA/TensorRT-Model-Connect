@@ -34,7 +34,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 from . import cancel, execution, gold_metrics, noninferiority
 from .aiperf_runner import run_aiperf
-from .config import Environment
+from .config import ConfigError, Environment
 from .judge import light
 from .services import serving_replicas
 from .suites import SELECTION_SEED, build_suite, request_sha
@@ -190,6 +190,8 @@ def plan(environment: Environment, model: Mapping[str, Any], item: Mapping[str, 
             samples = _fitted(model, samples, int(item.get("min_new_tokens", 16)))
         if item.get("pair_format"):  # reranking pairs on an encoder bundle: the shipped length decides
             samples = _pairs_fitted(model, samples, str(item["pair_format"]))
+        if item.get("max_audio_seconds"):  # clips longer than the bundle accepts: dropped for both sides
+            samples = _audio_fitted(environment, samples, float(item["max_audio_seconds"]))
         return [{"task": sample.get("task", suite.name), "gold": sample.get("label"), "sample_id": sample["sample_id"],
                  "request": sample["request"], "request_sha": sample["request_sha"],
                  **{key: sample[key] for key in ("cluster", "series") if key in sample}} for sample in samples]
@@ -198,6 +200,33 @@ def plan(environment: Environment, model: Mapping[str, Any], item: Mapping[str, 
     chosen = problems(item["plugin"], item.get("tasks"), int(item.get("n_shots", 0)),
                       selection_environment(environment, model, item))
     return [{"task": problem.task, "gold": problem.ground_truth} for problem in chosen]
+
+
+def _audio_fitted(environment: Environment, samples: Sequence[Mapping[str, Any]],
+                  seconds: float) -> list[dict[str, Any]]:
+    """Samples whose ``audio_path`` clip lasts at most ``seconds`` (the bundle's stated limit); the others are
+    dropped for both sides, as ``fit_prompt`` drops prompts the bundle cannot hold."""
+    import base64
+    import io
+
+    import soundfile
+
+    root = environment.media_root()
+    kept = []
+    for sample in samples:
+        media = (sample["request"].get("audio_path") or {}).get("$file") if isinstance(
+            sample["request"].get("audio_path"), Mapping) else None
+        if media is None:
+            source: Any = str(sample["request"].get("audio_path"))
+        elif "b64" in media:
+            source = io.BytesIO(base64.b64decode(media["b64"]))
+        else:
+            if root is None:
+                raise ConfigError("max_audio_seconds needs the media store (media_root or hf_datasets_cache)")
+            source = str(root / media["sha256"][:2] / f"{media['sha256']}{media['suffix']}")
+        if soundfile.info(source).duration <= seconds:
+            kept.append(dict(sample))
+    return kept
 
 
 def _fitted(model: Mapping[str, Any], samples: Sequence[Mapping[str, Any]], min_new: int) -> list[dict[str, Any]]:
@@ -556,7 +585,7 @@ def workload_perf(candidate: Mapping[int, Mapping[str, Any]], native: Mapping[in
 
 NO_ANSWER = "(no TRTMC answer)"
 # Corpus metrics where a missing TRTMC output scores as an empty one (an empty transcript or translation).
-EMPTY_ANSWERS = {"wer": {"text": ""}, "chrf": {"text": ""}}
+EMPTY_ANSWERS = {"wer": {"text": ""}, "cer": {"text": ""}, "chrf": {"text": ""}}
 
 
 def _unanswered_note(count: int, candidate: Mapping[str, Any]) -> str:

@@ -65,7 +65,7 @@ bool error_contains(const std::filesystem::path& path, const std::string& expect
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc != 3)
+    if (argc != 4)
         return 2;
     std::string pattern =
         (std::filesystem::temp_directory_path() / "trtmc-dataset-test-XXXXXX").string();
@@ -281,6 +281,40 @@ int main(int argc, char** argv) {
               "limited Task uses only declared implicit controls");
         check(invoke({"--max-new-tokens", "8", "--top-k", "1"}) != 0,
               "explicit unsupported benchmark option fails even at a default value");
+
+        const auto prompts = root / "prompts.txt";
+        {
+            std::ofstream file(prompts);
+            file << "First prompt\n\nSecond prompt\n";
+        }
+        for (const auto* mode : {"text_continuation", "text_generation"}) {
+            bundle(model, mode);
+            const auto command = quote(argv[3]) + " " + quote(model.string()) + " " +
+                                 quote(argv[2]) + " " + quote(prompts.string()) + " 7 >" +
+                                 quote(output.string()) + " 2>" +
+                                 quote((root / "stderr.txt").string());
+            check(std::system(command.c_str()) == 0,
+                  "batch runner accepts the declared bundle mode");
+            const auto batch = results(output);
+            check(batch.size() == 2, "batch runner emits one result per nonempty prompt");
+            for (std::size_t i = 0; i < batch.size(); ++i) {
+                check(batch[i].at("prompt") == (i == 0 ? "First prompt" : "Second prompt") &&
+                          batch[i].at("token_ids") == Json::array({100, 101}) &&
+                          batch[i].at("wall_ms").get<double>() >= 0 &&
+                          config(batch[i]).at("max_new_tokens") == 7,
+                      "batch runner preserves prompts, IDs, token limits and call timing");
+                if (std::string(mode) == "text_continuation")
+                    check(config(batch[i]).contains("temperature"),
+                          "semantic bundle executes the SDK method rather than a legacy interface");
+            }
+        }
+        bundle(model, "text_continuation");
+        const auto rejected = quote(argv[3]) + " " + quote(model.string()) + " " + quote(argv[2]) +
+                              " " + quote(prompts.string()) + " 20001 >" + quote(output.string()) +
+                              " 2>" + quote((root / "stderr.txt").string());
+        check(std::system(rejected.c_str()) != 0 && results(output).empty() &&
+                  error_contains(root / "stderr.txt", "fixture token limit exceeded"),
+              "batch runner propagates SDK rejection without trying its available legacy method");
     } catch (const std::exception& error) {
         ++failures;
         std::cerr << error.what() << '\n';

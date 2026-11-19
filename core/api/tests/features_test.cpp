@@ -185,7 +185,7 @@ void global_pooled_contracts(const std::filesystem::path& root, const trtmc::Loa
 void exercise(const trtmc::Model& model) {
     const float pixels[] = {0.5F, 0.25F, 0.125F};
     const trtmc::ImageInput image({pixels, 3}, 1, 1);
-    check(model.tasks().size() == 28, "all 28 distinct typed feature contracts are discoverable");
+    check(model.tasks().size() == 29, "all 29 distinct typed feature contracts are discoverable");
     const trtmc::BatchImageToClassScoresRequest batch_input{
         {{{image}, {}}, {{image}, {{"scale", 2.0}}}}};
     auto batch_classes = model.task<trtmc::BatchImageToClassScores>().run(batch_input);
@@ -398,6 +398,21 @@ void exercise(const trtmc::Model& model) {
     auto joint = model.task<trtmc::ImageTextToEmbedding>().run({image, "doc"});
     check(joint.values().size() == 3 && joint.values()[0] == 14 && joint.values()[2] == 3,
           "joint image/text embedding is one complete input");
+    // Two points of three floats: six floats, so the float count differs from num_points.
+    const float cloud[6]{1, 2, 3, 4, 5, 6};
+    const auto cloud_task = model.task<trtmc::PointsToEmbedding>();
+    auto cloud_embedded = cloud_task.run({{cloud}, 2, 3});
+    check(cloud_embedded.values().size() == 4 && cloud_embedded.values()[0] == 19 &&
+              cloud_embedded.values()[1] == 4 && cloud_embedded.values()[2] == 2 &&
+              cloud_embedded.values()[3] == 3 &&
+              cloud_embedded.embedding_space() == "fixture.embedding" &&
+              cloud_embedded.pooling() == "mean" && cloud_embedded.normalization() == "none",
+          "point-cloud embedding sends num_points, not the float count, across the C ABI");
+    auto cloud_pairs = cloud_task.run({{cloud}, 3, 2}, {{"scale", 2.0}});
+    check(cloud_pairs.values().size() == 4 && cloud_pairs.values()[0] == 38 &&
+              cloud_pairs.values()[1] == 5 && cloud_pairs.values()[2] == 3 &&
+              cloud_pairs.values()[3] == 2,
+          "the same floats split by input_dim into a different point count");
     auto text_score = model.task<trtmc::TextPairToRelevance>().run({"q", "doc"});
     check(text_score.score() == 46 && text_score.kind() == TRTMC_SCORE_UNBOUNDED,
           "text query/document roles survive");
@@ -435,8 +450,71 @@ void exercise(const trtmc::Model& model) {
     wrong_image.wire.byte_size = 1;
     rejects([&] { model.task<trtmc::ImageToEmbedding>().run({wrong_image}); },
             TRTMC_INVALID_ARGUMENT, "malformed image uses the existing checked HWC converter");
+    rejects([&] { cloud_task.run({{cloud}, 3, 3}); }, TRTMC_INVALID_ARGUMENT,
+            "num_points * input_dim beyond the caller span is rejected before the call");
+    rejects([&] { cloud_task.run({{cloud}, 1, 3}); }, TRTMC_INVALID_ARGUMENT,
+            "a span longer than num_points * input_dim is rejected");
+    rejects([&] { cloud_task.run({{cloud}, 2, 0}); }, TRTMC_INVALID_ARGUMENT,
+            "a zero input_dim never matches a nonempty point span");
+    rejects([&] { cloud_task.run({{cloud}, 2, 3}, {{"scale", "bad"}}); }, TRTMC_INVALID_CONFIG,
+            "point-cloud embedding config types use the family field table");
 }
 } // namespace
+
+static int spatial_contracts(int argc, char** argv) {
+    if (argc != 2)
+        return 2;
+    try {
+        const std::filesystem::path root(argv[1]);
+        auto load = [&](const char* mode) {
+            const auto path = root / (std::string("spatial-cpp-") + mode + ".bundle");
+            bundle(path, mode);
+            trtmc::LoadOptions options;
+            options.runtime_root = root.string();
+            return trtmc::Model::load(path.string(), options);
+        };
+        float a[2]{0.2F, 0.8F}, b[2]{0.7F, 0.9F};
+        trtmc::SpatialFeaturesToClassScoresRequest input{
+            {{"first", {a}, 1, 1, 2}, {"second", {b}, 1, 1, 2}}};
+        auto model = load("spatial_features_to_class_scores");
+        auto task = model.task<trtmc::SpatialFeaturesToClassScores>();
+        auto first = task.run(input);
+        auto view = first.view();
+        check(view.values.size == 4 && view.classes == 2 && view.height == 1 && view.width == 2,
+              "retain class-major output shape");
+        check(view.values.data[1] + view.values.data[3] > 1.0F,
+              "independent class probabilities are not normalized");
+        check(view.class_names.size == 2 && std::string_view(view.class_names.data[1].data,
+                                                             view.class_names.data[1].size) == "b",
+              "preserve class names in score order");
+        a[0] = 0.1F;
+        auto second = task.run(input);
+        check(first.view().values.data[0] == 0.2F && second.view().values.data[0] == 0.1F,
+              "results own storage across calls");
+        auto invalid = input;
+        invalid.inputs[0].width = 3;
+        rejects([&] { (void)task.run(invalid); }, TRTMC_INVALID_ARGUMENT,
+                "reject inconsistent CHW input sizes");
+        invalid = input;
+        invalid.inputs[1].name = "first";
+        rejects([&] { (void)task.run(invalid); }, TRTMC_INVALID_ARGUMENT,
+                "reject duplicate input names");
+        invalid = input;
+        invalid.inputs[0].channels = UINT64_MAX;
+        invalid.inputs[0].height = 2;
+        rejects([&] { (void)task.run(invalid); }, TRTMC_INVALID_ARGUMENT,
+                "reject overflowing shapes before reading input values");
+        for (const char* mode :
+             {"spatial_bad_shape", "spatial_bad_names", "spatial_bad_probability"})
+            rejects(
+                [&] { (void)load(mode).task<trtmc::SpatialFeaturesToClassScores>().run(input); },
+                TRTMC_INTERNAL_ERROR, "reject a malformed family result");
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << '\n';
+        return 1;
+    }
+    return failures ? 1 : 0;
+}
 
 int main(int argc, char** argv) {
     if (argc != 2)
@@ -590,5 +668,6 @@ int main(int argc, char** argv) {
         std::cerr << "unexpected: " << error.what() << '\n';
         return 1;
     }
+    check(spatial_contracts(argc, argv) == 0, "spatial feature contracts");
     return failures == 0 ? 0 : 1;
 }

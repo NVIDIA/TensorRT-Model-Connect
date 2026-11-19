@@ -59,6 +59,8 @@ EncoderPipeline::EncoderPipeline(std::unique_ptr<ITrtModule> encoder, std::strin
                                  std::shared_ptr<ITokenizer> tokenizer, std::string model_id_str)
     : encoder_(std::move(encoder)), mode_(std::move(mode)), tokenizer_(std::move(tokenizer)),
       model_id_(std::move(model_id_str)) {
+    if (mode_ == "reranking")
+        throw std::invalid_argument("BERT reranking requires a scoring head and is not supported");
     if (!encoder_ || !encoder_->ok())
         throw std::runtime_error("EncoderPipeline: invalid encoder module");
 }
@@ -100,17 +102,6 @@ EmbeddingResult EncoderPipeline::encode(const std::string& text) {
         raw.dim = hidden;
     }
     return raw;
-}
-
-float EncoderPipeline::rerank(const std::string& query, const std::string& document) {
-    if (!tokenizer_)
-        throw std::runtime_error("EncoderPipeline: no tokenizer configured");
-    // Match the text-only reranking template documented by the supported
-    // Nemotron rerank cross-encoder model card.
-    std::string combined = "question:" + query + "   passage:" + document;
-    auto ids = tokenizer_->encode(combined);
-    auto result = encode_ids(ids);
-    return result.data.empty() ? 0.0f : result.data[0];
 }
 
 EmbeddingResult EncoderPipeline::encode_ids(const std::vector<int32_t>& input_ids) {

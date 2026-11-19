@@ -52,9 +52,10 @@ cmake --build build --target trtmc_model_<family>
 ctest --test-dir build --output-on-failure
 ```
 
-A family with `tests/sdk_consumer.c` or `tests/sdk_consumer.cpp` also builds
-`test_<family>_sdk_c` and `test_<family>_sdk_cpp`; its E2E runs them from the
-build directory.
+When a selected E2E locates SDK consumers through `TRTMC_NATIVE_BUILD_DIR`,
+set it to the matching configured CMake build tree. The CI E2E runner forwards
+that directory. For the Qwen example below, building `trtmc_model_qwen` with
+`TRTMC_BUILD_TESTS=ON` also builds both C/C++ SDK consumers.
 
 Passing shared architecture tests does not replace family-specific proof.
 
@@ -78,6 +79,7 @@ binary/runtime root through the environment:
 ```bash
 TRTMC_BINARY="$PWD/build/apps/cli/trtmc" \
 TRTMC_RUNTIME_ROOT="$PWD/build/install/lib" \
+TRTMC_NATIVE_BUILD_DIR="$PWD/build" \
 python3 -m pytest families/qwen/tests/test_e2e.py \
   --e2e-testcase qwen3-0.6b-fp16 \
   -q -x
@@ -102,6 +104,7 @@ evaluated values, stage timings, and reproduction commands:
 TRTMC_E2E_ARTIFACT_DIR=/tmp/trtmc-e2e \
 TRTMC_BINARY="$PWD/build/apps/cli/trtmc" \
 TRTMC_RUNTIME_ROOT="$PWD/build/install/lib" \
+TRTMC_NATIVE_BUILD_DIR="$PWD/build" \
 python3 -m pytest families/qwen/tests/test_e2e.py \
   --e2e-testcase qwen3-0.6b-fp16 -q
 
