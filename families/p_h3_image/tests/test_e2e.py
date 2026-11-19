@@ -338,7 +338,11 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         )
         record_evidence(
             "inputs",
-            {"sample": index, "prompt": case["prompts"][index], "request": requests[index]},
+            {
+                "sample": index,
+                "prompt": case["prompts"][index],
+                "noise": Path(requests[index]["noise"]),
+            },
         )
         record_evidence(
             "metrics", {"sample": index, "rmse": rmse, "max_abs_error": maximum, "cosine": cosine}
@@ -356,7 +360,6 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
                     role,
                     {
                         "sample": index,
-                        "image": image_path,
                         "mode": "diffusers" if role == "reference" else "native",
                         "shape": list(pixels.shape),
                     },
