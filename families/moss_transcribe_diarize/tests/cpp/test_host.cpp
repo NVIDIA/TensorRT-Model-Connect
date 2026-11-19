@@ -19,10 +19,13 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <sys/resource.h>
+#include <unistd.h>
 #include <vector>
 
 namespace mtd = trtmc::moss_transcribe_diarize;
@@ -91,6 +94,18 @@ void test_runtime_config() {
                  "nine digit ids");
 }
 
+void test_token_limits() {
+    auto config = mtd::parse_runtime_config(bytes_of(runtime_json("fp32", 10)));
+    check(config.default_max_new_tokens == 5120 && config.max_sequence_length == 4096,
+          "limit fixture");
+    check(mtd::generation_room(config, 75) == 4096 - 75 + 1, "room after the prompt");
+    check(mtd::default_token_limit(config, 75) == 4022, "the cache bounds the default");
+    config.max_sequence_length = 8192;
+    check(mtd::default_token_limit(config, 75) == 5120,
+          "the bundle default when the cache has room");
+    check(mtd::default_token_limit(config, 8192) == 1, "one token after a full prompt");
+}
+
 void test_chunks() {
     auto chunks = mtd::plan_chunks(1, 480000, 1280);
     check(chunks.size() == 1 && chunks[0].audio_tokens == 1, "one sample -> one token");
@@ -143,7 +158,11 @@ void test_audio_span() {
 void test_prompt() {
     auto config = mtd::parse_runtime_config(bytes_of(runtime_json("fp32", 10)));
     const auto plan = mtd::build_prompt(config, 70);
-    check(plan.input_ids.size() == 2 + 71 + 2, "prompt length");
+    const bool sized =
+        plan.input_ids.size() == 2 + 71 + 2 && plan.audio_index.size() == plan.input_ids.size();
+    check(sized, "prompt length and audio index length");
+    if (!sized)
+        return;
     check(plan.input_ids.front() == 151644 && plan.input_ids.back() == 198, "prompt framing");
     std::int32_t expected_row = 0;
     bool rows_ok = true;
@@ -350,10 +369,54 @@ void test_log_mel() {
     expect_throw([&] { mtd::LogMelExtractor(bank, 10, 2, 32, 16); }, "bank/n_fft mismatch");
 }
 
+// Bytes of address space the process maps now (Linux).
+std::size_t address_space_bytes() {
+    std::ifstream statm("/proc/self/statm");
+    std::size_t pages = 0;
+    statm >> pages;
+    return pages * static_cast<std::size_t>(sysconf(_SC_PAGESIZE));
+}
+
+void test_log_mel_checks_before_allocating() {
+    // n_fft = 2^26 would need about 4 GiB of DFT buffers. Under an address-space
+    // limit of the current use plus 256 MiB, building that DFT before the bank
+    // check would fail with bad_alloc instead of the bank diagnostic.
+    mtd::MelFilterBank bank;
+    bank.freq_bins = 5;
+    bank.mel_bins = 3;
+    bank.weights.assign(15, 0.5F);
+    const std::size_t in_use = address_space_bytes();
+    rlimit saved{};
+    if (in_use == 0 || getrlimit(RLIMIT_AS, &saved) != 0) {
+        check(false, "read the address-space use and limit");
+        return;
+    }
+    rlimit capped = saved;
+    capped.rlim_cur = static_cast<rlim_t>(in_use + (std::size_t{256} << 20));
+    if (saved.rlim_cur != RLIM_INFINITY && saved.rlim_cur < capped.rlim_cur)
+        capped.rlim_cur = saved.rlim_cur;
+    if (setrlimit(RLIMIT_AS, &capped) != 0) {
+        check(false, "set the address-space limit");
+        return;
+    }
+    std::string outcome = "no error";
+    try {
+        mtd::LogMelExtractor(bank, 1 << 26, 160, 1 << 27, (1 << 27) / 160);
+    } catch (const std::invalid_argument& error) {
+        outcome = error.what();
+    } catch (const std::exception& error) {
+        outcome = std::string("other error: ") + error.what();
+    }
+    setrlimit(RLIMIT_AS, &saved);
+    check(outcome == "mel filter bank does not match n_fft",
+          "bank checked before the DFT allocates (" + outcome + ")");
+}
+
 } // namespace
 
 int main() {
     test_runtime_config();
+    test_token_limits();
     test_chunks();
     test_audio_span();
     test_prompt();
@@ -363,6 +426,7 @@ int main() {
     test_timestamps_ignore_the_locale();
     test_dft();
     test_log_mel();
+    test_log_mel_checks_before_allocating();
     if (failures != 0) {
         std::cerr << failures << " moss_transcribe_diarize host check(s) failed\n";
         return 1;

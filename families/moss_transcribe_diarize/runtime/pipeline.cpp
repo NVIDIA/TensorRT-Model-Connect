@@ -169,14 +169,10 @@ std::vector<float> TranscribeDiarizeModel::mono_samples(const internal::AudioVie
 
 std::int32_t TranscribeDiarizeModel::resolve_max_new_tokens(internal::ConfigView config,
                                                             std::size_t prompt_tokens) const {
-    // The last generated token is never fed back, so the cache must hold
-    // prompt_tokens + max_new_tokens - 1 rows.
-    const auto room = static_cast<std::int64_t>(config_.max_sequence_length) -
-                      static_cast<std::int64_t>(prompt_tokens) + 1;
+    const auto room = generation_room(config_, prompt_tokens);
     const auto requested = internal::config_get<std::int64_t>(config, kFields, "max_new_tokens");
     if (!requested)
-        return static_cast<std::int32_t>(
-            std::min<std::int64_t>(config_.default_max_new_tokens, room));
+        return default_token_limit(config_, prompt_tokens);
     if (*requested <= 0)
         throw internal::ConfigError("max_new_tokens must be positive");
     if (*requested > room) {

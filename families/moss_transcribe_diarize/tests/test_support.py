@@ -46,6 +46,10 @@ def test_builds_at_the_checkpoint_precision_by_default():
         # it, so discovery must not offer it either.
         {"model_type": "moss_transcribe_diarize", "architectures": ["MossTranscribeDiarizeModel"]},
         {"model_type": "moss_transcribe_diarize", "architectures": ["Qwen3ForCausalLM"]},
+        # The build reads only the plural list and the model type, whatever else is named.
+        {"architectures": ["MossTranscribeDiarizeModel"],
+         "architecture": "MossTranscribeDiarizeForConditionalGeneration"},
+        {"model_type": "qwen3", "architectures": ["MossTranscribeDiarizeForConditionalGeneration"]},
         {},
     ],
 )

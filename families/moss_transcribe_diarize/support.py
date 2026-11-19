@@ -3,10 +3,11 @@
 
 from tensorrt_model_connect.model_support import FamilySupport, ModelMetadata, family_support
 
+MODEL_TYPE = "moss_transcribe_diarize"
 ARCHITECTURE = "MossTranscribeDiarizeForConditionalGeneration"
 
 _describe_identity = family_support(
-    model_types=("moss_transcribe_diarize",),
+    model_types=(MODEL_TYPE,),
     architectures=(ARCHITECTURE,),
     tasks=("speech_transcription",),
     default_task="speech_transcription",
@@ -15,9 +16,16 @@ _describe_identity = family_support(
 
 
 def describe(metadata: ModelMetadata) -> FamilySupport | None:
-    # Other heads of this model type (the bare backbone produces no transcript)
-    # are refused by the build, so a checkpoint that names its architectures is
-    # claimed only when one of them is the conditional-generation head.
-    if metadata.architectures and ARCHITECTURE not in metadata.architectures:
+    # The build reads config.json's model_type and its plural "architectures"
+    # list, nothing else. Discovery refuses what either of them contradicts (the
+    # bare backbone produces no transcript), and still claims a checkpoint that
+    # names only one of them.
+    model_type = metadata.config.get("model_type")
+    if isinstance(model_type, str) and model_type and model_type != MODEL_TYPE:
         return None
+    listed = metadata.config.get("architectures")
+    if listed is not None:
+        names = (listed,) if isinstance(listed, str) else listed if isinstance(listed, list) else ()
+        if ARCHITECTURE not in names:
+            return None
     return _describe_identity(metadata)

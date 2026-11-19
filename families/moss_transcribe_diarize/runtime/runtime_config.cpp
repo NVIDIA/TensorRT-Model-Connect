@@ -5,6 +5,7 @@
 
 #include "families/moss_transcribe_diarize/runtime/runtime_config.h"
 
+#include <algorithm>
 #include <cmath>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
@@ -93,6 +94,16 @@ RuntimeConfig parse_runtime_config(const std::vector<char>& json_bytes) {
     config.default_max_new_tokens = positive(json, "default_max_new_tokens");
     validate_geometry(config);
     return config;
+}
+
+std::int64_t generation_room(const RuntimeConfig& config, std::size_t prompt_tokens) {
+    return static_cast<std::int64_t>(config.max_sequence_length) -
+           static_cast<std::int64_t>(prompt_tokens) + 1;
+}
+
+std::int32_t default_token_limit(const RuntimeConfig& config, std::size_t prompt_tokens) {
+    return static_cast<std::int32_t>(std::min<std::int64_t>(
+        config.default_max_new_tokens, generation_room(config, prompt_tokens)));
 }
 
 } // namespace trtmc::moss_transcribe_diarize

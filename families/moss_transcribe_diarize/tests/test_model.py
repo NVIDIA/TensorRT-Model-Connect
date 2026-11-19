@@ -18,6 +18,7 @@ pytest.importorskip("tensorrt")
 
 from families.moss_transcribe_diarize.checkpoint import Checkpoint  # noqa: E402
 from families.moss_transcribe_diarize.config import load_config  # noqa: E402
+from families.moss_transcribe_diarize.contract import runtime_json  # noqa: E402
 from families.moss_transcribe_diarize.graph import float32_to_bfloat16_bits  # noqa: E402
 from families.moss_transcribe_diarize.model import build  # noqa: E402
 from families.moss_transcribe_diarize.tests import test_e2e  # noqa: E402
@@ -77,6 +78,11 @@ def test_reads_the_checkpoint_contract(tmp_path):
     assert config.eos_token_ids == (151645,)
     assert config.default_max_new_tokens == 5120
     assert config.audio.head_dim == 64
+    # The runtime's default token limit is this value, bounded by the cache (host test).
+    prompt = {"digit_token_ids": list(range(10)), "prompt_prefix_ids": [1], "prompt_suffix_ids": [2]}
+    runtime = runtime_json(config, prompt, 8192, "bf16")
+    assert runtime["default_max_new_tokens"] == 5120
+    assert runtime["max_sequence_length"] == 8192
 
 
 def _variant(path: tuple[str, ...], value):
@@ -152,7 +158,7 @@ def test_bf16_tensors_keep_their_stored_bits(tmp_path):
     assert checkpoint.shape("w") == (2, 2)
     np.testing.assert_array_equal(checkpoint.bfloat16_bits("w").reshape(-1), bits)
     widened = checkpoint.float32("w").reshape(-1)
-    np.testing.assert_array_equal(widened.view(np.uint32) >> 16, bits.astype(np.uint32))
+    np.testing.assert_array_equal(widened.view(np.uint32), bits.astype(np.uint32) << 16)
     np.testing.assert_array_equal(checkpoint.float32("f"), values)
     with pytest.raises(ValueError):
         checkpoint.bfloat16_bits("f")
@@ -278,16 +284,47 @@ def test_e2e_evidence_checks_restate_the_enforced_comparisons():
     assert all(_consistent(c) for c in passed + failed)
 
     eos = {9}
+
+    def verdicts(tokens, gaps, argmax, max_new_tokens=10):
+        checks = test_e2e._teacher_forced_checks(tokens, gaps, [8.0] * len(gaps), argmax, eos,
+                                                 max_new_tokens, 1.0)
+        assert all(_consistent(c) for c in checks)
+        return {c["name"]: c["passed"] for c in checks}
+
     # BF16 spacing at a largest logit of 8.0 is 0.0625: a 0.05 gap is 0.8 spacings.
-    ended = test_e2e._teacher_forced_checks([4, 5, 9], [0.0, 0.05, 0.0], [8.0, 8.0, 8.0],
-                                            [4, 6, 9], eos, 10, 1.0)
-    assert {c["name"]: c["passed"] for c in ended} == {
-        "max_gap_bf16_spacings": True, "reference_eos_before_native_end": True,
-        "native_eos_without_reference_eos": True, "stops_at_eos_or_limit": True}
-    assert ended[0]["actual"] == 0.8
-    early = test_e2e._teacher_forced_checks([4, 5, 9], [0.0, 0.1, 0.0], [8.0, 8.0, 8.0],
-                                            [4, 9, 6], eos, 10, 1.0)
-    assert {c["name"]: c["passed"] for c in early} == {
-        "max_gap_bf16_spacings": False, "reference_eos_before_native_end": False,
-        "native_eos_without_reference_eos": False, "stops_at_eos_or_limit": True}
-    assert all(_consistent(c) for c in ended + early)
+    assert all(verdicts([4, 5, 9], [0.0, 0.05, 0.0], [4, 6, 9]).values())
+    assert verdicts([4, 5, 9], [0.0, 0.1, 0.0], [4, 9, 6]) == {
+        "steps_beyond_bf16_tolerance": False, "native_eos_before_end": True,
+        "stops_at_eos_or_limit": True, "reference_eos_before_native_end": False,
+        "native_eos_without_reference_eos": False}
+    # A non-finite score fails the gap row, as it fails the per-step assertion.
+    assert not verdicts([4, 5, 9], [0.0, float("nan"), 0.0], [4, 5, 9])[
+        "steps_beyond_bf16_tolerance"]
+    assert test_e2e._steps_beyond_tolerance(
+        [0.0, float("nan"), 0.0, 0.05], [8.0, 8.0, float("inf"), 8.0], 1.0) == [1, 2]
+    # A native EOS before the end fails both the evidence and the assertion.
+    assert not verdicts([4, 9, 5], [0.0, 0.0, 0.0], [4, 6, 5], 3)["native_eos_before_end"]
+    with pytest.raises(AssertionError):
+        _assert_termination([4, 9, 5], [4, 6, 5], eos, 3)
+
+
+def test_e2e_reference_precision_is_restored():
+    import torch
+
+    saved = (torch.get_float32_matmul_precision(), torch.backends.cuda.matmul.allow_tf32,
+             torch.backends.cudnn.allow_tf32)
+    try:
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cudnn.allow_tf32 = True
+        with pytest.raises(RuntimeError, match="reference failed"):
+            with test_e2e._fp32_reference_precision():
+                assert torch.get_float32_matmul_precision() == "highest"
+                assert torch.backends.cuda.matmul.allow_tf32 is False
+                assert torch.backends.cudnn.allow_tf32 is False
+                raise RuntimeError("reference failed")
+        assert torch.get_float32_matmul_precision() == "high"
+        assert torch.backends.cudnn.allow_tf32 is True
+    finally:
+        torch.set_float32_matmul_precision(saved[0])
+        torch.backends.cuda.matmul.allow_tf32 = saved[1]
+        torch.backends.cudnn.allow_tf32 = saved[2]
