@@ -97,6 +97,11 @@ struct ImageTextToEmbeddingRequest {
     ImageInput image;
     std::string text;
 };
+struct PointsToEmbeddingRequest {
+    Span<const float> points; // Row-major [num_points, input_dim] float32.
+    uint32_t num_points{0};
+    uint32_t input_dim{3};
+};
 struct TextPairToRelevanceRequest {
     std::string query;
     std::string document;
@@ -445,6 +450,15 @@ inline trtmc_image_text_to_embedding_request_v1
 feature_request(const ImageTextToEmbeddingRequest& input) {
     return {input.image.wire, c_string(input.text)};
 }
+// The wire carries a point count, not a float count; Core sizes the span from
+// num_points * input_dim, so a mismatched caller span must never reach it.
+inline trtmc_points_to_embedding_request_v1 feature_request(const PointsToEmbeddingRequest& input) {
+    if (input.points.size() !=
+        static_cast<uint64_t>(input.num_points) * static_cast<uint64_t>(input.input_dim))
+        throw Error(TRTMC_INVALID_ARGUMENT,
+                    "point-cloud points must hold exactly num_points * input_dim floats");
+    return {input.points.data(), static_cast<uint64_t>(input.num_points), input.input_dim};
+}
 inline trtmc_text_pair_to_relevance_request_v1
 feature_request(const TextPairToRelevanceRequest& input) {
     return {c_string(input.query), c_string(input.document)};
@@ -592,6 +606,12 @@ struct ImageTextToEmbeddingTraits {
     using Result = SemanticEmbeddingResult;
     using Table = trtmc_image_text_to_embedding_api_v1;
 };
+struct PointsToEmbeddingTraits {
+    static constexpr std::string_view kTask = TRTMC_TASK_POINTS_TO_EMBEDDING;
+    using Request = PointsToEmbeddingRequest;
+    using Result = SemanticEmbeddingResult;
+    using Table = trtmc_points_to_embedding_api_v1;
+};
 struct TextPairToRelevanceTraits {
     static constexpr std::string_view kTask = TRTMC_TASK_TEXT_PAIR_TO_RELEVANCE;
     using Request = TextPairToRelevanceRequest;
@@ -642,6 +662,7 @@ using ImageToSpatialFeatures = detail::FeatureTask<detail::ImageToSpatialFeature
 using ImageToPooledFeatures = detail::FeatureTask<detail::ImageToPooledFeaturesTraits>;
 using ImageToEmbedding = detail::FeatureTask<detail::ImageToEmbeddingTraits>;
 using ImageTextToEmbedding = detail::FeatureTask<detail::ImageTextToEmbeddingTraits>;
+using PointsToEmbedding = detail::FeatureTask<detail::PointsToEmbeddingTraits>;
 using TextPairToRelevance = detail::FeatureTask<detail::TextPairToRelevanceTraits>;
 using TextImageToRelevance = detail::FeatureTask<detail::TextImageToRelevanceTraits>;
 using TextImageTextToRelevance = detail::FeatureTask<detail::TextImageTextToRelevanceTraits>;
@@ -859,5 +880,58 @@ struct BatchImageToTokenAndPooledFeaturesTraits {
 } // namespace detail
 using BatchImageToTokenAndPooledFeatures =
     detail::FeatureBatchTask<detail::BatchImageToTokenAndPooledFeaturesTraits>;
+
+struct SpatialFeatureInput {
+    std::string name;
+    Span<const float> values;
+    uint64_t channels{0}, height{0}, width{0};
+};
+struct SpatialFeaturesToClassScoresRequest {
+    std::vector<SpatialFeatureInput> inputs;
+};
+using SpatialClassScoresResult = detail::ViewResult<trtmc_spatial_class_scores_view_v1>;
+
+class SpatialFeaturesToClassScores {
+  public:
+    static constexpr std::string_view kTask = TRTMC_TASK_SPATIAL_FEATURES_TO_CLASS_SCORES;
+    static constexpr uint32_t kMajor = 1, kMinor = 0;
+    std::vector<ConfigField> config_fields() const {
+        return detail::config_fields(state_, kTask, kMajor, kMinor);
+    }
+    SpatialClassScoresResult run(const SpatialFeaturesToClassScoresRequest& input,
+                                 const Config& config = {}) const {
+        std::vector<trtmc_spatial_feature_input_v1> maps;
+        maps.reserve(input.inputs.size());
+        for (const auto& item : input.inputs)
+            maps.push_back({{item.name.data(), item.name.size()},
+                            {item.values.data(), item.values.size()},
+                            item.channels,
+                            item.height,
+                            item.width});
+        const trtmc_spatial_features_to_class_scores_request_v1 request{maps.data(), maps.size()};
+        const auto entries = config.c_entries();
+        const auto options = entries.view();
+        trtmc_result* raw = nullptr;
+        trtmc_error* error = nullptr;
+        const auto status = api_->run(state_->handle, &request, &options, &raw, &error);
+        detail::ResultOwner owner(state_, raw);
+        detail::check(state_->api, status, error);
+        return SpatialClassScoresResult(std::move(owner), api_->result_view);
+    }
+    static void validate_table(const trtmc_api_header* table) {
+        if (!table || table->major != 1 || table->minor != 0 ||
+            table->byte_size < sizeof(trtmc_spatial_features_to_class_scores_api_v1))
+            throw Error(TRTMC_VERSION_MISMATCH, "incompatible spatial feature Task table");
+    }
+
+  private:
+    friend class Model;
+    SpatialFeaturesToClassScores(std::shared_ptr<detail::ModelState> state,
+                                 const trtmc_api_header* table) noexcept
+        : state_(std::move(state)),
+          api_(reinterpret_cast<const trtmc_spatial_features_to_class_scores_api_v1*>(table)) {}
+    std::shared_ptr<detail::ModelState> state_;
+    const trtmc_spatial_features_to_class_scores_api_v1* api_;
+};
 
 } // namespace trtmc

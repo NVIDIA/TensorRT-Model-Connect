@@ -1,0 +1,241 @@
+/*
+ * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+#include "families/table_transformer/runtime/image_preprocess_seam.h"
+
+#include <cmath>
+#include <iostream>
+#include <stdexcept>
+#include <vector>
+
+namespace {
+
+int g_failures = 0;
+
+void check(bool condition, const char* name) {
+    if (!condition) {
+        std::cerr << "FAIL: " << name << '\n';
+        ++g_failures;
+    }
+}
+
+void check_close(float actual, float expected, float tolerance, const char* name) {
+    if (std::fabs(actual - expected) > tolerance) {
+        std::cerr << "FAIL: " << name << " actual=" << actual << " expected=" << expected << '\n';
+        ++g_failures;
+    }
+}
+
+void test_table_transformer_resize_preserves_short_edge_for_square_image() {
+    trtmc::TableTransformerPreprocessConfig config;
+    config.longest_edge = 1333;
+    config.input_image_h = 800;
+    config.input_image_w = 800;
+
+    const auto shape = trtmc::compute_table_transformer_resize_shape(400, 400, config);
+    check(shape.height == 800, "table_transformer square resize height");
+    check(shape.width == 800, "table_transformer square resize width");
+}
+
+void test_table_transformer_resize_caps_longest_edge() {
+    trtmc::TableTransformerPreprocessConfig config;
+    config.longest_edge = 1333;
+    config.input_image_h = 796;
+    config.input_image_w = 1333;
+
+    const auto shape = trtmc::compute_table_transformer_resize_shape(382, 640, config);
+    check(shape.height == 796, "table_transformer landscape resize height");
+    check(shape.width == 1333, "table_transformer landscape resize width");
+}
+
+void test_table_transformer_resize_rounds_half_ties_to_even() {
+    trtmc::TableTransformerPreprocessConfig config;
+    config.longest_edge = 1333;
+    const auto landscape = trtmc::compute_table_transformer_resize_shape(600, 1200, config);
+    check(landscape.height == 666 && landscape.width == 1333,
+          "table_transformer landscape half tie rounds down to even");
+    const auto portrait = trtmc::compute_table_transformer_resize_shape(1200, 600, config);
+    check(portrait.height == 1333 && portrait.width == 666,
+          "table_transformer portrait half tie rounds down to even");
+    const auto odd_landscape = trtmc::compute_table_transformer_resize_shape(1335, 2666, config);
+    check(odd_landscape.height == 668 && odd_landscape.width == 1333,
+          "table_transformer landscape half tie rounds up to even");
+    const auto odd_portrait = trtmc::compute_table_transformer_resize_shape(2666, 1335, config);
+    check(odd_portrait.height == 1333 && odd_portrait.width == 668,
+          "table_transformer portrait half tie rounds up to even");
+}
+
+void test_table_transformer_resize_rounds_non_ties_to_nearest() {
+    trtmc::TableTransformerPreprocessConfig config;
+    config.longest_edge = 1333;
+    const auto below = trtmc::compute_table_transformer_resize_shape(599, 1200, config);
+    check(below.height == 665 && below.width == 1333, "table_transformer resize below half tie");
+    const auto above = trtmc::compute_table_transformer_resize_shape(601, 1200, config);
+    check(above.height == 668 && above.width == 1333, "table_transformer resize above half tie");
+}
+
+void test_table_transformer_preprocess_fits_half_tie_engine_dimensions() {
+    const std::vector<float> pixels(3U * 600U * 1200U, 0.75F);
+    trtmc::TableTransformerPreprocessConfig config;
+    config.longest_edge = 1333;
+    config.input_image_h = 666;
+    config.input_image_w = 1333;
+    const auto landscape =
+        trtmc::preprocess_table_transformer_image(pixels.data(), 600, 1200, config);
+    check(landscape.size() == 3U * 666U * 1333U,
+          "table_transformer landscape fits reference dimensions");
+
+    config.input_image_h = 1333;
+    config.input_image_w = 666;
+    const auto portrait =
+        trtmc::preprocess_table_transformer_image(pixels.data(), 1200, 600, config);
+    check(portrait.size() == 3U * 1333U * 666U,
+          "table_transformer portrait fits reference dimensions");
+}
+
+void test_table_transformer_resize_shapes_for_square_engine() {
+    trtmc::TableTransformerPreprocessConfig config;
+    config.longest_edge = 1333;
+    config.input_image_h = 1333;
+    config.input_image_w = 1333;
+
+    const auto landscape = trtmc::compute_table_transformer_resize_shape(382, 640, config);
+    const auto portrait = trtmc::compute_table_transformer_resize_shape(640, 382, config);
+    check(landscape.height == 796 && landscape.width == 1333,
+          "table_transformer square engine landscape resize shape");
+    check(portrait.height == 1333 && portrait.width == 796,
+          "table_transformer square engine portrait resize shape");
+}
+
+void test_table_transformer_preprocess_applies_normalization() {
+    const std::vector<float> pixels(3U * 2U * 2U, 0.75F);
+    trtmc::TableTransformerPreprocessConfig config;
+    config.longest_edge = 1333;
+    config.input_image_h = 2;
+    config.input_image_w = 2;
+    config.shortest_edge = 2;
+    config.longest_edge = 2;
+    config.image_mean = {0.25F, 0.5F, 0.75F};
+    config.image_std = {0.5F, 0.25F, 0.125F};
+
+    const auto pixel_values =
+        trtmc::preprocess_table_transformer_image(pixels.data(), 2, 2, config);
+    check(pixel_values.size() == 12, "table_transformer preprocess size");
+    check_close(pixel_values[0], (191.0F / 255.0F - 0.25F) / 0.5F, 1e-6F,
+                "table_transformer red normalization");
+    check_close(pixel_values[4], (191.0F / 255.0F - 0.5F) / 0.25F, 1e-6F,
+                "table_transformer green normalization");
+    check_close(pixel_values[8], (191.0F / 255.0F - 0.75F) / 0.125F, 1e-6F,
+                "table_transformer blue normalization");
+}
+
+void test_table_transformer_preprocess_rejects_resize_larger_than_engine_input() {
+    bool threw = false;
+    try {
+        const std::vector<float> pixels(3U * 2U * 2U, 0.0F);
+        trtmc::TableTransformerPreprocessConfig config;
+        config.longest_edge = 1333;
+        config.input_image_h = 2;
+        config.input_image_w = 2;
+        config.shortest_edge = 4;
+        config.longest_edge = 4;
+        config.image_mean = {0.0F, 0.0F, 0.0F};
+        config.image_std = {1.0F, 1.0F, 1.0F};
+        (void)trtmc::preprocess_table_transformer_image(pixels.data(), 2, 2, config);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check(threw, "table_transformer rejects a resize larger than the engine input");
+}
+
+void test_table_transformer_preprocess_rejects_padding_without_pixel_mask() {
+    bool threw = false;
+    try {
+        const std::vector<float> pixels(3U * 2U * 2U, 0.75F);
+        trtmc::TableTransformerPreprocessConfig config;
+        config.longest_edge = 1333;
+        config.input_image_h = 4;
+        config.input_image_w = 4;
+        config.shortest_edge = 2;
+        config.longest_edge = 2;
+        config.image_mean = {0.0F, 0.0F, 0.0F};
+        config.image_std = {1.0F, 1.0F, 1.0F};
+        (void)trtmc::preprocess_table_transformer_image(pixels.data(), 2, 2, config);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check(threw, "table_transformer rejects padding when pixel_mask is unavailable");
+}
+
+void test_table_transformer_preprocess_rejects_invalid_config() {
+    bool threw = false;
+    try {
+        const std::vector<float> pixels(12U, 0.0F);
+        trtmc::TableTransformerPreprocessConfig config;
+        config.longest_edge = 1333;
+        config.input_image_h = 2;
+        config.input_image_w = 2;
+        config.image_std = {0.5F, 0.0F, 0.125F};
+        (void)trtmc::preprocess_table_transformer_image(pixels.data(), 2, 2, config);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check(threw, "table_transformer rejects zero image std");
+}
+
+void test_table_transformer_dynamic_preprocess_preserves_actual_dimensions() {
+    trtmc::TableTransformerPreprocessConfig config;
+    config.longest_edge = 1333;
+    config.input_image_h = config.input_image_w = 1333;
+    config.dynamic_image_shapes = true;
+    const std::vector<float> pixels(3U * 600U * 900U, 0.75F);
+    try {
+        for (const auto shape : {trtmc::TableTransformerResizeShape{600, 900},
+                                 trtmc::TableTransformerResizeShape{900, 600},
+                                 trtmc::TableTransformerResizeShape{600, 600}}) {
+            const auto resized =
+                trtmc::compute_table_transformer_resize_shape(shape.height, shape.width, config);
+            const auto values = trtmc::preprocess_table_transformer_image(
+                pixels.data(), shape.height, shape.width, config);
+            check(values.size() == 3U * resized.height * resized.width,
+                  "dynamic Table Transformer uses the actual resized dimensions without padding");
+            check_close(values.front(), (191.0F / 255.0F - 0.485F) / 0.229F, 1e-5F,
+                        "dynamic Table Transformer preserves normalization");
+        }
+    } catch (const std::invalid_argument& error) {
+        std::cerr << error.what() << '\n';
+        check(false, "dynamic Table Transformer accepts landscape, portrait, and square images");
+    }
+    config.input_image_h = config.input_image_w = 799;
+    bool threw = false;
+    try {
+        (void)trtmc::preprocess_table_transformer_image(pixels.data(), 600, 600, config);
+    } catch (const std::invalid_argument&) {
+        threw = true;
+    }
+    check(threw, "dynamic Table Transformer still rejects images exceeding its profile capacity");
+}
+
+} // namespace
+
+int main() {
+    test_table_transformer_resize_preserves_short_edge_for_square_image();
+    test_table_transformer_resize_caps_longest_edge();
+    test_table_transformer_resize_rounds_half_ties_to_even();
+    test_table_transformer_resize_rounds_non_ties_to_nearest();
+    test_table_transformer_preprocess_fits_half_tie_engine_dimensions();
+    test_table_transformer_resize_shapes_for_square_engine();
+    test_table_transformer_preprocess_applies_normalization();
+    test_table_transformer_preprocess_rejects_invalid_config();
+    test_table_transformer_preprocess_rejects_resize_larger_than_engine_input();
+    test_table_transformer_preprocess_rejects_padding_without_pixel_mask();
+    test_table_transformer_dynamic_preprocess_preserves_actual_dimensions();
+
+    if (g_failures != 0) {
+        std::cerr << g_failures << " table_transformer preprocess test(s) failed\n";
+        return 1;
+    }
+    return 0;
+}

@@ -97,6 +97,16 @@ checkpoint and image hashes; they contain predictions, not model weights.
 The manual commands below remain the direct source-build path and show the
 operations performed by development mode.
 
+## Select native families
+
+CMake configures all discovered families by default. To configure one family,
+pass `-DTRTMC_BUILD_FAMILIES=qwen`; for several families, pass a quoted
+semicolon-separated list. An empty list, `-DTRTMC_BUILD_FAMILIES=""`, configures
+only the shared runtime, backends, applications, and their tests. This lets a
+CLI/backend-only build avoid unselected families' optional native prerequisites.
+Unknown family names fail configuration. Omitting the option or setting it to
+`*` preserves the default of configuring every family.
+
 ## Optional Edge-LLM Python tools
 
 After preparing the source-build prerequisites below, use CPython 3.12 to

@@ -6,9 +6,11 @@ from __future__ import annotations
 import inspect
 import io
 import json
+import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -18,6 +20,7 @@ import pytest
 import yaml
 
 from tools.ci.context import CiContext
+from tools.ci import environment as reference
 from tools.ci.container import CiContainer
 from tools.ci.docker_image import DockerImageManager
 from tools.ci.e2e import (
@@ -746,12 +749,83 @@ def test_internal_bridge_waits_for_the_exact_run_until_the_job_timeout() -> None
         "\n  publish:", 1
     )[0]
     assert "while true; do" in wait
-    assert "sleep 15" in wait
+    assert "poll_seconds=120" in wait and 'sleep "$poll_seconds"' in wait
     assert "seq " not in wait
     assert "gh run download" not in source
     assert "tools.public_failure" not in source
     assert "policy_sha" not in source
     assert "Protected failure details are not transferred to the public repository." in source
+
+
+def _run_bridge_wait(
+    tmp_path: Path, responses: list[str]
+) -> tuple[subprocess.CompletedProcess, list[str], Path]:
+    """Run the bridge wait step against a fake gh that answers the run polls with ``responses``."""
+    path = Path(__file__).resolve().parents[2] / ".github/workflows/internal-ci-bridge.yml"
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    script = next(
+        step["run"]
+        for step in workflow["jobs"]["dispatch"]["steps"]
+        if step["name"] == "Wait for the exact Internal CI result"
+    )
+    queue, calls, output = tmp_path / "responses", tmp_path / "calls", tmp_path / "output"
+    queue.write_text("".join(f"{response}\n" for response in responses), encoding="utf-8")
+    (tmp_path / "gh").write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "gh $*" >> "$CALLS"\n'
+        'if [[ "$*" == *" /rate_limit "* ]]; then echo $(( $(date +%s) + 300 )); exit 0; fi\n'
+        'next=$(head -n 1 "$RESPONSES")\n'
+        'tail -n +2 "$RESPONSES" > "$RESPONSES.rest" && mv "$RESPONSES.rest" "$RESPONSES"\n'
+        'case "$next" in\n'
+        '  rate) echo "gh: API rate limit exceeded for user ID 1." >&2; exit 1 ;;\n'
+        '  missing) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;\n'
+        '  *) echo "$next" ;;\n'
+        "esac\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "sleep").write_text(
+        '#!/usr/bin/env bash\necho "sleep $*" >> "$CALLS"\n', encoding="utf-8"
+    )
+    for fake in ("gh", "sleep"):
+        (tmp_path / fake).chmod(0o755)
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env={
+            **os.environ,
+            "PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}",
+            "CALLS": str(calls),
+            "RESPONSES": str(queue),
+            "RUN_ID": "7",
+            "PRIVATE_CI_OWNER": "owner",
+            "PRIVATE_CI_REPOSITORY": "repo",
+            "GITHUB_OUTPUT": str(output),
+            "RUNNER_TEMP": str(tmp_path),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    return result, calls.read_text(encoding="utf-8").splitlines(), output
+
+
+def test_internal_bridge_waits_out_a_rate_limit_instead_of_failing_the_gate(tmp_path: Path) -> None:
+    result, calls, output = _run_bridge_wait(
+        tmp_path,
+        ["rate", '{"status": "queued"}', '{"status": "completed", "conclusion": "success"}'],
+    )
+    assert result.returncode == 0, result.stderr
+    assert output.read_text(encoding="utf-8") == "conclusion=success\n"
+    assert "rate limit reached" in result.stdout
+    sleeps = [int(call.split()[1]) for call in calls if call.startswith("sleep ")]
+    # The first wait lasts until the token's reset instead of failing the gate.
+    assert len(sleeps) == 2 and 290 <= sleeps[0] <= 305
+    assert sleeps[1] == 120  # an ordinary poll
+
+
+def test_internal_bridge_still_fails_on_other_api_errors(tmp_path: Path) -> None:
+    result, calls, output = _run_bridge_wait(tmp_path, ["missing"])
+    assert result.returncode != 0 and "Not Found" in result.stderr
+    assert not output.exists() and not [call for call in calls if call.startswith("sleep ")]
 
 
 def test_internal_bridge_remains_a_one_shot_maintainer_label_trigger() -> None:
@@ -1463,3 +1537,124 @@ def test_wheel_validation_rejects_a_leaked_test_reference(tmp_path: Path) -> Non
     validator = WheelArchiveValidator(SimpleNamespace(repository=tmp_path))
     with pytest.raises(CiError, match="isolated test references are packaged"):
         validator.validate([wheel])
+
+
+def _reference_declaration(repository, value="isolated"):
+    tests = repository / "families/alpha/tests"
+    (tests / "manifests").mkdir(parents=True)
+    (tests / "manifests/case.json").write_text(json.dumps({"reference_environment": value}))
+    (tests / "requirements.txt").write_text("reference-probe==1.0\n")
+    return tests
+
+
+def _reference_wheel(directory):
+    directory.mkdir()
+    destination = directory / "reference_probe-1.0-py3-none-any.whl"
+    prefix = "reference_probe-1.0.dist-info/"
+    entries = {
+        "reference_probe.py": 'VALUE = "reference"\n',
+        prefix + "METADATA": "Metadata-Version: 2.1\nName: reference-probe\nVersion: 1.0\n",
+        prefix
+        + "WHEEL": "Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+    }
+    entries[prefix + "RECORD"] = "".join(name + ",,\n" for name in [*entries, prefix + "RECORD"])
+    with zipfile.ZipFile(destination, "w") as archive:
+        for name, contents in entries.items():
+            archive.writestr(name, contents)
+
+
+def test_reference_overrides_stay_local_and_base_packages_are_reused_offline(tmp_path, monkeypatch):
+    _reference_declaration(tmp_path)
+    base = tmp_path / "base-packages"
+    base.mkdir()
+    (base / "reference_probe.py").write_text('VALUE = "builder"\n')
+    (base / "shared_tensor_stack.py").write_text('VALUE = "reused"\n')
+    monkeypatch.setattr(reference, "_base_site_packages", lambda: [str(base)])
+    wheelhouse = tmp_path / "wheels"
+    _reference_wheel(wheelhouse)
+    environment = dict(os.environ, MODEL="alpha", PIP_NO_INDEX="1", PIP_FIND_LINKS=str(wheelhouse))
+    environment.pop("TRTMC_CI_STATE_DIR", None)
+    context = CiContext(tmp_path, environment)
+    reference.ReferenceEnvironment(context).prepare_selected()
+    python = reference.prepared_python(tmp_path, "alpha", environment)
+    output = subprocess.check_output(
+        [
+            str(python),
+            "-c",
+            "import reference_probe, shared_tensor_stack; print(reference_probe.VALUE, shared_tensor_stack.VALUE)",
+        ],
+        text=True,
+        env=dict(environment, HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", PIP_NO_INDEX="1"),
+    )
+    assert output.strip() == "reference reused"
+    builder = subprocess.check_output(
+        [sys.executable, "-c", "import reference_probe; print(reference_probe.VALUE)"],
+        text=True,
+        env=dict(environment, PYTHONPATH=str(base)),
+    )
+    assert builder.strip() == "builder"
+    assert python.parent.parent == tmp_path / ".ci/reference/alpha"
+    (tmp_path / "families/alpha/tests/requirements.txt").write_text("reference-probe==2.0\n")
+    with pytest.raises(CiError, match="stale"):
+        reference.prepared_python(tmp_path, "alpha", environment)
+
+
+def test_setup_prepares_only_the_selected_opted_in_family(tmp_path, monkeypatch):
+    _reference_declaration(tmp_path)
+    commands = []
+    context = CiContext(tmp_path, {"MODEL": "beta"})
+    monkeypatch.setattr(context, "run", lambda *args, **kwargs: commands.append(args))
+    reference.ReferenceEnvironment(context).prepare_selected()
+    context.env.pop("MODEL")
+    reference.ReferenceEnvironment(context).prepare_selected()
+    context.env["MODEL"] = "alpha"
+    (tmp_path / "families/alpha/tests/manifests/case.json").write_text("{}")
+    reference.ReferenceEnvironment(context).prepare_selected()
+    assert not commands
+
+
+@pytest.mark.parametrize("family", ["../alpha", "alpha/beta", "ALPHA", "alpha;true"])
+def test_invalid_family_is_rejected_before_running_commands(tmp_path, family):
+    with pytest.raises(CiError, match="Invalid reference family"):
+        reference.ReferenceEnvironment(CiContext(tmp_path, {"MODEL": family})).prepare_selected()
+
+
+def test_missing_requirements_fail_before_environment_creation(tmp_path):
+    tests = _reference_declaration(tmp_path)
+    (tests / "requirements.txt").unlink()
+    with pytest.raises(CiError, match="requirements are missing"):
+        reference.ReferenceEnvironment(CiContext(tmp_path, {"MODEL": "alpha"})).prepare_selected()
+    assert not (tmp_path / ".ci").exists()
+
+
+def test_failed_install_does_not_leave_a_ready_environment(tmp_path):
+    _reference_declaration(tmp_path)
+    directory = tmp_path / ".ci/reference/alpha"
+    directory.mkdir(parents=True)
+    (directory / "ready.json").write_text('{"requirements":"old"}')
+    context = CiContext(tmp_path, dict(os.environ, MODEL="alpha", PIP_NO_INDEX="1"))
+    with pytest.raises(CiError, match="Command failed"):
+        reference.ReferenceEnvironment(context).prepare_selected()
+    assert not (directory / "ready.json").exists()
+    with pytest.raises(CiError, match="not prepared"):
+        reference.prepared_python(tmp_path, "alpha", context.env)
+
+
+def test_family_selector_reaches_only_trusted_container_setup(tmp_path):
+    environment = {"TRTMC_CI_WORKSPACE": str(tmp_path), "TRTMC_CI_IMAGE": "base", "MODEL": "alpha"}
+    assert "MODEL=alpha" in CiContainer(environment)._environment_arguments()
+    assert (
+        "MODEL=alpha"
+        not in CiContainer(dict(environment, TRTMC_CI_HARDENED="true"))._environment_arguments()
+    )
+    pipeline = CiPipeline(CiContext(tmp_path, environment))
+    assert [name for name, _ in pipeline.stages["setup"]] == [
+        "Install and verify native wheel",
+        "Prepare isolated family reference",
+    ]
+
+
+def test_blank_state_override_keeps_reference_environment_under_ci(tmp_path):
+    assert reference.environment_directory(tmp_path, "alpha", {"TRTMC_CI_STATE_DIR": ""}) == (
+        tmp_path / ".ci/reference/alpha"
+    )

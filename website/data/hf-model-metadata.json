@@ -180,6 +180,17 @@
       "architecture_source": "model_index._class_name"
     },
     {
+      "hf_id": "gradium/phonon-31m-en",
+      "revision": "92741c5b07d085ff840e26fea8ce43110b87852f",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "gradium_phonon_tts",
+      "architectures": [
+        "GradiumPhononTTSForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "nvidia/gr00t17-lerobot-libero_spatial-640",
       "revision": "32a6ec786d6509df31b40392b4e4dcdda78c0f11",
       "revision_source": "resolved",
@@ -295,6 +306,17 @@
       "model_type": "qwen3",
       "architectures": [
         "Qwen3ForCausalLM"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "Qwen/Qwen3-ASR-0.6B-hf",
+      "revision": "7f1569a48a89f3e3f4dc3a5c9d28bddd903bc76c",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "qwen3_asr",
+      "architectures": [
+        "Qwen3ASRForConditionalGeneration"
       ],
       "architecture_source": "config.architectures"
     },
@@ -572,6 +594,17 @@
       "architecture_source": "model_index._class_name"
     },
     {
+      "hf_id": "black-forest-labs/FLUX.2-klein-base-4B",
+      "revision": "a3b4f4849157f664bdbc776fd7453c2783562f4d",
+      "revision_source": "declared",
+      "metadata_file": "model_index.json",
+      "model_type": null,
+      "architectures": [
+        "Flux2KleinPipeline"
+      ],
+      "architecture_source": "model_index._class_name"
+    },
+    {
       "hf_id": "bytedance-research/Lance",
       "revision": "7395315758865e6f56ab87ad06a88c7ac172f056",
       "revision_source": "declared",
@@ -715,6 +748,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "facebook/hubert-large-ls960-ft",
+      "revision": "ece5fabbf034c1073acae96d5401b25be96709d8",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "hubert",
+      "architectures": [
+        "HubertForCTC"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "facebook/nllb-200-distilled-600M",
       "revision": "f8d333a098d19b4fd9a8b18f94170487ad3f821d",
       "revision_source": "resolved",
@@ -847,6 +891,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "google/paligemma-3b-pt-224",
+      "revision": "35e4f46485b4d07967e7e9935bc3786aad50687c",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "paligemma",
+      "architectures": [
+        "PaliGemmaForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "google/siglip2-base-patch16-224",
       "revision": "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2",
       "revision_source": "resolved",
@@ -874,6 +929,17 @@
       "model_type": "granite",
       "architectures": [
         "GraniteForCausalLM"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "ibm-granite/granite-4.0-1b-speech",
+      "revision": "bd87ab862416353633ea431fe49b1614003623c5",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "granite_speech",
+      "architectures": [
+        "GraniteSpeechForConditionalGeneration"
       ],
       "architecture_source": "config.architectures"
     },
@@ -1284,6 +1350,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "openbmb/MiniCPM-OCR-1.0",
+      "revision": "883ca368d17335b9ce5aa6fef4d000ef0684fcaa",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "minicpm_ocr",
+      "architectures": [
+        "MiniCPMOcrForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "sentence-transformers/all-MiniLM-L6-v2",
       "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
       "revision_source": "resolved",
@@ -1357,6 +1434,17 @@
       "model_type": "bark",
       "architectures": [
         "BarkModel"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "swiss-ai/Apertus-8B-Instruct-2509",
+      "revision": "b946d40447b2b597999b9c86d44bee0b452c919f",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "apertus",
+      "architectures": [
+        "ApertusForCausalLM"
       ],
       "architecture_source": "config.architectures"
     },
@@ -1511,6 +1599,39 @@
       "model_type": "deepseek_v3",
       "architectures": [
         "DeepseekV3ForCausalLM"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "microsoft/table-transformer-structure-recognition",
+      "revision": "f4d4bdc85c3fe4b1fa49658882a5d38bbdd0f343",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "table-transformer",
+      "architectures": [
+        "TableTransformerForObjectDetection"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "lightonai/LightOnOCR-2-1B",
+      "revision": "be7c41313c30e940fe5571de59e5fabc779e00c8",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "mistral3",
+      "architectures": [
+        "LightOnOCRForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
+      "revision": "7b375e1b73b11138ff12fe22c8f2822d8fe03467",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "smolvlm",
+      "architectures": [
+        "SmolVLMForConditionalGeneration"
       ],
       "architecture_source": "config.architectures"
     }

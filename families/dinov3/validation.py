@@ -13,9 +13,9 @@ import numpy as np
 def _cosine(left, right) -> float:
     a = np.asarray(left, dtype=np.float64).reshape(-1)
     b = np.asarray(right, dtype=np.float64).reshape(-1)
-    assert a.shape == b.shape and a.size > 0
+    assert a.shape == b.shape and a.size > 0, f"cosine of shapes {a.shape} and {b.shape}"
     denominator = float(np.linalg.norm(a) * np.linalg.norm(b))
-    assert denominator > 0.0
+    assert denominator > 0.0, "cosine of an all-zero feature"
     return float(np.dot(a, b) / denominator)
 
 
@@ -34,12 +34,18 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
         actual["pooler_output_shape"]
     )
     expected_pooler = np.asarray(expected["pooler_output"], dtype=np.float64)
-    assert actual_hidden.shape == expected_hidden.shape
-    assert actual_pooler.shape == expected_pooler.shape
-    assert np.isfinite(actual_hidden).all() and np.isfinite(actual_pooler).all()
-    assert np.isfinite(expected_hidden).all() and np.isfinite(expected_pooler).all()
-    assert np.array_equal(actual_pooler, actual_hidden[:, 0, :])
-    assert np.array_equal(expected_pooler, expected_hidden[:, 0, :])
+    assert actual_hidden.shape == expected_hidden.shape, (
+        f"hidden-state shape {actual_hidden.shape} != reference {expected_hidden.shape}"
+    )
+    assert actual_pooler.shape == expected_pooler.shape, (
+        f"pooler shape {actual_pooler.shape} != reference {expected_pooler.shape}"
+    )
+    for side, hidden, pooler in (("candidate", actual_hidden, actual_pooler),
+                                 ("reference", expected_hidden, expected_pooler)):
+        bad = int(np.size(hidden) - np.count_nonzero(np.isfinite(hidden)))
+        bad += int(np.size(pooler) - np.count_nonzero(np.isfinite(pooler)))
+        assert bad == 0, f"{side} features have {bad} non-finite values"
+        assert np.array_equal(pooler, hidden[:, 0, :]), f"{side} pooler output is not its CLS token"
     _assert_at_least("full cosine", _cosine(actual_hidden, expected_hidden), thresholds, "full_cosine")
     _assert_at_least(
         "CLS cosine",
@@ -56,9 +62,13 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
         f"relative Frobenius error {float(relative_frobenius)!r} > {limit!r}"
     )
     register_count = int(expected["num_register_tokens"])
-    assert register_count == int(case["num_register_tokens"])
+    assert register_count == int(case["num_register_tokens"]), (
+        f"reference has {register_count} register tokens, the case expects {case['num_register_tokens']}"
+    )
     patch_start = 1 + register_count
-    assert 0 <= register_count and patch_start < actual_hidden.shape[1]
+    assert 0 <= register_count and patch_start < actual_hidden.shape[1], (
+        f"{register_count} register tokens leave no patch tokens in {actual_hidden.shape[1]}"
+    )
     if register_count:
         _assert_at_least(
             "register cosine",
@@ -68,7 +78,7 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
         )
     actual_patches = actual_hidden[:, patch_start:, :].reshape(-1, actual_hidden.shape[-1])
     expected_patches = expected_hidden[:, patch_start:, :].reshape(-1, expected_hidden.shape[-1])
-    assert actual_patches.shape[0] > 0 and expected_patches.shape[0] > 0
+    assert actual_patches.shape[0] > 0 and expected_patches.shape[0] > 0, "no patch tokens"
     denominators = np.linalg.norm(actual_patches, axis=1) * np.linalg.norm(expected_patches, axis=1)
     patch_cosines = np.divide(
         np.sum(actual_patches * expected_patches, axis=1),

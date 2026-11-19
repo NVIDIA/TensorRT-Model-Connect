@@ -12,6 +12,7 @@ from .e2e import E2ERunner
 from .package import WheelPackageManager
 from .process import CiError
 from .quality import ImpactAnalyzer, SourceQualityChecks, UnitTestRunner
+from .environment import ReferenceEnvironment
 
 
 class CiPipeline:
@@ -29,7 +30,13 @@ class CiPipeline:
                 ("Build native wheel", package.build),
                 ("Install and verify native wheel", package.install_once),
             ),
-            "setup": (("Install and verify native wheel", package.install_once),),
+            "setup": (
+                ("Install and verify native wheel", package.install_once),
+                (
+                    "Prepare isolated family reference",
+                    ReferenceEnvironment(context).prepare_selected,
+                ),
+            ),
             "selective-e2e": (("Run impacted family E2E", E2ERunner(context).selective),),
         }
 

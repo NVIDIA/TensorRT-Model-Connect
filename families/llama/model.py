@@ -71,7 +71,20 @@ def _build_engine(
     precision: str,
     verbose: bool,
     quant_ctx=None,
+    single_forward: bool = False,
 ) -> bytes:
+    if single_forward:
+        # Internal single forward pass: one full-sequence enqueue, without KV state.
+        if quant_ctx is not None or weights.get("_prepared_quantized", False) or config.raw.get("quantization_config"):
+            raise NotImplementedError("single forward requires unquantized weights")
+        rope = config.raw.get("rope_parameters") or config.raw.get("rope_scaling")
+        if rope:
+            kind = rope.get("rope_type", rope.get("type", "default"))
+            config.raw["rope_scaling"] = None if kind == "default" else rope
+        return build_dual_profile_decoder_engine(
+            config, weights, max_sequence_length, precision=precision, verbose=verbose,
+            profile_mode="prefill", single_forward=True,
+        )
     capability = native_kv_build_capability(
         config,
         precision=precision,

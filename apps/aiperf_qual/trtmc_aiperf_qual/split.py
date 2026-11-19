@@ -60,15 +60,68 @@ def host_models(assignment: Mapping[str, Any], host: str,
     return [selected[name] for name in lists[host]]
 
 
+# The packages whose versions every host must share: TensorRT, and the native reference's torch and transformers.
+PINNED_PACKAGES = ("tensorrt", "torch", "transformers")
+
+
+def pinned_versions(python: str) -> dict[str, str]:
+    """The interpreter's versions of PINNED_PACKAGES (from ``pip freeze``); {} when it cannot tell."""
+    import subprocess
+
+    try:
+        frozen = subprocess.run([python, "-m", "pip", "freeze", "--all"], capture_output=True, text=True,
+                                timeout=300, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    versions = {}
+    for line in frozen.splitlines():
+        name, separator, version = line.strip().partition("==")
+        name = name.lower().replace("_", "-")
+        if separator and name in PINNED_PACKAGES:
+            versions[name] = version
+    return versions
+
+
 def campaign_inputs(environment: Environment) -> dict[str, Any]:
-    """What every host must share: the harness, the serving and TRTMC code and runtime, and the resolved
-    dependencies of the harness and serving interpreters (families' own code is in each profile's run key)."""
+    """What every host must share: the harness, the serving and TRTMC sources, and the TensorRT, torch and
+    transformers versions of the harness and serving interpreters (families' own code is in each profile's run
+    key). ``informational`` records what may differ between hosts without stopping a merge: the built runtime
+    (a rebuild of the same sources need not be byte-identical) and the interpreters' other resolved dependencies."""
     code = code_digests(environment, {})
     code.pop("family", None)
+    runtime = code.pop("runtime", "")
     serve = str(environment.values.get("serve_python") or "")
+    serving = serve if serve and Path(serve).exists() else ""
     return {"harness": harness_digest(), "code": code,
-            "dependencies": {"harness": dependencies_digest(sys.executable),
-                             "serving": dependencies_digest(serve) if serve and Path(serve).exists() else ""}}
+            "versions": {"harness": pinned_versions(sys.executable),
+                         "serving": pinned_versions(serving) if serving else {}},
+            "informational": {"runtime": runtime,
+                              "dependencies": {"harness": dependencies_digest(sys.executable),
+                                               "serving": dependencies_digest(serving) if serving else ""}}}
+
+
+def required_inputs(inputs: Any) -> Any:
+    """The part of a root's campaign inputs that must match across hosts. Inputs recorded before the split into
+    required and informational parts are compared whole."""
+    if isinstance(inputs, Mapping) and "informational" in inputs:
+        return {key: value for key, value in inputs.items() if key != "informational"}
+    return inputs
+
+
+def informational_differences(roots: Sequence[Path]) -> list[str]:
+    """Which informational campaign inputs differ across ``roots`` (reported, never a merge problem)."""
+    seen: dict[str, set[str]] = {}
+    for root in roots:
+        plan = json.loads((root / PLAN).read_text()) if (root / PLAN).is_file() else {}
+        informational = (plan.get("inputs") or {}).get("informational") if isinstance(plan.get("inputs"), Mapping) else None
+        if not isinstance(informational, Mapping):
+            continue
+        for key, value in informational.items():
+            values = value.items() if isinstance(value, Mapping) else [("", value)]
+            for name, item in values:
+                seen.setdefault(f"{key}/{name}".rstrip("/"), set()).add(canonical(item))
+    return [f"the hosts' {name} differ (informational: TensorRT, torch, transformers and the sources match)"
+            for name, values in sorted(seen.items()) if len(values) > 1]
 
 
 def check_resume(out_root: Path, plan: Mapping[str, Any]) -> None:
@@ -127,7 +180,7 @@ def merge_check(assignment: Mapping[str, Any], roots: Sequence[Path], mode: str 
             problems.append(f"{root}: not run under this assignment ({plan.get('assignment')}, host {host})")
             continue
         seen_hosts.append(host)
-        inputs[str(root)] = canonical(plan.get("inputs"))
+        inputs[str(root)] = canonical(required_inputs(plan.get("inputs")))
         assigned = set(assignment["hosts"][host])
         for directory in sorted(path for path in root.iterdir() if path.is_dir() and not KEPT_ASIDE.search(path.name)):
             kind = _final(directory)
@@ -145,7 +198,8 @@ def merge_check(assignment: Mapping[str, Any], roots: Sequence[Path], mode: str 
         if seen_hosts.count(host) != 1:
             problems.append(f"host {host}: {seen_hosts.count(host)} result roots")
     if len(set(inputs.values())) > 1:
-        problems.append("the roots ran with different campaign inputs (harness, code, runtime, or dependencies)")
+        problems.append("the roots ran with different campaign inputs (harness, code, or the TensorRT, torch or "
+                        "transformers version)")
     for name in sorted(name for names in assignment["hosts"].values() for name in names):
         if name not in owner:
             problems.append(f"{name}: no {mode} result")

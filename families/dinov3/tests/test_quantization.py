@@ -444,11 +444,18 @@ def _build_pair(kind: str, weights, cfg, precision: str = "fp16"):
 @pytest.mark.parametrize("precision", ["fp16", "fp32"])
 @pytest.mark.parametrize("kind", ["vit", "convnext"])
 def test_quantized_engines_build_and_match_unquantized(kind, precision, request) -> None:
-    """The FP8 engine builds in the work precision, is smaller, finite, and tracks the base."""
+    """The FP8 engine builds in the work precision, is finite, and tracks the base.
+
+    In fp16 it is also smaller. With fp32 work tensors the builder may time a
+    higher-precision GEMM as faster for these toy shapes and fold the Dequantize
+    into its weights, so the FP8 plan is not reliably smaller there: one nightly
+    built a 797,636-byte FP8 ViT plan next to a 792,236-byte base plan.
+    """
     torch = pytest.importorskip("torch")
     weights, cfg = request.getfixturevalue(kind)
     plain, quant = _build_pair(kind, weights, cfg, precision)
-    assert len(quant) < len(plain)
+    if precision == "fp16":
+        assert len(quant) < len(plain)
     size = IMAGE if kind == "vit" else CONVNEXT_RAW["image_size"]
     pixels = torch.randn(1, 3, size, size, device="cuda")
     reference = _Engine(plain).run(torch, pixels)

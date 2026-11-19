@@ -7,8 +7,11 @@
 
 #include <memory>
 #include <napi.h>
+#include <optional>
 #include <string>
 #include <trtmc/task.h>
+#include <trtmc/text.hpp>
+#include <vector>
 
 class PipelineWrapper : public Napi::ObjectWrap<PipelineWrapper> {
   public:
@@ -20,4 +23,6 @@ class PipelineWrapper : public Napi::ObjectWrap<PipelineWrapper> {
     Napi::Value Generate(const Napi::CallbackInfo& info);
 
     std::unique_ptr<trtmc::ITask> task_;
+    std::optional<trtmc::TextContinuation> continuation_;
+    std::vector<trtmc::ConfigField> config_fields_;
 };

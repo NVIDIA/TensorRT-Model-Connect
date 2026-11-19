@@ -133,11 +133,15 @@ def near_capacity_request(environment: Environment, model: Mapping[str, Any], re
     return long, rendered_tokens(tokenizer, long)
 
 
+# The text generation Task under its legacy name and its Task SDK name (the migrated decoder LMs).
+TEXT_GENERATION_TASKS = frozenset({"text_generation", "text_continuation"})
+
+
 def near_capacity_applies(model: Mapping[str, Any], request: Mapping[str, Any]) -> bool:
     """The text generation Task's text-only requests (not vision-language models, whose image tokens share the
     bundle length) on a bundle long enough for a passage."""
     length = int(model["candidate"].get("max_sequence_length") or 0)
-    return (model.get("task") == "text_generation" and not any(key.startswith("image") for key in request)
+    return (model.get("task") in TEXT_GENERATION_TASKS and not any(key.startswith("image") for key in request)
             and length > 2 * NEAR_CAPACITY_NEW_TOKENS)
 
 
@@ -539,6 +543,19 @@ class _Phases:
                 if reset is not None:
                     reset()
         return None
+
+
+def reported_reference(reference: Mapping[str, Any], performance: Sequence[Mapping[str, Any]],
+                       accuracy: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """The report's native-reference summary. ``precision`` is the precision the native model ran at (as timed,
+    else as it answered the benchmarks, else the first it would be timed at); the configured fallback precision
+    is ``fallback_precision``, so a reader does not take the fallback for the precision that ran."""
+    ran = next((precision for precision in [*((item.get("reference") or {}).get("precision") for item in performance),
+                                            *((item.get("native") or {}).get("precision") for item in accuracy)]
+                if precision), None)
+    return {"backend": reference.get("backend"), "precision": ran or timing_precisions(reference)[0],
+            "fallback_precision": reference.get("precision"), "perf_precision": reference.get("perf_precision"),
+            "timing_precision": reference.get("timing_precision")}
 
 
 def timing_precisions(reference: Mapping[str, Any]) -> list[str]:
@@ -964,8 +981,7 @@ def _qualify(model: dict[str, Any], environment: Environment, out: Path) -> dict
               "performance_source": "quality" if dataset_only else "fixed",
               **({"accuracy_note": model["accuracy_note"]} if model.get("accuracy_note") else {}),
               **({"coverage": model["coverage"]} if model.get("coverage") else {}),
-              "reference": {key: reference.get(key) for key in ("backend", "precision", "perf_precision",
-                                                                 "timing_precision")},
+              "reference": reported_reference(reference, performance, accuracy),
               "reference_python": python, "duration_s": time.time() - started, "accuracy": accuracy,
               "performance": performance, "service_metrics": service_metrics,
               "errors": phases.errors,
