@@ -8,11 +8,13 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from functools import cache
 from pathlib import Path
 
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "bailing_hybrid"
 TASKS = frozenset({"text_continuation"})
@@ -92,6 +94,46 @@ def _required_path(value: str | None, label: str) -> Path:
     return path
 
 
+@cache
+def _native_test_binary(name: str) -> Path:
+    """Build source-only helpers in the configured native test tree."""
+    build_dir = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    subprocess.run(
+        ["cmake", "--build", str(build_dir), "--parallel", "2", "--target", name],
+        check=True,
+        timeout=600,
+    )
+    return _required_path(str(build_dir / name), name)
+
+
+def _record_comparison(tmp_path, label, native, reference, checks):
+    """Retain the output pair and the result of already enforced comparisons."""
+    if not evidence_enabled():
+        return
+    import numpy as np
+
+    paths = []
+    for role, value in (("native", native), ("reference", reference)):
+        if isinstance(value, np.ndarray):
+            path = tmp_path / f"{label}-{role}.npz"
+            np.savez_compressed(path, output=value)
+        else:
+            path = tmp_path / f"{label}-{role}.json"
+            path.write_text(json.dumps(value, ensure_ascii=False) + "\n", encoding="utf-8")
+        paths.append(path)
+    record_evidence(
+        "reference_comparison",
+        {
+            "label": label,
+            "scope": "independent_reference",
+            "enforced": True,
+            "native": paths[0],
+            "reference": paths[1],
+            "checks": [dict(check, scope="independent_reference") for check in checks],
+        },
+    )
+
+
 def _model_dir(manifest: dict) -> Path:
     explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
     if explicit:
@@ -142,31 +184,62 @@ def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
 
 
 def test_official_checkpoint_e2e(case_name, tmp_path):
+    _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {
+            key: value
+            for key, value in case.items()
+            if any(
+                word in key
+                for word in ("error", "cosine", "atol", "rtol", "snr", "rmse", "max_abs")
+            )
+        },
+    )
+    for asset_key in ("image", "test_image", "audio"):
+        if asset_key in case:
+            for asset_path in (TEST_ROOT / case[asset_key], TEST_ROOT / "data" / case[asset_key]):
+                if asset_path.is_file():
+                    record_evidence("inputs", {asset_key: asset_path})
+                    break
     import gc
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
     _, manifest, case = CASES[case_name]
-    directory = _model_dir(manifest)
+    with evidence_stage("checkpoint"):
+        directory = _model_dir(manifest)
     _, runtime_root = _runtime()
-    runner = runtime_root / "test_bailing_hybrid_runtime"
-    assert runner.is_file()
+    runner = _native_test_binary("test_bailing_hybrid_runtime")
+    with evidence_stage("comparison"):
+        assert runner.is_file()
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    tokenizer = AutoTokenizer.from_pretrained(directory)
+    with evidence_stage("reference"):
+        tokenizer = AutoTokenizer.from_pretrained(directory)
     # Recompute each prefix in the pinned official model. This checks the
     # native KDA recurrence against the full-prefix official recurrent kernel.
-    reference = AutoModelForCausalLM.from_pretrained(
-        directory,
-        dtype=torch.float32,
-        device_map={"": "cuda:0"},
-        trust_remote_code=True,
-        attn_implementation="eager",
-    ).eval()
+    with evidence_stage("reference"):
+        reference = AutoModelForCausalLM.from_pretrained(
+            directory,
+            dtype=torch.float32,
+            device_map={"": "cuda:0"},
+            trust_remote_code=True,
+            attn_implementation="eager",
+        ).eval()
     expected = []
     for prompt in case["prompts"]:
         inputs = tokenizer(prompt, return_tensors="pt", return_token_type_ids=False).to("cuda")
-        with torch.no_grad():
+        with evidence_stage("reference"), torch.no_grad():
             generated = reference.generate(
                 **inputs, do_sample=False, use_cache=False, max_new_tokens=case["max_new_tokens"]
             )
@@ -177,24 +250,58 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     gc.collect()
     torch.cuda.empty_cache()
     bundle = tmp_path / manifest["bundle"]
-    _build(directory, bundle, manifest)
+    with evidence_stage("build"):
+        _build(directory, bundle, manifest)
+    record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
     gc.collect()
     torch.cuda.empty_cache()
     requests = [
         {"prompt": prompt, "max_new_tokens": case["max_new_tokens"]} for prompt in case["prompts"]
     ]
-    completed = subprocess.run(
-        [str(runner), str(bundle), str(runtime_root)],
-        input=json.dumps(requests),
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=case.get("runtime_timeout_s", 3600),
+    with evidence_stage("runtime"):
+        completed = subprocess.run(
+            [str(runner), str(bundle), str(runtime_root)],
+            input=json.dumps(requests),
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=case.get("runtime_timeout_s", 3600),
+        )
+    record_evidence(
+        "runtime_process",
+        {
+            "argv": completed.args,
+            "returncode": completed.returncode,
+            "stdout": (completed.stdout or "")[-4096:],
+            "stderr": (completed.stderr or "")[-16384:],
+        },
     )
-    assert completed.returncode == 0, completed.stderr + completed.stdout
+    with evidence_stage("comparison"):
+        assert completed.returncode == 0, completed.stderr + completed.stdout
     payload = json.loads(completed.stdout.splitlines()[-1])
-    assert payload == expected
-    assert all(item["text"].strip() for item in payload)
+    record_evidence("inputs", {"requests": requests})
+    record_evidence("thresholds", {"tokens_and_text": "exact equality for every prompt"})
+    record_evidence("native", {"generations": payload})
+    record_evidence("reference", {"mode": "hf_transformers", "generations": expected})
+    with evidence_stage("comparison"):
+        assert payload == expected
+    with evidence_stage("comparison"):
+        assert all(item["text"].strip() for item in payload)
+    _record_comparison(
+        tmp_path,
+        "greedy-generations",
+        payload,
+        expected,
+        [
+            {
+                "name": "generation_mismatch",
+                "actual": int(payload != expected),
+                "operator": "==",
+                "expected": 0,
+                "passed": payload == expected,
+            },
+        ],
+    )
     print(f"Ling3 exact native greedy generations: {payload!r}", flush=True)
 
 

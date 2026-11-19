@@ -7,3 +7,4 @@ def test_bailing_hybrid_checkpoint_has_one_owner():
     family, support = resolve_family(ModelMetadata({"model_type": "bailing_hybrid"}, {}))
     assert family == "bailing_hybrid"
     assert support.tasks == ("text_continuation",)
+    assert support.default_task == "text_continuation"

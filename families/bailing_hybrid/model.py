@@ -362,6 +362,8 @@ class Graph:
 def build(request, writer):
     if request.task != "text_continuation" or request.backend != "trt":
         raise ValueError("Ling3 requires text_continuation with backend=trt")
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("bailing_hybrid does not support dynamic_kv_cache")
     if (
         request.precision != "fp32"
         or request.tensor_parallel_size != 1

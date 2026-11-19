@@ -185,8 +185,10 @@ class Pipeline final : public internal::IModel, public internal::ITextContinuati
 } // namespace trtmc::bailing_hybrid
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("bailing_hybrid does not support --kv-cache-size");
     using namespace trtmc;
-    if (context.kv_cache_size_bytes || context.reader.info().task != "text_continuation")
+    if (context.reader.info().task != "text_continuation")
         throw std::invalid_argument(
             "Ling3 uses a family-owned fixed KV profile for text continuation");
     const auto raw = bailing_hybrid::section(context.reader, "runtime.json");
