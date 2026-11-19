@@ -105,8 +105,15 @@ BF16. Latents stay in FP32 between steps.
 ## Numerical behaviour
 
 The sampler amplifies rounding differences, so two BF16 implementations of this model do not produce the same
-pixels, and neither does the reference in BF16 and FP32. Measured on twelve prompt / seed pairs at 512 x 512 and 20
-steps (PSNR of the decoded images, minimum / median / maximum):
+pixels, and neither does the reference in BF16 and FP32.
+
+### One-time precision study
+
+The numbers of this subsection were measured once, when the family was added: on an NVIDIA GB200 with TensorRT
+11.4, with scripts that are not part of the repository, on the first revision of the family. No test repeats them.
+They describe the engine graphs and the sampler, which that revision and this directory build alike.
+
+Twelve prompt / seed pairs at 512 x 512 and 20 steps (PSNR of the decoded images, minimum / median / maximum):
 
 | Pair | No guidance | Guidance scale 4 |
 | --- | --- | --- |
@@ -119,22 +126,29 @@ equally far from the reference FP32 module (about 1.1 % relative error each). Bu
 match the reference FP32 modules to 1e-5 per denoiser call and the sampled image to 81 dB (68 dB at guidance
 scale 4).
 
+### E2E cases
+
 The family E2E therefore bounds drift rather than asking for equal pixels (PSNR at least 20 dB, windowed SSIM at
 least 0.90, layout correlation at least 0.95), and uses prompts and seeds on which the reference agrees with itself
 across precisions. Every image is compared at the 8 bits per channel of the PNG the CLI writes; the SDK images and
-the reference are float pixels and are rounded the same way first. Its cases, native image against the reference
-BF16 run, measured on an NVIDIA B300 with TensorRT 11.4:
+the reference are float pixels and are rounded the same way first. The layout correlation is the correlation of
+the two images' 32 x 32 pixel block means, each colour channel around its own mean, so that it measures where an
+image is light and dark and not the overall colour the two share.
 
-| Case | PSNR | Windowed SSIM | Layout correlation | Reference BF16 against reference FP32 |
-| --- | --- | --- | --- | --- |
-| `qwen-image-2.1-l0` (512 x 512, 20 steps) | 29.2 dB | 0.985 | 0.9952 | 34.8 dB |
-| `qwen-image-2.1-l0-cfg` (same, guidance scale 4) | 29.3 dB | 0.980 | 0.9991 | 33.3 dB |
-| `qwen-image-2.1` (1024 x 1024, 40 steps) | 41.1 dB | 0.992 | 0.9995 | 38.5 dB |
+The E2E measures these values on every run. Native image against the reference BF16 run, on an NVIDIA B300 with
+TensorRT 11.4 and the tests of this revision:
 
-The last column was measured on an NVIDIA GB200. Rebuilding the engines on one GPU reproduces its numbers to
-0.01 dB. Another GPU model can select other kernels and land elsewhere in the spread above: the GB200 scored 28.2,
-29.7 and 36.5 dB on these cases, against the reference before rounding. Rounding the reference moves the PSNR of
-these cases by 0.00 to 0.15 dB; the largest shift belongs to the image with the largest flat area.
+| Case | PSNR | Windowed SSIM | Layout correlation |
+| --- | --- | --- | --- |
+| `qwen-image-2.1-l0` (512 x 512, 20 steps) | 29.2 dB | 0.985 | 0.9952 |
+| `qwen-image-2.1-l0-cfg` (same, guidance scale 4) | 29.3 dB | 0.980 | 0.9992 |
+| `qwen-image-2.1` (1024 x 1024, 40 steps) | 41.1 dB | 0.992 | 0.9994 |
+
+For the prompts and seeds of these cases, the one-time study measured the reference BF16 run 34.8, 33.3 and
+38.5 dB from the reference FP32 run. Rebuilding the engines on one GPU reproduces the PSNR to 0.01 dB. Another GPU
+model can select other kernels and land elsewhere in the spread of the study: on the GB200, the E2E of the family's
+first revision scored 28.2, 29.7 and 36.5 dB, against the reference before rounding. Rounding the reference moves
+the PSNR of these cases by 0.00 to 0.15 dB; the largest shift belongs to the image with the largest flat area.
 
 ## Not supported
 

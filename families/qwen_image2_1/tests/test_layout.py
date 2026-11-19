@@ -26,7 +26,12 @@ from families.qwen_image2_1.bundle_config import (
     scheduler_settings,
 )
 from families.qwen_image2_1.resample import shortcut_channels
-from families.qwen_image2_1.tests.image_checks import png_levels, spatial_std, to_png_bytes
+from families.qwen_image2_1.tests.image_checks import (
+    layout_correlation,
+    png_levels,
+    spatial_std,
+    to_png_bytes,
+)
 
 AXES = (16, 56, 56)
 
@@ -392,3 +397,50 @@ def test_png_levels_are_the_pixels_a_png_reads_back() -> None:
     # An image that already went through a PNG is left as it is.
     np.testing.assert_array_equal(png_levels(levels), levels)
     np.testing.assert_array_equal(to_png_bytes(levels), stored)
+
+
+@pytest.mark.parametrize("value", [np.nan, np.inf, -np.inf])
+def test_an_image_with_non_finite_pixels_has_no_png_values(value: float) -> None:
+    image = np.full((2, 2, 4), 0.5, dtype=np.float32)
+    image[1, 0, 2] = value
+    with pytest.raises(ValueError, match="NaN or infinite pixels"):
+        to_png_bytes(image)
+    with pytest.raises(ValueError, match="NaN or infinite pixels"):
+        png_levels(image)
+
+
+def _bands(offsets: np.ndarray, colour: tuple[int, int, int]) -> np.ndarray:
+    """A 512 x 512 RGB image of sixteen vertical bands, 32 pixels wide: ``colour + offset``."""
+    levels = np.asarray(colour, dtype=np.float64)[None, :] + offsets[:, None]
+    return np.broadcast_to(np.repeat(levels, 32, axis=0)[None, :, :], (512, 512, 3)) / 255.0
+
+
+def test_layout_correlation_measures_the_layout_not_the_overall_colour() -> None:
+    offsets = np.arange(-15.0, 16.0, 2.0)
+    colour = (204, 51, 26)
+    reference = _bands(offsets, colour)
+    assert layout_correlation(reference, reference, 32) == pytest.approx(1.0)
+    # The same bands on another colour: the layout is the same.
+    assert layout_correlation(_bands(offsets, (40, 90, 200)), reference, 32) == pytest.approx(1.0)
+
+    # Every channel's bands in the opposite order. The two images share their colour, and the
+    # channels' averages are 76 to 178 levels apart while the bands span 30: around one mean
+    # for all channels the block means would correlate to 0.97, above the E2E limit of 0.95.
+    mirrored = _bands(-offsets, colour)
+    around_one_mean = np.corrcoef(
+        mirrored.reshape(16, 32, 16, 32, 3).mean(axis=(1, 3)).reshape(-1),
+        reference.reshape(16, 32, 16, 32, 3).mean(axis=(1, 3)).reshape(-1),
+    )[0, 1]
+    assert around_one_mean == pytest.approx(0.973, abs=0.001)
+    assert layout_correlation(mirrored, reference, 32) == pytest.approx(-1.0)
+
+    # Half of the bands in place, half mirrored: far below the limit as well.
+    mixed = _bands(np.concatenate([offsets[:8], -offsets[8:]]), colour)
+    assert layout_correlation(mixed, reference, 32) < 0.5
+
+
+def test_layout_correlation_of_flat_block_means_is_zero() -> None:
+    flat = np.full((64, 64, 3), 0.25)
+    textured = _bands(np.arange(-15.0, 16.0, 2.0), (128, 128, 128))[:64, :64]
+    assert layout_correlation(flat, flat, 32) == 0.0
+    assert layout_correlation(flat, textured, 32) == 0.0

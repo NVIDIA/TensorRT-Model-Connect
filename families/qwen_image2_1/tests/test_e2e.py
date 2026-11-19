@@ -23,7 +23,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from families.qwen_image2_1.tests.image_checks import png_levels, spatial_std, to_png_bytes
+from families.qwen_image2_1.tests.image_checks import (
+    layout_correlation,
+    png_levels,
+    spatial_std,
+    to_png_bytes,
+)
 from tensorrt_model_connect import BuildRequest, build
 from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
@@ -42,7 +47,7 @@ SDK_LANGUAGES = ("c", "cpp")
 # pipeline's own BF16 and FP32 runs are 25-38 dB PSNR apart without guidance and 23-33 dB apart at
 # guidance scale 4; the native image is 20-39 dB and 17-29 dB from the official BF16 run. A wrong
 # graph or sampler lands far below both ranges: ignoring the guidance scale, for instance, scores
-# 10 dB, a windowed SSIM of 0.68 and a layout correlation of 0.70.
+# 10 dB and a windowed SSIM of 0.68.
 #
 # The limits therefore bound drift, not bit equality: same composition (block means), same local
 # structure (windowed SSIM), same pixels within the PSNR floor. Exactness of the graphs is
@@ -433,16 +438,6 @@ def _official_reference(
     return image
 
 
-def _block_means(image: np.ndarray, block: int) -> np.ndarray:
-    height = image.shape[0] // block * block
-    width = image.shape[1] // block * block
-    return (
-        image[:height, :width]
-        .reshape(height // block, block, width // block, block, image.shape[2])
-        .mean(axis=(1, 3))
-    )
-
-
 def _windowed_ssim(actual: np.ndarray, expected: np.ndarray, window: int) -> float:
     """Mean SSIM of the luminance over non-overlapping ``window`` x ``window`` tiles."""
 
@@ -477,17 +472,10 @@ def _metrics(actual: np.ndarray, expected: np.ndarray, block: int, window: int) 
     mse = float(np.mean((rgb_actual - rgb_expected) ** 2))
     psnr = float("inf") if mse == 0 else float(10.0 * np.log10(1.0 / mse))
     ssim = _windowed_ssim(rgb_actual, rgb_expected, window)
-    low_actual = _block_means(rgb_actual, block)
-    low_expected = _block_means(rgb_expected, block)
-    low_actual = (low_actual - low_actual.mean()).reshape(-1)
-    low_expected = (low_expected - low_expected.mean()).reshape(-1)
-    denominator = float(np.linalg.norm(low_actual) * np.linalg.norm(low_expected))
     return {
         "psnr_db": psnr,
         "ssim": ssim,
-        "layout_correlation": float(np.dot(low_actual, low_expected) / denominator)
-        if denominator > 0
-        else 0.0,
+        "layout_correlation": layout_correlation(rgb_actual, rgb_expected, block),
         "alpha_mean_abs_error": float(np.mean(np.abs(actual[..., 3] - expected[..., 3]))),
         "actual_std": spatial_std(rgb_actual),
         "expected_std": spatial_std(rgb_expected),
@@ -602,6 +590,7 @@ def _assert_parity(
     assert actual.shape == expected.shape, f"{label}: {actual.shape} vs {expected.shape}"
     assert actual.shape[2] == IMAGE_CHANNELS
     assert np.isfinite(actual).all() and actual.min() >= 0.0 and actual.max() <= 1.0
+    assert np.isfinite(expected).all(), f"{label}: the reference image has NaN or infinite pixels"
     metrics = _metrics(
         png_levels(actual),
         png_levels(expected),
