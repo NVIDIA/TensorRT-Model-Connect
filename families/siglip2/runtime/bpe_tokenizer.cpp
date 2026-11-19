@@ -77,7 +77,8 @@ inline std::string utf32_to_utf8(char32_t cp) {
     return r;
 }
 
-// Read one UTF-8 codepoint from raw bytes, advance ptr. Returns 0xFFFD on error.
+// Read one UTF-8 codepoint from raw bytes, advance ptr. Returns 0xFFFD on error. The bounds
+// are checked on the remaining length, so no pointer past the end of the text is formed.
 inline char32_t read_utf8(const char*& p, const char* end) {
     if (p >= end)
         return 0xFFFD;
@@ -86,20 +87,20 @@ inline char32_t read_utf8(const char*& p, const char* end) {
         ++p;
         return c;
     }
-    if ((c & 0xE0) == 0xC0 && p + 1 < end) {
+    if ((c & 0xE0) == 0xC0 && end - p > 1) {
         char32_t cp =
             (static_cast<char32_t>(c & 0x1F) << 6) | (static_cast<unsigned char>(p[1]) & 0x3F);
         p += 2;
         return cp;
     }
-    if ((c & 0xF0) == 0xE0 && p + 2 < end) {
+    if ((c & 0xF0) == 0xE0 && end - p > 2) {
         char32_t cp = (static_cast<char32_t>(c & 0x0F) << 12) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[1]) & 0x3F) << 6) |
                       (static_cast<unsigned char>(p[2]) & 0x3F);
         p += 3;
         return cp;
     }
-    if ((c & 0xF8) == 0xF0 && p + 3 < end) {
+    if ((c & 0xF8) == 0xF0 && end - p > 3) {
         char32_t cp = (static_cast<char32_t>(c & 0x07) << 18) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[1]) & 0x3F) << 12) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[2]) & 0x3F) << 6) |

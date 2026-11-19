@@ -12,6 +12,7 @@
 // out.bin: int32 grid_height, int32 grid_width, float32 pixel_values, float32 taps.
 
 #include "families/siglip2/runtime/naflex_preprocess.h"
+#include "families/siglip2/tests/cpp/preprocess_dump_io.h"
 
 #include <cstdint>
 #include <fstream>
@@ -44,15 +45,7 @@ int main(int argc, char** argv) {
             rgb[index] = static_cast<float>(bytes[index]) / 255.0F;
 
         const auto patches = trtmc::preprocess_siglip2_image(rgb.data(), height, width, config);
-        std::ofstream output(argv[13], std::ios::binary);
-        output.write(reinterpret_cast<const char*>(&patches.grid_height), sizeof(std::int32_t));
-        output.write(reinterpret_cast<const char*>(&patches.grid_width), sizeof(std::int32_t));
-        output.write(reinterpret_cast<const char*>(patches.pixel_values.data()),
-                     static_cast<std::streamsize>(patches.pixel_values.size() * sizeof(float)));
-        output.write(reinterpret_cast<const char*>(patches.position_weights.data()),
-                     static_cast<std::streamsize>(patches.position_weights.size() * sizeof(float)));
-        if (!output)
-            throw std::runtime_error("could not write the output file");
+        trtmc::write_siglip2_preprocess_dump(argv[13], patches);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

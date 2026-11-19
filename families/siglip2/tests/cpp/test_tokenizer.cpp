@@ -32,7 +32,8 @@ int main() {
                        {"type":"ByteFallback"},{"type":"Fuse"}]},
           "model":{"type":"BPE","byte_fallback":true,"fuse_unk":true,"unk_token":"<unk>",
                    "vocab":{"<pad>":0,"<eos>":1,"<bos>":2,"<unk>":3,"▁":4,"a":5,"b":6,
-                            "ab":7,"▁ab":8,"<0xC3>":9,"<0xA9>":10,"A":11},
+                            "ab":7,"▁ab":8,"<0xC3>":9,"<0xA9>":10,"A":11,
+                            "<0xE2>":12,"<0x82>":13,"<0xF0>":14,"<0x9F>":15},
                    "merges":[["a","b"],["▁","ab"]]}
         })";
         const auto tokenizer = trtmc::CreateSiglip2Tokenizer(json.data(), json.size(), true);
@@ -52,6 +53,26 @@ int main() {
         // An added token in the text is matched as itself.
         if (tokenizer->encode("a<eos>") != std::vector<int32_t>{5, 1, 1})
             throw std::runtime_error("added token mismatch");
+        // A prompt that ends inside a multi-byte sequence keeps the per-byte fallback, and the
+        // reader does not step past the end of the text to find that out.
+        std::string failures;
+        const auto expect = [&](const std::string& text, const std::vector<int32_t>& ids,
+                                const char* what) {
+            const auto got = tokenizer->encode(text);
+            if (got != ids) {
+                failures += std::string(what) + ": got";
+                for (const auto id : got)
+                    failures += " " + std::to_string(id);
+                failures += "\n";
+            }
+        };
+        expect("a\xc3", {5, 9, 1}, "truncated two-byte sequence");
+        expect("a\xe2\x82", {5, 12, 13, 1}, "truncated three-byte sequence");
+        expect("a\xe2", {5, 12, 1}, "three-byte lead at the end");
+        expect("a\xf0\x9f", {5, 14, 15, 1}, "truncated four-byte sequence");
+        expect("a\xf0", {5, 14, 1}, "four-byte lead at the end");
+        if (!failures.empty())
+            throw std::runtime_error(failures);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

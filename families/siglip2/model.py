@@ -131,6 +131,12 @@ def _tokenizer_contract(model_dir: Path) -> int:
     if template[1]["SpecialToken"].get("id") != eos_token:
         raise NotImplementedError("siglip2 tokenizer template must append the end token")
     _token_id(tokenizer, eos_token)
+    # The runtime resolves template tokens only among the added tokens marked special; an
+    # end token that is not marked would be dropped from every prompt.
+    if not any(entry.get("content") == eos_token and entry.get("special") is True
+               for entry in tokenizer.get("added_tokens", [])):
+        raise NotImplementedError(
+            "siglip2 tokenizer must register its end token as a special token")
     return _token_id(tokenizer, _named_token(tokenizer_config, "pad_token"))
 
 

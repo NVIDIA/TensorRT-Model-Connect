@@ -8,6 +8,7 @@
 // antialiased bilinear interpolation of the position table.
 
 #include "families/siglip2/runtime/naflex_preprocess.h"
+#include "families/siglip2/tests/cpp/preprocess_dump_io.h"
 
 #include <cmath>
 #include <cstdint>
@@ -685,6 +686,25 @@ void test_rejections() {
 
 } // namespace
 
+// A dump smaller than the stream buffer reaches the file only when the stream is closed; a
+// failure there (here: a full device) must still be reported, or the E2E would read a short file.
+void test_dump_reports_a_failed_final_write() {
+    if (!std::ifstream("/dev/full").good())
+        return;
+    trtmc::Siglip2Patches patches;
+    patches.grid_height = 1;
+    patches.grid_width = 1;
+    patches.pixel_values.assign(16 * 16 * 3, 0.5F);
+    patches.position_weights.assign(16 * 16, 1.0F / 256.0F);
+    bool reported = false;
+    try {
+        trtmc::write_siglip2_preprocess_dump("/dev/full", patches);
+    } catch (const std::runtime_error&) {
+        reported = true;
+    }
+    require(reported, "a dump written to a full device was not reported");
+}
+
 int main() {
     try {
         test_target_sizes();
@@ -692,6 +712,7 @@ int main() {
         test_axis_taps();
         test_patch_layout_and_normalisation();
         test_rejections();
+        test_dump_reports_a_failed_final_write();
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

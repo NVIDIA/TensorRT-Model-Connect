@@ -42,7 +42,8 @@ _PREPROCESSOR = {
 }
 
 _TOKENIZER = {
-    "added_tokens": [{"id": 0, "content": "<pad>"}, {"id": 1, "content": "<eos>"}],
+    "added_tokens": [{"id": 0, "content": "<pad>", "special": True},
+                     {"id": 1, "content": "<eos>", "special": True}],
     "normalizer": {"type": "Replace", "pattern": {"String": " "}, "content": "▁"},
     "pre_tokenizer": None,
     "post_processor": {"type": "TemplateProcessing",
@@ -187,6 +188,8 @@ def test_the_tokenizer_contract_returns_the_pad_id(tmp_path: Path) -> None:
                              "single": [{"SpecialToken": {"id": "<bos>"}},
                                         {"Sequence": {"id": "A"}}]}}, "one end token"),
         ({"model": {"type": "Unigram", "vocab": []}}, "byte-fallback BPE"),
+        ({"added_tokens": [{"id": 0, "content": "<pad>", "special": True},
+                          {"id": 1, "content": "<eos>"}]}, "special token"),
     ],
 )
 def test_tokenizers_the_runtime_would_tokenise_differently_are_refused(
