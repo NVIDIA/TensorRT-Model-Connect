@@ -10,7 +10,9 @@ same noise: the family's documented noise stream (seeded by ``--seed``) is
 injected into the reference's diffusion and voice-prompt sampling. The oracle
 compares the two syntheses frame by frame and transcribes the native audio
 with the declared Whisper checkpoint; the family's C and C++ SDK consumers
-then synthesize from the same bundle.
+then synthesize from the same bundle. With ``TRTMC_E2E_ARTIFACT_DIR`` set, the
+evidence report shows the script, the voice prompt, the native and reference
+audio, the transcript and every check as a ``reference_comparison``.
 """
 
 from __future__ import annotations
@@ -237,7 +239,7 @@ def _generate(
         command, check=True, capture_output=True, text=True, env=env, timeout=3600
     )
     record_evidence("commands", {"argv": command})
-    record_evidence("native", {"stdout": completed.stdout, "stderr": completed.stderr[-4000:]})
+    record_evidence("native_run", {"stdout": completed.stdout, "stderr": completed.stderr[-4000:]})
     payload = [
         json.loads(line[line.find("{") :]) for line in completed.stdout.splitlines() if "{" in line
     ][-1]
@@ -251,6 +253,14 @@ def _read_audio(path: Path) -> np.ndarray:
     samples, rate = sf.read(path, dtype="float32", always_2d=False)
     assert rate == 24000 and np.asarray(samples).ndim == 1
     return np.asarray(samples, dtype=np.float32)
+
+
+def _write_audio(path: Path, samples: np.ndarray) -> Path:
+    """Float32 24 kHz mono WAV, the format the native CLI writes."""
+    import soundfile as sf
+
+    sf.write(path, np.asarray(samples, dtype=np.float32), 24000, subtype="FLOAT")
+    return path
 
 
 def _turns(text: str) -> list[tuple[int, str]]:
@@ -428,6 +438,31 @@ def _frame_snr_db(actual: np.ndarray, expected: np.ndarray, frames: int) -> list
     ]
 
 
+# Identical audio has an infinite SNR; the evidence report needs finite numbers.
+_SNR_RECORD_CAP_DB = 300.0
+
+
+def _recorded_db(value: float) -> float:
+    return min(float(value), _SNR_RECORD_CAP_DB)
+
+
+def _check(name: str, label: str, scope: str, actual, operator: str, expected) -> dict:
+    passed = {
+        "==": actual == expected,
+        ">=": actual >= expected,
+        "<=": actual <= expected,
+    }[operator]
+    return {
+        "name": name,
+        "label": label,
+        "scope": scope,
+        "actual": actual,
+        "operator": operator,
+        "expected": expected,
+        "passed": bool(passed),
+    }
+
+
 def _assert_contract(
     native: np.ndarray,
     references: dict[str, np.ndarray],
@@ -435,14 +470,24 @@ def _assert_contract(
     manifest: dict,
     thresholds: dict,
     *,
+    records: tuple[dict, dict],
     truncated: bool = False,
 ) -> dict:
+    """Compare the native synthesis with the reference and record every check.
+
+    ``records`` are the evidence records of the native and the reference
+    synthesis (with their audio files); the transcripts are added to them.
+    Every value is computed before the first assertion, so the evidence report
+    shows the whole comparison even when a check fails.
+    """
+    native_record, reference_record = records
     assert native.size > 0 and native.size % 3200 == 0 and np.isfinite(native).all()
-    assert float(np.sqrt(np.mean(native**2))) >= thresholds["min_rms"]
-    expected = references[manifest["precision"]]
+    precision = manifest["precision"]
+    expected = references[precision]
+    rms = float(np.sqrt(np.mean(native**2)))
     report = {"native_frames": native.size // 3200, "reference_frames": expected.size // 3200}
-    if manifest["precision"] == "fp32":
-        assert native.size == expected.size, f"frame counts differ: {report}"
+    checks = [_check("min_rms", "Native RMS", "contract", rms, ">=", thresholds["min_rms"])]
+    if precision == "fp32":
         frames = min(int(thresholds["fp32_matched_frames"]), report["native_frames"])
         report["frame_snr_db"] = _frame_snr_db(native, expected, frames)
         report["frame_rms"] = [
@@ -450,8 +495,24 @@ def _assert_contract(
             for index in range(frames)
         ]
         report["prefix_snr_db"] = _snr_db(native[: frames * 3200], expected[: frames * 3200])
-        assert len(report["frame_snr_db"]) == frames, report
-        assert min(report["frame_snr_db"]) >= thresholds["fp32_min_frame_snr_db"], report
+        checks += [
+            _check(
+                "frame_count",
+                "Frames, native against Transformers",
+                "independent_reference",
+                report["native_frames"],
+                "==",
+                report["reference_frames"],
+            ),
+            _check(
+                "min_frame_snr_db",
+                f"Lowest SNR of the first {frames} frames against Transformers, dB",
+                "independent_reference",
+                _recorded_db(min(report["frame_snr_db"], default=0.0)),
+                ">=",
+                thresholds["fp32_min_frame_snr_db"],
+            ),
+        ]
     else:
         frames = int(thresholds["bf16_prefix_frames"])
         prefix = min(native.size, expected.size, references["fp32"].size, frames * 3200)
@@ -465,21 +526,91 @@ def _assert_contract(
         report["official_bf16_vs_fp32_prefix_snr_db"] = _snr_db(
             expected[:prefix], references["fp32"][:prefix]
         )
-        assert report["frame_count_ratio"] <= thresholds["bf16_max_frame_count_ratio"], report
-        assert report["prefix_snr_db"] >= thresholds["bf16_min_prefix_snr_db"], report
-        excess = (
-            report["official_bf16_vs_fp32_prefix_snr_db"] - report["native_vs_fp32_prefix_snr_db"]
+        excess = _recorded_db(report["official_bf16_vs_fp32_prefix_snr_db"]) - _recorded_db(
+            report["native_vs_fp32_prefix_snr_db"]
         )
-        assert excess <= thresholds["bf16_max_drift_excess_db"], report
+        checks += [
+            _check(
+                "frame_count_ratio",
+                "Frame-count ratio, native against Transformers bf16",
+                "independent_reference",
+                report["frame_count_ratio"],
+                "<=",
+                thresholds["bf16_max_frame_count_ratio"],
+            ),
+            _check(
+                "prefix_snr_db",
+                f"SNR of the first {frames} frames against Transformers bf16, dB",
+                "independent_reference",
+                _recorded_db(report["prefix_snr_db"]),
+                ">=",
+                thresholds["bf16_min_prefix_snr_db"],
+            ),
+            _check(
+                "drift_excess_db",
+                "Drift from Transformers fp32 beyond that of Transformers bf16, dB",
+                "independent_reference",
+                excess,
+                "<=",
+                thresholds["bf16_max_drift_excess_db"],
+            ),
+        ]
     spoken = " ".join(body for _, body in _turns(text))
     if truncated:
         # max_new_tokens ends the speech before the script does (a long prompt that
         # needs chunked prefill): the native speech must say what the reference's says.
-        assert report["native_frames"] == report["reference_frames"], report
         report["reference_transcript"] = _transcribe(expected, manifest)
         spoken = report["reference_transcript"]
+        checks.append(
+            _check(
+                "truncated_frame_count",
+                "Frames, native against Transformers",
+                "independent_reference",
+                report["native_frames"],
+                "==",
+                report["reference_frames"],
+            )
+        )
     report["transcript"] = _transcribe(native, manifest)
     report["asr_edit_distance"] = _edit_distance(report["transcript"], spoken)
+    checks.append(
+        _check(
+            "asr_word_edit_distance",
+            "Word edit distance of the Whisper transcript against the "
+            + ("reference's transcript" if truncated else "script"),
+            "independent_reference" if truncated else "contract",
+            report["asr_edit_distance"],
+            "<=",
+            thresholds["max_asr_edit_distance"],
+        )
+    )
+    record_evidence("native", {**native_record, "transcript": report["transcript"]})
+    if truncated:
+        record_evidence(
+            "reference", {**reference_record, "reference_text": report["reference_transcript"]}
+        )
+    record_evidence(
+        "reference_comparison",
+        {
+            "label": f"Transformers VibeVoice generation ({precision}) fed the same noise",
+            "scope": "independent_reference",
+            "enforced": True,
+            "native": native_record["audio"],
+            "reference": reference_record["audio"],
+            "checks": checks,
+        },
+    )
+    assert rms >= thresholds["min_rms"], report
+    if precision == "fp32":
+        assert native.size == expected.size, f"frame counts differ: {report}"
+        assert len(report["frame_snr_db"]) == frames, report
+        assert min(report["frame_snr_db"]) >= thresholds["fp32_min_frame_snr_db"], report
+    else:
+        assert report["frame_count_ratio"] <= thresholds["bf16_max_frame_count_ratio"], report
+        assert report["prefix_snr_db"] >= thresholds["bf16_min_prefix_snr_db"], report
+        assert excess <= thresholds["bf16_max_drift_excess_db"], report
+    if truncated:
+        assert report["native_frames"] == report["reference_frames"], report
     assert report["asr_edit_distance"] <= thresholds["max_asr_edit_distance"], report
     return report
 
@@ -573,8 +704,18 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             max_new_tokens=int(case["max_new_tokens"]),
             voice_prompts=[str(path) for path in voice_prompts],
         )
-    record_evidence("native", payload)
     native = _read_audio(output)
+    record_evidence(
+        "inputs",
+        {
+            "prompt": case["text"],
+            "seed": int(case["seed"]),
+            "max_new_tokens": int(case["max_new_tokens"]),
+            **({"voice_prompt": voice_prompts[0]} if voice_prompts else {}),
+        },
+    )
+    native_record = {"audio": output, "frames": native.size // 3200, "cli": payload}
+    record_evidence("native", native_record)
     with evidence_stage("reference"):
         # A bfloat16 case also runs the float32 reference: it bounds how far the
         # native output may drift compared with the official bfloat16 synthesis.
@@ -591,6 +732,31 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             )
             for precision in precisions
         }
+    reference_paths = {
+        precision: _write_audio(tmp_path / f"reference_{precision}.wav", audio)
+        for precision, audio in references.items()
+    }
+    views = [
+        {"title": "Voice prompt (input)", "audio": path, "caption": case["voice_text"]}
+        for path in voice_prompts
+    ]
+    views.append({"title": "Native synthesis", "audio": output, "caption": case["text"]})
+    views += [
+        {
+            "title": f"Transformers VibeVoice reference ({precision})",
+            "audio": path,
+            "caption": case["text"],
+        }
+        for precision, path in reference_paths.items()
+    ]
+    record_evidence("views", views)
+    precision = manifest["precision"]
+    reference_record = {
+        "mode": "hf_transformers",
+        "audio": reference_paths[precision],
+        "frames": references[precision].size // 3200,
+    }
+    record_evidence("reference", reference_record)
     with evidence_stage("compare"):
         report = _assert_contract(
             native,
@@ -598,6 +764,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             case["text"],
             manifest,
             record_evidence("thresholds", _thresholds(case_name)),
+            records=(native_record, reference_record),
             truncated=bool(case.get("truncated", False)),
         )
     record_evidence("compare", report)
