@@ -8,11 +8,11 @@
 // the checkpoint's pattern (Isolated) and byte-level BPE encoded. The schema is validated
 // exactly; any other normalizer, pattern, model or added-token contract is rejected.
 
+#include "families/minicpmv4_7/runtime/bpe_merge.h"
 #include "families/minicpmv4_7/runtime/tokenizer.h"
 
 #include <algorithm>
 #include <array>
-#include <climits>
 #include <cstdint>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
@@ -251,13 +251,10 @@ std::vector<std::string> pre_tokenize(std::string_view text) {
     return result;
 }
 
-struct PairHash {
-    std::size_t operator()(const std::pair<std::string, std::string>& pair) const {
-        const std::size_t first = std::hash<std::string>{}(pair.first);
-        const std::size_t second = std::hash<std::string>{}(pair.second);
-        return first ^ (second + 0x9e3779b9U + (first << 6U) + (first >> 2U));
-    }
-};
+std::uint64_t pair_key(std::int32_t left, std::int32_t right) {
+    return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(left)) << 32U) |
+           static_cast<std::uint32_t>(right);
+}
 
 class BpeTokenizer final : public ITokenizer {
   public:
@@ -313,12 +310,6 @@ class BpeTokenizer final : public ITokenizer {
     struct Segment {
         std::string text;
         std::int32_t added_id{-1};
-    };
-
-    struct MergeCandidate {
-        int rank{INT_MAX};
-        std::string first;
-        std::string second;
     };
 
     BpeTokenizer() = default;
@@ -406,9 +397,12 @@ class BpeTokenizer final : public ITokenizer {
         }
         require_schema(std::all_of(seen.begin(), seen.end(), [](bool value) { return value; }),
                        "base vocabulary is not dense");
-        for (const auto& token : byte_tables().byte_to_token)
-            require_schema(token_to_id_.count(token) == 1,
+        for (std::size_t byte = 0; byte < byte_ids_.size(); ++byte) {
+            const auto found = token_to_id_.find(byte_tables().byte_to_token[byte]);
+            require_schema(found != token_to_id_.end(),
                            "base vocabulary is missing a byte-level token");
+            byte_ids_[byte] = found->second;
+        }
     }
 
     void parse_added_tokens(const nlohmann::json& values) {
@@ -447,16 +441,25 @@ class BpeTokenizer final : public ITokenizer {
                          });
     }
 
+    // Merges are keyed by the ids of both parts; both parts and the merged token must be
+    // base-vocabulary tokens, as the BPE model requires when it loads the merge list.
     void parse_merges(const nlohmann::json& values) {
-        merge_rank_.reserve(values.size());
+        merges_.reserve(values.size());
+        const auto base_id = [&](const std::string& token) {
+            const auto found = token_to_id_.find(token);
+            require_schema(found != token_to_id_.end() && found->second < kBaseVocabSize,
+                           "contains a BPE merge outside the base vocabulary");
+            return found->second;
+        };
         for (std::size_t index = 0; index < values.size(); ++index) {
             const auto& value = values.at(index);
             require_schema(value.is_array() && value.size() == 2 && value.at(0).is_string() &&
                                value.at(1).is_string(),
                            "contains an invalid BPE merge");
-            auto pair =
-                std::make_pair(value.at(0).get<std::string>(), value.at(1).get<std::string>());
-            require_schema(merge_rank_.emplace(std::move(pair), static_cast<int>(index)).second,
+            const auto left = value.at(0).get<std::string>();
+            const auto right = value.at(1).get<std::string>();
+            const BpeMergeRule rule{static_cast<std::int32_t>(index), base_id(left + right)};
+            require_schema(merges_.emplace(pair_key(base_id(left), base_id(right)), rule).second,
                            "contains a duplicate BPE merge");
         }
     }
@@ -503,64 +506,25 @@ class BpeTokenizer final : public ITokenizer {
         return result;
     }
 
-    static std::vector<std::string> byte_encode(std::string_view text) {
-        std::vector<std::string> result;
-        result.reserve(text.size());
-        for (const unsigned char byte : text)
-            result.push_back(byte_tables().byte_to_token[byte]);
-        return result;
-    }
-
-    MergeCandidate best_merge(const std::vector<std::string>& tokens) const {
-        MergeCandidate best;
-        for (std::size_t index = 0; index + 1 < tokens.size(); ++index) {
-            const auto found = merge_rank_.find({tokens[index], tokens[index + 1]});
-            if (found != merge_rank_.end() && found->second < best.rank)
-                best = {found->second, tokens[index], tokens[index + 1]};
-        }
-        return best;
-    }
-
-    static std::vector<std::string> merge_pair(std::vector<std::string> tokens,
-                                               const MergeCandidate& merge) {
-        std::vector<std::string> result;
-        result.reserve(tokens.size());
-        for (std::size_t index = 0; index < tokens.size(); ++index) {
-            if (index + 1 < tokens.size() && tokens[index] == merge.first &&
-                tokens[index + 1] == merge.second) {
-                result.push_back(merge.first + merge.second);
-                ++index;
-            } else {
-                result.push_back(std::move(tokens[index]));
-            }
-        }
-        return result;
-    }
-
-    std::vector<std::string> apply_merges(std::vector<std::string> tokens) const {
-        while (tokens.size() > 1) {
-            const auto merge = best_merge(tokens);
-            if (merge.rank == INT_MAX)
-                break;
-            tokens = merge_pair(std::move(tokens), merge);
-        }
-        return tokens;
-    }
-
     void encode_text(std::string_view text, std::vector<std::int32_t>& result) const {
+        const auto lookup = [this](std::int32_t left, std::int32_t right) -> const BpeMergeRule* {
+            const auto found = merges_.find(pair_key(left, right));
+            return found == merges_.end() ? nullptr : &found->second;
+        };
         for (const auto& word : pre_tokenize(text)) {
-            for (const auto& token : apply_merges(byte_encode(word))) {
-                const auto found = token_to_id_.find(token);
-                if (found == token_to_id_.end())
-                    schema_error("cannot encode a byte-level BPE token");
-                result.push_back(found->second);
-            }
+            std::vector<std::int32_t> ids;
+            ids.reserve(word.size());
+            for (const unsigned char byte : word)
+                ids.push_back(byte_ids_[byte]);
+            const auto merged = merge_bpe(std::move(ids), lookup);
+            result.insert(result.end(), merged.begin(), merged.end());
         }
     }
 
     std::vector<std::string> vocabulary_;
     std::unordered_map<std::string, std::int32_t> token_to_id_;
-    std::unordered_map<std::pair<std::string, std::string>, int, PairHash> merge_rank_;
+    std::array<std::int32_t, 256> byte_ids_{};
+    std::unordered_map<std::uint64_t, BpeMergeRule> merges_;
     std::unordered_set<std::int32_t> special_ids_;
     std::vector<std::pair<std::string, std::int32_t>> added_tokens_;
 };

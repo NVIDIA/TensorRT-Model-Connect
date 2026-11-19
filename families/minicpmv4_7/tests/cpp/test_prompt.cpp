@@ -6,6 +6,7 @@
 // Host-only contract of the MiniCPM-V 4.7 runtime against values recorded from the provider
 // (transformers 5.22.2): image slicing, vision position ids, canvas M-RoPE and the chat format.
 
+#include "families/minicpmv4_7/runtime/bpe_merge.h"
 #include "families/minicpmv4_7/runtime/image_preprocess.h"
 #include "families/minicpmv4_7/runtime/prompt.h"
 #include "families/minicpmv4_7/runtime/sampler.h"
@@ -14,10 +15,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
+#include <map>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace trtmc::minicpmv4_7;
@@ -229,6 +232,46 @@ void generation() {
     expect(dominant, "nucleus keeps the dominant candidate");
 }
 
+// BPE merges in the order of the tokenizers BPE model: lowest (rank, position) first over the
+// current symbols, so a pair formed by a merge competes with the pairs queued before it.
+void bpe_merges() {
+    using Rules = std::map<std::pair<int32_t, int32_t>, BpeMergeRule>;
+    std::size_t lookups = 0;
+    const auto merge = [&](std::vector<int32_t> ids, const Rules& rules) {
+        lookups = 0;
+        return merge_bpe(std::move(ids), [&](int32_t left, int32_t right) -> const BpeMergeRule* {
+            ++lookups;
+            const auto found = rules.find({left, right});
+            return found == rules.end() ? nullptr : &found->second;
+        });
+    };
+    constexpr int32_t a = 0, b = 1, c = 2, ab = 3, aba = 4, aa = 5, aaaa = 6, bc = 7;
+    const Rules pairs{{{a, a}, {0, aa}}, {{aa, aa}, {1, aaaa}}};
+    expect(merge({a, a, a}, pairs) == std::vector<int32_t>{aa, a}, "repeated pair, left first");
+    expect(merge({a, a, a, a, a}, pairs) == std::vector<int32_t>{aaaa, a}, "merged pairs merge");
+    expect(merge({a, b, c}, Rules{{{b, c}, {0, bc}}, {{a, b}, {1, ab}}}) ==
+               std::vector<int32_t>{a, bc},
+           "lowest rank first; a queued pair that changed is skipped");
+    expect(merge({a, b, a, b}, Rules{{{a, b}, {1, ab}}, {{ab, a}, {0, aba}}}) ==
+               std::vector<int32_t>{aba, b},
+           "a pair formed by a merge is ranked against the queued pairs");
+    expect(merge({}, pairs).empty() && merge({c}, pairs) == std::vector<int32_t>{c},
+           "empty and single-symbol words");
+
+    // A word whose merges extend one token left to right: one merge per pass for a full rescan
+    // (about n * n / 2 pair lookups), at most 3 lookups per symbol here.
+    constexpr int32_t n = 4096;
+    Rules chain;
+    std::vector<int32_t> word(static_cast<std::size_t>(n));
+    for (int32_t index = 0; index < n; ++index) {
+        word[static_cast<std::size_t>(index)] = index;
+        if (index > 0)
+            chain[{index == 1 ? 0 : n + index - 1, index}] = BpeMergeRule{index, n + index};
+    }
+    expect(merge(word, chain) == std::vector<int32_t>{2 * n - 1}, "chained merges");
+    expect(lookups <= 3 * static_cast<std::size_t>(n), "pair lookups grow linearly with the word");
+}
+
 } // namespace
 
 int main() {
@@ -237,6 +280,7 @@ int main() {
     canvas();
     conversation();
     generation();
+    bpe_merges();
     if (failures == 0)
         std::cout << "minicpmv4_7 host contract: all checks passed\n";
     return failures == 0 ? 0 : 1;
