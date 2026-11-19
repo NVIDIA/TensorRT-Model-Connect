@@ -135,6 +135,7 @@ def _build(model_dir: Path, bundle: Path, manifest: dict) -> None:
             family=FAMILY,
             task=manifest["task"],
             precision=manifest["precision"],
+            quantization=manifest.get("quantization"),
             image_height=manifest["image_height"],
             image_width=manifest["image_width"],
             tensor_parallel_size=manifest["tensor_parallel_size"],
