@@ -8,15 +8,8 @@ import tensorrt as trt
 from . import graph as g
 
 
-def build_vision(weights, cfg, height, width, verbose=False):
-    import torch
-    from transformers.models.paddleocr_vl.modeling_paddleocr_vl import (
-        PaddleOCRVisionRotaryEmbedding,
-    )
-    from transformers.vision_utils import (
-        get_vision_interpolation_indices_and_weights,
-        get_vision_position_ids,
-    )
+def build_vision(weights, cfg, height, width, verbose=False, *, rotary_theta=10000.0):
+    from .vision_positions import position_tables
 
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
     builder = trt.Builder(logger)
@@ -31,28 +24,14 @@ def build_vision(weights, cfg, height, width, verbose=False):
     gh, gw = height // patch, width // patch
     count = gh * gw
     prefix = "visual.vision_model"
-    grid = torch.tensor([[1, gh, gw]])
-    indices, factors = get_vision_interpolation_indices_and_weights(
-        grid,
-        num_grid_per_side=cfg.image_size // patch,
-        mode="bilinear",
-        align_corners=True,
-        spatial_merge_size=1,
-        kwargs={},
+    positions, cosine, sine = position_tables(
+        weights[prefix + ".embeddings.position_embedding.weight"],
+        gh,
+        gw,
+        cfg.image_size // patch,
+        dim,
+        rotary_theta,
     )
-    positions = (
-        (
-            torch.from_numpy(weights[prefix + ".embeddings.position_embedding.weight"])[indices]
-            * factors[:, :, None]
-        )
-        .sum(1)
-        .numpy()
-    )
-    rotary = PaddleOCRVisionRotaryEmbedding(cfg)
-    with torch.no_grad():
-        cosine, sine = rotary(
-            torch.empty(count, hidden_size), get_vision_position_ids(grid, 1, kwargs={})
-        )
 
     def const(value):
         value = np.ascontiguousarray(value, dtype=np.float32)
@@ -70,8 +49,8 @@ def build_vision(weights, cfg, height, width, verbose=False):
         layer.second_transpose = (0, 2, 1, 3)
         return layer.get_output(0)
 
-    cos = const(cosine.numpy().reshape(1, 1, count, dim))
-    sin = const(sine.numpy().reshape(1, 1, count, dim))
+    cos = const(cosine.reshape(1, 1, count, dim))
+    sin = const(sine.reshape(1, 1, count, dim))
 
     def rope(x):
         first = net.add_slice(

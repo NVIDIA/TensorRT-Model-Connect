@@ -31,6 +31,28 @@ def build(request, writer):
     from transformers import AutoConfig, AutoProcessor
 
     config = AutoConfig.from_pretrained(directory)
+    raw_config = json.loads((directory / "config.json").read_text())
+    vision_raw = raw_config.get("vision_config", {})
+    vision_rope = vision_raw.get("rope_parameters")
+    if vision_rope is None:
+        vision_rope = vision_raw.get("rope_scaling")
+    if vision_rope is None:
+        vision_rope = {}
+    if not isinstance(vision_rope, dict):
+        raise ValueError("PaddleOCR requires axial vision rotary parameters")
+    vision_rope_type = vision_rope.get("rope_type", vision_rope.get("type", "axial"))
+    vision_theta = vision_rope.get("rope_theta", vision_raw.get("rope_theta", 10000.0))
+    if vision_raw.get("head_dim") not in (
+        None,
+        config.vision_config.hidden_size // config.vision_config.num_attention_heads,
+    ):
+        raise ValueError("PaddleOCR requires vision head dimensions to match its hidden size")
+    if (
+        vision_rope_type not in ("axial", "default")
+        or type(vision_theta) not in (int, float)
+        or not 0 < vision_theta < float("inf")
+    ):
+        raise ValueError("PaddleOCR requires finite positive axial rotary frequencies")
     cfg = config.text_config.to_dict()
     cfg["rope_theta"] = config.text_config.rope_parameters["rope_theta"]
     cfg["mrope_section"] = config.text_config.rope_parameters.get("mrope_section", [16, 24, 24])
@@ -44,7 +66,6 @@ def build(request, writer):
         or config.vision_config.patch_size != 14
         or config.vision_config.spatial_merge_size != 2
         or config.vision_config.hidden_act != "gelu_pytorch_tanh"
-        or config.vision_config.rope_parameters["rope_type"] != "axial"
     ):
         raise ValueError("Unsupported PaddleOCR topology")
     if height <= 0 or width <= 0 or height % 28 or width % 28:
@@ -94,7 +115,15 @@ def build(request, writer):
         weights = {key: handle.get_tensor(key).float().numpy() for key in handle.keys()}
     writer.set_header(family="paddleocr_vl", task=request.task, backend=request.backend)
     writer.add_bytes(
-        "vision.plan", build_vision(weights, config.vision_config, height, width, request.verbose)
+        "vision.plan",
+        build_vision(
+            weights,
+            config.vision_config,
+            height,
+            width,
+            request.verbose,
+            rotary_theta=vision_theta,
+        ),
     )
     writer.add_bytes("decoder.plan", build_decoder(weights, cfg, length, request.verbose))
     writer.add_bytes("tokenizer.json", processor.tokenizer.backend_tokenizer.to_str().encode())
