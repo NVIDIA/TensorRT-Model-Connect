@@ -173,6 +173,8 @@ def build_mask(weights, cfg, size, verbose=False):
 def build(request, writer):
     if request.task != "text_prompted_segmentation" or request.backend != "trt":
         raise ValueError("CLIPSeg requires text_prompted_segmentation and backend=trt")
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("clipseg does not support dynamic_kv_cache")
     if (
         request.precision != "fp32"
         or request.max_batch_size != 1
