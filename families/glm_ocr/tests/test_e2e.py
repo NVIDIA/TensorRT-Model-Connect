@@ -212,6 +212,12 @@ def _run_native(binary: Path, runtime_root: Path, bundle: Path, image: Path, cas
     return payloads[-1]
 
 
+def _eos_token_ids(model_dir: Path) -> frozenset[int]:
+    """The checkpoint's end-of-sequence ids, as its ``generation_config.json`` states them."""
+    eos = json.loads((model_dir / "generation_config.json").read_text(encoding="utf-8"))["eos_token_id"]
+    return frozenset([int(eos)] if isinstance(eos, int) else [int(token) for token in eos])
+
+
 @lru_cache(maxsize=2)
 def _official(model_dir: str, dtype_name: str):
     import torch
@@ -291,8 +297,17 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, tmp_path_factor
         payload = _run_native(binary, runtime_root, bundle, image, case)
     native_ids = [int(token) for token in payload["token_ids"]]
     native_text = payload["text"]
-    record_evidence("native", {"text": native_text, "token_ids": native_ids})
-    assert 0 < len(native_ids) <= int(case["max_new_tokens"])
+    max_new_tokens = int(case["max_new_tokens"])
+    ended_at_eos = bool(native_ids) and native_ids[-1] in _eos_token_ids(model_dir)
+    record_evidence("native", {"text": native_text, "token_ids": native_ids,
+                               "stop": "end-of-sequence token" if ended_at_eos else "max_new_tokens"})
+    assert 0 < len(native_ids) <= max_new_tokens
+    # A complete generation ends with one of the checkpoint's end-of-sequence tokens (the runtime
+    # returns it) or fills max_new_tokens; a shorter run without one is truncated, and the bf16
+    # comparison below only scores the tokens that were produced.
+    assert ended_at_eos or len(native_ids) == max_new_tokens, (
+        f"{FAMILY} {case_name}: generation stopped after {len(native_ids)} of {max_new_tokens} tokens "
+        f"without an end-of-sequence token")
 
     if manifest["precision"] == "fp32":
         with evidence_stage("reference"):
