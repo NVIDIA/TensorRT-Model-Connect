@@ -74,18 +74,26 @@ std::string render_chat(Span<const internal::ImagesTextMessage> messages,
             throw std::invalid_argument("SmolVLM messages need at least one part");
         result += role_label(message.role);
         result += std::holds_alternative<internal::ImageView>(message.parts[0]) ? ":" : ": ";
+        // Consecutive text parts are rendered as one run, so a reserved literal split across
+        // parts is checked as the run that the tokenizer will see.
+        std::string text_run;
+        const auto flush_text = [&] {
+            for (const char* literal : kReservedLiterals)
+                if (text_run.find(literal) != std::string::npos)
+                    throw std::invalid_argument(
+                        std::string("SmolVLM text parts must not contain the ") + literal +
+                        " token");
+            result += text_run;
+            text_run.clear();
+        };
         for (const auto& part : message.parts) {
             std::visit(
                 [&](const auto& value) {
                     using Value = std::decay_t<decltype(value)>;
                     if constexpr (std::is_same_v<Value, internal::TextPartView>) {
-                        for (const char* literal : kReservedLiterals)
-                            if (value.text.find(literal) != std::string_view::npos)
-                                throw std::invalid_argument(
-                                    std::string("SmolVLM text parts must not contain the ") +
-                                    literal + " token");
-                        result += value.text;
+                        text_run += value.text;
                     } else if constexpr (std::is_same_v<Value, internal::ImageView>) {
+                        flush_text();
                         result += image_text(value);
                     } else {
                         throw std::invalid_argument(
@@ -94,6 +102,7 @@ std::string render_chat(Span<const internal::ImagesTextMessage> messages,
                 },
                 part);
         }
+        flush_text();
         result += "<end_of_utterance>\n";
     }
     return result + "Assistant:";

@@ -59,7 +59,9 @@ checkpoint's generation default; `temperature` 0 is greedy as well.
   view. Text parts may not contain the literal `<image>`, `<end_of_utterance>`
   or `<|im_start|>` tokens: the reference would read them as an image slot or
   as a message boundary, so text could otherwise pose as another role's
-  message. A request whose image tokens alone exceed the context is rejected
+  message. Adjacent text parts are checked as the one run they render to, so a
+  literal split across them is rejected too. A request whose image tokens alone
+  exceed the context is rejected
   before its remaining images are tiled.
 - **Tokenizer.** The checkpoint's byte-level BPE: literal special tokens,
   digits split one by one, the GPT-2 split expression, rank-ordered merges
