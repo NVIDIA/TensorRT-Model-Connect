@@ -231,6 +231,9 @@ def _run_native(
 ) -> dict:
     command = [str(binary), *_native_arguments(bundle, runtime_root, prompt, case)]
     environment = dict(os.environ)
+    environment.pop("TRTMC_LLAMA_TRACE_PREFILL_IDS", None)
+    if "expected_prompt_token_ids" in case:
+        environment["TRTMC_LLAMA_TRACE_PREFILL_IDS"] = "1"
     if tp_size > 1:
         environment["TRTMC_NCCL_RENDEZVOUS"] = str(tmp_path / "nccl.rendezvous")
         prefix = ["mpirun", "--tag-output", "-np", str(tp_size)]
@@ -593,6 +596,12 @@ def test_e2e(case_name: str, request, tmp_path: Path) -> None:
             assert_prefill_token_count(
                 payload["runtime_stderr"], int(case["expected_runtime_prefill_tokens"])
             )
+
+    if "expected_prompt_token_ids" in case:
+        from families.llama.tests.runtime_receipt import assert_prefill_token_ids
+
+        with evidence_stage("compare"):
+            assert_prefill_token_ids(payload["runtime_stderr"], case["expected_prompt_token_ids"])
 
     if _NATIVE_KV_FIELDS <= case.keys():
         from families.llama.tests.runtime_receipt import assert_native_kv_receipt

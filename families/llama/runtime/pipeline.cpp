@@ -217,6 +217,13 @@ void LlamaTextGenerationPipeline::run_prefill_batched(const std::vector<int32_t>
     }
     std::cerr << "[trtmc.prefill] tokens=" << sq << " launches=" << launches
               << " max_chunk=" << max_chunk << '\n';
+    if (const char* trace = std::getenv("TRTMC_LLAMA_TRACE_PREFILL_IDS");
+        trace != nullptr && std::strcmp(trace, "1") == 0) {
+        std::cerr << "[trtmc.prefill_ids]";
+        for (const auto token_id : input_ids)
+            std::cerr << ' ' << token_id;
+        std::cerr << '\n';
+    }
 }
 
 void LlamaTextGenerationPipeline::run_prefill_chunk(const int32_t* token_ids, int32_t chunk_size,

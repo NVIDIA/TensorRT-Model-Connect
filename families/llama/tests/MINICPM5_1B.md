@@ -127,3 +127,19 @@ This does not qualify other checkpoints, precisions, tensor-parallel sizes,
 long contexts, sampling, concurrency or performance. Rebuild the Llama DSO;
 no engine format change is required. The documentation-only evidence commit
 leaves the tested runtime and test source blobs unchanged.
+## Native prompt-ID assertions
+
+For cases declaring `expected_prompt_token_ids`, E2E now enables
+`TRTMC_LLAMA_TRACE_PREFILL_IDS=1` only in that native subprocess. After successful
+prefill, the Llama pipeline emits its actual input vector in one
+`[trtmc.prefill_ids]` receipt. The checker compares the ordered IDs exactly,
+including BOS, in addition to the existing count receipt and unchanged
+FP16/FP32 generated-output comparison. This guards against same-length token
+substitutions that a count assertion alone cannot detect.
+
+Tracing is off by default. Cases without expected IDs explicitly remove an
+inherited flag, so normal generation and the chat control do not emit input IDs.
+Ten added CPU cases cover exact BOS/multitoken receipts, same-length wrong IDs,
+missing/duplicate/malformed receipts, length mismatches and subprocess opt-in.
+The focused Python group now passes 27 tests. The initial H200 input evidence
+above remains count-only; the stricter gate requires its own target-GPU rerun.

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 
+_PREFILL_IDS = re.compile(r"^\[trtmc\.prefill_ids\]((?: \d+)*)$")
 _PREFILL = re.compile(r"^\[trtmc\.prefill\] tokens=(\d+) launches=(\d+) max_chunk=(\d+)$")
 _RUNTIME_ERROR = re.compile(
     r"\[trt\]\s+ERROR:|IExecutionContext::enqueueV3:\s+Error Code|"
@@ -30,6 +31,18 @@ def assert_prefill_token_count(stderr: str, expected_tokens: int) -> None:
     assert len(observations) == 1, f"expected one prefill receipt, got {observations}"
     assert observations[0][0] == expected_tokens, (
         f"native prefill token count {observations[0][0]} != {expected_tokens}"
+    )
+
+
+def assert_prefill_token_ids(stderr: str, expected_ids: list[int]) -> None:
+    observations = []
+    for line in stderr.splitlines():
+        match = _PREFILL_IDS.fullmatch(line.strip())
+        if match:
+            observations.append([int(value) for value in match.group(1).split()])
+    assert len(observations) == 1, f"expected one prompt-ID receipt, got {observations}"
+    assert observations[0] == expected_ids, (
+        f"native prompt token IDs {observations[0]} != {expected_ids}"
     )
 
 
