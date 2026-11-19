@@ -2,3 +2,4 @@ numpy
 safetensors
 torch
 transformers>=5.20.0
+accelerate

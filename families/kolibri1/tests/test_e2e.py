@@ -315,10 +315,7 @@ def test_native_tokenizer(case_name):
 
     _, manifest, _ = CASES[case_name]
     directory = _model_dir(manifest)
-    runner = (
-        _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
-        / "test_kolibri1_tokenizer"
-    )
+    runner = _native_test_binary("test_kolibri1_tokenizer")
     reference = AutoTokenizer.from_pretrained(directory)
     for text in [
         "The capital of Germany is",
