@@ -370,9 +370,11 @@ class Pipeline final : public internal::IModel, public internal::ITextToImage {
 } // namespace trtmc::p_h3_image
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("p_h3_image does not support --kv-cache-size");
     using namespace trtmc;
     using namespace p_h3_image;
-    if (context.kv_cache_size_bytes || context.reader.info().task != "text_to_image")
+    if (context.reader.info().task != "text_to_image")
         throw std::invalid_argument("P-H3-Image requires text_to_image without external state");
     const auto raw = section(context.reader, "runtime.json");
     auto cfg = nlohmann::json::parse(raw.begin(), raw.end());

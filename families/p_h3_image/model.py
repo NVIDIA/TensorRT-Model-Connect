@@ -222,6 +222,8 @@ def _vae_head(g, cfg):
 def build(request, writer):
     if request.backend != "trt" or request.task != "text_to_image":
         raise ValueError("P-H3-Image requires text_to_image with backend=trt")
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("p_h3_image does not support dynamic_kv_cache")
     if (
         request.precision != "bf16"
         or request.quantization not in (None, "none")

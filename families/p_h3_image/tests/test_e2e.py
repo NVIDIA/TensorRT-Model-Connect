@@ -8,11 +8,13 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from functools import cache
 from pathlib import Path
 
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "p_h3_image"
 TASKS = frozenset({"text_to_image"})
@@ -92,6 +94,46 @@ def _required_path(value: str | None, label: str) -> Path:
     return path
 
 
+@cache
+def _native_test_binary(name: str) -> Path:
+    """Build source-only helpers in the configured native test tree."""
+    build_dir = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    subprocess.run(
+        ["cmake", "--build", str(build_dir), "--parallel", "2", "--target", name],
+        check=True,
+        timeout=600,
+    )
+    return _required_path(str(build_dir / name), name)
+
+
+def _record_comparison(tmp_path, label, native, reference, checks):
+    """Retain the output pair and the result of already enforced comparisons."""
+    if not evidence_enabled():
+        return
+    import numpy as np
+
+    paths = []
+    for role, value in (("native", native), ("reference", reference)):
+        if isinstance(value, np.ndarray):
+            path = tmp_path / f"{label}-{role}.npz"
+            np.savez_compressed(path, output=value)
+        else:
+            path = tmp_path / f"{label}-{role}.json"
+            path.write_text(json.dumps(value, ensure_ascii=False) + "\n", encoding="utf-8")
+        paths.append(path)
+    record_evidence(
+        "reference_comparison",
+        {
+            "label": label,
+            "scope": "independent_reference",
+            "enforced": True,
+            "native": paths[0],
+            "reference": paths[1],
+            "checks": [dict(check, scope="independent_reference") for check in checks],
+        },
+    )
+
+
 def _model_dir(manifest: dict) -> Path:
     explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
     if explicit:
@@ -169,32 +211,71 @@ def test_native_tokenizer(case_name):
 
 
 def test_official_checkpoint_e2e(case_name, tmp_path):
+    _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {
+            key: value
+            for key, value in case.items()
+            if any(
+                word in key
+                for word in ("error", "cosine", "atol", "rtol", "snr", "rmse", "max_abs")
+            )
+        },
+    )
+    for asset_key in ("image", "test_image", "audio"):
+        if asset_key in case:
+            for asset_path in (TEST_ROOT / case[asset_key], TEST_ROOT / "data" / case[asset_key]):
+                if asset_path.is_file():
+                    record_evidence("inputs", {asset_key: asset_path})
+                    break
     import gc
     import numpy as np
     import torch
 
     _, manifest, case = CASES[case_name]
-    directory = _model_dir(manifest)
+    with evidence_stage("checkpoint"):
+        directory = _model_dir(manifest)
     _, runtime_root = _runtime()
     import sys
 
     height, width = manifest["image_height"], manifest["image_width"]
     input_path = tmp_path / "reference-input.json"
     input_path.write_text(json.dumps([manifest, case]))
-    oracle = subprocess.run(
-        [
-            sys.executable,
-            str(TEST_ROOT / "reference.py"),
-            str(directory),
-            str(input_path),
-            str(tmp_path),
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=case["runtime_timeout_s"],
+    with evidence_stage("reference"):
+        oracle = subprocess.run(
+            [
+                sys.executable,
+                str(TEST_ROOT / "reference.py"),
+                str(directory),
+                str(input_path),
+                str(tmp_path),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=case["runtime_timeout_s"],
+        )
+    record_evidence(
+        "reference_process",
+        {
+            "argv": oracle.args,
+            "returncode": oracle.returncode,
+            "stdout": (oracle.stdout or "")[-4096:],
+            "stderr": (oracle.stderr or "")[-16384:],
+        },
     )
-    assert oracle.returncode == 0, oracle.stderr + oracle.stdout
+    with evidence_stage("comparison"):
+        assert oracle.returncode == 0, oracle.stderr + oracle.stdout
     print(oracle.stdout, end="", flush=True)
     requests = json.loads((tmp_path / "reference-requests.json").read_text())
     expected = [
@@ -202,25 +283,42 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
         for index in range(len(case["prompts"]))
     ]
     bundle = tmp_path / manifest["bundle"]
-    _build(directory, bundle, manifest)
+    with evidence_stage("build"):
+        _build(directory, bundle, manifest)
+    record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
     gc.collect()
     torch.cuda.empty_cache()
-    completed = subprocess.run(
-        [str(runtime_root / "test_p_h3_image_runtime"), str(bundle), str(runtime_root)],
-        input=json.dumps(requests),
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=case["runtime_timeout_s"],
+    with evidence_stage("runtime"):
+        completed = subprocess.run(
+            [str(_native_test_binary("test_p_h3_image_runtime")), str(bundle), str(runtime_root)],
+            input=json.dumps(requests),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=case["runtime_timeout_s"],
+        )
+    record_evidence(
+        "runtime_process",
+        {
+            "argv": completed.args,
+            "returncode": completed.returncode,
+            "stdout": (completed.stdout or "")[-4096:],
+            "stderr": (completed.stderr or "")[-16384:],
+        },
     )
-    assert completed.returncode == 0, completed.stderr + completed.stdout
+    with evidence_stage("comparison"):
+        assert completed.returncode == 0, completed.stderr + completed.stdout
     results = json.loads(completed.stdout.splitlines()[-1])
-    assert len(results) == len(expected)
+    with evidence_stage("comparison"):
+        assert len(results) == len(expected)
     for index, (result, oracle) in enumerate(zip(results, expected)):
-        assert result == dict(height=height, width=width, channels=3, count=height * width * 3)
+        with evidence_stage("comparison"):
+            assert result == dict(height=height, width=width, channels=3, count=height * width * 3)
         actual = np.fromfile(requests[index]["output"], dtype="<f4").reshape(oracle.shape)
-        assert np.isfinite(actual).all()
-        assert actual.min() >= 0 and actual.max() <= 1
+        with evidence_stage("comparison"):
+            assert np.isfinite(actual).all()
+        with evidence_stage("comparison"):
+            assert actual.min() >= 0 and actual.max() <= 1
         difference = actual.astype(np.float64) - oracle.astype(np.float64)
         rmse = float(np.sqrt(np.mean(difference**2)))
         maximum = float(np.abs(difference).max())
@@ -230,9 +328,74 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
             f"P-H3-Image prompt {index}: RMSE={rmse}, max_abs={maximum}, cosine={cosine}",
             flush=True,
         )
-        assert rmse <= case["rmse_max"]
-        assert maximum <= case["max_abs_error"]
-        assert cosine >= case["cosine_min"]
+        record_evidence(
+            "inputs",
+            {"sample": index, "prompt": case["prompts"][index], "request": requests[index]},
+        )
+        record_evidence(
+            "metrics", {"sample": index, "rmse": rmse, "max_abs_error": maximum, "cosine": cosine}
+        )
+        if evidence_enabled():
+            from PIL import Image
+
+            views = []
+            for role, pixels in (("native", actual), ("reference", oracle)):
+                image_path = tmp_path / f"{role}-{index}.png"
+                Image.fromarray(np.rint(np.clip(pixels, 0, 1) * 255).astype(np.uint8)).save(
+                    image_path
+                )
+                record_evidence(
+                    role,
+                    {
+                        "sample": index,
+                        "image": image_path,
+                        "mode": "diffusers" if role == "reference" else "native",
+                        "shape": list(pixels.shape),
+                    },
+                )
+                views.append(
+                    {
+                        "title": f"Sample {index} / {role}",
+                        "image": image_path,
+                        "caption": case["prompts"][index],
+                    }
+                )
+            record_evidence("views", views)
+        with evidence_stage("comparison"):
+            assert rmse <= case["rmse_max"]
+        with evidence_stage("comparison"):
+            assert maximum <= case["max_abs_error"]
+        with evidence_stage("comparison"):
+            assert cosine >= case["cosine_min"]
+        _record_comparison(
+            tmp_path,
+            f"pixels-{index}",
+            actual,
+            oracle,
+            [
+                {
+                    "name": "rmse",
+                    "actual": rmse,
+                    "operator": "<=",
+                    "expected": case["rmse_max"],
+                    "passed": rmse <= case["rmse_max"],
+                },
+                {
+                    "name": "max_abs_error",
+                    "actual": maximum,
+                    "operator": "<=",
+                    "expected": case["max_abs_error"],
+                    "passed": maximum <= case["max_abs_error"],
+                },
+                {
+                    "name": "cosine",
+                    "actual": cosine,
+                    "operator": ">=",
+                    "expected": case["cosine_min"],
+                    "passed": cosine >= case["cosine_min"],
+                },
+            ],
+        )
 
 
 @pytest.mark.parametrize("rotary_dim", [96, 128])
