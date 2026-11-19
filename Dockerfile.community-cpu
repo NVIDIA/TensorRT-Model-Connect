@@ -16,7 +16,14 @@ ARG TORCH_VERSION=2.12.0+cu130
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PIP_NO_CACHE_DIR=1
 
-RUN apt-get update && \
+# The GitHub-hosted runners that build this image run in Azure, so Ubuntu
+# packages come from Azure's public Ubuntu mirror. arm64 images use
+# ports.ubuntu.com, which this leaves unchanged.
+RUN sed -i \
+      -e 's|http://archive.ubuntu.com/ubuntu/|http://azure.archive.ubuntu.com/ubuntu/|' \
+      -e 's|http://security.ubuntu.com/ubuntu/|http://azure.archive.ubuntu.com/ubuntu/|' \
+      /etc/apt/sources.list.d/ubuntu.sources && \
+    apt-get update && \
     apt-get install -y --no-install-recommends \
       build-essential \
       cmake \
