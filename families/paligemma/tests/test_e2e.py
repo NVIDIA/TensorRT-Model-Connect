@@ -3,10 +3,23 @@
 
 """Real PaliGemma build, public images_text_to_text Task and transformers reference.
 
-The FP32 bundle must reproduce the FP32 reference's greedy tokens exactly. The
-BF16 bundle is held to a normalized text edit distance against the same FP32
-reference. Both runs also check the native prompt ids and decoded text against
-the reference processor, using the tokenizer packaged in the bundle.
+The requests use the repository's shared test photograph and a tall synthetic
+image, against the transformers model run in FP32:
+
+* ``token_exact`` (FP32 bundle): the native greedy tokens and text equal the
+  reference's.
+* ``teacher_forced_near_tie`` (BF16 bundle): the FP32 reference, forced through
+  the native tokens on its own generation path, ranks every native token within
+  ``near_tie_logit_tolerance`` of its top logit, and the native text equals the
+  reference processor's decoding of the native tokens. Free-running greedy text
+  may leave the FP32 text after such a near tie. The tolerance (``thresholds/``)
+  is 1.0 logit, about 1.8 times the largest departure of the official model run
+  in BF16 from its own FP32 argmax on 41 image / prompt pairs (0.548 logit;
+  19 of 265 tokens below the argmax).
+
+Both runs also check the native prompt ids and the decoding of the reference
+tokens with the tokenizer packaged in the bundle. The evidence keeps the input
+images, both outputs and one reference comparison per request.
 """
 
 from functools import cache
@@ -24,6 +37,7 @@ from tools.e2e_evidence import evidence_stage, record_evidence
 
 ROOT = Path(__file__).resolve().parent
 FAMILY = "paligemma"
+PHOTO = ROOT / "data" / "test_img.jpeg"
 CASES = {}
 for path in sorted((ROOT / "manifests").glob("*.json")):
     manifest = json.loads(path.read_text())
@@ -32,11 +46,11 @@ for path in sorted((ROOT / "manifests").glob("*.json")):
 
 # PaliGemma "pt" checkpoints answer task prefixes: captioning, VQA, detection.
 REQUESTS = (
-    {"prompt": "caption en", "images": ("shapes",), "max_new_tokens": 32},
+    {"prompt": "caption en", "images": ("photo",), "max_new_tokens": 32},
+    {"prompt": "answer en What color is the car?", "images": ("photo",), "max_new_tokens": 16},
+    {"prompt": "detect car", "images": ("photo",), "max_new_tokens": 16},
     {"prompt": "answer en What color is the circle?", "images": ("shapes",), "max_new_tokens": 16},
-    {"prompt": "detect circle", "images": ("shapes",), "max_new_tokens": 16},
-    {"prompt": "describe en", "images": ("landscape",), "max_new_tokens": 48},
-    {"prompt": "caption en", "images": ("shapes", "landscape"), "max_new_tokens": 32},
+    {"prompt": "caption en", "images": ("photo", "shapes"), "max_new_tokens": 32},
 )
 
 
@@ -71,18 +85,80 @@ def _checkpoint(manifest):
                                   allow_patterns=["*.json", "*.safetensors", "tokenizer.model"]))
 
 
-def _images():
-    """Deterministic synthetic scenes; no image asset or license is involved."""
-    y, x = np.mgrid[:240, :320]
-    shapes = np.full((240, 320, 3), 255, np.uint8)
-    shapes[(y - 120) ** 2 + (x - 90) ** 2 <= 60 ** 2] = (220, 30, 30)
-    shapes[(np.abs(y - 120) <= 50) & (np.abs(x - 235) <= 50)] = (30, 60, 200)
-    y, x = np.mgrid[:300, :200]
-    landscape = np.empty((300, 200, 3), np.uint8)
-    landscape[:] = (110, 170, 235)
-    landscape[y > 190] = (60, 150, 60)
-    landscape[(y - 70) ** 2 + (x - 140) ** 2 <= 30 ** 2] = (250, 220, 40)
-    return {"shapes": shapes, "landscape": landscape}
+def _images(directory):
+    """Decoded RGB pixels of each request image and the image file they come from.
+
+    The photograph is wide; the synthetic scene (red circle above a blue square)
+    is tall, so both aspect ratios reach the squash onto the 224x224 square.
+    """
+    from PIL import Image
+
+    with Image.open(PHOTO) as image:
+        photo = np.asarray(image.convert("RGB"))
+    y, x = np.mgrid[:320, :240]
+    shapes = np.full((320, 240, 3), 255, np.uint8)
+    shapes[(y - 90) ** 2 + (x - 120) ** 2 <= 60 ** 2] = (220, 30, 30)
+    shapes[(np.abs(y - 235) <= 50) & (np.abs(x - 120) <= 50)] = (30, 60, 200)
+    Image.fromarray(shapes).save(directory / "shapes.png")
+    return {"photo": photo, "shapes": shapes}, {"photo": PHOTO, "shapes": directory / "shapes.png"}
+
+
+def _listing(texts):
+    return "\n".join(f"{index}. {text}" for index, text in enumerate(texts, 1))
+
+
+def _record_inputs(files):
+    record_evidence("inputs", {
+        "images": [files[name] for name in sorted(files)],
+        "prompt": _listing(f"[{' + '.join(item['images'])}] {item['prompt']}" for item in REQUESTS),
+        "requests": [dict(item, images=list(item["images"])) for item in REQUESTS],
+    })
+
+
+def _record_comparisons(results, directory, tolerance):
+    """One comparison per request: the checks the assertions below enforce."""
+    for index, (row, item) in enumerate(zip(results, REQUESTS), 1):
+        native, reference = directory / f"native-{index}.json", directory / f"reference-{index}.json"
+        native.write_text(json.dumps(row["actual"]))
+        reference.write_text(json.dumps(row["reference"]))
+        if tolerance is None:
+            actual, expected = row["actual"]["token_ids"], row["reference"]["token_ids"]
+            differing = sum(a != b for a, b in zip(actual, expected)) + abs(len(actual) - len(expected))
+            distance = row["normalized_text_edit_distance"]
+            checks = [{"name": "differing_tokens", "label": "Generated tokens unlike the reference",
+                       "scope": "independent_reference", "actual": differing, "operator": "==",
+                       "expected": 0, "passed": differing == 0},
+                      {"name": "normalized_text_edit_distance",
+                       "label": "Normalized edit distance to the reference text",
+                       "scope": "independent_reference", "actual": distance, "operator": "<=",
+                       "expected": 0.0, "passed": distance <= 0.0}]
+        else:
+            gap = row["max_teacher_forced_gap"]
+            decoding = _ned(row["actual"]["text"], row["reference"]["native_decoded"])
+            checks = [{"name": "max_teacher_forced_gap",
+                       "label": "Largest FP32 logit gap below the argmax, native tokens forced",
+                       "scope": "independent_reference", "actual": gap, "operator": "<=",
+                       "expected": tolerance, "passed": gap <= tolerance},
+                      {"name": "native_text_decoding",
+                       "label": "Normalized edit distance to the reference decoding of the native tokens",
+                       "scope": "independent_reference", "actual": decoding, "operator": "<=",
+                       "expected": 0.0, "passed": decoding <= 0.0}]
+        count = len(row["actual"]["token_ids"])
+        characters = len(row["actual"]["text"].strip())
+        checks += [{"name": "text_characters", "label": "Native text characters, at least one",
+                    "scope": "contract", "actual": characters, "operator": ">=", "expected": 1,
+                    "passed": characters >= 1},
+                   {"name": "generated_tokens", "label": "Generated tokens, at least one",
+                    "scope": "contract", "actual": count, "operator": ">=", "expected": 1,
+                    "passed": count >= 1},
+                   {"name": "max_new_tokens", "label": "Generated tokens, at most max_new_tokens",
+                    "scope": "contract", "actual": count, "operator": "<=",
+                    "expected": item["max_new_tokens"], "passed": count <= item["max_new_tokens"]}]
+        record_evidence("reference_comparison", {
+            "label": f"{index}. [{' + '.join(item['images'])}] {item['prompt']}",
+            "scope": "independent_reference", "enforced": True,
+            "native": native, "reference": reference, "checks": checks,
+        })
 
 
 def _native_requests(images, directory):
@@ -95,10 +171,26 @@ def _native_requests(images, directory):
              "max_new_tokens": item["max_new_tokens"]} for item in REQUESTS]
 
 
-def _reference(checkpoint, images, trust_remote_code):
+def _reference(checkpoint, images, trust_remote_code, native=None):
+    """FP32 greedy results; with native results, also the FP32 gaps of the native tokens.
+
+    The gaps come from generate() forced through the native tokens, so the prefix
+    attention, positions and cache follow transformers' own decoding.
+    """
     import torch
     from PIL import Image
-    from transformers import AutoProcessor, PaliGemmaForConditionalGeneration
+    from transformers import (AutoProcessor, LogitsProcessor, LogitsProcessorList,
+                              PaliGemmaForConditionalGeneration)
+
+    class Force(LogitsProcessor):
+        def __init__(self, tokens):
+            self.tokens, self.step = tokens, 0
+
+        def __call__(self, input_ids, scores):
+            forced = torch.full_like(scores, float("-inf"))
+            forced[:, self.tokens[self.step]] = 0
+            self.step += 1
+            return forced
 
     # The slow processor resamples with Pillow, which the native preprocessing reproduces.
     processor = AutoProcessor.from_pretrained(checkpoint, local_files_only=True, use_fast=False,
@@ -114,7 +206,7 @@ def _reference(checkpoint, images, trust_remote_code):
                                              "error_msgs")), info
         model = model.to("cuda").eval()
         results = []
-        for request in REQUESTS:
+        for index, request in enumerate(REQUESTS):
             pictures = [Image.fromarray(images[name]) for name in request["images"]]
             inputs = processor(images=[pictures], text=[request["prompt"]], return_tensors="pt")
             inputs.pop("labels", None)
@@ -124,9 +216,21 @@ def _reference(checkpoint, images, trust_remote_code):
                                         max_new_tokens=request["max_new_tokens"])
             prompt = inputs["input_ids"][0].tolist()
             tokens = output[0, len(prompt):].cpu().tolist()
-            results.append({"input_ids": prompt, "token_ids": tokens,
-                            "text": processor.decode(tokens, skip_special_tokens=True,
-                                                     clean_up_tokenization_spaces=False)})
+            result = {"input_ids": prompt, "token_ids": tokens,
+                      "text": processor.decode(tokens, skip_special_tokens=True,
+                                               clean_up_tokenization_spaces=False)}
+            forced = native[index]["token_ids"] if native is not None else []
+            if forced:
+                with torch.inference_mode():
+                    scored = model.generate(**inputs, do_sample=False, max_new_tokens=len(forced),
+                                            logits_processor=LogitsProcessorList([Force(forced)]),
+                                            output_logits=True, return_dict_in_generate=True)
+                logits = torch.stack(scored.logits)[:, 0].float()
+                chosen = logits.gather(1, torch.tensor(forced, device=logits.device)[:, None])[:, 0]
+                result["native_gaps"] = (logits.max(dim=1).values - chosen).tolist()
+                result["native_decoded"] = processor.decode(forced, skip_special_tokens=True,
+                                                            clean_up_tokenization_spaces=False)
+            results.append(result)
         return results
     finally:
         del model
@@ -184,7 +288,8 @@ def test_e2e(case_name, request, tmp_path):
     consumer = _binary("test_paligemma_sdk_cpp")
     checker = _binary("paligemma_tokenizer_check")
     checkpoint = _checkpoint(manifest)
-    images = _images()
+    images, files = _images(tmp_path)
+    _record_inputs(files)
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
         build(BuildRequest(model_dir=checkpoint, output_path=bundle, family=FAMILY,
@@ -198,9 +303,14 @@ def test_e2e(case_name, request, tmp_path):
                          runtime, tmp_path, "native")
         assert completed.returncode == 0, completed.stdout + completed.stderr
     actual = json.loads(destination.read_text())
+    record_evidence("native", {"text": _listing(row["text"] for row in actual), "results": actual})
+    assert case["oracle"] in {"token_exact", "teacher_forced_near_tie"}
+    near_tie = case["oracle"] == "teacher_forced_near_tie"
     with evidence_stage("reference"):
-        expected = _reference(checkpoint, images, manifest["trust_remote_code"])
+        expected = _reference(checkpoint, images, manifest["trust_remote_code"],
+                              native=actual if near_tie else None)
         record_evidence("reference", {"backend": "hf_transformers", "precision": "fp32",
+                                      "text": _listing(row["text"] for row in expected),
                                       "results": expected})
     assert len(actual) == len(expected) == len(REQUESTS)
 
@@ -220,15 +330,27 @@ def test_e2e(case_name, request, tmp_path):
     results = [{"prompt": item["prompt"], "images": list(item["images"]), "actual": a,
                 "reference": b, "normalized_text_edit_distance": _ned(a["text"], b["text"])}
                for item, a, b in zip(REQUESTS, actual, expected)]
+    tolerance = None
+    if near_tie:
+        tolerance = json.loads((ROOT / "thresholds" / f"{case_name}.json").read_text())[
+            "threshold_overrides"]["near_tie_logit_tolerance"]
+        record_evidence("thresholds", {"near_tie_logit_tolerance": tolerance})
+        for row in results:
+            row["max_teacher_forced_gap"] = max(row["reference"].get("native_gaps") or [float("inf")])
+    record_evidence("metrics", {"cases": results, "oracle": case["oracle"]})
+    _record_comparisons(results, tmp_path, tolerance)
     for row, item in zip(results, REQUESTS):
         assert 0 < len(row["actual"]["token_ids"]) <= item["max_new_tokens"], row
-    if case["oracle"] == "token_exact":
-        record_evidence("metrics", {"cases": results, "oracle": "token_exact"})
+        assert row["actual"]["text"].strip(), row
+    if not near_tie:
         assert all(row["actual"]["token_ids"] == row["reference"]["token_ids"]
                    and row["actual"]["text"] == row["reference"]["text"] for row in results), results
-    else:
-        assert case["oracle"] == "normalized_text_edit_distance"
-        threshold = json.loads((ROOT / "thresholds" / f"{case_name}.json").read_text())[
-            "threshold_overrides"]["normalized_text_edit_distance"]
-        record_evidence("metrics", {"cases": results, "normalized_text_edit_distance_max": threshold})
-        assert all(row["normalized_text_edit_distance"] <= threshold for row in results), results
+        return
+    eos = json.loads((checkpoint / "generation_config.json").read_text())["eos_token_id"]
+    eos = set(eos if isinstance(eos, list) else [eos])
+    for row, item in zip(results, REQUESTS):
+        tokens = row["actual"]["token_ids"]
+        assert row["max_teacher_forced_gap"] <= tolerance, row
+        assert row["actual"]["text"] == row["reference"]["native_decoded"], row
+        assert not eos.intersection(tokens[:-1]), row
+        assert tokens[-1] in eos or len(tokens) == item["max_new_tokens"], row

@@ -80,13 +80,23 @@ TRTMC_RUNTIME_ROOT=<build> TRTMC_NATIVE_BUILD_DIR=<build> \
 
 Build the CMake targets `trtmc`, `trtmc_backend_trt`, `trtmc_model_paligemma`,
 `test_paligemma_sdk_cpp` and `paligemma_tokenizer_check` first. The E2E builds
-the FP32 and BF16 bundles, runs five requests (captioning, VQA, detection, a
-tall image and a two-image prompt) through the public `images_text_to_text`
-Task, and compares them with the transformers FP32 reference (eager attention,
-TF32 off, slow image processor). The FP32 bundle must reproduce the reference
-tokens exactly; the BF16 bundle is held to a normalized text edit distance.
-Both also check the native prompt ids and decoded text against the reference
-processor with the tokenizer packaged in the bundle.
+the FP32 and BF16 bundles, runs five requests through the public
+`images_text_to_text` Task and compares them with the transformers FP32
+reference (eager attention, TF32 off, slow image processor). The requests use
+the repository's shared test photograph, `tests/data/test_img.jpeg` (see
+`ASSET_LICENSES.md`), and a tall synthetic image: a caption, a VQA question
+and a detection on the photograph, a VQA question on the synthetic image, and
+a caption of both images together. The FP32 bundle must reproduce the
+reference tokens exactly. For the BF16 bundle the FP32 reference is forced
+through the native tokens: every native token must lie within 1.0 logit of the
+reference's top logit (the official model run in BF16 departs from its FP32
+argmax by up to 0.548 logit on 41 image / prompt pairs), and the native text
+must equal the reference processor's decoding of the native tokens; a
+free-running BF16 text can leave the FP32 text after such a near tie. Both
+also check the native prompt ids and the decoding of the reference tokens
+with the tokenizer packaged in the bundle. With
+`TRTMC_E2E_ARTIFACT_DIR` set, each case's evidence keeps the input images, the
+native and reference outputs and one reference comparison per request.
 
 `tests/test_graph.py` compares the FP32 and BF16 engines with transformers on a
 seeded tiny random checkpoint (no download), and `tests/test_model.py` plus the CTest

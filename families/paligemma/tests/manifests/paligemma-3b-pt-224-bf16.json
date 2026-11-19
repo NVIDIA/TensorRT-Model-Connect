@@ -15,7 +15,7 @@
       "premerge": true,
       "reference_precision": "fp32",
       "reference_backend": "hf_transformers",
-      "oracle": "normalized_text_edit_distance"
+      "oracle": "teacher_forced_near_tie"
     }
   ]
 }
