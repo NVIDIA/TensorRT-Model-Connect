@@ -212,13 +212,45 @@ def test_unsupported_schedules_are_rejected(tmp_path, overrides, message) -> Non
         scheduler_settings(_write_checkpoint(tmp_path, **overrides))
 
 
+# The BPE model options and one added-token record of the checkpoint's tokenizer.json.
+_CHECKPOINT_MODEL = {
+    "type": "BPE",
+    "dropout": None,
+    "unk_token": None,
+    "continuing_subword_prefix": "",
+    "end_of_word_suffix": "",
+    "fuse_unk": False,
+    "byte_fallback": False,
+    "ignore_merges": False,
+}
+_CHECKPOINT_ADDED_TOKEN = {
+    "id": 151644,
+    "content": "<|im_start|>",
+    "single_word": False,
+    "lstrip": False,
+    "rstrip": False,
+    "normalized": False,
+    "special": True,
+}
+
+
 def _tokenizer_definition(**overrides) -> dict:
     return {
+        "added_tokens": [_CHECKPOINT_ADDED_TOKEN],
         "normalizer": TOKENIZER_NORMALIZER,
         "pre_tokenizer": TOKENIZER_PRE_TOKENIZER,
-        "model": {"type": "BPE"},
+        "model": _CHECKPOINT_MODEL,
         **overrides,
     }
+
+
+def _model(**options) -> dict:
+    return {"model": {**_CHECKPOINT_MODEL, **options}}
+
+
+def _added_token(**fields) -> dict:
+    record = {**_CHECKPOINT_ADDED_TOKEN, **fields}
+    return {"added_tokens": [{key: value for key, value in record.items() if value is not ...}]}
 
 
 def _pre_tokenizer(split: dict | None = None, byte_level: dict | None = None) -> dict:
@@ -232,6 +264,11 @@ def _pre_tokenizer(split: dict | None = None, byte_level: dict | None = None) ->
 def test_the_checkpoint_tokenizer_configuration_is_accepted() -> None:
     require_supported_tokenizer(_tokenizer_definition())
     require_supported_tokenizer(_tokenizer_definition(normalizer=None))
+    # Options left out mean the same as the checkpoint's values.
+    require_supported_tokenizer(_tokenizer_definition(model={"type": "BPE"}, added_tokens=None))
+    require_supported_tokenizer(
+        _tokenizer_definition(added_tokens=[{"id": 7, "content": "<|x|>", "special": False}])
+    )
     # Offsets are not part of the ids.
     require_supported_tokenizer(
         _tokenizer_definition(pre_tokenizer=_pre_tokenizer(byte_level={"trim_offsets": True}))
@@ -258,6 +295,24 @@ def test_the_checkpoint_tokenizer_configuration_is_accepted() -> None:
         ),
         ({"normalizer": {"type": "NFKC"}}, "normalizer"),
         ({"normalizer": {"type": "Lowercase"}}, "normalizer"),
+        (_model(ignore_merges=True), "ignore_merges"),
+        (_model(fuse_unk=True), "fuse_unk"),
+        (_model(byte_fallback=True), "byte_fallback"),
+        (_model(dropout=0.1), "dropout"),
+        (_model(unk_token="<unk>"), "unk_token"),
+        (_model(continuing_subword_prefix="##"), "continuing_subword_prefix"),
+        (_model(end_of_word_suffix="</w>"), "end_of_word_suffix"),
+        (_added_token(single_word=True), "single_word"),
+        (_added_token(lstrip=True), "lstrip"),
+        (_added_token(rstrip=True), "rstrip"),
+        (_added_token(id=...), r"added_tokens\[0\]"),
+        (_added_token(content=...), r"added_tokens\[0\]"),
+        (_added_token(content=""), r"added_tokens\[0\]"),
+        (_added_token(id="151644"), r"added_tokens\[0\]"),
+        (_added_token(id=True), r"added_tokens\[0\]"),
+        (_added_token(id=-1), r"added_tokens\[0\]"),
+        ({"added_tokens": ["<|im_start|>"]}, r"added_tokens\[0\]"),
+        ({"added_tokens": {"<|im_start|>": 151644}}, "to be a list"),
     ],
 )
 def test_other_tokenizer_configurations_are_rejected(overrides: dict, message: str) -> None:

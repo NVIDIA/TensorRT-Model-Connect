@@ -146,26 +146,12 @@ GenerationSettings Pipeline::resolve(internal::ConfigView config) const {
     return settings;
 }
 
-Pipeline::EncodedPrompt Pipeline::encode_prompt(const std::string& prompt) {
-    // An empty prompt would leave the encoder nothing to read; the pipeline substitutes a space.
-    const std::string text = prompt.empty() ? " " : prompt;
-    auto ids = tokenizer_->encode(config_.prompt_prefix + text + config_.prompt_suffix);
-
-    const auto prefix = static_cast<std::size_t>(config_.prefix_tokens);
-    const auto capacity = prefix + static_cast<std::size_t>(config_.text_tokens);
-    if (ids.size() <= prefix)
-        throw std::runtime_error("Qwen-Image 2.1 prompt frame lost its system turn");
-    if (ids.size() > capacity) {
-        throw std::invalid_argument(
-            "Qwen-Image 2.1 prompt needs " + std::to_string(ids.size() - prefix) +
-            " text tokens; this bundle was built for " + std::to_string(config_.text_tokens));
-    }
-    const auto length = static_cast<std::int32_t>(ids.size() - prefix);
-    ids.resize(capacity, config_.pad_token_id);
-
+Pipeline::EncodedPrompt Pipeline::encode_prompt(const PromptTokens& tokens) {
+    const auto length = tokens.length;
     TensorMap inputs;
-    inputs.emplace("input_ids",
-                   Tensor{ids.data(), {static_cast<std::int64_t>(capacity)}, DType::kInt32});
+    inputs.emplace("input_ids", Tensor{const_cast<std::int32_t*>(tokens.ids.data()),
+                                       {static_cast<std::int64_t>(tokens.ids.size())},
+                                       DType::kInt32});
     const auto outputs = engines_.text_encoder->forward(inputs);
     const auto width = static_cast<std::size_t>(config_.text_hidden_size);
     auto hidden =
@@ -221,7 +207,9 @@ ImageResult Pipeline::decode(const std::vector<float>& latents) {
 
 ImageResult Pipeline::run(const internal::TextToImageRequest& request,
                           internal::ConfigView config) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    // Validation and tokenization read only the request and the bundle's static state. They run
+    // before the lock, so neither a request that is rejected nor a long prompt holds up the
+    // generations that wait for this pipeline's engines.
     const auto settings = resolve(config);
 
     // Caller-supplied latents use the layout [latent_channels, latent_height, latent_width].
@@ -246,11 +234,17 @@ ImageResult Pipeline::run(const internal::TextToImageRequest& request,
                                config_.latent_height(), config_.latent_width());
     }
 
+    const auto prompt_tokens = tokenize_prompt(*tokenizer_, config_, std::string(request.prompt));
+    PromptTokens negative_tokens;
+    if (settings.use_negative_prompt)
+        negative_tokens = tokenize_prompt(*tokenizer_, config_, settings.negative_prompt);
+
+    std::lock_guard<std::mutex> lock(mutex_);
     const auto begin = Clock::now();
-    const auto prompt = encode_prompt(std::string(request.prompt));
+    const auto prompt = encode_prompt(prompt_tokens);
     EncodedPrompt negative;
     if (settings.use_negative_prompt)
-        negative = encode_prompt(settings.negative_prompt);
+        negative = encode_prompt(negative_tokens);
     const auto encoded = Clock::now();
 
     const auto sigmas = flow_match_sigmas(config_, settings.num_steps);

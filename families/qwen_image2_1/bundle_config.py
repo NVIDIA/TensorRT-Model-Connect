@@ -159,17 +159,61 @@ def _without_offset_options(pre_tokenizer: object) -> object:
     }
 
 
-def require_supported_tokenizer(tokenizer: dict) -> None:
-    """Reject a ``tokenizer.json`` whose text splitting the native tokenizer does not reproduce.
+def _require_supported_model_options(model: dict) -> None:
+    """The BPE model must leave unset every option that changes ids and the runtime lacks."""
+    for option in ("ignore_merges", "fuse_unk", "byte_fallback"):
+        if model.get(option) not in (None, False):
+            raise ValueError(f"qwen_image2_1 does not support a BPE tokenizer with {option} set")
+    for option in ("dropout", "unk_token"):
+        if model.get(option) is not None:
+            raise ValueError(f"qwen_image2_1 does not support a BPE tokenizer with {option} set")
+    for option in ("continuing_subword_prefix", "end_of_word_suffix"):
+        if model.get(option) not in (None, ""):
+            raise ValueError(f"qwen_image2_1 does not support a BPE tokenizer with {option} set")
 
-    The runtime implements one configuration, the checkpoint's: byte-level BPE behind the Split
-    pattern of ``TOKENIZER_PRE_TOKENIZER``. A different pattern, behavior or byte-level option
+
+def _require_literal_added_tokens(added_tokens: object) -> None:
+    """Added tokens must be complete records that match literally, wherever they occur."""
+    if added_tokens is None:
+        return
+    if not isinstance(added_tokens, list):
+        raise ValueError("qwen_image2_1 requires added_tokens of tokenizer.json to be a list")
+    for index, token in enumerate(added_tokens):
+        content = token.get("content") if isinstance(token, dict) else None
+        token_id = token.get("id") if isinstance(token, dict) else None
+        if (
+            not isinstance(content, str)
+            or not content
+            or isinstance(token_id, bool)
+            or not isinstance(token_id, int)
+            or token_id < 0
+        ):
+            raise ValueError(
+                f"qwen_image2_1 requires added_tokens[{index}] of tokenizer.json to have a "
+                "non-empty string content and a token id"
+            )
+        for option in ("single_word", "lstrip", "rstrip"):
+            if token.get(option) not in (None, False):
+                raise ValueError(
+                    f"qwen_image2_1 matches added tokens literally; added_tokens[{index}] "
+                    f"({content!r}) sets {option}"
+                )
+
+
+def require_supported_tokenizer(tokenizer: dict) -> None:
+    """Reject a ``tokenizer.json`` that the native tokenizer does not reproduce.
+
+    The runtime implements one configuration, the checkpoint's: byte-level BPE without optional
+    model behavior, behind the Split pattern of ``TOKENIZER_PRE_TOKENIZER``, with added tokens
+    matched literally. Another pattern, byte-level option, model option or added-token option
     would silently produce other token ids, so the build refuses it. The NFC normalizer is
     accepted although the runtime does not normalize (see the family README).
     """
     model = tokenizer.get("model")
     if not isinstance(model, dict) or model.get("type") != "BPE":
         raise ValueError("qwen_image2_1 requires a BPE tokenizer.json")
+    _require_supported_model_options(model)
+    _require_literal_added_tokens(tokenizer.get("added_tokens"))
     if _without_offset_options(tokenizer.get("pre_tokenizer")) != _without_offset_options(
         TOKENIZER_PRE_TOKENIZER
     ):

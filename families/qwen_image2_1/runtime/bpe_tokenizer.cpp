@@ -9,10 +9,12 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
-#include <climits>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
 #include <iterator>
+#include <limits>
 #include <list>
 #include <nlohmann/json.hpp>
 #include <queue>
@@ -876,6 +878,13 @@ class BpeTokenizer final : public ITokenizer {
             if (!chars.empty() && !mEndOfWordSuffix.empty()) {
                 chars.back() += mEndOfWordSuffix;
             }
+            // Without an unknown token the reference model leaves a symbol that is not in the
+            // vocabulary out of the word before merging, so its neighbours can form a pair.
+            chars.erase(std::remove_if(chars.begin(), chars.end(),
+                                       [&](const std::string& symbol) {
+                                           return mTokenToId.find(symbol) == mTokenToId.end();
+                                       }),
+                        chars.end());
             auto tokens = apply_merges(std::move(chars));
             for (const auto& token : tokens) {
                 auto it = mTokenToId.find(token);
@@ -1048,56 +1057,73 @@ class BpeTokenizer final : public ITokenizer {
 
     // ─── BPE merge algorithm ───
 
-    struct MergeCandidate {
-        int rank;
-        std::string first;
-        std::string second;
-    };
-
-    MergeCandidate find_best_merge(const std::vector<std::string>& tokens) const {
-        MergeCandidate best{INT_MAX, "", ""};
-        for (size_t i = 0; i + 1 < tokens.size(); ++i) {
-            auto it =
-                mMergeRank.find(std::make_pair(std::cref(tokens[i]), std::cref(tokens[i + 1])));
-            if (it != mMergeRank.end() && it->second < best.rank) {
-                best = {it->second, tokens[i], tokens[i + 1]};
-            }
-        }
-        return best;
-    }
-
-    static std::vector<std::string> merge_all_pairs(std::vector<std::string> tokens,
-                                                    const std::string& first,
-                                                    const std::string& second) {
-        std::string merged = first + second;
-        std::vector<std::string> result;
-        result.reserve(tokens.size());
-        for (size_t i = 0; i < tokens.size(); ++i) {
-            if (i + 1 < tokens.size() && tokens[i] == first && tokens[i + 1] == second) {
-                result.push_back(merged);
-                ++i; // skip next
-            } else {
-                result.push_back(std::move(tokens[i]));
-            }
-        }
-        return result;
-    }
-
-    // Optimized: merge ALL occurrences of the best pair per pass.
+    // Applies one merge at a time: the lowest rank first and, among equal ranks, the leftmost
+    // pair. Each merge makes the pairs on both sides of the new token candidates in turn, so a
+    // rule that uses a token can apply before the remaining occurrences of the rule that
+    // produced it. This is the order of the reference BPE model; merging every occurrence of
+    // the best pair per pass differs from it whenever a merge table ranks such a rule first.
     std::vector<std::string> apply_merges(std::vector<std::string> tokens) const {
-        if (tokens.size() <= 1)
+        const std::size_t count = tokens.size();
+        if (count <= 1)
             return tokens;
 
-        while (true) {
-            auto best = find_best_merge(tokens);
-            if (best.rank == INT_MAX)
-                break;
-            tokens = merge_all_pairs(std::move(tokens), best.first, best.second);
-            if (tokens.size() <= 1)
-                break;
+        constexpr std::size_t kNone = std::numeric_limits<std::size_t>::max();
+        // Live symbols form a list; a symbol merged into its left neighbour leaves it.
+        std::vector<std::size_t> next(count);
+        std::vector<std::size_t> previous(count);
+        std::vector<bool> merged_away(count, false);
+        for (std::size_t i = 0; i < count; ++i) {
+            previous[i] = i == 0 ? kNone : i - 1;
+            next[i] = i + 1 < count ? i + 1 : kNone;
         }
 
-        return tokens;
+        // Rank of the rule for the pair that starts at `left`, or -1 without one.
+        const auto rank_at = [&](std::size_t left) -> int {
+            const std::size_t right = next[left];
+            if (right == kNone)
+                return -1;
+            const auto it =
+                mMergeRank.find(std::make_pair(std::cref(tokens[left]), std::cref(tokens[right])));
+            return it == mMergeRank.end() ? -1 : it->second;
+        };
+
+        using Candidate = std::pair<int, std::size_t>; // rank, position of the left symbol
+        std::priority_queue<Candidate, std::vector<Candidate>, std::greater<Candidate>> candidates;
+        for (std::size_t i = 0; i + 1 < count; ++i) {
+            if (const int rank = rank_at(i); rank >= 0)
+                candidates.emplace(rank, i);
+        }
+
+        while (!candidates.empty()) {
+            const auto [rank, left] = candidates.top();
+            candidates.pop();
+            // An earlier merge may have consumed either symbol of this candidate. A pair has one
+            // rank and a symbol only grows, so the same rank means the same pair is still there.
+            if (merged_away[left] || rank_at(left) != rank)
+                continue;
+
+            const std::size_t right = next[left];
+            tokens[left] += tokens[right];
+            merged_away[right] = true;
+            next[left] = next[right];
+            if (next[left] != kNone)
+                previous[next[left]] = left;
+
+            if (previous[left] != kNone) {
+                if (const int before = rank_at(previous[left]); before >= 0)
+                    candidates.emplace(before, previous[left]);
+            }
+            if (const int after = rank_at(left); after >= 0)
+                candidates.emplace(after, left);
+        }
+
+        std::vector<std::string> result;
+        result.reserve(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            if (!merged_away[i])
+                result.push_back(std::move(tokens[i]));
+        }
+        return result;
     }
 
     // ─── JSON parsing helpers ───
@@ -1108,15 +1134,18 @@ class BpeTokenizer final : public ITokenizer {
 
     void parse_vocab(const nlohmann::json& j) {
         auto& vocab_obj = j["model"]["vocab"];
-        size_t vocab_size = vocab_obj.size();
-        mVocab.resize(vocab_size);
+        mVocab.resize(vocab_obj.size());
 
         for (auto& [token, id] : vocab_obj.items()) {
-            int32_t token_id = id.get<int32_t>();
-            if (token_id >= 0 && token_id < static_cast<int32_t>(vocab_size)) {
-                mVocab[token_id] = token;
-                mTokenToId[token] = token_id;
-            }
+            if (!id.is_number_integer() || id.get<std::int64_t>() < 0 ||
+                id.get<std::int64_t>() > std::numeric_limits<int32_t>::max())
+                throw std::runtime_error("Invalid tokenizer.json: model.vocab maps \"" + token +
+                                         "\" to something other than a token id");
+            const auto token_id = id.get<int32_t>();
+            if (static_cast<size_t>(token_id) >= mVocab.size())
+                mVocab.resize(static_cast<size_t>(token_id) + 1);
+            mVocab[static_cast<size_t>(token_id)] = token;
+            mTokenToId[token] = token_id;
         }
     }
 
@@ -1128,24 +1157,37 @@ class BpeTokenizer final : public ITokenizer {
         mMergeRank.reserve(merges_arr.size());
 
         for (size_t i = 0; i < merges_arr.size(); ++i) {
+            const auto& rule = merges_arr[i];
+            const auto malformed = [&]() {
+                return std::runtime_error("Invalid tokenizer.json: model.merges[" +
+                                          std::to_string(i) + "] is not a pair of tokens");
+            };
             std::string first, second;
 
-            if (merges_arr[i].is_array()) {
-                auto arr = merges_arr[i].get<std::vector<std::string>>();
-                if (arr.size() != 2)
-                    continue;
-                first = std::move(arr[0]);
-                second = std::move(arr[1]);
-            } else if (merges_arr[i].is_string()) {
-                std::string merge_str = merges_arr[i].get<std::string>();
+            if (rule.is_array()) {
+                if (rule.size() != 2 || !rule[0].is_string() || !rule[1].is_string())
+                    throw malformed();
+                first = rule[0].get<std::string>();
+                second = rule[1].get<std::string>();
+            } else if (rule.is_string()) {
+                std::string merge_str = rule.get<std::string>();
                 auto space_pos = merge_str.find(' ');
                 if (space_pos == std::string::npos)
-                    continue;
+                    throw malformed();
                 first = merge_str.substr(0, space_pos);
                 second = merge_str.substr(space_pos + 1);
             } else {
-                continue;
+                throw malformed();
             }
+
+            // The reference model refuses a rule whose parts or result have no token id; applying
+            // one here would produce a piece that cannot be looked up.
+            if (mTokenToId.find(first) == mTokenToId.end() ||
+                mTokenToId.find(second) == mTokenToId.end() ||
+                mTokenToId.find(first + second) == mTokenToId.end())
+                throw std::runtime_error("Invalid tokenizer.json: model.merges[" +
+                                         std::to_string(i) +
+                                         "] names a token outside the vocabulary");
 
             auto pair = std::make_pair(std::move(first), std::move(second));
             mMergeRank[pair] = static_cast<int>(i);
@@ -1155,19 +1197,41 @@ class BpeTokenizer final : public ITokenizer {
     void parse_added_tokens(const nlohmann::json& j) {
         if (!j.contains("added_tokens"))
             return;
-        for (auto& tok : j["added_tokens"]) {
-            std::string content = tok["content"].get<std::string>();
-            int32_t id = tok["id"].get<int32_t>();
+        const auto& records = j["added_tokens"];
+        if (!records.is_array())
+            throw std::runtime_error("Invalid tokenizer.json: added_tokens must be an array");
+        for (size_t index = 0; index < records.size(); ++index) {
+            const auto& tok = records[index];
+            const std::string where = "added_tokens[" + std::to_string(index) + "]";
+            const auto content_it = tok.is_object() ? tok.find("content") : tok.end();
+            const auto id_it = tok.is_object() ? tok.find("id") : tok.end();
+            if (!tok.is_object() || content_it == tok.end() || !content_it->is_string() ||
+                content_it->get_ref<const std::string&>().empty() || id_it == tok.end() ||
+                !id_it->is_number_integer() || id_it->get<std::int64_t>() < 0 ||
+                id_it->get<std::int64_t>() > std::numeric_limits<int32_t>::max())
+                throw std::runtime_error("Invalid tokenizer.json: " + where +
+                                         " needs a non-empty string content and a token id");
+            // Added tokens are matched literally wherever they occur. These options make the
+            // reference match them only at word boundaries or together with adjacent
+            // whitespace, which this tokenizer does not do.
+            for (const char* option : {"single_word", "lstrip", "rstrip"}) {
+                const auto option_it = tok.find(option);
+                if (option_it != tok.end() && !option_it->is_null() &&
+                    (!option_it->is_boolean() || option_it->get<bool>()))
+                    throw std::runtime_error("Unsupported tokenizer.json: " + where + " sets " +
+                                             option + "; added tokens are matched literally");
+            }
+            std::string content = content_it->get<std::string>();
+            const auto id = id_it->get<int32_t>();
 
-            if (id >= 0 && static_cast<size_t>(id) >= mVocab.size()) {
+            if (static_cast<size_t>(id) >= mVocab.size()) {
                 mVocab.resize(static_cast<size_t>(id) + 1);
             }
-            if (id >= 0) {
-                mVocab[id] = content;
-                mTokenToId[content] = id;
-            }
+            mVocab[static_cast<size_t>(id)] = content;
+            mTokenToId[content] = id;
 
-            if (tok.value("special", false)) {
+            const auto special_it = tok.find("special");
+            if (special_it != tok.end() && special_it->is_boolean() && special_it->get<bool>()) {
                 mSpecialTokens[content] = id;
                 mSpecialIds.insert(id);
                 if (is_eos_content(content))
@@ -1360,6 +1424,29 @@ class BpeTokenizer final : public ITokenizer {
         return {};
     }
 
+    // The BPE model options that change token ids and that encoding does not implement. A
+    // tokenizer.json that sets one would otherwise load and silently encode as if it did not.
+    static void require_implemented_model_options(const nlohmann::json& model) {
+        const auto unsupported = [](const char* option) {
+            return std::runtime_error(std::string("Unsupported tokenizer.json: model.") + option +
+                                      " is set; this tokenizer does not implement it");
+        };
+        for (const char* option : {"ignore_merges", "fuse_unk", "byte_fallback"}) {
+            const auto it = model.find(option);
+            if (it != model.end() && !it->is_null() && (!it->is_boolean() || it->get<bool>()))
+                throw unsupported(option);
+        }
+        for (const char* option : {"dropout", "unk_token"}) {
+            const auto it = model.find(option);
+            if (it != model.end() && !it->is_null())
+                throw unsupported(option);
+        }
+        const auto prefix = model.find("continuing_subword_prefix");
+        if (prefix != model.end() && !prefix->is_null() &&
+            (!prefix->is_string() || !prefix->get_ref<const std::string&>().empty()))
+            throw unsupported("continuing_subword_prefix");
+    }
+
     void parse_tokenizer_json(const char* json_data, std::size_t json_size) {
         nlohmann::json j;
         try {
@@ -1376,7 +1463,7 @@ class BpeTokenizer final : public ITokenizer {
         if (!model.contains("merges") || !model["merges"].is_array())
             throw std::runtime_error("Invalid tokenizer.json: model.merges must be an array");
 
-        mByteFallback = model.value("byte_fallback", false);
+        require_implemented_model_options(model);
         mEndOfWordSuffix = optional_model_string(model, "end_of_word_suffix");
         parse_vocab(j);
         parse_merges(j);

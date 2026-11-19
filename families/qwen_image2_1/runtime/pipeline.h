@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "families/qwen_image2_1/runtime/prompt_tokens.h"
 #include "families/qwen_image2_1/runtime/runtime_config.h"
 #include "families/qwen_image2_1/runtime/tokenizer.h"
 #include "trtmc/internal/image.h"
@@ -54,7 +55,7 @@ class Pipeline final : public internal::IModel, public internal::ITextToImage {
     };
 
     GenerationSettings resolve(internal::ConfigView config) const;
-    EncodedPrompt encode_prompt(const std::string& prompt);
+    EncodedPrompt encode_prompt(const PromptTokens& tokens);
     std::vector<float> predict_velocity(const std::vector<float>& latents, float timestep,
                                         const EncodedPrompt& prompt);
     ImageResult decode(const std::vector<float>& latents);
