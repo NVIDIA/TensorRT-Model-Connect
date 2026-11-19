@@ -6,13 +6,12 @@
 from __future__ import annotations
 
 import json
-import os
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 
-import tensorrt_model_connect
 from tensorrt_model_connect.build import cmake_prefixes, detect_local_platform
 
 from ..build_routing import native_kv_architecture_capability
@@ -34,7 +33,11 @@ def local_target() -> dict:
 def _package_prefixes() -> list[Path]:
     """Search standalone CMake prefixes, then the SDK shipped in an MC wheel."""
     prefixes = cmake_prefixes()
-    module_dir = Path(tensorrt_model_connect.__file__).resolve().parent
+    try:
+        package = distribution("tensorrt-model-connect")
+    except PackageNotFoundError:
+        return prefixes
+    module_dir = Path(package.locate_file("tensorrt_model_connect"))
     if (module_dir / "bin/trtmc").is_file():
         return [*prefixes, module_dir]
     return prefixes
@@ -99,7 +102,7 @@ def installed_package(target: dict) -> dict:
     )
 
 
-def builder_python(package: dict, target: dict) -> str:
+def builder_python(package: dict, target: dict, requested: Path | None = None) -> str:
     """Select a verified builder interpreter for the chosen native SDK release.
 
     The native SDK remains required. This only discovers an interpreter; it
@@ -108,8 +111,7 @@ def builder_python(package: dict, target: dict) -> str:
     """
     version = package["version"]
     module = _RELEASES[version][3]
-    interpreter = (sys.executable if version == "0.11.0"
-                   else os.environ.get("TRTMC_EDGELLM_PYTHON", sys.executable))
+    interpreter = sys.executable if requested is None else str(requested)
     pin_check = ("import transformers; assert transformers.__version__ == '5.17.0'; "
                  if version == "0.12.0" else "")
     try:
@@ -134,10 +136,10 @@ def builder_python(package: dict, target: dict) -> str:
                 f"Edge builder Python must match Edge {version} and the native TensorRT SDK"
             )
     except (OSError, ValueError, subprocess.SubprocessError) as error:
-        if version == "0.11.0" and package.get("python"):
+        if requested is None and version == "0.11.0" and package.get("python"):
             return package["python"]
         raise ValueError(
-            "Set TRTMC_EDGELLM_PYTHON to a compatible installed Edge 0.12 builder interpreter"
+            "Pass --edge-builder-python with an installed interpreter matching the selected Edge SDK"
         ) from error
     return interpreter
 
@@ -231,7 +233,7 @@ def prepare(
     compressed = compressed_static_fp8(raw.get("quantization_config") or {})
     if compressed and package["version"] != "0.12.0":
         raise ValueError("The calibrated compressed-tensors route requires Edge 0.12.0")
-    interpreter = builder_python(package, target)
+    interpreter = builder_python(package, target, getattr(request, "edge_builder_python", None))
     if package["version"] == "0.12.0" and draft_dir is not None:
         _check_draft_offsets(interpreter, draft_dir, log_path)
     checkpoint = staging / "edge_llm/checkpoint"

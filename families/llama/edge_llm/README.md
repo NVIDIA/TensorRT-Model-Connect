@@ -12,9 +12,11 @@ the family-owned fallback.
   and TensorRT match the SDK; otherwise use the SDK's bundled interpreter.
 - **Opt-in 0.12.0** (official revision `513dcd18291e587c80928911a480761352f3c2d8`):
   configure MC with `TRTMC_ENABLE_EDGELLM=ON` and
-  `TRTMC_EDGELLM_RELEASE=0.12.0`. Point `TRTMC_EDGELLM_PYTHON` at the
-  isolated interpreter containing the release's builder (PyPI or from source),
-  Transformers 5.17.0 and the matching TensorRT Python bindings. For a PyTorch
+  `TRTMC_EDGELLM_RELEASE=0.12.0`. Pass
+  `--edge-builder-python /absolute/path/to/python` to `trtmc llama build`.
+  The interpreter needs the release's builder (PyPI or from source),
+  Transformers 5.17.0 and matching TensorRT bindings. If omitted, the
+  family checks the current interpreter. For a PyTorch
   `.bin` draft, the Edge builder and the native Python graph builder also need
   Torch. Edge externalizes the draft weights, so its interpreter must expose
   checkpoint byte offsets as well. For the documented EAGLE3 draft, the

@@ -245,6 +245,7 @@ def test_edge_cli_uses_ordinary_family_build(tmp_path, monkeypatch, precision):
 
     def paired(request, writer, execution):
         assert isinstance(request, LlamaBuildRequest)
+        assert request.edge_builder_python == tmp_path / "edge-python"
         assert request.execution is execution
         assert execution.variant == "eagle3"
         assert [(item.role, item.model_dir) for item in execution.checkpoints] == [("draft", draft)]
@@ -256,6 +257,7 @@ def test_edge_cli_uses_ordinary_family_build(tmp_path, monkeypatch, precision):
     options = ["--precision", precision] if precision else []
     assert build_cli.main(["llama",
         "build", str(source), *options, "-o", str(output),
+        "--edge-builder-python", str(tmp_path / "edge-python"),
         "--execution-variant", "eagle3", "--companion", f"draft={draft}",
     ]) == 0
     assert len(seen) == 1
@@ -574,7 +576,6 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
                 with pytest.raises(ValueError, match="source revision"):
                     builder.installed_package(target)
 
-        monkeypatch.delenv("TRTMC_EDGELLM_PYTHON", raising=False)
         platform = {"tensorrt_version": "11.1.0.106"}
         for release in ("0.11.0", "0.12.0"):
             package = {"version": release}
@@ -600,7 +601,7 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
                 if release == "0.11.0":
                     assert builder.builder_python(package, platform) == package["python"]
                 else:
-                    with pytest.raises(ValueError, match="TRTMC_EDGELLM_PYTHON"):
+                    with pytest.raises(ValueError, match="--edge-builder-python"):
                         builder.builder_python(package, platform)
 
             for _ in range(3):
