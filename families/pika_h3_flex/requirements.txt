@@ -1,9 +1,4 @@
-torch>=2.6
+# The original Diffusers/Transformers oracle runs in tests/requirements.txt's environment.
+torch==2.12.0
 numpy==2.5.2
 safetensors==0.8.0
-transformers==5.15.0
-diffusers @ git+https://github.com/huggingface/diffusers.git@d0b9b1b5a540e5f9df2f8ec236347bf9c5aa7d1f
-peft==0.20.0
-accelerate==1.14.0
-huggingface-hub==1.32.0
-pillow==12.3.0

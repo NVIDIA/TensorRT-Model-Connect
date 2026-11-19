@@ -26,8 +26,9 @@
       "audio_snr_min_db": 20.0,
       "audio_cosine_min": 0.99,
       "audio_max_abs": 0.1,
-      "noise_max_abs": 0.000001,
+      "noise_max_abs": 1e-06,
       "runtime_timeout_s": 14400
     }
-  ]
+  ],
+  "reference_environment": "isolated"
 }

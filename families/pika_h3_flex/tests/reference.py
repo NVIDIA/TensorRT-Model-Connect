@@ -8,12 +8,27 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import transformers
+import diffusers
 from diffusers import ModularPipeline
+from diffusers.hooks.group_offloading import apply_group_offloading
 
 
 def main():
     directory, input_path, output_dir = map(Path, sys.argv[1:])
     manifest, case = json.loads(input_path.read_text())
+    assert transformers.__version__ == "5.15.0"
+    assert torch.__version__.split("+")[0] == "2.12.0"
+    (output_dir / "reference-environment.json").write_text(
+        json.dumps(
+            {
+                "python": sys.executable,
+                "torch": torch.__version__,
+                "transformers": transformers.__version__,
+                "diffusers": diffusers.__version__,
+            }
+        )
+    )
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     pipeline = ModularPipeline.from_pretrained(
@@ -28,7 +43,17 @@ def main():
         str(directory), weight_name="fl2va/adapter.safetensors", local_files_only=True
     )
     pipeline.text_encoder.set_attn_implementation("eager")
-    pipeline.to("cuda")
+    # Keep weights on CPU and place only the active leaf on CUDA. Whole-component
+    # offload still requires the complete transformer partition on the GPU.
+    for component in pipeline.components.values():
+        if isinstance(component, torch.nn.Module):
+            apply_group_offloading(
+                component,
+                onload_device=torch.device("cuda"),
+                offload_device=torch.device("cpu"),
+                offload_type="leaf_level",
+                use_stream=False,
+            )
     assert pipeline.vae.use_tiling
     assert pipeline.vae.tile_sample_min_height == pipeline.vae.tile_sample_min_width == 256
     assert pipeline.config.denoising_step_list == [1000, 750, 500, 250, 100, 40, 0]
