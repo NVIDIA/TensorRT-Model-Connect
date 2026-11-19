@@ -11,6 +11,8 @@ from .builders import build_decoder, build_vision
 def build(request, writer):
     if request.task != "images_text_to_text" or request.backend != "trt":
         raise ValueError("BLIP-2 requires images_text_to_text with backend=trt")
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("blip2 does not support dynamic_kv_cache")
     if (
         request.precision != "fp32"
         or request.tensor_parallel_size != 1

@@ -155,8 +155,10 @@ class Pipeline final : public internal::IModel, public internal::IImagesTextToTe
 } // namespace trtmc::blip2
 
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("blip2 does not support --kv-cache-size");
     using namespace trtmc;
-    if (context.kv_cache_size_bytes || context.reader.info().task != "images_text_to_text")
+    if (context.reader.info().task != "images_text_to_text")
         throw std::invalid_argument(
             "BLIP-2 requires image/text generation without an external KV cache");
     const auto raw = blip2::section(context.reader, "runtime.json");

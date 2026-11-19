@@ -16,6 +16,7 @@ def test_blip2_checkpoint_has_one_owner():
     )
     assert family == "blip2"
     assert support.tasks == ("images_text_to_text",)
+    assert support.default_task == "images_text_to_text"
 
 
 def test_standalone_vision_checkpoint_is_not_claimed():
