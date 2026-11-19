@@ -328,7 +328,7 @@ foreach(_trtmc_runtime_cmake IN LISTS _trtmc_family_runtime_cmake)
   )
 endforeach()
 list(REMOVE_ITEM _trtmc_unknown_families "*")
-if(NOT "${_trtmc_unknown_families}" STREQUAL "")
+if(_trtmc_unknown_families)
   message(FATAL_ERROR "Unknown model families in TRTMC_BUILD_FAMILIES: ${_trtmc_unknown_families}")
 endif()
 
