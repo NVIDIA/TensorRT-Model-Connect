@@ -115,4 +115,4 @@ def test_mismatched_prebuilt_bundle_fails_before_reference_or_generation(
         test_e2e, "build", lambda *_args: pytest.fail("a supplied bundle must not be rebuilt")
     )
     with pytest.raises(AssertionError, match="build.max_sequence_length"):
-        test_e2e.artifacts.__wrapped__(tmp_path_factory)
+        test_e2e.artifacts.__wrapped__(tmp_path_factory)()
