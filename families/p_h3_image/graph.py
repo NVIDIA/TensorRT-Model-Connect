@@ -239,8 +239,8 @@ class Graph:
 
     def save(self, stream):
         options = self.builder.create_builder_config()
-        options.clear_flag(trt.BuilderFlag.TF32)
         options.builder_optimization_level = 3
+        options.clear_flag(trt.BuilderFlag.TF32)
         dynamic = [
             self.net.get_input(i)
             for i in range(self.net.num_inputs)

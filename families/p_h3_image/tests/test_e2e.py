@@ -249,6 +249,14 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     import sys
 
     height, width = manifest["image_height"], manifest["image_width"]
+    record_evidence(
+        "inputs",
+        {
+            "seed": case["seed"],
+            "num_inference_steps": case["num_inference_steps"],
+            "prompt_upsampler": case["prompt_upsampler"],
+        },
+    )
     input_path = tmp_path / "reference-input.json"
     input_path.write_text(json.dumps([manifest, case]))
     with evidence_stage("reference"):
