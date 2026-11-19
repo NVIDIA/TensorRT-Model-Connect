@@ -12,6 +12,8 @@ import tensorrt as trt
 def build(request, writer):
     if request.task != "spectrogram_to_audio" or request.backend != "trt":
         raise ValueError("SpeechT5 HiFiGAN requires spectrogram_to_audio with backend=trt")
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("speecht5_hifigan does not support dynamic_kv_cache")
     if (
         request.precision != "fp32"
         or request.tensor_parallel_size != 1

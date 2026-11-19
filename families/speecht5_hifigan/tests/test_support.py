@@ -7,3 +7,4 @@ def test_speecht5_hifigan_checkpoint_has_one_owner():
     family, support = resolve_family(ModelMetadata({"model_type": "hifigan"}, {}))
     assert family == "speecht5_hifigan"
     assert support.tasks == ("spectrogram_to_audio",)
+    assert support.default_task == "spectrogram_to_audio"

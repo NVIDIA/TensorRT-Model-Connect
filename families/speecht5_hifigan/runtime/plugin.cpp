@@ -66,8 +66,10 @@ std::vector<char> section(const BundleReader& reader, const char* name) {
 } // namespace
 } // namespace trtmc::speecht5_hifigan
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("speecht5_hifigan does not support --kv-cache-size");
     using namespace trtmc;
-    if (context.kv_cache_size_bytes || context.reader.info().task != "spectrogram_to_audio")
+    if (context.reader.info().task != "spectrogram_to_audio")
         throw std::invalid_argument(
             "HiFiGAN requires spectrogram-to-audio without an external cache");
     const auto raw = speecht5_hifigan::section(context.reader, "runtime.json");
