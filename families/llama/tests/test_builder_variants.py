@@ -428,6 +428,7 @@ assert "torch" not in sys.modules
 
 def test_edge_eagle3_falls_back_to_native_with_original_pair(tmp_path, monkeypatch):
     import json
+    from dataclasses import replace
     from unittest.mock import Mock
     from families.llama.build_request import BuildRequest
     from families.llama.edge_llm import dispatch
@@ -451,9 +452,15 @@ def test_edge_eagle3_falls_back_to_native_with_original_pair(tmp_path, monkeypat
         assert draft_dir == draft
         native(original, output)
 
-    monkeypatch.setattr(dispatch, "build", unavailable)
-    dispatch.build_paired(request, writer,
-                          BuildExecutionInputs("eagle3", (NamedCheckpoint("draft", draft),)))
+    route = Mock(side_effect=unavailable)
+    monkeypatch.setattr(dispatch, "build", route)
+    execution = BuildExecutionInputs("eagle3", (NamedCheckpoint("draft", draft),))
+    for quantization in ("fp8", "nvfp4", "int4_awq"):
+        with pytest.raises(ValueError, match="EAGLE3.*quantization"):
+            dispatch.build_paired(replace(request, quantization=quantization), writer, execution)
+    route.assert_not_called()
+    build_native.assert_not_called()
+    dispatch.build_paired(request, writer, execution)
     build_native.assert_called_once_with(
         model_dir=source, draft_dir=draft, output=request.output_path,
         max_sequence_length=256, max_query=64, draft_depth=6, verbose=False,

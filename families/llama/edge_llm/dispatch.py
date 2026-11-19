@@ -175,6 +175,8 @@ def build_paired(request, writer, execution) -> None:
     execution.validate_local()
     if execution.variant != "eagle3" or tuple(x.role for x in execution.checkpoints) != ("draft",):
         raise ValueError("Llama paired execution requires variant=eagle3 and one draft checkpoint")
+    if request.quantization not in {None, "none"}:
+        raise ValueError("Llama EAGLE3 does not support quantization; use original FP16 checkpoints")
     draft_dir = execution.checkpoints[0].model_dir
     base = json.loads((request.model_dir / "config.json").read_text())
     if not isinstance(base, dict):
