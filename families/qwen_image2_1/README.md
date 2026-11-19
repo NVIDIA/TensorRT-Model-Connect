@@ -115,17 +115,19 @@ scale 4).
 The family E2E therefore bounds drift rather than asking for equal pixels (PSNR at least 20 dB, windowed SSIM at
 least 0.90, layout correlation at least 0.95), and uses prompts and seeds on which the reference agrees with itself
 across precisions. Every image is compared at the 8 bits per channel of the PNG the CLI writes; the SDK images and
-the reference are float pixels and are rounded the same way first. Its cases, native CLI image against the
-reference BF16 run, measured on an NVIDIA GB200 with TensorRT 11.4:
+the reference are float pixels and are rounded the same way first. Its cases, native image against the reference
+BF16 run, measured on an NVIDIA B300 with TensorRT 11.4:
 
 | Case | PSNR | Windowed SSIM | Layout correlation | Reference BF16 against reference FP32 |
 | --- | --- | --- | --- | --- |
-| `qwen-image-2.1-l0` (512 x 512, 20 steps) | 28.2 dB | 0.982 | 0.994 | 34.8 dB |
-| `qwen-image-2.1-l0-cfg` (same, guidance scale 4) | 29.7 dB | 0.981 | 0.999 | 33.3 dB |
-| `qwen-image-2.1` (1024 x 1024, 40 steps) | 36.5 dB | 0.987 | 0.998 | 38.5 dB |
+| `qwen-image-2.1-l0` (512 x 512, 20 steps) | 29.2 dB | 0.985 | 0.9952 | 34.8 dB |
+| `qwen-image-2.1-l0-cfg` (same, guidance scale 4) | 29.3 dB | 0.980 | 0.9991 | 33.3 dB |
+| `qwen-image-2.1` (1024 x 1024, 40 steps) | 41.1 dB | 0.992 | 0.9995 | 38.5 dB |
 
-Rebuilding the engines on that GPU reproduces these numbers to 0.01 dB. Another GPU model can select other kernels
-and land elsewhere in the spread above.
+The last column was measured on an NVIDIA GB200. Rebuilding the engines on one GPU reproduces its numbers to
+0.01 dB. Another GPU model can select other kernels and land elsewhere in the spread above: the GB200 scored 28.2,
+29.7 and 36.5 dB on these cases, against the reference before rounding. Rounding the reference moves the PSNR of
+these cases by 0.00 to 0.15 dB; the largest shift belongs to the image with the largest flat area.
 
 ## Not supported
 
