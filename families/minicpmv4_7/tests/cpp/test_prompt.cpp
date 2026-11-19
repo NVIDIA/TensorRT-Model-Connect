@@ -4,12 +4,14 @@
  */
 
 // Host-only contract of the MiniCPM-V 4.7 runtime against values recorded from the provider
-// (transformers 5.22.2): image slicing, vision position ids, canvas M-RoPE and the chat format.
+// (transformers 5.22.2, tokenizers 0.23.1): image slicing, vision position ids, canvas M-RoPE,
+// the chat format, the generation budget, BPE merge order and the tokenizer's NFC.
 
 #include "families/minicpmv4_7/runtime/bpe_merge.h"
 #include "families/minicpmv4_7/runtime/image_preprocess.h"
 #include "families/minicpmv4_7/runtime/prompt.h"
 #include "families/minicpmv4_7/runtime/sampler.h"
+#include "families/minicpmv4_7/runtime/tokenizer.h"
 
 #include <array>
 #include <cstddef>
@@ -272,6 +274,15 @@ void bpe_merges() {
     expect(lookups <= 3 * static_cast<std::size_t>(n), "pair lookups grow linearly with the word");
 }
 
+// NFC as the tokenizers normalizer applies it: Unicode 9.0 data, so a mark assigned later
+// (U+09FE, U+1DF6; Unicode 10.0) is not reordered before an older mark of a lower class.
+void normalization() {
+    expect(tokenizer_nfc("e\u0301") == "\u00e9", "composition");
+    expect(tokenizer_nfc("\u1e0a\u0323") == "\u1e0c\u0307", "reordering, then composition");
+    expect(tokenizer_nfc("\u09fe\u06e3") == "\u09fe\u06e3", "a Unicode 10.0 mark stays in place");
+    expect(tokenizer_nfc("x\u1df6\u0316") == "x\u1df6\u0316", "no reordering across it");
+}
+
 } // namespace
 
 int main() {
@@ -281,6 +292,7 @@ int main() {
     conversation();
     generation();
     bpe_merges();
+    normalization();
     if (failures == 0)
         std::cout << "minicpmv4_7 host contract: all checks passed\n";
     return failures == 0 ? 0 : 1;

@@ -19,6 +19,7 @@
 #include <string>
 #include <unicode/normalizer2.h>
 #include <unicode/regex.h>
+#include <unicode/uniset.h>
 #include <unicode/utf8.h>
 #include <unordered_map>
 #include <unordered_set>
@@ -207,17 +208,43 @@ void require_utf8(std::string_view text) {
     }
 }
 
-// One non-added-token segment: NFC, then the Split pattern with Isolated behavior.
-std::vector<std::string> pre_tokenize(std::string_view text) {
+// The NFC normalizer of Hugging Face tokenizers holds Unicode 9.0 data: a character assigned
+// later is kept as it is and bounds the normalization around it, so no canonical reordering or
+// composition crosses it. ICU's NFC restricted to the characters of Unicode 9.0 does the same.
+const icu::Normalizer2& unicode9_nfc() {
+    struct Unicode9Nfc {
+        icu::UnicodeSet assigned;
+        std::unique_ptr<icu::FilteredNormalizer2> normalizer;
+
+        Unicode9Nfc() {
+            UErrorCode status = U_ZERO_ERROR;
+            assigned.applyPattern(UNICODE_STRING_SIMPLE("[:age=9.0:]"), status);
+            const auto* nfc = icu::Normalizer2::getNFCInstance(status);
+            if (U_FAILURE(status))
+                throw std::runtime_error("MiniCPM-V 4.7 cannot initialize NFC normalization");
+            assigned.freeze();
+            normalizer = std::make_unique<icu::FilteredNormalizer2>(*nfc, assigned);
+        }
+    };
+    static const Unicode9Nfc instance;
+    return *instance.normalizer;
+}
+
+icu::UnicodeString normalize(std::string_view text) {
     UErrorCode status = U_ZERO_ERROR;
-    const auto* nfc = icu::Normalizer2::getNFCInstance(status);
-    if (U_FAILURE(status))
-        throw std::runtime_error("MiniCPM-V 4.7 cannot initialize NFC normalization");
     icu::UnicodeString normalized;
-    nfc->normalize(icu::UnicodeString::fromUTF8(icu::StringPiece(text.data(), text.size())),
-                   normalized, status);
+    unicode9_nfc().normalize(
+        icu::UnicodeString::fromUTF8(icu::StringPiece(text.data(), text.size())), normalized,
+        status);
     if (U_FAILURE(status))
         throw std::invalid_argument("MiniCPM-V 4.7 cannot normalize prompt text");
+    return normalized;
+}
+
+// One non-added-token segment: NFC, then the Split pattern with Isolated behavior.
+std::vector<std::string> pre_tokenize(std::string_view text) {
+    const icu::UnicodeString normalized = normalize(text);
+    UErrorCode status = U_ZERO_ERROR;
     static const auto pattern = [] {
         UErrorCode code = U_ZERO_ERROR;
         std::unique_ptr<icu::RegexPattern> value(icu::RegexPattern::compile(
@@ -534,6 +561,12 @@ class BpeTokenizer final : public ITokenizer {
 std::unique_ptr<ITokenizer> CreateBpeTokenizer(const char* tokenizer_json_data,
                                                std::size_t tokenizer_json_size) {
     return BpeTokenizer::create(tokenizer_json_data, tokenizer_json_size);
+}
+
+std::string tokenizer_nfc(std::string_view text) {
+    std::string result;
+    normalize(text).toUTF8String(result);
+    return result;
 }
 
 } // namespace trtmc::minicpmv4_7

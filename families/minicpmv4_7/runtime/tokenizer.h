@@ -29,4 +29,8 @@ class ITokenizer {
 std::unique_ptr<ITokenizer> CreateBpeTokenizer(const char* tokenizer_json_data,
                                                std::size_t tokenizer_json_size);
 
+// The tokenizer's NFC with the Unicode 9.0 data of the tokenizers library: a character assigned
+// later stays in place and bounds the normalization around it.
+std::string tokenizer_nfc(std::string_view text);
+
 } // namespace trtmc::minicpmv4_7
