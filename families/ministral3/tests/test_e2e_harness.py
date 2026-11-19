@@ -3,6 +3,7 @@
 
 """CPU checks of the E2E harness: native call plan and the parity oracle."""
 
+import math
 from pathlib import Path
 
 import numpy as np
@@ -223,3 +224,72 @@ def test_bf16_raw_features_are_checked_for_length_not_only_direction():
     longer = dict(native, pooled=native["pooled"] * 1.01)
     with pytest.raises(AssertionError, match="pooled-feature relative error"):
         test_e2e._assert_parity(longer, truth, official, case, test_e2e.DEFAULT_THRESHOLDS)
+
+
+def valid_row(row):
+    """A row the E2E report accepts: plain finite numbers and a verdict that matches them."""
+    assert set(row) == {"name", "label", "scope", "actual", "operator", "expected", "passed"}
+    assert row["scope"] in {"contract", "independent_reference"}
+    assert row["operator"] in {"==", ">=", "<="} and row["label"]
+    assert type(row["actual"]) in (int, float) and type(row["expected"]) in (int, float)
+    assert math.isfinite(row["actual"]) and math.isfinite(row["expected"])
+    assert type(row["passed"]) is bool
+    evaluated = {
+        "==": row["actual"] == row["expected"],
+        ">=": row["actual"] >= row["expected"],
+        "<=": row["actual"] <= row["expected"],
+    }[row["operator"]]
+    assert evaluated is row["passed"]
+
+
+def test_every_check_is_recorded_before_it_is_asserted():
+    """The report reads these rows; a failing check is recorded as failed before it raises."""
+    native, truth = parity_inputs(np.random.default_rng(5), 0.0)
+    recorded = []
+    test_e2e._assert_parity(
+        native, truth, None, CASE, test_e2e.DEFAULT_THRESHOLDS, record=recorded.append
+    )
+    (rows,) = recorded
+    names = [row["name"] for row in rows]
+    assert len(set(names)) == len(names)
+    assert {"token_ids_differing_texts", "embedding_cosine_min", "pooled_feature_cosine"} <= set(
+        names
+    )
+    for row in rows:
+        valid_row(row)
+    assert all(row["passed"] for row in rows)
+    recorded.clear()
+    with pytest.raises(AssertionError, match="token-feature relative error"):
+        test_e2e._assert_parity(
+            scaled(native, 1.01),
+            truth,
+            None,
+            CASE,
+            test_e2e.DEFAULT_THRESHOLDS,
+            record=recorded.append,
+        )
+    (rows,) = recorded
+    for row in rows:
+        valid_row(row)
+    assert [row["name"] for row in rows if not row["passed"]] == [
+        "token_feature_relative_error_max"
+    ]
+
+
+def test_bf16_checks_are_recorded_relative_to_the_official_run():
+    native, truth, official = bf16_inputs()
+    recorded = []
+    test_e2e._assert_parity(
+        native, truth, official, case_of(30), test_e2e.DEFAULT_THRESHOLDS, record=recorded.append
+    )
+    (rows,) = recorded
+    names = {row["name"] for row in rows}
+    assert {
+        "bf16_token_count",
+        "bf16_embedding_mean",
+        "bf16_token_relative_max",
+        "bf16_pooled_feature_relative_error",
+    } <= names
+    for row in rows:
+        valid_row(row)
+    assert all(row["passed"] for row in rows)
