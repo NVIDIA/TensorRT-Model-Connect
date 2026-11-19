@@ -81,8 +81,10 @@ std::vector<char> section(const BundleReader& reader, const char* name) {
 } // namespace
 } // namespace trtmc::vitmatte
 extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context) {
+    if (context.kv_cache_size_bytes != 0)
+        throw std::invalid_argument("vitmatte does not support --kv-cache-size");
     using namespace trtmc;
-    if (context.kv_cache_size_bytes || context.reader.info().task != "image_trimap_to_alpha")
+    if (context.reader.info().task != "image_trimap_to_alpha")
         throw std::invalid_argument(
             "ViTMatte requires image-trimap-to-alpha without an external cache");
     const auto raw = vitmatte::section(context.reader, "runtime.json");

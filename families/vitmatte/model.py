@@ -14,6 +14,8 @@ from . import graph as g
 def build(request, writer):
     if request.task != "image_trimap_to_alpha" or request.backend != "trt":
         raise ValueError("ViTMatte requires image_trimap_to_alpha with backend=trt")
+    if request.dynamic_kv_cache:
+        raise NotImplementedError("vitmatte does not support dynamic_kv_cache")
     if (
         request.precision != "fp32"
         or request.tensor_parallel_size != 1

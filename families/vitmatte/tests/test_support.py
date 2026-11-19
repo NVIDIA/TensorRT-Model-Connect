@@ -7,3 +7,4 @@ def test_vitmatte_checkpoint_has_one_owner():
     family, support = resolve_family(ModelMetadata({"model_type": "vitmatte"}, {}))
     assert family == "vitmatte"
     assert support.tasks == ("image_trimap_to_alpha",)
+    assert support.default_task == "image_trimap_to_alpha"

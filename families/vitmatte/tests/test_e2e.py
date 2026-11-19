@@ -8,11 +8,13 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from functools import cache
 from pathlib import Path
 
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "vitmatte"
 TASKS = frozenset({"image_trimap_to_alpha"})
@@ -92,6 +94,46 @@ def _required_path(value: str | None, label: str) -> Path:
     return path
 
 
+@cache
+def _native_test_binary(name: str) -> Path:
+    """Build source-only helpers in the configured native test tree."""
+    build_dir = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    subprocess.run(
+        ["cmake", "--build", str(build_dir), "--parallel", "2", "--target", name],
+        check=True,
+        timeout=600,
+    )
+    return _required_path(str(build_dir / name), name)
+
+
+def _record_comparison(tmp_path, label, native, reference, checks):
+    """Retain the output pair and the result of already enforced comparisons."""
+    if not evidence_enabled():
+        return
+    import numpy as np
+
+    paths = []
+    for role, value in (("native", native), ("reference", reference)):
+        if isinstance(value, np.ndarray):
+            path = tmp_path / f"{label}-{role}.npz"
+            np.savez_compressed(path, output=value)
+        else:
+            path = tmp_path / f"{label}-{role}.json"
+            path.write_text(json.dumps(value, ensure_ascii=False) + "\n", encoding="utf-8")
+        paths.append(path)
+    record_evidence(
+        "reference_comparison",
+        {
+            "label": label,
+            "scope": "independent_reference",
+            "enforced": True,
+            "native": paths[0],
+            "reference": paths[1],
+            "checks": [dict(check, scope="independent_reference") for check in checks],
+        },
+    )
+
+
 def _model_dir(manifest: dict) -> Path:
     explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
     if explicit:
@@ -149,48 +191,86 @@ def _run_json(
     command: str,
     *arguments: str,
 ) -> dict:
-    invocation = [
-        str(binary),
-        command,
-        str(bundle),
-        "--runtime-root",
-        str(runtime_root),
-        *arguments,
-    ]
-    env = os.environ.copy()
-    env["LD_LIBRARY_PATH"] = ":".join(
-        (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
-    )
-    completed = subprocess.run(
-        invocation,
-        check=False,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=int(case.get("runtime_timeout_s", 3600)),
-    )
-    assert completed.returncode == 0, completed.stderr + completed.stdout
-    payloads = []
-    for line in completed.stdout.splitlines():
-        start = line.find("{")
-        if start >= 0:
-            try:
-                payloads.append(json.loads(line[start:]))
-            except json.JSONDecodeError:
-                pass
-    assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
-    assert all((payload == payloads[0] for payload in payloads))
-    return payloads[0]
+    with evidence_stage("runtime"):
+        invocation = [
+            str(binary),
+            command,
+            str(bundle),
+            "--runtime-root",
+            str(runtime_root),
+            *arguments,
+        ]
+        env = os.environ.copy()
+        env["LD_LIBRARY_PATH"] = ":".join(
+            (value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value)
+        )
+        completed = subprocess.run(
+            invocation,
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=int(case.get("runtime_timeout_s", 3600)),
+        )
+        record_evidence(
+            "native_process",
+            {
+                "argv": completed.args,
+                "stdout": (completed.stdout or "")[-4096:],
+                "stderr": (completed.stderr or "")[-16384:],
+                "returncode": completed.returncode,
+            },
+        )
+        assert completed.returncode == 0, completed.stderr + completed.stdout
+        payloads = []
+        for line in completed.stdout.splitlines():
+            start = line.find("{")
+            if start >= 0:
+                try:
+                    payloads.append(json.loads(line[start:]))
+                except json.JSONDecodeError:
+                    pass
+        assert payloads, f"native {command} returned no JSON: {completed.stdout[-1000:]}"
+        assert all((payload == payloads[0] for payload in payloads))
+        return payloads[0]
 
 
 def test_official_checkpoint_e2e(case_name, tmp_path):
+    _, manifest, case = CASES[case_name]
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence(
+        "checkpoint",
+        {
+            "repo_id": manifest["hf_id"],
+            "revision": manifest["hf_revision"],
+            "precision": manifest["precision"],
+        },
+    )
+    record_evidence(
+        "thresholds",
+        {
+            key: value
+            for key, value in case.items()
+            if any(
+                word in key
+                for word in ("error", "cosine", "atol", "rtol", "snr", "rmse", "max_abs")
+            )
+        },
+    )
+    for asset_key in ("image", "test_image", "audio"):
+        if asset_key in case:
+            for asset_path in (TEST_ROOT / case[asset_key], TEST_ROOT / "data" / case[asset_key]):
+                if asset_path.is_file():
+                    record_evidence("inputs", {asset_key: asset_path})
+                    break
     import numpy as np
     import torch
     from PIL import Image
     from transformers import VitMatteImageProcessor, VitMatteForImageMatting
 
     _, manifest, case = CASES[case_name]
-    directory = _model_dir(manifest)
+    with evidence_stage("checkpoint"):
+        directory = _model_dir(manifest)
     _, runtime_root = _runtime()
     image = (
         Image.open(TEST_ROOT / "data" / case["image"])
@@ -200,51 +280,122 @@ def test_official_checkpoint_e2e(case_name, tmp_path):
     rgb = tmp_path / "image.rgb"
     rgb.write_bytes(np.asarray(image, dtype=np.uint8).tobytes())
     bundle = tmp_path / manifest["bundle"]
-    _build(directory, bundle, manifest)
+    with evidence_stage("build"):
+        _build(directory, bundle, manifest)
+    record_evidence("bundle", {"path": str(bundle), "manifest": manifest})
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
-    reference = (
-        VitMatteForImageMatting.from_pretrained(directory, dtype=torch.float32).eval().to("cuda")
-    )
-    processor = VitMatteImageProcessor.from_pretrained(directory)
+    with evidence_stage("reference"):
+        reference = (
+            VitMatteForImageMatting.from_pretrained(directory, dtype=torch.float32)
+            .eval()
+            .to("cuda")
+        )
+    with evidence_stage("reference"):
+        processor = VitMatteImageProcessor.from_pretrained(directory)
     for index in range(2):
         states = np.ones((512, 512), dtype=np.uint8)
         states[: 64 + index * 32, :] = 0
         states[200:360, 160 + index * 64 : 300 + index * 64] = 2
         trimap = Image.fromarray(np.array([0, 128, 255], dtype=np.uint8)[states])
         inputs = processor(images=image, trimaps=trimap, return_tensors="pt").to("cuda")
-        assert inputs.pixel_values.shape == (1, 4, 512, 512)
-        with torch.no_grad():
+        with evidence_stage("comparison"):
+            assert inputs.pixel_values.shape == (1, 4, 512, 512)
+        with evidence_stage("reference"), torch.no_grad():
             expected = reference(**inputs).alphas[0, 0].cpu().numpy()
         source = tmp_path / f"trimap-{index}.u8"
         source.write_bytes(states.tobytes())
         target = tmp_path / f"alpha-{index}.f32"
-        completed = subprocess.run(
-            [
-                str(runtime_root / "test_vitmatte_runtime"),
-                str(bundle),
-                str(runtime_root),
-                str(rgb),
-                str(source),
-                str(target),
-                "512",
-                "512",
-            ],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=600,
+        with evidence_stage("runtime"):
+            completed = subprocess.run(
+                [
+                    str(_native_test_binary("test_vitmatte_runtime")),
+                    str(bundle),
+                    str(runtime_root),
+                    str(rgb),
+                    str(source),
+                    str(target),
+                    "512",
+                    "512",
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=600,
+            )
+        record_evidence(
+            "runtime_process",
+            {
+                "argv": completed.args,
+                "returncode": completed.returncode,
+                "stdout": (completed.stdout or "")[-4096:],
+                "stderr": (completed.stderr or "")[-16384:],
+            },
         )
-        assert completed.returncode == 0, completed.stderr + completed.stdout
-        assert json.loads(completed.stdout.splitlines()[-1]) == dict(
-            rows=512, columns=512, count=512 * 512
-        )
+        with evidence_stage("comparison"):
+            assert completed.returncode == 0, completed.stderr + completed.stdout
+        with evidence_stage("comparison"):
+            assert json.loads(completed.stdout.splitlines()[-1]) == dict(
+                rows=512, columns=512, count=512 * 512
+            )
         actual = np.fromfile(target, dtype="<f4").reshape(512, 512)
-        assert np.isfinite(actual).all() and actual.min() >= 0 and actual.max() <= 1
+        with evidence_stage("comparison"):
+            assert np.isfinite(actual).all() and actual.min() >= 0 and actual.max() <= 1
+        record_evidence(
+            "inputs",
+            {
+                "sample": index,
+                "trimap": np.asarray(trimap),
+                "pixels": inputs.pixel_values.cpu().numpy(),
+            },
+        )
+        record_evidence("native", {"sample": index, "alpha": actual})
+        record_evidence(
+            "reference", {"mode": "hf_transformers", "sample": index, "alpha": expected}
+        )
+        if evidence_enabled():
+            views = []
+            for role, alpha in (("native", actual), ("reference", expected)):
+                output = tmp_path / f"{role}-alpha-{index}.png"
+                Image.fromarray(np.rint(np.clip(alpha, 0, 1) * 255).astype(np.uint8)).save(output)
+                views.append(
+                    {
+                        "title": f"Sample {index} / {role}",
+                        "image": output,
+                        "caption": "Alpha on the same 0–1 scale",
+                    }
+                )
+            record_evidence("views", views)
         error = actual.astype(np.float64) - expected.astype(np.float64)
         maximum = float(np.max(np.abs(error)))
         rmse = float(np.sqrt(np.mean(error**2)))
-        assert maximum <= case["max_abs_error"]
-        assert rmse <= case["max_rmse"]
-        assert np.count_nonzero((actual > 0.05) & (actual < 0.95)) > 100
+        record_evidence("metrics", {"sample": index, "max_abs_error": maximum, "rmse": rmse})
+        with evidence_stage("comparison"):
+            assert maximum <= case["max_abs_error"]
+        with evidence_stage("comparison"):
+            assert rmse <= case["max_rmse"]
+        with evidence_stage("comparison"):
+            assert np.count_nonzero((actual > 0.05) & (actual < 0.95)) > 100
+        _record_comparison(
+            tmp_path,
+            f"alpha-{index}",
+            actual,
+            expected,
+            [
+                {
+                    "name": "max_abs_error",
+                    "actual": maximum,
+                    "operator": "<=",
+                    "expected": case["max_abs_error"],
+                    "passed": maximum <= case["max_abs_error"],
+                },
+                {
+                    "name": "rmse",
+                    "actual": rmse,
+                    "operator": "<=",
+                    "expected": case["max_rmse"],
+                    "passed": rmse <= case["max_rmse"],
+                },
+            ],
+        )
         print(f"ViTMatte trimap={index}: max_abs={maximum:.8g}, RMSE={rmse:.8g}")
