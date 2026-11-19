@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from families.qwen_image2_1.tests.image_checks import png_levels, spatial_std, to_png_bytes
 from tensorrt_model_connect import BuildRequest, build
 from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
@@ -48,6 +49,11 @@ SDK_LANGUAGES = ("c", "cpp")
 # asserted in FP32 by test_engine_parity.py. Every case uses a prompt and seed on which the
 # official BF16 and FP32 runs agree to at least 32 dB, which keeps the native image well inside
 # the limits; the family README lists the values measured per case.
+#
+# Every comparison is made at the 8 bits per channel of the PNG the CLI writes. The SDK images and
+# the reference are float pixels and are rounded the same way first (png_levels), so the CLI, C
+# and C++ comparisons measure the same quantity, and the PNGs recorded as evidence hold exactly
+# the pixels that were compared.
 DEFAULT_THRESHOLDS = {
     "min_psnr_db": 20.0,
     "min_ssim": 0.90,
@@ -303,7 +309,9 @@ def _assert_native_contract(
         with Image.open(output) as image:
             assert image.mode == "RGBA" and image.size == size
             pixels = np.asarray(image, dtype=np.float32) / np.float32(255.0)
-        assert pixels[..., :3].std() > 0.02, "an image generated from a seed must not be flat"
+        assert spatial_std(pixels[..., :3]) > 0.02, (
+            "an image generated from a seed must not be flat"
+        )
         return output.read_bytes()
 
     first = seeded("seed-7", 7)
@@ -460,7 +468,10 @@ def _windowed_ssim(actual: np.ndarray, expected: np.ndarray, window: int) -> flo
 
 
 def _metrics(actual: np.ndarray, expected: np.ndarray, block: int, window: int) -> dict:
-    """Image-level agreement between two float ``[H, W, 4]`` RGBA images in [0, 1]."""
+    """Image-level agreement between two float ``[H, W, 4]`` RGBA images in [0, 1].
+
+    ``actual_std`` and ``expected_std`` are spatial: a flat image scores 0 whatever its colour.
+    """
     rgb_actual = actual[..., :3].astype(np.float64)
     rgb_expected = expected[..., :3].astype(np.float64)
     mse = float(np.mean((rgb_actual - rgb_expected) ** 2))
@@ -478,8 +489,8 @@ def _metrics(actual: np.ndarray, expected: np.ndarray, block: int, window: int) 
         if denominator > 0
         else 0.0,
         "alpha_mean_abs_error": float(np.mean(np.abs(actual[..., 3] - expected[..., 3]))),
-        "actual_std": float(rgb_actual.std()),
-        "expected_std": float(rgb_expected.std()),
+        "actual_std": spatial_std(rgb_actual),
+        "expected_std": spatial_std(rgb_expected),
     }
 
 
@@ -487,8 +498,7 @@ def _save_png(image: np.ndarray, path: Path) -> Path:
     """Write a float ``[H, W, 4]`` image in [0, 1] as an RGBA PNG of the same size."""
     from PIL import Image
 
-    pixels = np.rint(np.clip(image, 0.0, 1.0) * 255.0).astype(np.uint8)
-    Image.fromarray(pixels, "RGBA").save(path, format="PNG")
+    Image.fromarray(to_png_bytes(image), "RGBA").save(path, format="PNG")
     return path
 
 
@@ -593,7 +603,10 @@ def _assert_parity(
     assert actual.shape[2] == IMAGE_CHANNELS
     assert np.isfinite(actual).all() and actual.min() >= 0.0 and actual.max() <= 1.0
     metrics = _metrics(
-        actual, expected, int(thresholds["layout_block_size"]), int(thresholds["ssim_window"])
+        png_levels(actual),
+        png_levels(expected),
+        int(thresholds["layout_block_size"]),
+        int(thresholds["ssim_window"]),
     )
     record_evidence(f"metrics_{label}", metrics)
     _record_comparison(label, metrics, thresholds, native_file, reference_file)

@@ -17,7 +17,8 @@ are listed in `NOTICE`.
 | `tokenizer.json` | The checkpoint's BPE tokenizer. |
 | `runtime.json` | Output size, text budget, prompt frame, scheduler constants. |
 
-Every plan is static. Engine I/O is FP32; linear layers, convolutions and attention run in BF16; normalisation
+Every plan is static. Floating-point engine I/O is FP32, and the two integer inputs are INT32: the text encoder's
+`input_ids` and the denoiser's `text_length`. Linear layers, convolutions and attention run in BF16; normalisation
 statistics and the transformer's rotary rotation run in FP32, as in the reference.
 
 The graph builders take the compute type as a parameter. Bundles are always built in BF16; the parity tests also
@@ -113,8 +114,9 @@ scale 4).
 
 The family E2E therefore bounds drift rather than asking for equal pixels (PSNR at least 20 dB, windowed SSIM at
 least 0.90, layout correlation at least 0.95), and uses prompts and seeds on which the reference agrees with itself
-across precisions. Its cases, native CLI image against the reference BF16 run, measured on an NVIDIA GB200 with
-TensorRT 11.4:
+across precisions. Every image is compared at the 8 bits per channel of the PNG the CLI writes; the SDK images and
+the reference are float pixels and are rounded the same way first. Its cases, native CLI image against the
+reference BF16 run, measured on an NVIDIA GB200 with TensorRT 11.4:
 
 | Case | PSNR | Windowed SSIM | Layout correlation | Reference BF16 against reference FP32 |
 | --- | --- | --- | --- | --- |

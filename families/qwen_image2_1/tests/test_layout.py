@@ -25,6 +25,7 @@ from families.qwen_image2_1.bundle_config import (
     scheduler_settings,
 )
 from families.qwen_image2_1.resample import shortcut_channels
+from families.qwen_image2_1.tests.image_checks import png_levels, spatial_std, to_png_bytes
 
 AXES = (16, 56, 56)
 
@@ -318,3 +319,31 @@ def test_the_checkpoint_tokenizer_configuration_is_accepted() -> None:
 def test_other_tokenizer_configurations_are_rejected(overrides: dict, message: str) -> None:
     with pytest.raises(ValueError, match=message):
         require_supported_tokenizer(_tokenizer_definition(**overrides))
+
+
+def test_flat_images_have_no_spatial_deviation_whatever_their_colour() -> None:
+    red = np.zeros((16, 16, 3), dtype=np.float32)
+    red[..., 0] = 1.0
+    # Over all axes a uniform red image deviates by 0.47; over its pixels it does not.
+    assert red.std() > 0.4
+    assert spatial_std(red) == 0.0
+    assert spatial_std(np.full((16, 16, 3), 0.5, dtype=np.float32)) == 0.0
+
+    ramp = np.zeros((16, 16, 3), dtype=np.float32)
+    ramp[..., 1] = np.linspace(0.0, 1.0, 16, dtype=np.float32)[None, :]
+    # One channel that varies over the pixels is enough.
+    assert spatial_std(ramp) == pytest.approx(ramp[..., 1].std())
+    assert spatial_std(ramp) > 0.02
+
+
+def test_png_levels_are_the_pixels_a_png_reads_back() -> None:
+    image = np.array([[[0.0, 0.5, 1.0, 0.2499]], [[-0.1, 1.2, 0.5019, 0.998]]], dtype=np.float32)
+    stored = to_png_bytes(image)
+    assert stored.dtype == np.uint8
+    assert stored.tolist() == [[[0, 128, 255, 64]], [[0, 255, 128, 254]]]
+    levels = png_levels(image)
+    assert levels.dtype == np.float32
+    np.testing.assert_array_equal(levels, stored.astype(np.float32) / np.float32(255.0))
+    # An image that already went through a PNG is left as it is.
+    np.testing.assert_array_equal(png_levels(levels), levels)
+    np.testing.assert_array_equal(to_png_bytes(levels), stored)
