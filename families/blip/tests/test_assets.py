@@ -97,7 +97,7 @@ def test_combined_local_assets_do_not_require_cached_checkpoint(tmp_path, monkey
 
 def test_missing_image_fails_before_loading_torch_or_model():
     with pytest.raises(FileNotFoundError, match="TRTMC_BLIP_REFERENCE_IMAGE"):
-        e2e.artifacts.__wrapped__(None)
+        e2e.artifacts.__wrapped__(None, None)
 
 
 @pytest.mark.parametrize("kind", ["missing", "directory"])

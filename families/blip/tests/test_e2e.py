@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import struct
 import subprocess
+import traceback
 
 import numpy as np
 import pytest
@@ -100,7 +101,7 @@ def pytest_generate_tests(metafunc):
 
 
 @pytest.fixture(scope="module")
-def artifacts(tmp_path_factory):
+def artifacts(tmp_path_factory, request):
     image_path = input_image()
     model_dir = checkpoint_dir()
     import torch
@@ -138,11 +139,19 @@ def artifacts(tmp_path_factory):
     model.load_state_dict(state, strict=True)
     del state
     model = model.eval().cuda()
-    torch.backends.cuda.matmul.allow_tf32 = False
+    previous_precision = torch.get_float32_matmul_precision()
+    previous_cudnn_tf32 = torch.backends.cudnn.allow_tf32
+    request.addfinalizer(lambda: torch.set_float32_matmul_precision(previous_precision))
+    request.addfinalizer(lambda: setattr(torch.backends.cudnn, "allow_tf32", previous_cudnn_tf32))
+    torch.set_float32_matmul_precision("highest")
     torch.backends.cudnn.allow_tf32 = False
     processor = BlipProcessor.from_pretrained(model_dir, use_fast=False)
     (work / "tokenizer.json").write_bytes((model_dir / "tokenizer.json").read_bytes())
-    return bundle, binary, runtime, model, processor, image_path
+    explicit = os.environ.get("TRTMC_BLIP_MODEL_DIR")
+    revision = (
+        None if explicit and (Path(explicit) / "config.json").is_file() else MANIFEST["hf_revision"]
+    )
+    return bundle, binary, runtime, model, processor, image_path, model_dir, revision
 
 
 def section(bundle, name):
@@ -186,7 +195,7 @@ def case_inputs(case_name, artifacts, tmp_path_factory):
     import torch
     from PIL import Image, ImageOps
 
-    bundle, binary, runtime, model, processor, image_path = artifacts
+    bundle, binary, runtime, model, processor, image_path = artifacts[:6]
     case = CASES[case_name]
     image = Image.open(image_path).convert("RGB")
     if case["mirror"]:
@@ -202,8 +211,8 @@ def case_inputs(case_name, artifacts, tmp_path_factory):
     return native_image, inputs, expected, vision, continuation
 
 
-def test_official_checkpoint_e2e(case_name, artifacts, case_inputs, tmp_path):
-    bundle, binary, runtime, _model, processor, _image_path = artifacts
+def _check_caption(case_name, artifacts, case_inputs, tmp_path):
+    bundle, binary, runtime, _model, processor, _image_path = artifacts[:6]
     native_image, inputs, _expected, _vision, continuation = case_inputs
     case = CASES[case_name]
     evidence_image = tmp_path / "input.png"
@@ -216,10 +225,6 @@ def test_official_checkpoint_e2e(case_name, artifacts, case_inputs, tmp_path):
             "mirror": case["mirror"],
             "task": MANIFEST["task"],
         },
-    )
-    record_evidence(
-        "checkpoint",
-        {"hf_id": MANIFEST["hf_id"], "hf_revision": MANIFEST["hf_revision"], "precision": "fp32"},
     )
     record_evidence(
         "thresholds",
@@ -235,7 +240,7 @@ def test_official_checkpoint_e2e(case_name, artifacts, case_inputs, tmp_path):
         "token_ids": continuation,
         "text": processor.decode(continuation, skip_special_tokens=True),
         "oracle": "transformers.BlipForConditionalGeneration",
-        "hf_revision": MANIFEST["hf_revision"],
+        "hf_revision": artifacts[7],
     }
     record_evidence("reference", reference_evidence)
     env = dict(os.environ)
@@ -261,6 +266,38 @@ def test_official_checkpoint_e2e(case_name, artifacts, case_inputs, tmp_path):
     record_evidence("native", native_payload)
     expected_tokens = continuation
     expected_text = reference_evidence["text"]
+    pair = {}
+    for role, value in (("native", native_payload), ("reference", reference_evidence)):
+        path = tmp_path / f"caption-{role}.json"
+        path.write_text(json.dumps(value), encoding="utf-8")
+        pair[role] = path
+    record_evidence(
+        "reference_comparison",
+        {
+            "label": "Greedy caption continuation",
+            "scope": "independent_reference",
+            "enforced": True,
+            **pair,
+            "checks": [
+                {
+                    "name": "token_mismatch",
+                    "scope": "independent_reference",
+                    "actual": int(native_payload["token_ids"] != expected_tokens),
+                    "operator": "==",
+                    "expected": 0,
+                    "passed": native_payload["token_ids"] == expected_tokens,
+                },
+                {
+                    "name": "text_mismatch",
+                    "scope": "independent_reference",
+                    "actual": int(native_payload["text"] != expected_text),
+                    "operator": "==",
+                    "expected": 0,
+                    "passed": native_payload["text"] == expected_text,
+                },
+            ],
+        },
+    )
     assert native_payload["token_ids"] == expected_tokens
     assert native_payload["text"] == expected_text
 
@@ -304,14 +341,13 @@ def test_official_checkpoint_e2e(case_name, artifacts, case_inputs, tmp_path):
     assert repeat_payload["repeated_request"] == "passed"
     assert repeat_payload["invalid_requests"] == 4
     native_evidence.update(request_reuse=repeat_payload, tokenizer=json.loads(probe.stdout))
-    _check_engine_tensors(case_name, artifacts, case_inputs, native_evidence, reference_evidence)
     print(json.dumps({"case": case_name, "tokens": continuation, "text": native_payload["text"]}))
 
 
-def _check_engine_tensors(case_name, artifacts, case_inputs, native=None, reference=None):
+def _check_engine_tensors(case_name, artifacts, case_inputs, tmp_path):
     import torch
 
-    bundle, _binary, _runtime, model, _processor, _image_path = artifacts
+    bundle, _binary, _runtime, model, _processor, _image_path = artifacts[:6]
     _native_image, inputs, expected, vision, _continuation = case_inputs
     actual_vision = engine_run(
         bundle, "vision", {"pixel_values": inputs["pixel_values"].cpu().numpy()}
@@ -334,16 +370,16 @@ def _check_engine_tensors(case_name, artifacts, case_inputs, native=None, refere
         "causal_mask": mask,
         "last_index": np.array([length - 1], np.int32),
     }
-    native_evidence = {**(native or {}), "vision": actual_vision}
+    native_evidence = {"vision": actual_vision}
     reference_evidence = {
-        **(reference or {}),
         "vision": expected_vision,
         "logits": expected_logits,
         "oracle": "transformers.BlipForConditionalGeneration",
-        "hf_revision": MANIFEST["hf_revision"],
+        "hf_revision": artifacts[7],
     }
     record_evidence("reference", reference_evidence)
     logit_errors = []
+    failures = []
     for embeddings in (expected_vision, actual_vision):
         actual_logits = engine_run(
             bundle, "decoder", {**decoder_inputs, "image_embeds": embeddings}
@@ -353,9 +389,16 @@ def _check_engine_tensors(case_name, artifacts, case_inputs, native=None, refere
             "reference" if embeddings is expected_vision else "native"
         )
         record_evidence("native", native_evidence)
-        with evidence_stage("compare"):
-            np.testing.assert_allclose(actual_logits, expected_logits, atol=1e-3, rtol=1e-4)
+        source = native_evidence["decoder_feature_source"]
+        _record_array_comparison(
+            tmp_path, "decoder-" + source, actual_logits, expected_logits, 1e-3, 1e-4
+        )
         logit_errors.append(float(np.max(np.abs(actual_logits - expected_logits))))
+        try:
+            with evidence_stage("compare"):
+                np.testing.assert_allclose(actual_logits, expected_logits, atol=1e-3, rtol=1e-4)
+        except AssertionError as error:
+            failures.append(f"decoder with {source} features: {error}")
     print(
         json.dumps(
             {
@@ -367,8 +410,12 @@ def _check_engine_tensors(case_name, artifacts, case_inputs, native=None, refere
     )
     # Check the encoder after the decoder so its failure does not conceal the
     # independent decoder comparison. Both original numerical gates apply.
-    with evidence_stage("compare"):
-        np.testing.assert_allclose(actual_vision, expected_vision, atol=5e-4, rtol=1e-4)
+    _record_array_comparison(tmp_path, "vision", actual_vision, expected_vision, 5e-4, 1e-4)
+    try:
+        with evidence_stage("compare"):
+            np.testing.assert_allclose(actual_vision, expected_vision, atol=5e-4, rtol=1e-4)
+    except AssertionError as error:
+        failures.append(f"vision features: {error}")
     record_evidence(
         "metrics",
         {
@@ -378,6 +425,68 @@ def _check_engine_tensors(case_name, artifacts, case_inputs, native=None, refere
         },
     )
 
+    if failures:
+        raise AssertionError("\n\n".join(failures))
 
-def test_official_checkpoint_tensors(case_name, artifacts, case_inputs):
-    _check_engine_tensors(case_name, artifacts, case_inputs)
+
+def _record_array_comparison(tmp_path, label, native, reference, atol, rtol):
+    pair = {}
+    for role, values in (("native", native), ("reference", reference)):
+        path = tmp_path / f"{label}-{role}.npy"
+        np.save(path, values, allow_pickle=False)
+        pair[role] = path
+    mismatches = int(
+        np.count_nonzero(~np.isclose(native, reference, atol=atol, rtol=rtol, equal_nan=True))
+    )
+    record_evidence(
+        "reference_comparison",
+        {
+            "label": label,
+            "scope": "independent_reference",
+            "enforced": True,
+            "atol": atol,
+            "rtol": rtol,
+            **pair,
+            "checks": [
+                {
+                    "name": "values_outside_tolerance",
+                    "scope": "independent_reference",
+                    "actual": mismatches,
+                    "operator": "==",
+                    "expected": 0,
+                    "passed": mismatches == 0,
+                }
+            ],
+        },
+    )
+
+
+def test_official_checkpoint_e2e(case_name, artifacts, case_inputs, tmp_path):
+    record_evidence(
+        "checkpoint",
+        {
+            "hf_id": MANIFEST["hf_id"],
+            "expected_hf_revision": MANIFEST["hf_revision"],
+            "hf_revision": artifacts[7],
+            "model_dir": str(artifacts[6]),
+            "precision": "fp32",
+            "revision_status": "unverified" if artifacts[7] is None else "pinned_cache_lookup",
+        },
+    )
+    failures = []
+    for label, check in (("caption", _check_caption), ("tensors", _check_engine_tensors)):
+        try:
+            with evidence_stage(label):
+                check(case_name, artifacts, case_inputs, tmp_path)
+        except Exception as error:
+            # Defer reporting until both independent gates have run. Their
+            # original assertions and numerical criteria remain authoritative.
+            record_evidence(
+                label + "_failure",
+                {"type": type(error).__name__, "traceback": traceback.format_exc()},
+            )
+            failures.append((label, error))
+    if failures:
+        raise AssertionError(
+            "\n\n".join(f"{label}: {error}" for label, error in failures)
+        ) from failures[0][1]

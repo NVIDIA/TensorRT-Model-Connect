@@ -10,7 +10,6 @@ import numpy as np
 import tensorrt as trt
 
 from .graph import Graph
-from .vision_graph import VisionGraph
 
 
 def resolve(model_dir):
@@ -49,9 +48,11 @@ def resolve(model_dir):
     if not processor.get("do_rescale", True) or processor.get("rescale_factor", 1 / 255) != 1 / 255:
         raise ValueError("blip requires standard RGB rescaling")
     for name in ("image_mean", "image_std"):
-        values = processor[name]
-        if len(values) != 3 or not np.isfinite(values).all():
-            raise ValueError("blip image normalization needs three finite values")
+        with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+            values = np.asarray(processor[name], dtype=np.float32)
+        if values.shape != (3,) or not np.isfinite(values).all():
+            raise ValueError("blip image normalization needs three finite float32 values")
+        processor[name] = values.tolist()
     if any(v <= 0 for v in processor["image_std"]):
         raise ValueError("blip image_std must be positive")
     return cfg, processor
@@ -60,6 +61,13 @@ def resolve(model_dir):
 def load_weights(model_dir):
     root = Path(model_dir)
     import torch
+    from torch.torch_version import TorchVersion
+
+    if TorchVersion(torch.__version__) < "2.10.0":
+        raise RuntimeError(
+            "BLIP checkpoint loading requires PyTorch>=2.10; "
+            "install families/blip/requirements.txt before building"
+        )
 
     # The public checkpoint is a state dict. Never load executable pickle objects.
     result = {
@@ -85,7 +93,7 @@ def build_engine(weights, cfg, stage, max_length, verbose=False):
     config = builder.create_builder_config()
     config.builder_optimization_level = 3
     config.clear_flag(trt.BuilderFlag.TF32)
-    graph = VisionGraph(network, weights) if stage == "vision" else Graph(network, weights)
+    graph = Graph(network, weights)
     if stage == "vision":
         out = graph.vision(cfg["vision_config"])
         out.name = "image_embeds"
@@ -134,6 +142,18 @@ def build(request, writer):
     if not 2 <= max_length <= cfg["text_config"]["max_position_embeddings"]:
         raise ValueError("blip sequence capacity exceeds the text position table")
     weights = load_weights(request.model_dir)
+    vocab_size = cfg["text_config"]["vocab_size"]
+    width = cfg["text_config"]["hidden_size"]
+    if type(vocab_size) is not int or vocab_size <= 0:
+        raise ValueError("blip vocab_size must be a positive integer")
+    for key, shape in (
+        ("text_decoder.bert.embeddings.word_embeddings.weight", (vocab_size, width)),
+        ("text_decoder.cls.predictions.decoder.weight", (vocab_size, width)),
+        ("text_decoder.cls.predictions.decoder.bias", (vocab_size,)),
+        ("text_decoder.cls.predictions.bias", (vocab_size,)),
+    ):
+        if key not in weights or weights[key].shape != shape:
+            raise ValueError(f"blip {key} must match the decoder vocabulary: expected {shape}")
     writer.set_header(family="blip", task=request.task, backend=request.backend)
     for stage in ("vision", "decoder"):
         writer.add_bytes(
@@ -143,7 +163,7 @@ def build(request, writer):
     writer.add_json(
         "runtime.json",
         {
-            "vision_kernel_backend": "cuda_fp32",
+            "vision_kernel_backend": "trt",
             "image_size": size,
             "image_tokens": (size // cfg["vision_config"]["patch_size"]) ** 2 + 1,
             "vision_width": cfg["vision_config"]["hidden_size"],

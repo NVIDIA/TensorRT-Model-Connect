@@ -10,12 +10,10 @@ The builder produces an FP32 vision encoder and an FP32 causal text decoder.
 The decoder recomputes the complete prefix at each step; it does not maintain
 a KV cache. The image encoder runs once per request. All topology,
 preprocessing, WordPiece tokenization, and generation behavior belong to this
-family. The vision graph uses family-owned TensorRT V3 plugins with CUDA kernels
-for FP32 normalization, softmax, and exact GELU, and cuBLASLt for affine
-projections. Explicit reduction/FMA order and a fixed FP32 error-function
-approximation preserve rounding through the encoder's residual blocks.
-TensorRT serializes and executes both engines and lowers the remaining math.
-Native inference uses CUDA libraries and runs without Python, ATen, or TVM-FFI.
+family. Both engines express normalization, affine projections, softmax, and
+exact GELU with TensorRT graph operations. TensorRT owns fusion, tactics, and
+GPU execution; the family does not load custom primitive kernels or cuBLASLt.
+Native inference runs without Python, ATen, or TVM-FFI.
 
 ## Build and run
 
@@ -23,9 +21,12 @@ Use the repository's [source build instructions](../../website/docs/getting-star
 to prepare a matching CUDA/TensorRT environment. Install this family's
 `requirements.txt`, and install the ICU development
 library (`uc` component) for native Unicode normalization. Then build the
-selected native targets and install the matching native Python package:
+selected native targets and install the matching native Python package. Set
+`TRTMC_BUILD_FAMILIES=blip` when configuring to require only this family's
+native dependencies:
 
 ```bash
+cmake -S . -B build -DTRTMC_BUILD_FAMILIES=blip
 cmake --build build --parallel 8 --target trtmc trtmc_backend_trt trtmc_model_blip
 python -m pip install . --no-build-isolation
 PYTHONPATH=core/builder:. python -m tensorrt_model_connect build \
@@ -42,21 +43,10 @@ The checkpoint publishes a PyTorch state dictionary, loaded with
 `torch.load(weights_only=True)` with a version above the affected range in
 [GHSA-63cw-57p8-fm3p](https://github.com/pytorch/pytorch/security/advisories/GHSA-63cw-57p8-fm3p).
 PyTorch is used to read that checkpoint and run the official test reference.
-It is not linked or loaded by native inference. The native projections reuse
-cuBLASLt from the existing CUDA environment with a 32 MiB workspace budget.
-When CUDA math libraries are already installed beside Model Connect under
-`nvidia/cu13/lib`, the native model uses that copy; otherwise it uses the
-system CUDA library search path. Source builds discover the existing CUDA
-math library at configuration time. No additional package, runtime Python
-import, or package installation is required. Qualify each CUDA math-library
-version against the original accuracy gates because FP32 reduction rounding
-can differ across versions.
-
-BLIP supports builds with `TRTMC_ENABLE_BYOK=OFF`. A native package supplies the
-CUDA plugins. The builder locates them through installed package metadata, so
-source changes to native kernels require reinstalling the package before
-building bundles. Bundles produced with a different vision-kernel backend must
-be rebuilt with the matching package.
+It is not linked or loaded by native inference. The loader checks the installed
+PyTorch version before deserializing the state dictionary. BLIP supports
+`TRTMC_ENABLE_BYOK=OFF`. Rebuild bundles created with the removed custom
+vision-kernel backend before loading them with this version.
 The native tokenizer uses ICU for Unicode NFD, nonspacing-mark removal, and
 lowercasing, matching the reference's per-code-point normalization order.
 BLIP VQA, image-text retrieval, and BLIP-2 are
@@ -86,10 +76,10 @@ tests compare byte for byte with the reference. Missing staged assets fail
 before model loading.
 
 ```bash
-cmake -S . -B build -DTRTMC_BUILD_TESTS=ON
+cmake -S . -B build -DTRTMC_BUILD_TESTS=ON -DTRTMC_BUILD_FAMILIES=blip
 cmake --build build --parallel 8 --target trtmc trtmc_backend_trt \
-  trtmc_model_blip test_blip_native test_blip_tokenizer test_blip_fp32_kernels
-ctest --test-dir build -R '^test_blip_(tokenizer|fp32_kernels)$' --output-on-failure
+  trtmc_model_blip test_blip_native test_blip_tokenizer
+ctest --test-dir build -R '^test_blip_tokenizer$' --output-on-failure
 curl --fail --location --output /tmp/blip-reference-demo.jpg \
   'https://storage.googleapis.com/sfr-vision-language-research/BLIP/demo.jpg?generation=1642901856234049'
 TRTMC_BLIP_REFERENCE_IMAGE=/tmp/blip-reference-demo.jpg \
@@ -100,9 +90,11 @@ TRTMC_BINARY="$PWD/build/trtmc" TRTMC_RUNTIME_ROOT="$PWD/build" \
 ```
 
 The four input cases cover the original and mirrored image, each with and
-without a caption prefix. Caption checks and direct tensor checks run as
-separate tests that share the checkpoint and reference inputs, so a caption
-mismatch does not conceal decoder qualification. Gates require exact greedy
+without a caption prefix. Each case runs caption checks and direct tensor
+checks independently before reporting its failure, so pytest's stop-on-first-
+failure option cannot conceal tensor qualification after a caption mismatch.
+Both decoder feature sources and the vision gate retain their original
+criteria. The case evidence records every paired comparison and its verdict. Gates require exact greedy
 continuation tokens, native
 preprocessing parity, tokenizer parity, repeatable requests after intervening
 valid and invalid requests, and numerical comparison of the vision features
