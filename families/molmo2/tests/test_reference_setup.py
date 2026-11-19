@@ -68,4 +68,4 @@ def test_missing_reference_fails_before_engine_build(tmp_path, tmp_path_factory,
         test_e2e, "build", lambda *_args: pytest.fail("engine build started before reference setup")
     )
     with pytest.raises(CiError, match="not prepared"):
-        test_e2e.artifacts.__wrapped__(tmp_path_factory)
+        test_e2e.artifacts.__wrapped__(tmp_path_factory)()
