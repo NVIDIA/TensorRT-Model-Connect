@@ -142,4 +142,18 @@ inherited flag, so normal generation and the chat control do not emit input IDs.
 Ten added CPU cases cover exact BOS/multitoken receipts, same-length wrong IDs,
 missing/duplicate/malformed receipts, length mismatches and subprocess opt-in.
 The focused Python group now passes 27 tests. The initial H200 input evidence
-above remains count-only; the stricter gate requires its own target-GPU rerun.
+above was count-only. The stricter gate was rerun at
+`76275b9848a4a6a8a9cb868322cdea77f5ba9bb8` on the same H200 environment:
+3 passed, 11 unselected skipped. Both raw cases matched all expected native
+prompt IDs (16 multilingual/digit IDs and BOS `[0]`), the chat control emitted
+no ID trace, and all 22 generated IDs still matched the FP32 reference.
+Native trace controls `0`, `invalid` and `1` passed; the old implementation
+failed the requested trace probe after real prefill. Four native CTests,
+27 focused Python tests and all 312 source-quality tool tests passed at this
+source head. These statements cover the exact test inputs, not arbitrary
+prompts or runtime performance.
+
+The copied configuration's publisher, revision and license are recorded in
+`families/llama/NOTICE`. The pinned checkpoint also has a documentation-only
+entry in `website/data/hf-model-metadata.json`, as required by the contributor
+guide; that inventory does not control support ownership or qualification.
