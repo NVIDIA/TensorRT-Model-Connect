@@ -43,6 +43,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, record_evidence
 
 FAMILY = "swinv2"
 TASKS = frozenset({"image_to_class_scores"})
@@ -187,6 +188,10 @@ def _run_json(
         env=env,
         timeout=int(case.get("runtime_timeout_s", 3600)),
     )
+    record_evidence(
+        "native_process",
+        {"argv": completed.args, "stdout": completed.stdout, "stderr": completed.stderr},
+    )
     payloads = []
     for line in completed.stdout.splitlines():
         start = line.find("{")
@@ -205,6 +210,7 @@ def _asset(raw: str) -> Path:
     if not path.is_absolute():
         path = TEST_ROOT / path
     assert path.is_file(), f"selected {FAMILY} E2E asset does not exist: {path}"
+    record_evidence("inputs", {"image": path})
     return path
 
 
@@ -261,6 +267,85 @@ def _check_logits(scores: list[float], reference: list[float]) -> tuple[float, f
     return worst, cosine
 
 
+def _record_reference_comparison(
+    scores: list[float],
+    labels: list[str],
+    reference: list[float],
+    reference_labels: list[str],
+    tmp_path: Path,
+) -> None:
+    """Record both outputs and the gate's comparisons for the E2E report; gates nothing.
+
+    The assertions of ``_check_logits`` and the test stay the gate. A recording
+    problem is recorded as such and never changes the test's outcome.
+    """
+    if not evidence_enabled() or len(scores) != len(reference) or not scores:
+        return
+    try:
+        import numpy as np
+
+        native_top = max(range(len(scores)), key=scores.__getitem__)
+        reference_top = max(range(len(reference)), key=reference.__getitem__)
+        worst = max(abs(a - b) for a, b in zip(scores, reference))
+        cosine = _cosine(scores, reference)
+        native_path = tmp_path / f"{FAMILY}-native-logits.npy"
+        reference_path = tmp_path / f"{FAMILY}-reference-logits.npy"
+        np.save(native_path, np.asarray(scores, dtype=np.float32))
+        np.save(reference_path, np.asarray(reference, dtype=np.float32))
+        record_evidence("native", {
+            "top_class": native_top,
+            "label": labels[native_top] if native_top < len(labels) else "",
+            "logits": np.asarray(scores, dtype=np.float32),
+        })
+        record_evidence("reference", {
+            "top_class": reference_top,
+            "label": reference_labels[reference_top],
+            "logits": np.asarray(reference, dtype=np.float32),
+        })
+        record_evidence("thresholds", {
+            "max_abs_logit_difference": _LOGIT_TOLERANCE,
+            "cosine_min": _COSINE_FLOOR,
+        })
+        record_evidence("reference_comparison", {
+            "label": "Transformers float32 reference with the slow ViTImageProcessor",
+            "scope": "independent_reference",
+            "enforced": True,
+            "native": native_path,
+            "reference": reference_path,
+            "checks": [
+                {
+                    "name": "max_abs_logit_difference",
+                    "label": "Max absolute logit difference",
+                    "scope": "independent_reference",
+                    "actual": worst,
+                    "operator": "<=",
+                    "expected": _LOGIT_TOLERANCE,
+                    "passed": worst <= _LOGIT_TOLERANCE,
+                },
+                {
+                    "name": "cosine",
+                    "label": "Logit cosine similarity",
+                    "scope": "independent_reference",
+                    "actual": cosine,
+                    "operator": ">=",
+                    "expected": _COSINE_FLOOR,
+                    "passed": cosine >= _COSINE_FLOOR,
+                },
+                {
+                    "name": "top_class",
+                    "label": "Predicted class ID",
+                    "scope": "independent_reference",
+                    "actual": native_top,
+                    "operator": "==",
+                    "expected": reference_top,
+                    "passed": native_top == reference_top,
+                },
+            ],
+        })
+    except Exception as error:
+        record_evidence("comparison_preview", {"error": f"{type(error).__name__}: {error}"})
+
+
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     model_dir = _model_dir(manifest)
@@ -273,6 +358,8 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
                         "image_to_class_scores", "--image", str(_asset(case["test_image"])))
 
     scores = [float(value) for value in payload["scores"]]
+    labels = [str(label) for label in payload["labels"]]
+    _record_reference_comparison(scores, labels, reference, reference_labels, tmp_path)
     worst, cosine = _check_logits(scores, reference)
 
     # The head emits logits; nothing in the runtime softmaxes them, and the
@@ -282,11 +369,10 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     # Every class is named, in class order. A partial or reordered vocabulary
     # would line names up against the wrong scores while still returning the
     # right count.
-    labels = [str(label) for label in payload["labels"]]
     assert labels == reference_labels, f"{FAMILY} labels do not match the checkpoint's id2label"
 
-    # The prediction is reported but not gated: measured, it survives every
-    # structural error but one in the table above.
+    # The prediction is checked too, but it is not the gate: measured, it
+    # survives every structural error but one in the table above.
     top = max(range(len(scores)), key=lambda index: scores[index])
     assert top == max(range(len(reference)), key=lambda index: reference[index])
     print(
