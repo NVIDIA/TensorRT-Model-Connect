@@ -2,6 +2,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: Apache-2.0
  */
+#include "families/vjepa2/runtime/fp32_kernels.h"
 #include "families/vjepa2/runtime/preprocess.h"
 #include "trtmc/internal/features.h"
 #include "trtmc/internal/model.h"
@@ -125,6 +126,7 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         size % patch || frames % tubelet || cfg.at("grid") != size / patch ||
         cfg.at("grid_frames") != frames / tubelet)
         throw std::runtime_error("Invalid V-JEPA2 patch profile");
+    vjepa2::initialize_fp32_kernels();
     const auto plan = vjepa2::section(context.reader, "model.plan");
     auto engine = context.backend.create_module(plan.data(), plan.size(), {});
     if (!engine || !engine->ok())

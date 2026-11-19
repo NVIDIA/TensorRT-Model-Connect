@@ -83,11 +83,6 @@ def build(request, writer):
         value = np.ascontiguousarray(value, dtype=np.float32)
         return net.add_constant(value.shape, value).get_output(0)
 
-    def reshape(x, shape):
-        layer = net.add_shuffle(x)
-        layer.reshape_dims = shape
-        return layer.get_output(0)
-
     def add(a, b):
         return net.add_elementwise(a, b, trt.ElementWiseOperation.SUM).get_output(0)
 
@@ -108,68 +103,16 @@ def build(request, writer):
         layer.second_transpose = (0, 2, 1, 3)
         return layer.get_output(0)
 
-    indices = np.arange(length)
-    positions = [indices // (grid * grid), indices // grid % grid, indices % grid]
-    # Keep the reference's FP32 frequency arithmetic and trigonometry in the
-    # graph. Host-generated lookup tables round the power and phase differently.
-    exponent = mul(
-        const(np.arange(rotary_dim // 2, dtype=np.float32).reshape(1, 1, 1, -1)),
-        const(np.full((1, 1, 1, 1), 2.0 / rotary_dim)),
-    )
-    power = net.add_elementwise(
-        const(np.full((1, 1, 1, 1), 10000)), exponent, trt.ElementWiseOperation.POW
-    ).get_output(0)
-    omega = net.add_unary(power, trt.UnaryOperation.RECIP).get_output(0)
-    tables = []
-    for position in positions:
-        frequency = mul(const(position.reshape(1, 1, length, 1)), omega)
-        # The checkpoint repeats the frequency vector, while rotating adjacent
-        # pairs. Retain that exact layout independently for depth, height and width.
-        pair = []
-        for operation in (trt.UnaryOperation.COS, trt.UnaryOperation.SIN):
-            value = net.add_unary(frequency, operation).get_output(0)
-            repeated = net.add_concatenation([value, value])
-            repeated.axis = 3
-            pair.append(repeated.get_output(0))
-        tables.append(tuple(pair))
+    from .native_kernels import add_fp32_kernel
 
     def rope(x):
-        pieces = []
-        for axis, (cosine, sine) in enumerate(tables):
-            start = axis * rotary_dim
-            original = net.add_slice(
-                x, (0, 0, 0, start), (1, heads, length, rotary_dim), (1, 1, 1, 1)
-            ).get_output(0)
-            even = net.add_slice(
-                x, (0, 0, 0, start), (1, heads, length, rotary_dim // 2), (1, 1, 1, 2)
-            ).get_output(0)
-            odd = net.add_slice(
-                x, (0, 0, 0, start + 1), (1, heads, length, rotary_dim // 2), (1, 1, 1, 2)
-            ).get_output(0)
-            negative = net.add_unary(odd, trt.UnaryOperation.NEG).get_output(0)
-            joined = net.add_concatenation(
-                [
-                    reshape(negative, (1, heads, length, rotary_dim // 2, 1)),
-                    reshape(even, (1, heads, length, rotary_dim // 2, 1)),
-                ]
-            )
-            joined.axis = 4
-            pieces.append(
-                add(
-                    mul(original, cosine),
-                    mul(reshape(joined.get_output(0), (1, heads, length, rotary_dim)), sine),
-                )
-            )
-        used = 3 * rotary_dim
-        if used < dim:
-            pieces.append(
-                net.add_slice(
-                    x, (0, 0, 0, used), (1, heads, length, dim - used), (1, 1, 1, 1)
-                ).get_output(0)
-            )
-        joined = net.add_concatenation(pieces)
-        joined.axis = 3
-        return joined.get_output(0)
+        return add_fp32_kernel(
+            net,
+            "rotary",
+            [x],
+            x.shape,
+            [{"type": "int", "value": grid}],
+        )
 
     pixels = net.add_input("pixel_values", trt.float32, (1, 3, frames, size, size))
     prefix = "encoder.embeddings.patch_embeddings.proj"
@@ -196,17 +139,16 @@ def build(request, writer):
             rope(query), trt.MatrixOperation.NONE, rope(key), trt.MatrixOperation.TRANSPOSE
         ).get_output(0)
         scores = mul(scores, const(np.full((1, 1, 1, 1), dim**-0.5)))
-        softmax = net.add_softmax(scores)
-        softmax.axes = 8
+        probabilities = add_fp32_kernel(net, "softmax", [scores], scores.shape)
         context = net.add_matrix_multiply(
-            softmax.get_output(0), trt.MatrixOperation.NONE, value, trt.MatrixOperation.NONE
+            probabilities, trt.MatrixOperation.NONE, value, trt.MatrixOperation.NONE
         ).get_output(0)
         merged = net.add_shuffle(context)
         merged.first_transpose = (0, 2, 1, 3)
         merged.reshape_dims = (length, width)
         hidden = add(hidden, linear(merged.get_output(0), prefix + ".attention.proj"))
         inner = linear(norm(hidden, prefix + ".norm2"), prefix + ".mlp.fc1")
-        inner = net.add_activation(inner, trt.ActivationType.GELU_ERF).get_output(0)
+        inner = add_fp32_kernel(net, "gelu", [inner], inner.shape)
         hidden = add(hidden, linear(inner, prefix + ".mlp.fc2"))
     hidden = norm(hidden, "encoder.layernorm")
     hidden.name = "features"
