@@ -30,11 +30,15 @@ def main():
         attn_implementation="eager",
         experts_implementation="eager",
     ).eval()
-    # The loader preserves storage dtype for renamed source tensors. Set the
-    # requested compute dtype on the renamed norms and the router's FP32 bias.
+    # The FP8 loader can retain checkpoint BF16 storage for unquantized and
+    # renamed parameters. Honor the requested FP16 execution dtype throughout
+    # the official model, while preserving FP32 buffers such as rotary
+    # frequencies and the routing correction bias.
+    with torch.no_grad():
+        for parameter in reference.parameters():
+            if parameter.dtype in (torch.bfloat16, torch.float32):
+                parameter.data = parameter.data.to(dtype=torch.float16)
     for layer in reference.model.layers:
-        layer.post_self_attn_layernorm.to(dtype=torch.float16)
-        layer.post_mlp_layernorm.to(dtype=torch.float16)
         layer.mlp.gate.e_score_correction_bias = layer.mlp.gate.e_score_correction_bias.float()
     del layer
     torch.cuda.empty_cache()
