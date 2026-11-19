@@ -345,29 +345,85 @@ def _pooled_relative_error(pooled: np.ndarray, reference: dict, queries: int) ->
     return float(_row_relative_errors(np.asarray(pooled)[None, :], document_mean[None, :])[0])
 
 
-def _assert_parity(
+def _check(name: str, label: str, scope: str, actual, operator: str, expected) -> dict:
+    """One row of the recorded comparison; values are plain Python numbers."""
+    actual, expected = (
+        (int(actual), int(expected))
+        if operator == "=="
+        else (
+            float(actual),
+            float(expected),
+        )
+    )
+    passed = (
+        actual == expected
+        if operator == "=="
+        else actual >= expected
+        if operator == ">="
+        else actual <= expected
+    )
+    return {
+        "name": name,
+        "label": label,
+        "scope": scope,
+        "actual": actual,
+        "operator": operator,
+        "expected": expected,
+        "passed": bool(passed),
+    }
+
+
+def _tiles(text: str, offsets: list) -> bool:
+    data = text.encode("utf-8")
+    ends = [0] + [end for _, end in offsets]
+    return bool(
+        offsets
+        and all(begin == ends[index] and begin < end for index, (begin, end) in enumerate(offsets))
+        and ends[-1] == len(data)
+        and b"".join(data[begin:end] for begin, end in offsets) == data
+    )
+
+
+def _parity_checks(
     native: dict, truth: dict, official: dict | None, case: dict, thresholds: dict
-) -> dict:
+) -> tuple[dict, list[tuple[dict, str]]]:
+    """The case's summary and every check with its failure message, in assertion order."""
     queries = len(case["queries"])
-    for text, mine, theirs in zip(
-        case["queries"] + case["documents"], native["tokens"], truth["tokens"]
-    ):
-        assert mine["token_ids"] == theirs["token_ids"], (
-            f"native token IDs differ from AutoTokenizer: {text!r}"
-        )
-        data = text.encode("utf-8")
-        offsets = mine["byte_offsets"]
-        ends = [0] + [end for _, end in offsets]
-        assert (
-            offsets
-            and all(
-                begin == ends[index] and begin < end for index, (begin, end) in enumerate(offsets)
-            )
-            and ends[-1] == len(data)
-        ), f"native byte offsets do not tile the input: {text!r} {offsets}"
-        assert b"".join(data[begin:end] for begin, end in offsets) == data, (
-            f"native byte offsets do not tile the input: {text!r}"
-        )
+    texts = case["queries"] + case["documents"]
+    differing_ids = [
+        text
+        for text, mine, theirs in zip(texts, native["tokens"], truth["tokens"])
+        if mine["token_ids"] != theirs["token_ids"]
+    ]
+    untiled = [
+        (text, mine["byte_offsets"])
+        for text, mine in zip(texts, native["tokens"])
+        if not _tiles(text, mine["byte_offsets"])
+    ]
+    checks = [
+        (
+            _check(
+                "token_ids_differing_texts",
+                "Texts whose native token IDs differ from AutoTokenizer",
+                "independent_reference",
+                len(differing_ids),
+                "==",
+                0,
+            ),
+            f"native token IDs differ from AutoTokenizer: {differing_ids[:1]!r}",
+        ),
+        (
+            _check(
+                "byte_offsets_untiled_texts",
+                "Texts whose byte offsets do not tile the input",
+                "contract",
+                len(untiled),
+                "==",
+                0,
+            ),
+            f"native byte offsets do not tile the input: {untiled[:1]!r}",
+        ),
+    ]
     drift = _drifts(native, truth, queries)
     summary = {
         "embedding_cosine_min": float(1 - drift["embedding"].max()),
@@ -381,26 +437,83 @@ def _assert_parity(
     if drift["score"].size:
         native_scores = _scores(native["embeddings"], queries)
         truth_scores = _scores(truth["embeddings"], queries)
-        assert (native_scores.argmax(axis=1) == truth_scores.argmax(axis=1)).all(), (
-            "retrieval ranking differs"
+        moved = int((native_scores.argmax(axis=1) != truth_scores.argmax(axis=1)).sum())
+        checks.append(
+            (
+                _check(
+                    "retrieval_top_document_changes",
+                    "Queries whose top-scoring document differs from the FP32 truth",
+                    "independent_reference",
+                    moved,
+                    "==",
+                    0,
+                ),
+                "retrieval ranking differs",
+            )
         )
     if official is None:
-        assert summary["embedding_cosine_min"] >= thresholds["embedding_cosine"], summary
-        assert summary["score_abs_diff_max"] <= thresholds["score_abs_diff"], summary
-        assert summary["token_feature_cosine_min"] >= thresholds["token_feature_cosine"], summary
-        assert (
-            summary["token_feature_relative_error_max"]
-            <= thresholds["token_feature_relative_error"]
-        ), f"token-feature relative error exceeds its bound: {summary}"
-        assert summary["pooled_feature_cosine"] >= thresholds["pooled_feature_cosine"], summary
-        assert (
-            summary["pooled_feature_relative_error"] <= thresholds["pooled_feature_relative_error"]
-        ), f"pooled-feature relative error exceeds its bound: {summary}"
-        return summary
+        rows = (
+            ("embedding_cosine_min", "Embedding cosine, minimum", ">=", "embedding_cosine", None),
+            (
+                "score_abs_diff_max",
+                "Query-document score difference, maximum",
+                "<=",
+                "score_abs_diff",
+                None,
+            ),
+            (
+                "token_feature_cosine_min",
+                "Token-feature cosine, minimum",
+                ">=",
+                "token_feature_cosine",
+                None,
+            ),
+            (
+                "token_feature_relative_error_max",
+                "Token-feature relative L2 error, maximum",
+                "<=",
+                "token_feature_relative_error",
+                "token-feature relative error exceeds its bound",
+            ),
+            ("pooled_feature_cosine", "Pooled-feature cosine", ">=", "pooled_feature_cosine", None),
+            (
+                "pooled_feature_relative_error",
+                "Pooled-feature relative L2 error",
+                "<=",
+                "pooled_feature_relative_error",
+                "pooled-feature relative error exceeds its bound",
+            ),
+        )
+        for key, label, operator, limit, prefix in rows:
+            message = f"{prefix}: {summary}" if prefix else str(summary)
+            checks.append(
+                (
+                    _check(
+                        key,
+                        label,
+                        "independent_reference",
+                        summary[key],
+                        operator,
+                        thresholds[limit],
+                    ),
+                    message,
+                )
+            )
+        return summary, checks
     # A BF16 bundle is judged only relative to the official BF16 run's drift from
     # the FP32 truth. A mean over few tokens is dominated by single texts.
-    assert summary["tokens"] >= 100, (
-        "BF16 drift statistics need at least 100 tokens of token features"
+    checks.append(
+        (
+            _check(
+                "bf16_token_count",
+                "Tokens with features behind the BF16 statistics",
+                "contract",
+                summary["tokens"],
+                ">=",
+                100,
+            ),
+            "BF16 drift statistics need at least 100 tokens of token features",
+        )
     )
     reference_drift = _drifts(official, truth, queries)
     official_pooled = official["tokens"][queries]["hidden"].astype(np.float64).mean(axis=0)
@@ -433,29 +546,93 @@ def _assert_parity(
             }
     summary.update(drift_statistics=statistics, pooled_drift=pooled, long_documents=long_documents)
     mean_ratio, max_ratio = thresholds["bf16_mean_drift_ratio"], thresholds["bf16_max_drift_ratio"]
+    words = {
+        "embedding": "embedding drift (1 - cosine)",
+        "score": "score difference",
+        "token": "token-feature drift (1 - cosine)",
+        "token_relative": "token-feature relative L2 error",
+    }
     for kind, values in statistics.items():
-        assert values["native_mean"] <= mean_ratio * values["official_bf16_mean"], (
-            f"BF16 {kind} mean drift exceeds the official BF16 drift: {summary}"
+        for statistic, ratio in (("mean", mean_ratio), ("max", max_ratio)):
+            checks.append(
+                (
+                    _check(
+                        f"bf16_{kind}_{statistic}",
+                        f"BF16 {words[kind]}, {statistic}: at most {ratio:g}x the official BF16 run's",
+                        "independent_reference",
+                        values[f"native_{statistic}"],
+                        "<=",
+                        ratio * values[f"official_bf16_{statistic}"],
+                    ),
+                    f"BF16 {kind} {statistic} drift exceeds the official BF16 drift: {summary}",
+                )
+            )
+    checks.append(
+        (
+            _check(
+                "bf16_pooled_feature_drift",
+                f"BF16 pooled-feature drift (1 - cosine): at most {max_ratio:g}x the official BF16 run's",
+                "independent_reference",
+                pooled["native"],
+                "<=",
+                max_ratio * pooled["official_bf16"],
+            ),
+            f"BF16 pooled-feature drift exceeds the official BF16 drift: {summary}",
         )
-        assert values["native_max"] <= max_ratio * values["official_bf16_max"], (
-            f"BF16 {kind} max drift exceeds the official BF16 drift: {summary}"
-        )
-    assert pooled["native"] <= max_ratio * pooled["official_bf16"], (
-        f"BF16 pooled-feature drift exceeds the official BF16 drift: {summary}"
     )
-    assert pooled["native_relative"] <= max_ratio * pooled["official_bf16_relative"], (
-        f"BF16 pooled-feature relative error exceeds the official BF16 one: {summary}"
-    )
-    for item in long_documents:
-        assert item["native"] <= max_ratio * item["official_bf16"], (
-            f"BF16 long document drift exceeds the official BF16 drift: {summary}"
+    checks.append(
+        (
+            _check(
+                "bf16_pooled_feature_relative_error",
+                f"BF16 pooled-feature relative L2 error: at most {max_ratio:g}x the official BF16 run's",
+                "independent_reference",
+                pooled["native_relative"],
+                "<=",
+                max_ratio * pooled["official_bf16_relative"],
+            ),
+            f"BF16 pooled-feature relative error exceeds the official BF16 one: {summary}",
         )
+    )
+    for index, item in enumerate(long_documents):
+        checks.append(
+            (
+                _check(
+                    f"bf16_long_document_{index + 1}_drift",
+                    f"BF16 drift of long document {index + 1}: at most {max_ratio:g}x the official BF16 run's",
+                    "independent_reference",
+                    item["native"],
+                    "<=",
+                    max_ratio * item["official_bf16"],
+                ),
+                f"BF16 long document drift exceeds the official BF16 drift: {summary}",
+            )
+        )
+    return summary, checks
+
+
+def _assert_parity(
+    native: dict,
+    truth: dict,
+    official: dict | None,
+    case: dict,
+    thresholds: dict,
+    record=None,
+) -> dict:
+    """Evaluate every check, hand the rows to ``record`` first, then assert them in order."""
+    summary, checks = _parity_checks(native, truth, official, case, thresholds)
+    if record is not None:
+        record([row for row, _ in checks])
+    for row, message in checks:
+        assert row["passed"], message
     return summary
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
-    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence(
+        "inputs",
+        {"manifest": manifest, "case": case, "query": "\n\n".join(case["queries"])},
+    )
     model_dir, pinned = _model_dir(manifest)
     record_evidence(
         "checkpoint",
@@ -484,7 +661,51 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             else None
         )
     with evidence_stage("compare"):
+        first = native["tokens"][0]
+        record_evidence(
+            "native",
+            {
+                "embeddings": native["embeddings"],
+                "token_ids": first["token_ids"],
+                "byte_offsets": first["byte_offsets"],
+                "pooled_features": native["pooled"],
+            },
+        )
+        record_evidence(
+            "reference",
+            {
+                "source": "Transformers AutoModel in FP32, TF32 off: the checkpoint's documented recipe",
+                "embeddings": truth["embeddings"],
+                "reference_ids": truth["tokens"][0]["token_ids"],
+            },
+        )
+        native_file = tmp_path / "native_embeddings.npy"
+        reference_file = tmp_path / "reference_embeddings.npy"
+        np.save(native_file, native["embeddings"])
+        np.save(reference_file, truth["embeddings"])
+        label = f"{manifest['precision'].upper()} bundle against the FP32 Transformers recipe" + (
+            " and the official BF16 run" if official is not None else ""
+        )
+
+        def record(checks: list) -> None:
+            record_evidence(
+                "reference_comparison",
+                {
+                    "label": label,
+                    "scope": "independent_reference",
+                    "enforced": True,
+                    "native": native_file,
+                    "reference": reference_file,
+                    "checks": checks,
+                },
+            )
+
         summary = _assert_parity(
-            native, truth, official, case, record_evidence("thresholds", _thresholds(case_name))
+            native,
+            truth,
+            official,
+            case,
+            record_evidence("thresholds", _thresholds(case_name)),
+            record=record,
         )
         record_evidence("compare", summary)
