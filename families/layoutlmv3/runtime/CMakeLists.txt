@@ -15,6 +15,26 @@ list(PREPEND CMAKE_PREFIX_PATH "${_layoutlmv3_torch_prefix}")
 find_package(Torch REQUIRED)
 separate_arguments(_layoutlmv3_torch_cxx_flags NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
 
+# Family factories exchange C++ runtime objects with core and the backend.
+# Torch must match their toolchain ABI before its flags can be applied here.
+execute_process(
+  COMMAND ${Python3_EXECUTABLE} -c "import torch; print(int(torch.compiled_with_cxx11_abi()), end='')"
+  RESULT_VARIABLE _layoutlmv3_torch_abi_result OUTPUT_VARIABLE _layoutlmv3_torch_abi)
+if(NOT _layoutlmv3_torch_abi_result EQUAL 0 OR NOT _layoutlmv3_torch_abi MATCHES "^[01]$")
+  message(FATAL_ERROR "LayoutLMv3 could not determine Torch's C++ ABI")
+endif()
+include(CheckCXXSourceCompiles)
+unset(_layoutlmv3_torch_abi_matches CACHE)
+check_cxx_source_compiles("#include <string>
+#if defined(__GLIBCXX__) && _GLIBCXX_USE_CXX11_ABI != ${_layoutlmv3_torch_abi}
+#error Torch C++ ABI differs from the native runtime toolchain
+#endif
+int main() { return 0; }
+" _layoutlmv3_torch_abi_matches)
+if(NOT _layoutlmv3_torch_abi_matches)
+  message(FATAL_ERROR "LayoutLMv3 requires Torch's C++ ABI to match the native runtime toolchain")
+endif()
+
 add_library(trtmc_model_layoutlmv3 SHARED bpe_tokenizer.cpp document_input.cpp image_preprocess.cpp plugin.cpp)
 target_include_directories(trtmc_model_layoutlmv3 PRIVATE ${PROJECT_SOURCE_DIR}
   ${PROJECT_SOURCE_DIR}/core/runtime/include)
@@ -27,7 +47,7 @@ target_compile_options(trtmc_model_layoutlmv3 PRIVATE
 set_target_properties(trtmc_model_layoutlmv3 PROPERTIES
   LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
   BUILD_RPATH "\$ORIGIN;${TORCH_INSTALL_PREFIX}/lib"
-  INSTALL_RPATH "\$ORIGIN;\$ORIGIN/../../torch/lib")
+  INSTALL_RPATH "\$ORIGIN;\$ORIGIN/../../torch/lib;${TORCH_INSTALL_PREFIX}/lib")
 install(TARGETS trtmc_model_layoutlmv3 LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 if(TRTMC_BUILD_TESTS)
@@ -36,6 +56,7 @@ if(TRTMC_BUILD_TESTS)
   target_include_directories(test_layoutlmv3_tokenizer PRIVATE ${PROJECT_SOURCE_DIR})
   target_link_libraries(test_layoutlmv3_tokenizer PRIVATE
     trtmc_model_layoutlmv3 nlohmann_json::nlohmann_json)
+  target_compile_options(test_layoutlmv3_tokenizer PRIVATE ${_layoutlmv3_torch_cxx_flags})
   set_target_properties(test_layoutlmv3_tokenizer PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 endif()

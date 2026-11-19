@@ -15,3 +15,7 @@ Prepare it with `MODEL=layoutlmv3 python -m tools.ci pipeline setup`, then run
 the family tests from the normal base environment with the native paths required
 by the repository validation guide. The E2E adapter invokes the prepared
 reference interpreter without changing the base Transformers installation.
+
+The native Torch distribution must use the runtime toolchain's C++ ABI. CMake
+checks this before applying Torch compile flags to the family and its tokenizer
+helper. Native-prefix installs retain the discovered Torch library directory.
