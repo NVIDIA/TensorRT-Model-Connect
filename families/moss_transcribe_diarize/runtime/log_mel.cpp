@@ -32,6 +32,19 @@ std::size_t next_power_of_two(std::size_t value) {
     return result;
 }
 
+// Bluestein's algorithm turns a length-N DFT into a circular convolution of a
+// power of two of at least 2N - 1 points. N is checked before that size is
+// computed: zero has no transform, and above 2^(digits/2) the chirp phase n * n
+// or the padded size would no longer be representable.
+std::size_t bluestein_size(std::size_t length) {
+    constexpr std::size_t kMaxLength = std::size_t{1}
+                                       << (std::numeric_limits<std::size_t>::digits / 2);
+    if (length == 0 || length > kMaxLength)
+        throw std::invalid_argument("DFT length must lie in [1, " + std::to_string(kMaxLength) +
+                                    "]");
+    return next_power_of_two(2 * length - 1);
+}
+
 } // namespace
 
 MelFilterBank parse_mel_filter_bank(const std::vector<char>& bytes) {
@@ -50,9 +63,7 @@ MelFilterBank parse_mel_filter_bank(const std::vector<char>& bytes) {
     return bank;
 }
 
-Dft::Dft(std::size_t length) : length_(length), padded_(next_power_of_two(2 * length - 1)) {
-    if (length == 0)
-        throw std::invalid_argument("DFT length must be positive");
+Dft::Dft(std::size_t length) : length_(length), padded_(bluestein_size(length)) {
     chirp_.resize(length_);
     kernel_spectrum_.assign(padded_, {0.0, 0.0});
     const auto period = 2 * length_;

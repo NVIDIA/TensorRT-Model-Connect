@@ -14,6 +14,10 @@ from tensorrt_model_connect.model_support import ModelMetadata, resolve_family
     [
         {"model_type": "moss_transcribe_diarize"},
         {"architectures": ["MossTranscribeDiarizeForConditionalGeneration"]},
+        {
+            "model_type": "moss_transcribe_diarize",
+            "architectures": ["MossTranscribeDiarizeForConditionalGeneration"],
+        },
     ],
 )
 def test_discovery_has_one_owner(config):
@@ -38,6 +42,10 @@ def test_builds_at_the_checkpoint_precision_by_default():
         {"model_type": "whisper"},
         {"model_type": "moss_transcribe_diarize_audio"},
         {"architectures": ["MossTranscribeDiarizeModel"]},
+        # A backbone checkpoint names this model type as well; the build refuses
+        # it, so discovery must not offer it either.
+        {"model_type": "moss_transcribe_diarize", "architectures": ["MossTranscribeDiarizeModel"]},
+        {"model_type": "moss_transcribe_diarize", "architectures": ["Qwen3ForCausalLM"]},
         {},
     ],
 )
