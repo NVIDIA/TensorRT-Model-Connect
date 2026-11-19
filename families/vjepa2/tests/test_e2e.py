@@ -230,21 +230,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
     from PIL import Image
     from torchvision.transforms import functional as vision
     from torchvision.transforms import InterpolationMode
-    from transformers import AutoVideoProcessor, VJEPA2Model
-    import sys
-    import transformers
-
-    record_evidence(
-        "reference_environment",
-        {
-            "requested": manifest.get("reference_environment", "default"),
-            "python": sys.executable,
-            "transformers": transformers.__version__,
-        },
-    )
-    assert transformers.__version__ == "5.20.0", (
-        "V-JEPA2 parity requires the original pinned Transformers5.20.0 reference"
-    )
+    from families.vjepa2.tests.reference.runner import run_reference
 
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
@@ -260,7 +246,6 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         },
     )
     _, runtime_root = _runtime()
-    processor = AutoVideoProcessor.from_pretrained(directory)
     image = Image.open(TEST_ROOT / "data" / case["image"]).convert("RGB")
     record_evidence(
         "inputs",
@@ -290,13 +275,13 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         )
         assert completed.returncode == 0, completed.stderr
         native_geometry = json.loads(completed.stdout)
-        inputs = processor(
-            videos=[frame[None, ...] * 255],
-            input_data_format="channels_last",
-            do_sample_frames=False,
-            return_tensors="pt",
+        reference_outputs, _ = run_reference(
+            directory,
+            frame[None, ...] * 255,
+            tmp_path / f"reference-pixels-{index}",
+            inference=False,
         )
-        expected = inputs.pixel_values_videos[0, 0].numpy()
+        expected = reference_outputs["pixels"]
         actual = np.fromfile(target, dtype="<f4").reshape(3, 256, 256)
         record_evidence(
             "preprocessing",
@@ -331,11 +316,6 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
     request.addfinalizer(lambda: setattr(torch.backends.cudnn, "allow_tf32", cudnn_tf32))
     torch.set_float32_matmul_precision("highest")
     torch.backends.cudnn.allow_tf32 = False
-    reference = (
-        VJEPA2Model.from_pretrained(directory, dtype=torch.float32, attn_implementation="eager")
-        .eval()
-        .to("cuda")
-    )
     base = np.asarray(image, dtype=np.float32) / 255
     clip = np.stack([np.roll(base, 2 * index, axis=1) for index in range(64)])
     comparison_failures = []
@@ -344,15 +324,14 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         source = tmp_path / f"video-{label}.f32"
         target = tmp_path / f"features-{label}.f32"
         source.write_bytes(video.astype("<f4").tobytes())
-        inputs = processor(
-            videos=[video * 255],
-            input_data_format="channels_last",
-            do_sample_frames=False,
-            return_tensors="pt",
-        ).to("cuda")
-        assert inputs.pixel_values_videos.shape == (1, 64, 3, 256, 256)
-        with torch.no_grad():
-            expected = reference(**inputs, skip_predictor=True).last_hidden_state[0].cpu().numpy()
+        reference_outputs, reference_metadata = run_reference(
+            directory,
+            video * 255,
+            tmp_path / f"reference-{label}",
+            inference=True,
+        )
+        assert reference_metadata["pixel_shape"] == [1, 64, 3, 256, 256]
+        expected = reference_outputs["features"]
         completed = subprocess.run(
             [
                 str(_native_test_binary("test_vjepa2_runtime")),
