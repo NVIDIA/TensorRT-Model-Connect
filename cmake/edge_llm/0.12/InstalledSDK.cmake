@@ -42,11 +42,19 @@ endforeach()
 if(IS_ABSOLUTE "${CMAKE_INSTALL_LIBDIR}" OR IS_ABSOLUTE "${CMAKE_INSTALL_BINDIR}")
   message(FATAL_ERROR "Edge SDK receipt requires relocatable install directories")
 endif()
+set(_receipt_revision null)
+if(_edge_provisioned)
+  set(_receipt_revision "\"${_edge_revision}\"")
+endif()
 set(_all false)
 if(_edge_provisioned AND TRTMC_EDGELLM_ALL_KERNELS)
   set(_all true)
 endif()
 get_filename_component(_sdk_prefix "${TensorRTEdgeLLM_DIR}/../../.." ABSOLUTE)
+set(_sdk_license "${_sdk_prefix}/share/licenses/TensorRTEdgeLLM/LICENSE")
+if(NOT EXISTS "${_sdk_license}" OR IS_DIRECTORY "${_sdk_license}")
+  message(FATAL_ERROR "The installed TensorRTEdgeLLM SDK is missing its license: ${_sdk_license}")
+endif()
 set(_onnx false)
 if(TRTMC_EDGELLM_ONNX)
   set(_onnx true)
@@ -65,7 +73,7 @@ file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/edgellm-sdk")
 file(WRITE "${_receipt}" "{
   \"schema_version\": 2,
   \"version\": \"${TensorRTEdgeLLM_VERSION}\",
-  \"release_revision\": \"${_edge_revision}\",
+  \"release_revision\": ${_receipt_revision},
   \"arch\": \"${CMAKE_SYSTEM_PROCESSOR}\",
   \"architectures\": [${EdgeLLM_CUDA_ARCHITECTURE}],
   \"cuda_version\": \"${CUDAToolkit_VERSION_MAJOR}.${CUDAToolkit_VERSION_MINOR}\",
@@ -80,7 +88,7 @@ file(WRITE "${_receipt}" "{
 foreach(_component IN ITEMS sdk EdgeLLM)
   install(FILES "${CMAKE_CURRENT_LIST_DIR}/NOTICE"
     DESTINATION share/licenses/TensorRTEdgeLLM COMPONENT "${_component}")
-  install(FILES "${_sdk_prefix}/share/licenses/TensorRTEdgeLLM/LICENSE"
+  install(FILES "${_sdk_license}"
     DESTINATION share/licenses/TensorRTEdgeLLM COMPONENT "${_component}")
   install(FILES "${_receipt}" DESTINATION share/trtmc COMPONENT "${_component}")
   install(FILES "$<TARGET_FILE:TensorRTEdgeLLM::Plugin>" DESTINATION "${CMAKE_INSTALL_LIBDIR}"

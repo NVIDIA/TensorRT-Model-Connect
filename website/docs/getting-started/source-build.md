@@ -113,10 +113,9 @@ The default Edge-enabled source build still uses 0.11.0. To build against the
 0.12.0 C++ SDK, set both `-DTRTMC_ENABLE_EDGELLM=ON` and
 `-DTRTMC_EDGELLM_RELEASE=0.12.0` at configure time. Keep the 0.12 Python
 builder in a separate environment: its Transformers requirement is different
-from Model Connect's shared pin. Set `TRTMC_EDGELLM_PYTHON` to that
-environment's interpreter. See the [native SDK setup](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/cmake/edge_llm/README.md)
-for the matching TensorRT installation, pip and from-source options. Only a
-family ported and validated on this release can claim 0.12 offload.
+from Model Connect's shared pin. This option provisions the native SDK; it
+does not port any family adapter. See the [native SDK setup](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/cmake/edge_llm/README.md)
+for provisioning options. Follow each family's instructions for model builds.
 
 ## Optional Edge-LLM Python tools
 

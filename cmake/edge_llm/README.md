@@ -31,8 +31,11 @@ reuse it. Alternatively, `TRTMC_EDGELLM_SOURCE_DIR` accepts a populated
 checkout of the pinned revision and its submodules, including for offline
 builds. With no provided SDK or source, CMake fetches the public revision
 during this opt-in configure. It uses upstream's native build, prebuilt kernel
-selection and CMake exports. An external SDK does not attest its kernel groups;
-to request `TRTMC_EDGELLM_ALL_KERNELS=ON`, provision from the pinned source.
+selection and CMake exports. An external SDK attests its package version,
+not its source commit or kernel groups. Its receipt records
+a null source revision; the pinned source build records the verified commit.
+The SDK must include its installed license. To request all kernel groups
+(`TRTMC_EDGELLM_ALL_KERNELS=ON`), provision from pinned source.
 `TRTMC_EDGELLM_ONNX=ON` installs the upstream ONNX builder commands only when
 requested; it does not change the native MC graph path or qualify any family.
 
@@ -42,7 +45,6 @@ example, when the native SDK uses TensorRT 11.4.0.106:
 ```bash
 python3 -m venv "$HOME/.venvs/edge012"
 "$HOME/.venvs/edge012/bin/python" -m pip install 'tensorrt==11.4.0.106' 'tensorrt-edgellm[builder]==0.12.0'
-export TRTMC_EDGELLM_PYTHON="$HOME/.venvs/edge012/bin/python"
 ```
 
 The same interpreter can instead install `.[builder]` from the official
