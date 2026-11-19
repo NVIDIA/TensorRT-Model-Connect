@@ -28,15 +28,6 @@ class Weights:
         return self.files[self.index[name]].get_tensor(name).float().numpy()
 
 
-class PlanWriter(trt.IStreamWriter):
-    def __init__(self, stream):
-        super().__init__()
-        self.stream = stream
-
-    def write(self, data):
-        return self.stream.write(data)
-
-
 class Graph:
     def __init__(self, weights, cfg, logger):
         self.weights, self.cfg, self.logger = weights, cfg, logger
@@ -115,10 +106,12 @@ class Graph:
         options = self.builder.create_builder_config()
         options.clear_flag(trt.BuilderFlag.TF32)
         options.builder_optimization_level = 3
-        if not self.builder.build_serialized_network_to_stream(
-            self.net, options, PlanWriter(stream)
-        ):
+        # Keep serialization bounded to the current engine. The caller releases
+        # this graph before loading the next layer's weights.
+        plan = self.builder.build_serialized_network(self.net, options)
+        if plan is None:
             raise RuntimeError("Ling3 engine build failed")
+        stream.write(memoryview(plan))
 
     def kda(self, hidden, prefix):
         net, cfg = self.net, self.cfg
