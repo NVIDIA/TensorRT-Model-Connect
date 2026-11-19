@@ -189,8 +189,8 @@ def test_native_tokenizer(case_name):
     _, manifest, _ = CASES[case_name]
     directory = _model_dir(manifest)
     reference = AutoTokenizer.from_pretrained(directory / "tokenizer")
-    root = _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
-    runner = root / "test_p_h3_image_tokenizer"
+    _required_path(os.environ.get("TRTMC_RUNTIME_ROOT"), "TRTMC_RUNTIME_ROOT")
+    runner = _native_test_binary("test_p_h3_image_tokenizer")
     for text in (
         "",
         "A watercolor painting of Berlin.",
