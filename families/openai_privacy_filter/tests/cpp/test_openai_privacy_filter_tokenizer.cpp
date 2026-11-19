@@ -190,6 +190,15 @@ void splits_and_ids() {
     check(tokenizer.encode("").empty() && o200k_split("").empty(), "empty text");
 }
 
+void accepts_null_truncation_and_padding() {
+    auto json = miniature();
+    json["truncation"] = nullptr;
+    json["padding"] = nullptr;
+    const auto tokenizer = O200kTokenizer::from_json(json.dump());
+    check(tokenizer.encode("aaab") == O200kTokenizer::from_json(miniature().dump()).encode("aaab"),
+          "null truncation and padding");
+}
+
 template <class Function>
 void rejects(Function&& function, const std::string& what) {
     try {
@@ -219,6 +228,32 @@ void rejects_other_configurations() {
          [](nlohmann::json& j) {
              j["pre_tokenizer"]["pretokenizers"][1]["add_prefix_space"] = true;
          }},
+        // Hugging Face tokenizers defaults an omitted use_regex to true (a second split) and
+        // refuses to load an omitted add_prefix_space or invert, so each must be an explicit false.
+        {"an omitted use_regex",
+         [](nlohmann::json& j) { j["pre_tokenizer"]["pretokenizers"][1].erase("use_regex"); }},
+        {"an omitted add_prefix_space",
+         [](nlohmann::json& j) {
+             j["pre_tokenizer"]["pretokenizers"][1].erase("add_prefix_space");
+         }},
+        {"an omitted split invert",
+         [](nlohmann::json& j) { j["pre_tokenizer"]["pretokenizers"][0].erase("invert"); }},
+        {"truncation",
+         [](nlohmann::json& j) {
+             j["truncation"] = {{"direction", "Right"},
+                                {"max_length", 1},
+                                {"strategy", "LongestFirst"},
+                                {"stride", 0}};
+         }},
+        {"padding",
+         [](nlohmann::json& j) {
+             j["padding"] = {{"strategy", {{"Fixed", 64}}},
+                             {"direction", "Right"},
+                             {"pad_to_multiple_of", nullptr},
+                             {"pad_id", 0},
+                             {"pad_type_id", 0},
+                             {"pad_token", "!"}};
+         }},
         {"a framing post-processor",
          [](nlohmann::json& j) { j["post_processor"] = {{"type", "TemplateProcessing"}}; }},
         {"merge-only BPE", [](nlohmann::json& j) { j["model"]["ignore_merges"] = false; }},
@@ -240,6 +275,7 @@ void rejects_other_configurations() {
 int main() {
     try {
         splits_and_ids();
+        accepts_null_truncation_and_padding();
         rejects_malformed_text();
         rejects_other_configurations();
         std::cout << "openai_privacy_filter tokenizer contracts passed\n";

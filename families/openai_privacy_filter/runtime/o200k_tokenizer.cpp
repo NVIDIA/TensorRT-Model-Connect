@@ -289,21 +289,34 @@ bool json_false_or_absent(const nlohmann::json& object, const char* key) {
            (object[key].is_boolean() && !object[key].get<bool>());
 }
 
+bool json_explicit_false(const nlohmann::json& object, const char* key) {
+    return object.contains(key) && object[key].is_boolean() && !object[key].get<bool>();
+}
+
+bool json_null_or_absent(const nlohmann::json& object, const char* key) {
+    return !object.contains(key) || object[key].is_null();
+}
+
 void validate_configuration(const nlohmann::json& root) {
     if (root.contains("normalizer") && !root["normalizer"].is_null())
         unsupported("a normalizer is declared");
+    // Hugging Face tokenizers applies both while encoding; the native encoder applies neither.
+    if (!json_null_or_absent(root, "truncation") || !json_null_or_absent(root, "padding"))
+        unsupported("truncation or padding is configured");
     const auto& pre = root.at("pre_tokenizer");
     if (pre.value("type", "") != "Sequence" || pre.at("pretokenizers").size() != 2)
         unsupported("pre_tokenizer is not Sequence[Split, ByteLevel]");
+    // Hugging Face tokenizers takes an omitted use_regex as true (a second split) and does not
+    // load an omitted add_prefix_space or invert, so each must be an explicit false.
     const auto& split = pre["pretokenizers"][0];
     if (split.value("type", "") != "Split" ||
         split.at("pattern").value("Regex", "") != kO200kPattern ||
-        split.value("behavior", "") != "Isolated" || !json_false_or_absent(split, "invert"))
+        split.value("behavior", "") != "Isolated" || !json_explicit_false(split, "invert"))
         unsupported("the split rule is not the o200k pattern");
     const auto& byte_level = pre["pretokenizers"][1];
     if (byte_level.value("type", "") != "ByteLevel" ||
-        !json_false_or_absent(byte_level, "add_prefix_space") ||
-        !json_false_or_absent(byte_level, "use_regex"))
+        !json_explicit_false(byte_level, "add_prefix_space") ||
+        !json_explicit_false(byte_level, "use_regex"))
         unsupported("the byte-level step adds a prefix space or splits again");
     if (root.contains("post_processor") && !root["post_processor"].is_null() &&
         root["post_processor"].value("type", "") != "ByteLevel")
