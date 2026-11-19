@@ -276,11 +276,69 @@ def test_conversion_preserves_existing_destination(tmp_path):
     assert destination.read_bytes() == b"existing"
 
 
+def test_conversion_never_replaces_a_destination_created_meanwhile(tmp_path, monkeypatch):
+    # Another conversion finishes between the first check and the publication:
+    # its file stays, this one fails, and no temporary file is left behind.
+    from families.wavlm import convert_checkpoint
+
+    source, destination = tmp_path / "pytorch_model.bin", tmp_path / "model.safetensors"
+    torch.save({"weight": torch.ones(2)}, source)
+    save_file = convert_checkpoint.save_file
+
+    def racing_save_file(tensors, path):
+        save_file(tensors, path)
+        destination.write_bytes(b"other conversion")
+
+    monkeypatch.setattr(convert_checkpoint, "save_file", racing_save_file)
+    with pytest.raises(FileExistsError):
+        convert(source, destination)
+    assert destination.read_bytes() == b"other conversion"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["model.safetensors",
+                                                                "pytorch_model.bin"]
+
+
+def test_conversion_publishes_without_temporary_files(tmp_path):
+    source, destination = tmp_path / "pytorch_model.bin", tmp_path / "model.safetensors"
+    torch.save({"weight": torch.arange(3, dtype=torch.float32)}, source)
+    convert(source, destination)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["model.safetensors",
+                                                                "pytorch_model.bin"]
+    from safetensors.numpy import load_file
+
+    np.testing.assert_array_equal(load_file(destination)["weight"], np.arange(3))
+
+
 def test_conversion_rejects_empty_state(tmp_path):
     source = tmp_path / "pytorch_model.bin"
     torch.save({}, source)
     with pytest.raises(ValueError, match="nonempty"):
         convert(source, tmp_path / "model.safetensors")
+
+
+def test_e2e_reference_refuses_a_fixture_at_another_rate(tmp_path, monkeypatch):
+    # The reference does not resample, so an 8 kHz fixture read as 16 kHz audio
+    # would give a wrong reference. It fails before any model is loaded.
+    import wave
+    from types import SimpleNamespace
+
+    from families.wavlm.tests import test_e2e
+
+    clip = tmp_path / "clip.wav"
+    with wave.open(str(clip), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(8000)
+        handle.writeframes(b"\x00\x00" * 800)
+    processor = SimpleNamespace(feature_extractor=SimpleNamespace(sampling_rate=16000))
+    monkeypatch.setattr(transformers.AutoProcessor, "from_pretrained",
+                        lambda *args, **kwargs: processor)
+
+    def load_model(*args, **kwargs):
+        raise AssertionError("the reference model was loaded")
+
+    monkeypatch.setattr(transformers.WavLMForCTC, "from_pretrained", load_model)
+    with pytest.raises(AssertionError, match="fixture is 8000 Hz"):
+        test_e2e._official_reference(tmp_path, {"test_input_audio": str(clip)})
 
 
 def test_e2e_preparation_preserves_cached_checkpoint(tmp_path, monkeypatch):

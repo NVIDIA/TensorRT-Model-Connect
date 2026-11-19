@@ -134,16 +134,81 @@ def test_special_tokens_map_overrides_the_legacy_configuration(tmp_path):
         config_module.resolve(tmp_path, {})
 
 
+_DECODER = {"29": {"content": "<s>", "special": True}, "30": {"content": "</s>", "special": True}}
+
+
 def test_added_tokens_decoder_replaces_the_legacy_files(tmp_path):
     # With added_tokens_decoder the loader reads neither added_tokens.json nor
-    # special_tokens_map.json.
-    tokenizer = {**_TOKENIZER, "added_tokens_decoder": {
-        "29": {"content": "<s>", "special": True}, "30": {"content": "</s>", "special": True}}}
-    _write(tmp_path, added={}, tokenizer=tokenizer)
+    # special_tokens_map.json. Both legacy files here contradict the
+    # configuration (swapped ids, another delimiter), so merging either shows.
+    tokenizer = {**_TOKENIZER, "added_tokens_decoder": _DECODER}
+    _write(tmp_path, added={"<s>": 30, "</s>": 29}, tokenizer=tokenizer)
     (tmp_path / "special_tokens_map.json").write_text(json.dumps({"word_delimiter_token": "a"}))
     cfg = config_module.resolve(tmp_path, {})
     assert cfg["tokens"][29:] == ["<s>", "</s>"]
     assert cfg["word_delimiter_token"] == "|"
+
+
+def test_added_tokens_decoder_does_not_open_the_legacy_files(tmp_path):
+    # A stale, malformed legacy file next to a decoder-layout configuration does
+    # not stop the build: the loader never opens it.
+    _write(tmp_path, tokenizer={**_TOKENIZER, "added_tokens_decoder": _DECODER})
+    (tmp_path / "added_tokens.json").write_text("{not json")
+    (tmp_path / "special_tokens_map.json").write_text("{not json")
+    assert config_module.resolve(tmp_path, {})["tokens"][29:] == ["<s>", "</s>"]
+
+
+def test_the_legacy_layout_still_reports_a_malformed_legacy_file(tmp_path):
+    _write(tmp_path)
+    (tmp_path / "special_tokens_map.json").write_text("{not json")
+    with pytest.raises(json.JSONDecodeError):
+        config_module.resolve(tmp_path, {})
+
+
+def test_resolve_refuses_one_added_token_under_two_ids(tmp_path):
+    # Transformers decodes ids 29 and 30 both as <s>. One id per token would keep
+    # <s> at 30 and leave id 29 to vocab.json's </s>, a different transcript.
+    tokenizer = {**_TOKENIZER, "added_tokens_decoder": {
+        "29": {"content": "<s>"}, "30": {"content": "<s>"}}}
+    vocab = {**_VOCAB, "</s>": 29, "<s>": 30}
+    with pytest.raises(NotImplementedError, match="'<s>' to two ids"):
+        config_module.resolve(_write(tmp_path, vocab=vocab, added={}, tokenizer=tokenizer), {})
+
+
+@pytest.mark.parametrize("key", ["word_delimiter_token", "pad_token"])
+def test_resolve_refuses_an_explicitly_unset_special_token(tmp_path, key):
+    # A null leaves the token unset in Transformers: the delimiter then stays in
+    # the text and the pad token is not dropped, which the runtime does not do.
+    with pytest.raises(NotImplementedError, match=f"needs a {key}"):
+        config_module.resolve(_write(tmp_path, tokenizer={**_TOKENIZER, key: None}), {})
+
+
+def test_resolve_takes_the_default_for_an_absent_word_delimiter(tmp_path):
+    tokenizer = {key: value for key, value in _TOKENIZER.items() if key != "word_delimiter_token"}
+    assert config_module.resolve(_write(tmp_path, tokenizer=tokenizer),
+                                 {})["word_delimiter_token"] == "|"
+
+
+@pytest.mark.parametrize("override, fragment", [
+    ({"sampling_rate": 0}, "positive integer sampling_rate"),
+    ({"sampling_rate": -16000}, "positive integer sampling_rate"),
+    ({"sampling_rate": "16000"}, "positive integer sampling_rate"),
+    ({"sampling_rate": 16000.0}, "positive integer sampling_rate"),
+    ({"sampling_rate": True}, "positive integer sampling_rate"),
+    ({"do_normalize": "false"}, "boolean do_normalize"),
+    ({"do_normalize": 0}, "boolean do_normalize"),
+])
+def test_resolve_refuses_preprocessor_values_it_would_misread(tmp_path, override, fragment):
+    # int() and bool() would take each of these: "false" turns normalisation on,
+    # and a rate of 0 builds a bundle the runtime cannot load.
+    with pytest.raises(NotImplementedError, match=fragment):
+        config_module.resolve(_write(tmp_path, pre={**_PRE, **override}), {})
+
+
+def test_resolve_takes_the_feature_extractor_defaults(tmp_path):
+    pre = {key: value for key, value in _PRE.items() if key not in ("sampling_rate", "do_normalize")}
+    cfg = config_module.resolve(_write(tmp_path, pre=pre), {})
+    assert (cfg["sample_rate"], cfg["do_normalize"]) == (16000, True)
 
 
 def test_resolve_reads_serialised_special_tokens(tmp_path):
@@ -230,8 +295,15 @@ def test_weight_normed_kernel_reproduces_the_reference_formula():
     kernel = g.weight_normed_kernel(weight_g, weight_v)
     assert kernel.shape == weight_v.shape
 
-    # Each kernel tap ends up with the length weight_g states for it. That is
-    # the whole content of the reparameterisation, so it is checked directly.
+    # The kernel element by element, signs included: weight_g * weight_v divided
+    # by the norm of weight_v over the output and input axes. weight_g has
+    # negative taps here, so a kernel built from |weight_g| or with its sign
+    # flipped fails this comparison.
+    assert (weight_g < 0).any() and (weight_g > 0).any()
+    norm = np.sqrt((weight_v.astype(np.float64) ** 2).sum(axis=(0, 1), keepdims=True))
+    np.testing.assert_allclose(kernel, weight_g * weight_v / norm, rtol=1e-6, atol=1e-6)
+
+    # Each kernel tap ends up with the length weight_g states for it.
     lengths = np.sqrt((kernel.astype(np.float64) ** 2).sum(axis=(0, 1)))
     assert np.abs(lengths - np.abs(weight_g).reshape(-1)).max() < 1e-5
 

@@ -79,11 +79,33 @@ def _selected_cases(config) -> tuple[list[str], bool]:
     return (sorted(selected), True)
 
 
+MODEL_DIR_OVERRIDE = f"TRTMC_{FAMILY.upper()}_MODEL_DIR"
+
+
+def _require_one_checkpoint(names: list[str]) -> None:
+    """The model-directory override names one checkpoint; refuse it for a selection of several.
+
+    Otherwise every selected case would build and run the override's checkpoint,
+    and a case for another checkpoint would pass without testing it.
+    """
+    if not os.environ.get(MODEL_DIR_OVERRIDE):
+        return
+    checkpoints = sorted({(CASES[name][1]["hf_id"], CASES[name][1].get("hf_revision") or "")
+                          for name in names})
+    if len(checkpoints) > 1:
+        raise pytest.UsageError(
+            f"{MODEL_DIR_OVERRIDE} stands for one checkpoint, but the selected cases use "
+            f"{len(checkpoints)}: " + ", ".join(f"{hf_id}@{revision}" for hf_id, revision in checkpoints)
+            + "; select the cases of one checkpoint")
+
+
 def pytest_generate_tests(metafunc) -> None:
     if "case_name" in metafunc.fixturenames:
         names, enabled = _selected_cases(metafunc.config)
         parameters = names
-        if not enabled:
+        if enabled:
+            _require_one_checkpoint(names)
+        else:
             parameters = [
                 pytest.param(
                     name,
@@ -104,9 +126,10 @@ def _required_path(value: str | None, label: str) -> Path:
 
 
 def _model_dir(manifest: dict) -> Path:
-    explicit = os.environ.get(f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+    # pytest_generate_tests refuses the override for a selection of several checkpoints.
+    explicit = os.environ.get(MODEL_DIR_OVERRIDE)
     if explicit:
-        return _required_path(explicit, f"TRTMC_{FAMILY.upper()}_MODEL_DIR")
+        return _required_path(explicit, MODEL_DIR_OVERRIDE)
     from huggingface_hub import snapshot_download
 
     try:
@@ -241,15 +264,20 @@ def _official_reference(model_dir: Path, case: dict) -> tuple[str, list[int]]:
 
     with wave.open(str(_asset(case["test_input_audio"]))) as handle:
         assert handle.getsampwidth() == 2, "the reference path expects 16-bit PCM"
+        rate = handle.getframerate()
         channels = handle.getnchannels()
         raw = np.frombuffer(handle.readframes(handle.getnframes()), dtype="<i2")
     waveform = raw.astype(np.float32).reshape(-1, channels).mean(axis=1) / 32768.0
 
     processor = AutoProcessor.from_pretrained(str(model_dir))
+    # The fixture must already be at the checkpoint's rate: the reference does
+    # not resample, and the runtime refuses any other rate.
+    assert rate == processor.feature_extractor.sampling_rate, (
+        f"the fixture is {rate} Hz, the checkpoint expects "
+        f"{processor.feature_extractor.sampling_rate} Hz"
+    )
     model = WavLMForCTC.from_pretrained(str(model_dir)).eval()
-    values = processor(
-        waveform, sampling_rate=processor.feature_extractor.sampling_rate, return_tensors="pt"
-    ).input_values
+    values = processor(waveform, sampling_rate=rate, return_tensors="pt").input_values
     with torch.no_grad():
         logits = model(values).logits[0]
 
@@ -259,10 +287,18 @@ def _official_reference(model_dir: Path, case: dict) -> tuple[str, list[int]]:
     previous = None
     for token_id in predicted:
         if token_id != previous and token_id != blank:
-            collapsed.append(int(token_id))
+            collapsed.append(token_id)
         previous = token_id
     text = processor.decode(predicted)
-    return (text, collapsed)
+    return (text, _token_ids(collapsed, "reference"))
+
+
+def _token_ids(value, side: str) -> list[int]:
+    """CTC ids as JSON integers. Anything else fails here instead of being coerced."""
+    assert isinstance(value, list) and all(type(item) is int for item in value), (
+        f"{side} token_ids must be a list of integers, not {str(value)[:200]}"
+    )
+    return value
 
 
 def _thresholds(case_name: str) -> dict:
@@ -290,7 +326,8 @@ def _assert_parity(native: dict, reference_text: str, reference_ids: list[int],
     text = str(native["text"])
     expected = reference_text
     assert expected.strip(), "the reference produced an empty transcript, so the gate proves nothing"
-    token_ids = [int(value) for value in native["token_ids"]]
+    token_ids = _token_ids(native["token_ids"], "native")
+    reference_ids = _token_ids(reference_ids, "reference")
 
     bound = thresholds.get("max_character_error_rate")
     if bound is not None:
@@ -330,7 +367,8 @@ def _record_reference_comparison(
         return
     try:
         text = str(native["text"])
-        token_ids = [int(value) for value in native["token_ids"]]
+        token_ids = _token_ids(native["token_ids"], "native")
+        reference_ids = _token_ids(reference_ids, "reference")
         native_path = tmp_path / "transcription-native.json"
         reference_path = tmp_path / "transcription-reference.json"
         native_path.write_text(
@@ -352,7 +390,10 @@ def _record_reference_comparison(
             }
         ]
         bound = thresholds.get("max_character_error_rate")
-        if bound is not None:
+        if not reference_text.strip():
+            # The gate stops at a blank reference, so nothing after it is measured.
+            pass
+        elif bound is not None:
             rate = _character_edits(reference_text, text) / len(reference_text)
             checks.append(
                 {

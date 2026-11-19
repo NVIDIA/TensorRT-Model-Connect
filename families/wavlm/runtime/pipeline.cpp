@@ -55,18 +55,22 @@ TextResult WavLMPipeline::run(const internal::SpeechTranscriptionRequest& reques
                                     " Hz audio, not " + std::to_string(rate) + " Hz");
     }
 
-    const auto channels = static_cast<std::int32_t>(audio.channels == 0 ? 1U : audio.channels);
-    auto samples = wavlm::mix_mono(audio.samples.data(),
-                                   static_cast<std::int64_t>(audio.samples.size()), channels);
+    const auto channels = static_cast<std::int64_t>(audio.channels == 0 ? 1U : audio.channels);
+    const auto values = static_cast<std::int64_t>(audio.samples.size());
+    if (values % channels != 0)
+        throw std::invalid_argument("wavlm input is not a whole number of audio frames");
 
-    const auto count = static_cast<std::int64_t>(samples.size());
+    // The engine's profile is built for a range of samples per channel. A clip
+    // outside it is refused from its length alone, before any of it is mixed
+    // or copied, rather than failing inside TensorRT.
+    const std::int64_t count = values / channels;
     if (count < config_.min_samples || count > config_.max_samples) {
-        // The engine's profile is built for a sample range; a clip outside it
-        // is refused by name rather than failing inside TensorRT.
         throw std::invalid_argument("wavlm accepts " + std::to_string(config_.min_samples) +
                                     " to " + std::to_string(config_.max_samples) +
-                                    " samples, not " + std::to_string(count));
+                                    " samples per channel, not " + std::to_string(count));
     }
+    auto samples =
+        wavlm::mix_mono(audio.samples.data(), values, static_cast<std::int32_t>(channels));
 
     if (config_.do_normalize)
         wavlm::normalize_waveform(samples);

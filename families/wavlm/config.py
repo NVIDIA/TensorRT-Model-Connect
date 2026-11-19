@@ -44,10 +44,17 @@ def _require(condition: bool, message: str) -> None:
         raise NotImplementedError(f"wavlm {message}")
 
 
-def _token_text(value, default: str) -> str:
-    """A tokenizer_config token is a string or a serialised AddedToken."""
-    if value is None:
+def _special_token(settings: dict, key: str, default: str) -> str:
+    """One special token as the tokenizer resolves it.
+
+    An absent key takes the tokenizer's default. An explicit null leaves the
+    token unset in Transformers, which decodes differently from the runtime,
+    so it is refused. A value is a string or a serialised AddedToken.
+    """
+    if key not in settings:
         return default
+    value = settings[key]
+    _require(value is not None, f"needs a {key}; the tokenizer configuration sets it to null")
     if isinstance(value, dict):
         value = value.get("content")
     _require(isinstance(value, str) and value != "",
@@ -162,7 +169,11 @@ def _added_tokens(tokenizer: dict, added_file: dict) -> dict:
         content = token.get("content") if isinstance(token, dict) else token
         _require(isinstance(content, str) and content != "",
                  "needs string added tokens in tokenizer_config.json")
-        added[content] = int(index)
+        index = int(index)
+        # Transformers decodes every id from this table, so one content under
+        # two ids cannot be inverted into a single id per token.
+        _require(added.get(content, index) == index, f"tokenizer maps {content!r} to two ids")
+        added[content] = index
     return added
 
 
@@ -191,14 +202,22 @@ def resolve(model_dir: Path, shapes: dict) -> dict:
     pre = _read_json(model_dir / "preprocessor_config.json", "preprocessor_config.json")
     vocab = _read_json(model_dir / "vocab.json", "vocab.json")
     tokenizer = _read_optional_json(model_dir / "tokenizer_config.json")
-    added = _added_tokens(tokenizer, _read_optional_json(model_dir / "added_tokens.json"))
-    settings = _tokenizer_settings(tokenizer,
-                                   _read_optional_json(model_dir / "special_tokens_map.json"))
+    # With added_tokens_decoder the loader opens neither legacy file, so a stale
+    # or malformed copy next to the configuration does not stop the build.
+    legacy = "added_tokens_decoder" not in tokenizer
+    added = _added_tokens(
+        tokenizer, _read_optional_json(model_dir / "added_tokens.json") if legacy else {})
+    settings = _tokenizer_settings(
+        tokenizer, _read_optional_json(model_dir / "special_tokens_map.json") if legacy else {})
 
     _require(int(pre.get("feature_size", 1)) == 1, "reads single-channel audio")
     _require(float(pre.get("padding_value", 0.0)) == 0.0, "needs a zero padding value")
     _require(pre.get("padding_side", "right") == "right", "needs right padding")
-    sample_rate = int(pre.get("sampling_rate", 16000))
+    sample_rate = pre.get("sampling_rate", 16000)
+    _require(type(sample_rate) is int and sample_rate > 0,
+             f"needs a positive integer sampling_rate, not {sample_rate!r}")
+    do_normalize = pre.get("do_normalize", True)
+    _require(isinstance(do_normalize, bool), f"needs a boolean do_normalize, not {do_normalize!r}")
 
     tokenizer_class = tokenizer.get("tokenizer_class") or cfg.get("tokenizer_class") or _TOKENIZER
     _require(tokenizer_class == _TOKENIZER,
@@ -219,19 +238,19 @@ def resolve(model_dir: Path, shapes: dict) -> dict:
 
     # The tokenizer's pad token is the CTC blank its decoder drops; the head was
     # trained with config.pad_token_id as that blank, so the two must agree.
-    pad = _token_text(settings.get("pad_token"), "<pad>")
+    pad = _special_token(settings, "pad_token", "<pad>")
     blank = ids.get(pad)
     _require(blank is not None, f"needs its pad token {pad!r} in the vocabulary as the CTC blank")
     pad_token_id = cfg.get("pad_token_id")
     _require(pad_token_id is None or int(pad_token_id) == blank,
              f"pad token {pad!r} is id {blank} but config.pad_token_id is {pad_token_id}")
-    delimiter = _token_text(settings.get("word_delimiter_token"), "|")
+    delimiter = _special_token(settings, "word_delimiter_token", "|")
     _require(delimiter in ids, f"needs its word delimiter {delimiter!r} in the vocabulary")
 
     resolved = {
         **geometry,
         "sample_rate": sample_rate,
-        "do_normalize": bool(pre.get("do_normalize", True)),
+        "do_normalize": do_normalize,
         "tokens": tokens,
         "blank_token_id": int(blank),
         "word_delimiter_token": delimiter,

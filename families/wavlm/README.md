@@ -39,14 +39,18 @@ other than the exact one, an odd positional kernel, a vocabulary whose ids do
 not cover the head, a tokenizer other than `Wav2Vec2CTCTokenizer` (the phoneme
 tokenizer joins tokens with spaces), a tokenizer that lowercases or whose space
 clean-up would change the text (`clean_up_tokenization_spaces` with `.`, `?`,
-`!`, `,` or `'` in the vocabulary), and a pad token that disagrees with
-`config.pad_token_id`. It reads the configuration before any weight, so a
+`!`, `,` or `'` in the vocabulary), a pad token that disagrees with
+`config.pad_token_id`, a pad or word-delimiter token set to `null` (Transformers
+then leaves it unset and decodes differently), one added token under two ids, a
+`do_normalize` that is not a JSON boolean and a `sampling_rate` that is not a
+positive integer. It reads the configuration before any weight, so a
 checkpoint without a CTC head, such as the pretrained `microsoft/wavlm-large`,
 resolves to this family through its `model_type` and is refused because it has
 no transcription to build. Special and added tokens are read as Transformers'
 tokenizer loader reads them: in the legacy layout `special_tokens_map.json`
 overrides `tokenizer_config.json` and added tokens come from `added_tokens.json`;
-a `tokenizer_config.json` with `added_tokens_decoder` replaces both files.
+a `tokenizer_config.json` with `added_tokens_decoder` replaces both files, which
+are then not read at all.
 
 ## Checkpoints
 
@@ -71,8 +75,10 @@ python -m families.wavlm.convert_checkpoint MODEL_DIR/pytorch_model.bin MODEL_DI
 ```
 
 Conversion requires PyTorch 2.10.0 or newer, uses `weights_only=True`,
-validates a nonempty tensor dictionary, refuses to overwrite its destination and
-preserves tensor names and dtypes. The direct E2E performs this preparation in a
+validates a nonempty tensor dictionary and preserves tensor names and dtypes. It
+never replaces its destination: it writes a temporary file next to it and
+publishes it with a hard link, which fails if the destination appeared
+meanwhile. The direct E2E performs this preparation in a
 temporary directory without modifying the cached checkpoint.
 
 ## Precision
@@ -132,9 +138,11 @@ fp16 graph gave relative errors of 5.4 % and 7.8 %.
 
 ## Scope
 
-Input is true-length mono PCM at the checkpoint's sample rate, one clip per
-call, 4,000 to 480,000 samples (30 s at 16 kHz) by default; `max_sequence_length`
-sets a different upper bound in samples. No resampling, batching or padded
+Input is true-length PCM at the checkpoint's sample rate (channels are averaged
+to mono), one clip per call, 4,000 to 480,000 samples per channel (30 s at
+16 kHz) by default; `max_sequence_length` sets a different upper bound in
+samples. A clip outside the range is refused from its length, before any of it
+is mixed or copied. No resampling, batching or padded
 attention mask is implemented. The `WavLMForSequenceClassification`,
 `WavLMForXVector` and `WavLMForAudioFrameClassification` heads and the bare
 encoder's hidden states are not built.
@@ -157,12 +165,17 @@ encoder's hidden states are not built.
   Transformers models on CPU (feature encoder, bias table, encoder with gate and
   bias, with controls for a gate on the wrong rows, an ungated bias and a
   transposed offset), the blank and delimiter against Transformers' tokenizer
-  loader for both tokenizer layouts, the checkpoint conversion, and, on a GPU,
-  real fp32 and
-  fp16 engines of both layouts against the same models.
+  loader for both tokenizer layouts, the checkpoint conversion (including a
+  destination that appears while converting), the E2E reference's sample-rate
+  check, and, on a GPU, real fp32 and fp16 engines of both layouts against the
+  same models.
 - `tests/cpp/`: the CTC decoder with a blank that is not id 0 and with
   delimiters at the edges, waveform normalisation and the pipeline's refusals,
-  with a fake engine.
+  with a fake engine (an oversized clip is refused from its length, unread).
+- `tests/test_e2e_contract.py`: the E2E's own rules on CPU. The
+  `TRTMC_WAVLM_MODEL_DIR` override stands for one checkpoint and is refused for
+  a selection that spans both; CTC ids must be JSON integers; and the recorded
+  evidence follows the parity gate, a blank reference included.
 - `tests/test_e2e.py`: builds each manifest's bundle, runs the native
   `transcribe` command on a 23.3 s LibriSpeech test-clean utterance (6930-75918-0003,
   CC BY 4.0; 1,165 frames, beyond the 800-frame bucket range) and requires the

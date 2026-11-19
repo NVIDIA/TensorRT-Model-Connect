@@ -117,5 +117,42 @@ int test_pipeline_contract() {
         std::cerr << "FAIL: an unusable clip reached the engine\n";
         return 1;
     }
+
+    // The profile bounds samples per channel: four stereo frames fit a
+    // four-sample profile.
+    const float stereo[]{0, 0, 1, 1, 0, 0, -1, -1};
+    internal::SpeechTranscriptionRequest two_channels;
+    two_channels.audio.samples = {stereo, 8};
+    two_channels.audio.channels = 2;
+    try {
+        if (pipeline.run(two_channels, {}).text != "a b") {
+            std::cerr << "FAIL: stereo transcript\n";
+            return 1;
+        }
+    } catch (const std::exception& error) {
+        std::cerr << "FAIL: four stereo frames were refused: " << error.what() << '\n';
+        return 1;
+    }
+
+    // A clip far beyond the profile is refused from its length alone. Its
+    // samples are never read: mixing it first would fail on the allocation
+    // (std::length_error), not with the profile refusal.
+    const int checked = *calls;
+    internal::SpeechTranscriptionRequest oversized;
+    oversized.audio.samples = {samples, std::size_t{1} << 62};
+    try {
+        static_cast<void>(pipeline.run(oversized, {}));
+        std::cerr << "FAIL: an oversized clip was accepted\n";
+        return 1;
+    } catch (const std::invalid_argument&) {
+    } catch (const std::exception& error) {
+        std::cerr << "FAIL: an oversized clip was processed before the profile check: "
+                  << error.what() << '\n';
+        return 1;
+    }
+    if (*calls != checked) {
+        std::cerr << "FAIL: an oversized clip reached the engine\n";
+        return 1;
+    }
     return 0;
 }
