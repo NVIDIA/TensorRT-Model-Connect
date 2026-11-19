@@ -1,7 +1,7 @@
 # MiniCPM5-1B checkpoint coverage
 
 This adds a pinned E2E selection for `openbmb/MiniCPM5-1B` through the existing
-Llama family. It does not add a new architecture or claim GPU qualification.
+Llama family. It does not add a new architecture. GPU evidence below covers the three declared cases.
 
 The configuration fixture is copied from the Apache-2.0 publisher checkpoint:
 https://huggingface.co/openbmb/MiniCPM5-1B/blob/87179e5c1f455ef22e6223592d2d61351b525bfc/config.json
@@ -14,14 +14,13 @@ and reference comparison with thinking disabled, FP16 candidate, FP32 reference,
 a 256-token build limit and ten generated tokens. These limits are a small
 parity experiment, not a long-context or performance claim.
 
-Validation remaining: build the pinned checkpoint on authorized GPU hardware
-and run `families/llama/tests/test_e2e.py` with `--e2e-model minicpm5-1b`, using
-the normal family E2E runtime environment. No large weights were downloaded locally.
+The checkpoint was built and run on an authorized H200 with the normal family
+E2E runtime environment. The exact selection and qualification limits are below.
 
 The Llama tokenizer's Sequence/Split classification fix was merged upstream
 as `11ed7177`. This branch includes current main while preserving the original
-dependency history. This checkpoint coverage still requires target-GPU parity
-before runtime qualification.
+dependency history. The recorded target-GPU parity covers the declared checkpoint
+revision, precision and short prompts only.
 
 ## Tokenizer-sensitive premerge coverage
 
@@ -76,7 +75,8 @@ The third premerge case uses an empty raw prompt, requires the reference's
 single BOS token and a one-token native prefill receipt, then retains the same
 FP16/FP32 generated-output comparison. No parity threshold is changed. A CPU
 comparison against the pinned Tokenizers assets covers 28 inputs with and without
-special tokens; target-GPU generation for all three cases remains unrun.
+special tokens. The H200 run below also checks generation for all three cases.
+
 ## Single-token prefill mask contract
 
 A run of the three cases on one NVIDIA H200 at `fb2d3312` passed chat and
@@ -90,5 +90,40 @@ The runtime now accepts a dynamic mask whose current profile minimum is
 remain in place. The native KV regression reproduces the error with concrete
 OPT buffer dimensions, checks both BOS-only and one-token-tail masks, and
 rejects four malformed minimum profiles. It failed before the correction and
-passed on H200 afterward. The full checkpoint cases must also be rerun before
-claiming generation parity for this revision.
+passed on H200 afterward. All three full checkpoint cases were then rerun at
+`3e149b2bb4e5c1ee3e6b324591a65dfecf7ebd83`.
+
+## Recorded H200 validation
+
+On 2026-11-19, the following unchanged family selection passed at `3e149b2b`:
+
+```bash
+python -m pytest families/llama/tests/test_e2e.py \
+  --e2e-testcase minicpm5-1b,minicpm5-1b-multilingual-digits,minicpm5-1b-empty \
+  -vv -s -p no:cacheprovider --tb=short
+```
+
+| Case | Native prefill tokens | Generated token IDs versus FP32 reference |
+| --- | ---: | --- |
+| Chat | 25 | 2/2 identical, including EOS; text `Paris` |
+| Multilingual/digits | 16 | 10/10 identical |
+| Empty raw text | 1 | 10/10 identical |
+
+Result: 3 passed, 11 unselected cases skipped. Candidate FP16, reference FP32,
+TP1, 256-token bundle capacity, at most ten generated tokens; checkpoint and
+tokenizer revision `87179e5c1f455ef22e6223592d2d61351b525bfc`. Comparison
+thresholds were unchanged. The receipt proves native input token counts,
+not native input token-ID equality.
+
+Environment: one NVIDIA H200, x86_64 Ubuntu 24.04, driver 595.71.05,
+CUDA 13.4.3 development image, TensorRT 11.4.0.106, PyTorch 2.12.0+cu130,
+Transformers 5.2.0 and Tokenizers 0.22.2. The repository Dockerfile was used
+with x86_64 TensorRT include paths and Hopper architecture settings. Production
+CLI, TensorRT backend and Llama DSO compiled; four native CTests passed,
+including the new KV regression. The focused Python group passed 17 tests;
+source-quality passed all 312 tool tests at the same source head.
+
+This does not qualify other checkpoints, precisions, tensor-parallel sizes,
+long contexts, sampling, concurrency or performance. Rebuild the Llama DSO;
+no engine format change is required. The documentation-only evidence commit
+leaves the tested runtime and test source blobs unchanged.
