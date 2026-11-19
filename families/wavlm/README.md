@@ -176,7 +176,10 @@ encoder's hidden states are not built.
 - `tests/test_e2e_contract.py`: the E2E's own rules on CPU. The
   `TRTMC_WAVLM_MODEL_DIR` override stands for one checkpoint and is refused for
   a selection that spans both; CTC ids must be JSON integers; and the recorded
-  evidence follows the parity gate, a blank reference included.
+  evidence follows the parity gate, a blank reference included. For human
+  review the evidence report plays the input clip, captioned with the text the
+  speaker read (LibriSpeech's transcript), next to the native and reference
+  transcripts.
 - `tests/test_e2e.py`: builds each manifest's bundle, runs the native
   `transcribe` command on a 23.3 s LibriSpeech test-clean utterance (6930-75918-0003,
   CC BY 4.0; 1,165 frames, beyond the 800-frame bucket range) and requires the

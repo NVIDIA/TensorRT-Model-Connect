@@ -115,3 +115,13 @@ def test_the_recorded_checks_follow_the_parity_gate(tmp_path):
     rate = bounded["reference_comparison"]["checks"][1]
     assert (rate["name"], rate["actual"], rate["expected"], rate["passed"]) == (
         "character_error_rate", 1 / 3, 0.5, True)
+
+
+def test_the_report_shows_the_input_with_the_text_its_speaker_read(tmp_path):
+    view = e2e._input_view(e2e.TEST_ROOT / _CASE["test_input_audio"])
+    assert view["title"] == "Input audio" and view["audio"].is_file()
+    assert view["caption"].startswith("Read text (dataset transcript): FROM THE RESPECT PAID HER")
+    # A clip without a stored transcript is shown without a caption.
+    clip = tmp_path / "clip.wav"
+    clip.write_bytes(b"")
+    assert "caption" not in e2e._input_view(clip)

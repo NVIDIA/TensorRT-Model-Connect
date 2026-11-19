@@ -443,13 +443,26 @@ def _record_reference_comparison(
         record_evidence("comparison_preview", {"error": f"{type(error).__name__}: {error}"})
 
 
+def _input_view(audio: Path) -> dict:
+    """The input clip for a human reviewer, captioned with the text its speaker read.
+
+    The transcript stored next to the clip is the dataset's own (LibriSpeech's
+    for the shipped fixture). It is shown for review only and takes no part in
+    the parity gate, which compares the runtime with the Transformers reference.
+    """
+    view = {"title": "Input audio", "audio": audio}
+    transcript = audio.with_suffix(".txt")
+    if transcript.is_file():
+        view["caption"] = ("Read text (dataset transcript): "
+                           + transcript.read_text(encoding="utf-8").strip())
+    return view
+
+
 def test_e2e(tmp_path: Path, case_name: str) -> None:
     manifest_path, manifest, case = CASES[case_name]
     assert manifest_path.is_file()
-    record_evidence(
-        "inputs",
-        {"manifest": manifest, "case": case, "audio": TEST_ROOT / str(case["test_input_audio"])},
-    )
+    record_evidence("inputs", {"manifest": manifest, "case": case})
+    record_evidence("views", [_input_view(TEST_ROOT / str(case["test_input_audio"]))])
     binary, runtime_root = _runtime()
     model_dir = _model_dir(manifest)
     record_evidence(
