@@ -11,6 +11,7 @@
 #include "families/whisper/runtime/whisper_cross_kv_apply.h"
 #include "families/whisper/runtime/whisper_cross_kv_plan.h"
 #include "families/whisper/runtime/whisper_decode_policy.h"
+#include "families/whisper/runtime/whisper_decode_step.h"
 #include "families/whisper/runtime/whisper_host_plan.h"
 #include "families/whisper/runtime/whisper_mel_spectrogram.h"
 #include "plugin_helpers.h"
@@ -90,6 +91,19 @@ WhisperPipeline::WhisperPipeline(
                       std::move(model_id_str)) {}
 
 WhisperPipeline::~WhisperPipeline() = default;
+
+void WhisperPipeline::queue_decode_step_copies() {
+    // Until the buffer is held again the steps wait for the engine first.
+    step_logits_count_ = 0;
+    const std::string refusal = whisper_queued_step_refusal(*decoder_, *state_, DType::kFloat32);
+    if (!refusal.empty())
+        throw std::runtime_error("WhisperPipeline: decode steps cannot queue their copies: " +
+                                 refusal);
+    const std::size_t count = whisper_logits_count(*decoder_);
+    if (step_logits_.allocate(count * sizeof(float)) != cudaSuccess)
+        throw std::runtime_error("WhisperPipeline: unable to allocate the logits buffer");
+    step_logits_count_ = count;
+}
 
 TextResult WhisperPipeline::transcribe(const float* audio_data, int32_t num_samples,
                                        const TranscriptionConfig& config) {
@@ -261,13 +275,29 @@ std::vector<int32_t> WhisperPipeline::run_decoder(const std::vector<int32_t>& in
 
     const int32_t eot_id = whisper_config_.eot_token_id;
 
-    auto result = run_whisper_decode_loop(
-        initial_tokens, max_new_tokens, eot_id,
-        [this](int32_t token, std::vector<float>& logits, std::string&) {
-            run_decoder_step(token, logits);
-            return true;
-        },
-        [](const std::vector<float>& logits) { return whisper_select_argmax_token(logits); });
+    WhisperDecodeLoopResult result;
+    if (step_logits_count_ != 0) {
+        // Each step leaves its logits in the page-locked buffer; the selection
+        // reads them there.
+        result = run_whisper_decode_loop_over<WhisperLogitsView>(
+            initial_tokens, max_new_tokens, eot_id,
+            [this](int32_t token, WhisperLogitsView& logits, std::string&) {
+                run_queued_decoder_step(token);
+                logits = {static_cast<const float*>(step_logits_.get()), step_logits_count_};
+                return true;
+            },
+            [](const WhisperLogitsView& logits) {
+                return whisper_select_argmax_token(logits.data, logits.size);
+            });
+    } else {
+        result = run_whisper_decode_loop(
+            initial_tokens, max_new_tokens, eot_id,
+            [this](int32_t token, std::vector<float>& logits, std::string&) {
+                run_decoder_step(token, logits);
+                return true;
+            },
+            [](const std::vector<float>& logits) { return whisper_select_argmax_token(logits); });
+    }
 
     if (result.prefill_failed) {
         std::cerr << "[whisper] Prefill step failed: " << result.error << std::endl;
@@ -301,6 +331,29 @@ void WhisperPipeline::run_decoder_step(int32_t token_id, std::vector<float>& log
     std::memcpy(logits.data(), logits_tensor.data, num_logits * sizeof(float));
 
     state_->advance();
+}
+
+void WhisperPipeline::run_queued_decoder_step(int32_t token_id) {
+    Tensor token_tensor;
+    token_tensor.data = &token_id;
+    token_tensor.shape = {1};
+    token_tensor.dtype = DType::kInt32;
+
+    TensorMap inputs;
+    inputs["token_id"] = token_tensor;
+    state_->prepare_step(inputs);
+
+    // The logits download and the state's cache-row copies go on the decoder's
+    // stream behind the engine; one wait covers the engine and the copies.
+    const bool queued = run_whisper_queued_decode_step(
+        *decoder_, *state_, inputs, [this](const void* device_logits) {
+            return device_logits != nullptr &&
+                   cudaMemcpyAsync(step_logits_.get(), device_logits,
+                                   step_logits_count_ * sizeof(float), cudaMemcpyDeviceToHost,
+                                   decoder_->stream()) == cudaSuccess;
+        });
+    if (!queued)
+        throw std::runtime_error("WhisperPipeline: unable to queue the logits download");
 }
 
 } // namespace trtmc

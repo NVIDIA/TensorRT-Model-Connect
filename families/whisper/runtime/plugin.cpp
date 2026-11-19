@@ -7,9 +7,12 @@
 #include "families/whisper/runtime/pipeline.h"
 #include "families/whisper/runtime/plugin_helpers.h"
 #include "families/whisper/runtime/whisper_cross_kv_plan.h"
+#include "families/whisper/runtime/whisper_decode_step.h"
 #include "trtmc/runtime/family_factory.h"
 #include "trtmc/runtime/trt_backend.h"
 
+#include <iostream>
+#include <memory>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
@@ -92,7 +95,7 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     if (!tokenizer)
         throw std::runtime_error("Whisper bundle does not contain its required tokenizer");
 
-    return new WhisperPipeline(
+    auto pipeline = std::make_unique<WhisperPipeline>(
         std::move(encoder.module), std::move(decoder.module), std::move(state), std::move(model),
         hidden_size, config.at("decoder_layers").get<std::int32_t>(), std::move(mel),
         config.at("mel_n_fft").get<std::int32_t>(), config.at("mel_hop_length").get<std::int32_t>(),
@@ -101,4 +104,7 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         config.at("mel_win_length").get<std::int32_t>(), config.at("mel_preemph").get<float>(),
         config.at("mel_normalize_per_feature").get<bool>(),
         config.at("mel_frontend").get<std::string>(), decoder_options.stream, std::move(tokenizer));
+    std::cerr << whisper_choose_decode_step(*pipeline, tp_size, context.backend.name())
+              << std::endl;
+    return pipeline.release();
 }

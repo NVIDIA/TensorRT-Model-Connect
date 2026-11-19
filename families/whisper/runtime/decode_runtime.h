@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -13,6 +14,8 @@ namespace trtmc {
 
 constexpr float WhisperMaskedScore = -1.0e4F;
 
+// The index of the first largest logit (std::max_element's choice); 0 for none.
+int32_t whisper_select_argmax_token(const float* logits, std::size_t count);
 int32_t whisper_select_argmax_token(const std::vector<float>& logits);
 
 /// Sample a token using temperature scaling and top-k filtering.

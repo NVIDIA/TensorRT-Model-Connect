@@ -28,6 +28,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cuda_runtime_api.h>
 
 namespace trtmc {
 
@@ -59,6 +60,14 @@ class WhisperInferenceState {
     // n_tokens: number of tokens processed in this step (default 1).
     //           >1 for batched prefill / multi-token steps.
     virtual void advance(int32_t n_tokens = 1) = 0;
+
+    // Whether advance() does nothing on the device but queue work on `stream`.
+    // A caller may then issue it behind an engine it enqueued on that stream
+    // and wait once for both, instead of waiting for the engine first.
+    virtual bool advance_queues_on(cudaStream_t stream) const {
+        (void)stream;
+        return false;
+    }
 
     // Provide the total prompt length before prefill starts.
     // Cache policies that distinguish prompt and decode tokens can use this
