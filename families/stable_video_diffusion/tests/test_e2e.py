@@ -22,6 +22,7 @@ import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "stable_video_diffusion"
 TASKS = frozenset({"initial_image_text_to_video"})
@@ -31,6 +32,7 @@ MANIFEST_ROOT = TEST_ROOT / "manifests"
 CONFIG_OVERRIDES = ("min_guidance_scale", "max_guidance_scale", "fps", "motion_bucket_id",
                     "noise_aug_strength")
 DEFAULT_FPS = 7
+SDK_LANGUAGES = {"c": "C", "cpp": "C++"}
 
 
 def _case_index() -> dict[str, tuple[Path, dict, dict]]:
@@ -193,7 +195,7 @@ def _sdk_frames(native_build: Path, runtime_root: Path, bundle: Path, pixels: np
     np.ascontiguousarray(pixels).tofile(raw)
     height, width = pixels.shape[:2]
     frames = {}
-    for language in ("c", "cpp"):
+    for language in SDK_LANGUAGES:
         consumer = native_build / f"test_{FAMILY}_sdk_{language}"
         assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
         output = tmp_path / f"sdk-{language}.f32"
@@ -262,6 +264,53 @@ def _frame_psnrs(native: np.ndarray, reference: np.ndarray) -> list[float]:
     return [_psnr(left, right) for left, right in zip(native, reference)]
 
 
+def _check_row(name: str, label: str, scope: str, actual: float, operator: str,
+               expected: float) -> dict:
+    """One evidence-report row: the measured value, its limit and the verdict."""
+    actual, expected = float(actual), float(expected)
+    passed = actual >= expected if operator == ">=" else actual <= expected
+    return {"name": name, "label": label, "scope": scope, "actual": actual,
+            "operator": operator, "expected": expected, "passed": passed}
+
+
+def _animation(frames: np.ndarray, fps: int, path: Path) -> Path | None:
+    """The frames as a looping GIF for the evidence report (written only when recording)."""
+    if not evidence_enabled():
+        return None
+    from PIL import Image
+
+    try:
+        first, *rest = (Image.fromarray(frame) for frame in frames)
+        first.save(path, save_all=True, append_images=rest, duration=round(1000 / fps), loop=0)
+    except (OSError, ValueError) as error:
+        record_evidence("attachment_error", {"attachment": path.name, "error": str(error)})
+        return None
+    return path
+
+
+def _record_reference(references: dict[str, np.ndarray], fps: int, tmp_path: Path,
+                      native_video: Path | None, precision: str, checks: list[dict]) -> None:
+    """The official clips next to the native one, and every check of the case with its limit."""
+    if not evidence_enabled():
+        return
+    videos = {name: _animation(frames, fps, tmp_path / f"official-{name}.gif")
+              for name, frames in references.items()}
+    record_evidence("reference", {
+        "source": "official diffusers StableVideoDiffusionPipeline, TF32 off, same seed and "
+                  "initial latents as the native run",
+        "precisions": sorted(references)})
+    views = [{"title": "Sample 0 / reference", "video": videos["fp32"],
+              "caption": "Official pipeline, FP32"}]
+    if "fp16" in videos:
+        views.append({"title": "Official FP16 pipeline", "video": videos["fp16"],
+                      "caption": "The precision reference of the FP16 shortfall check"})
+    record_evidence("views", views)
+    record_evidence("reference_comparison", {
+        "label": f"Native {precision.upper()} frames vs the official FP32 pipeline",
+        "scope": "independent_reference", "enforced": True,
+        "native": native_video, "reference": videos["fp32"], "checks": checks})
+
+
 def test_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     assert manifest["trust_remote_code"] is False
@@ -272,11 +321,25 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
     image, pixels = _initial_image(manifest, case, tmp_path)
     frames = int(manifest["video_num_frames"])
     shape = (frames, int(manifest["image_height"]), int(manifest["image_width"]), 3)
-
-    _build(model_dir, bundle, manifest)
-    native, payload = _native(binary, runtime_root, bundle, image, case, tmp_path / "native")
     fps = int(case.get("fps", DEFAULT_FPS))
+    precision = str(manifest["precision"])
+    record_evidence("inputs", {
+        "manifest": manifest, "case": case, "image": image, "prompt": "",
+        "seed": int(case["seed"]), "num_steps": int(case["num_steps"]), "num_frames": frames,
+        "fps": fps, "height": shape[1], "width": shape[2]})
+    record_evidence("thresholds", thresholds)
+
+    with evidence_stage("build"):
+        _build(model_dir, bundle, manifest)
+    with evidence_stage("native"):
+        native, payload = _native(binary, runtime_root, bundle, image, case, tmp_path / "native")
     print(f"{FAMILY} {case_name}: native generation {payload['inference_ms']:.0f} ms")
+    native_video = _animation(native, fps, tmp_path / f"native-{precision}.gif")
+    record_evidence("native", {"shape": list(native.shape), "inference_ms": payload["inference_ms"],
+                               "timestamps_seconds": payload["timestamps_seconds"]})
+    record_evidence("views", [{"title": "Sample 0 / native", "video": native_video,
+                               "caption": f"Native {precision.upper()} bundle, {frames} frames "
+                                          f"at {fps} fps"}])
     assert native.shape == shape
     assert payload["conditioned_prefix_frames"] == 0, "every frame is generated"
     assert payload["timestamps_seconds"] == pytest.approx([index / fps for index in range(frames)])
@@ -284,16 +347,22 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
     # The public C and C++ SDKs run the same Task on the same pixels. The consumers pass
     # only the seed and the step count, so the comparison needs a case that leaves every
     # other Config field at its default.
+    checks = []
     sdk_unpassed = [name for name in CONFIG_OVERRIDES if name in case]
     if sdk_unpassed:
         print(f"{FAMILY} {case_name}: SDK parity not compared, the consumers do not pass "
               + ", ".join(sdk_unpassed))
     else:
-        for language, values in _sdk_frames(native_build, runtime_root, bundle, pixels, case,
-                                            tmp_path).items():
+        with evidence_stage("sdk"):
+            sdk = _sdk_frames(native_build, runtime_root, bundle, pixels, case, tmp_path)
+        for language, values in sdk.items():
             assert values.shape == shape
             sdk_psnr = min(_frame_psnrs(_quantize(values), native))
             print(f"{FAMILY} {case_name} {language} SDK vs CLI: min frame PSNR {sdk_psnr:.2f} dB")
+            checks.append(_check_row(
+                f"{language}_sdk_min_frame_psnr",
+                f"{SDK_LANGUAGES[language]} SDK vs CLI: min frame PSNR (dB)", "contract",
+                sdk_psnr, ">=", thresholds["min_sdk_frame_psnr"]))
             assert sdk_psnr >= float(thresholds["min_sdk_frame_psnr"])
 
     # Task invariants: the clip starts at the conditioning image and moves.
@@ -301,17 +370,31 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
     motion = float(np.mean(np.abs(native[-1].astype(np.float64) - native[0].astype(np.float64))))
     print(f"{FAMILY} {case_name}: first frame vs image {first_psnr:.2f} dB, "
           f"mean |last - first| {motion:.2f} / 255")
+    checks += [
+        _check_row("first_frame_psnr_vs_image", "First frame vs the initial image: PSNR (dB)",
+                   "contract", first_psnr, ">=", thresholds["min_first_frame_psnr_vs_image"]),
+        _check_row("mean_abs_motion", "Mean |last frame - first frame| (of 255)", "contract",
+                   motion, ">=", thresholds["min_mean_abs_motion"]),
+    ]
     assert first_psnr >= float(thresholds["min_first_frame_psnr_vs_image"])
     assert motion >= float(thresholds["min_mean_abs_motion"])
 
-    references = {precision: _quantize(_official(model_dir, manifest, case, image, precision))
-                  for precision in case["reference_precisions"]}
+    with evidence_stage("reference"):
+        references = {name: _quantize(_official(model_dir, manifest, case, image, name))
+                      for name in case["reference_precisions"]}
     exact = references["fp32"]
     native_psnrs = _frame_psnrs(native, exact)
-    print(f"{FAMILY} {case_name} native {manifest['precision']} vs official fp32: "
+    print(f"{FAMILY} {case_name} native {precision} vs official fp32: "
           f"min {min(native_psnrs):.2f} mean {np.mean(native_psnrs):.2f} dB")
-    assert min(native_psnrs) >= float(thresholds["min_frame_psnr_vs_official_fp32"])
-    assert float(np.mean(native_psnrs)) >= float(thresholds["min_mean_psnr_vs_official_fp32"])
+    checks += [
+        _check_row("min_frame_psnr_vs_official_fp32",
+                   "Native vs official FP32: min frame PSNR (dB)", "independent_reference",
+                   min(native_psnrs), ">=", thresholds["min_frame_psnr_vs_official_fp32"]),
+        _check_row("mean_frame_psnr_vs_official_fp32",
+                   "Native vs official FP32: mean frame PSNR (dB)", "independent_reference",
+                   np.mean(native_psnrs), ">=", thresholds["min_mean_psnr_vs_official_fp32"]),
+    ]
+    shortfall = None
     if "fp16" in references:
         official_psnrs = _frame_psnrs(references["fp16"], exact)
         print(f"{FAMILY} {case_name} official fp16 vs official fp32: "
@@ -320,4 +403,12 @@ def test_e2e(case_name: str, tmp_path: Path) -> None:
         # seven healthy builds measured 0.14-1.65 dB, four builds with plain FP16 linear and
         # convolution layers (FP16 accumulation) 2.72-3.23 dB; the bound lies between them.
         shortfall = float(np.mean(official_psnrs)) - float(np.mean(native_psnrs))
+        checks.append(_check_row(
+            "mean_psnr_shortfall_vs_official_fp16",
+            "Mean PSNR shortfall vs the official FP16 pipeline (dB)", "independent_reference",
+            shortfall, "<=", thresholds["max_mean_psnr_shortfall_vs_official_fp16_db"]))
+    _record_reference(references, fps, tmp_path, native_video, precision, checks)
+    assert min(native_psnrs) >= float(thresholds["min_frame_psnr_vs_official_fp32"])
+    assert float(np.mean(native_psnrs)) >= float(thresholds["min_mean_psnr_vs_official_fp32"])
+    if shortfall is not None:
         assert shortfall <= float(thresholds["max_mean_psnr_shortfall_vs_official_fp16_db"])
