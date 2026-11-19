@@ -46,15 +46,6 @@ class Weights:
         return value.to(torch.float16 if dtype == np.float16 else torch.float32).numpy()
 
 
-class PlanWriter(trt.IStreamWriter):
-    def __init__(self, stream):
-        super().__init__()
-        self.stream = stream
-
-    def write(self, data):
-        return self.stream.write(data)
-
-
 class Graph:
     def __init__(self, weights, cfg, logger):
         self.weights, self.cfg = weights, cfg
@@ -148,10 +139,12 @@ class Graph:
         options = self.builder.create_builder_config()
         options.builder_optimization_level = 3
         options.clear_flag(trt.BuilderFlag.TF32)
-        if not self.builder.build_serialized_network_to_stream(
-            self.net, options, PlanWriter(stream)
-        ):
+        # Serialize one engine at a time; the enclosing build releases this
+        # graph before loading the next layer's weights.
+        plan = self.builder.build_serialized_network(self.net, options)
+        if plan is None:
             raise RuntimeError("Kolibri1 engine build failed")
+        stream.write(memoryview(plan))
 
     def layer(self, index, length):
         net, cfg = self.net, self.cfg
