@@ -33,7 +33,7 @@ import numpy as np
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
-from tools.e2e_evidence import evidence_stage, record_evidence
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "openai_privacy_filter"
 TASKS = frozenset({"text_to_head_scores"})
@@ -231,11 +231,36 @@ def _json_line(completed: subprocess.CompletedProcess) -> dict:
     return payloads[0]
 
 
-def _reference_ids(model_dir: Path, texts: list[str]) -> list[list[int]]:
+@lru_cache(maxsize=None)
+def _tokenizer(model_dir: str):
     from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(str(model_dir))
+    return AutoTokenizer.from_pretrained(model_dir)
+
+
+def _reference_ids(model_dir: Path, texts: list[str]) -> list[list[int]]:
+    tokenizer = _tokenizer(str(model_dir))
     return [list(tokenizer(text)["input_ids"]) for text in texts]
+
+
+def _entities(logits: np.ndarray, ids: list[int], id2label: dict, model_dir: Path) -> str:
+    """Readable PII spans of the argmax BIOES labels, one ``type: text`` line each."""
+    spans: list[tuple[str, int, int]] = []
+    open_span: list | None = None
+    for position, label_id in enumerate(logits.argmax(axis=1)):
+        prefix, _, kind = str(id2label[str(int(label_id))]).partition("-")
+        if prefix == "O" or not kind:
+            open_span = None
+            continue
+        if prefix in ("B", "S") or open_span is None or open_span[0] != kind:
+            open_span = [kind, position, position]
+            spans.append(open_span)
+        open_span[2] = position
+        if prefix in ("E", "S"):
+            open_span = None
+    tokenizer = _tokenizer(str(model_dir))
+    lines = [f"{kind}: {tokenizer.decode(ids[start : end + 1]).strip()}" for kind, start, end in spans]
+    return "\n".join(lines) if lines else "No PII span: every token is labelled O"
 
 
 def _check_tokenizer(
@@ -295,7 +320,7 @@ def _reference_logits(model_dir: Path, ids: list[int]) -> np.ndarray:
     return logits.double().cpu().numpy()
 
 
-def _check_logits(native: np.ndarray, reference: np.ndarray) -> dict:
+def _check_logits(native: np.ndarray, reference: np.ndarray, tmp_path: Path) -> dict:
     assert native.shape == reference.shape
     difference = np.abs(native - reference)
     cosine = float(
@@ -305,6 +330,7 @@ def _check_logits(native: np.ndarray, reference: np.ndarray) -> dict:
     margin = ordered[:, -1] - ordered[:, -2]
     decided = margin > 2 * _LOGIT_TOLERANCE
     agree = native.argmax(axis=1) == reference.argmax(axis=1)
+    mismatches = int((decided & ~agree).sum())
     measured = {
         "max_abs": float(difference.max()),
         "mean_abs": float(difference.mean()),
@@ -312,8 +338,61 @@ def _check_logits(native: np.ndarray, reference: np.ndarray) -> dict:
         "tokens": int(native.shape[0]),
         "decided_tokens": int(decided.sum()),
         "label_agreement": float(agree.mean()),
+        "decided_label_mismatches": mismatches,
     }
     record_evidence("compare", measured)
+    record_evidence(
+        "thresholds",
+        {
+            "logit_max_abs": _LOGIT_TOLERANCE,
+            "logit_cosine_min": _COSINE_FLOOR,
+            "decided_top2_margin": 2 * _LOGIT_TOLERANCE,
+        },
+    )
+    if evidence_enabled():
+        pair = {}
+        for role, values in (("native", native), ("reference", reference)):
+            path = tmp_path / f"{role}_logits.npy"
+            np.save(path, values.astype(np.float32), allow_pickle=False)
+            pair[role] = path
+        record_evidence(
+            "reference_comparison",
+            {
+                "label": f"Logits of {native.shape[0]} tokens x {native.shape[1]} labels",
+                "scope": "independent_reference",
+                "enforced": True,
+                **pair,
+                "checks": [
+                    {
+                        "name": "logit_cosine",
+                        "label": "Cosine similarity of all logits",
+                        "scope": "independent_reference",
+                        "actual": cosine,
+                        "operator": ">=",
+                        "expected": _COSINE_FLOOR,
+                        "passed": cosine >= _COSINE_FLOOR,
+                    },
+                    {
+                        "name": "logit_max_abs_error",
+                        "label": "Largest |native - reference| logit",
+                        "scope": "independent_reference",
+                        "actual": measured["max_abs"],
+                        "operator": "<=",
+                        "expected": _LOGIT_TOLERANCE,
+                        "passed": measured["max_abs"] <= _LOGIT_TOLERANCE,
+                    },
+                    {
+                        "name": "decided_label_mismatches",
+                        "label": "Labels that differ where the reference top-2 margin exceeds twice the tolerance",
+                        "scope": "independent_reference",
+                        "actual": mismatches,
+                        "operator": "==",
+                        "expected": 0,
+                        "passed": mismatches == 0,
+                    },
+                ],
+            },
+        )
     print(f"{FAMILY} parity: {measured}")
     assert cosine >= _COSINE_FLOOR, f"{FAMILY} logit cosine {cosine}"
     assert measured["max_abs"] <= _LOGIT_TOLERANCE, (
@@ -327,7 +406,6 @@ def _check_logits(native: np.ndarray, reference: np.ndarray) -> dict:
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, tmp_path_factory) -> None:
     manifest_path, manifest, case = CASES[case_name]
-    record_evidence("inputs", {"manifest": manifest["name"], "case": case_name})
     model_dir = _model_dir(manifest)
     record_evidence(
         "checkpoint", {"hf_id": manifest["hf_id"], "hf_revision": manifest["hf_revision"]}
@@ -337,6 +415,10 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, tmp_path_factor
     config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
     labels = len(config["id2label"])
     (ids,) = _reference_ids(model_dir, [text])
+    record_evidence(
+        "inputs",
+        {"prompt": text, "manifest": manifest["name"], "case": case_name, "tokens": len(ids)},
+    )
     assert 0 < len(ids) <= int(manifest["max_sequence_length"])
     if case.get("exercise_window"):
         reach = int(config["num_hidden_layers"]) * int(config["sliding_window"])
@@ -354,6 +436,13 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, tmp_path_factor
             _run([str(binary), "encode", str(bundle), *common, "--text", text], runtime_root)
         )
         native = _check_payload(cli, len(ids), labels)
+        record_evidence(
+            "native",
+            {
+                "text": _entities(native, ids, config["id2label"], model_dir),
+                "logits": native.astype(np.float32),
+            },
+        )
         by_ids = _json_line(
             _run(
                 [str(binary), "encode", str(bundle), *common, "--token-ids", json.dumps(ids)],
@@ -375,5 +464,14 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, tmp_path_factor
             )
     with evidence_stage("reference"):
         reference = _reference_logits(model_dir, ids)
+        record_evidence(
+            "reference",
+            {
+                "mode": "hf_transformers",
+                "reference_text": _entities(reference, ids, config["id2label"], model_dir),
+                "token_ids": ids,
+                "logits": reference.astype(np.float32),
+            },
+        )
     with evidence_stage("compare"):
-        _check_logits(native, reference)
+        _check_logits(native, reference, tmp_path)
