@@ -320,9 +320,16 @@ void LlamaKvCache::write_bidirectional_mask(TensorMap& inputs, int32_t seq_len) 
 }
 
 void LlamaKvCache::write_decode_mask(TensorMap& inputs) {
+    // Note (Jiaxin Deng): Prefill buffers start at profile OPT, so validate a one-row mask
+    // against the profile minimum instead of the current buffer shape.
     if (bound_module_ == nullptr ||
-        (!dynamic_binding_enabled_ && bound_module_->tensor_shape(names_.attention_mask) !=
-                                          std::vector<int64_t>{1, max_length_ + 1})) {
+        (!dynamic_binding_enabled_ &&
+         bound_module_->tensor_shape(names_.attention_mask) !=
+             std::vector<int64_t>{1, max_length_ + 1} &&
+         (!bound_module_->input_is_dynamic(names_.attention_mask) ||
+          bound_module_->input_profile_shape(names_.attention_mask, bound_module_->profile_idx(),
+                                             ProfileShapeSelector::kMin) !=
+              std::vector<int64_t>{1, max_length_ + 1}))) {
         throw std::runtime_error("Llama standard decoder has an invalid attention-mask contract");
     }
 

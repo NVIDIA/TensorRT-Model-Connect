@@ -80,6 +80,10 @@ class NativeKvModuleStub final : public ITrtModule {
         entry.dtype = dtype;
     }
 
+    void set_input_profile_min_shape(const std::string& name, std::vector<int64_t> shape) {
+        profile_min_shapes_[name] = std::move(shape);
+    }
+
     void add_key_positions_input(std::vector<int64_t> shape = {-1}) {
         add("key_positions", std::move(shape), DType::kInt32, true);
     }
@@ -119,6 +123,9 @@ class NativeKvModuleStub final : public ITrtModule {
     }
     std::vector<int64_t> input_profile_shape(const std::string& name, int32_t profile_idx,
                                              ProfileShapeSelector selector) const override {
+        const auto minimum = profile_min_shapes_.find(name);
+        if (selector == ProfileShapeSelector::kMin && minimum != profile_min_shapes_.end())
+            return minimum->second;
         if (name == "token_id" && !token_profile_max_lengths_.empty()) {
             const int32_t tokens =
                 selector == ProfileShapeSelector::kMin
@@ -169,6 +176,7 @@ class NativeKvModuleStub final : public ITrtModule {
     }
 
   private:
+    std::unordered_map<std::string, std::vector<int64_t>> profile_min_shapes_;
     struct Entry {
         std::vector<int64_t> shape;
         DType dtype;
@@ -299,6 +307,46 @@ int run_native_kv_contract_tests(const char* model) {
         check(cache.needs_attention_mask() && inputs.count("attention_mask") == 1 &&
                   inputs.count("cache_write_indices") == 0 && cache.position() == 1,
               "standard attention-mask cache path still advances normally");
+    }
+
+    {
+        Cache cache(1, 11, 2, stream, DType::kFloat16);
+        NativeKvModuleStub prefill(stream, 1, 11, 1, 2, DType::kFloat16, false, nullptr, 4, 16, {},
+                                   false, true);
+        prefill.set_tensor("attention_mask", {64, 75}, DType::kFloat32);
+        prefill.set_input_profile_min_shape("attention_mask", {1, 12});
+        cache.bind_cache_inputs(prefill);
+        try {
+            TensorMap inputs;
+            cache.prepare_step(inputs, 1);
+            const auto& mask = inputs.at("attention_mask");
+            const auto* values = static_cast<const float*>(mask.data);
+            check(mask.shape == std::vector<int64_t>({1, 12}) && values[0] < -1000.0F &&
+                      values[11] == 0.0F,
+                  "single-token prefill masks unused fixed cache rows");
+            cache.set_position(4);
+            prefill.set_tensor("attention_mask", {4, 15}, DType::kFloat32);
+            cache.prepare_step(inputs, 1);
+            values = static_cast<const float*>(inputs.at("attention_mask").data);
+            check(values[0] == 0.0F && values[3] == 0.0F && values[4] < -1000.0F &&
+                      values[11] == 0.0F,
+                  "one-token prefill tail retains the visible prefix");
+        } catch (const std::runtime_error& error) {
+            check(false,
+                  std::string("single-token dynamic-mask prefill rejected: ") + error.what());
+        }
+        for (const auto& shape :
+             std::vector<std::vector<int64_t>>{{1, 11}, {2, 13}, {-1, 12}, {1, 12, 1}}) {
+            prefill.set_input_profile_min_shape("attention_mask", shape);
+            bool rejected = false;
+            try {
+                TensorMap inputs;
+                cache.prepare_step(inputs, 1);
+            } catch (const std::runtime_error&) {
+                rejected = true;
+            }
+            check(rejected, "single-token prefill rejects malformed attention-mask profiles");
+        }
     }
 
     {

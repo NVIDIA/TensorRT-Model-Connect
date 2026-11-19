@@ -77,3 +77,18 @@ single BOS token and a one-token native prefill receipt, then retains the same
 FP16/FP32 generated-output comparison. No parity threshold is changed. A CPU
 comparison against the pinned Tokenizers assets covers 28 inputs with and without
 special tokens; target-GPU generation for all three cases remains unrun.
+## Single-token prefill mask contract
+
+A run of the three cases on one NVIDIA H200 at `fb2d3312` passed chat and
+multilingual/digit generation but failed the empty case before prefill. The
+single BOS token selected the one-row mask path, which required the static
+decoder mask shape even when bound to a fixed-cache prefill engine. That
+engine's dynamic mask buffer initially has the profile OPT shape.
+
+The runtime now accepts a dynamic mask whose current profile minimum is
+`[1, cache_capacity + 1]`. Static decoder validation and mask construction
+remain in place. The native KV regression reproduces the error with concrete
+OPT buffer dimensions, checks both BOS-only and one-token-tail masks, and
+rejects four malformed minimum profiles. It failed before the correction and
+passed on H200 afterward. The full checkpoint cases must also be rerun before
+claiming generation parity for this revision.
