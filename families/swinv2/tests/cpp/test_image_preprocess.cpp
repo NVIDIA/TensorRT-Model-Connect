@@ -102,25 +102,28 @@ void test_bicubic_matches_pillow_byte_for_byte() {
 
 void test_a_wide_image_is_squashed_not_cropped() {
     // The processor resizes straight to the square: no aspect-ratio rule and no
-    // crop. The colour boundary of a 64 x 256 half-and-half image must stay in
-    // the middle; scaling the short edge and cropping would discard it.
+    // crop. A 64 x 256 image that is black over its left quarter must keep that
+    // quarter: squashed to 32 x 32, the boundary lands at column 8. Scaling the
+    // short edge and centre-cropping would keep only white columns. A boundary
+    // in the middle would not tell the two apart.
     constexpr std::int32_t kHeight = 64;
     constexpr std::int32_t kWidth = 256;
+    constexpr std::int32_t kBoundary = kWidth / 4;
     std::vector<float> pixels(static_cast<std::size_t>(kHeight) * kWidth * 3U);
     for (std::int32_t y = 0; y < kHeight; ++y) {
         for (std::int32_t x = 0; x < kWidth; ++x) {
             for (std::int32_t c = 0; c < 3; ++c)
                 pixels[(static_cast<std::size_t>(y) * kWidth + x) * 3U + c] =
-                    x < kWidth / 2 ? 0.0F : 1.0F;
+                    x < kBoundary ? 0.0F : 1.0F;
         }
     }
     const auto out =
         trtmc::swinv2::preprocess_image(pixels.data(), kHeight, kWidth, identity_config(32, 32));
     check(out.size() == 3U * 32U * 32U, "the output is planar at the configured size");
-    check(out[16U * 32U + 2U] == 0.0F, "the left edge survives the squash");
+    check(out[16U * 32U + 2U] == 0.0F, "the black left quarter survives the squash");
     check(out[16U * 32U + 29U] == 1.0F, "the right edge survives the squash");
-    check(out[16U * 32U + 14U] < 0.5F && out[16U * 32U + 17U] > 0.5F,
-          "the boundary stays at the centre");
+    check(out[16U * 32U + 7U] < 0.5F && out[16U * 32U + 8U] > 0.5F,
+          "the boundary lands at a quarter of the output width");
 }
 
 void test_rescale_and_normalisation_follow_the_reference() {
