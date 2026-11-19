@@ -95,4 +95,4 @@ else()
   target_compile_definitions(trtmc_model_layoutlmv3 PRIVATE TRTMC_LAYOUTLMV3_HAS_FP32_KERNELS=0)
 endif()
 set_property(TARGET trtmc_model_layoutlmv3 APPEND PROPERTY
-  INSTALL_RPATH "\$ORIGIN/../../tvm_ffi/lib")
+  INSTALL_RPATH "\$ORIGIN/../../tvm_ffi/lib;${TRTMC_TVM_FFI_LIBRARY_DIR}")
