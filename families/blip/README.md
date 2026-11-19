@@ -1,0 +1,113 @@
+# BLIP image captioning
+
+This family implements `Salesforce/blip-image-captioning-base` at revision
+`82a37760796d32b1411fe092ab5d4e227313294b` as the `images_text_to_text` task.
+It accepts one RGB image and an optional caption prefix in one user message.
+The result contains the generated continuation and token IDs, including the
+terminating SEP token. It excludes the conditioning prefix from the result.
+
+The builder produces an FP32 vision encoder and an FP32 causal text decoder.
+The decoder recomputes the complete prefix at each step; it does not maintain
+a KV cache. The image encoder runs once per request. All topology,
+preprocessing, WordPiece tokenization, and generation behavior belong to this
+family. The vision engine uses family-owned TensorRT IPluginV3 operations for FP32
+normalization, affine projections, softmax, and exact GELU. Fixed reduction
+ordering and an explicit erf approximation prevent small rounding differences
+from accumulating through the vision residual blocks. Affine projections use
+the existing CUDA cuBLASLt library; convolution and attention matrix products
+remain TensorRT graph operations. The decoder remains a TensorRT graph.
+Native inference runs without Python, ATen, or TVM-FFI. No additional Python
+package is required for these operations.
+
+## Build and run
+
+Use the repository's [source build instructions](../../website/docs/getting-started/source-build.md)
+to prepare a matching CUDA/TensorRT environment. Install this family's
+`requirements.txt`, and install the ICU development
+library (`uc` component) for native Unicode normalization. Then build the
+selected native targets and install the matching native Python package. Set
+`TRTMC_BUILD_FAMILIES=blip` when configuring to require only this family's
+native dependencies:
+
+```bash
+cmake -S . -B build -DTRTMC_BUILD_FAMILIES=blip
+cmake --build build --parallel 8 --target trtmc trtmc_backend_trt trtmc_model_blip
+python -m pip install . --no-build-isolation
+PYTHONPATH=core/builder:. python -m tensorrt_model_connect build \
+  Salesforce/blip-image-captioning-base \
+  --revision 82a37760796d32b1411fe092ab5d4e227313294b \
+  --precision fp32 --max-sequence-length 64 -o blip-base.bundle
+build/trtmc run blip-base.bundle --runtime-root build \
+  --image /path/to/image.jpg --prompt "" --set max_new_tokens=32
+build/trtmc run blip-base.bundle --runtime-root build \
+  --image /path/to/image.jpg --prompt "a photography of" --set max_new_tokens=32
+```
+
+The checkpoint publishes a PyTorch state dictionary, loaded with
+`torch.load(weights_only=True)` with a version above the affected range in
+[GHSA-63cw-57p8-fm3p](https://github.com/pytorch/pytorch/security/advisories/GHSA-63cw-57p8-fm3p).
+PyTorch is used to read that checkpoint and run the official test reference.
+It is not linked or loaded by native inference. The loader checks the installed
+PyTorch version before deserializing the state dictionary. BLIP supports
+`TRTMC_ENABLE_BYOK=OFF`. Build and install the matching native package before
+building bundles so its TensorRT plugin creators are available. Existing pure
+TensorRT vision bundles remain loadable; rebuild them to use the FP32 plugins.
+The native tokenizer uses ICU for Unicode NFD, nonspacing-mark removal, and
+lowercasing, matching the reference's per-code-point normalization order.
+BLIP VQA, image-text retrieval, and BLIP-2 are
+separate architectures and are not claimed by this family.
+
+Only greedy generation is exposed. `max_new_tokens` defaults to 20, and the
+prefix plus output budget must fit the bundle's sequence capacity (64 by
+default, at most the checkpoint's 512-position table). FP16, quantization,
+batching, tensor/context parallelism, videos, tools, and conversation histories
+are rejected. Image resizing uses Pillow-compatible bicubic filtering to
+384 by 384; RGB input is normalized with the checkpoint's channel statistics.
+
+## Validation
+
+The family manifest pins the checkpoint revision and declares the immutable
+storage generation of the upstream example image in `external_files`. CI
+downloads that image before the offline proof and supplies its directory as
+`TRTMC_BLIP_MODEL_DIR`. The checkpoint is then loaded from the separately
+staged Hugging Face cache with `local_files_only=True`. The E2E tests make no
+image download requests, and the image is not redistributed in this repository.
+
+For local runs, set `TRTMC_BLIP_REFERENCE_IMAGE` to an existing verified copy
+of the pinned image and `TRTMC_BLIP_MODEL_DIR` to the pinned local checkpoint.
+The latter may be omitted when the checkpoint is already in the Hugging Face
+cache. `TRTMC_BLIP_IMAGE` optionally supplies a separate input copy, which the
+tests compare byte for byte with the reference. Missing staged assets fail
+before model loading.
+
+```bash
+cmake -S . -B build -DTRTMC_BUILD_TESTS=ON -DTRTMC_BUILD_FAMILIES=blip
+cmake --build build --parallel 8 --target trtmc trtmc_backend_trt \
+  trtmc_model_blip test_blip_native test_blip_tokenizer test_blip_fp32_kernels
+ctest --test-dir build -R '^test_blip_(tokenizer|fp32_kernels)$' --output-on-failure
+curl --fail --location --output /tmp/blip-reference-demo.jpg \
+  'https://storage.googleapis.com/sfr-vision-language-research/BLIP/demo.jpg?generation=1642901856234049'
+TRTMC_BLIP_REFERENCE_IMAGE=/tmp/blip-reference-demo.jpg \
+TRTMC_NATIVE_BUILD_DIR="$PWD/build" \
+TRTMC_BINARY="$PWD/build/trtmc" TRTMC_RUNTIME_ROOT="$PWD/build" \
+  PYTHONPATH=core/builder:apps/benchmark:. python -m pytest \
+  families/blip/tests --e2e-model blip -q -s
+```
+
+The four input cases cover the original and mirrored image, each with and
+without a caption prefix. Each case runs caption checks and direct tensor
+checks independently before reporting its failure, so pytest's stop-on-first-
+failure option cannot conceal tensor qualification after a caption mismatch.
+Both decoder feature sources and the vision gate retain their original
+criteria. The case evidence records every paired comparison and its verdict. Gates require exact greedy
+continuation tokens, native
+preprocessing parity, tokenizer parity, repeatable requests after intervening
+valid and invalid requests, and numerical comparison of the vision features
+and teacher-forced decoder logits. The image-feature tolerance is
+`atol=5e-4, rtol=1e-4`; the decoder tolerance is `atol=1e-3, rtol=1e-4`.
+No performance or deployment qualification is implied by a correctness run.
+
+`TRTMC_NATIVE_BUILD_DIR` points to the configured native test build directory.
+Building the registered tokenizer test also builds `test_blip_native`, which
+E2E loads from that directory for preprocessing and request-lifecycle checks.
+`TRTMC_RUNTIME_ROOT` supplies the installed model and backend libraries.
