@@ -8,7 +8,11 @@ if(NOT TRTMC_ENABLE_EDGELLM)
 endif()
 # Temporary migration switch. Keep unported family adapters on the established
 # SDK by default. One Model Connect build links exactly one Edge release.
-set(TRTMC_EDGELLM_RELEASE "0.11.0" CACHE STRING "Edge-LLM SDK release for this build")
+if(NOT DEFINED TRTMC_EDGELLM_RELEASE)
+  set(TRTMC_EDGELLM_RELEASE "0.11.0")
+endif()
+# A Conan toolchain may provide a normal variable rather than a cache entry.
+set(TRTMC_EDGELLM_RELEASE "${TRTMC_EDGELLM_RELEASE}" CACHE STRING "Edge-LLM SDK release for this build" FORCE)
 set_property(CACHE TRTMC_EDGELLM_RELEASE PROPERTY STRINGS "0.11.0" "0.12.0")
 if(TRTMC_EDGELLM_RELEASE STREQUAL "0.12.0")
   include("${CMAKE_CURRENT_LIST_DIR}/0.12/Provider.cmake")
