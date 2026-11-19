@@ -239,21 +239,7 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
     import numpy as np
     import torch
     from PIL import Image
-    from transformers import LayoutLMv3ImageProcessor, LayoutLMv3Model, LayoutLMv3Tokenizer
-    import sys
-    import transformers
-
-    record_evidence(
-        "reference_environment",
-        {
-            "requested": manifest.get("reference_environment", "default"),
-            "python": sys.executable,
-            "transformers": transformers.__version__,
-        },
-    )
-    assert transformers.__version__ == "5.20.0", (
-        "LayoutLMv3 parity retains the original Transformers5.20.0 reference"
-    )
+    from families.layoutlmv3.tests.reference.runner import run_reference
 
     _, manifest, case = CASES[case_name]
     with evidence_stage("checkpoint"):
@@ -276,15 +262,12 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
     config = json.loads(_bundle_section(bundle, "runtime.json"))
     tokenizer_path = tmp_path / "tokenizer.json"
     tokenizer_path.write_bytes(_bundle_section(bundle, "tokenizer.json"))
-    tokenizer = LayoutLMv3Tokenizer.from_pretrained(directory)
-    processor = LayoutLMv3ImageProcessor.from_pretrained(directory, apply_ocr=False)
     matmul_precision = torch.get_float32_matmul_precision()
     cudnn_tf32 = torch.backends.cudnn.allow_tf32
     request.addfinalizer(lambda: torch.set_float32_matmul_precision(matmul_precision))
     request.addfinalizer(lambda: setattr(torch.backends.cudnn, "allow_tf32", cudnn_tf32))
     torch.set_float32_matmul_precision("highest")
     torch.backends.cudnn.allow_tf32 = False
-    reference = LayoutLMv3Model.from_pretrained(directory, dtype=torch.float32).eval().to("cuda")
     original = Image.open(TEST_ROOT / "data" / case["image"]).convert("RGB")
     documents = [
         (
@@ -330,12 +313,14 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
             ]
             for box in pixel_boxes
         ]
-        text = tokenizer(
-            words, boxes=normalized, padding="max_length", max_length=length, return_tensors="pt"
+        oracle = run_reference(
+            directory,
+            pixels * 255,
+            words,
+            normalized,
+            length,
+            tmp_path / f"reference-document-{index}",
         )
-        visual = processor(
-            images=pixels * 255, input_data_format="channels_last", return_tensors="pt"
-        ).pixel_values
         preprocess_request = dict(
             height=image.height,
             width=image.width,
@@ -365,15 +350,12 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
         )
         assert completed.returncode == 0, completed.stderr
         encoded = json.loads(completed.stdout)
-        assert encoded["input_ids"] == text.input_ids[0].tolist()
-        assert encoded["attention_mask"] == text.attention_mask[0].tolist()
-        assert encoded["bbox"] == text.bbox[0].reshape(-1).tolist()
-        word_indices = [
-            word if word is not None else (-1 if text.attention_mask[0, i] else -2)
-            for i, word in enumerate(text.word_ids())
-        ]
+        assert encoded["input_ids"] == oracle["input_ids"][0].tolist()
+        assert encoded["attention_mask"] == oracle["attention_mask"][0].tolist()
+        assert encoded["bbox"] == oracle["bbox"][0].reshape(-1).tolist()
+        word_indices = oracle["word_indices"].tolist()
         assert encoded["word_indices"] == word_indices
-        expected_pixels = visual[0].numpy()
+        expected_pixels = oracle["pixels"]
         actual_pixels = np.fromfile(native_pixels, dtype="<f4").reshape(3, 224, 224)
         record_evidence(
             "native_preprocessing", {"sample": index, "pixels": actual_pixels, **encoded}
@@ -383,33 +365,18 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
             {
                 "sample": index,
                 "pixels": expected_pixels,
-                "input_ids": text.input_ids[0].tolist(),
-                "attention_mask": text.attention_mask[0].tolist(),
-                "bbox": text.bbox[0].numpy(),
+                "input_ids": oracle["input_ids"][0].tolist(),
+                "attention_mask": oracle["attention_mask"][0].tolist(),
+                "bbox": oracle["bbox"][0],
                 "word_indices": word_indices,
             },
         )
         np.testing.assert_allclose(actual_pixels, expected_pixels, atol=case["pixel_atol"], rtol=0)
-        all_boxes = torch.cat([text.bbox[0], reference.visual_bbox.cpu()], dim=0)
-        for path, axis in [(rx, 0), (ry, 3)]:
-            coordinates = all_boxes[:, axis].cuda()
-            expected = (
-                reference.encoder.relative_position_bucket(
-                    coordinates[None, :] - coordinates[:, None],
-                    num_buckets=reference.config.rel_2d_pos_bins,
-                    max_distance=reference.config.max_rel_2d_pos,
-                )
-                .cpu()
-                .numpy()
+        for path, name in [(rx, "relative_x"), (ry, "relative_y")]:
+            assert np.array_equal(
+                np.fromfile(path, dtype="<i4").reshape(total, total), oracle[name]
             )
-            assert np.array_equal(np.fromfile(path, dtype="<i4").reshape(total, total), expected)
-        with torch.no_grad():
-            expected = (
-                reference(**text.to("cuda"), pixel_values=visual.to("cuda"))
-                .last_hidden_state[0, :length]
-                .cpu()
-                .numpy()
-            )
+        expected = oracle["features"]
         target = tmp_path / f"features-{index}.f32"
         completed = subprocess.run(
             [str(_native_test_binary("test_layoutlmv3_runtime")), str(bundle), str(runtime_root)],
@@ -428,7 +395,8 @@ def test_official_checkpoint_e2e(case_name, tmp_path, request):
             columns=768,
             source_words=len(words),
             tokens=[
-                [token, word_indices[i], i] for i, token in enumerate(text.input_ids[0].tolist())
+                [token, word_indices[i], i]
+                for i, token in enumerate(oracle["input_ids"][0].tolist())
             ],
         )
         actual = np.fromfile(target, dtype="<f4").reshape(length, 768)
