@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from tensorrt_model_connect import BuildRequest, build
-from tools.e2e_evidence import evidence_stage, record_evidence
+from tools.e2e_evidence import evidence_enabled, evidence_stage, record_evidence
 
 FAMILY = "dinov2_with_registers"
 TASKS = frozenset({"image_to_token_and_pooled_features"})
@@ -94,6 +94,34 @@ def _required_path(value: str | None, label: str) -> Path:
     path = Path(value)
     assert path.exists(), f"selected {FAMILY} E2E {label} does not exist: {path}"
     return path
+
+
+def _record_comparison(tmp_path, label, native, reference, checks):
+    """Retain the output pair and the result of already enforced comparisons."""
+    if not evidence_enabled():
+        return
+    import numpy as np
+
+    paths = []
+    for role, value in (("native", native), ("reference", reference)):
+        if isinstance(value, np.ndarray):
+            path = tmp_path / f"{label}-{role}.npz"
+            np.savez_compressed(path, output=value)
+        else:
+            path = tmp_path / f"{label}-{role}.json"
+            path.write_text(json.dumps(value, ensure_ascii=False) + "\n", encoding="utf-8")
+        paths.append(path)
+    record_evidence(
+        "reference_comparison",
+        {
+            "label": label,
+            "scope": "independent_reference",
+            "enforced": True,
+            "native": paths[0],
+            "reference": paths[1],
+            "checks": [dict(check, scope="independent_reference") for check in checks],
+        },
+    )
 
 
 def _model_dir(manifest: dict) -> Path:
@@ -309,6 +337,34 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             np.testing.assert_allclose(
                 pooled, reference.pooler_output[0].numpy(), atol=5e-3, rtol=0
             )
+        mismatch = int(np.count_nonzero(~np.isclose(native, expected, atol=5e-3, rtol=0)))
+        pooled_mismatch = int(
+            np.count_nonzero(
+                ~np.isclose(pooled, reference.pooler_output[0].numpy(), atol=5e-3, rtol=0)
+            )
+        )
+        _record_comparison(
+            tmp_path,
+            f"features-{sample}",
+            native,
+            expected,
+            [
+                {
+                    "name": "features_outside_tolerance",
+                    "actual": mismatch,
+                    "operator": "==",
+                    "expected": 0,
+                    "passed": mismatch == 0,
+                },
+                {
+                    "name": "pooler_outside_tolerance",
+                    "actual": pooled_mismatch,
+                    "operator": "==",
+                    "expected": 0,
+                    "passed": pooled_mismatch == 0,
+                },
+            ],
+        )
         with evidence_stage("comparison"):
             assert payload["pooling"] == "class_token"
         with evidence_stage("comparison"):
