@@ -22,7 +22,8 @@ def new_network(verbose: bool, quant_ctx=None):
         1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED)
     )
     config = builder.create_builder_config()
-    config.builder_optimization_level = 1
+    # TensorRT's default level for unquantized builds; FP8 builds keep level 1.
+    config.builder_optimization_level = 1 if quant_ctx is not None else 3
     config.avg_timing_iterations = 8
     config.max_aux_streams = 0
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
