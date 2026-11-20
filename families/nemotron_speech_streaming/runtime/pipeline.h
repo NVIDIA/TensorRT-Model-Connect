@@ -11,6 +11,7 @@
 // runtime inference does not call Python.
 
 #include "families/nemotron_speech_streaming/runtime/rnnt_config.h"
+#include "families/nemotron_speech_streaming/runtime/streaming_cache.h"
 #include "families/nemotron_speech_streaming/runtime/tokenizer.h"
 #include "trtmc/runtime/trt_backend.h"
 #include "trtmc/runtime/trt_module.h"
@@ -60,13 +61,13 @@ class RnntPipeline final : public ITranscription, public IStreamingTranscription
                                           int32_t input_sample_rate, int32_t& actual_frames) const;
     std::vector<float> run_encoder(const std::vector<float>& mel, int32_t actual_frames);
     ITrtModule& streaming_encoder_for(int32_t right_context, bool first_step);
+    // The pool a stream's encoder caches are lent from, or null where the
+    // stream keeps them in host tensors.
+    std::shared_ptr<rnnt::StreamingCacheBufferPool> device_cache_pool() const;
     std::vector<float> run_streaming_encoder(int32_t right_context, const std::vector<float>& mel,
-                                             const std::vector<float>& cache_last_channel,
-                                             const std::vector<float>& cache_last_time,
+                                             rnnt::StreamingEncoderCache& cache,
                                              int32_t cache_last_channel_len,
-                                             int32_t valid_query_frames, bool first_step,
-                                             std::vector<float>& next_channel,
-                                             std::vector<float>& next_time);
+                                             int32_t valid_query_frames, bool first_step);
     std::vector<float> run_predictor(int32_t token_id, std::vector<float>& state_h,
                                      std::vector<float>& state_c);
     std::vector<float> run_joint(const float* encoder_frame, const float* pred_output);
@@ -87,6 +88,9 @@ class RnntPipeline final : public ITranscription, public IStreamingTranscription
     std::map<int32_t, std::vector<char>> streaming_first_encoder_sections_;
     std::map<int32_t, std::unique_ptr<ITrtModule>> streaming_encoders_;
     std::map<int32_t, std::unique_ptr<ITrtModule>> streaming_first_encoders_;
+    // Shared with the streams it lends to, so a stream may outlive the pipeline.
+    std::shared_ptr<rnnt::StreamingCacheBufferPool> streaming_cache_pool_{
+        std::make_shared<rnnt::StreamingCacheBufferPool>()};
     IBackend* backend_{nullptr};
     ModuleCreateOptions module_options_;
     RnntConfig config_;
