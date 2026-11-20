@@ -16,8 +16,9 @@ find_package(Torch REQUIRED)
 separate_arguments(_layoutlmv3_torch_cxx_flags NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
 
 # Family factories exchange C++ runtime objects with core and the backend.
-# Compare the native compiler with the resolved LibTorch package, including its
-# imported target's usage requirements, before applying those flags to the DSO.
+# Check the resolved LibTorch flags that are actually applied to this DSO.
+# The standard-library ABI probe does not need to link LibTorch or export its
+# transitive dependencies into a separate try-compile project.
 include(CheckCXXSourceCompiles)
 include(CMakePushCheckState)
 cmake_push_check_state(RESET)
@@ -34,7 +35,6 @@ else()
   set(_layoutlmv3_native_abi 0)
 endif()
 set(CMAKE_REQUIRED_FLAGS "${TORCH_CXX_FLAGS}")
-set(CMAKE_REQUIRED_LIBRARIES torch)
 unset(_layoutlmv3_torch_abi_matches CACHE)
 check_cxx_source_compiles("#include <string>
 #if defined(__GLIBCXX__) && _GLIBCXX_USE_CXX11_ABI != ${_layoutlmv3_native_abi}

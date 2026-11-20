@@ -17,8 +17,8 @@ by the repository validation guide. The E2E adapter invokes the prepared
 reference interpreter without changing the base Transformers installation.
 
 The resolved LibTorch CMake package must use the runtime toolchain's C++ ABI.
-CMake checks its compile flags and imported target before applying them to the
-family and tokenizer helper. Native-prefix installs retain the discovered Torch
+CMake checks its compile flags before applying them to the family and tokenizer
+helper. Native-prefix installs retain the discovered Torch
 library directory. Select a different family with `-DTRTMC_BUILD_FAMILIES=<family>`
 or use an empty value for core-only builds to omit LayoutLMv3's dependencies.
 
