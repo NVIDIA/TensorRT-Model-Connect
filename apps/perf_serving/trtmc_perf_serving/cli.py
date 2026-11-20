@@ -217,7 +217,7 @@ def reference_env(arguments: argparse.Namespace) -> int:
 
     python = (reference_python(arguments.requirements, arguments.root, build_isolation=not arguments.no_build_isolation,
                                prepare=arguments.prepare)
-              if arguments.requirements else Path(sys.executable))
+              if arguments.requirements or arguments.prepare else Path(sys.executable))
     print(json.dumps({"python": str(python), "requirements": str(arguments.requirements or "") or None}))
     return 0
 

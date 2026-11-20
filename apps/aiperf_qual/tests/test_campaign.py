@@ -106,6 +106,26 @@ def test_a_reference_model_directory_is_loaded_from_the_reference_environment(tm
             pass
 
 
+def test_a_preparation_script_alone_gets_a_reference_environment(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual import services
+
+    environment = Environment({"repo": str(tmp_path), "serve_python": "python3",
+                               "reference_env_root": str(tmp_path / "envs")})
+    seen = []
+
+    def run(command, **options):
+        seen.append(command)
+        return subprocess.CompletedProcess(command, 0, stdout=json.dumps({"python": "/envs/e/bin/python"}) + "\n",
+                                           stderr="")
+
+    monkeypatch.setattr(services.subprocess, "run", run)
+    prepared = {"catalog_profile": "p", "reference": {"prepare": "families/f/reference/prepare.py"}}
+    assert services.reference_python(environment, prepared) == "/envs/e/bin/python"
+    assert "--prepare" in seen[0] and "--requirements" not in seen[0]
+    assert services.reference_python(environment, {"catalog_profile": "p", "reference": {}}) == "python3"
+    assert len(seen) == 1  # nothing to prepare or install: the serving interpreter
+
+
 def test_ensure_bundle_records_a_failed_build_under_the_gpu_lock(tmp_path, monkeypatch):
     environment = Environment({"repo": str(tmp_path), "bundle_root": str(tmp_path / "engines"),
                                "gpu_lock": str(tmp_path / "gpu.lock")})
