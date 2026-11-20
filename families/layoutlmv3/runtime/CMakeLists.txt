@@ -16,23 +16,35 @@ find_package(Torch REQUIRED)
 separate_arguments(_layoutlmv3_torch_cxx_flags NATIVE_COMMAND "${TORCH_CXX_FLAGS}")
 
 # Family factories exchange C++ runtime objects with core and the backend.
-# Torch must match their toolchain ABI before its flags can be applied here.
-execute_process(
-  COMMAND ${Python3_EXECUTABLE} -c "import torch; print(int(torch.compiled_with_cxx11_abi()), end='')"
-  RESULT_VARIABLE _layoutlmv3_torch_abi_result OUTPUT_VARIABLE _layoutlmv3_torch_abi)
-if(NOT _layoutlmv3_torch_abi_result EQUAL 0 OR NOT _layoutlmv3_torch_abi MATCHES "^[01]$")
-  message(FATAL_ERROR "LayoutLMv3 could not determine Torch's C++ ABI")
-endif()
+# Compare the native compiler with the resolved LibTorch package, including its
+# imported target's usage requirements, before applying those flags to the DSO.
 include(CheckCXXSourceCompiles)
+include(CMakePushCheckState)
+cmake_push_check_state(RESET)
+unset(_layoutlmv3_toolchain_cxx11_abi CACHE)
+check_cxx_source_compiles("#include <string>
+#if defined(__GLIBCXX__) && _GLIBCXX_USE_CXX11_ABI != 1
+#error Native toolchain uses the old libstdc++ ABI
+#endif
+int main() { return 0; }
+" _layoutlmv3_toolchain_cxx11_abi)
+if(_layoutlmv3_toolchain_cxx11_abi)
+  set(_layoutlmv3_native_abi 1)
+else()
+  set(_layoutlmv3_native_abi 0)
+endif()
+set(CMAKE_REQUIRED_FLAGS "${TORCH_CXX_FLAGS}")
+set(CMAKE_REQUIRED_LIBRARIES torch)
 unset(_layoutlmv3_torch_abi_matches CACHE)
 check_cxx_source_compiles("#include <string>
-#if defined(__GLIBCXX__) && _GLIBCXX_USE_CXX11_ABI != ${_layoutlmv3_torch_abi}
+#if defined(__GLIBCXX__) && _GLIBCXX_USE_CXX11_ABI != ${_layoutlmv3_native_abi}
 #error Torch C++ ABI differs from the native runtime toolchain
 #endif
 int main() { return 0; }
 " _layoutlmv3_torch_abi_matches)
+cmake_pop_check_state()
 if(NOT _layoutlmv3_torch_abi_matches)
-  message(FATAL_ERROR "LayoutLMv3 requires Torch's C++ ABI to match the native runtime toolchain")
+  message(FATAL_ERROR "LayoutLMv3 requires the resolved LibTorch C++ ABI to match the native runtime toolchain")
 endif()
 
 add_library(trtmc_model_layoutlmv3 SHARED bpe_tokenizer.cpp document_input.cpp image_preprocess.cpp plugin.cpp)

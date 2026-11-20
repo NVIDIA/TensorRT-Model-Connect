@@ -27,7 +27,6 @@ std::filesystem::path math_library_path() {
         const auto library = directory / "../../nvidia/cu13/lib/libcublasLt.so.13";
         if (std::filesystem::is_regular_file(library))
             return std::filesystem::canonical(library);
-        return "libcublasLt.so.13";
     }
     const std::filesystem::path embedded(TRTMC_LAYOUTLMV3_CUBLASLT_BUILD_LIBRARY);
     return std::filesystem::is_regular_file(embedded) ? embedded

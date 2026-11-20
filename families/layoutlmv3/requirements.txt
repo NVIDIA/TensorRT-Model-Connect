@@ -4,3 +4,4 @@ torch
 transformers>=5.2
 safetensors
 Pillow
+nvidia-cublas>=13,<14
