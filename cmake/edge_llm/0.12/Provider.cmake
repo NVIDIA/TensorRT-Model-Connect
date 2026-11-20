@@ -43,8 +43,9 @@ _edgellm_check_gpu("${TRTMC_EDGELLM_CUDA_ARCHITECTURE}")
 # The SDK's relocatable device code and its consumers must use the same
 # compiler target. Keep the numeric GPU identity for checks and receipts.
 set(EdgeLLM_CUDA_ARCHITECTURE "${TRTMC_EDGELLM_CUDA_ARCHITECTURE}")
-if(EdgeLLM_CUDA_ARCHITECTURE STREQUAL "103")
-  set(EdgeLLM_CUDA_ARCHITECTURE "103a")
+# Match native detection in the pinned SDK's cmake/EdgeLLMPlatform.cmake.
+if(EdgeLLM_CUDA_ARCHITECTURE MATCHES "^(100|101|103|110|121)$")
+  string(APPEND EdgeLLM_CUDA_ARCHITECTURE "a")
 endif()
 _edgellm_trt_version("${TRTMC_TRT_INCLUDE_DIR}" _edge_trt_version)
 _edgellm_check_trt_library("${TRTMC_TRT_LIBRARY}" "${_edge_trt_version}")
