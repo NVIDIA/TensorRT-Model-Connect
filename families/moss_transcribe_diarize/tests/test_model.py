@@ -308,13 +308,13 @@ def test_e2e_evidence_checks_restate_the_enforced_comparisons():
         _assert_termination([4, 9, 5], [4, 6, 5], eos, 3)
 
 
-def test_e2e_reference_precision_is_restored():
+@pytest.mark.parametrize("entering", ["high", "medium", "highest"])
+def test_e2e_reference_precision_is_restored(entering):
     import torch
 
-    saved = (torch.get_float32_matmul_precision(), torch.backends.cuda.matmul.allow_tf32,
-             torch.backends.cudnn.allow_tf32)
+    saved = (torch.get_float32_matmul_precision(), torch.backends.cudnn.allow_tf32)
     try:
-        torch.set_float32_matmul_precision("high")
+        torch.set_float32_matmul_precision(entering)
         torch.backends.cudnn.allow_tf32 = True
         with pytest.raises(RuntimeError, match="reference failed"):
             with test_e2e._fp32_reference_precision():
@@ -322,9 +322,9 @@ def test_e2e_reference_precision_is_restored():
                 assert torch.backends.cuda.matmul.allow_tf32 is False
                 assert torch.backends.cudnn.allow_tf32 is False
                 raise RuntimeError("reference failed")
-        assert torch.get_float32_matmul_precision() == "high"
+        assert torch.get_float32_matmul_precision() == entering
+        assert torch.backends.cuda.matmul.allow_tf32 is (entering != "highest")
         assert torch.backends.cudnn.allow_tf32 is True
     finally:
         torch.set_float32_matmul_precision(saved[0])
-        torch.backends.cuda.matmul.allow_tf32 = saved[1]
-        torch.backends.cudnn.allow_tf32 = saved[2]
+        torch.backends.cudnn.allow_tf32 = saved[1]

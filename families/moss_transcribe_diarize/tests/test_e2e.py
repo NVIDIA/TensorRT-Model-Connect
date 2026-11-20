@@ -226,7 +226,8 @@ def _json_line(completed: subprocess.CompletedProcess) -> dict:
 
 
 def _sdk_consumer(name: str) -> Path:
-    """A direct SDK consumer of the native build, built by name when missing."""
+    """A direct SDK consumer, brought up to date in the native build tree (a no-op when it
+    is current), so that it never predates the sources under test."""
     native = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
     target = f"test_{FAMILY}_sdk_{name}"
     subprocess.run(["cmake", "--build", str(native), "--parallel", "8", "--target", target],
@@ -285,8 +286,11 @@ def _assert_input_contract(binary: Path, runtime_root: Path, bundle: Path, case:
         "token_ids"] == tokens
     unlimited = _json_line(_cli(binary, runtime_root, bundle, audio_path))
     assert unlimited["token_ids"] == tokens
+    # 180 s need six 30 s windows of 375 audio rows, more than the bundle's 2048 positions.
+    overlong = np.zeros(180 * SAMPLE_RATE, dtype=np.float32)
     refused = [
         (_write_wav(tmp_path / "rate.wav", audio, 8000), (), "16000 Hz"),
+        (_write_wav(tmp_path / "overlong.wav", overlong, SAMPLE_RATE), (), "max_sequence_length"),
         (audio_path, ("--source-language", "en"), "source_language"),
         (audio_path, ("--set", "max_new_tokens=1000000"), "exceeds"),
     ]
@@ -298,20 +302,21 @@ def _assert_input_contract(binary: Path, runtime_root: Path, bundle: Path, case:
 @contextmanager
 def _fp32_reference_precision():
     """TF32 off and the highest FP32 matmul precision while the reference runs; the
-    process-wide settings are restored afterwards, also when the reference fails."""
+    process-wide settings are restored afterwards, also when the reference fails.
+
+    The matmul policy is set and restored only through set_float32_matmul_precision
+    (CUDA matmul TF32 follows it); assigning torch.backends.cuda.matmul.allow_tf32
+    as well would turn a restored "medium" into "high". cuDNN has its own flag."""
     import torch
 
-    saved = (torch.get_float32_matmul_precision(), torch.backends.cuda.matmul.allow_tf32,
-             torch.backends.cudnn.allow_tf32)
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
+    saved = (torch.get_float32_matmul_precision(), torch.backends.cudnn.allow_tf32)
     torch.set_float32_matmul_precision("highest")
+    torch.backends.cudnn.allow_tf32 = False
     try:
         yield
     finally:
         torch.set_float32_matmul_precision(saved[0])
-        torch.backends.cuda.matmul.allow_tf32 = saved[1]
-        torch.backends.cudnn.allow_tf32 = saved[2]
+        torch.backends.cudnn.allow_tf32 = saved[1]
 
 
 @pytest.fixture
