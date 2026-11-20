@@ -1,0 +1,254 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+from pathlib import Path
+
+import pytest
+
+from trtmc_short_drama import catalog
+from trtmc_short_drama.engine import Engine, Served
+from trtmc_short_drama.flow import Flows, Step, Steps
+
+PLUGIN = '''
+from trtmc_short_drama.flow import Step
+
+def run(context):
+    context.project.log("polished")
+
+STEP = Step("polish", run, role="llm", description="test plugin")
+'''
+
+
+def test_flow_versions_are_numbered_and_never_overwritten(tmp_path: Path):
+    flows = Flows(tmp_path, {"llm": "q", "image": "i", "video": "v", "asr": "w"})
+    reference, first = flows.load("default")
+    assert reference == "default@1" and first["steps"][0] == {
+        "step": "plan", "model": "q", "params": {"temperature": 0.7, "shot_seconds": 8, "max_tokens": 12000}}
+    edited = {"steps": [{"step": "plan", "model": "other", "params": {}}, *first["steps"][1:]]}
+    assert flows.save("default", edited, note="bigger model") == "default@2"
+    assert flows.load("default")[1]["steps"][0]["model"] == "other"
+    assert flows.load("default@1")[1]["steps"][0]["model"] == "q"
+    assert flows.save("mine", edited) == "mine@1" and flows.names() == ["default", "mine"]
+
+
+@pytest.mark.parametrize("flow", [{}, {"steps": []}, {"steps": [{"name": "plan"}]},
+                                  {"steps": [{"step": "plan", "params": []}]}])
+def test_invalid_flows_are_rejected(tmp_path: Path, flow):
+    flows = Flows(tmp_path, {})
+    with pytest.raises(ValueError):
+        flows.save("default", flow)
+
+
+def test_plugins_load_after_reload_and_disappear_with_their_file(tmp_path: Path):
+    core = [Step("plan", lambda context: None)]
+    steps = Steps(core, tmp_path)
+    assert steps.get("polish") is None
+    (tmp_path / "polish.py").write_text(PLUGIN, encoding="utf-8")
+    (tmp_path / "broken.py").write_text("raise RuntimeError('boom')\n", encoding="utf-8")
+    steps.reload()
+    assert steps.get("polish").source == "polish.py" and "broken.py" in steps.errors
+    (tmp_path / "polish.py").unlink()
+    steps.reload()
+    assert steps.get("polish") is None and steps.get("plan") is not None
+
+
+def test_a_plugin_cannot_replace_a_core_step(tmp_path: Path):
+    (tmp_path / "plan.py").write_text(PLUGIN.replace('"polish"', '"plan"'), encoding="utf-8")
+    steps = Steps([Step("plan", lambda context: None)], tmp_path)
+    assert steps.get("plan").source == "core" and "plan.py" in steps.errors
+
+
+def test_server_command_registers_bundles_and_one_kernel(tmp_path: Path):
+    engine = Engine(tmp_path / "trtmc-server", tmp_path, 8701, tmp_path / "log")
+    command = engine.command(frozenset({Served("w", tmp_path / "w.bundle"),
+                                        Served("v", tmp_path / "v.bundle", ("libvsa.so", "run", "vsa"))}))
+    assert command[command.index("--port") + 1] == "8701"
+    assert [command[i + 1] for i, part in enumerate(command) if part == "--model"] == [
+        f"v={tmp_path / 'v.bundle'}", f"w={tmp_path / 'w.bundle'}"]
+    assert command[command.index("--byok-library") + 1] == str(tmp_path / "libvsa.so")
+    with pytest.raises(ValueError):
+        engine.command(frozenset({Served("a", tmp_path / "a", ("x", "f", "k")),
+                                  Served("b", tmp_path / "b", ("y", "f", "k"))}))
+
+
+def test_tiers_follow_gpu_memory(tmp_path: Path, monkeypatch):
+    big = catalog.parse_gpu("1, NVIDIA GB300, 262144, 10.3")
+    assert big.compute_capability == "10.3" and catalog.pick_tier(big).name == "a"
+    assert catalog.pick_tier(catalog.parse_gpu("0, RTX PRO 6000, 97887, 12.0")).name == "b"
+    assert catalog.pick_tier(catalog.parse_gpu("0, RTX 4090, 24564, 8.9")).name == "c"  # 23.99 GiB
+    assert catalog.pick_tier(catalog.parse_gpu("0, H100, 81559, 9.0")).name == "b"
+    assert catalog.pick_tier(big, "b").name == "b"
+    with pytest.raises(ValueError):
+        catalog.pick_tier(catalog.parse_gpu("0, small, 16384, 8.6"))
+    # DGX Spark and Jetson Thor report no GPU memory of their own; they use system memory
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal:       127535704 kB\nMemFree:  1 kB\n")
+    assert round(catalog.system_memory_gib(meminfo), 1) == 121.6
+    monkeypatch.setattr(catalog, "system_memory_gib", lambda: 121.6)
+    spark = catalog.parse_gpu("0, NVIDIA GB10, [N/A], 12.1")
+    assert spark.memory_gib == 121.6 and catalog.pick_tier(spark).name == "b"
+    tiers = catalog.describe_tiers()
+    assert [t["name"] for t in tiers] == ["a", "b", "c"]
+    assert not tiers[0]["ready"] and tiers[0]["missing"] == [catalog._H3]
+    assert tiers[1]["ready"] and tiers[2]["ready"]
+
+
+def test_video_submission_waits_while_server_storage_is_full(tmp_path: Path, monkeypatch):
+    import httpx
+
+    from trtmc_short_drama import engine as engine_module
+
+    request = httpx.Request("POST", "http://127.0.0.1:8701/v1/videos")
+    answers = [httpx.Response(429, json={"error": {"message": "full"}}, request=request),
+               httpx.Response(202, json={"id": "v1", "status": "completed"}, request=request)]
+    posts = []
+    monkeypatch.setattr(engine_module.httpx, "post", lambda *a, **k: posts.append(a) or answers[len(posts) - 1])
+    monkeypatch.setattr(engine_module, "STORAGE_RETRY_SECONDS", 0)
+
+    class Stream:
+        def __init__(self, *args, **kwargs):
+            self.response = httpx.Response(200, content=b"mp4", request=request)
+
+        def __enter__(self):
+            return self.response
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(engine_module.httpx, "stream", Stream)
+    reference = tmp_path / "r.png"
+    reference.write_bytes(b"png")
+    engine = Engine(tmp_path / "trtmc-server", tmp_path, 8701, tmp_path / "log")
+    engine.video("v", "p", [reference], tmp_path / "out.mp4", seed=1)
+    assert len(posts) == 2 and (tmp_path / "out.mp4").read_bytes() == b"mp4"
+
+
+def test_bundle_page_cache_is_dropped_file_by_file(tmp_path: Path, monkeypatch):
+    import os
+
+    from trtmc_short_drama import engine as engine_module
+
+    advised = []
+    monkeypatch.setattr(os, "posix_fadvise", lambda fd, offset, length, advice: advised.append(advice),
+                        raising=False)
+    single = tmp_path / "llm.bundle"
+    single.write_bytes(b"x")
+    directory = tmp_path / "h3.bundle"
+    (directory / "plans").mkdir(parents=True)
+    for name in ("manifest.json", "plans/dit.plan"):
+        (directory / name).write_bytes(b"x")
+    engine_module.drop_page_cache([single, directory, tmp_path / "missing.bundle"])
+    assert advised == [os.POSIX_FADV_DONTNEED] * 3
+
+
+def test_whisper_builds_from_a_view_that_forces_the_language(tmp_path: Path, monkeypatch):
+    import json
+
+    import huggingface_hub
+
+    from trtmc_short_drama import cli
+
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "model.safetensors").write_bytes(b"weights")
+    (snapshot / "generation_config.json").write_text(json.dumps(
+        {"lang_to_id": {"<|en|>": 50259, "<|zh|>": 50260}, "forced_decoder_ids": [[1, None], [2, 50360]]}))
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda repo_id: str(snapshot))
+    model = catalog.TIERS["a"].models["asr"]
+    assert model.bundle_name("10.3") == "whisper-zh-sm103.bundle"
+    view = Path(cli.checkpoint_view(model, tmp_path / "data", create=True))
+    assert (view / "model.safetensors").resolve() == (snapshot / "model.safetensors").resolve()
+    forced = json.loads((view / "generation_config.json").read_text())["forced_decoder_ids"]
+    assert forced == [[1, 50260], [2, 50360]]
+    command = cli.build_command(model, tmp_path / "w.bundle", tmp_path, str(view))
+    assert command[3:5] == ["build", str(view)]
+
+
+def test_the_language_model_is_built_only_with_llm_local(tmp_path: Path, monkeypatch, capsys):
+    from trtmc_short_drama import cli
+
+    monkeypatch.setattr(cli.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(catalog, "gpus", lambda: [catalog.parse_gpu("1, NVIDIA GB300, 262144, 10.3")])
+    (tmp_path / "trtmc-server").touch()
+    common = ["up", "--dry-run", "--data", str(tmp_path / "data"), "--runtime-root", str(tmp_path)]
+    assert cli.main(common) == 0
+    printed = capsys.readouterr().out
+    assert "build llm" not in printed and "build video" in printed and "--llm local serves Qwen/Qwen3.6-27B" in printed
+    assert cli.main([*common, "--llm", "local"]) == 0
+    assert "build llm: " in capsys.readouterr().out
+    with pytest.raises(SystemExit, match="needs --llm local"):
+        cli.main([*common, "--bundle", f"llm={tmp_path / 'q.bundle'}"])
+    assert "build vision" not in printed  # the analysis uses Settings' vision model unless --vision local
+    assert cli.main([*common, "--vision", "local"]) == 0
+    built = capsys.readouterr().out
+    assert "build vision: " in built and "--task vision_language_generation --precision fp16" in built
+    with pytest.raises(SystemExit, match="needs --vision local"):
+        cli.main([*common, "--bundle", f"vision={tmp_path / 'v.bundle'}"])
+
+
+def test_a_planned_tier_says_what_is_missing_before_it_starts(tmp_path: Path, monkeypatch):
+    from trtmc_short_drama import cli
+
+    monkeypatch.setattr(cli.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(catalog, "gpus", lambda: [catalog.parse_gpu("1, NVIDIA GB300, 262144, 10.3")])
+    (tmp_path / "trtmc-server").touch()
+    start = ["up", "--data", str(tmp_path / "data"), "--runtime-root", str(tmp_path)]
+    with pytest.raises(SystemExit, match="tier A is planned; TRTMC main still needs: MiniMax-H3 reference-to-video") as stopped:
+        cli.main(start)
+    assert "--allow-planned" in str(stopped.value)
+    assert cli.main([*start, "--dry-run"]) == 0
+
+
+def test_tier_b_builds_a_vertical_editor_and_wan_image_to_video(tmp_path: Path, monkeypatch, capsys):
+    from trtmc_short_drama import cli
+
+    monkeypatch.setattr(cli.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(catalog, "gpus", lambda: [catalog.parse_gpu("0, RTX PRO 6000, 97887, 12.0")])
+    (tmp_path / "trtmc-server").touch()
+    assert cli.main(["up", "--dry-run", "--data", str(tmp_path / "data"), "--runtime-root", str(tmp_path)]) == 0
+    built = {line.split(":")[0]: line for line in capsys.readouterr().out.splitlines() if line.startswith("build ")}
+    assert set(built) == {"build image", "build edit", "build video", "build asr"}
+    assert "Qwen/Qwen-Image-Edit-2511 -o" in built["build edit"] and \
+        "--task image_edit --precision bf16 --image-height 1280 --image-width 704" in built["build edit"]
+    assert "Qwen/Qwen-Image -o" in built["build image"] and "--precision bf16" in built["build image"]
+    assert "Wan-AI/Wan2.2-TI2V-5B -o" in built["build video"] and \
+        "--task initial_image_text_to_video --precision bf16" in built["build video"]
+    assert catalog.TIERS["b"].models["video"].first_frame and not catalog.TIERS["a"].models["video"].first_frame
+
+
+def test_tier_c_builds_z_image_turbo_and_wan_without_an_edit_model(tmp_path: Path, monkeypatch, capsys):
+    from trtmc_short_drama import cli
+
+    monkeypatch.setattr(cli.shutil, "which", lambda tool: f"/usr/bin/{tool}")
+    monkeypatch.setattr(catalog, "gpus", lambda: [catalog.parse_gpu("0, RTX 4090, 24564, 8.9")])
+    (tmp_path / "trtmc-server").touch()
+    assert cli.main(["up", "--dry-run", "--data", str(tmp_path / "data"), "--runtime-root", str(tmp_path)]) == 0
+    built = {line.split(":")[0]: line for line in capsys.readouterr().out.splitlines() if line.startswith("build ")}
+    assert set(built) == {"build image", "build video", "build asr"}  # no edit model fits beside them
+    assert "Tongyi-MAI/Z-Image-Turbo -o" in built["build image"]
+    assert "--precision bf16 --image-height 1280 --image-width 720" in built["build image"]
+    assert catalog.TIERS["c"].models["image"].picture_size == "720x1280"
+    assert catalog.TIERS["b"].models["image"].picture_size == "928x1664"
+
+
+def test_h3_is_built_through_the_family_command(tmp_path: Path):
+    from trtmc_short_drama import cli
+
+    command = cli.build_command(catalog.TIERS["a"].models["video"], tmp_path / "h3.bundle", tmp_path, "unused")
+    assert command[1:5] == ["-m", "tensorrt_model_connect", "minimax_h3", "build-omniref"]
+    assert "--two-window" in command  # the app sends a continuation prompt with every shot
+    assert command[command.index("--kernel-library") + 1] == str(tmp_path / "libtrtmc_minimax_h3_omniref_vsa.so")
+    assert command[command.index("--bridge") + 1] == str(tmp_path / "libtrtmc_byok_tvm_ffi.so")
+
+
+def test_a_server_that_exits_while_loading_names_the_cause(tmp_path: Path):
+    server = tmp_path / "trtmc-server"
+    server.write_text("#!/bin/sh\necho 'trtmc-server: error: optional serving dependencies are unavailable'\nexit 2\n",
+                      encoding="utf-8")
+    server.chmod(0o755)
+    engine = Engine(server, tmp_path, 8701, tmp_path / "logs" / "server.log")
+    with pytest.raises(RuntimeError, match="exited while loading: trtmc-server: error: optional serving"):
+        engine.ensure([Served("v", tmp_path / "v.bundle")])
+    status = engine.status()
+    assert status["loaded"] == [] and status["loading"] == [] and "optional serving" in status["failure"]
+    assert engine.log_tail(1) == ["trtmc-server: error: optional serving dependencies are unavailable"]
