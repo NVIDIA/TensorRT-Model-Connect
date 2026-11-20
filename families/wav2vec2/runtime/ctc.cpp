@@ -105,6 +105,13 @@ CtcDecoded greedy_decode(const float* logits, std::int64_t frames, std::int64_t 
         const auto& token = vocabulary.tokens[static_cast<std::size_t>(token_id)];
         decoded.text += (token == vocabulary.word_delimiter_token) ? std::string(" ") : token;
     }
+    const auto first = decoded.text.find_first_not_of(' ');
+    if (first == std::string::npos) {
+        decoded.text.clear();
+    } else {
+        decoded.text.erase(decoded.text.find_last_not_of(' ') + 1);
+        decoded.text.erase(0, first);
+    }
     return decoded;
 }
 

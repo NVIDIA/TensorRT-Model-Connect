@@ -113,6 +113,12 @@ void test_greedy_decode() {
     check(decode({2, 0, 2}) == "AA", "a blank between repeats keeps both letters");
     check(decode({2, 2, 0, 3}) == "AB", "collapse happens before the blank is dropped");
     check(decode({2, 1, 3}) == "A B", "the word delimiter becomes a space");
+    check(decode({1, 2, 3}) == "AB", "a leading word delimiter adds no boundary space");
+    check(decode({2, 3, 1}) == "AB", "a trailing word delimiter adds no boundary space");
+    check(decode({1, 0, 1}) == "", "blank-separated word delimiters produce empty text");
+    check(decode({1, 2, 1, 0, 1, 3, 1}) == "A  B",
+          "trimming boundaries preserves blank-separated internal spaces");
+    check(decode({1, 2, 0, 2, 1}) == "AA", "boundary trimming preserves doubled letters");
 
     // The control: if the blank were dropped before the collapse, 'A<pad>A'
     // would become a single 'A'. The assertion above is what excludes that.
@@ -122,11 +128,17 @@ void test_greedy_decode() {
         trtmc::wav2vec2::greedy_decode(rows({2, 0, 3}, 4).data(), 3, 4, vocabulary());
     check(decoded.token_ids.size() == 2, "token ids skip the blank");
     check(decoded.token_ids[0] == 2 && decoded.token_ids[1] == 3, "token ids keep their order");
+
+    const auto boundaries =
+        trtmc::wav2vec2::greedy_decode(rows({1, 2, 0, 2, 1}, 4).data(), 5, 4, vocabulary());
+    check(boundaries.token_ids == std::vector<std::int32_t>{1, 2, 2, 1},
+          "text trimming retains boundary delimiters in collapsed token ids");
 }
 
 } // namespace
 
 int test_pipeline_language();
+int test_pipeline_boundaries();
 
 int main() {
     test_normalize();
@@ -134,6 +146,7 @@ int main() {
     test_feature_frames();
     test_greedy_decode();
     failures += test_pipeline_language();
+    failures += test_pipeline_boundaries();
     if (failures != 0) {
         std::printf("wav2vec2 ctc: %d check(s) failed\n", failures);
         return EXIT_FAILURE;
