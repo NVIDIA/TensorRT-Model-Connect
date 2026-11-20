@@ -249,6 +249,10 @@ def int4_plugin_version(request, config: dict, target: dict, weight_format: str,
         if version is not None:
             raise UnavailableEdgeConfiguration("INT4 plugin selection requires AWQ weights")
         return None
+    if modern and config.get("model_type") == "qwen3":
+        raise UnavailableEdgeConfiguration(
+            "InternVL Edge 0.12 Qwen3-backed decoders require ONNX, but AWQ is mapped only to the direct builder"
+        )
     version = 2 if version is None else version
     if version == 1 and not modern and not (
         config.get("model_type") == "qwen2"

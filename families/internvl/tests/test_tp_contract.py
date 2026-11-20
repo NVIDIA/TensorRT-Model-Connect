@@ -489,6 +489,14 @@ def test_declared_build_matches_legacy_request(tmp_path, monkeypatch, options):
         int4_plugin_version(selected, config, {"sm": 80}, "fp16")
     assert int4_plugin_version(replace(selected, int4_gemm_plugin_version=None),
                                config, {"sm": 120}, "int4_awq") == 2
+    # In 0.12 the Qwen3-backed decoder needs ONNX for Q/K norm. Its packed
+    # runtime contract is direct-only, independent of the chosen INT4 plugin.
+    automatic = replace(selected, int4_gemm_plugin_version=None)
+    assert int4_plugin_version(automatic, config, {"sm": 120}, "int4_awq", modern=True) == 2
+    for request in (automatic, selected):
+        with pytest.raises(UnavailableEdgeConfiguration, match="ONNX.*AWQ"):
+            int4_plugin_version(request, {"model_type": "qwen3"}, {"sm": 80},
+                                "int4_awq", modern=True)
 
 
 def test_declared_help_is_offline_and_dependency_free():
