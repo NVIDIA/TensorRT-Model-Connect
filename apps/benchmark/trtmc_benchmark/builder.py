@@ -344,6 +344,20 @@ def _manifest_checkpoint(model: ModelDescriptor) -> dict[str, str] | None:
     return {"hf_id": model.hf_id, "revision": model.hf_revision}
 
 
+def _builder_files(root: Path) -> list[Path]:
+    """Every file a build may read under ``root``: Python sources and the data next to them
+    (``cli.json``, FP8 / NVFP4 scale tables, ...). Tests, bytecode and documentation are left out."""
+    files = []
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if not path.is_file() or "tests" in relative.parts or "__pycache__" in relative.parts:
+            continue
+        if path.suffix in {".md", ".pyc"}:
+            continue
+        files.append(path)
+    return files
+
+
 def _source_digest(model: ModelDescriptor) -> str:
     specification = importlib.util.find_spec(f"families.{model.family}")
     if specification is None or not specification.origin:
@@ -351,16 +365,9 @@ def _source_digest(model: ModelDescriptor) -> str:
     roots = (Path(tensorrt_model_connect.__file__).parent, Path(specification.origin).parent)
     digest = hashlib.sha256()
     for index, root in enumerate(roots):
-        for path in sorted(root.rglob("*.py")):
-            relative = path.relative_to(root)
-            if "tests" in relative.parts or "__pycache__" in relative.parts:
-                continue
-            digest.update(f"{index}/{relative.as_posix()}\0".encode())
+        for path in _builder_files(root):
+            digest.update(f"{index}/{path.relative_to(root).as_posix()}\0".encode())
             digest.update(path.read_bytes())
-    declaration = roots[1] / "cli.json"
-    if declaration.is_file():
-        digest.update(b"family-cli\0")
-        digest.update(declaration.read_bytes())
     return digest.hexdigest()
 
 

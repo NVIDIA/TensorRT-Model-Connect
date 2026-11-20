@@ -146,6 +146,14 @@
           "action": "append",
           "default": [],
           "help": "Local companion checkpoint as ROLE=LOCAL_DIR"
+        },
+        {
+          "name": "edge_builder_python",
+          "flags": [
+            "--edge-builder-python"
+          ],
+          "type": "path",
+          "help": "Absolute Python interpreter for the optional Edge builder"
         }
       ]
     },

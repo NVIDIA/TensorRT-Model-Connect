@@ -82,7 +82,10 @@ benchmarks:
                    gate: {min_cosine: 0.999, max_relative_l2: 0.02},
                    # A native model that cannot run the candidate's precision (fp16) runs at fp32: TRTMC's half-
                    # precision error is then not shared by the reference, so the tolerance doubles.
-                   mismatched_precision_gate: {min_cosine: 0.998, max_relative_l2: 0.04}}
+                   mismatched_precision_gate: {min_cosine: 0.998, max_relative_l2: 0.04},
+                   # An FP8 candidate carries its quantization error: the families' FP8 E2E cosine (0.99), and the
+                   # relative L2 that cosine allows at equal norms (sqrt(2 * 0.01) ~ 0.14).
+                   quantized_gate: {min_cosine: 0.99, max_relative_l2: 0.15}}
   # SciFact reranking of fixed BM25 top-20 candidates (nDCG@10). Each document keeps its head so that the pair, as
   # the bundle's reranker forms it (`pair_format`, the eagle_vlm runtime's), fits the bundle; both sides get it.
   rerank: {suite: scifact-rerank, suite_definition: scifact-rerank-bm25-300, metric: rerank_ndcg, gate: {margin: 1.0},
@@ -288,7 +291,7 @@ tasks:
   # content diverges across precisions. Acc is the gold-referenced checks below (GenEval, VBench CLIP-T);
   # the pixel parity under latent replay is reported only (`informational`): generated media drift
   # between TRTMC and the native model at any precision.
-  image_generation:
+  image_generation: &generate_image
     reference: {precision: bf16}
     # Families whose TRTMC runtime takes caller initial latents render with the same initial noise on
     # both sides (latent replay), which makes them comparable pixel by pixel: how much further TRTMC is
@@ -300,7 +303,7 @@ tasks:
                      fallback_min: {psnr_db: 19.0, ssim: 0.8}, min_pass_rate: 0.9},
                     # Text-to-image with caller latents when supported: GenEval-style (all 553 prompts over its six
                     # tags, OWLv2 detections and CLIP colors, exact counts), paired right/wrong per prompt, margin 5 points.
-                    {check: geneval, suite: geneval-full, only_families: [flux, pixart, qwen_image, z_image, stable_diffusion],
+                    {check: geneval, suite: geneval-full, only_families: [flux, pixart, qwen_image, z_image, stable_diffusion, chroma],
                      latent_replay_families: [flux, pixart, qwen_image, z_image, stable_diffusion],
                      detector: google/owlv2-base-patch16-ensemble,
                      detector_revision: cfd3195ba4ea9592eec887ded089f4c08eff231d,
@@ -317,6 +320,7 @@ tasks:
                      detector_threshold: 0.2, gate: {margin: 1.0}}]
     performance: &media_policy {output_grader: parity_image, output_grader_params: {min_psnr: 0, min_ssim: -1},
                      measurement: {settle_s: 0, warmup: 1, requests: 3, runs: 3}}
+  text_to_image: *generate_image  # image_generation under its Task SDK name
   image_edit:  # edit inputs are model-specific: the catalog testcase
     reference: {precision: bf16}
     # Edits of ten Imagenette images with the same initial noise on both sides (latent replay),

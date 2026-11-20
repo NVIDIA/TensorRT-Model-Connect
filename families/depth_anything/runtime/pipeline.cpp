@@ -24,20 +24,20 @@ const Tensor& require_output(const std::unordered_map<std::string, Tensor>& outp
 }
 
 // Nearest-neighbour resample of the engine's square depth map back onto the
-// caller's image. The family owns this because it resized the input itself.
+// caller's image, with the reference's convention (PyTorch's "nearest"): output
+// position i takes source floor(i * source / target). The family owns this
+// because it resized the input itself.
 std::vector<float> resample(const float* source, int32_t source_h, int32_t source_w,
                             int32_t target_h, int32_t target_w) {
+    const float scale_y = static_cast<float>(source_h) / static_cast<float>(target_h);
+    const float scale_x = static_cast<float>(source_w) / static_cast<float>(target_w);
     std::vector<float> output(static_cast<std::size_t>(target_h) * target_w);
     for (int32_t y = 0; y < target_h; ++y) {
-        const int32_t src_y =
-            std::min(source_h - 1, static_cast<int32_t>((static_cast<float>(y) + 0.5F) *
-                                                        static_cast<float>(source_h) /
-                                                        static_cast<float>(target_h)));
+        const int32_t src_y = std::min(
+            source_h - 1, static_cast<int32_t>(std::floor(static_cast<float>(y) * scale_y)));
         for (int32_t x = 0; x < target_w; ++x) {
-            const int32_t src_x =
-                std::min(source_w - 1, static_cast<int32_t>((static_cast<float>(x) + 0.5F) *
-                                                            static_cast<float>(source_w) /
-                                                            static_cast<float>(target_w)));
+            const int32_t src_x = std::min(
+                source_w - 1, static_cast<int32_t>(std::floor(static_cast<float>(x) * scale_x)));
             output[static_cast<std::size_t>(y) * target_w + x] =
                 source[static_cast<std::size_t>(src_y) * source_w + src_x];
         }

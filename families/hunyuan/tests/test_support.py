@@ -117,16 +117,32 @@ def test_shared_mtp_request_is_rejected_by_family(request_and_route):
         model.build(request, object())
 
 
-def test_compatible_wheel_selected_and_source_python_is_fallback(monkeypatch):
+@pytest.mark.parametrize(("release", "entrypoint"), [
+    ("0.11.0", "experimental.builder.cli"),
+    ("0.12.0", "tensorrt_edgellm.builder.cli"),
+])
+def test_compatible_wheel_selected_and_source_python_is_fallback(monkeypatch, release, entrypoint):
     def probe(*args, **kwargs):
-        assert "-I" in args[0]
-        return SimpleNamespace(stdout=json.dumps(["0.11.0", "11.1.0.106"]))
+        command = args[0]
+        assert "-I" in command
+        assert f"from {entrypoint} import main" in command[-1]
+        return SimpleNamespace(stdout=json.dumps([release, "11.1.0.106"]))
+
     monkeypatch.setattr(builder.subprocess, "run", probe)
-    package = {"python": "/sdk/private/python"}
+    package = {"version": release}
+    if release == "0.11.0":
+        package["python"] = "/sdk/private/python"
     target = {"tensorrt_version": "11.1.0.106"}
     assert builder.builder_python(package, target) == builder.sys.executable
     target["tensorrt_version"] = "11.0.0.0"
-    assert builder.builder_python(package, target) == package["python"]
+    if release == "0.11.0":
+        assert builder.builder_python(package, target) == package["python"]
+    else:
+        with pytest.raises(ValueError, match="matching the selected Edge SDK"):
+            builder.builder_python(package, target)
+    # An explicitly chosen interpreter must never silently select another one.
+    with pytest.raises(ValueError, match="matching the selected Edge SDK"):
+        builder.builder_python(package, target, builder.sys.executable)
 
 
 def test_reference_interpreter_is_explicit_and_data_only(tmp_path, monkeypatch):

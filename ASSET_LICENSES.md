@@ -27,17 +27,22 @@ The following paths contain byte-identical copies of an original photograph
 provided by the project maintainer who took the photograph and authorized its
 inclusion and redistribution in this repository under the Apache License 2.0:
 
+- `families/idefics3/tests/data/test_img.jpeg`
 - `families/detr/tests/data/test_img.jpeg`
 - `families/dinov3/tests/data/test_img.jpeg`
+- `families/gemma3n/tests/data/test_img.jpeg`
 - `families/internvl/tests/data/test_img.jpeg`
 - `families/lance/tests/data/test_img.jpeg`
 - `families/locateanything/tests/data/test_img.jpeg`
 - `families/moge/tests/data/test_img.jpeg`
 - `families/molmo2/tests/data/test_img.jpeg`
+- `families/oneformer/tests/data/test_img.jpeg`
+- `families/paligemma/tests/data/test_img.jpeg`
 - `families/phi4_multimodal/tests/data/test_img.jpeg`
 - `families/qwen_image/tests/data/test_img.jpeg`
 - `families/qwen_vl/tests/data/test_img.jpeg`
 - `families/qwen3_vl_moe/tests/data/test_img.jpeg`
+- `families/rt_detr/tests/data/test_img.jpeg`
 - `families/sam/tests/data/test_img.jpeg`
 - `families/sam3/tests/data/test_img.jpeg`
 - `families/segformer/tests/data/test_img.jpeg`
@@ -51,6 +56,10 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 - `families/timm_resnet/tests/data/test_img.jpeg`
 - `families/timm_vgg/tests/data/test_img.jpeg`
 - `families/timm_vit/tests/data/test_img.jpeg`
+
+`families/gemma3n/tests/data/test_img_car.jpeg` is a byte-identical copy of
+`families/timm_resnet/tests/data/test_img_car.jpeg`, a crop of the same
+photograph, and is distributed under the same terms.
 
 `families/timm_resnet/tests/data/test_img_car.jpeg` is a crop of the same
 photograph (columns 260 to 639, rows 60 to 381, saved again as JPEG) and is
@@ -171,6 +180,8 @@ golden data.
 `families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav` and
 `families/higgs_audio_v2_tokenizer/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 are PCM WAV versions of utterance `6930-75918-0003` from the LibriSpeech
+`families/wav2vec2_bert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+are PCM WAV conversions of utterance `6930-75918-0003` from the LibriSpeech
 `test-clean` split, which OpenSLR distributes as FLAC in SLR12 under the
 Creative Commons Attribution 4.0
 International license. LibriSpeech was prepared by Vassil Panayotov with the
@@ -182,6 +193,11 @@ audiobooks.
 
 A byte-identical copy is stored at
 `families/qwen3_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`.
+
+A byte-identical copy is stored at
+`families/wavlm/tests/data/librispeech-test-clean-6930-75918-0003.wav`, next to
+`families/wavlm/tests/data/librispeech-test-clean-6930-75918-0003.txt`, the
+utterance's transcript from the same LibriSpeech release.
 
 ## SANA world-model fixtures
 

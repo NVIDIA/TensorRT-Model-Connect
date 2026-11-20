@@ -47,6 +47,7 @@ module.exports = {
       link: {type: 'doc', id: 'models-recipes/overview'},
       items: [
         'models-recipes/cosmos3-edge-llm',
+        'models-recipes/hunyuan-edge-llm',
         'models-recipes/nemotron-omni-edge-llm',
         {
           type: 'category',

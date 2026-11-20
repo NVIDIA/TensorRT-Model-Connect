@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+COPY requirements.txt /opt/trtmc-ci/family-requirements.txt
+RUN python -m pip install --disable-pip-version-check --no-cache-dir \
+        --no-build-isolation -r /opt/trtmc-ci/family-requirements.txt \
+    && python -m pip check
+
+# The upstream Uni3D-B checkpoint, pinned to the manifest revision and checked by SHA-256.
+RUN python -c 'from hashlib import sha256; from pathlib import Path; from urllib.request import urlopen; data = urlopen("https://huggingface.co/BAAI/Uni3D/resolve/3d8233b76aa350d72f6213ecd2123c2026b42355/modelzoo/uni3d-b/model.pt", timeout=600).read(); assert sha256(data).hexdigest() == "bb533f918957e939f0e500376bef5166437883443da10fd9adccde0d1b512fba"; Path("/opt/trtmc-ci/uni3d").mkdir(parents=True); Path("/opt/trtmc-ci/uni3d/model.pt").write_bytes(data)'
+ENV TRTMC_UNI3D_MODEL_DIR=/opt/trtmc-ci/uni3d

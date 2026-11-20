@@ -246,6 +246,25 @@ struct DocumentRelevanceStorage final : ResultStorage {
     trtmc_document_relevance_view_v1 view{};
 };
 
+struct SpectrogramFrameFeaturesStorage final : ResultStorage {
+    explicit SpectrogramFrameFeaturesStorage(internal::SpectrogramFrameFeaturesResult result)
+        : value(std::move(result)) {
+        result_require(value.source_frame_count > 0, "spectral features have no source frames");
+        result_require(value.input_frame_indices.size() == value.features.rows,
+                       "spectral feature rows lack input frame indices");
+        for (const auto index : value.input_frame_indices)
+            result_require(index < value.source_frame_count,
+                           "spectral feature index exceeds source frames");
+        for (const float feature : value.features.values)
+            result_require(std::isfinite(feature), "spectral features contain nonfinite values");
+        view = {matrix_view(value.features),
+                {value.input_frame_indices.data(), value.input_frame_indices.size()},
+                value.source_frame_count};
+    }
+    internal::SpectrogramFrameFeaturesResult value;
+    trtmc_spectrogram_frame_features_view_v1 view{};
+};
+
 template <class Storage, class View>
 trtmc_status TRTMC_CALL result_view(const trtmc_result* result, View* out,
                                     trtmc_error** error) noexcept {
@@ -393,6 +412,34 @@ convert(const trtmc_image_to_token_and_pooled_features_request_v1& input) {
 internal::ImageToClassScoresRequest convert(const trtmc_image_to_class_scores_request_v1& input) {
     return {image_input(input.image)};
 }
+
+trtmc_status TRTMC_CALL spectral_features_run(
+    trtmc_model* model, const trtmc_spectrogram_to_frame_features_request_v1* input,
+    const trtmc_config_view_v1* config, trtmc_result** output, trtmc_error** error) noexcept {
+    if (output)
+        *output = nullptr;
+    return guarded(error, [&] {
+        require(input && output, "spectral feature request and output are required");
+        const internal::SpectrogramToFrameFeaturesRequest request{matrix_input(input->spectrogram)};
+        require(request.spectrogram.rows > 0 && request.spectrogram.columns > 0,
+                "spectral feature input must be nonempty");
+        const ConvertedConfig options(config);
+        std::lock_guard<std::mutex> lock(model_mutex(model));
+        auto& family = require_interface<internal::ISpectrogramToFrameFeatures>(
+            model, internal::ISpectrogramToFrameFeatures::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::ISpectrogramToFrameFeatures>(),
+                             options.view());
+        auto result = family.run(request, options.view());
+        result_require(result.source_frame_count == request.spectrogram.rows,
+                       "family changed the spectral source frame count");
+        *output = make_result<SpectrogramFrameFeaturesStorage>(std::move(result));
+    });
+}
+const trtmc_spectrogram_to_frame_features_api_v1 spectral_features_api{
+    {1, 0, sizeof(spectral_features_api)},
+    spectral_features_run,
+    result_view<SpectrogramFrameFeaturesStorage, trtmc_spectrogram_frame_features_view_v1>};
 
 template <class Interface, class Request, class Storage>
 trtmc_status TRTMC_CALL run(trtmc_model* model, const Request* input,
@@ -847,6 +894,7 @@ const TaskBinding bindings[] = {
     {internal::IImageToTokenAndPooledFeatures::kTask, 1, 0,
      &image_to_token_and_pooled_features_api.header},
     {internal::ITextQueryDocumentsToRelevance::kTask, 1, 0, &query_documents_api.header},
+    {internal::ISpectrogramToFrameFeatures::kTask, 1, 0, &spectral_features_api.header},
     {internal::ITextToTokenFeatures::kTask, 1, 0, &text_to_token_features_api.header},
     {internal::ITextPairToTokenFeatures::kTask, 1, 0, &text_pair_to_token_features_api.header},
     {internal::ITextToPooledFeatures::kTask, 1, 0, &text_to_pooled_features_api.header},
