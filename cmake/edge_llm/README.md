@@ -160,3 +160,7 @@ and `edgellm-onnx-audio-build`. The package manifest exposes their
 `visual_builder` and `audio_builder` aliases for existing family consumers.
 Families decide which checkpoint towers to build; provisioning adds no model
 selection or runtime dispatch. The original Edge source pin is unchanged.
+
+For a native GB300 build, specify the numeric GPU architecture `103`. The
+0.12 provider uses the upstream `103a` compiler target for its SDK kernels;
+the installed receipt and CuTe asset tag still identify SM103.
