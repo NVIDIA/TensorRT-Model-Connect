@@ -8,8 +8,10 @@ Tensor names and shapes must stay compatible with the C++ bundle runtime.
 
 from __future__ import annotations
 
+import ml_dtypes
 import numpy as np
 import tensorrt as trt
+from . import weight_stripping
 from .native_kv_attention_builder import (
     NativeKvMasks,
     add_explicit_masked_grouped_query_attention,
@@ -31,14 +33,73 @@ def layer_tensor_name(stem: str, layer: int) -> str:
     return f"{stem}_{layer}"
 
 
+def _placeholder_weights(dtype: np.dtype, count: int) -> trt.Weights:
+    """A null (data-less) weight descriptor of the given type and count."""
+    trt_dtype = {
+        np.dtype(np.float32): trt.float32,
+        np.dtype(np.float16): trt.float16,
+        np.dtype(ml_dtypes.bfloat16): trt.bfloat16,
+    }.get(np.dtype(dtype))
+    if trt_dtype is None:
+        raise ValueError(f"weight stripping does not support dtype {dtype}")
+    return trt.Weights(trt_dtype, 0, count)
+
+
 def add_constant(
     network: trt.INetworkDefinition,
     shape: tuple[int, ...],
     values: np.ndarray,
     dtype: np.dtype = np.float32,
+    name: str | None = None,
 ) -> trt.ITensor:
-    """Add a constant tensor in the given *dtype* (default float32)."""
-    weights = trt.Weights(np.ascontiguousarray(values, dtype=dtype))
+    """Add a constant tensor in the given *dtype* (default float32).
+
+    When a strip session is active and *name* is given, a GEMM-scale constant
+    is added as a null placeholder and its values are recorded for refit
+    instead of being baked into the plan. ``name`` becomes the TensorRT weight
+    name, so it is also the refit key.
+    """
+    # Decide from geometry alone: a stripped weight may be a TensorRef that has
+    # not been read off disk, and materializing it here would defeat the point.
+    # count/nbytes come from the declared shape and target dtype, which is
+    # exactly what would have been baked.
+    count = int(np.prod(shape)) if shape else 1
+    session = weight_stripping.active()
+    if session is not None and session.should_strip(
+            name, count * np.dtype(dtype).itemsize):
+        # What gets recorded must be exactly what would have been baked, so no
+        # conversion may still be pending for this weight.
+        if np.dtype(values.dtype) != np.dtype(dtype):
+            raise RuntimeError(
+                f"weight {name!r} is not already in final form "
+                f"(dtype={values.dtype}, want {np.dtype(dtype)}): stripping "
+                f"would record different bytes than a baked build would use")
+        if isinstance(values, np.ndarray) and not values.flags["C_CONTIGUOUS"]:
+            raise RuntimeError(
+                f"weight {name!r} is not C-contiguous: stripping would record "
+                f"different bytes than a baked build would use")
+        layer = network.add_constant(shape, _placeholder_weights(dtype, count))
+        # setWeightsName needs the layer's canonical descriptor, not the
+        # Weights object passed in (that one "is not used in the network").
+        if not network.set_weights_name(layer.weights, name):
+            raise RuntimeError(f"set_weights_name failed for weight {name!r}")
+        session.record(name, values)
+        return layer.get_output(0)
+    # Not stripped, so the values are needed: a TensorRef reads from disk here.
+    contiguous = np.ascontiguousarray(values, dtype=dtype)
+    if contiguous.dtype == np.dtype(ml_dtypes.bfloat16):
+        # TensorRT's Python bindings cannot implicitly convert an ml_dtypes
+        # bfloat16 array (it reads as an opaque V16 void dtype), so describe
+        # the buffer explicitly. trt.Weights does not copy, and the array must
+        # outlive the build -- assert that it is the caller's own buffer (held
+        # by the WeightDict) rather than a temporary made by the conversion.
+        if contiguous is not values:
+            raise RuntimeError(
+                "bfloat16 constant would reference a temporary buffer; pass an "
+                "already-contiguous bfloat16 array")
+        weights = trt.Weights(trt.bfloat16, contiguous.ctypes.data, contiguous.size)
+    else:
+        weights = trt.Weights(contiguous)
     layer = network.add_constant(shape, weights)
     return layer.get_output(0)
 
@@ -50,22 +111,43 @@ def add_matmul_rhs_constant(
     rhs_width: int,
     rhs_weights: np.ndarray,
     dtype: np.dtype = np.float32,
+    name: str | None = None,
+    hf_layout: bool = False,
 ) -> trt.ITensor:
-    """Matrix multiply: lhs @ rhs_constant.  rhs is [lhs_width, rhs_width]."""
+    """Matrix multiply: lhs @ rhs_constant.  rhs is [lhs_width, rhs_width].
+
+    With *hf_layout* the constant is declared in the checkpoint's own
+    [out, in] layout and TensorRT is asked to transpose it in the matmul
+    instead. TensorRT folds that into kernel selection rather than
+    materializing a transposed copy, so the host-side transpose -- and the
+    array copy it requires -- can be skipped entirely. The refit key then
+    expects checkpoint-layout bytes.
+    """
     rank = len(tuple(lhs.shape))
-    rhs_shape = (lhs_width, rhs_width) if rank <= 2 else (1,) * (rank - 2) + (lhs_width, rhs_width)
+    if hf_layout:
+        rhs_shape = (rhs_width, lhs_width) if rank <= 2 \
+            else (1,) * (rank - 2) + (rhs_width, lhs_width)
+        rhs_op = trt.MatrixOperation.TRANSPOSE
+    else:
+        rhs_shape = (lhs_width, rhs_width) if rank <= 2 \
+            else (1,) * (rank - 2) + (lhs_width, rhs_width)
+        rhs_op = trt.MatrixOperation.NONE
     rhs = add_constant(
         network,
         rhs_shape,
-        np.asarray(rhs_weights).reshape(rhs_shape),
+        # A TensorRef already carries the declared shape, and reshaping it
+        # through NumPy would read the whole tensor off disk.
+        rhs_weights if tuple(getattr(rhs_weights, "shape", ())) == tuple(rhs_shape)
+        else np.asarray(rhs_weights).reshape(rhs_shape),
         dtype=dtype,
+        name=name,
     )
     rhs = _cast_back_to_trt_dtype(network, rhs, lhs.dtype)
     mm = network.add_matrix_multiply(
         lhs,
         trt.MatrixOperation.NONE,
         rhs,
-        trt.MatrixOperation.NONE,
+        rhs_op,
     )
     return _cast_back_to_trt_dtype(network, mm.get_output(0), lhs.dtype)
 
