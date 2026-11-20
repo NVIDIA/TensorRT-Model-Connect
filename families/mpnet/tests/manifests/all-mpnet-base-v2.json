@@ -12,6 +12,12 @@
       "premerge": true,
       "reference_precision": "fp32",
       "prompt": "This is an example sentence for embedding."
+    },
+    {
+      "name": "all-mpnet-base-v2-unicode-clean-text",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "Hello​world café\u0001"
     }
   ],
   "tensor_parallel_size": 1,

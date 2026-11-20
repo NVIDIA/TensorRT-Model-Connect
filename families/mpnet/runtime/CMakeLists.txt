@@ -37,6 +37,16 @@ install(TARGETS trtmc_model_mpnet
 )
 
 if(TRTMC_BUILD_TESTS)
+  add_executable(test_mpnet_tokenizer
+    ${PROJECT_SOURCE_DIR}/families/mpnet/tests/cpp/test_tokenizer.cpp
+    wordpiece_tokenizer.cpp
+  )
+  target_include_directories(test_mpnet_tokenizer PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(test_mpnet_tokenizer PRIVATE nlohmann_json::nlohmann_json)
+  target_compile_options(test_mpnet_tokenizer PRIVATE -Wall -Wextra -Wpedantic -Werror)
+  add_test(NAME mpnet_tokenizer COMMAND test_mpnet_tokenizer)
+  set_tests_properties(mpnet_tokenizer PROPERTIES LABELS "cpu")
+
   add_executable(test_mpnet_task_contract
     ${PROJECT_SOURCE_DIR}/families/mpnet/tests/cpp/test_task_contract.cpp
   )

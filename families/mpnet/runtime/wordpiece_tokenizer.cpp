@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include "families/mpnet/runtime/accent_data.h"
+#include "families/mpnet/runtime/lowercase_data.h"
+#include "families/mpnet/runtime/punctuation_data.h"
 #include "families/mpnet/runtime/tokenizer.h"
 
 #include <algorithm>
@@ -85,16 +88,28 @@ inline bool in_ranges(char32_t cp, const UnicodeRange* ranges, size_t count) {
     return false;
 }
 
+// Note (Jiaxin Deng): Clean format and private-use characters before WordPiece splits the text.
+constexpr UnicodeRange kOtherControlRanges[] = {
+    {0x00AD, 0x00AD},   {0x0600, 0x0605},   {0x061C, 0x061C},   {0x06DD, 0x06DD},
+    {0x070F, 0x070F},   {0x180E, 0x180E},   {0x200B, 0x200F},   {0x202A, 0x202E},
+    {0x2060, 0x2064},   {0x2066, 0x206F},   {0xE000, 0xF8FF},   {0xFEFF, 0xFEFF},
+    {0xFFF9, 0xFFFB},   {0x110BD, 0x110BD}, {0x1BCA0, 0x1BCA3}, {0x1D173, 0x1D17A},
+    {0xE0001, 0xE0001}, {0xE0020, 0xE007F}, {0xF0000, 0xFFFFD}, {0x100000, 0x10FFFD},
+};
+
 inline bool is_control_char(char32_t cp) {
     if (cp == '\t' || cp == '\n' || cp == '\r')
         return false;
-    return (cp <= 0x1F) || (cp >= 0x7F && cp <= 0x9F);
+    if (cp < 0xA0)
+        return cp <= 0x1F || cp >= 0x7F;
+    return in_ranges(cp, kOtherControlRanges,
+                     sizeof(kOtherControlRanges) / sizeof(kOtherControlRanges[0]));
 }
 
 constexpr UnicodeRange kWhitespaceRanges[] = {
     {' ', ' '},       {'\t', '\r'}, // space, tab, LF, VT, FF, CR
-    {0x00A0, 0x00A0}, {0x1680, 0x1680}, {0x2000, 0x200A}, {0x2028, 0x2029},
-    {0x202F, 0x202F}, {0x205F, 0x205F}, {0x3000, 0x3000},
+    {0x0085, 0x0085}, {0x00A0, 0x00A0}, {0x1680, 0x1680}, {0x2000, 0x200A},
+    {0x2028, 0x2029}, {0x202F, 0x202F}, {0x205F, 0x205F}, {0x3000, 0x3000},
 };
 
 inline bool is_whitespace(char32_t cp) {
@@ -102,19 +117,15 @@ inline bool is_whitespace(char32_t cp) {
                      sizeof(kWhitespaceRanges) / sizeof(kWhitespaceRanges[0]));
 }
 
-constexpr UnicodeRange kPunctuationRanges[] = {
-    {33, 47},         {58, 64},         {91, 96},         {123, 126}, // ASCII punctuation
-    {0x2000, 0x206F},                                                 // General Punctuation
-    {0x3000, 0x303F},                                                 // CJK Symbols and Punctuation
-    {0xFE30, 0xFE4F},                                                 // CJK Compatibility Forms
-    {0xFE50, 0xFE6F},                                                 // Small Form Variants
-    {0xFF00, 0xFF0F},                                                 // Fullwidth
-    {0xFF1A, 0xFF20}, {0xFF3B, 0xFF40}, {0xFF5B, 0xFF65},
-};
-
 inline bool is_punctuation(char32_t cp) {
-    return in_ranges(cp, kPunctuationRanges,
-                     sizeof(kPunctuationRanges) / sizeof(kPunctuationRanges[0]));
+    if (cp < 0x80)
+        return (cp >= 33 && cp <= 47) || (cp >= 58 && cp <= 64) || (cp >= 91 && cp <= 96) ||
+               (cp >= 123 && cp <= 126);
+    const auto* ranges = mpnet_unicode::kPunctuationRanges;
+    const auto* end = ranges + sizeof(mpnet_unicode::kPunctuationRanges) / sizeof(*ranges);
+    const auto* range = std::lower_bound(
+        ranges, end, cp, [](const auto& entry, char32_t point) { return entry.last < point; });
+    return range != end && cp >= range->first;
 }
 
 constexpr UnicodeRange kCjkRanges[] = {
@@ -126,62 +137,25 @@ inline bool is_cjk_char(char32_t cp) {
     return in_ranges(cp, kCjkRanges, sizeof(kCjkRanges) / sizeof(kCjkRanges[0]));
 }
 
-constexpr UnicodeRange kMnRanges[] = {
-    {0x0300, 0x036F}, // Combining Diacritical Marks
-    {0x1AB0, 0x1AFF}, // Extended
-    {0x1DC0, 0x1DFF}, // Supplement
-    {0x20D0, 0x20FF}, // For Symbols
-    {0xFE20, 0xFE2F}, // Combining Half Marks
-};
-
-inline bool is_mn_category(char32_t cp) {
-    return in_ranges(cp, kMnRanges, sizeof(kMnRanges) / sizeof(kMnRanges[0]));
+inline std::uint8_t combining_order(char32_t cp) {
+    if (cp < 0x80)
+        return 0;
+    const auto* orders = mpnet_unicode::kCombiningOrders;
+    const auto* end = orders + sizeof(mpnet_unicode::kCombiningOrders) / sizeof(*orders);
+    const auto* order = std::lower_bound(
+        orders, end, cp, [](const auto& entry, char32_t point) { return entry.point < point; });
+    return order != end && order->point == cp ? order->rank : 0;
 }
 
-// Simple NFD decomposition for common accented Latin characters
-inline void nfd_decompose(char32_t cp, std::vector<char32_t>& out) {
-    // Pre-composed Latin letters → base + combining mark
-    // This covers the most common accented characters
-    struct Decomposition {
-        char32_t composed;
-        char32_t base;
-        char32_t mark;
-    };
-    static const Decomposition kDecomps[] = {
-        {0xC0, 'A', 0x0300}, {0xC1, 'A', 0x0301}, {0xC2, 'A', 0x0302}, {0xC3, 'A', 0x0303},
-        {0xC4, 'A', 0x0308}, {0xC5, 'A', 0x030A}, {0xC7, 'C', 0x0327}, {0xC8, 'E', 0x0300},
-        {0xC9, 'E', 0x0301}, {0xCA, 'E', 0x0302}, {0xCB, 'E', 0x0308}, {0xCC, 'I', 0x0300},
-        {0xCD, 'I', 0x0301}, {0xCE, 'I', 0x0302}, {0xCF, 'I', 0x0308}, {0xD1, 'N', 0x0303},
-        {0xD2, 'O', 0x0300}, {0xD3, 'O', 0x0301}, {0xD4, 'O', 0x0302}, {0xD5, 'O', 0x0303},
-        {0xD6, 'O', 0x0308}, {0xD9, 'U', 0x0300}, {0xDA, 'U', 0x0301}, {0xDB, 'U', 0x0302},
-        {0xDC, 'U', 0x0308}, {0xDD, 'Y', 0x0301}, {0xE0, 'a', 0x0300}, {0xE1, 'a', 0x0301},
-        {0xE2, 'a', 0x0302}, {0xE3, 'a', 0x0303}, {0xE4, 'a', 0x0308}, {0xE5, 'a', 0x030A},
-        {0xE7, 'c', 0x0327}, {0xE8, 'e', 0x0300}, {0xE9, 'e', 0x0301}, {0xEA, 'e', 0x0302},
-        {0xEB, 'e', 0x0308}, {0xEC, 'i', 0x0300}, {0xED, 'i', 0x0301}, {0xEE, 'i', 0x0302},
-        {0xEF, 'i', 0x0308}, {0xF1, 'n', 0x0303}, {0xF2, 'o', 0x0300}, {0xF3, 'o', 0x0301},
-        {0xF4, 'o', 0x0302}, {0xF5, 'o', 0x0303}, {0xF6, 'o', 0x0308}, {0xF9, 'u', 0x0300},
-        {0xFA, 'u', 0x0301}, {0xFB, 'u', 0x0302}, {0xFC, 'u', 0x0308}, {0xFD, 'y', 0x0301},
-        {0xFF, 'y', 0x0308},
-    };
-    for (const auto& d : kDecomps) {
-        if (cp == d.composed) {
-            out.push_back(d.base);
-            out.push_back(d.mark);
-            return;
-        }
-    }
-    out.push_back(cp);
-}
-
-// Simple ASCII lowercase (handles A-Z only; full Unicode tolower is complex)
 inline char32_t to_lower(char32_t cp) {
-    if (cp >= 'A' && cp <= 'Z')
-        return cp + 32;
-    // Latin-1 Supplement uppercase
-    if (cp >= 0xC0 && cp <= 0xD6)
-        return cp + 32;
-    if (cp >= 0xD8 && cp <= 0xDE)
-        return cp + 32;
+    if (cp < 0x80)
+        return cp >= 'A' && cp <= 'Z' ? cp + 32 : cp;
+    const auto* ranges = mpnet_unicode::kLowercaseRanges;
+    const auto* end = ranges + sizeof(mpnet_unicode::kLowercaseRanges) / sizeof(*ranges);
+    const auto* range = std::lower_bound(
+        ranges, end, cp, [](const auto& entry, char32_t point) { return entry.last < point; });
+    if (range != end && cp >= range->first && (cp - range->first) % range->stride == 0)
+        return static_cast<char32_t>(static_cast<std::int32_t>(cp) + range->delta);
     return cp;
 }
 
@@ -232,25 +206,73 @@ std::string bert_lowercase(const std::string& text) {
     size_t pos = 0;
     while (pos < text.size()) {
         char32_t cp = utf8_to_char32(text, pos);
-        result += char32_to_utf8(to_lower(cp));
+        // Note (Jiaxin Deng): The reference expands dotted I into two Unicode scalars.
+        if (cp == 0x0130)
+            result += "i\xCC\x87";
+        else
+            result += char32_to_utf8(to_lower(cp));
     }
     return result;
 }
 
 std::string bert_strip_accents(const std::string& text) {
-    // NFD decompose, then remove Mn category characters
+    struct Mark {
+        char32_t point;
+        std::uint8_t order;
+    };
     std::string result;
+    std::vector<Mark> pending;
+    const auto flush = [&] {
+        std::stable_sort(pending.begin(), pending.end(), [](const Mark& left, const Mark& right) {
+            return left.order < right.order;
+        });
+        for (const auto& mark : pending)
+            result += char32_to_utf8(mark.point);
+        pending.clear();
+    };
+    const auto append = [&](char32_t cp) {
+        // Note (Jiaxin Deng): Removed starters still block canonical reordering across them.
+        if (cp == mpnet_unicode::kAccentBoundary) {
+            flush();
+            return;
+        }
+        const auto order = combining_order(cp);
+        if (order == 0) {
+            flush();
+            result += char32_to_utf8(cp);
+        } else {
+            pending.push_back({cp, order});
+        }
+    };
     size_t pos = 0;
     while (pos < text.size()) {
-        char32_t cp = utf8_to_char32(text, pos);
-        std::vector<char32_t> decomposed;
-        nfd_decompose(cp, decomposed);
-        for (char32_t dcp : decomposed) {
-            if (!is_mn_category(dcp)) {
-                result += char32_to_utf8(dcp);
-            }
+        const char32_t cp = utf8_to_char32(text, pos);
+        if (cp < 0x80) {
+            append(cp);
+            continue;
+        }
+        // Note (Jiaxin Deng): Algorithmic Hangul decomposition avoids 11,172 table entries.
+        if (cp >= 0xAC00 && cp <= 0xD7A3) {
+            const auto index = cp - 0xAC00;
+            append(0x1100 + index / 588);
+            append(0x1161 + index % 588 / 28);
+            if (index % 28 != 0)
+                append(0x11A7 + index % 28);
+            continue;
+        }
+        const auto* mappings = mpnet_unicode::kAccentMappings;
+        const auto* end = mappings + sizeof(mpnet_unicode::kAccentMappings) / sizeof(*mappings);
+        const auto* mapping =
+            std::lower_bound(mappings, end, cp,
+                             [](const auto& entry, char32_t point) { return entry.last < point; });
+        if (mapping != end && cp >= mapping->first) {
+            for (std::uint16_t index = 0; index < mapping->size; ++index)
+                append(mpnet_unicode::kAccentValues[mapping->offset + index]);
+        } else {
+            append(cp);
         }
     }
+    flush();
     return result;
 }
 
