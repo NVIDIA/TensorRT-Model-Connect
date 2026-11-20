@@ -17,10 +17,11 @@ from pathlib import Path
 import site
 import subprocess
 import sys
-import tempfile
 import time
 from typing import TYPE_CHECKING
 
+from .build_worker import write_weight_snapshot
+from .build_staging import worker_staging
 from .config import ModelConfig
 from .parallel import ParallelConfig
 from .checkpoint_mapper import WeightDict, load_standard_weights
@@ -288,8 +289,9 @@ def _build_weightless_native_engines(
     device = _current_cuda_device()
     interpreter = _worker_command()
     roles = ("prefill", "decode")
-    with tempfile.TemporaryDirectory(prefix="trtmc-qwen-build-", dir=output_dir) as temporary, ExitStack() as resources:
-        directory = Path(temporary)
+    with worker_staging(output_dir) as directory, ExitStack() as resources:
+        weights_path = directory / "weights"
+        write_weight_snapshot(weights_path, load_standard_weights(model_dir, config, precision="bf16"))
         config_path = directory / "config.json"
         config_path.write_text(json.dumps(asdict(config)), encoding="utf-8")
         workers = {}
@@ -297,14 +299,17 @@ def _build_weightless_native_engines(
             for role in roles:
                 command = [
                     *interpreter,
-                    "--model-dir", str(model_dir.resolve()), "--config", str(config_path),
+                    "--weights", str(weights_path), "--config", str(config_path),
                     "--role", role, "--max-sequence-length", str(max_sequence_length),
                     "--cuda-device", str(device), "--plan", str(directory / f"{role}.plan"),
                     "--metadata", str(directory / f"{role}.json"), "--watch-parent",
                 ]
                 if verbose:
                     command.append("--verbose")
-                log = resources.enter_context((directory / f"{role}.log").open("wb"))
+                    # TensorRT writes native diagnostics to the caller's stderr.
+                    log = 2
+                else:
+                    log = resources.enter_context((directory / f"{role}.log").open("wb"))
                 workers[role] = subprocess.Popen(
                     command, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
             pending = set(roles)
@@ -318,8 +323,8 @@ def _build_weightless_native_engines(
                     if status != 0:
                         raise RuntimeError(f"Qwen {role} build worker exited with status {status}")
                     pending.remove(role)
-                    # Forward the compiler diagnostics without adding build-mode output.
-                    sys.stderr.write((directory / f"{role}.log").read_text(encoding="utf-8", errors="replace"))
+                    if not verbose:
+                        sys.stderr.write((directory / f"{role}.log").read_text(encoding="utf-8", errors="replace"))
                 if pending:
                     time.sleep(0.05)
             metadata = []

@@ -1,8 +1,10 @@
 # Validate the Qwen3-0.6B weightless build
 
 For single-device BF16 text generation with the native TensorRT KV cache, the
-Qwen3-0.6B builder compiles the prefill and decode engines in parallel. Each
-worker builds its engine with placeholders for the large projection matrices
+Qwen3-0.6B builder loads the checkpoint weights once and stages the converted
+arrays beside the requested output. Both workers map those arrays read-only
+and compile the prefill and decode engines in parallel. Each worker builds
+its engine with placeholders for the large projection matrices
 and language-model head, refits the engine with the checkpoint weights, and
 serializes a complete plan. The resulting bundle runs independently of the
 checkpoint.

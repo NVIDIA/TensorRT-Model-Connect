@@ -15,6 +15,28 @@ import threading
 from .config import ModelConfig
 
 
+def write_weight_snapshot(directory: Path, weights: dict) -> None:
+    """Stage the parent's converted arrays before launching either build."""
+    import numpy as np
+
+    directory.mkdir()
+    for index, value in enumerate(weights.values()):
+        np.save(directory / f"{index}.npy", value, allow_pickle=False)
+    (directory / "names.json").write_text(json.dumps(list(weights)), encoding="utf-8")
+
+
+def read_weight_snapshot(directory: Path) -> dict:
+    """Map tensors read-only and restore the mapper's scalar dimensions."""
+    import numpy as np
+
+    weights = {}
+    names = json.loads((directory / "names.json").read_text(encoding="utf-8"))
+    for index, name in enumerate(names):
+        value = np.load(directory / f"{index}.npy", mmap_mode="r", allow_pickle=False)
+        weights[name] = value.item() if value.ndim == 0 else value
+    return weights
+
+
 @contextmanager
 def _watch_parent(enabled: bool):
     """Stop an active isolated worker when its parent's private pipe closes."""
@@ -44,7 +66,7 @@ def _watch_parent(enabled: bool):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model-dir", type=Path, required=True)
+    parser.add_argument("--weights", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--role", choices=("prefill", "decode"), required=True)
     parser.add_argument("--max-sequence-length", type=int, required=True)
@@ -70,7 +92,7 @@ def main() -> int:
             raise ValueError("Qwen isolated weightless workers require BF16")
         config.raw["_decoder_engine_role"] = args.role
         owner = _QwenModel()
-        weights = owner.load_weights(str(args.model_dir), config, precision=precision)
+        weights = read_weight_snapshot(args.weights)
         with weightless_build():
             plan = owner.build_engine(
                 config, weights, args.max_sequence_length, precision=precision,

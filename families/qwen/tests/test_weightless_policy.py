@@ -101,7 +101,7 @@ def build_harness(monkeypatch, tmp_path):
                            sections=sections, output_dir=output)
 
 
-def test_selected_bf16_topology_uses_workers_without_loading_parent_weights(build_harness):
+def test_selected_bf16_topology_uses_paired_workers(build_harness):
     harness = build_harness
     harness.run()
     assert len(harness.parallel) == 1

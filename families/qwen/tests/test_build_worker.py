@@ -20,6 +20,7 @@ import pytest
 pytest.importorskip("tensorrt")
 
 from families.qwen import build_worker, model  # noqa: E402
+from families.qwen.build_staging import worker_staging  # noqa: E402
 from families.qwen.tests.test_weightless_policy import _config  # noqa: E402
 
 
@@ -30,16 +31,16 @@ import os
 from pathlib import Path
 import sys
 import time
-from families.qwen.build_worker import _watch_parent
+from families.qwen.build_worker import _watch_parent, read_weight_snapshot
 
 parser = argparse.ArgumentParser()
-for name in ("model-dir", "config", "role", "max-sequence-length", "cuda-device", "plan", "metadata"):
+for name in ("weights", "config", "role", "max-sequence-length", "cuda-device", "plan", "metadata"):
     parser.add_argument("--" + name, required=True)
 parser.add_argument("--verbose", action="store_true")
 parser.add_argument("--watch-parent", action="store_true")
 args = parser.parse_args()
 with _watch_parent(args.watch_parent):
-    assert Path(args.model_dir).is_dir()
+    assert Path(args.weights, "names.json").is_file()
     configuration = json.loads(Path(args.config).read_text())
     assert configuration["raw"]["_resolved_build_precision"] == "bf16"
     records = Path(os.environ["QWEN_WORKER_TEST_RECORDS"])
@@ -49,15 +50,28 @@ with _watch_parent(args.watch_parent):
     }))
     mode = os.environ.get("QWEN_WORKER_TEST_MODE", "success")
     print("[TRT] worker diagnostic " + json.dumps({"role": args.role, "fake": True}), flush=True)
+    if mode == "wait_for_monitor":
+        while not (records / "release").exists():
+            time.sleep(0.02)
     if mode == "fail_" + args.role:
         print("intentional " + args.role + " worker failure", flush=True)
         sys.exit(7)
+    if mode == "prefill_done" and args.role == "decode":
+        time.sleep(60)
     if mode == "hang" or mode.startswith("fail_"):
         time.sleep(60)
     native = {"native_kv_cache": mode != "invalid_native", "native_kv_contract_version": 1}
     if mode == "metadata_mismatch" and args.role == "decode":
         native["unexpected"] = True
     plan = args.role.encode() if mode != "empty_plan" else b""
+    if mode == "record_weights":
+        weights = read_weight_snapshot(Path(args.weights))
+        tensor = weights["layer.0.w_q"]
+        assert not tensor.flags.writeable
+        assert weights["_attention_size"] == 128
+        plan = tensor.tobytes()
+    if mode == "prefill_done":
+        plan = b"x" * (1024 * 1024)
     Path(args.plan).write_bytes(plan)
     Path(args.metadata).write_text(json.dumps({
         "role": args.role, "plan_bytes": len(plan) + (mode == "wrong_size"),
@@ -81,8 +95,9 @@ def worker_harness(monkeypatch, tmp_path):
     monkeypatch.setenv("QWEN_WORKER_TEST_RECORDS", str(records))
     monkeypatch.setenv("QWEN_WORKER_TEST_MODE", "success")
     # A broken system temp location must not affect output-local staging.
-    monkeypatch.setattr(model.tempfile, "tempdir", str(tmp_path / "missing-system-tmp"))
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "missing-system-tmp"))
     monkeypatch.setattr(model, "_current_cuda_device", lambda: 3)
+    monkeypatch.setattr(model, "load_standard_weights", lambda *args, **kwargs: {"_attention_size": 128})
     processes, commands = [], []
     state = SimpleNamespace(fail_launch=False)
 
@@ -134,7 +149,39 @@ def test_isolated_worker_ignores_checkpoint_python_modules(tmp_path):
     assert not (tmp_path / "shadow-imported").exists()
 
 
-def test_workers_preserve_device_roles_and_metadata(worker_harness, capsys):
+def test_both_workers_use_snapshot_when_checkpoint_changes(worker_harness, monkeypatch):
+    import numpy as np
+
+    harness = worker_harness
+    original = np.arange(4, dtype=np.float16).reshape(2, 2)
+    source = harness.checkpoint / "matrix.npy"
+    np.save(source, original)
+    loads = []
+
+    def load(directory, config, *, precision):
+        assert Path(directory) == harness.checkpoint and precision == "bf16"
+        loads.append(directory)
+        return {"layer.0.w_q": np.load(source, allow_pickle=False), "_attention_size": 128}
+
+    launch = model.subprocess.Popen
+
+    def change_checkpoint_between_launches(command, **kwargs):
+        if command[command.index("--role") + 1] == "decode":
+            np.save(source, np.ones_like(original))
+        return launch(command, **kwargs)
+
+    monkeypatch.setenv("QWEN_WORKER_TEST_MODE", "record_weights")
+    monkeypatch.setattr(model, "load_standard_weights", load)
+    monkeypatch.setattr(model.subprocess, "Popen", change_checkpoint_between_launches)
+    plans = model._build_weightless_native_engines(
+        harness.checkpoint, harness.config, 16384, output_dir=harness.private, verbose=False)
+    assert len(loads) == 1
+    assert not np.array_equal(original, np.load(source, allow_pickle=False))
+    assert plans == (original.tobytes(), original.tobytes())
+    _assert_joined_and_clean(harness)
+
+
+def test_workers_preserve_device_roles_and_metadata(worker_harness):
     harness = worker_harness
     result = model._build_weightless_native_engines(
         harness.checkpoint, harness.config, 16384, output_dir=harness.private, verbose=True)
@@ -145,7 +192,6 @@ def test_workers_preserve_device_roles_and_metadata(worker_harness, capsys):
     assert all(row["cuda_device"] == 3 for row in rows)
     assert rows[0]["pid"] != rows[1]["pid"]
     assert all("--verbose" in command for command in harness.commands)
-    assert capsys.readouterr().err.count("[TRT] worker diagnostic ") == 2
     _assert_joined_and_clean(harness)
 
 
@@ -201,7 +247,7 @@ def test_cancellation_joins_workers_and_preserves_interrupt(worker_harness, monk
     _assert_joined_and_clean(harness)
 
 
-def _stdin_parent_source(harness):
+def _stdin_parent_source(harness, *, verbose=False):
     return f'''
 import json
 import subprocess
@@ -211,7 +257,7 @@ from types import SimpleNamespace
 from families.qwen import model
 from families.qwen.config import ModelConfig
 model._current_cuda_device = lambda: 3
-model.tempfile.tempdir = {str(harness.private / "missing-system-tmp")!r}
+model.load_standard_weights = lambda *args, **kwargs: {{"_attention_size": 128}}
 def popen(command, **kwargs):
     roots = json.dumps([*json.loads(command[4]), {str(harness.fake.parent)!r}])
     return subprocess.Popen([*command[:4], roots, {harness.fake.stem!r}, *command[6:]], **kwargs)
@@ -219,7 +265,7 @@ model.subprocess = SimpleNamespace(Popen=popen, PIPE=subprocess.PIPE, STDOUT=sub
                                    TimeoutExpired=subprocess.TimeoutExpired)
 config = ModelConfig(**json.loads({json.dumps(asdict(harness.config))!r}))
 prefill, decode = model._build_weightless_native_engines(
-    Path({str(harness.checkpoint)!r}), config, 16384, output_dir=Path({str(harness.private)!r}), verbose=False)
+    Path({str(harness.checkpoint)!r}), config, 16384, output_dir=Path({str(harness.private)!r}), verbose={verbose!r})
 print(json.dumps([prefill.decode(), decode.decode(), config.raw["_native_kv_cache_metadata"]]))
 '''
 
@@ -237,6 +283,33 @@ def test_invocation_from_stdin_needs_no_main_guard(worker_harness):
     assert harness.sentinel.read_text() == "keep"
 
 
+def test_verbose_diagnostics_reach_caller_while_workers_are_running(worker_harness, monkeypatch):
+    harness = worker_harness
+    monkeypatch.setenv("QWEN_WORKER_TEST_MODE", "wait_for_monitor")
+    log_path = harness.records / "caller.stderr"
+    release = harness.records / "release"
+    with log_path.open("wb") as log, subprocess.Popen(
+        [sys.executable, "-c", _stdin_parent_source(harness, verbose=True)],
+        stdout=subprocess.DEVNULL, stderr=log, env=dict(os.environ, CUDA_VISIBLE_DEVICES=""),
+    ) as parent:
+        try:
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline and parent.poll() is None:
+                if log_path.read_bytes().count(b"[TRT] worker diagnostic ") == 2:
+                    break
+                time.sleep(0.02)
+            assert log_path.read_bytes().count(b"[TRT] worker diagnostic ") == 2
+            assert parent.poll() is None
+        finally:
+            release.touch()
+            try:
+                parent.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                parent.kill()
+                raise
+        assert parent.returncode == 0
+
+
 def _process_is_running(pid):
     try:
         os.kill(pid, 0)
@@ -252,10 +325,18 @@ def _process_is_running(pid):
     return state not in {"Z", "X"}
 
 
-@pytest.mark.skipif(os.name != "posix", reason="this check terminates the caller with POSIX SIGTERM")
-def test_parent_sigterm_stops_both_worker_processes(worker_harness, monkeypatch):
+@pytest.mark.skipif(os.name != "posix", reason="this check terminates the caller with a POSIX signal")
+@pytest.mark.parametrize("kill_parent", [False, True], ids=["SIGTERM", "SIGKILL"])
+def test_parent_death_reclaims_only_its_worker_stage(worker_harness, monkeypatch, kill_parent):
     harness = worker_harness
-    monkeypatch.setenv("QWEN_WORKER_TEST_MODE", "hang")
+    monkeypatch.setenv("QWEN_WORKER_TEST_MODE", "prefill_done")
+    with worker_staging(harness.private) as other_stage:
+        other_plan = other_stage / "prefill.plan"
+        other_plan.write_bytes(b"active build")
+        _check_parent_death(harness, other_plan, kill_parent)
+
+
+def _check_parent_death(harness, other_plan, kill_parent):
     parent = subprocess.Popen(
         [sys.executable, "-"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=dict(os.environ, CUDA_VISIBLE_DEVICES=""),
@@ -270,21 +351,29 @@ def test_parent_sigterm_stops_both_worker_processes(worker_harness, monkeypatch)
             try:
                 records = [json.loads((harness.records / f"{role}.json").read_text())
                            for role in ("prefill", "decode")]
-            except (FileNotFoundError, json.JSONDecodeError):
-                if parent.poll() is not None:
-                    break
-                time.sleep(0.02)
-            else:
+                stage = Path(records[0]["plan"]).parent
                 pids = [record["pid"] for record in records]
-                break
-        assert len(pids) == 2, parent.stderr.read().decode() if parent.poll() is not None else "workers did not start"
-        assert all(_process_is_running(pid) for pid in pids)
-        parent.terminate()
-        assert parent.wait(timeout=5) == -signal.SIGTERM
+                if (stage / "prefill.plan").stat().st_size == 1024 * 1024 and not _process_is_running(pids[0]):
+                    break
+            except (FileNotFoundError, json.JSONDecodeError):
+                pass
+            if parent.poll() is not None:
+                pytest.fail(parent.stderr.read().decode())
+            time.sleep(0.02)
+        else:
+            pytest.fail("prefill did not leave a completed plan")
+        assert _process_is_running(pids[1])
+        if kill_parent:
+            parent.kill()
+        else:
+            parent.terminate()
+        assert parent.wait(timeout=5) == -(signal.SIGKILL if kill_parent else signal.SIGTERM)
         deadline = time.monotonic() + 10
-        while any(_process_is_running(pid) for pid in pids) and time.monotonic() < deadline:
+        while (stage.exists() or any(map(_process_is_running, pids))) and time.monotonic() < deadline:
             time.sleep(0.02)
         assert not any(_process_is_running(pid) for pid in pids)
+        assert not stage.exists()
+        assert other_plan.read_bytes() == b"active build"
         assert harness.sentinel.read_text() == "keep"
     finally:
         if parent.poll() is None:
@@ -297,7 +386,7 @@ def test_parent_sigterm_stops_both_worker_processes(worker_harness, monkeypatch)
         parent.stderr.close()
 
 
-def test_worker_selects_device_before_loading_and_building(monkeypatch, tmp_path):
+def test_worker_selects_device_before_mapping_and_building(monkeypatch, tmp_path):
     from cuda.bindings import runtime as cudart
 
     calls = []
@@ -308,8 +397,8 @@ def test_worker_selects_device_before_loading_and_building(monkeypatch, tmp_path
     config_path.write_text(json.dumps(asdict(config)))
     weights = object()
 
-    def load(self, directory, config, *, precision):
-        calls.append(("load", directory, precision))
+    def load(directory):
+        calls.append(("map", directory))
         return weights
 
     def build(self, config, supplied, capacity, **kwargs):
@@ -322,13 +411,13 @@ def test_worker_selects_device_before_loading_and_building(monkeypatch, tmp_path
         config.raw["_native_kv_cache_metadata"] = {"native_kv_cache": True, "native_kv_contract_version": 1}
         return b"complete plan"
 
-    monkeypatch.setattr(model._QwenModel, "load_weights", load)
+    monkeypatch.setattr(build_worker, "read_weight_snapshot", load)
     monkeypatch.setattr(model._QwenModel, "build_engine", build)
-    monkeypatch.setattr(sys, "argv", ["worker", "--model-dir", str(tmp_path), "--config", str(config_path),
+    monkeypatch.setattr(sys, "argv", ["worker", "--weights", str(tmp_path), "--config", str(config_path),
                                     "--role", "decode", "--max-sequence-length", "16384", "--cuda-device", "3",
                                     "--plan", str(plan_path), "--metadata", str(metadata_path)])
     assert build_worker.main() == 0
-    assert calls == [("device", 3), ("load", str(tmp_path), "bf16"), ("build", "decode")]
+    assert calls == [("device", 3), ("map", tmp_path), ("build", "decode")]
     assert plan_path.read_bytes() == b"complete plan"
     assert json.loads(metadata_path.read_text()) == {
         "role": "decode", "plan_bytes": len(b"complete plan"),
