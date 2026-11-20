@@ -4,6 +4,10 @@ title: Cosmos3-Edge reasoning
 
 # Cosmos3-Edge reasoning
 
+An installed Model Connect wheel uses its own native Edge SDK, not a
+different SDK on `CMAKE_PREFIX_PATH`. To switch releases, use a matching
+wheel or a standalone Model Connect builder and runner together.
+
 The `cosmos3_edge` family implements text, image, video and mixed image/video
 reasoning for `nvidia/Cosmos3-Edge`. It is distinct from Cosmos3 Diffusers
 image/video generation and does not produce trajectories or policy actions.
