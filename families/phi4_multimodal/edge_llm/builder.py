@@ -6,12 +6,12 @@
 from __future__ import annotations
 
 import json
-from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 
+import tensorrt_model_connect
 from tensorrt_model_connect.build import (
     cmake_prefixes,
     detect_local_platform,
@@ -32,16 +32,12 @@ def local_target() -> dict:
 
 
 def _package_prefixes() -> list[Path]:
-    """Search standalone CMake prefixes, then the SDK shipped in an MC wheel."""
-    prefixes = cmake_prefixes()
-    try:
-        package = distribution("tensorrt-model-connect")
-    except PackageNotFoundError:
-        return prefixes
-    module_dir = Path(package.locate_file("tensorrt_model_connect"))
-    if (module_dir / "bin/trtmc").is_file():
-        return [*prefixes, module_dir]
-    return prefixes
+    """Use the active wheel's SDK with its native runner, or standalone prefixes."""
+    module_dir = Path(tensorrt_model_connect.__file__).resolve().parent
+    receipt = module_dir / "share/trtmc/edge-llm.json"
+    if (module_dir / "bin/trtmc").is_file() and (receipt.exists() or receipt.is_symlink()):
+        return [module_dir]
+    return cmake_prefixes()
 
 
 def package_present() -> bool:
