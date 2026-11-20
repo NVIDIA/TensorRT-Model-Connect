@@ -5,7 +5,6 @@
 # rounding, reference/prepare_int4_awq.py), so the comparison measures the TensorRT implementation, not INT4
 # quantization, and MMLU holds the bundle to the unquantized margin.
 reference:
-  requirements: families/llama/reference/int4_awq_requirements.txt
   prepare: families/llama/reference/prepare_int4_awq.py
   model_directory: trtmc-reference/nemotron-nano-4b-int4-awq
 benchmarks:

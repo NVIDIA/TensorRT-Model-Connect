@@ -22,9 +22,9 @@ from pathlib import Path
 PIP_TIMEOUT_S = 7200  # native extensions (for example FlashAttention) build for a long time on aarch64
 
 
-def _digest(requirements: Path, build_isolation: bool, prepare: Path | None = None) -> str:
+def _digest(requirements: Path | None, build_isolation: bool, prepare: Path | None = None) -> str:
     digest = hashlib.sha256(b"trtmc-perf-serve-reference-env-v1\0")
-    digest.update(requirements.read_bytes())
+    digest.update(requirements.read_bytes() if requirements is not None else b"")
     if prepare is not None:
         digest.update(b"\0prepare\0" + prepare.read_bytes())
     digest.update(f"{sys.executable}\0{sys.version}\0build-isolation={build_isolation}".encode())
@@ -51,17 +51,24 @@ def _run(command: list[str], log: Path, timeout: int) -> None:
         raise RuntimeError(f"{' '.join(command[:4])} failed (exit {code}); see {log}")
 
 
-def reference_python(requirements: Path, root: Path, *, build_isolation: bool = True,
+def reference_python(requirements: Path | None, root: Path, *, build_isolation: bool = True,
                      prepare: Path | None = None) -> Path:
     """The interpreter of the environment for ``requirements`` (created on first use); ``prepare`` runs once
-    after the install, in the environment's directory (for example an upstream checkout)."""
-    requirements = requirements.resolve()
-    if not requirements.is_file():
-        raise RuntimeError(f"requirements file not found: {requirements}")
+    after the install, in the environment's directory (for example an upstream checkout). Without requirements
+    the environment only holds what ``prepare`` writes (for example a prepared checkpoint)."""
+    if requirements is None and prepare is None:
+        raise RuntimeError("a reference environment needs requirements or a preparation script")
+    if requirements is not None:
+        requirements = requirements.resolve()
+        if not requirements.is_file():
+            raise RuntimeError(f"requirements file not found: {requirements}")
     if prepare is not None and not prepare.resolve().is_file():
         raise RuntimeError(f"preparation script not found: {prepare}")
     expected = _digest(requirements, build_isolation, prepare.resolve() if prepare else None)
-    name = requirements.parent.name if requirements.name == "requirements.txt" else requirements.stem
+    if requirements is None:
+        name = prepare.stem
+    else:
+        name = requirements.parent.name if requirements.name == "requirements.txt" else requirements.stem
     for attempt in itertools.count():
         environment = root.resolve() / (f"{name}-{expected[:12]}" + (f"-r{attempt}" if attempt else ""))
         python, stamp, frozen = environment / "bin/python", environment / ".requirements.sha256", environment / ".freeze"
@@ -80,12 +87,13 @@ def reference_python(requirements: Path, root: Path, *, build_isolation: bool = 
     _run([sys.executable, "-m", "venv", "--system-site-packages", str(environment)], log, timeout=600)
     _inherit_site_packages(environment)
     install = [str(python), "-m", "pip", "install", "--disable-pip-version-check"]
-    if not build_isolation:
+    if requirements is not None and not build_isolation:
         install.append("--no-build-isolation")
         # A non-isolated source build imports its build backend from this environment, so it must be there
         # first (copies inherited from the serving interpreter already satisfy this).
         _run([*install, "setuptools", "wheel"], log, timeout=PIP_TIMEOUT_S)
-    _run([*install, "-r", str(requirements)], log, timeout=PIP_TIMEOUT_S)
+    if requirements is not None:
+        _run([*install, "-r", str(requirements)], log, timeout=PIP_TIMEOUT_S)
     if prepare is not None:
         _run([str(python), str(prepare.resolve()), str(environment)], log, timeout=PIP_TIMEOUT_S)
     frozen.write_text(_freeze(python))
