@@ -110,11 +110,71 @@ def test_an_unpacked_pooling_head_is_refused(tmp_path: Path) -> None:
         config_module.resolve(_model_dir(tmp_path), weights)
 
 
-def test_bilinear_resize_is_refused(tmp_path: Path) -> None:
-    # SigLIP 2 asks for bilinear; the runtime reproduces Pillow's bicubic only.
+def test_bilinear_resize_is_selected(tmp_path: Path) -> None:
     directory = _model_dir(tmp_path, {}, {"resample": 2})
-    with pytest.raises(NotImplementedError, match="bicubic"):
+    assert config_module.resolve(directory, _weights())["resample"] == 2
+
+
+@pytest.mark.parametrize("resample", [0, 1, 4, 5])
+def test_other_resize_filters_are_refused(tmp_path: Path, resample: int) -> None:
+    directory = _model_dir(tmp_path, {}, {"resample": resample})
+    with pytest.raises(NotImplementedError, match="resize"):
         config_module.resolve(directory, _weights())
+
+
+def _bpe_tokenizer() -> dict:
+    return {
+        "model": {
+            "type": "BPE", "vocab": {"<pad>": 0, "<eos>": 1, "<unk>": 2},
+            "merges": [], "byte_fallback": True, "fuse_unk": True,
+            "ignore_merges": False, "dropout": None,
+            "continuing_subword_prefix": None, "end_of_word_suffix": None,
+        },
+        "normalizer": {"type": "Replace", "pattern": {"String": " "}, "content": "▁"},
+        "pre_tokenizer": {
+            "type": "Split", "pattern": {"String": " "},
+            "behavior": "MergedWithPrevious", "invert": False,
+        },
+        "decoder": {"type": "Sequence", "decoders": [
+            {"type": "Replace", "pattern": {"String": "▁"}, "content": " "},
+            {"type": "ByteFallback"}, {"type": "Fuse"},
+        ]},
+        "post_processor": {
+            "type": "TemplateProcessing",
+            "single": [{"Sequence": {"id": "A", "type_id": 0}},
+                       {"SpecialToken": {"id": "<eos>", "type_id": 0}}],
+            "special_tokens": {"<eos>": {"id": "<eos>", "ids": [1], "tokens": ["<eos>"]}},
+        },
+        "added_tokens": [{"id": 0, "content": "<pad>", "special": True,
+                          "normalized": False, "single_word": False,
+                          "lstrip": False, "rstrip": False}],
+    }
+
+
+def _write_bpe(tmp_path: Path, tokenizer: dict) -> None:
+    (tmp_path / "tokenizer.json").write_text(json.dumps(tokenizer), encoding="utf-8")
+    (tmp_path / "tokenizer_config.json").write_text('{"pad_token": "<pad>"}', encoding="utf-8")
+
+
+def test_gemma_bpe_preserves_pad_id_zero(tmp_path: Path) -> None:
+    _write_bpe(tmp_path, _bpe_tokenizer())
+    assert model_module._pad_token_id(tmp_path) == 0
+
+
+def test_bpe_pad_token_can_be_resolved_from_the_vocab(tmp_path: Path) -> None:
+    tokenizer = _bpe_tokenizer()
+    tokenizer["added_tokens"] = []
+    _write_bpe(tmp_path, tokenizer)
+    assert model_module._pad_token_id(tmp_path) == 0
+
+
+@pytest.mark.parametrize("field", ["normalizer", "pre_tokenizer", "decoder", "post_processor"])
+def test_unimplemented_bpe_processing_is_refused(tmp_path: Path, field: str) -> None:
+    tokenizer = _bpe_tokenizer()
+    tokenizer[field] = None
+    _write_bpe(tmp_path, tokenizer)
+    with pytest.raises(NotImplementedError, match="BPE"):
+        model_module._pad_token_id(tmp_path)
 
 
 def test_a_centre_crop_is_refused(tmp_path: Path) -> None:
@@ -168,3 +228,72 @@ def test_fp16_is_refused(tmp_path: Path) -> None:
     )
     with pytest.raises(NotImplementedError, match="fp32 only"):
         model_module.build(request, writer=None)
+
+
+@pytest.mark.parametrize("task", ["image_to_embedding", "text_to_embedding", "text_image_to_relevance"])
+def test_bpe_bilinear_bundle_preserves_runtime_contract(tmp_path: Path, monkeypatch, task: str) -> None:
+    directory = _model_dir(tmp_path, {}, {"resample": 2})
+    _write_bpe(directory, _bpe_tokenizer())
+    weights = _weights()
+    for key in ("text_model.final_layer_norm.weight", "vision_model.embeddings.patch_embedding.bias",
+                "vision_model.post_layernorm.weight", "vision_model.head.probe"):
+        weights[key] = np.zeros((_HIDDEN,), np.float32)
+    monkeypatch.setattr(model_module, "_open_checkpoint", lambda _: weights)
+    engines = []
+
+    def engine(weights, cfg, **kwargs):
+        assert cfg["resample"] == 2
+        assert cfg["text"]["max_text_len"] == _WINDOW
+        engines.append(True)
+        return b"engine-stub"
+
+    monkeypatch.setattr(model_module, "build_vision_engine", engine)
+    monkeypatch.setattr(model_module, "build_text_engine", engine)
+
+    class Writer:
+        def __init__(self):
+            self.sections = {}
+
+        def set_header(self, **header):
+            self.header = header
+
+        def add_bytes(self, name, data):
+            self.sections[name] = data
+
+        def add_json(self, name, data):
+            self.sections[name] = data
+
+    writer = Writer()
+    model_module.build(BuildRequest(model_dir=directory, output_path=tmp_path / "test.bundle",
+                                    family="siglip", task=task, precision="fp32"), writer)
+    assert writer.header == {"family": "siglip", "task": task, "backend": "trt"}
+    assert len(engines) == 2
+    assert set(writer.sections) == {"vision.plan", "text.plan", "tokenizer.json", "runtime.json"}
+    runtime = writer.sections["runtime.json"]
+    assert runtime["pad_token_id"] == 0
+    assert runtime["resample"] == 2
+    assert runtime["max_text_len"] == _WINDOW
+    assert runtime["embedding_dim"] == _HIDDEN
+    assert json.loads(writer.sections["tokenizer.json"])["model"]["type"] == "BPE"
+    with pytest.raises(NotImplementedError, match="unquantized fp32"):
+        model_module.build(BuildRequest(model_dir=directory, output_path=tmp_path / "fp8.bundle",
+                                        family="siglip", task=task, precision="fp32",
+                                        quantization="fp8"), Writer())
+    assert len(engines) == 2
+
+
+
+def test_pinned_siglip2_checkpoint_geometry(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    fixture = json.loads((Path(__file__).parent / "data/siglip2-checkpoint-shapes.json")
+                         .read_text(encoding="utf-8"))
+    weights = {key: SimpleNamespace(shape=shape) for key, shape in fixture["shapes"].items()}
+    directory = _model_dir(tmp_path, fixture["config"], fixture["preprocessor"])
+    cfg = config_module.resolve(directory, weights)
+    assert cfg["text"]["vocab_size"] == 256000
+    assert cfg["text"]["max_text_len"] == 64
+    assert cfg["vision"]["image_size"] == 224
+    assert cfg["text"]["num_layers"] == cfg["vision"]["num_layers"] == 12
+    assert cfg["text"]["hidden_size"] == cfg["vision"]["hidden_size"] == 768
+    assert cfg["resample"] == 2

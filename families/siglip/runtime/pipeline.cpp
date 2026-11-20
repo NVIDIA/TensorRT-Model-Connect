@@ -69,12 +69,8 @@ SiglipPipeline::SiglipPipeline(std::unique_ptr<ITrtModule> vision, std::unique_p
         !std::isfinite(config_.logit_bias)) {
         throw std::runtime_error("siglip runtime config has invalid dimensions");
     }
-    if (config_.resample != 3) {
-        // SigLIP 2 resamples bilinear. This family reproduces Pillow's bicubic
-        // only, so a checkpoint asking for anything else is refused here rather
-        // than resampled with the wrong filter.
-        throw std::runtime_error("siglip is qualified for bicubic resize only");
-    }
+    if (config_.preprocess.resample != 2 && config_.preprocess.resample != 3)
+        throw std::runtime_error("siglip resize requires bilinear (2) or bicubic (3)");
 }
 
 std::vector<internal::TaskInstance> SiglipPipeline::task_bindings() {
