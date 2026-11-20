@@ -406,7 +406,9 @@ def test_every_ready_catalog_task_has_defaults_or_a_stated_gap():
     from trtmc_aiperf_qual.config import CONFIG_ROOT
     from trtmc_aiperf_qual.selection import catalog
 
-    not_qualified: dict[str, str] = {}  # Task -> why no generic native reference or benchmark serves it yet
+    not_qualified: dict[str, str] = {  # Task -> why no generic native reference or benchmark serves it yet
+        "images_text_to_text": "not every family of this Task declares the OCRBench suite's template controls yet",
+    }
     tasks = yaml.safe_load((CONFIG_ROOT / "tasks.yaml").read_text())["tasks"]
     assert {profile.task for profile in catalog(REPOSITORY)} - set(tasks) == set(not_qualified)
 

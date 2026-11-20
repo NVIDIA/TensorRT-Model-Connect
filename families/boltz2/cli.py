@@ -15,7 +15,7 @@ from tensorrt_model_connect.graph_transform import GraphTransform, graph_transfo
 from tensorrt_model_connect.model_support import resolve_model
 
 
-DIFFUSION_TOKEN_PRECISIONS = frozenset({"bf16", "fp32"})
+DIFFUSION_TOKEN_PRECISIONS = frozenset({"fp16", "bf16", "fp32"})
 
 
 @dataclass(frozen=True)
@@ -27,9 +27,9 @@ class BuildRequest:
     max_sequence_length: int | None = 117
     verbose: bool = False
     # Compute dtype of the diffusion token-transformer projections. Upstream
-    # Boltz-2 runs the whole score model in fp32; "bf16" casts only these
-    # matmuls to bf16 (state, norms and attention stay fp32).
-    diffusion_token_precision: str = "bf16"
+    # Boltz-2 runs the whole score model in fp32; "fp16" (default) and "bf16"
+    # cast only these matmuls (state, norms and attention stay fp32).
+    diffusion_token_precision: str = "fp16"
 
     def __post_init__(self) -> None:
         if self.backend != "trt":
@@ -86,7 +86,7 @@ def build_bundle(request: BuildRequest, output: Path, *, transform: GraphTransfo
 def build(*, model: str, output: Path, revision: str | None = None,
           task: str = "structure_prediction", precision: str = "bf16", backend: str = "trt",
           max_sequence_length: int | None = 117, verbose: bool = False,
-          diffusion_token_precision: str = "bf16") -> int:
+          diffusion_token_precision: str = "fp16") -> int:
     request = BuildRequest(resolve_model(model, revision), task, precision, backend,
                            max_sequence_length, verbose, diffusion_token_precision)
     build_bundle(request, output)

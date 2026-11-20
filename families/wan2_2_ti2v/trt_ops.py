@@ -195,6 +195,76 @@ def linear_fp8_e4m3(
     return bf16_barrier(network, y)
 
 
+def linear_nvfp4(
+    network,
+    x,
+    weight,
+    bias=None,
+    *,
+    input_scale: float,
+    weight_refs: list[np.ndarray],
+):
+    """Row linear (``[rows, in]``) with NVFP4 W4A4 and a BF16 output and bias boundary.
+
+    The weight is a packed FP4 constant with e4m3 block scales and one global scale. The
+    activation is quantized at run time in blocks of 16 with the static global ``input_scale``.
+    ``weight_refs`` keeps the NumPy-owned FP4 storage alive until TensorRT has serialized.
+    """
+
+    from .quantization import NVFP4_BLOCK_SIZE, quantize_nvfp4_weight
+
+    if not math.isfinite(input_scale) or input_scale <= 0.0:
+        raise ValueError("NVFP4 input scale must be positive and finite")
+    if len(x.shape) != 2:
+        raise ValueError("NVFP4 linear expects [rows, in] activations")
+    packed, block_scale, weight_scale_2 = quantize_nvfp4_weight(weight)
+    weight_refs.extend((packed, block_scale))
+    out_features, in_features = np.asarray(weight).shape
+    x = cast(network, x, trt.bfloat16)
+
+    fp4_weight = network.add_constant(
+        (out_features, in_features),
+        trt.Weights(trt.DataType.FP4, packed.ctypes.data, out_features * in_features),
+    ).get_output(0)
+    fp8_block_scale = network.add_constant(
+        (out_features, in_features // NVFP4_BLOCK_SIZE),
+        trt.Weights(trt.DataType.FP8, block_scale.ctypes.data, block_scale.size),
+    ).get_output(0)
+    weight_scale = network.add_dequantize(
+        fp8_block_scale,
+        constant(network, np.asarray([weight_scale_2], dtype=np.float32)),
+        trt.float32,
+    )
+    dequantized_weight = network.add_dequantize(fp4_weight, weight_scale.get_output(0), trt.float32)
+    dequantized_weight.axis = 1
+    bf16_weight = cast(network, dequantized_weight.get_output(0), trt.bfloat16)
+
+    global_scale = constant(network, np.asarray([input_scale], dtype=np.float32))
+    quantized_x = network.add_dynamic_quantize(
+        x, 1, NVFP4_BLOCK_SIZE, trt.DataType.FP4, trt.DataType.FP8
+    )
+    quantized_x.set_input(1, global_scale)
+    activation_scale = network.add_dequantize(
+        quantized_x.get_output(1), cast(network, global_scale, trt.bfloat16), trt.bfloat16
+    )
+    dequantized_x = network.add_dequantize(
+        quantized_x.get_output(0), activation_scale.get_output(0), trt.bfloat16
+    )
+    dequantized_x.axis = 1
+
+    y = network.add_matrix_multiply(
+        dequantized_x.get_output(0),
+        trt.MatrixOperation.NONE,
+        bf16_weight,
+        trt.MatrixOperation.TRANSPOSE,
+    ).get_output(0)
+    if bias is not None:
+        bias_tensor = constant(network, np.asarray(bias, dtype=np.float32).reshape(1, -1))
+        bias_tensor = cast(network, bias_tensor, y.dtype)
+        y = network.add_elementwise(y, bias_tensor, trt.ElementWiseOperation.SUM).get_output(0)
+    return bf16_barrier(network, y)
+
+
 def layer_norm(network, x, hidden_size: int, eps: float, *, round_bf16: bool = False):
     x = cast(network, x, trt.float32)
     gamma = constant(network, np.ones((1, hidden_size), dtype=np.float32))

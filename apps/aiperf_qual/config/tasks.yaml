@@ -177,7 +177,7 @@ benchmarks:
   action_parity: {suite: action-parity, suite_definition: lerobot-act-observations-50, metric: action_parity,
                   gate: {max_error_of_range: 0.001}}
   # LeRobot action chunks (GR00T, pi0.5) on recorded LIBERO observations with the family's fixed flow noise on
-  # both sides (each family states its suite and its precision's E2E tolerance: tests/aiperf), every observation.
+  # both sides (each family states its suite and its precision's gate: tests/aiperf), every observation.
   action_chunk_parity: {suite: action-chunk-parity, metric: action_parity, gate: {max_error_of_range: 0.001}}
   # Structure prediction from the same noise as the native model (the family's suite): lDDT, aligned RMSD, pLDDT
   # and confidence against the native structure, the family's E2E gate.
@@ -291,7 +291,7 @@ tasks:
   # content diverges across precisions. Acc is the gold-referenced checks below (GenEval, VBench CLIP-T);
   # the pixel parity under latent replay is reported only (`informational`): generated media drift
   # between TRTMC and the native model at any precision.
-  image_generation:
+  image_generation: &generate_image
     reference: {precision: bf16}
     # Families whose TRTMC runtime takes caller initial latents render with the same initial noise on
     # both sides (latent replay), which makes them comparable pixel by pixel: how much further TRTMC is
@@ -303,7 +303,7 @@ tasks:
                      fallback_min: {psnr_db: 19.0, ssim: 0.8}, min_pass_rate: 0.9},
                     # Text-to-image with caller latents when supported: GenEval-style (all 553 prompts over its six
                     # tags, OWLv2 detections and CLIP colors, exact counts), paired right/wrong per prompt, margin 5 points.
-                    {check: geneval, suite: geneval-full, only_families: [flux, pixart, qwen_image, z_image, stable_diffusion],
+                    {check: geneval, suite: geneval-full, only_families: [flux, pixart, qwen_image, z_image, stable_diffusion, chroma],
                      latent_replay_families: [flux, pixart, qwen_image, z_image, stable_diffusion],
                      detector: google/owlv2-base-patch16-ensemble,
                      detector_revision: cfd3195ba4ea9592eec887ded089f4c08eff231d,
@@ -320,6 +320,7 @@ tasks:
                      detector_threshold: 0.2, gate: {margin: 1.0}}]
     performance: &media_policy {output_grader: parity_image, output_grader_params: {min_psnr: 0, min_ssim: -1},
                      measurement: {settle_s: 0, warmup: 1, requests: 3, runs: 3}}
+  text_to_image: *generate_image  # image_generation under its Task SDK name
   image_edit:  # edit inputs are model-specific: the catalog testcase
     reference: {precision: bf16}
     # Edits of ten Imagenette images with the same initial noise on both sides (latent replay),

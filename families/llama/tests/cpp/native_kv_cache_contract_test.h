@@ -8,6 +8,7 @@
 #include "trtmc/runtime/trt_module.h"
 #include "trtmc/task.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cuda_runtime_api.h>
 #include <iostream>
@@ -241,6 +242,19 @@ int run_native_kv_contract_tests(const char* model) {
     cudaStream_t stream = nullptr;
     if (cudaStreamCreate(&stream) != cudaSuccess)
         return 1;
+
+    {
+        // E4M3 attention can observe masked rows before they receive a KV value.
+        Cache packed(2, 17, 13, stream, DType::kFloat8E4M3);
+        for (int layer = 0; layer < 2; ++layer) {
+            for (auto* tensor : {&packed.cache_k(layer), &packed.cache_v(layer)}) {
+                std::vector<std::uint8_t> bytes(tensor->nbytes(), 0xff);
+                check(bytes.size() == 17 * 13 && tensor->copy_to_host(bytes.data()) &&
+                          std::all_of(bytes.begin(), bytes.end(), [](auto b) { return b == 0; }),
+                      "initial packed K and V rows are finite encoding zero");
+            }
+        }
+    }
 
     check(rejects_native_contract<Cache>(
               stream,

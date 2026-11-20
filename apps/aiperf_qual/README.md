@@ -71,7 +71,10 @@ the ordinary parity decision still requires every selected sample to pass, unles
 `outliers` (`max_fraction` of the samples, each within `outliers.gate` merged over the gate): then that many
 single-sample outliers pass and are listed in every report, while a missing answer or a larger error still
 fails. A profile's family file declares it (DINOv3; camembert-base, roberta-large and fnet-base for
-encoder-parity); the shared Task defaults do not.
+encoder-parity; the GR00T FP8 and pi0.5 bf16 and FP8 action chunks); the shared Task defaults do not.
+`action_parity` with `gripper_component` bounds the arm components by the gate's error and compares the
+gripper by sign (`max_gripper_sign_changes` steps may differ, default 0), the open or close command a
+LIBERO robot executes.
 DINOv3 uses 50 seeded COCO val2017 images, complete hidden and pooled features, and its existing
 family E2E criteria. Accuracy and task-call P50 come from the same extraction requests.
 
@@ -447,6 +450,12 @@ A suite with media and neither `media_root` nor `hf_datasets_cache` configured i
 - New machine: a new file under `config/environments/` (paths, Python interpreters, ports, lock, model list,
   retention); Docker or bare metal only differ in these paths. A run's own inputs (its ledger and multi-host
   assignment) stay with that run's results and are passed by path (`run-all --ledger`, `--assignment`).
+- Several hosts without a frozen assignment: a coordinator hands profiles (a checkpoint's profiles together) to
+  hosts as they free up. Each attempt is a fragment, `run-all --campaign ID --fragment ID --host NAME --profile ...`
+  in an `--out-root` of its own (it resumes only as the same fragment). The coordinator's manifest
+  (`{"campaign": ID, "expected": [profiles], "accepted": [fragments]}`) decides what merges: `merge-check
+  --manifest` and `summary --manifest` require exactly one result per expected profile among the accepted
+  fragments, run with the same campaign inputs, and leave fragments the manifest did not accept out.
 
 
 ## Native endpoint group coverage

@@ -232,7 +232,19 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             raise NotImplementedError(
                 f"Llama does not support quantization={request.quantization!r}"
             )
-        quantized = request.quantization in {"fp8", "nvfp4", "int4_awq"}
+        from .prepared_quantization import compressed_static_fp8
+
+        embedded = config.raw.get("quantization_config") or {}
+        sidecar = model_dir / "hf_quant_config.json"
+        declared = json.loads(sidecar.read_text())["quantization"] if sidecar.is_file() else embedded
+        source_format = None
+        if compressed_static_fp8(embedded):
+            source_format = "fp8"
+        elif declared.get("quant_algo") in {"FP8", "NVFP4"}:
+            source_format = declared["quant_algo"].lower()
+        if source_format and request.quantization not in {None, source_format}:
+            raise ValueError("Requested quantization conflicts with the prepared Llama source")
+        quantized = source_format is not None or request.quantization in {"fp8", "nvfp4", "int4_awq"}
         if quantized and (request.dynamic_kv_cache or request.fp32_layers):
             raise NotImplementedError(
                 "quantized Llama builds do not support dynamic_kv_cache or fp32_layers"
@@ -244,7 +256,9 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         config.raw["dynamic_kv_cache"] = request.dynamic_kv_cache
         config.raw["_quantized_build_requested"] = quantized
         quant_ctx = None
-        if quantized:
+        # PreparedLinear consumes these source bytes and scales directly. Do not
+        # construct a second quantization context for an explicit FP8 request.
+        if quantized and source_format is None:
             from . import graph_ops
             from .quantization import calibrate_llama
 
@@ -256,6 +270,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             fp32_layers=request.fp32_layers,
             quant_ctx=quant_ctx,
         )
+
+        if weights.get("_prepared_quantized", False):
+            kv_algo = declared.get("kv_cache_quant_algo")
+            if kv_algo not in (None, "FP8"):
+                raise NotImplementedError(f"Unsupported prepared Llama cache format: {kv_algo!r}")
+            scales = [f"layer.{i}.kv_{kind}_scale" in weights
+                      for i in range(config.num_hidden_layers) for kind in ("k", "v")]
+            if (kv_algo == "FP8" or any(scales)) and not all(scales):
+                raise ValueError("Prepared Llama FP8 cache requires calibrated K and V for every layer")
+            weights["_fp8_kv_cache"] = all(scales)
 
         writer.set_header(family="llama", task=request.task, backend=request.backend)
         if request.dynamic_kv_cache:
@@ -319,6 +343,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             max_cache_length=max_sequence_length,
             decoder_engine_layout=layout,
         )
+        if weights.get("_fp8_kv_cache", False):
+            runtime_config["fp8_kv_cache"] = True
         if request.dynamic_kv_cache:
             runtime_config["dynamic_kv_cache"] = True
         writer.add_json("runtime.json", runtime_config)

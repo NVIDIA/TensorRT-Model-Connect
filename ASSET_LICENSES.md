@@ -29,12 +29,17 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 
 - `families/idefics3/tests/data/test_img.jpeg`
 - `families/detr/tests/data/test_img.jpeg`
+- `families/vjepa2/tests/data/test_img.jpeg`
+
+- `families/layoutlmv3/tests/data/test_img.jpeg`
 - `families/dinov3/tests/data/test_img.jpeg`
+- `families/gemma3n/tests/data/test_img.jpeg`
 - `families/internvl/tests/data/test_img.jpeg`
 - `families/lance/tests/data/test_img.jpeg`
 - `families/locateanything/tests/data/test_img.jpeg`
 - `families/moge/tests/data/test_img.jpeg`
 - `families/molmo2/tests/data/test_img.jpeg`
+- `families/oneformer/tests/data/test_img.jpeg`
 - `families/paligemma/tests/data/test_img.jpeg`
 - `families/phi4_multimodal/tests/data/test_img.jpeg`
 - `families/qwen_image/tests/data/test_img.jpeg`
@@ -55,6 +60,14 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 - `families/timm_vgg/tests/data/test_img.jpeg`
 - `families/timm_vit/tests/data/test_img.jpeg`
 
+`families/gemma3n/tests/data/test_img_car.jpeg` is a byte-identical copy of
+`families/timm_resnet/tests/data/test_img_car.jpeg`, a crop of the same
+photograph, and is distributed under the same terms.
+
+`families/swinv2/tests/data/test_img.png` is the same photograph decoded to RGB
+and saved losslessly as PNG (its pixels equal Pillow's decode of the
+`test_img.jpeg` copies listed above) and is distributed under the same terms.
+
 `families/timm_resnet/tests/data/test_img_car.jpeg` is a crop of the same
 photograph (columns 260 to 639, rows 60 to 381, saved again as JPEG) and is
 distributed under the same terms.
@@ -66,6 +79,12 @@ distributed under the Apache License 2.0 with the rest of the project:
 
 - `families/deepseek_ocr/tests/data/orc_test_img.jpeg` — screenshot of
   project source text created for OCR regression testing
+- `families/glm_ocr/tests/data/orc_test_img.jpeg` — byte-identical copy of
+  `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the page the GLM-OCR E2E
+  cases read
+- `families/glm_ocr/tests/data/orc_test_img_line.png` — the first line of that
+  page (columns 0 to 839, rows 0 to 55, decoded and saved again as PNG), the
+  single-line GLM-OCR E2E cases
 - `families/lighton_ocr/tests/data/invoice.png` — synthetic invoice with
   invented data rendered by the family-owned `generate_fixture.py`
 - `families/phi4_multimodal/tests/data/dynamic-hd/synthetic-*.png` (7 images) —
@@ -79,6 +98,11 @@ distributed under the Apache License 2.0 with the rest of the project:
 - `families/timm_inception_v4/tests/data/orc_test_img.jpeg` — byte-identical copy of
   `families/deepseek_ocr/tests/data/orc_test_img.jpeg`, the input of the FP8
   E2E case, chosen for its clear top-1 margin
+- `families/trocr/tests/data/printed_total.png`, `printed_thanks.png`,
+  `printed_receipt.png`, `printed_small.png`, `printed_tight.png` and
+  `printed_tall.png` — printed text lines written by the checked-in
+  `families/trocr/tests/data/generate.py` with Pillow's built-in default font,
+  Aileron Regular (https://dotcolon.net/fonts/aileron, CC0 1.0 Universal)
 - `families/minicpm_ocr/tests/data/minicpm_ocr_page.png` — the decoded pixels of
   `families/deepseek_ocr/tests/data/orc_test_img.jpeg` saved losslessly as PNG, so
   the native loader and the reference processor read identical pixels
@@ -171,11 +195,14 @@ golden data.
 
 ## LibriSpeech accuracy fixture
 
-`families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav`
-and its byte-identical copy
-`families/hubert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
-are utterance `6930-75918-0003` from the LibriSpeech `test-clean` split,
+`families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav` and
+`families/mimi/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+are unmodified copies of utterance `6930-75918-0003` from the LibriSpeech `test-clean` split,
 distributed by OpenSLR as SLR12 under the Creative Commons Attribution 4.0
+`families/wav2vec2_bert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+are PCM WAV conversions of utterance `6930-75918-0003` from the LibriSpeech
+`test-clean` split, which OpenSLR distributes as FLAC in SLR12 under the
+Creative Commons Attribution 4.0
 International license. LibriSpeech was prepared by Vassil Panayotov with the
 assistance of Daniel Povey and is derived from LibriVox public-domain
 audiobooks.
@@ -185,6 +212,11 @@ audiobooks.
 
 A byte-identical copy is stored at
 `families/qwen3_asr/tests/data/librispeech-test-clean-6930-75918-0003.wav`.
+
+A byte-identical copy is stored at
+`families/wavlm/tests/data/librispeech-test-clean-6930-75918-0003.wav`, next to
+`families/wavlm/tests/data/librispeech-test-clean-6930-75918-0003.txt`, the
+utterance's transcript from the same LibriSpeech release.
 
 ## SANA world-model fixtures
 

@@ -245,6 +245,7 @@ def test_edge_cli_uses_ordinary_family_build(tmp_path, monkeypatch, precision):
 
     def paired(request, writer, execution):
         assert isinstance(request, LlamaBuildRequest)
+        assert request.edge_builder_python == tmp_path / "edge-python"
         assert request.execution is execution
         assert execution.variant == "eagle3"
         assert [(item.role, item.model_dir) for item in execution.checkpoints] == [("draft", draft)]
@@ -256,6 +257,7 @@ def test_edge_cli_uses_ordinary_family_build(tmp_path, monkeypatch, precision):
     options = ["--precision", precision] if precision else []
     assert build_cli.main(["llama",
         "build", str(source), *options, "-o", str(output),
+        "--edge-builder-python", str(tmp_path / "edge-python"),
         "--execution-variant", "eagle3", "--companion", f"draft={draft}",
     ]) == 0
     assert len(seen) == 1
@@ -426,6 +428,7 @@ assert "torch" not in sys.modules
 
 def test_edge_eagle3_falls_back_to_native_with_original_pair(tmp_path, monkeypatch):
     import json
+    from dataclasses import replace
     from unittest.mock import Mock
     from families.llama.build_request import BuildRequest
     from families.llama.edge_llm import dispatch
@@ -449,9 +452,15 @@ def test_edge_eagle3_falls_back_to_native_with_original_pair(tmp_path, monkeypat
         assert draft_dir == draft
         native(original, output)
 
-    monkeypatch.setattr(dispatch, "build", unavailable)
-    dispatch.build_paired(request, writer,
-                          BuildExecutionInputs("eagle3", (NamedCheckpoint("draft", draft),)))
+    route = Mock(side_effect=unavailable)
+    monkeypatch.setattr(dispatch, "build", route)
+    execution = BuildExecutionInputs("eagle3", (NamedCheckpoint("draft", draft),))
+    for quantization in ("fp8", "nvfp4", "int4_awq"):
+        with pytest.raises(ValueError, match="EAGLE3.*quantization"):
+            dispatch.build_paired(replace(request, quantization=quantization), writer, execution)
+    route.assert_not_called()
+    build_native.assert_not_called()
+    dispatch.build_paired(request, writer, execution)
     build_native.assert_called_once_with(
         model_dir=source, draft_dir=draft, output=request.output_path,
         max_sequence_length=256, max_query=64, draft_depth=6, verbose=False,
@@ -552,30 +561,64 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
         # An installed wheel supplies Python tooling, never the native C++ SDK.
         from types import SimpleNamespace
 
-        package = {"python": "/sdk/private/python"}
+        # An externally installed 0.12 native SDK declares its release but
+        # cannot attest a source commit. An absent field is not an attestation.
+        if weight_format == "fp16":
+            target.update(cuda_version="13.3", tensorrt_version="11.4.0.106")
+            (prefix / "plugin.so").touch()
+            (prefix / "python").touch()
+            for version, (schema, key, pin, _) in builder._RELEASES.items():
+                metadata = dict(version=version, schema_version=schema, arch=target["arch"],
+                                cuda_version=target["cuda_version"], architectures=[target["sm"]],
+                                tensorrt_version=target["tensorrt_version"],
+                                plugin="plugin.so", python="python")
+                for value in (pin, None, "unknown"):
+                    manifest.write_text(json.dumps({**metadata, key: value}))
+                    if value == pin or (version == "0.12.0" and value is None):
+                        assert builder.installed_package(target)[key] == value
+                    else:
+                        with pytest.raises(ValueError, match="source revision"):
+                            builder.installed_package(target)
+                manifest.write_text(json.dumps(metadata))
+                with pytest.raises(ValueError, match="source revision"):
+                    builder.installed_package(target)
+
         platform = {"tensorrt_version": "11.1.0.106"}
-        responses = iter([
-            '["0.11.0", "11.1.0.106"]',
-            '["0.10.1", "11.1.0.106"]',
-            '["0.11.0", "11.0.0.114"]',
-            "not JSON",
-        ])
-        def probe(command, **kwargs):
-            assert command[0] == builder.sys.executable
-            assert command[1:3] == ["-I", "-c"]
-            assert kwargs == dict(check=True, capture_output=True, text=True, timeout=30)
-            return SimpleNamespace(stdout=next(responses))
+        for release in ("0.11.0", "0.12.0"):
+            package = {"version": release}
+            if release == "0.11.0":
+                package["python"] = "/sdk/private/python"
+            responses = iter([
+                f'["{release}", "11.1.0.106"]',
+                '["0.10.1", "11.1.0.106"]',
+                f'["{release}", "11.0.0.114"]',
+                "not JSON",
+            ])
 
-        monkeypatch.setattr(builder.subprocess, "run", probe)
-        assert builder.builder_python(package, platform) == builder.sys.executable
-        for _ in range(3):
-            assert builder.builder_python(package, platform) == package["python"]
+            def probe(command, **kwargs):
+                assert command[:3] == [builder.sys.executable, "-I", "-c"]
+                assert ("5.17.0" in command[3]) == (release == "0.12.0")
+                assert kwargs == dict(check=True, capture_output=True, text=True, timeout=30)
+                return SimpleNamespace(stdout=next(responses))
 
-        def unavailable(*args, **kwargs):
-            raise builder.subprocess.TimeoutExpired("python", 30)
+            monkeypatch.setattr(builder.subprocess, "run", probe)
+            assert builder.builder_python(package, platform) == builder.sys.executable
 
-        monkeypatch.setattr(builder.subprocess, "run", unavailable)
-        assert builder.builder_python(package, platform) == package["python"]
+            def check_incompatible_tool():
+                if release == "0.11.0":
+                    assert builder.builder_python(package, platform) == package["python"]
+                else:
+                    with pytest.raises(ValueError, match="--edge-builder-python"):
+                        builder.builder_python(package, platform)
+
+            for _ in range(3):
+                check_incompatible_tool()
+
+            def unavailable(*args, **kwargs):
+                raise builder.subprocess.TimeoutExpired("python", 30)
+
+            monkeypatch.setattr(builder.subprocess, "run", unavailable)
+            check_incompatible_tool()
 
 
 def test_edge_windows_nonmatch_does_not_probe_compiler(tmp_path, monkeypatch, caplog):

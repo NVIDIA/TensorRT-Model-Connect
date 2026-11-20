@@ -115,6 +115,26 @@ LlamaKvCache::LlamaKvCache(int32_t num_layers, int32_t max_length, int32_t kv_di
             return;
     }
 
+    if (cache_dtype_ == DType::kFloat8E4M3) {
+        // Packed prefill dequantizes unwritten rows before applying the mask.
+        // Seed them with finite zero once, rather than clearing on each request.
+        for (int32_t i = 0; i < num_layers; ++i) {
+            for (auto* tensor : {&cache_k_[i], &cache_v_[i]}) {
+                const auto status = cudaMemsetAsync(tensor->data(), 0, tensor->nbytes(), stream_);
+                if (status != cudaSuccess)
+                    throw std::runtime_error(
+                        std::string("Cannot initialize packed Llama KV cache: ") +
+                        cudaGetErrorString(status));
+            }
+        }
+        // The prefill module may consume these buffers on a different stream.
+        const auto status = cudaStreamSynchronize(stream_);
+        if (status != cudaSuccess)
+            throw std::runtime_error(
+                std::string("Cannot complete packed Llama KV initialization: ") +
+                cudaGetErrorString(status));
+    }
+
     // Pre-allocate mask buffer: [max_length + 1] for dense causal mask.
     mask_buf_.resize(static_cast<std::size_t>(max_length) + 1);
     key_positions_.resize(static_cast<std::size_t>(max_length));
@@ -405,6 +425,10 @@ void LlamaKvCache::bind_to(ITrtModule& module) {
             (!dynamic_binding_enabled_ &&
              (module.tensor_shape(names_.cache_k[layer]) != cache_shape ||
               module.tensor_shape(names_.cache_v[layer]) != cache_shape)) ||
+            module.tensor_dtype(names_.cache_k[layer]) != cache_dtype_ ||
+            module.tensor_dtype(names_.cache_v[layer]) != cache_dtype_ ||
+            module.tensor_dtype(names_.present_k[layer]) != cache_dtype_ ||
+            module.tensor_dtype(names_.present_v[layer]) != cache_dtype_ ||
             module.tensor_shape(names_.present_k[layer]) != present_shape ||
             module.tensor_shape(names_.present_v[layer]) != present_shape) {
             throw std::runtime_error("Llama standard decoder has an invalid KV contract");

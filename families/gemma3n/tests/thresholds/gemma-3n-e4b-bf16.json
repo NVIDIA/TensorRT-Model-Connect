@@ -1,0 +1,5 @@
+{
+  "threshold_overrides": {
+    "teacher_forced_logit_margin": 0.7
+  }
+}

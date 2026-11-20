@@ -107,6 +107,23 @@ CLI/backend-only build avoid unselected families' optional native prerequisites.
 Unknown family names fail configuration. Omitting the option or setting it to
 `*` preserves the default of configuring every family.
 
+## Optional Edge-LLM 0.12.0 migration build
+
+The default Edge-enabled source build still uses 0.11.0. To build against the
+0.12.0 C++ SDK, set both `-DTRTMC_ENABLE_EDGELLM=ON` and
+`-DTRTMC_EDGELLM_RELEASE=0.12.0` at configure time. Keep the 0.12 Python
+builder in a separate environment: its Transformers requirement is different
+from Model Connect's shared pin. This option provisions the native SDK; it
+does not port any family adapter. See the [native SDK setup](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/cmake/edge_llm/README.md)
+for provisioning options. Follow each family's instructions for model builds.
+
+On GB300, pass `-DCMAKE_CUDA_ARCHITECTURES=103` for a native build. Model
+Connect records SM103 and selects the upstream `103a` compiler target when
+it builds the optional 0.12 SDK kernels. The reduced SDK build includes the
+CTM decode kernels required by the upstream attention plugin on this GPU.
+Model Connect also uses `103a` when device-linking the SDK into a consumer;
+using `103` there can leave runtime CUDA kernels unavailable.
+
 ## Optional Edge-LLM Python tools
 
 After preparing the source-build prerequisites below, use CPython 3.12 to
@@ -197,6 +214,11 @@ cmake --build "$TRTMC_BUILD_DIR" --parallel "$(nproc)" --target \
 
 export PATH="$PWD/$TRTMC_BUILD_DIR:$PATH"
 ```
+
+The command above builds the Qwen family. If you configured with
+`-DTRTMC_BUILD_FAMILIES=""`, omit `trtmc_model_qwen` from the target list. For a
+specific family selection, replace it with the corresponding selected targets,
+such as `trtmc_model_qwen2_5_omni` for `-DTRTMC_BUILD_FAMILIES=qwen2_5_omni`.
 
 To run the optional text server from this build, install its Python control
 plane dependencies with `python -m pip install -e '.[serve]' -C py-only=true`.

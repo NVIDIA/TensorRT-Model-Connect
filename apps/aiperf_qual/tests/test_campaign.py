@@ -855,6 +855,22 @@ def test_html_report_lists_failures_first_with_evidence(tmp_path):
     assert legend.count("<div><dt>") == 4  # one line per result
 
 
+
+def test_hosts_that_may_merge_show_the_same_campaign_inputs(tmp_path):
+    required = {"harness": "h", "code": {"core": "c"}, "versions": {"harness": {"tensorrt": "11.4.0.106"}}}
+    roots = []
+    for host, runtime, harness in (("host-a", "r1", "h"), ("host-b", "r2", "h"), ("host-c", "r1", "other")):
+        root = tmp_path / host
+        root.mkdir()
+        inputs = {**required, "harness": harness, "informational": {"runtime": runtime, "dependencies": {"harness": host}}}
+        (root / campaign.PLAN).write_text(json.dumps({"host": host, "fragment": "q001-1", "inputs": inputs}))
+        roots.append(root)
+
+    digests = [part.split("campaign inputs ")[1] for part in campaign.run_context(roots).split(" · ")]
+
+    assert digests[0] == digests[1]  # only each host's own runtime build and dependency set differ
+    assert digests[2] != digests[0]
+
 def test_html_pass_rate_excludes_inconclusive_accuracy(tmp_path):
     from trtmc_aiperf_qual.report_html import render
 
