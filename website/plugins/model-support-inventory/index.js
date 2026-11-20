@@ -76,6 +76,7 @@ const TASKS = {
   image_to_pooled_features: ['Pooled image features', 'Computer Vision', 'image-feature-extraction', 'extract-features'],
   image_to_embedding: ['Image embedding', 'Computer Vision', 'image-feature-extraction', 'embed'],
   image_text_to_embedding: ['Image and text embedding', 'Multimodal', null, 'embed'],
+  document_words_to_token_features: ['Document words to token features', 'Multimodal', null, null],
   points_to_embedding: ['Point-cloud embedding', 'Computer Vision', null, null],
   text_pair_to_relevance: ['Text-pair relevance', 'Natural Language Processing', 'text-ranking', 'rerank'],
   text_image_to_relevance: ['Text and image relevance', 'Multimodal', null, 'rerank'],

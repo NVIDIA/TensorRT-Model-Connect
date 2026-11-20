@@ -667,6 +667,46 @@ class SpectralFeaturesFixture final : public IModel, public ISpectrogramToFrameF
     std::string mode_;
 };
 
+class DocumentFeaturesFixture final : public IModel, public IDocumentWordsToTokenFeatures {
+  public:
+    explicit DocumentFeaturesFixture(std::string mode) : mode_(std::move(mode)) {}
+    const char* task() const noexcept override { return mode_.c_str(); }
+    std::vector<TaskInstance> task_bindings() override {
+        return {bind<IDocumentWordsToTokenFeatures>(*this)};
+    }
+    DocumentTokenFeaturesResult run(const DocumentWordsToTokenFeaturesRequest& input,
+                                    ConfigView config) override {
+        validate_config({}, config);
+        DocumentTokenFeaturesResult result;
+        result.source_word_count = input.words.size();
+        result.features.rows = 4;
+        result.features.columns = 2;
+        result.features.values = {
+            9,
+            8,
+            input.words[0].box.x_min,
+            static_cast<float>(input.words[0].text.size()),
+            input.words[input.words.size() - 1].box.y_max,
+            static_cast<float>(input.words[input.words.size() - 1].text.size()),
+            0,
+            0};
+        result.tokens = {{0, -1, 0},
+                         {17, 0, 1},
+                         {18, static_cast<int64_t>(input.words.size() - 1), 2},
+                         {1, -2, 3}};
+        if (mode_ == "document_bad_word")
+            result.tokens[1].word_index = input.words.size();
+        if (mode_ == "document_bad_source")
+            ++result.source_word_count;
+        if (mode_ == "document_bad_count")
+            result.tokens.pop_back();
+        return result;
+    }
+
+  private:
+    std::string mode_;
+};
+
 class MissingFixture final : public IModel {
   public:
     const char* task() const noexcept override { return "missing"; }
@@ -731,6 +771,9 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
         return new SpatialModel(context.reader.info().task);
     if (context.reader.info().task.rfind("spectral_", 0) == 0)
         return new SpectralFeaturesFixture(context.reader.info().task);
+
+    if (context.reader.info().task.rfind("document_", 0) == 0)
+        return new DocumentFeaturesFixture(context.reader.info().task);
     if (context.reader.info().task == "missing")
         return new MissingFixture;
     if (context.reader.info().task.rfind("video_", 0) == 0)

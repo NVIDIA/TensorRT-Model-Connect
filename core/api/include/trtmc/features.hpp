@@ -9,6 +9,7 @@
 #include "trtmc/features.h"
 #include "trtmc/image.hpp"
 #include "trtmc/matrix.hpp"
+#include "trtmc/perception.hpp"
 #include "trtmc/scores.hpp"
 #include "trtmc/text.hpp"
 #include "trtmc/video.hpp"
@@ -1040,6 +1041,68 @@ class SpectrogramToFrameFeatures {
           api_(reinterpret_cast<const trtmc_spectrogram_to_frame_features_api_v1*>(table)) {}
     std::shared_ptr<detail::ModelState> state_;
     const trtmc_spectrogram_to_frame_features_api_v1* api_;
+};
+
+struct DocumentWord {
+    std::string text;
+    PixelBox box;
+};
+struct DocumentWordsToTokenFeaturesRequest {
+    ImageInput image;
+    std::vector<DocumentWord> words;
+};
+using DocumentFeatureToken = trtmc_document_feature_token_v1;
+class DocumentTokenFeaturesResult
+    : public detail::FeatureResultOwner<trtmc_document_token_features_view_v1> {
+  public:
+    using FeatureResultOwner::FeatureResultOwner;
+    FloatMatrixView features() const noexcept { return detail::feature_matrix(view_.features); }
+    Span<const DocumentFeatureToken> tokens() const noexcept {
+        return {view_.tokens, static_cast<size_t>(view_.token_count)};
+    }
+    uint64_t source_word_count() const noexcept { return view_.source_word_count; }
+};
+class DocumentWordsToTokenFeatures {
+  public:
+    static constexpr std::string_view kTask = TRTMC_TASK_DOCUMENT_WORDS_TO_TOKEN_FEATURES;
+    static constexpr uint32_t kMajor = 1, kMinor = 0;
+    static void validate_table(const trtmc_api_header* table) {
+        if (!table || table->major != 1 || table->minor != 0 ||
+            table->byte_size < sizeof(trtmc_document_words_to_token_features_api_v1))
+            throw Error(TRTMC_VERSION_MISMATCH, "incompatible document feature Task table");
+    }
+    std::vector<ConfigField> config_fields() const {
+        return detail::config_fields(state_, kTask, 1, 0);
+    }
+    DocumentTokenFeaturesResult run(const DocumentWordsToTokenFeaturesRequest& input,
+                                    const Config& config = {}) const {
+        std::vector<trtmc_document_word_v1> words;
+        words.reserve(input.words.size());
+        for (const auto& word : input.words)
+            words.push_back({detail::c_string(word.text), word.box});
+        const trtmc_document_words_to_token_features_request_v1 request{input.image.wire,
+                                                                        words.data(), words.size()};
+        const auto entries = config.c_entries();
+        const auto options = entries.view();
+        trtmc_result* raw = nullptr;
+        trtmc_error* error = nullptr;
+        auto status = api_->run(state_->handle, &request, &options, &raw, &error);
+        DocumentTokenFeaturesResult result(state_, raw);
+        detail::check(state_->api, status, error);
+        error = nullptr;
+        status = api_->result_view(raw, &result.wire_view(), &error);
+        detail::check(state_->api, status, error);
+        return result;
+    }
+
+  private:
+    friend class Model;
+    DocumentWordsToTokenFeatures(std::shared_ptr<detail::ModelState> state,
+                                 const trtmc_api_header* table) noexcept
+        : state_(std::move(state)),
+          api_(reinterpret_cast<const trtmc_document_words_to_token_features_api_v1*>(table)) {}
+    std::shared_ptr<detail::ModelState> state_;
+    const trtmc_document_words_to_token_features_api_v1* api_;
 };
 
 } // namespace trtmc
