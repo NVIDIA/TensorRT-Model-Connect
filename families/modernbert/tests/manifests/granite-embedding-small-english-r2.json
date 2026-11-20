@@ -19,6 +19,24 @@
       "exercise_local_window": true,
       "prompt": "The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge. The river flows through the quiet forest while bright birds gather near the old bridge.",
       "premerge": true
+    },
+    {
+      "name": "granite-embedding-small-english-r2-nfc",
+      "reference_precision": "fp32",
+      "prompt": "A café serves crème brûlée.",
+      "premerge": true
+    },
+    {
+      "name": "granite-embedding-small-english-r2-nfd",
+      "reference_precision": "fp32",
+      "prompt": "A café serves crème brûlée.",
+      "premerge": true
+    },
+    {
+      "name": "granite-embedding-small-english-r2-unicode-boundaries",
+      "reference_precision": "fp32",
+      "prompt": "مرحبا، بالعالم ١٢٣ Ⅻ ².",
+      "premerge": true
     }
   ],
   "tensor_parallel_size": 1,
