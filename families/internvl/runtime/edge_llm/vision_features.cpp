@@ -4,9 +4,15 @@
  */
 #include <cuda_runtime_api.h>
 #include <dlfcn.h>
+#ifdef TRTMC_INTERNVL_EDGE_012
+#include <tensorrt_edgellm/common/trtInterop.h>
+#include <tensorrt_edgellm/multimodal/common/multimodalRunner.h>
+#include <tensorrt_edgellm/runtime/streaming.h>
+#else
 #include <edgellm/cpp/common/logger.h>
 #include <edgellm/cpp/multimodal/common/multimodalRunner.h>
 #include <edgellm/cpp/runtime/streaming.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -17,6 +23,7 @@
 #include <vector>
 
 namespace {
+using EdgeDataType = decltype(trt_edgellm::rt::Tensor{}.getDataType());
 struct Stream {
     cudaStream_t value{nullptr};
     Stream() {
@@ -60,13 +67,18 @@ int main(int argc, char** argv) {
             throw std::runtime_error(std::string("Cannot load Edge plugin: ") + dlerror());
         using InitializeFn = bool (*)(void*, const char*);
         auto initialize = reinterpret_cast<InitializeFn>(dlsym(plugin.get(), "initEdgellmPlugins"));
-        if (!initialize || !initialize(static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger), ""))
+#ifdef TRTMC_INTERNVL_EDGE_012
+        auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::TrtLogger::instance());
+#else
+        auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger);
+#endif
+        if (!initialize || !initialize(logger, ""))
             throw std::runtime_error("Cannot initialize Edge plugin");
         Stream stream;
         trt_edgellm::rt::LLMGenerationRequest request{};
         request.requests.resize(1);
         trt_edgellm::rt::Tensor image({1, height, width, 3}, trt_edgellm::rt::DeviceType::kCPU,
-                                      nvinfer1::DataType::kUINT8);
+                                      EdgeDataType::kUINT8);
         std::ifstream input(argv[4], std::ios::binary);
         if (!input.read(static_cast<char*>(image.rawPointer()), image_bytes))
             throw std::runtime_error("Cannot read RGB fixture");
@@ -80,7 +92,7 @@ int main(int argc, char** argv) {
             throw std::runtime_error("Cannot create Edge visual runner");
         context_memory =
             trt_edgellm::rt::Tensor({runner->getRequiredContextMemorySize()},
-                                    trt_edgellm::rt::DeviceType::kGPU, nvinfer1::DataType::kUINT8);
+                                    trt_edgellm::rt::DeviceType::kGPU, EdgeDataType::kUINT8);
         try {
             if (!runner->setContextMemory(context_memory))
                 throw std::runtime_error("Cannot set visual context memory");
@@ -90,7 +102,7 @@ int main(int argc, char** argv) {
                 !runner->infer(stream.value))
                 throw std::runtime_error("Edge visual inference failed");
             const auto& output = runner->getOutputEmbedding();
-            if (output.getDataType() != nvinfer1::DataType::kHALF ||
+            if (output.getDataType() != EdgeDataType::kHALF ||
                 output.getShape().volume() <= 0)
                 throw std::runtime_error("Invalid Edge feature shape or dtype");
             std::vector<uint16_t> features(output.getShape().volume());
