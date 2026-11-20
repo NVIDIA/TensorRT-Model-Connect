@@ -5,10 +5,6 @@
 # copy a caller's venv or record a build-machine interpreter path in a wheel.
 _edgellm_check_trt_selection("${TensorRT_INCLUDE_DIR}" "${TensorRT_LIBRARY}")
 _edgellm_trt_version("${TensorRT_INCLUDE_DIR}" _edge_trt_version)
-# This is the native consumer architecture. An external SDK does not export
-# a manifest of its compiled device code. Each family still validates execution.
-set(EdgeLLM_CUDA_ARCHITECTURE "${TRTMC_EDGELLM_CUDA_ARCHITECTURE}")
-
 # Keep the SDK exported target's transitive libraries, including device link.
 # Do not reconstruct an installed static link interface from archive names.
 if(NOT TARGET TensorRTEdgeLLM::Core OR NOT TARGET TensorRTEdgeLLM::Plugin)
@@ -75,7 +71,7 @@ file(WRITE "${_receipt}" "{
   \"version\": \"${TensorRTEdgeLLM_VERSION}\",
   \"release_revision\": ${_receipt_revision},
   \"arch\": \"${CMAKE_SYSTEM_PROCESSOR}\",
-  \"architectures\": [${EdgeLLM_CUDA_ARCHITECTURE}],
+  \"architectures\": [${TRTMC_EDGELLM_CUDA_ARCHITECTURE}],
   \"cuda_version\": \"${CUDAToolkit_VERSION_MAJOR}.${CUDAToolkit_VERSION_MINOR}\",
   \"tensorrt_version\": \"${_edge_trt_version}\",
   \"all_native_kernels\": ${_all},
