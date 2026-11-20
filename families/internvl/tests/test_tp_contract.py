@@ -305,8 +305,14 @@ def test_ordinary_cli_keeps_edge_selection_in_the_family(tmp_path, monkeypatch):
 
     monkeypatch.setattr(dispatch, "build", select)
     assert build_cli.main(["internvl", "build", str(source), "-o", str(output)]) == 0
-    assert len(seen) == 1
+    assert len(seen) == 1 and seen[0].edge_builder_python is None
     assert output.is_file()
+    interpreter = tmp_path / "edge-python"
+    assert build_cli.main([
+        "internvl", "build", str(source), "-o", str(tmp_path / "explicit.bundle"),
+        "--edge-builder-python", str(interpreter),
+    ]) == 0
+    assert seen[1].edge_builder_python == interpreter
 
 
 def test_internvl_does_not_register_unowned_companion_options():
@@ -323,7 +329,7 @@ def test_internvl_does_not_register_unowned_companion_options():
     assert "--companion" not in flags
 
 
-@pytest.mark.parametrize("mode", ["absent", "success", "corrupt", "failure", "cancel", "device_failure", "capacity_failure", "larger_device", "quality_failure", "quality_failure_sm120", "awq_unmapped_qwen2", "awq_unmapped_qwen3", "native_capacity_failure", "native_larger_device"])
+@pytest.mark.parametrize("mode", ["absent", "success", "corrupt", "failure", "cancel", "device_failure", "capacity_failure", "larger_device", "quality_failure", "quality_failure_sm120", "awq_unmapped_qwen2", "awq_unmapped_qwen3", "native_capacity_failure", "native_larger_device", "v12_capacity_failure", "v12_larger_device", "v12_other_context"])
 def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, caplog, mode):
     import json
     from tensorrt_model_connect.build import BuildRequest
@@ -334,7 +340,7 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
     (source / "config.json").write_text(json.dumps({
         "max_position_embeddings": 4096, "hidden_size": 896,
     }))
-    if mode in {"capacity_failure", "larger_device", "native_capacity_failure", "native_larger_device"}:
+    if mode.startswith("v12_") or mode in {"capacity_failure", "larger_device", "native_capacity_failure", "native_larger_device"}:
         (source / "config.json").write_text(json.dumps({
             "max_position_embeddings": 4096, "model_type": "qwen3",
             "num_hidden_layers": 40, "hidden_size": 5120,
@@ -351,7 +357,7 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
             "num_hidden_layers": 32, "hidden_size": 4096,
         }))
     monkeypatch.setattr(dispatch, "device_memory_bytes", lambda: (
-        40 if mode == "capacity_failure" else 64 if mode == "native_larger_device" else 48
+        40 if mode in {"capacity_failure", "v12_capacity_failure", "v12_other_context"} else 64 if mode == "native_larger_device" else 48
     ) * 1024 ** 3)
     prefix = tmp_path / "package"
     manifest = prefix / "share/trtmc/edge-llm.json"
@@ -368,11 +374,14 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
     if hasattr(builder, "request_weight_format"):
         monkeypatch.setattr(builder, "request_weight_format", lambda *_: "int4_awq" if mode.startswith(("quality_failure", "awq_unmapped")) else "fp16")
     request = BuildRequest(source, tmp_path / "out", "internvl", "vision_language_generation", "fp16",
-                           max_sequence_length=384)
+                           max_sequence_length=4096 if mode in {"v12_capacity_failure", "v12_larger_device"} else 384)
     writer = object()
     target = {"os": "linux", "arch": "x86_64", "sm": 80, "tensorrt_version": "11.1.0.106"}
     if mode == "quality_failure_sm120" or mode.startswith("awq_unmapped"):
         target["sm"] = 120
+    if mode.startswith("v12_"):
+        target.update(tensorrt_version="11.4.0.106", cuda_version="13.4")
+        monkeypatch.setattr(builder, "selected_release", lambda: "0.12.0")
     target_calls = []
 
     def local_target():
@@ -398,6 +407,7 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
             raise KeyboardInterrupt()
         return {}, {}
 
+    monkeypatch.setattr(builder, "prepare", prepare)
     monkeypatch.setattr(dispatch, "EDGE_DISPATCH", {("linux", "x86_64", target["sm"], fmt): prepare for fmt in ("fp16", "int4_awq")})
     monkeypatch.setattr(builder, "publish", lambda *args: publications.append(args))
     def native(*args):
@@ -410,20 +420,20 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
     assert all(not path.exists() for path in stages)
     assert native_calls == ([(request, writer)] if mode in {
         "absent", "corrupt", "failure", "device_failure", "native_larger_device",
-        "capacity_failure", "native_capacity_failure", "awq_unmapped_qwen2", "awq_unmapped_qwen3",
+        "capacity_failure", "v12_capacity_failure", "native_capacity_failure", "awq_unmapped_qwen2", "awq_unmapped_qwen3",
     } else [])
-    assert len(publications) == (1 if mode in {"success", "larger_device", "quality_failure", "quality_failure_sm120"} else 0)
+    assert len(publications) == (1 if mode in {"success", "larger_device", "quality_failure", "quality_failure_sm120", "v12_larger_device", "v12_other_context"} else 0)
     assert len(target_calls) == (0 if mode in {
         "absent", "native_capacity_failure", "native_larger_device",
     } else 1)
     logs = list(tmp_path.glob(".out.edge-*.log"))
-    if mode in {"corrupt", "failure", "device_failure", "capacity_failure",
+    if mode in {"corrupt", "failure", "device_failure", "capacity_failure", "v12_capacity_failure",
                 "awq_unmapped_qwen2", "awq_unmapped_qwen3"}:
         assert len(logs) == 1 and "Traceback" in logs[0].read_text()
         assert "Retrying native once" in caplog.text
     else:
         assert not logs and "Edge build failed" not in caplog.text
-    if mode in {"capacity_failure", "native_capacity_failure"} or mode.startswith("awq_unmapped"):
+    if mode in {"capacity_failure", "v12_capacity_failure", "native_capacity_failure"} or mode.startswith("awq_unmapped"):
         assert not stages  # Do not execute a known unavailable Edge configuration.
 
 
@@ -479,6 +489,14 @@ def test_declared_build_matches_legacy_request(tmp_path, monkeypatch, options):
         int4_plugin_version(selected, config, {"sm": 80}, "fp16")
     assert int4_plugin_version(replace(selected, int4_gemm_plugin_version=None),
                                config, {"sm": 120}, "int4_awq") == 2
+    # In 0.12 the Qwen3-backed decoder needs ONNX for Q/K norm. Its packed
+    # runtime contract is direct-only, independent of the chosen INT4 plugin.
+    automatic = replace(selected, int4_gemm_plugin_version=None)
+    assert int4_plugin_version(automatic, config, {"sm": 120}, "int4_awq", modern=True) == 2
+    for request in (automatic, selected):
+        with pytest.raises(UnavailableEdgeConfiguration, match="ONNX.*AWQ"):
+            int4_plugin_version(request, {"model_type": "qwen3"}, {"sm": 80},
+                                "int4_awq", modern=True)
 
 
 def test_declared_help_is_offline_and_dependency_free():

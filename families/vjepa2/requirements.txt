@@ -1,0 +1,3 @@
+# The original Transformers5.20 reference is isolated via tests/requirements.txt.
+torch>=2.6
+torchvision

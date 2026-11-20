@@ -1,0 +1,20 @@
+{
+  "name": "mimi",
+  "hf_id": "kyutai/mimi",
+  "hf_revision": "89091b3e466eb6a9d11e537bf26b144f194978f7",
+  "family": "mimi",
+  "bundle": "mimi.bundle",
+  "task": "audio_codebook_tokens_to_audio",
+  "precision": "fp32",
+  "max_sequence_length": 25,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "mimi-speech-decode",
+      "premerge": true,
+      "audio": "librispeech-test-clean-6930-75918-0003.wav",
+      "max_abs_error": 0.0001,
+      "min_snr_db": 60
+    }
+  ]
+}

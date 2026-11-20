@@ -1,0 +1,5 @@
+numpy
+safetensors
+torch
+transformers>=4.45
+scipy

@@ -503,6 +503,23 @@ def test_action_parity_takes_an_absolute_tolerance_in_robot_units():
     assert gold_metrics.action_parity(close, native, {"max_abs_error": 0.01})[0] is False
 
 
+def test_action_parity_compares_a_gripper_by_sign_and_bounds_the_arm():
+    native = {"action_dim": 3, "actions": [0.0, 1.0, 0.9, 0.5, 1.5, -0.8]}  # 2 steps of [arm, arm, gripper]
+    gate = {"max_abs_error": 0.03, "gripper_component": -1}
+    same_sign = {"actions": [0.0, 1.02, 0.2, 0.5, 1.5, -0.1]}  # the gripper moves by 0.7, same direction
+    ok, reason = gold_metrics.action_parity(same_sign, native, gate)
+    assert ok is True and "arm max abs error 0.02" in reason and "gripper sign changes 0" in reason
+    assert gold_metrics.action_parity(same_sign, native, {"max_abs_error": 0.03})[0] is False  # all components
+    arm_off = {"actions": [0.0, 1.05, 0.9, 0.5, 1.5, -0.8]}
+    assert gold_metrics.action_parity(arm_off, native, gate)[0] is False
+    flipped = {"actions": [0.0, 1.0, -0.1, 0.5, 1.5, -0.8]}  # the other direction at one step
+    assert gold_metrics.action_parity(flipped, native, gate)[0] is False
+    assert gold_metrics.action_parity(flipped, native, {**gate, "max_gripper_sign_changes": 1})[0] is True
+    assert gold_metrics.action_parity(flipped, native, {**gate, "gripper_component": 2})[0] is False
+    assert gold_metrics.action_parity(native, native, gate)[0] is True  # a valid output agrees with itself
+    assert gold_metrics.action_parity(flipped, {"actions": native["actions"]}, gate)[0] is None  # no action_dim
+
+
 def test_a_fitted_image_covers_the_video_size_and_keeps_its_center(tmp_path):
     from PIL import Image
 
