@@ -18,6 +18,8 @@ import json
 from dataclasses import replace
 from pathlib import Path
 import struct
+import subprocess
+import sys
 from tempfile import TemporaryDirectory
 
 import pytest
@@ -265,9 +267,17 @@ def test_saved_weightless_bundles_preserve_native_kv_outputs(tmp_path, monkeypat
         assert observed_networks == [0, 1] and not worker_results
         build(request)
         assert len(worker_results) == 1 and len(worker_results[0]) == 2 and all(worker_results[0])
-        report = compare_bundles(baseline, candidate)
+        # Execute the saved plans in a new CUDA context, independently of the
+        # reference compiler and refitter used to produce these bundles.
+        report_path = Path(directory) / "parity.json"
+        comparison = subprocess.run([
+            sys.executable, str(Path(__file__).resolve()), str(baseline), str(candidate),
+            "--report", str(report_path),
+        ])
+        assert report_path.is_file(), f"Qwen comparison exited {comparison.returncode} without a report"
+        report = json.loads(report_path.read_text(encoding="utf-8"))
         assert len(report["cases"]) == 12
-        assert report["passed"], json.dumps(report, indent=2)
+        assert comparison.returncode == 0 and report["passed"], json.dumps(report, indent=2)
 
 
 def main():
