@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 import shutil
@@ -27,7 +28,7 @@ def local_target() -> dict:
     return detect_local_platform()
 
 
-def _package_prefixes() -> list[Path]:
+def _package_prefixes(*, report_conflict: bool = False) -> list[Path]:
     """Use the active wheel's SDK with its native runner, or standalone prefixes."""
     try:
         package = distribution("tensorrt-model-connect")
@@ -36,6 +37,17 @@ def _package_prefixes() -> list[Path]:
     module_dir = Path(package.locate_file("tensorrt_model_connect"))
     receipt = module_dir / "share/trtmc/edge-llm.json"
     if (module_dir / "bin/trtmc").is_file() and (receipt.exists() or receipt.is_symlink()):
+        if report_conflict:
+            for prefix in cmake_prefixes():
+                other = prefix / "share/trtmc/edge-llm.json"
+                if other.is_file() and other.resolve() != receipt.resolve():
+                    logging.getLogger(__name__).warning(
+                        "Cannot use standalone Edge SDK at %s with the installed Model Connect runner; "
+                        "using its packaged SDK at %s. To change SDKs, install a matching Model "
+                        "Connect wheel or use the matching standalone builder and runner together.",
+                        prefix, module_dir,
+                    )
+                    break
         return [module_dir]
     return cmake_prefixes()
 
@@ -62,7 +74,7 @@ def installed_package(target: dict) -> dict:
         FileNotFoundError: No CMake installation or required artifact exists.
         ValueError: Pin, architecture, SDK or contained-path contract differs.
     """
-    for prefix in _package_prefixes():
+    for prefix in _package_prefixes(report_conflict=True):
         manifest = prefix / "share/trtmc/edge-llm.json"
         if not manifest.is_file():
             continue
@@ -136,7 +148,9 @@ def builder_python(package: dict, target: dict, requested: Path | None = None) -
         if requested is None and version == "0.11.0" and package.get("python"):
             return package["python"]
         raise ValueError(
-            "Pass --edge-builder-python with an installed interpreter matching the selected Edge SDK"
+            "Pass --edge-builder-python with an installed interpreter matching the selected Edge SDK "
+            f"({version}) and the native TensorRT SDK. "
+            "To select another Edge release, use a matching Model Connect wheel or standalone builder and runner."
         ) from error
     return interpreter
 

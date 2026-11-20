@@ -7,6 +7,10 @@ translation checkpoint. When Model Connect is built with the optional 0.12.0
 SDK, pass the Python interpreter containing the matching Edge builder. It can
 be a PyPI or source installation; it does not replace the native SDK.
 
+An installed Model Connect wheel uses its own native Edge SDK, not a
+different SDK on `CMAKE_PREFIX_PATH`. To switch releases, use a matching
+wheel or a standalone Model Connect builder and runner together.
+
 ```sh
 trtmc hunyuan build tencent/Hy-MT2-1.8B --precision fp16 \
   --max-sequence-length 1024 --edge-builder-python /path/to/edge-env/bin/python \
