@@ -49,6 +49,13 @@ if(TRTMC_BUILD_TESTS)
   target_compile_options(test_whisper_mel_spectrogram PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME whisper_mel_spectrogram COMMAND test_whisper_mel_spectrogram)
 
+  add_executable(test_whisper_cross_kv_contract
+    ${PROJECT_SOURCE_DIR}/families/whisper/tests/cpp/test_whisper_cross_kv_contract.cpp
+  )
+  target_include_directories(test_whisper_cross_kv_contract PRIVATE ${PROJECT_SOURCE_DIR})
+  target_compile_options(test_whisper_cross_kv_contract PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME whisper_cross_kv_contract COMMAND test_whisper_cross_kv_contract)
+
   # CPU CUDA stubs live in the test, so allocation failures can be injected
   # without a GPU or cudart.
   add_executable(test_whisper_cross_kv_alloc

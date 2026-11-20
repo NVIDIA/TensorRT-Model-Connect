@@ -273,9 +273,9 @@ def test_quantized_engines_build(tiny) -> None:
     names = {decoder.get_tensor_name(i) for i in range(decoder.num_io_tensors)}
     assert {"token_id", "logits", "present_k_0", "cross_k_0"} <= names
     encoder = runtime.deserialize_cuda_engine(fp8_encoder)
-    assert encoder.get_tensor_name(encoder.num_io_tensors - 1) == "encoder_output" or any(
-        encoder.get_tensor_name(i) == "encoder_output" for i in range(encoder.num_io_tensors)
-    )
+    encoder_names = {encoder.get_tensor_name(i) for i in range(encoder.num_io_tensors)}
+    assert {"mel_features", model.ENCODER_PADDED_ROWS, "cross_k_0", "cross_v_0"} <= encoder_names
+    assert "encoder_output" not in encoder_names
     assert len(fp8_decoder) < len(plain_decoder)
     assert len(fp8_encoder) < len(plain_encoder)
 

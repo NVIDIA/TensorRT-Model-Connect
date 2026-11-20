@@ -74,6 +74,10 @@ class WhisperPipeline final : public ITranscription {
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
 
+    // Whether the encoder engine projects each decoder layer's cross-attention
+    // K/V (a single-GPU bundle): the decoder then reads the encoder's outputs
+    // in place, and the raw-state buffers below stay empty.
+    bool cross_kv_projected_{false};
     std::vector<std::vector<uint8_t>> cross_k_host_;
     std::vector<whisper::DeviceBuffer> cross_k_ptrs_;
     std::vector<whisper::DeviceBuffer> cross_v_ptrs_;
