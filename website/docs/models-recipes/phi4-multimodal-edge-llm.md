@@ -4,6 +4,31 @@ title: Phi4 Multimodal with Edge-LLM
 
 # Phi4 Multimodal with Edge-LLM
 
+## Opt-in Edge 0.12
+
+Build MC with `TRTMC_ENABLE_EDGELLM=ON` and `TRTMC_EDGELLM_RELEASE=0.12.0`;
+this selects a matching native SDK at build time rather than switching ABI at
+runtime. Install the matching Python builder from the official wheel or source.
+For `microsoft/Phi-4-multimodal-instruct`, the family command is:
+
+```bash
+trtmc phi4_multimodal build "$MODEL_DIR" -o phi4.bundle --precision fp16 \
+  --max-sequence-length 10368 --edge-builder-python "$EDGE_PYTHON"
+trtmc run phi4.bundle --image "$IMAGE" --prompt "Describe this image." \
+  --max-new-tokens 30 --temperature 1 --top-k 1
+```
+
+Both Edge and the warned native fallback passed the actual visual-feature
+check and the unchanged image-answer quality gate on SM80 (NED 0.1241 and
+0, respectively). A separate raw text-only completion executed on both but
+missed the FP32 text-distance gate. The optional Edge route does not change
+the native fallback's requested precision or context. The released direct
+builder does not offer a Phi4 audio component; this owner does not expose
+audio-conditioned generation. See the [family-owned recipe](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/phi4_multimodal/edge_llm/README.md)
+for the exact scope of the results.
+
+## Default Edge 0.11: historical profiles
+
 The `phi4_multimodal` family owns the optional Edge-LLM 0.11 complete-network
 offload for `microsoft/Phi-4-multimodal-instruct`. Build and runtime selection
 remain inside the family; no global execution-mode switch is required.

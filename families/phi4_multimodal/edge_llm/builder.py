@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 import shutil
 import subprocess
@@ -18,7 +19,11 @@ from tensorrt_model_connect.build import (
 )
 
 
-EDGE_REVISION = "95515c2f87fba8982db5a519f9022277667b3cc9"
+# One C++ SDK per installation; the manifest is its build-time receipt.
+_RELEASES = {
+    "0.11.0": (1, "revision", "95515c2f87fba8982db5a519f9022277667b3cc9", "experimental.builder.cli"),
+    "0.12.0": (2, "release_revision", "513dcd18291e587c80928911a480761352f3c2d8", "tensorrt_edgellm.builder.cli"),
+}
 
 
 def local_target() -> dict:
@@ -26,9 +31,22 @@ def local_target() -> dict:
     return detect_local_platform()
 
 
+def _package_prefixes() -> list[Path]:
+    """Search standalone CMake prefixes, then the SDK shipped in an MC wheel."""
+    prefixes = cmake_prefixes()
+    try:
+        package = distribution("tensorrt-model-connect")
+    except PackageNotFoundError:
+        return prefixes
+    module_dir = Path(package.locate_file("tensorrt_model_connect"))
+    if (module_dir / "bin/trtmc").is_file():
+        return [*prefixes, module_dir]
+    return prefixes
+
+
 def package_present() -> bool:
     """Absence of the optional SDK is a non-match, not a failed Edge build."""
-    for prefix in cmake_prefixes():
+    for prefix in _package_prefixes():
         manifest = prefix / "share/trtmc/edge-llm.json"
         if manifest.exists() or manifest.is_symlink():
             return True
@@ -48,14 +66,19 @@ def installed_package(target: dict, *, onnx: bool = False) -> dict:
         FileNotFoundError: No CMake installation or required artifact exists.
         ValueError: Pin, architecture, SDK or contained-path contract differs.
     """
-    for prefix in cmake_prefixes():
+    for prefix in _package_prefixes():
         manifest = prefix / "share/trtmc/edge-llm.json"
         if not manifest.is_file():
             continue
         package = json.loads(manifest.read_text(encoding="utf-8"))
-        if package.get("schema_version") != 1 or package.get("revision") != EDGE_REVISION:
-            raise ValueError(f"Edge package has an unsupported revision/schema: {manifest}")
-        if package.get("version") != "0.11.0" or package.get("arch") != target["arch"]:
+        release = _RELEASES.get(package.get("version"))
+        if release is None or package.get("schema_version") != release[0]:
+            raise ValueError(f"Unsupported Edge package release or schema: {manifest}")
+        revision_key, pinned = release[1:3]
+        allowed = (pinned, None) if package["version"] == "0.12.0" else (pinned,)
+        if revision_key not in package or package[revision_key] not in allowed:
+            raise ValueError(f"Unsupported Edge package source revision: {manifest}")
+        if package.get("arch") != target["arch"]:
             raise ValueError("Edge package version/architecture differs from executing worker")
         if target["sm"] not in package.get("architectures", []):
             raise ValueError("Edge package was not built for this local GPU")
@@ -65,10 +88,13 @@ def installed_package(target: dict, *, onnx: bool = False) -> dict:
             or package.get("tensorrt_version") != target["tensorrt_version"]
         ):
             raise ValueError("Edge package CUDA/TensorRT differs from executing worker")
+        if onnx and package["version"] == "0.12.0":
+            raise ValueError("Phi4 Edge 0.12 accepts the documented original checkpoint; "
+                             "prepared checkpoints retain their native precision")
         if onnx and not package.get("onnx"):
             raise ValueError("Phi4 requires the optional Edge ONNX tools")
         tools = ("onnx_builder", "onnx_visual_builder") if onnx else ()
-        for name in ("python", "plugin") + tools:
+        for name in (*tools, "plugin", *(("python",) if package.get("version") == "0.11.0" else ())):
             relative = Path(package[name])
             path = (prefix / relative).resolve()
             if relative.is_absolute() or not path.is_relative_to(prefix.resolve()):
@@ -83,20 +109,22 @@ def installed_package(target: dict, *, onnx: bool = False) -> dict:
     )
 
 
-def builder_python(package: dict, target: dict, *, onnx: bool = False) -> str:
-    """Use installed 0.11.0 Python tools when compatible, otherwise the SDK Python.
+def builder_python(package: dict, target: dict, requested: Path | None = None, *, onnx: bool = False) -> str:
+    """Select a verified builder interpreter for the chosen native SDK release.
 
     The native SDK remains required. This only discovers an interpreter; it
     never installs packages or substitutes the wheel's runtime for the C++ SDK.
-    An incompatible ambient install is ignored.
+    Only the legacy 0.11 SDK includes an interpreter to fall back to.
     """
-    interpreter = sys.executable
-    imports = (
-        "from tensorrt_edgellm.scripts.export import main; "
-        "from tensorrt_edgellm.quantization.quantization_configs import _VISUAL_PREFIXES; "
-        if onnx
-        else "from experimental.builder.cli import main; "
-    )
+    version = package["version"]
+    module = _RELEASES[version][3]
+    if onnx:
+        module = "tensorrt_edgellm.scripts.export"
+    interpreter = sys.executable if requested is None else str(requested)
+    pin_check = ("import transformers; assert transformers.__version__ == '5.17.0'; "
+                 if version == "0.12.0" else "")
+    if onnx:
+        pin_check += "from tensorrt_edgellm.quantization.quantization_configs import _VISUAL_PREFIXES; "
     try:
         if not Path(interpreter).is_absolute() or not Path(interpreter).is_file():
             raise ValueError("Edge builder Python must be an existing absolute interpreter path")
@@ -106,20 +134,24 @@ def builder_python(package: dict, target: dict, *, onnx: bool = False) -> str:
                 "-I",
                 "-c",
                 "import json, tensorrt, tensorrt_edgellm; "
-                + imports
-                + "print(json.dumps([tensorrt_edgellm.__version__, tensorrt.__version__]))",
+                f"{pin_check}from {module} import main; "
+                "print(json.dumps([tensorrt_edgellm.__version__, tensorrt.__version__]))",
             ],
             check=True,
             capture_output=True,
             text=True,
             timeout=30,
         )
-        if json.loads(probe.stdout) != ["0.11.0", target["tensorrt_version"]]:
+        if json.loads(probe.stdout) != [version, target["tensorrt_version"]]:
             raise ValueError(
-                "Edge builder Python must match Edge 0.11.0 and the native TensorRT SDK"
+                f"Edge builder Python must match Edge {version} and the native TensorRT SDK"
             )
-    except (OSError, ValueError, subprocess.SubprocessError):
-        return package["python"]
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        if requested is None and version == "0.11.0" and package.get("python"):
+            return package["python"]
+        raise ValueError(
+            "Pass --edge-builder-python with an installed interpreter matching the selected Edge SDK"
+        ) from error
     return interpreter
 
 
@@ -246,6 +278,9 @@ def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path) -> 
     weight_format = request_weight_format(request, raw)
     onnx_flow = weight_format != "fp16"
     package = installed_package(target, onnx=onnx_flow)
+    interpreter = builder_python(package, target, getattr(request, "edge_builder_python", None),
+                                 onnx=onnx_flow)
+    version = package["version"]
     if weight_format == "int4_awq" and not package.get("all_native_kernels"):
         raise ValueError("Phi4 AWQ requires the native Edge ALL_KERNELS SDK")
     config = raw
@@ -278,13 +313,12 @@ def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path) -> 
     )
     validate_tokenizer(tokenizer, tokenizer_config)
     engine = staging / "edge_llm/engine"
-    interpreter = builder_python(package, target, onnx=onnx_flow)
     # Calling upstream main preserves its complete build/artifact orchestration.
     command = [
         interpreter,
         "-I",
         "-c",
-        "from experimental.builder.cli import main; main()",
+        f"from {_RELEASES[version][3]} import main; main()",
         "--model-dir",
         str(checkpoint),
         "--engine-dir",
@@ -375,8 +409,9 @@ def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path) -> 
                 files[path.relative_to(staging).as_posix()] = path
     return files, {
         "version": 1,
-        "edge_revision": EDGE_REVISION,
-        "builder_flow": "onnx" if onnx_flow else "experimental",
+        "edge_release": version,
+        "edge_revision": package[_RELEASES[version][1]],
+        "builder_flow": "onnx" if onnx_flow else ("direct" if version == "0.12.0" else "experimental"),
         "target": target,
         "precision": "fp16",
         "weight_format": weight_format,
