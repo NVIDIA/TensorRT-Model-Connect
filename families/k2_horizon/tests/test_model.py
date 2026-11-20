@@ -252,6 +252,7 @@ def test_build_writes_the_exact_native_kv_bundle(monkeypatch, tmp_path: Path) ->
     assert len(runtime) == 24
     assert runtime["native_kv_cache"] is True
     assert runtime["native_kv_contract_version"] == 1
+    assert runtime["decoder_engine_layout"] == "dual_profile"
     assert runtime["layernorm_num_groups"] == 4
     assert runtime["tensor_parallel_mode"] == "single"
 

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from tools import model_benchmark
@@ -16,4 +17,4 @@ def test_aiperf_subcommand_delegates_to_the_aiperf_qualification(tmp_path: Path)
     command, env = model_benchmark.aiperf_command(arguments)
     assert command[:4] == ["/venv/bin/python", "-m", "trtmc_aiperf_qual", "run-all"]
     assert command[command.index("--profile") + 1] == "qwen3-0.6b-fp16" and command[-1] == "0/2"
-    assert env["PYTHONPATH"].split(":")[0].endswith("apps/aiperf_qual")
+    assert env["PYTHONPATH"].split(os.pathsep)[0].endswith("apps/aiperf_qual")

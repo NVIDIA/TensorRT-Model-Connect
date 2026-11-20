@@ -232,7 +232,8 @@ void Qwen38KvCache::bind_to(ITrtModule& module) {
 }
 
 void Qwen38KvCache::bind_cache_inputs(ITrtModule& module) {
-    has_position_input_ = module.has_input(names_.position_id);
+    // A read-only consumer can use different position inputs (e.g. batched
+    // position_ids). It must not change the owning decoder's step contract.
     for (int32_t i = 0; i < num_layers_; ++i) {
         auto li = static_cast<std::size_t>(i);
         module.bind_external(names_.cache_k[li], cache_k_[li].data());

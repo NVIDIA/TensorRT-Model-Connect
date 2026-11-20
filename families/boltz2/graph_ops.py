@@ -17,10 +17,20 @@ _CONSTANT_STORAGE_KEY = object()
 class Graph:
     """Small family-local facade over TensorRT network-definition operations."""
 
-    def __init__(self, network: Any, trt: Any, weights: MutableMapping[Any, Any]):
+    def __init__(
+        self,
+        network: Any,
+        trt: Any,
+        weights: MutableMapping[Any, Any],
+        *,
+        linear_dtype: Any = None,
+    ):
         self.network = network
         self.trt = trt
         self.weights = weights
+        # Optional matmul dtype for ``linear``: the input and weight are cast to
+        # it and the product is cast back to the input dtype before the bias.
+        self.linear_dtype = linear_dtype
         if not isinstance(weights, MutableMapping):
             raise TypeError("Boltz-2 TensorRT weights must provide mutable lifetime storage")
         # TensorRT may defer reading IConstantLayer host buffers until engine
@@ -153,14 +163,16 @@ class Graph:
                 f"{int(tensor.shape[-1])} != {in_features}"
             )
         rank = len(tensor.shape)
+        compute = tensor if self.linear_dtype is None else self.cast(tensor, self.linear_dtype)
         rhs_shape = (1,) * max(0, rank - 2) + (in_features, out_features)
-        rhs = self.cast(self.constant(weight.T, rhs_shape), tensor.dtype)
+        rhs = self.cast(self.constant(weight.T, rhs_shape), compute.dtype)
         output = self.network.add_matrix_multiply(
-            tensor,
+            compute,
             self.trt.MatrixOperation.NONE,
             rhs,
             self.trt.MatrixOperation.NONE,
         ).get_output(0)
+        output = self.cast(output, tensor.dtype)
         bias_name = f"{prefix}.bias"
         if bias_name in self.weights:
             bias = self.weight(bias_name)

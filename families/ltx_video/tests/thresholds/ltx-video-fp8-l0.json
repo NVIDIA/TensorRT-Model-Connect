@@ -1,0 +1,7 @@
+{
+  "threshold_overrides": {
+    "max_pixel_mean": 0.98,
+    "min_pixel_mean": 0.08,
+    "min_pixel_std": 0.04
+  }
+}

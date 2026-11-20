@@ -9,6 +9,7 @@ import inspect
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from families.sam3 import vision_encoder_builder
 
@@ -201,3 +202,77 @@ def test_sam3_tracker_neck_publishes_bf16_values_through_fp32_abi(monkeypatch) -
     assert "network.add_cast(rounded, trt.float32).get_output(0)" in tracker_source
     assert 'rounded.name = f"sam3_tracker_feature_{level}_bf16_round"' in tracker_source
     assert bf16_round not in detector_source
+
+
+def test_sam3_fp16_graph_keeps_matmul_in_fp16(monkeypatch) -> None:
+    class Tensor:
+        def __init__(self, name: str, dtype: str):
+            self.name = name
+            self.dtype = dtype
+
+    class Network:
+        def add_cast(self, tensor, dtype):
+            raise AssertionError("the fp16 graph must not cast around its GEMMs")
+
+    class GraphOps:
+        def __init__(self):
+            self.calls = []
+
+        def add_matmul_rhs_constant(
+            self, network, tensor, input_width, output_width, weight, *, dtype
+        ):
+            del network, weight
+            self.calls.append((tensor.name, input_width, output_width, dtype))
+            return Tensor("matmul", tensor.dtype)
+
+    graph_ops = GraphOps()
+    monkeypatch.setattr(
+        vision_encoder_builder,
+        "_trt",
+        lambda: SimpleNamespace(float16="fp16", float32="fp32"),
+    )
+    monkeypatch.setattr(vision_encoder_builder, "_graph_ops", lambda: graph_ops)
+
+    output = vision_encoder_builder._add_fp16_matmul_island(
+        Network(),
+        Tensor("input", "fp16"),
+        8,
+        16,
+        np.zeros((16, 8), dtype=np.float32),
+    )
+
+    assert graph_ops.calls == [("input", 8, 16, np.float16)]
+    assert (output.name, output.dtype) == ("matmul", "fp16")
+
+
+def test_sam3_fp16_graph_narrows_after_the_fp32_pre_norm() -> None:
+    source = inspect.getsource(vision_encoder_builder.build_sam3_vision_encoder_engine)
+    pre_norm = source.index('weights["vision.pre_layer_norm.weight"]')
+    narrow = source.index("hidden = network.add_cast(hidden, trt.float16).get_output(0)")
+    first_block = source.index("for layer_idx in range(num_layers):")
+    assert pre_norm < narrow < first_block
+    assert 'block_np_dtype = np.float16 if precision == "fp16" else np.float32' in source
+    assert source.count("dtype=block_np_dtype") == 4
+    # Plan outputs keep the FP32 ABI consumed by the core plan and the runtime.
+    assert "pos_np, dtype=work_np_dtype" in source
+
+
+@pytest.mark.parametrize("precision", ["bf16", "int8"])
+def test_sam3_vision_rejects_unsupported_precision(precision: str) -> None:
+    with pytest.raises(ValueError, match="fp16 or fp32"):
+        vision_encoder_builder.build_sam3_vision_encoder_engine(
+            {},
+            image_size=1008,
+            patch_size=14,
+            pretrain_image_size=336,
+            hidden_size=1024,
+            intermediate_size=4736,
+            num_layers=32,
+            num_heads=16,
+            window_size=24,
+            global_attn_indexes=[7, 15, 23, 31],
+            fpn_hidden_size=256,
+            rope_theta=10000.0,
+            eps=1e-6,
+            precision=precision,
+        )

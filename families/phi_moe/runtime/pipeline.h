@@ -93,7 +93,8 @@ class PhiMoeTextGenerationPipeline final : public ITextGeneration {
                             int32_t max_new_tokens, const TextGenerationConfig& cfg,
                             int32_t prompt_token_count);
     ITrtModule& bind_decoder_for_step();
-    void run_prefill(const std::vector<int32_t>& input_ids, std::vector<float>& logits);
+    void run_prefill(const std::vector<int32_t>& input_ids, std::vector<float>& logits,
+                     bool prime_decoder);
     // Execute the required family-owned batched prefill engine.
     void run_prefill_batched(const std::vector<int32_t>& input_ids, std::vector<float>& logits);
     void prime_decoder_after_batched_prefill(const std::vector<int32_t>& input_ids);

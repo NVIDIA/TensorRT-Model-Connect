@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .config import ModelConfig
+from . import quantization
 
 
 VOICECHAT_MODEL_ID = "nvidia/NVIDIA-NemotronLabs-VoiceChat-11B"
@@ -234,8 +235,8 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise ValueError("Nemotron VoiceChat requires precision=fp32")
     if request.tensor_parallel_size != 1:
         raise NotImplementedError("Nemotron VoiceChat requires tensor_parallel_size=1")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Nemotron VoiceChat does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError("Nemotron VoiceChat supports only quantization none or fp8")
     if request.fp32_layers:
         raise NotImplementedError("Nemotron VoiceChat does not support fp32_layers")
     if request.mtp_seq_len is not None:
@@ -255,15 +256,26 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     verbose = request.verbose
     writer.set_header(family="nemotron_voicechat", task=request.task, backend=request.backend)
 
-    thinker_weights = native_core.VoiceChatThinkerBuilder().load_weights(str(model_path), thinker)
+    quant_ctx = None
+    if request.quantization == "fp8":
+        quant_ctx = quantization.create_fp8_context(
+            thinker.hidden_size,
+            thinker.num_hidden_layers,
+            thinker.intermediate_size,
+            native_core._parse_layer_types(str(_THINKER_CONFIG["hybrid_override_pattern"])),
+        )
+    thinker_weights = native_core.VoiceChatThinkerBuilder().load_weights(
+        str(model_path), thinker, quant=quant_ctx
+    )
     thinker_plan = native_core.build_thinker_engine(
         thinker,
         thinker_weights,
         max_cache_length,
         verbose=verbose,
+        quant=quant_ctx,
     )
     writer.add_bytes("engine.plan", thinker_plan)
-    del thinker_weights, thinker_plan
+    del thinker_weights, thinker_plan, quant_ctx
     gc.collect()
 
     perception_weights = native_core.load_perception_weights(str(model_path), stt)

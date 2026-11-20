@@ -53,8 +53,11 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("foundationpose does not support tensor parallelism")
     if request.context_parallel_size != 1:
         raise NotImplementedError("foundationpose does not support context parallelism")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("foundationpose does not support quantization")
+    quantization = None if request.quantization in {None, "none"} else request.quantization
+    if quantization not in {None, "fp8"}:
+        raise NotImplementedError("foundationpose supports quantization 'fp8' or none")
+    if quantization == "fp8" and request.precision != "fp16":
+        raise ValueError("foundationpose quantization='fp8' requires precision='fp16'")
     if request.fp32_layers:
         raise NotImplementedError("foundationpose does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -66,6 +69,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         kind="refiner",
         max_batch=42,
         precision=request.precision,
+        quantization=quantization,
         verbose=bool(request.verbose),
     )
     scorer_plan = build_foundationpose_engine(
@@ -73,6 +77,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         kind="scorer",
         max_batch=252,
         precision=request.precision,
+        quantization=quantization,
         verbose=bool(request.verbose),
     )
     writer.set_header(family="foundationpose", task=request.task, backend=request.backend)

@@ -1,0 +1,970 @@
+{
+ "reference": "tokenizers 0.22.2",
+ "groups": [
+  {
+   "group": "plain prompts",
+   "cases": [
+    {
+     "text": "A cat holding a sign that says hello world",
+     "pieces": [
+      "A",
+      " cat",
+      " holding",
+      " a",
+      " sign",
+      " that",
+      " says",
+      " hello",
+      " world"
+     ]
+    },
+    {
+     "text": "A capybara wearing a wizard hat, reading a book by candlelight, oil painting",
+     "pieces": [
+      "A",
+      " capybara",
+      " wearing",
+      " a",
+      " wizard",
+      " hat",
+      ",",
+      " reading",
+      " a",
+      " book",
+      " by",
+      " candlelight",
+      ",",
+      " oil",
+      " painting"
+     ]
+    },
+    {
+     "text": "\u4e00\u53ea\u6234\u7740\u773c\u955c\u7684\u6a58\u732b\u5750\u5728\u4e66\u684c\u524d\u5199\u4ee3\u7801\uff0c\u5c4f\u5e55\u4e0a\u663e\u793a\"\u4f60\u597d\uff0c\u4e16\u754c\"\uff0c\u8d5b\u535a\u670b\u514b\u98ce\u683c\uff0c\u9713\u8679\u706f\u5149",
+     "pieces": [
+      "\u4e00\u53ea\u6234\u7740\u773c\u955c\u7684\u6a58\u732b\u5750\u5728\u4e66\u684c\u524d\u5199\u4ee3\u7801",
+      "\uff0c\u5c4f\u5e55\u4e0a\u663e\u793a",
+      "\"\u4f60\u597d",
+      "\uff0c\u4e16\u754c",
+      "\"\uff0c",
+      "\u8d5b\u535a\u670b\u514b\u98ce\u683c",
+      "\uff0c\u9713\u8679\u706f\u5149"
+     ]
+    },
+    {
+     "text": " ",
+     "pieces": [
+      " "
+     ]
+    },
+    {
+     "text": "<|im_start|>user\nA cat<|im_end|>\n<|im_start|>assistant\n",
+     "pieces": [
+      "<|im_start|>",
+      "user",
+      "\n",
+      "A",
+      " cat",
+      "<|im_end|>",
+      "\n",
+      "<|im_start|>",
+      "assistant",
+      "\n"
+     ]
+    }
+   ]
+  },
+  {
+   "group": "an apostrophe before letters",
+   "cases": [
+    {
+     "text": "x'hello",
+     "pieces": [
+      "x",
+      "'hello"
+     ]
+    },
+    {
+     "text": "'hello",
+     "pieces": [
+      "'hello"
+     ]
+    },
+    {
+     "text": "say 'hello' now",
+     "pieces": [
+      "say",
+      " '",
+      "hello",
+      "'",
+      " now"
+     ]
+    },
+    {
+     "text": "rock'n'roll",
+     "pieces": [
+      "rock",
+      "'n",
+      "'roll"
+     ]
+    },
+    {
+     "text": "'tis the season",
+     "pieces": [
+      "'t",
+      "is",
+      " the",
+      " season"
+     ]
+    },
+    {
+     "text": "l'\u00e9t\u00e9",
+     "pieces": [
+      "l",
+      "'\u00e9t\u00e9"
+     ]
+    },
+    {
+     "text": "O'Brien's",
+     "pieces": [
+      "O",
+      "'Brien",
+      "'s"
+     ]
+    }
+   ]
+  },
+  {
+   "group": "contractions in any letter case",
+   "cases": [
+    {
+     "text": "it's",
+     "pieces": [
+      "it",
+      "'s"
+     ]
+    },
+    {
+     "text": "IT'S",
+     "pieces": [
+      "IT",
+      "'S"
+     ]
+    },
+    {
+     "text": "DON'T stop",
+     "pieces": [
+      "DON",
+      "'T",
+      " stop"
+     ]
+    },
+    {
+     "text": "we'Re he'LL I'VE she'D I'M",
+     "pieces": [
+      "we",
+      "'Re",
+      " he",
+      "'LL",
+      " I",
+      "'VE",
+      " she",
+      "'D",
+      " I",
+      "'M"
+     ]
+    },
+    {
+     "text": "'\u017ftop",
+     "pieces": [
+      "'\u017f",
+      "top"
+     ]
+    }
+   ]
+  },
+  {
+   "group": "an apostrophe elsewhere",
+   "cases": [
+    {
+     "text": "'",
+     "pieces": [
+      "'"
+     ]
+    },
+    {
+     "text": "''",
+     "pieces": [
+      "''"
+     ]
+    },
+    {
+     "text": "a'",
+     "pieces": [
+      "a",
+      "'"
+     ]
+    },
+    {
+     "text": "'1",
+     "pieces": [
+      "'",
+      "1"
+     ]
+    },
+    {
+     "text": "' x",
+     "pieces": [
+      "'",
+      " x"
+     ]
+    },
+    {
+     "text": "'\n",
+     "pieces": [
+      "'\n"
+     ]
+    },
+    {
+     "text": "5'9\"",
+     "pieces": [
+      "5",
+      "'",
+      "9",
+      "\""
+     ]
+    },
+    {
+     "text": "\"quoted\"",
+     "pieces": [
+      "\"quoted",
+      "\""
+     ]
+    }
+   ]
+  },
+  {
+   "group": "numbers of every kind",
+   "cases": [
+    {
+     "text": "\uff12\uff10\uff12\uff16\u5e74",
+     "pieces": [
+      "\uff12",
+      "\uff10",
+      "\uff12",
+      "\uff16",
+      "\u5e74"
+     ]
+    },
+    {
+     "text": "abc\uff11\uff12\uff13",
+     "pieces": [
+      "abc",
+      "\uff11",
+      "\uff12",
+      "\uff13"
+     ]
+    },
+    {
+     "text": "x\u00b2+y\u00b3",
+     "pieces": [
+      "x",
+      "\u00b2",
+      "+y",
+      "\u00b3"
+     ]
+    },
+    {
+     "text": "\u00bd cup",
+     "pieces": [
+      "\u00bd",
+      " cup"
+     ]
+    },
+    {
+     "text": "\u216b \u2167",
+     "pieces": [
+      "\u216b",
+      " ",
+      "\u2167"
+     ]
+    },
+    {
+     "text": "\u2460\u2461\u2462",
+     "pieces": [
+      "\u2460",
+      "\u2461",
+      "\u2462"
+     ]
+    },
+    {
+     "text": "\u0663 \u0643\u062a\u0628",
+     "pieces": [
+      "\u0663",
+      " \u0643\u062a\u0628"
+     ]
+    },
+    {
+     "text": "\u0967\u0968\u0969 \u0930\u0941\u092a\u092f\u0947",
+     "pieces": [
+      "\u0967",
+      "\u0968",
+      "\u0969",
+      " \u0930",
+      "\u0941\u092a\u092f",
+      "\u0947"
+     ]
+    },
+    {
+     "text": "\u09e9 \u099f\u09be\u0995\u09be",
+     "pieces": [
+      "\u09e9",
+      " \u099f",
+      "\u09be\u0995",
+      "\u09be"
+     ]
+    },
+    {
+     "text": "\u3007\u4e00\u4e8c",
+     "pieces": [
+      "\u3007",
+      "\u4e00\u4e8c"
+     ]
+    },
+    {
+     "text": "price: $5.00",
+     "pieces": [
+      "price",
+      ":",
+      " $",
+      "5",
+      ".",
+      "0",
+      "0"
+     ]
+    },
+    {
+     "text": "3.14",
+     "pieces": [
+      "3",
+      ".",
+      "1",
+      "4"
+     ]
+    },
+    {
+     "text": "1,000",
+     "pieces": [
+      "1",
+      ",",
+      "0",
+      "0",
+      "0"
+     ]
+    },
+    {
+     "text": "\ud835\udfce\ud835\udfcf",
+     "pieces": [
+      "\ud835\udfce",
+      "\ud835\udfcf"
+     ]
+    }
+   ]
+  },
+  {
+   "group": "letters of many scripts",
+   "cases": [
+    {
+     "text": "\u05e9\u05dc\u05d5\u05dd \u05e2\u05d5\u05dc\u05dd",
+     "pieces": [
+      "\u05e9\u05dc\u05d5\u05dd",
+      " \u05e2\u05d5\u05dc\u05dd"
+     ]
+    },
+    {
+     "text": "\u09ac\u09be\u0982\u09b2\u09be \u09ad\u09be\u09b7\u09be",
+     "pieces": [
+      "\u09ac",
+      "\u09be\u0982",
+      "\u09b2",
+      "\u09be",
+      " \u09ad",
+      "\u09be\u09b7",
+      "\u09be"
+     ]
+    },
+    {
+     "text": "\u0ba4\u0bae\u0bbf\u0bb4\u0bcd \u0bae\u0bca\u0bb4\u0bbf",
+     "pieces": [
+      "\u0ba4\u0bae",
+      "\u0bbf\u0bb4",
+      "\u0bcd",
+      " \u0bae",
+      "\u0bca\u0bb4",
+      "\u0bbf"
+     ]
+    },
+    {
+     "text": "\u10e5\u10d0\u10e0\u10d7\u10e3\u10da\u10d8 \u10d4\u10dc\u10d0",
+     "pieces": [
+      "\u10e5\u10d0\u10e0\u10d7\u10e3\u10da\u10d8",
+      " \u10d4\u10dc\u10d0"
+     ]
+    },
+    {
+     "text": "\u0540\u0561\u0575\u0565\u0580\u0565\u0576 \u056c\u0565\u0566\u0578\u0582",
+     "pieces": [
+      "\u0540\u0561\u0575\u0565\u0580\u0565\u0576",
+      " \u056c\u0565\u0566\u0578\u0582"
+     ]
+    },
+    {
+     "text": "\u0e20\u0e32\u0e29\u0e32\u0e44\u0e17\u0e22",
+     "pieces": [
+      "\u0e20\u0e32\u0e29\u0e32\u0e44\u0e17\u0e22"
+     ]
+    },
+    {
+     "text": "\ud55c\uad6d\uc5b4 \ud14c\uc2a4\ud2b8",
+     "pieces": [
+      "\ud55c\uad6d\uc5b4",
+      " \ud14c\uc2a4\ud2b8"
+     ]
+    },
+    {
+     "text": "\u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8",
+     "pieces": [
+      "\u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8"
+     ]
+    },
+    {
+     "text": "\u0395\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba\u03ac",
+     "pieces": [
+      "\u0395\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba\u03ac"
+     ]
+    },
+    {
+     "text": "Vi\u1ec7t Nam",
+     "pieces": [
+      "Vi\u1ec7t",
+      " Nam"
+     ]
+    },
+    {
+     "text": "na\u00efve caf\u00e9",
+     "pieces": [
+      "na\u00efve",
+      " caf\u00e9"
+     ]
+    },
+    {
+     "text": "\u01c5 \u02b0 \u00aa \u00ba",
+     "pieces": [
+      "\u01c5",
+      " \u02b0",
+      " \u00aa",
+      " \u00ba"
+     ]
+    },
+    {
+     "text": "\ud840\udc00\ud840\udc01",
+     "pieces": [
+      "\ud840\udc00\ud840\udc01"
+     ]
+    },
+    {
+     "text": "\u03a9 \u03a9",
+     "pieces": [
+      "\u03a9",
+      " \u03a9"
+     ]
+    }
+   ]
+  },
+  {
+   "group": "characters that are neither letters nor numbers",
+   "cases": [
+    {
+     "text": "\u30ab\u30bf\u30ab\u30ca\u30fb\u30c6\u30b9\u30c8",
+     "pieces": [
+      "\u30ab\u30bf\u30ab\u30ca",
+      "\u30fb\u30c6\u30b9\u30c8"
+     ]
+    },
+    {
+     "text": "\u0645\u0631\u062d\u0628\u0627\u060c \u0627\u0644\u0639\u0627\u0644\u0645",
+     "pieces": [
+      "\u0645\u0631\u062d\u0628\u0627",
+      "\u060c",
+      " \u0627\u0644\u0639\u0627\u0644\u0645"
+     ]
+    },
+    {
+     "text": "\u0928\u092e\u0938\u094d\u0924\u0947\u0964 \u0926\u0941\u0928\u093f\u092f\u093e",
+     "pieces": [
+      "\u0928\u092e\u0938",
+      "\u094d\u0924",
+      "\u0947\u0964",
+      " \u0926",
+      "\u0941\u0928",
+      "\u093f\u092f",
+      "\u093e"
+     ]
+    },
+    {
+     "text": "q\u0301",
+     "pieces": [
+      "q",
+      "\u0301"
+     ]
+    },
+    {
+     "text": "x\u0301y",
+     "pieces": [
+      "x",
+      "\u0301y"
+     ]
+    },
+    {
+     "text": "\u0301a",
+     "pieces": [
+      "\u0301a"
+     ]
+    },
+    {
+     "text": "\u0e01\u0e31\u0e19",
+     "pieces": [
+      "\u0e01",
+      "\u0e31\u0e19"
+     ]
+    },
+    {
+     "text": "\ud83d\ude42 smile",
+     "pieces": [
+      "\ud83d\ude42",
+      " smile"
+     ]
+    },
+    {
+     "text": "\ud83d\ude42\ud83d\ude42",
+     "pieces": [
+      "\ud83d\ude42\ud83d\ude42"
+     ]
+    },
+    {
+     "text": "a\ud83d\ude42b",
+     "pieces": [
+      "a",
+      "\ud83d\ude42b"
+     ]
+    },
+    {
+     "text": "\u00a92026",
+     "pieces": [
+      "\u00a9",
+      "2",
+      "0",
+      "2",
+      "6"
+     ]
+    },
+    {
+     "text": "x\u2014y",
+     "pieces": [
+      "x",
+      "\u2014y"
+     ]
+    },
+    {
+     "text": "x\u2026",
+     "pieces": [
+      "x",
+      "\u2026"
+     ]
+    },
+    {
+     "text": "a\u200db",
+     "pieces": [
+      "a",
+      "\u200db"
+     ]
+    },
+    {
+     "text": "a\u200bb",
+     "pieces": [
+      "a",
+      "\u200bb"
+     ]
+    },
+    {
+     "text": "#tag @you $x",
+     "pieces": [
+      "#tag",
+      " @",
+      "you",
+      " $",
+      "x"
+     ]
+    },
+    {
+     "text": "C++ f(x)=y",
+     "pieces": [
+      "C",
+      "++",
+      " f",
+      "(x",
+      ")=",
+      "y"
+     ]
+    },
+    {
+     "text": "_x x_y __init__",
+     "pieces": [
+      "_x",
+      " x",
+      "_y",
+      " __",
+      "init",
+      "__"
+     ]
+    }
+   ]
+  },
+  {
+   "group": "whitespace before letters, numbers and symbols",
+   "cases": [
+    {
+     "text": "a  b",
+     "pieces": [
+      "a",
+      " ",
+      " b"
+     ]
+    },
+    {
+     "text": "a   b",
+     "pieces": [
+      "a",
+      "  ",
+      " b"
+     ]
+    },
+    {
+     "text": "a \t b",
+     "pieces": [
+      "a",
+      " \t",
+      " b"
+     ]
+    },
+    {
+     "text": "a\u2003b",
+     "pieces": [
+      "a",
+      "\u2003b"
+     ]
+    },
+    {
+     "text": "a\u3000b",
+     "pieces": [
+      "a",
+      "\u3000b"
+     ]
+    },
+    {
+     "text": "a\u00a0b",
+     "pieces": [
+      "a",
+      "\u00a0b"
+     ]
+    },
+    {
+     "text": " a",
+     "pieces": [
+      " a"
+     ]
+    },
+    {
+     "text": "  a",
+     "pieces": [
+      " ",
+      " a"
+     ]
+    },
+    {
+     "text": "a ",
+     "pieces": [
+      "a",
+      " "
+     ]
+    },
+    {
+     "text": "a  ",
+     "pieces": [
+      "a",
+      "  "
+     ]
+    },
+    {
+     "text": "  ",
+     "pieces": [
+      "  "
+     ]
+    },
+    {
+     "text": "\t",
+     "pieces": [
+      "\t"
+     ]
+    },
+    {
+     "text": " 5",
+     "pieces": [
+      " ",
+      "5"
+     ]
+    },
+    {
+     "text": "  5",
+     "pieces": [
+      " ",
+      " ",
+      "5"
+     ]
+    },
+    {
+     "text": "\t5",
+     "pieces": [
+      "\t",
+      "5"
+     ]
+    },
+    {
+     "text": " !",
+     "pieces": [
+      " !"
+     ]
+    },
+    {
+     "text": "  !",
+     "pieces": [
+      " ",
+      " !"
+     ]
+    },
+    {
+     "text": "\t!",
+     "pieces": [
+      "\t",
+      "!"
+     ]
+    },
+    {
+     "text": " \t!",
+     "pieces": [
+      " ",
+      "\t",
+      "!"
+     ]
+    },
+    {
+     "text": "\u3000!",
+     "pieces": [
+      "\u3000",
+      "!"
+     ]
+    },
+    {
+     "text": "Bonjour\u00a0!",
+     "pieces": [
+      "Bonjour",
+      "\u00a0",
+      "!"
+     ]
+    },
+    {
+     "text": "mot\u202f?",
+     "pieces": [
+      "mot",
+      "\u202f",
+      "?"
+     ]
+    },
+    {
+     "text": "\t- item",
+     "pieces": [
+      "\t",
+      "-",
+      " item"
+     ]
+    },
+    {
+     "text": " '",
+     "pieces": [
+      " '"
+     ]
+    },
+    {
+     "text": " 'a",
+     "pieces": [
+      " '",
+      "a"
+     ]
+    },
+    {
+     "text": " 's",
+     "pieces": [
+      " '",
+      "s"
+     ]
+    }
+   ]
+  },
+  {
+   "group": "line breaks",
+   "cases": [
+    {
+     "text": "\n",
+     "pieces": [
+      "\n"
+     ]
+    },
+    {
+     "text": "\n\n",
+     "pieces": [
+      "\n\n"
+     ]
+    },
+    {
+     "text": " \n",
+     "pieces": [
+      " \n"
+     ]
+    },
+    {
+     "text": "\n ",
+     "pieces": [
+      "\n",
+      " "
+     ]
+    },
+    {
+     "text": " \n ",
+     "pieces": [
+      " \n",
+      " "
+     ]
+    },
+    {
+     "text": "a\nb",
+     "pieces": [
+      "a",
+      "\n",
+      "b"
+     ]
+    },
+    {
+     "text": "a \n b",
+     "pieces": [
+      "a",
+      " \n",
+      " b"
+     ]
+    },
+    {
+     "text": "a\n\nb",
+     "pieces": [
+      "a",
+      "\n\n",
+      "b"
+     ]
+    },
+    {
+     "text": "a \n \n b",
+     "pieces": [
+      "a",
+      " \n \n",
+      " b"
+     ]
+    },
+    {
+     "text": "  \n  \n  x",
+     "pieces": [
+      "  \n  \n",
+      " ",
+      " x"
+     ]
+    },
+    {
+     "text": "a\r\nb",
+     "pieces": [
+      "a",
+      "\r\n",
+      "b"
+     ]
+    },
+    {
+     "text": "a.\n\nb",
+     "pieces": [
+      "a",
+      ".\n\n",
+      "b"
+     ]
+    },
+    {
+     "text": "!\n",
+     "pieces": [
+      "!\n"
+     ]
+    },
+    {
+     "text": "! \n",
+     "pieces": [
+      "!",
+      " \n"
+     ]
+    },
+    {
+     "text": ".\r\n\r\nx",
+     "pieces": [
+      ".\r\n\r\n",
+      "x"
+     ]
+    },
+    {
+     "text": "a \r b",
+     "pieces": [
+      "a",
+      " \r",
+      " b"
+     ]
+    },
+    {
+     "text": "a\u2028b",
+     "pieces": [
+      "a",
+      "\u2028b"
+     ]
+    },
+    {
+     "text": "a\u0085b",
+     "pieces": [
+      "a",
+      "\u0085b"
+     ]
+    },
+    {
+     "text": "line one\n\n  line two\n",
+     "pieces": [
+      "line",
+      " one",
+      "\n\n",
+      " ",
+      " line",
+      " two",
+      "\n"
+     ]
+    }
+   ]
+  }
+ ]
+}

@@ -6,7 +6,7 @@ pagination_prev: null
 ---
 
 The reader-facing explanation moved to
-[Quantization](/features/quantization). This unlisted compatibility page keeps
+[Quantization](../features/quantization.md). This unlisted compatibility page keeps
 the source-level ownership contract consumed by repository checks.
 
 ## Ownership standard
@@ -28,7 +28,7 @@ contracts.
 ## Test enforcement
 
 `tests/builder/test_quantization_ownership.py` enforces this boundary. Follow
-the canonical [Quantization](/features/quantization) page for the complete
+the canonical [Quantization](../features/quantization.md) page for the complete
 workflow and current command examples.
 
 {/* Collaborative review anchor: batch 2. */}

@@ -1,7 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Direct FP32 TensorRT segments for the Boltz-2 diffusion token transformer."""
+"""Direct TensorRT segments for the Boltz-2 diffusion token transformer.
+
+The token state, norms, attention and residual adds run in fp32 as in upstream
+Boltz-2. ``projection_precision="fp16"`` (the bundle default) or ``"bf16"`` runs
+only the projection matmuls in that type; ``"fp32"`` keeps the upstream fp32 graph.
+fp16 is as fast as bf16 and its three extra mantissa bits keep the diffusion
+trajectory closer to the fp32 reference; the projection inputs and outputs stay
+far inside the fp16 range (see the family README).
+"""
 
 from __future__ import annotations
 
@@ -26,6 +34,7 @@ TOKEN_HEAD_WIDTH = TOKEN_CHANNELS // TOKEN_HEADS
 TOKEN_LAYERS = 24
 TOKEN_SEGMENT_SIZE = 6
 TOKEN_BIAS_CHANNELS = TOKEN_LAYERS * TOKEN_HEADS
+PROJECTION_PRECISIONS = ("fp16", "bf16", "fp32")
 
 
 @dataclass(frozen=True)
@@ -94,6 +103,7 @@ def define_diffusion_token_network(
     token_count: int,
     first_layer: int,
     layer_count: int,
+    projection_precision: str = "fp16",
 ):
     """Define one contiguous score token-transformer segment."""
 
@@ -101,7 +111,12 @@ def define_diffusion_token_network(
         raise ValueError("Boltz-2 diffusion token count must be positive")
     if first_layer < 0 or layer_count <= 0 or first_layer + layer_count > TOKEN_LAYERS:
         raise ValueError("Boltz-2 diffusion token layer range must be within [0, 24)")
-    graph = Graph(network, trt, weights)
+    if projection_precision not in PROJECTION_PRECISIONS:
+        raise ValueError(
+            f"Boltz-2 diffusion token projection precision must be one of {PROJECTION_PRECISIONS}"
+        )
+    linear_dtype = {"fp16": trt.float16, "bf16": trt.bfloat16, "fp32": None}[projection_precision]
+    graph = Graph(network, trt, weights, linear_dtype=linear_dtype)
     a = network.add_input("a", trt.float32, (1, token_count, TOKEN_CHANNELS))
     condition = network.add_input("single_condition", trt.float32, (1, token_count, TOKEN_CHANNELS))
     bias = network.add_input(
@@ -160,6 +175,7 @@ def build_diffusion_token_engine(
     workspace_bytes: int = 16 << 30,
     verbose: bool = False,
     verify_checkpoint: bool = True,
+    projection_precision: str = "fp16",
 ) -> DiffusionTokenBuildResult:
     """Build one direct score token-transformer segment."""
 
@@ -181,6 +197,7 @@ def build_diffusion_token_engine(
         token_count=token_count,
         first_layer=first_layer,
         layer_count=layer_count,
+        projection_precision=projection_precision,
     )
     config = builder.create_builder_config()
     config.builder_optimization_level = 3
@@ -201,5 +218,9 @@ def build_diffusion_token_engine(
         first_layer=first_layer,
         layer_count=layer_count,
         token_count=token_count,
-        precision="fp32-upstream-exact",
+        precision=(
+            "fp32-upstream-exact"
+            if projection_precision == "fp32"
+            else f"fp32-{projection_precision}-projections"
+        ),
     )

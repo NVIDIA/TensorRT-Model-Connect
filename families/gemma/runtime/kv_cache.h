@@ -40,7 +40,8 @@ class GemmaKvCache : public GemmaInferenceState {
     // cache_dtype controls the element type for K/V cache buffers (default FP32).
     // names provides explicit tensor names for engine I/O binding.
     GemmaKvCache(int32_t num_layers, int32_t max_length, int32_t kv_dim, cudaStream_t stream,
-                 DType cache_dtype = DType::kFloat32, GemmaKvCacheNames names = {});
+                 DType cache_dtype = DType::kFloat32, GemmaKvCacheNames names = {},
+                 std::vector<int32_t> kv_dimensions = {});
 
     // --- GemmaInferenceState overrides ---
     void reset() override;
@@ -99,7 +100,7 @@ class GemmaKvCache : public GemmaInferenceState {
     std::vector<DeviceTensor> present_v_; // [num_layers]
     int32_t num_layers_{0};
     int32_t max_length_{0};
-    int32_t kv_dim_{0};
+    std::vector<int32_t> kv_dimensions_;
     int32_t position_{0};
     cudaStream_t stream_{nullptr};
     // Buffers owned by this object — Tensor.data in prepare_step() points here.

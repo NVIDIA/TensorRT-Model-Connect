@@ -54,6 +54,11 @@ std::vector<int32_t> k2_horizon_uno_deterministic_uniform_noise(
 // rows: [0, 1, ..., 1].
 std::vector<float> k2_horizon_uno_draft_lora_mask(int32_t block_length);
 
+// True when any row has a nonzero LoRA mask. Calls whose mask is all 0 (prompt,
+// verify and AR rows) run on the base profile, which skips the LoRA branch;
+// its delta is multiplied by 0 there anyway.
+bool k2_horizon_uno_mask_uses_lora(const std::vector<float>& lora_mask);
+
 // Greedy Psi-Spec verification. proposal_tokens is [clean, spec_1, ...].
 // verifier_next_tokens contains the base-AR next token predicted after each
 // corresponding proposal row. A rejection commits the verified correction;

@@ -3,8 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#include "trtmc/runtime/family_loader.h"
-#include "trtmc/task.h"
+#include "trtmc/action.hpp"
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "../../../../third_party/stb/stb_image.h"
@@ -119,28 +118,32 @@ int main(int argc, char** argv) {
         using Clock = std::chrono::steady_clock;
         const auto memory_before = gpu_memory();
         const auto load_started = Clock::now();
-        auto task = trtmc::load_task(argv[1], argv[2]);
+        trtmc::LoadOptions options;
+        options.runtime_root = argv[2];
+        auto model = trtmc::Model::load(argv[1], options);
+        const auto control = model.task<trtmc::ImageStateToActionChunk>();
         const double startup_ms =
             std::chrono::duration<double, std::milli>(Clock::now() - load_started).count();
-        auto* control = dynamic_cast<trtmc::IRobotControl*>(task.get());
-        if (control == nullptr)
-            throw std::runtime_error("bundle does not implement IRobotControl");
 
-        const trtmc::RobotObservation observation{{image.pixels.data(), image.pixels.size()},
-                                                  image.height,
-                                                  image.width,
-                                                  3,
-                                                  {state.data(), state.size()}};
-        auto chunk = control->predict_action_chunk(observation);
-        if (chunk.num_actions != 100 || chunk.action_dim != 14 || chunk.actions.size() != 1400)
+        const trtmc::ImageStateToActionChunkRequest request{
+            {trtmc::ImageInput({image.pixels.data(), image.pixels.size()},
+                               static_cast<std::uint32_t>(image.height),
+                               static_cast<std::uint32_t>(image.width)),
+             {state.data(), state.size()}}};
+        const auto chunk = control.run(request);
+        const auto matrix = chunk.actions();
+        if (matrix.rows != 100 || matrix.columns != 14 || matrix.values.size() != 1400)
             throw std::runtime_error("ACT result must be one 100x14 action chunk");
-        write_floats(argv[5], chunk.actions);
+        const std::vector<float> actions(matrix.values.begin(), matrix.values.end());
+        const auto num_actions = static_cast<int32_t>(matrix.rows);
+        const auto action_dim = static_cast<std::size_t>(matrix.columns);
+        write_floats(argv[5], actions);
 
         for (int index = 0; index < 2; ++index)
-            (void)control->predict_action_chunk(observation);
+            (void)control.run(request);
         std::vector<double> inference_ms;
         for (int index = 0; index < 10; ++index)
-            inference_ms.push_back(control->predict_action_chunk(observation).inference_ms);
+            inference_ms.push_back(control.run(request).inference_ms());
 
         constexpr double control_hz = 50.0;
         const auto period = std::chrono::duration_cast<Clock::duration>(
@@ -149,14 +152,14 @@ int main(int argc, char** argv) {
         std::vector<Clock::time_point> emitted;
         int missed_deadlines = 0;
         volatile float checksum = 0.0F;
-        for (int32_t step = 0; step < chunk.num_actions; ++step) {
+        for (int32_t step = 0; step < num_actions; ++step) {
             const auto target = control_start + step * period;
             std::this_thread::sleep_until(target);
             const auto actual = Clock::now();
             emitted.push_back(actual);
             if (actual > target + period)
                 ++missed_deadlines;
-            checksum += chunk.actions[static_cast<std::size_t>(step) * chunk.action_dim];
+            checksum += actions[static_cast<std::size_t>(step) * action_dim];
         }
         (void)checksum;
 
@@ -182,13 +185,13 @@ int main(int argc, char** argv) {
         const double p95 = percentile(inference_ms, 0.95);
         std::cout << nlohmann::json(
                          {
-                             {"num_actions", chunk.num_actions},
-                             {"action_dim", chunk.action_dim},
-                             {"within_training_bounds", chunk.within_training_bounds},
+                             {"num_actions", num_actions},
+                             {"action_dim", action_dim},
+                             {"within_training_bounds", chunk.within_training_bounds()},
                              {"chunk_inference_p50_ms", p50},
                              {"chunk_inference_p95_ms", p95},
                              {"chunk_throughput_per_second", 1000.0 / p50},
-                             {"action_step_capacity_hz", 1000.0 * chunk.num_actions / p50},
+                             {"action_step_capacity_hz", 1000.0 * num_actions / p50},
                              {"control_frequency_hz", control_hz},
                              {"control_effective_hz", effective_hz},
                              {"control_p99_abs_jitter_ms", percentile(jitter_ms, 0.99)},

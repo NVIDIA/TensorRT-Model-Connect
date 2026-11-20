@@ -58,6 +58,9 @@ def resolve(model_dir: str | Path, *, latent_size: int) -> dict:
 
     return {
         "latent_size": int(latent_size),
+        # The two scheduler fields that tell a distilled few-step checkpoint from its base.
+        "scheduler_class": str(scheduler.get("_class_name", "")),
+        "timestep_spacing": str(scheduler.get("timestep_spacing", "")),
         "image_size": int(latent_size) * 8,
         "unet": {
             "in_channels": int(unet["in_channels"]),

@@ -21,16 +21,26 @@ def add_constant(network, shape, values, dtype=np.float32):
     return network.add_constant(tuple(shape), weights).get_output(0)
 
 
-def add_linear(network, inp, weight, bias, dtype=np.float32):
-    """Linear over the last axis. ``weight`` is [out_features, in_features]."""
-    weight = np.asarray(weight)
-    out_features, in_features = int(weight.shape[0]), int(weight.shape[1])
+def add_linear(network, inp, weight, bias, dtype=np.float32, *, matmul=None):
+    """Linear over the last axis. ``weight`` is [out_features, in_features].
+
+    ``matmul`` (``(network, input) -> output``) replaces the matrix product, which is how
+    a quantized projection takes its place; the bias is added the same way either way.
+    ``weight`` may be None then.
+    """
     rank = len(tuple(inp.shape))
-    rhs_shape = (1,) * (rank - 2) + (in_features, out_features)
-    rhs = add_constant(network, rhs_shape, weight.T.reshape(rhs_shape), dtype=dtype)
-    product = network.add_matrix_multiply(
-        inp, trt.MatrixOperation.NONE, _retype(network, rhs, inp.dtype), trt.MatrixOperation.NONE
-    ).get_output(0)
+    if matmul is not None:
+        product = matmul(network, inp)
+        out_features = int(product.shape[-1])
+    else:
+        weight = np.asarray(weight)
+        out_features, in_features = int(weight.shape[0]), int(weight.shape[1])
+        rhs_shape = (1,) * (rank - 2) + (in_features, out_features)
+        rhs = add_constant(network, rhs_shape, weight.T.reshape(rhs_shape), dtype=dtype)
+        product = network.add_matrix_multiply(
+            inp, trt.MatrixOperation.NONE, _retype(network, rhs, inp.dtype),
+            trt.MatrixOperation.NONE,
+        ).get_output(0)
     if bias is None:
         return product
     bias_shape = (1,) * (rank - 1) + (out_features,)

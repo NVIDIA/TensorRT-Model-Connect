@@ -8,6 +8,8 @@
 #include "families/wan2_2_ti2v/runtime/options.h"
 #include "families/wan2_2_ti2v/runtime/runtime_config.h"
 #include "families/wan2_2_ti2v/runtime/tokenizer.h"
+#include "trtmc/internal/model.h"
+#include "trtmc/internal/video.h"
 #include "trtmc/runtime/trt_backend.h"
 #include "trtmc/task.h"
 
@@ -41,27 +43,48 @@ make_wan22_vae_cache_bindings(const std::vector<void*>& input_addresses,
                               const std::vector<void*>& output_addresses,
                               const Wan22TI2VRuntimeShape& shape);
 
-class Wan22TI2VPipeline final : public IImageGeneration {
+// One bundle, two tasks: text-to-video, and image-to-video when the bundle
+// carries the first-frame VAE encoder. Bundles built for image_generation keep
+// the legacy interface.
+class Wan22TI2VPipeline final : public internal::IModel,
+                                public IImageGeneration,
+                                public internal::ITextToVideo,
+                                public internal::IInitialImageTextToVideo {
   public:
     Wan22TI2VPipeline(Wan22ModuleLoader module_loader, std::unique_ptr<ITokenizer> tokenizer,
                       Wan22TI2VOptions options, wan2_2_ti2v::RuntimeConfig runtime_config,
-                      std::string model_id);
+                      std::string model_id, std::string primary_task = IImageGeneration::kTask,
+                      bool image_encoder = false);
     ~Wan22TI2VPipeline() override;
+
+    const char* task() const noexcept override { return primary_task_.c_str(); }
+    std::vector<internal::TaskInstance> task_bindings() override;
 
     ImageResult generate_image(const std::string& prompt,
                                const ImageGenerationConfig& cfg = {}) override;
+    internal::VideoResult run(const internal::TextToVideoRequest& request,
+                              internal::ConfigView config) override;
+    internal::VideoResult run(const internal::InitialImageTextToVideoRequest& request,
+                              internal::ConfigView config) override;
 
   private:
+    // Callers hold generation_mutex_. A first frame selects image-to-video.
+    ImageResult generate(const std::string& prompt, const Wan22TI2VRequest& request,
+                         const std::vector<float>* first_frame_pixels);
+    Wan22TI2VRequest resolve_config(internal::ConfigView config) const;
     std::vector<int32_t> tokenize(const std::string& text) const;
     std::vector<float> encode_text(const std::vector<int32_t>& ids, ITrtModule& text_encoder);
+    std::vector<float> encode_first_frame(const std::vector<float>& pixels,
+                                          const Wan22TI2VRuntimeShape& shape);
     std::vector<float> run_denoiser(const std::vector<float>& latents,
                                     const std::vector<float>& context,
                                     const std::vector<float>& time,
                                     const Wan22TI2VRuntimeShape& shape, ITrtModule& denoiser);
     void run_denoising(std::vector<float>& latents, const std::vector<float>& prompt_context,
-                       const std::vector<float>& negative_context, const Wan22TI2VRequest& request,
-                       const Wan22TI2VRuntimeShape& shape, double& denoiser_ms,
-                       double& scheduler_ms);
+                       const std::vector<float>& negative_context,
+                       const std::vector<float>* first_frame_latent,
+                       const Wan22TI2VRequest& request, const Wan22TI2VRuntimeShape& shape,
+                       double& denoiser_ms, double& scheduler_ms);
     ImageResult decode_video(const std::vector<float>& latents, const Wan22TI2VRuntimeShape& shape);
     std::unique_ptr<ITrtModule>
     load_module(const std::string& section_name,
@@ -74,6 +97,9 @@ class Wan22TI2VPipeline final : public IImageGeneration {
     Wan22TI2VOptions options_;
     wan2_2_ti2v::RuntimeConfig runtime_config_;
     std::string model_id_;
+    std::string primary_task_;
+    bool image_encoder_{false};
+    std::vector<internal::ConfigField> config_fields_; // Borrows options_.negative_prompt.
     cudaStream_t stream_{nullptr};
     std::mutex generation_mutex_;
 };

@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import aiperf_metrics
-from .campaign import NO_VERDICT, SIGNAL_NAMES, SIGNALS, is_pass, measurement_note, ms, reported_perf, request_label, signal, signal_reason
+from .campaign import (NO_VERDICT, SIGNAL_NAMES, SIGNALS, is_pass, measurement_note, ms, native_mode, native_mode_counts,
+                       reported_perf, request_label, signal, signal_reason)
 from .report import _fmt, counted
 
 EVIDENCE = ("report.md", "report.json", "execution.jsonl", "execution.timing-recovered.jsonl",
@@ -28,7 +29,7 @@ EVIDENCE = ("report.md", "report.json", "execution.jsonl", "execution.timing-rec
             "artifacts/candidate/server.log", "candidate/server.log")
 LIGHT_COLORS = {"green": "#1e8e3e", "yellow": "#b06000", "red": "#c5221f", "white": "#5f6368", "n/a": "#5f6368"}
 LEGEND = (("green", "Quality meets its criteria and task timings are available; dataset timings have no performance gate."),
-          ("yellow", "Performance within the margin of native, or an inconclusive accuracy difference. Inconclusive Acc is not a pass."),
+          ("yellow", "Performance within the margin of native (an inconclusive Acc of an older report is not a pass)."),
           ("red", "Accuracy or performance worse than native beyond the margin."),
           ("white", "No valid comparison: a build, run, or environment error, or results that cannot be compared."))
 STYLE = """
@@ -87,7 +88,8 @@ let n=0;for(const r of document.querySelectorAll('tr.m, section.client-metrics')
 const v=r.dataset.k.includes(q)&&(!s||r.dataset.result===s);
 r.style.display=v?'':'none';if(r.classList.contains('m'))n+=v}document.getElementById('n').textContent=n}
 """
-NO_VERDICT_LABELS = {"error": "run error", "build-failed": "build failed", "config-error": "configuration error",
+NO_VERDICT_LABELS = {"error": "run error", "environment-blocked": "environment blocked",
+                     "build-failed": "build failed", "config-error": "configuration error",
                      "not-run": "not run", "excluded": "excluded", "smoke-fail": "smoke failed"}
 TIMING_SPREAD = re.compile(r"^(TRTMC|native) CI (±[\d.]+%)")
 NO_WORK = re.compile(r"^(TRTMC|native): (\d+ responses report no work|no work evidence)")
@@ -183,13 +185,16 @@ def _accuracy_values(items: Sequence[Mapping[str, Any]]) -> str:
 
 
 def _latency(profile: str, items: Sequence[Mapping[str, Any]], side: str) -> str:
-    """One side's p50 of each reported request (labelled when there are several)."""
+    """One side's p50 of each reported request (labelled when there are several); the native side's with the mode
+    that answered (compile, or eager)."""
     lines = []
     for item in items:
         timing = item.get(side) or {}
         unit = " / audio s" if timing.get("unit") or (item.get("candidate") or {}).get("unit") else ""
         label = f"<span class='detail'>{_e(request_label(profile, item))}</span> " if len(items) > 1 else ""
-        lines.append(f"<div>{label}{_e(ms(timing.get('p50_ms')))}{unit}</div>")
+        mode = (f" <span class='detail'>{_e(item['reference_mode'])}</span>"
+                if side == "reference" and item.get("reference_mode") and timing.get("p50_ms") is not None else "")
+        lines.append(f"<div>{label}{_e(ms(timing.get('p50_ms')))}{unit}{mode}</div>")
         if side == "candidate" and (note := measurement_note(item)):
             lines.append(f"<span class='detail'>{_e(note)}</span>")
     return "".join(lines) or "<span class='none'>—</span>"
@@ -225,6 +230,10 @@ def _accuracy(items: Sequence[Mapping[str, Any]]) -> str:
                                                               "; ".join(item.get("notes", []))) if text)
         table = (f"<table><tr><th>sample</th><th>reason</th><th>TRTMC</th><th>native</th></tr>{rows}</table>"
                  if rows else "")
+        tolerated = "".join(f"<tr><td>{_e(o.get('sample_id'))}</td><td>{_e(o.get('explanation'))}</td></tr>"
+                            for o in item.get("outliers") or [])
+        if tolerated:
+            table += f"<table><tr><th>tolerated outlier</th><th>measurement</th></tr>{tolerated}</table>"
         parts.append(f"<div>{head}{error}{table}</div>")
     return "".join(parts)
 
@@ -248,7 +257,8 @@ def _performance(items: Sequence[Mapping[str, Any]]) -> str:
                 reasons += f" · {item['out_of_capacity']} capacity rejections excluded on both sides"
         else:
             reasons += " · repeated fixed-workload gate"
-        rows.append(f"<tr><td>{_e(item.get('request') or item.get('reference_mode'))}</td><td><span class='badge' "
+        name = " · ".join(str(part) for part in (item.get("reference_mode"), item.get("request")) if part)
+        rows.append(f"<tr><td>{_e(name)}</td><td><span class='badge' "
                     f"style='background:{color}'>{_e(light)}</span></td>"
                     f"<td>{_e(_ms(candidate.get('p50_ms')))}{unit}</td><td>{_e(_ms(reference.get('p50_ms')))}{unit}"
                     f" {_e(reference.get('precision') or '')}</td><td>{_e(reasons)}</td></tr>")
@@ -337,7 +347,7 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
         row, result = rows[profile], results[profile]
         perf = reported_perf(row)
         issue = _issue(profile, row, result)
-        key = f"{profile} {row.get('task') or ''} {result} {row.get('root')}".lower()
+        key = f"{profile} {row.get('task') or ''} {result} {row.get('root')} {native_mode(row)}".lower()
         metrics = row.get("aiperf_metrics", [])
         metrics_link = f"<div class='detail'><a href='#aiperf-{index}'>AIPerf client metrics</a></div>" if metrics else ""
         if metrics:
@@ -349,7 +359,8 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
                     + (f"<div class='detail'>{_e(issue)}</div>" if issue else "")
                     + f"</td><td><code>{_e(profile)}</code><div class='detail'>{_e(row.get('task') or '—')}</div>"
                     f"{metrics_link}</td>"
-                    f"<td>{_precision(row)}</td><td>{_accuracy_values(row.get('accuracy', []))}</td>"
+                    f"<td>{_precision(row)}</td><td>{_e(native_mode(row))}</td>"
+                    f"<td>{_accuracy_values(row.get('accuracy', []))}</td>"
                     f"<td class='timing'>{_latency(profile, perf, 'reference')}</td>"
                     f"<td class='timing'>{_latency(profile, perf, 'candidate')}</td>"
                     f"{rerun}"
@@ -364,7 +375,8 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
              f"<span class='card-item'>Pass {_light('green')}<span class='none'>+</span>{_light('yellow')}"
              f"<strong>{passed}</strong></span><span class='card-item'>Pass rate <strong>{rate}</strong></span>"
              f"<span class='card-item'>Valid comparisons <strong>{len(rows) - tally['white']} / {len(rows)}"
-             "</strong></span></div></section>")
+             "</strong></span></div><div class='card'><span class='card-label'>Native mode</span>"
+             f"<span class='card-item'>{_e(native_mode_counts(rows))}</span></div></section>")
     legend = "<dl class='legend'>" + "".join(f"<div><dt>{_signal(result)}</dt><dd>{_e(text)}</dd></div>"
                                              for result, text in LEGEND) + "</dl>"
     related = " · ".join(f'<a href="{_e(href)}">{_e(label)}</a>' for label, href in links)
@@ -376,7 +388,8 @@ def render(rows: Mapping[str, Mapping[str, Any]], counts: Mapping[str, int], ran
     native_section = ("<h2>AIPerf native client metrics (informational; no gate)</h2>"
                       f"<p class='purpose'>{_e(aiperf_metrics.NOTE)}</p>{''.join(client_metrics)}"
                       if client_metrics else "")
-    columns = ["Result", "Model / Task", "Precision", "Quality (TRTMC / native)", "Native task p50", "TRTMC task p50",
+    columns = ["Result", "Model / Task", "Precision", "Native mode", "Quality (TRTMC / native)", "Native task p50",
+               "TRTMC task p50",
                *(["Rerun"] if reruns else []), "Evidence"]
     document = ("<!doctype html><html lang='en'><meta charset='utf-8'><meta name='viewport' "
                 f"content='width=device-width,initial-scale=1'><title>{_e(title)}</title><style>{STYLE}</style>"

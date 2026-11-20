@@ -43,6 +43,8 @@ struct FluxGenerationPlan {
     int32_t z_dim{0};
     FluxPackLayout layout;
     bool is_flux2{false};
+    // Two denoiser passes per step (cond / empty-prompt uncond), FLUX.2-klein.
+    bool true_cfg{false};
     std::size_t latent_size{0};
     flux_scheduler::FlowMatchEulerConfig scheduler_config;
 };
@@ -77,6 +79,7 @@ inline FluxGenerationPlan make_flux_generation_plan(const FluxDiffusionConfig& c
     plan.z_dim = config.z_dim;
     plan.layout = make_flux_pack_layout(config, plan.z_dim, h_lat, w_lat);
     plan.is_flux2 = !weights.vae_bn_mean.empty();
+    plan.true_cfg = plan.is_flux2 && config.true_cfg && plan.guidance_scale > 1.0F;
     plan.latent_size = plan.is_flux2
                            ? (static_cast<std::size_t>(plan.layout.packed_channels) *
                               static_cast<std::size_t>(plan.layout.h_packed) *

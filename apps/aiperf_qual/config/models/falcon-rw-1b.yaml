@@ -3,3 +3,6 @@
 
 # MMLU is near chance at this size: LAMBADA last-word prediction discriminates.
 absolute: [lambada]
+
+reference:
+  mode: eager  # torch.compile: generation recompiles past Dynamo's limit

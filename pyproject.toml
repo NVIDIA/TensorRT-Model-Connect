@@ -42,7 +42,7 @@ serve = [
     "fastapi>=0.115,<0.142",
     "starlette>=0.44",
     "python-multipart>=0.0.20,<0.1",
-    "Pillow>=10,<13",
+    "Pillow>=10,<14",
     "pydantic>=2.11,<3",
     "uvicorn>=0.30,<0.53",
 ]
@@ -54,7 +54,7 @@ test = [
     "starlette>=0.44",
     "httpx>=0.27,<0.29",
     "python-multipart>=0.0.20,<0.1",
-    "Pillow>=10,<13",
+    "Pillow>=10,<14",
     "pydantic>=2.11,<3",
     "uvicorn>=0.30,<0.53",
 ]

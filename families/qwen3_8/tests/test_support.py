@@ -135,6 +135,9 @@ def test_edge_request_preserves_fields_and_family_owner(tmp_path, monkeypatch, v
     request = BuildRequest(source, tmp_path / "out", "qwen3_8", "text_generation", "fp16",
                            graph_transform=lambda layer: layer)
     assert coerce_request(request) is request
+    from families.qwen3_8.model import _build_native
+    with pytest.raises(NotImplementedError, match="graph_transform"):
+        _build_native(request, None)
     execution = BuildExecutionInputs("dspark", (NamedCheckpoint("draft", draft),))
     assert cli.execution_inputs(None) is None
     extended = with_execution(request, execution)
@@ -244,8 +247,18 @@ def test_edge_request_preserves_fields_and_family_owner(tmp_path, monkeypatch, v
     with pytest.raises(ValueError, match="Conflicting embedded MTP"):
         builder.runtime_checkpoint_files(source, runtime_config, embedded_mtp=True)
     monkeypatch.setattr(builder, "local_target", lambda: {**target, "sm": 80})
-    with pytest.raises(NotImplementedError, match="requested MTP"):
-        dispatch.build_paired(mtp, None, BuildExecutionInputs("mtp"))
+    from families.qwen3_8 import model
+    native_requests = []
+    monkeypatch.setattr(model, "_build_native",
+                        lambda request, writer, **kwargs: native_requests.append((request, writer, kwargs)))
+    dispatch.build_paired(mtp, None, BuildExecutionInputs("mtp"))
+    native_request, native_writer, native_options = native_requests.pop()
+    assert native_request.quantization == quantization
+    assert native_request.mtp_seq_len == 4
+    assert native_request.task == mtp.task and native_request.model_dir == mtp.model_dir
+    assert native_writer is None and native_options == {"require_mtp": True}
+    with pytest.raises(ValueError, match="four verification"):
+        dispatch.build_paired(replace(mtp, mtp_seq_len=2), None, BuildExecutionInputs("mtp"))
     assert len(commands) == (2 if vision else 1)
     metadata["quantization"]["group_size"] = 32
     (source / "hf_quant_config.json").write_text(json.dumps(metadata))
@@ -379,12 +392,21 @@ def test_dspark_capacity_boundaries_keep_the_requested_pair(tmp_path, monkeypatc
                              "kv_cache_quant_algo": None},
         }))
     seen = []
+    native_seen = []
+    from families.qwen3_8 import model
+    monkeypatch.setattr(model, "_build_native",
+                        lambda original, writer, **kwargs: native_seen.append((original, kwargs)))
 
     def build(original, writer, native, *, draft_dir, execution_variant="dspark"):
         assert execution_variant == variant
         assert original is request and draft_dir == execution.checkpoints[0].model_dir
-        with pytest.raises(NotImplementedError, match="Native Qwen3.8"):
-            native(original, writer)
+        native(original, writer)
+        assert native_seen[-1][0].max_sequence_length == limit
+        assert native_seen[-1][0].quantization == quantization
+        expected = {"draft_dir": execution.checkpoints[0].model_dir}
+        if variant == "dflash":
+            expected["draft_variant"] = variant
+        assert native_seen[-1][1] == expected
         seen.append(original)
 
     monkeypatch.setattr(dispatch, "build", build)
@@ -403,13 +425,24 @@ def test_dspark_checkpoint_error_is_distinct_from_request_error(tmp_path, monkey
 
 
 @pytest.mark.parametrize("arch, sm", [("x86_64", 90), ("aarch64", 120)])
-def test_dspark_unqualified_platform_names_required_route(tmp_path, monkeypatch, arch, sm):
+def test_dspark_unqualified_platform_uses_native_pair(tmp_path, monkeypatch, arch, sm):
     from families.qwen3_8.edge_llm import builder, dispatch
+    from families.qwen3_8 import model
 
     request, execution = _dspark_pair_request(tmp_path)
+    captured = []
     monkeypatch.setattr(builder, "local_target", lambda: {"os": "linux", "arch": arch, "sm": sm})
-    with pytest.raises(NotImplementedError, match="Linux x86_64, SM120 and FP16"):
-        dispatch.build_paired(request, None, execution)
+    monkeypatch.setattr(model, "_build_native",
+                        lambda request, writer, **kwargs: captured.append((request, writer, kwargs)))
+    dispatch.build_paired(request, None, execution)
+    assert len(captured) == 1
+    native_request, writer, kwargs = captured[0]
+    assert native_request.quantization == "nvfp4"
+    assert native_request.precision == "fp16"
+    assert native_request.model_dir == request.model_dir
+    assert native_request.max_sequence_length == request.max_sequence_length
+    assert kwargs == {"draft_dir": execution.checkpoints[0].model_dir}
+    assert writer is None
     assert not list(tmp_path.glob(".out.edge-*"))
 
 
@@ -678,3 +711,71 @@ def test_builder_interpreter_checks_requested_api(monkeypatch, onnx, available):
     monkeypatch.setattr(builder.subprocess, "run", probe)
     result = builder.builder_python({"python": "/sdk/python"}, {"tensorrt_version": "test-trt"}, onnx=onnx)
     assert result == (builder.sys.executable if available else "/sdk/python")
+
+
+@pytest.mark.parametrize("edge", [False, True])
+def test_e2e_tp2_uses_one_family_owned_process(monkeypatch, tmp_path, edge):
+    import json
+    import subprocess
+    from pathlib import Path
+    from families.qwen3_8.tests import test_e2e as owner
+
+    calls = []
+    sections = ({"edge_llm.json": {}, "edge_llm/engine/llm_world2_rank0.engine": {},
+                 "edge_llm/engine/llm_world2_rank1.engine": {},
+                 "edge_llm/engine/visual/visual.engine": {}} if edge else
+                {"engine.rank0.plan": {}, "engine.rank1.plan": {}, "native_visual.json": {},
+                 "native_visual.rank0.plan": {}, "native_visual.rank1.plan": {}})
+    payload = {"family": "qwen3_8", "task": "images_text_to_text", "sections": sections}
+    def run(command, **kwargs):
+        calls.append(command)
+        output = payload if command[1] == "inspect" else {"text": "Paris", "token_ids": [1]}
+        return subprocess.CompletedProcess(command, 0, json.dumps(output), "")
+    monkeypatch.setattr(owner.subprocess, "run", run)
+    assert owner._assert_rank_sections(Path("trtmc"), tmp_path / "model.bundle", 2,
+                                       "vision_language_generation") is edge
+    result = owner._run_native(Path("trtmc"), tmp_path, tmp_path / "model.bundle", "Capital?",
+                               {"max_new_tokens": 4}, 2, tmp_path, edge=edge)
+    assert result == {"text": "Paris", "token_ids": [1]}
+    assert calls[-1] == ["trtmc", "run", str(tmp_path / "model.bundle"), "--runtime-root",
+                        str(tmp_path), "--prompt", "Capital?", "--max-new-tokens", "4"]
+    if not edge:
+        del sections["native_visual.rank1.plan"]
+        with pytest.raises(AssertionError):
+            owner._assert_rank_sections(Path("trtmc"), tmp_path / "model.bundle", 2,
+                                         "vision_language_generation")
+
+
+@pytest.mark.parametrize("image_field", ["image", "images"])
+def test_reference_inputs_preserves_both_image_and_video(monkeypatch, tmp_path, image_field):
+    from types import SimpleNamespace
+    from PIL import Image
+    import torch
+    from transformers import AutoProcessor
+    from families.qwen3_8.tests import test_e2e as owner
+
+    path = tmp_path / "frame.png"
+    Image.new("RGB", (4, 4), "red").save(path)
+    class Processor:
+        image_processor = SimpleNamespace(patch_size=2, merge_size=2)
+        video_processor = SimpleNamespace(patch_size=2, merge_size=2, temporal_patch_size=2)
+        def apply_chat_template(self, messages, **kwargs):
+            assert [x["type"] for x in messages[0]["content"]] == ["image", "video", "text"]
+            assert kwargs == {"tokenize": False, "add_generation_prompt": True, "enable_thinking": False}
+            return "both modalities"
+        def __call__(self, **kwargs):
+            assert kwargs["text"] == ["both modalities"] and len(kwargs["images"]) == 1
+            assert kwargs["videos"][0].shape == (2, 4, 4, 3)
+            assert kwargs["video_metadata"][0].frames_indices == [0, 1]
+            assert kwargs["video_metadata"][0].fps == 1
+            assert kwargs["do_sample_frames"] is False and kwargs["return_tensors"] == "pt"
+            assert self.image_processor.size == {"shortest_edge": 2048, "longest_edge": 20480}
+            assert self.video_processor.size == {"shortest_edge": 4096, "longest_edge": 40960}
+            return {"input_ids": torch.tensor([[1, 2]]),
+                    "image_grid_thw": torch.tensor([[1, 2, 2]]),
+                    "video_grid_thw": torch.tensor([[1, 2, 2]])}
+    monkeypatch.setattr(AutoProcessor, "from_pretrained", lambda *_args, **_kwargs: Processor())
+    case = {image_field: path if image_field == "image" else [path],
+            "video_frames": [path, path], "video_fps": 1.0}
+    result = owner._reference_inputs(tmp_path, {}, None, "Compare.", case)
+    assert result["input_ids"].tolist() == [[1, 2]]

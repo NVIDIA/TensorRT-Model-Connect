@@ -50,6 +50,7 @@ import tensorrt as trt
 
 from . import graph_ops
 from . import graph_blocks
+from .quantization import configure_fp8_build
 from .utils import (
     const_in_work_dtype as _const_in_work_dtype,
     create_builder_context,
@@ -211,6 +212,7 @@ def build_dual_profile_decoder_engine(
     builder = builder_context.builder
     network = builder_context.network
     trt_config = builder_context.config
+    configure_fp8_build(trt_config, quant_ctx)
 
     if precision == "fp16":
         work_np_dtype, work_trt_dtype = np.float16, trt.float16

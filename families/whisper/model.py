@@ -42,6 +42,7 @@ from . import graph_blocks
 from .prompt_metadata import whisper_decoder_prompt_metadata
 from .parallel import normalize_parallel_config
 from .decoder_tp_builder import build_whisper_tp_decoder_engine
+from .quantization import calibrate_whisper
 
 
 def _encoder_precision(raw: dict, precision: str) -> str:
@@ -52,6 +53,20 @@ def _encoder_precision(raw: dict, precision: str) -> str:
             f"Whisper fp32_layers supports only selector 0 (the encoder); got {invalid}"
         )
     return "fp32" if precision == "fp16" and 0 in fp32_layers else precision
+
+
+_DUAL_GEMM_KNOB = "peep:match_dual_gemm"
+
+
+def _configure_quantized_build(trt_config, quant_ctx) -> None:
+    """Apply the FP8 build options and keep layer names for kernel inspection."""
+    if quant_ctx is None:
+        return
+    trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
+    if quant_ctx.has_fp8_weights and _DUAL_GEMM_KNOB in getattr(trt_config, "all_build_routes", ""):
+        # TensorRT's fused dual-GEMM kernel fails to compile with scalar-scale FP8.
+        # The route is set only when this TensorRT build lists the knob.
+        trt_config.build_route = f"-{_DUAL_GEMM_KNOB}=off"
 
 
 def _load_bias_or_zeros(readers, hf_key: str, size: int, dtype=np.float32) -> np.ndarray:
@@ -309,6 +324,7 @@ class _WhisperModel:
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 1
         trt_config.clear_flag(trt.BuilderFlag.TF32)
+        _configure_quantized_build(trt_config, quant_ctx)
 
         token_id = network.add_input("token_id", trt.int32, (1,))
         position_id = network.add_input("position_id", trt.int32, (1,))
@@ -397,6 +413,7 @@ class _WhisperModel:
                 max_source_positions=max_source_positions,
                 dtype=work_np_dtype,
                 activation_type=config.hidden_act or "gelu",
+                quant_ctx=quant_ctx,
             )
             hidden_state = result["hidden"]
             present_k_outputs.append(result["present_k"])
@@ -443,10 +460,13 @@ class _WhisperModel:
         weights: WeightDict,
         *,
         precision: str = "fp32",
+        quant_ctx=None,
         verbose: bool = False,
     ) -> bytes | None:
         encoder_precision = _encoder_precision(config.raw, precision)
-        return _build_whisper_encoder(config, weights, precision=encoder_precision, verbose=verbose)
+        return _build_whisper_encoder(
+            config, weights, precision=encoder_precision, quant_ctx=quant_ctx, verbose=verbose
+        )
 
     def get_vl_config(self, config: ModelConfig) -> dict | None:
         raw = config.raw
@@ -526,7 +546,7 @@ class _WhisperModel:
         return {"mel_filterbank": mel_fb_bytes}
 
 
-def _build_whisper_encoder(config, weights, *, precision="fp32", verbose=False):
+def _build_whisper_encoder(config, weights, *, precision="fp32", quant_ctx=None, verbose=False):
     enc_layers = weights["_enc_layers"]
     enc_heads = weights["_enc_heads"]
     enc_ffn = weights["_enc_ffn"]
@@ -551,6 +571,8 @@ def _build_whisper_encoder(config, weights, *, precision="fp32", verbose=False):
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     tc = builder.create_builder_config()
     tc.builder_optimization_level = 1
+    _configure_quantized_build(tc, quant_ctx)
+    matmul = graph_blocks.make_matmul_fn(network, work_np_dtype, quant_ctx)
     if precision == "fp32":
         # Honor the FP32 encoder boundary without TF32 operand rounding.
         tc.clear_flag(trt.BuilderFlag.TF32)
@@ -649,6 +671,8 @@ def _build_whisper_encoder(config, weights, *, precision="fp32", verbose=False):
             v_bias=weights[f"{pfx}.b_v"],
             o_bias=weights[f"{pfx}.b_o"],
             dtype=work_np_dtype,
+            matmul=matmul,
+            weight_prefix=pfx,
         )
         hs = network.add_elementwise(hs, attn, trt.ElementWiseOperation.SUM).get_output(0)
         n2 = graph_ops.add_layer_norm(
@@ -662,9 +686,7 @@ def _build_whisper_encoder(config, weights, *, precision="fp32", verbose=False):
         )
         fc1 = graph_ops.add_bias_sum(
             network,
-            graph_ops.add_matmul_rhs_constant(
-                network, n2, hidden, enc_ffn, weights[f"{pfx}.w_fc1"], dtype=work_np_dtype
-            ),
+            matmul(n2, hidden, enc_ffn, weights[f"{pfx}.w_fc1"], f"{pfx}.w_fc1"),
             enc_ffn,
             weights[f"{pfx}.b_fc1"],
             dtype=work_np_dtype,
@@ -672,9 +694,7 @@ def _build_whisper_encoder(config, weights, *, precision="fp32", verbose=False):
         act = graph_ops.add_activation(network, fc1, config.hidden_act or "gelu", dtype=work_np_dtype)
         fc2 = graph_ops.add_bias_sum(
             network,
-            graph_ops.add_matmul_rhs_constant(
-                network, act, enc_ffn, hidden, weights[f"{pfx}.w_fc2"], dtype=work_np_dtype
-            ),
+            matmul(act, enc_ffn, hidden, weights[f"{pfx}.w_fc2"], f"{pfx}.w_fc2"),
             hidden,
             weights[f"{pfx}.b_fc2"],
             dtype=work_np_dtype,
@@ -728,9 +748,11 @@ def _add_whisper_decoder_layer(
     max_source_positions,
     dtype=np.float32,
     activation_type="gelu",
+    quant_ctx=None,
 ):
     attention_size = hidden_size
     attention_window = max_cache_length + 1
+    matmul = graph_blocks.make_matmul_fn(network, dtype, quant_ctx)
 
     # Self-attention
     normed = graph_ops.add_layer_norm(
@@ -744,27 +766,21 @@ def _add_whisper_decoder_layer(
     )
     q = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden_size, attention_size, weights[f"{prefix}.w_q"], dtype=dtype
-        ),
+        matmul(normed, hidden_size, attention_size, weights[f"{prefix}.w_q"], f"{prefix}.w_q"),
         attention_size,
         weights[f"{prefix}.q_bias"],
         dtype=dtype,
     )
     k = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden_size, attention_size, weights[f"{prefix}.w_k"], dtype=dtype
-        ),
+        matmul(normed, hidden_size, attention_size, weights[f"{prefix}.w_k"], f"{prefix}.w_k"),
         attention_size,
         weights[f"{prefix}.k_bias"],
         dtype=dtype,
     )
     v = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden_size, attention_size, weights[f"{prefix}.w_v"], dtype=dtype
-        ),
+        matmul(normed, hidden_size, attention_size, weights[f"{prefix}.w_v"], f"{prefix}.w_v"),
         attention_size,
         weights[f"{prefix}.v_bias"],
         dtype=dtype,
@@ -794,9 +810,7 @@ def _add_whisper_decoder_layer(
     )
     sa = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, cf, attention_size, hidden_size, weights[f"{prefix}.w_o"], dtype=dtype
-        ),
+        matmul(cf, attention_size, hidden_size, weights[f"{prefix}.w_o"], f"{prefix}.w_o"),
         hidden_size,
         weights[f"{prefix}.o_bias"],
         dtype=dtype,
@@ -816,9 +830,7 @@ def _add_whisper_decoder_layer(
     )
     cq = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, cn, hidden_size, attention_size, weights[f"{prefix}.cross_w_q"], dtype=dtype
-        ),
+        matmul(cn, hidden_size, attention_size, weights[f"{prefix}.cross_w_q"], f"{prefix}.cross_w_q"),
         attention_size,
         weights[f"{prefix}.cross_b_q"],
         dtype=dtype,
@@ -833,13 +845,12 @@ def _add_whisper_decoder_layer(
         cross_v_typed = network.add_cast(cross_v, trt.float16).get_output(0)
     ck_proj = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network,
+        matmul(
             cross_k_typed,
             hidden_size,
             attention_size,
             weights[f"{prefix}.cross_w_k"],
-            dtype=dtype,
+            f"{prefix}.cross_w_k",
         ),
         attention_size,
         weights[f"{prefix}.cross_b_k"],
@@ -847,13 +858,12 @@ def _add_whisper_decoder_layer(
     )
     cv_proj = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network,
+        matmul(
             cross_v_typed,
             hidden_size,
             attention_size,
             weights[f"{prefix}.cross_w_v"],
-            dtype=dtype,
+            f"{prefix}.cross_w_v",
         ),
         attention_size,
         weights[f"{prefix}.cross_b_v"],
@@ -874,8 +884,8 @@ def _add_whisper_decoder_layer(
     )
     ca = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, ccf, attention_size, hidden_size, weights[f"{prefix}.cross_w_o"], dtype=dtype
+        matmul(
+            ccf, attention_size, hidden_size, weights[f"{prefix}.cross_w_o"], f"{prefix}.cross_w_o"
         ),
         hidden_size,
         weights[f"{prefix}.cross_b_o"],
@@ -902,6 +912,8 @@ def _add_whisper_decoder_layer(
         mlp_size=ffn_dim,
         dtype=dtype,
         activation_type=activation_type,
+        quant_ctx=quant_ctx,
+        layer_prefix=prefix,
     )
     out = network.add_elementwise(pca, mlp, trt.ElementWiseOperation.SUM).get_output(0)
     return {"hidden": out, "present_k": present_k, "present_v": present_v}
@@ -979,14 +991,22 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower() != "whisper":
         raise ValueError(f"Whisper does not support model_type={config.model_type!r}")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Whisper does not support quantization")
+    quantized = request.quantization not in {None, "none"}
+    if quantized and request.precision != "fp16":
+        raise ValueError("Whisper quantization requires precision=fp16")
+    if quantized and request.fp32_layers:
+        raise ValueError("Whisper quantization does not support fp32_layers")
     parallel = ParallelConfig(tp_size=int(request.tensor_parallel_size))
     parallel.validate()
+    if quantized and parallel.enabled:
+        raise ValueError("Whisper tensor-parallel builds do not support quantization")
     model = _WhisperModel()
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_fp32_layers"] = tuple(request.fp32_layers)
     weights = model.load_weights(str(model_dir), config)
+    quant_ctx = (
+        calibrate_whisper(model_dir, graph_ops, request.quantization, config) if quantized else None
+    )
     max_length = int(request.max_sequence_length or 256)
     writer.set_header(family="whisper", task=request.task, backend=request.backend)
     if parallel.enabled:
@@ -1011,13 +1031,18 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 weights,
                 max_length,
                 precision=request.precision,
-                quant_ctx=None,
+                quant_ctx=quant_ctx,
                 verbose=request.verbose,
                 parallel_config=parallel,
             ),
         )
     encoder = model.build_vision_engine(
-        str(model_dir), config, weights, precision=request.precision, verbose=request.verbose
+        str(model_dir),
+        config,
+        weights,
+        precision=request.precision,
+        quant_ctx=quant_ctx,
+        verbose=request.verbose,
     )
     if encoder is None:
         raise RuntimeError("Whisper encoder build returned no engine")

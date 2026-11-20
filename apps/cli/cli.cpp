@@ -97,8 +97,9 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
          {CommandKind::kEmbed,
           {"--text", "--token-ids", "--image", "--title", "--body", "--role"}}},
         {"rerank", {CommandKind::kRerank, {"--query", "--document", "--image", "--documents"}}},
-        {"classify", {CommandKind::kClassify, {"--image"}}},
+        {"classify", {CommandKind::kClassify, {"--image", "--audio"}}},
         {"detect", {CommandKind::kDetect, {"--image", "--prompt"}}},
+        {"layout", {CommandKind::kLayout, {"--image"}}},
         {"extract-features", {CommandKind::kExtractFeatures, {"--image"}}},
         {"predict-structure",
          {CommandKind::kPredictStructure,
@@ -113,8 +114,8 @@ const std::unordered_map<std::string, CommandSpec>& command_specs() {
         {"video-segment", {CommandKind::kVideoSegment, {"--frame", "--prompt"}}},
         {"generate-audio",
          {CommandKind::kGenerateAudio,
-          {"--prompt", "--output", "--max-new-tokens", "--talker-max-new-tokens", "--seed",
-           "--stream", "--chunk-frames", "--language"}}},
+          {"--prompt", "--description", "--output", "--max-new-tokens", "--talker-max-new-tokens",
+           "--seed", "--stream", "--chunk-frames", "--language"}}},
         {"transcribe",
          {CommandKind::kTranscribe,
           {"--input", "--max-output-tokens", "--source-language", "--target-language",
@@ -916,6 +917,27 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
                             {"image_width", result.image_width}});
         return EXIT_SUCCESS;
     }
+    case CommandKind::kLayout: {
+        const io::LoadedImage image = read_image(require_option(command, "--image"));
+        const auto result = require_interface<IDocumentLayout>(task).analyze_layout(
+            image.pixels.data(), image.height, image.width);
+        nlohmann::json regions = nlohmann::json::array();
+        for (const auto& region : result.regions) {
+            const auto& box = region.box;
+            require_finite({box.x_min, box.y_min, box.x_max, box.y_max, box.score},
+                           "layout region");
+            for (const auto& vertex : region.polygon)
+                require_finite({vertex[0], vertex[1]}, "layout polygon");
+            regions.push_back({{"box", {box.x_min, box.y_min, box.x_max, box.y_max}},
+                               {"score", box.score},
+                               {"class_id", box.class_id},
+                               {"polygon", region.polygon}});
+        }
+        write_json(output, {{"regions", regions},
+                            {"image_height", result.image_height},
+                            {"image_width", result.image_width}});
+        return EXIT_SUCCESS;
+    }
     case CommandKind::kExtractFeatures: {
         const io::LoadedImage image = read_image(require_option(command, "--image"));
         const auto result = require_interface<IImageFeatureExtractor>(task).extract_image_features(
@@ -1142,6 +1164,8 @@ int dispatch(const Command& command, ITask& task, std::ostream& output) {
         config.max_new_tokens = int_option(command, "--max-new-tokens", 128, 1);
         config.talker_max_new_tokens = int_option(command, "--talker-max-new-tokens", 0, 0);
         config.seed = int_option(command, "--seed", -1);
+        if (has_option(command, "--description"))
+            config.description = command.options.at("--description");
         const bool streaming = has_option(command, "--stream") &&
                                parse_bool(command.options.at("--stream"), "--stream");
         if (!streaming && has_option(command, "--chunk-frames"))
@@ -1612,7 +1636,7 @@ void print_usage(std::ostream& output) {
               "  trtmc inspect BUNDLE\n"
               "  trtmc COMMAND BUNDLE [--runtime-root DIR] [OPTIONS]\n\n"
               "Execution commands:\n"
-              "  run, encode, embed, rerank, classify, detect, extract-features,\n"
+              "  run, encode, embed, rerank, classify, detect, layout, extract-features,\n"
               "  predict-structure, disparity, depth, geometry,\n"
               "  segment,\n"
               "  segment-prompted, video-segment, generate-audio, transcribe,\n"
@@ -1636,6 +1660,9 @@ void print_usage(std::ostream& output) {
               "  predict-structure BUNDLE --input REQUEST [--input-encoding ENCODING]\n"
               "  .yaml/.yml, .json and .b2rq select their declared encodings.\n"
               "  SDK output defaults to prediction.cif or prediction.pdb.\n\n"
+              "Audio classification input:\n"
+              "  classify BUNDLE --audio WAV scores an audio model's own classes;\n"
+              "  classify BUNDLE --image FILE stays the image path.\n\n"
               "BYOK options:\n"
               "  --byok-library DSO --byok-function FUNCTION --byok-name KERNEL\n\n"
               "Runtime-sized KV cache:\n"

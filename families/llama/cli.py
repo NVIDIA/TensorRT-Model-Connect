@@ -44,6 +44,7 @@ def build(
     quantization: str | None = None,
     dynamic_kv_cache: bool = False,
     execution_variant: str | None = None, companion: list[str] | tuple[str, ...] = (),
+    edge_builder_python: Path | None = None,
 ) -> int:
     """Run the declared owner command; help never imports this handler."""
     execution = execution_inputs(execution_variant, companion)
@@ -60,7 +61,7 @@ def build(
         quantization=quantization,
         dynamic_kv_cache=dynamic_kv_cache,
     )
-    if execution is not None:
-        request = with_execution(request, execution)
+    if execution is not None or edge_builder_python is not None:
+        request = with_execution(request, execution, edge_builder_python=edge_builder_python)
     build_bundle(request, output)
     return 0

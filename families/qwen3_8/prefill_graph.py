@@ -298,12 +298,10 @@ def add_deltanet_layer_prefill(
                  f"{prefix}.deltanet_in_proj_qkv")  # [T, conv_dim]
     z = matmul(normed, hidden_size, d_inner, weights.get(f"{prefix}.deltanet_z_proj"),
                f"{prefix}.deltanet_z_proj")  # [T, d_inner]
-    a_raw = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, num_heads, weights[f"{prefix}.deltanet_a_proj"],
-        dtype=dtype)  # [T, H]
-    b_raw = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, num_heads, weights[f"{prefix}.deltanet_b_proj"],
-        dtype=dtype)  # [T, H]
+    a_raw = matmul(normed, hidden_size, num_heads, weights.get(f"{prefix}.deltanet_a_proj"),
+                   f"{prefix}.deltanet_a_proj")  # [T, H]
+    b_raw = matmul(normed, hidden_size, num_heads, weights.get(f"{prefix}.deltanet_b_proj"),
+                   f"{prefix}.deltanet_b_proj")  # [T, H]
 
     # ===== causal depthwise conv1d over [old state | new tokens] =====
     qkv_cols = _shuffle(network, qkv, first=(1, 0))  # [conv_dim, T]

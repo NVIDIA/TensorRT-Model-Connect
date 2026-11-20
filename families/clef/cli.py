@@ -16,6 +16,7 @@ class BuildRequest:
     max_questions: int = 64
     max_options: int = 512
     verbose: bool = False
+    quantization: str | None = None
 
     def __post_init__(self):
         if self.task != "structured_decision" or self.precision != "bf16" or self.backend != "trt":
@@ -29,6 +30,9 @@ class BuildRequest:
             raise ValueError("max_sequence_length must be a multiple of 64")
         if self.max_questions < 3 or self.max_options < 8:
             raise ValueError("max_questions must be at least 3 and max_options at least 8")
+        from .quantization import is_fp8
+
+        is_fp8(self.quantization)
 
 
 def build_bundle(request: BuildRequest, output: Path):
@@ -54,6 +58,7 @@ def build(
     max_questions: int = 64,
     max_options: int = 512,
     verbose: bool = False,
+    quantization: str | None = None,
 ):
     from tensorrt_model_connect.model_support import resolve_model
 
@@ -64,6 +69,7 @@ def build(
             max_questions=max_questions,
             max_options=max_options,
             verbose=verbose,
+            quantization=None if quantization == "none" else quantization,
         ),
         output,
     )

@@ -34,11 +34,10 @@ _PUBLISHED_NVFP4_CONFIG_GROUPS = {
 
 
 def checkpoint_quantization(raw: dict, source: Path, target: dict) -> str | None:
-    """Admit original weights or the published Gemma4 MoE NVFP4 layout.
+    """Admit original weights or the published Gemma4 dense/MoE NVFP4 layouts.
 
     This forwards an already quantized checkpoint; it never calibrates weights
-    or changes its KV-cache format. Dense packed targets and packed companions
-    have separate unresolved capacity/contracts and are not admitted here.
+    or changes its KV-cache format. Packed companions are not admitted here.
     """
     text = raw.get("text_config") or {}
     quant = raw.get("quantization_config") or text.get("quantization_config")
@@ -50,19 +49,22 @@ def checkpoint_quantization(raw: dict, source: Path, target: dict) -> str | None
     if not isinstance(quant, dict) or not sidecar.is_file():
         raise ValueError("Gemma4 NVFP4 requires matching ModelOpt config and hf_quant_config.json")
     exported = json.loads(sidecar.read_text(encoding="utf-8")).get("quantization", {})
+    moe = (text.get("enable_moe_block") is True
+           and (text.get("hidden_size"), text.get("num_hidden_layers"),
+                text.get("num_experts"), text.get("top_k_experts")) == (2816, 30, 128, 8))
+    dense = (text.get("enable_moe_block") is False
+             and (text.get("hidden_size"), text.get("num_hidden_layers")) == (5376, 60))
     if (raw.get("model_type") != "gemma4" or text.get("model_type") != "gemma4_text"
-            or text.get("enable_moe_block") is not True
-            or (text.get("hidden_size"), text.get("num_hidden_layers"),
-                text.get("num_experts"), text.get("top_k_experts")) != (2816, 30, 128, 8)
+            or not (moe or dense)
             or quant.get("quant_method") != "modelopt" or quant.get("quant_algo") != "NVFP4"
             or quant.get("config_groups") != _PUBLISHED_NVFP4_CONFIG_GROUPS
             or exported.get("quant_algo") != "NVFP4" or exported.get("group_size") != 16
             or exported.get("kv_cache_quant_algo") != "FP8"
             or quant.get("kv_cache_scheme") != {"dynamic": False, "num_bits": 8, "type": "float"}
             or text.get("quantization_config") not in (None, quant)):
-        raise ValueError("Gemma4 Edge maps only the published 26B-A4B ModelOpt NVFP4/FP8-KV layout")
-    if target.get("sm") not in {120, 121}:
-        raise ValueError("Gemma4 NVFP4/FP8-KV offload requires a native SM12x Edge installation")
+        raise ValueError("Gemma4 Edge requires a published dense31B or MoE26B-A4B ModelOpt NVFP4 layout")
+    if moe and target.get("sm") not in {120, 121}:
+        raise ValueError("Gemma4 NVFP4 offload requires a native SM12x Edge installation")
     return "nvfp4"
 
 
@@ -100,7 +102,7 @@ def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path):
     checkpoint.mkdir(parents=True)
     shutil.copy2(source / "config.json", checkpoint / "config.json")
     additions = {"EDGELLM_PLUGIN_PATH": package["plugin"]}
-    if checkpoint_quant:
+    if checkpoint_quant and text.get("enable_moe_block"):
         # The upstream exporter otherwise defaults the MoE plugin to Thor.
         additions["EDGELLM_NVFP4_MOE_TARGET"] = "sm12x"
     env = subprocess_environment(
@@ -154,6 +156,11 @@ def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path):
     for name in required:
         if not (engine / name).is_file() or (engine / name).stat().st_size == 0:
             raise ValueError(f"Edge Gemma4 builder omitted required artifact: {name}")
+    # ModelOpt sidecars can label FP8 cache even without serialized K/V
+    # scales. Report what Edge actually built, not the sidecar's declaration.
+    cache_dtype = json.loads((engine / "config.json").read_text()).get("kv_cache_dtype")
+    if cache_dtype not in {"fp16", "bf16", "fp8"}:
+        raise ValueError("Edge Gemma4 engine has an invalid or missing kv_cache_dtype")
     files = {}
     for directory in (engine, checkpoint):
         for path in sorted(directory.rglob("*")):
@@ -166,7 +173,7 @@ def prepare(request, raw: dict, target: dict, staging: Path, log_path: Path):
         "max_sequence_length": limit, "max_input_length": input_limit, "max_batch_size": 1,
         "execution_variant": "autoregressive", "builder_flow": "onnx", "task": request.task,
         "checkpoint_quantization": checkpoint_quant,
-        "kv_cache_quantization": "fp8" if checkpoint_quant else None,
+        "kv_cache_quantization": "fp8" if cache_dtype == "fp8" else None,
         "vision": has_vision, "audio": has_audio,
         "ple": bool(text.get("hidden_size_per_layer_input", 0)), "artifacts": list(files),
     }

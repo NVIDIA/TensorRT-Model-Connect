@@ -30,6 +30,8 @@ namespace trtmc::k2_horizon_uno {
 namespace {
 
 constexpr std::int32_t kMaximumBlockLength = 8;
+// Prompt chunks on the base profile; bundles built before them stop at 8.
+constexpr std::int32_t kMaximumPromptRows = 64;
 constexpr std::int32_t kVocabSize = 250624;
 constexpr std::int32_t kNumLayers = 36;
 constexpr std::int32_t kMaxPositionEmbeddings = 524288;
@@ -47,9 +49,13 @@ std::string require_text_section(const BundleReader& bundle, std::string_view na
     return {data.begin(), data.end()};
 }
 
-std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<char>& plan) {
+constexpr std::int32_t kLoraProfile = 0;
+constexpr std::int32_t kBaseProfile = 1;
+
+// One deserialized engine, one execution context per profile.
+BackendDualProfileModules load_engine(IBackend& backend, const std::vector<char>& plan) {
     const auto start = std::chrono::steady_clock::now();
-    auto module = backend.create_module(plan.data(), plan.size(), {});
+    auto modules = backend.create_dual_profile_modules(plan.data(), plan.size(), {});
     const auto elapsed =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     std::ostringstream receipt;
@@ -57,10 +63,15 @@ std::unique_ptr<ITrtModule> load_engine(IBackend& backend, const std::vector<cha
             << "[trtmc.load_timing] label=\"k2_horizon_uno.engine.plan\" load_deserialize_ms="
             << elapsed << " plan_bytes=" << plan.size() << '\n';
     std::cerr << receipt.str();
-    if (module == nullptr || !module->ok())
+    if (modules.prefill == nullptr || !modules.prefill->ok() || modules.decode == nullptr ||
+        !modules.decode->ok())
         throw std::runtime_error("K2-Horizon-Uno failed to load engine.plan");
-    module->set_timing_label("k2_horizon_uno.engine.plan");
-    return module;
+    if (modules.prefill->profile_idx() != kLoraProfile ||
+        modules.decode->profile_idx() != kBaseProfile)
+        throw std::runtime_error("K2-Horizon-Uno engine contexts use unexpected profiles");
+    modules.prefill->set_timing_label("k2_horizon_uno.engine.plan.lora");
+    modules.decode->set_timing_label("k2_horizon_uno.engine.plan.base");
+    return modules;
 }
 
 std::shared_ptr<ITokenizer> create_tokenizer(const BundleReader& bundle) {
@@ -107,20 +118,36 @@ K2HorizonUnoKvCacheNames make_cache_names() {
     return names;
 }
 
-void require_dynamic_vector_input(const ITrtModule& module, const std::string& name, DType dtype) {
+void require_dynamic_vector_input(const ITrtModule& module, const std::string& name, DType dtype,
+                                  std::int32_t profile) {
+    const auto mismatch = [&name] {
+        return std::runtime_error("K2-Horizon-Uno dynamic input contract mismatch for '" + name +
+                                  "'");
+    };
     if (!module.has_input(name) || module.tensor_dtype(name) != dtype ||
         !module.input_is_dynamic(name) ||
-        module.input_profile_shape(name, 0, ProfileShapeSelector::kMin) !=
-            std::vector<std::int64_t>{1} ||
-        module.input_profile_shape(name, 0, ProfileShapeSelector::kMax) !=
-            std::vector<std::int64_t>{kMaximumBlockLength}) {
-        throw std::runtime_error("K2-Horizon-Uno dynamic input contract mismatch for '" + name +
-                                 "'");
-    }
-    const auto optimum = module.input_profile_shape(name, 0, ProfileShapeSelector::kOpt);
+        module.input_profile_shape(name, profile, ProfileShapeSelector::kMin) !=
+            std::vector<std::int64_t>{1})
+        throw mismatch();
+    // Decode blocks need 8 rows; the base profile may take longer prompt chunks.
+    const auto maximum = module.input_profile_shape(name, profile, ProfileShapeSelector::kMax);
+    const std::int64_t limit = profile == kBaseProfile ? kMaximumPromptRows : kMaximumBlockLength;
+    if (maximum.size() != 1 || maximum.front() < kMaximumBlockLength || maximum.front() > limit)
+        throw mismatch();
+    const auto optimum = module.input_profile_shape(name, profile, ProfileShapeSelector::kOpt);
     if (optimum.size() != 1 || optimum.front() < 1 || optimum.front() > kMaximumBlockLength) {
         throw std::runtime_error("K2-Horizon-Uno input profile optimum is invalid for '" + name +
                                  "'");
+    }
+}
+
+void require_empty_mask_profile(const ITrtModule& module, std::int32_t profile) {
+    for (const auto selector :
+         {ProfileShapeSelector::kMin, ProfileShapeSelector::kOpt, ProfileShapeSelector::kMax}) {
+        if (module.input_profile_shape("lora_mask", profile, selector) !=
+            std::vector<std::int64_t>{0}) {
+            throw std::runtime_error("K2-Horizon-Uno base profile must take an empty lora_mask");
+        }
     }
 }
 
@@ -132,11 +159,15 @@ std::set<std::string> tensor_names(const std::vector<TensorInfo>& tensors) {
 }
 
 void validate_engine(const ITrtModule& module, const K2HorizonUnoKvCacheNames& cache_names) {
-    if (module.optimization_profile_count() != 1)
-        throw std::runtime_error("K2-Horizon-Uno requires exactly one optimization profile");
-    require_dynamic_vector_input(module, "token_id", DType::kInt32);
-    require_dynamic_vector_input(module, "position_id", DType::kInt32);
-    require_dynamic_vector_input(module, "lora_mask", DType::kFloat32);
+    if (module.optimization_profile_count() != 2)
+        throw std::runtime_error(
+            "K2-Horizon-Uno requires a LoRA profile and a base profile; rebuild the bundle");
+    for (const auto profile : {kLoraProfile, kBaseProfile}) {
+        require_dynamic_vector_input(module, "token_id", DType::kInt32, profile);
+        require_dynamic_vector_input(module, "position_id", DType::kInt32, profile);
+    }
+    require_dynamic_vector_input(module, "lora_mask", DType::kFloat32, kLoraProfile);
+    require_empty_mask_profile(module, kBaseProfile);
     if (!module.has_output("logits") || module.tensor_dtype("logits") != DType::kFloat32 ||
         module.tensor_shape("logits") !=
             std::vector<std::int64_t>{kMaximumBlockLength, kVocabSize}) {
@@ -203,17 +234,20 @@ ITask* create(const FamilyContext& context) {
     auto tokenizer = create_tokenizer(context.reader);
     validate_chat_tokenizer(*tokenizer);
 
-    auto decoder = load_engine(context.backend, require_section(context.reader, "engine.plan"));
+    auto decoders = load_engine(context.backend, require_section(context.reader, "engine.plan"));
+    auto lora_decoder = std::move(decoders.prefill);
+    auto base_decoder = std::move(decoders.decode);
     auto cache_names = make_cache_names();
-    validate_engine(*decoder, cache_names);
-    auto cache = std::make_unique<K2HorizonUnoKvCache>(max_cache_length, decoder->stream(),
+    validate_engine(*lora_decoder, cache_names);
+    auto cache = std::make_unique<K2HorizonUnoKvCache>(max_cache_length, lora_decoder->stream(),
                                                        std::move(cache_names));
     if (!cache->ok())
         throw std::runtime_error("K2-Horizon-Uno KV allocation failed");
-    cache->bind_to(*decoder);
+    cache->bind_to(*lora_decoder);
+    cache->bind_to(*base_decoder);
 
-    return new K2HorizonUnoTextGenerationPipeline(std::move(decoder), std::move(cache),
-                                                  std::move(tokenizer));
+    return new K2HorizonUnoTextGenerationPipeline(std::move(lora_decoder), std::move(base_decoder),
+                                                  std::move(cache), std::move(tokenizer));
 }
 
 } // namespace trtmc::k2_horizon_uno

@@ -37,6 +37,7 @@ from typing import Mapping, Union
 import numpy as np
 import tensorrt as trt
 from . import graph_ops
+from .quantization import QwenImageQuantContext, calibrate_qwen_image, configure_build
 
 PathLike = Union[str, Path]
 
@@ -63,6 +64,10 @@ _CAST_DTYPE = trt.bfloat16
 # builder.build_serialized_network() returns. Without this, TRT silently
 # reads garbage (or segfaults).
 _weight_refs: list[np.ndarray] = []
+
+# FP8 quantization context of the engine being built (None for plain BF16 builds). Set and
+# cleared by ``build_qwen_image_dit_engine``; ``_add_linear_3d`` reads it.
+_QUANT_CTX: "QwenImageQuantContext | None" = None
 
 
 def _to_compute_dtype(network, tensor):
@@ -893,6 +898,7 @@ def _add_mlp_block(
     w2 = np.asarray(weights[f"{prefix}.net.2.weight"], dtype=np.float32)  # [hidden, inner]
     b2 = np.asarray(weights[f"{prefix}.net.2.bias"], dtype=np.float32)
 
+    qprefix = getattr(weights, "prefix", "") + prefix
     h = _add_linear_3d(
         network,
         x_3d,
@@ -900,6 +906,7 @@ def _add_mlp_block(
         intermediate_size,
         w1,
         b1,
+        qname=f"{qprefix}.net.0.proj",
     )
     h = graph_ops.add_gelu_new(network, h)
     return _add_linear_3d(
@@ -909,6 +916,7 @@ def _add_mlp_block(
         hidden_size,
         w2,
         b2,
+        qname=f"{qprefix}.net.2",
     )
 
 
@@ -950,6 +958,7 @@ def _add_qkv_with_norm_and_rope(
             hidden_size,
             w_hf,
             b,
+            qname=getattr(weights, "prefix", "") + weight_key,
         )
 
     q_3d = _proj(q_key)
@@ -1054,6 +1063,10 @@ def _add_joint_block_graph(
         def __init__(self, base: Mapping[str, np.ndarray], prefix: str):
             self._base = base
             self._prefix = prefix
+
+        @property
+        def prefix(self) -> str:
+            return self._prefix
 
         def __getitem__(self, key: str):
             return self._base[f"{self._prefix}{key}"]
@@ -1223,6 +1236,7 @@ def _add_joint_block_graph(
             dim,
             w,
             b,
+            qname=f"{weights_prefix}{key_suffix}",
         )
 
     img_attn_out = _out_proj(attn_img_3d, "attn.to_out.0", n_img)
@@ -1338,23 +1352,33 @@ def _add_linear_3d(
     out_dim: int,
     w_hf: np.ndarray,
     b_hf: "np.ndarray | None",
+    qname: "str | None" = None,
 ):
     """Linear on a [B, S, in_dim] tensor -> [B, S, out_dim].
 
     Uses a rank-3 matmul so the leading batch dimension can be dynamic
     (B = -1). The weight is broadcast as ``[1, in_dim, out_dim]`` and TRT's
     matmul handles the implicit broadcast along axis 0.
+
+    ``qname`` (for example ``transformer_blocks.3.attn.to_k``) names the projection for
+    FP8 builds; when the build's quantization context has a scale for it, the matmul
+    runs on an FP8 weight instead.
     """
     x_c = _to_compute_dtype(network, x_3d)
-    w_t = np.ascontiguousarray(w_hf.T, dtype=np.float32)  # [in, out]
-    w_const = _add_constant_reduced(network, (1, in_dim, out_dim), w_t.reshape(1, in_dim, out_dim))
-    mm = network.add_matrix_multiply(
-        x_c,
-        trt.MatrixOperation.NONE,
-        w_const,
-        trt.MatrixOperation.NONE,
-    )
-    y = mm.get_output(0)
+    if qname is not None and _QUANT_CTX is not None and _QUANT_CTX.should_quantize(qname):
+        y = _QUANT_CTX.matmul_3d(network, x_c, w_hf, qname)
+    else:
+        w_t = np.ascontiguousarray(w_hf.T, dtype=np.float32)  # [in, out]
+        w_const = _add_constant_reduced(
+            network, (1, in_dim, out_dim), w_t.reshape(1, in_dim, out_dim)
+        )
+        mm = network.add_matrix_multiply(
+            x_c,
+            trt.MatrixOperation.NONE,
+            w_const,
+            trt.MatrixOperation.NONE,
+        )
+        y = mm.get_output(0)
     if b_hf is not None:
         b_const = _add_constant_reduced(
             network,
@@ -1590,6 +1614,51 @@ def build_qwen_image_dit_engine(
     max_batch_size: int = 1,
     opt_batch_size: int | None = None,
     verbose: bool = False,
+    quantization: str | None = None,
+) -> Path:
+    """Build the full Qwen-Image MMDiT denoiser; ``quantization="fp8"`` quantizes it to FP8.
+
+    FP8 quantizes the joint-block projections of the original BF16 weights at build time
+    (see ``quantization.py``). It supports text-to-image only (no condition images).
+    """
+    global _QUANT_CTX
+    quant_ctx = None
+    if quantization not in (None, "none"):
+        if cfg.zero_cond_t or (image_token_shapes is not None and len(image_token_shapes) > 1):
+            raise NotImplementedError("Qwen-Image FP8 supports text-to-image only")
+        quant_ctx = calibrate_qwen_image(cfg, weights, quantization)
+    _QUANT_CTX = quant_ctx
+    try:
+        return _build_qwen_image_dit_engine(
+            cfg,
+            weights,
+            out_path,
+            h_lat=h_lat,
+            w_lat=w_lat,
+            n_text=n_text,
+            image_token_shapes=image_token_shapes,
+            max_batch_size=max_batch_size,
+            opt_batch_size=opt_batch_size,
+            verbose=verbose,
+            quant_ctx=quant_ctx,
+        )
+    finally:
+        _QUANT_CTX = None
+
+
+def _build_qwen_image_dit_engine(
+    cfg: QwenImageDiTConfig,
+    weights: Mapping[str, "np.ndarray"],
+    out_path: PathLike,
+    *,
+    h_lat: int,
+    w_lat: int,
+    n_text: int,
+    image_token_shapes: list[tuple[int, int]] | None = None,
+    max_batch_size: int = 1,
+    opt_batch_size: int | None = None,
+    verbose: bool = False,
+    quant_ctx: QwenImageQuantContext | None = None,
 ) -> Path:
     """Build the full Qwen-Image MMDiT denoiser as a single TRT engine.
 
@@ -1693,6 +1762,8 @@ def build_qwen_image_dit_engine(
     )
 
     builder, config, network = _make_builder(verbose)
+    if quant_ctx is not None:
+        configure_build(config)
 
     # When ``max_batch_size > 1`` we expose a dynamic leading batch dim via a
     # TensorRT optimization profile. Otherwise the engine remains fixed at

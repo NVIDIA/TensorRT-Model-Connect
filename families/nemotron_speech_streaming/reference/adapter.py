@@ -82,6 +82,7 @@ class Adapter:
         model = (_load_prompted(archive, spec.device) if self.prompted
                  else ASRModel.restore_from(str(archive), map_location="cpu"))
         self.model = model.eval().to(spec.device)
+        host.maybe_compile(self.model.encoder, spec)
         decoding = getattr(getattr(self.model, "cfg", None), "decoding", None)
         if decoding is not None and hasattr(decoding, "use_cuda_graph_decoder"):  # as the family reference
             decoding.use_cuda_graph_decoder = False

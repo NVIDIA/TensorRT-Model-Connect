@@ -23,7 +23,7 @@ from starlette.datastructures import UploadFile
 from .errors import ModelNotFoundError, WorkerProtocolError, WorkerSaturatedError
 from .protocol import extract_task_timing
 from .schemas import ImageGenerationRequest
-from .uploads import create_uploaded_input
+from .uploads import ImagePixelLimitError, create_uploaded_input, image_file
 from trtmc_perf_serving.openai import image_generation
 from trtmc_perf_serving.video_media import encode
 
@@ -95,23 +95,35 @@ class VideoJobs:
         await self.expire()
         if not self.accepting:
             return self.error(503, "server_draining", "server is not accepting requests")
+        upload = reference = None  # multipart input_reference: the video's initial image
         try:
             if request.headers.get("content-type", "").split(";", 1)[0] == "application/json":
                 body = VideoRequest.model_validate(await request.json())
             else:
-                async with request.form(max_files=0, max_fields=24,
+                async with request.form(max_files=1, max_fields=24,
                                         max_part_size=self.config.max_body_bytes) as form:
-                    if len(form.multi_items()) != len(form) or any(isinstance(v, UploadFile) for v in form.values()):
-                        raise ValueError("video requests require unique text fields")
-                    body = VideoRequest.from_form(dict(form))
+                    items = form.multi_items()
+                    files = [value for _, value in items if isinstance(value, UploadFile)]
+                    if len(items) != len(form) or any(
+                            isinstance(value, UploadFile) and key != "input_reference" for key, value in items):
+                        raise ValueError("video requests take unique text fields and one input_reference image")
+                    body = VideoRequest.from_form({k: v for k, v in items if not isinstance(v, UploadFile)})
+                    if files:
+                        upload = await files[0].read()
             if len(body.prompt.encode()) > self.config.max_prompt_bytes:
                 return self.error(413, "content_too_large", "prompt exceeds the server limit")
-            if not self.registry.supports(body.model, "video_generation"):
+            capability = "video_generation" if upload is None else "initial_image_video_generation"
+            if not self.registry.supports(body.model, capability):
                 return self.error(400, "unsupported_task", "model does not support this endpoint")
+            if upload is not None:  # decode only for a model that takes it, off the event loop
+                reference = await asyncio.to_thread(image_file, upload, self.config.max_image_pixels)
             geometry = self.registry.video_geometry(body.model)
             width, height, count = geometry["width"], geometry["height"], geometry["num_frames"]
             if body.num_frames not in (None, count) or body.size not in (None, f"{width}x{height}"):
                 raise ValueError("size and num_frames must match the built video geometry")
+            # The image becomes the first frame as given; fitting it to the frame is the client's choice.
+            if reference is not None and (reference[2]["image_width"], reference[2]["image_height"]) != (width, height):
+                return self.error(400, "invalid_request", f"input_reference must be {width}x{height}, the video size")
             reserved = width * height * count * 3 * 4 + self.config.max_body_bytes + 1024 * 1024
             if (len(self.jobs) >= self.config.max_video_jobs or
                     sum(job["reserved"] for job in self.jobs.values()) + reserved > self.config.max_video_bytes):
@@ -128,6 +140,8 @@ class VideoJobs:
             return self.error(404, error.code, str(error))
         except WorkerSaturatedError:
             return self.error(429, "server_busy", "all model worker replicas are busy")
+        except ImagePixelLimitError:
+            return self.error(413, "content_too_large", "input_reference exceeds the server pixel limit")
         except (ValueError, ValidationError, json.JSONDecodeError):
             return self.error(400, "invalid_request", "invalid or unsupported video controls")
         except RuntimeError:
@@ -151,12 +165,18 @@ class VideoJobs:
             payload = {"prompt": mapped.pop("prompt"), "config": mapped, "output_path": str(root / "frames")}
             if noise:
                 payload["initial_latents_path"] = str(media.path)
+            if reference is not None:
+                image = root / f"initial_image{reference[1]}"
+                image.write_bytes(reference[0])
+                payload["image_path"] = str(image)
             context = {**request.state.timing, "record_kind": "video_completion", "job_id": identifier,
                        "prompt_sha256": hashlib.sha256(body.prompt.encode()).hexdigest(),
                        "negative_prompt_sha256": hashlib.sha256(body.negative_prompt.encode() if body.negative_prompt else b"").hexdigest(),
                        "generation_config": {k: v for k, v in mapped.items() if k != "negative_prompt"},
-                       "initial_latents_sha256": hashlib.sha256(noise).hexdigest() if noise else None}
-            task = asyncio.create_task(self.run(job, request, payload, geometry, body.fps, session, media, context))
+                       "initial_latents_sha256": hashlib.sha256(noise).hexdigest() if noise else None,
+                       "initial_image_sha256": hashlib.sha256(reference[0]).hexdigest() if reference else None}
+            task = asyncio.create_task(self.run(job, request, capability, payload, geometry, body.fps, session,
+                                                media, context))
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
             return JSONResponse(self.view(job), status_code=202)
@@ -174,7 +194,7 @@ class VideoJobs:
             if not self.setups:
                 self.setups_idle.set()
 
-    async def run(self, job, request, payload, geometry, fps, session, media, context):
+    async def run(self, job, request, capability, payload, geometry, fps, session, media, context):
         started = time.monotonic()
 
         def validate(result):
@@ -184,7 +204,7 @@ class VideoJobs:
                 raise WorkerProtocolError("native video geometry differs from the built clip")
 
         try:
-            result = await self.execute(request, job["model"], "video_generation", "generate_video", payload,
+            result = await self.execute(request, job["model"], capability, "generate_video", payload,
                                         validate, release_input=media.close, acquired_session=session,
                                         task_context=context)
             if isinstance(result, JSONResponse):

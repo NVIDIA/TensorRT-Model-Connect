@@ -7,6 +7,7 @@ candidate:
   model_directory: trtmc-reference/Fast-FoundationStereo
 
 reference:
+  mode: eager  # torch.compile: the official model fails in Dynamo (TypeError)
   adapter: families/fast_foundation_stereo/reference/adapter.py  # the pinned official source (no generic adapter)
   prepare: families/fast_foundation_stereo/reference/prepare.py
   requirements: families/fast_foundation_stereo/requirements.txt  # the family's dependencies, layered on the serving interpreter

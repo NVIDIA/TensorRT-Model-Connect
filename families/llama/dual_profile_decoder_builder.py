@@ -20,9 +20,9 @@ Scope: covers the same architectural variants the explicit
 ``standard_decoder_builder`` supports — RMSNorm or LayerNorm; SwiGLU or
 GeluFC MLP; RoPE (full / partial / interleaved), learned absolute, or
 ALiBi position; sequential or parallel residual; optional q/k_norm,
-QKV/output/MLP biases, and a Bloom-style embedding LayerNorm. Quantized
-builds (fp8 / int8 ``quant_ctx``) thread Q/DQ insertion through every
-projection matmul via ``QuantContext.maybe_quantized_matmul``. Per-layer
+QKV/output/MLP biases, and a Bloom-style embedding LayerNorm. Prepared
+ModelOpt FP8/NVFP4 projections retain source packed weights and calibrated
+scales through family-owned ``PreparedLinear`` TensorRT Q/DQ graphs. Per-layer
 debug outputs, hidden-state outputs, and the VL ``embed_input`` path stay
 on ``standard_decoder_builder`` for now and are dispatched there from
 inside ``build_standard_decoder_engine``.
@@ -61,6 +61,10 @@ from . import graph_blocks
 if TYPE_CHECKING:
     from .config import ModelConfig
     from .checkpoint_mapper import WeightDict
+
+# Tactic-selection point for the native-KV active key-row count (typical chat
+# and benchmark contexts); any count from 1 to the cache capacity is valid.
+NATIVE_KV_ACTIVE_KEY_ROWS_OPTIMUM = 256
 
 
 def _const_in_work_dtype(
@@ -217,6 +221,7 @@ def build_dual_profile_decoder_engine(
     native_kv_cache: bool = False,
     runtime_sized_kv_cache: bool = False,
     quant_ctx=None,
+    single_forward: bool = False,
 ) -> bytes:
     """Build a prefill/decode-capable dynamic-Sq decoder engine.
 
@@ -245,6 +250,13 @@ def build_dual_profile_decoder_engine(
     from one row through the bundle capacity.
     """
     _supports_config(config, weights)
+    if single_forward and position_type == "alibi":
+        raise ValueError("single forward pass does not support ALiBi")
+    if single_forward and (
+        native_kv_cache or runtime_sized_kv_cache or quant_ctx is not None
+        or profile_mode != "prefill"
+    ):
+        raise ValueError("full forward requires an unquantized, cache-free prefill profile")
     if quant_ctx is not None and native_kv_cache:
         raise NotImplementedError("native Llama KV cache does not support quantized builds")
     if profile_mode not in ("dual_profile", "prefill", "decode"):
@@ -295,9 +307,18 @@ def build_dual_profile_decoder_engine(
     builder = trt.Builder(logger)
     network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
     trt_config = builder.create_builder_config()
-    trt_config.builder_optimization_level = 1
+    trt_config.builder_optimization_level = (
+        1 if quant_ctx is None else quant_ctx.builder_optimization_level
+    )
+    if single_forward and precision == "fp32":
+        # The full-forward FP32 oracle uses strict FP32 matmuls. TF32's
+        # truncated mantissa accumulates visible logit error over the stack.
+        trt_config.clear_flag(trt.BuilderFlag.TF32)
     if quant_ctx is not None and quant_ctx.disable_dual_gemm_fusion:
         trt_config.build_route = "-peep:match_dual_gemm=off"
+    if quant_ctx is not None:
+        # Keep per-layer tactic details so the plan inspector shows the quantized GEMM kernels.
+        trt_config.profiling_verbosity = trt.ProfilingVerbosity.DETAILED
     # Native full-context Llama builds can require substantial tactic workspace
     # while TensorRT compiles the primitive attention graph. This is build-time
     # scratch only (it is not serialized as runtime KV memory), and the limit
@@ -319,9 +340,12 @@ def build_dual_profile_decoder_engine(
     attention_mask: trt.ITensor | None = None
     cache_write_indices: trt.ITensor | None = None
     key_value_lengths: trt.ITensor | None = None
+    key_positions: trt.ITensor | None = None
     if native_kv_cache:
         cache_write_indices = network.add_input("cache_write_indices", trt.int32, (1,))
         key_value_lengths = network.add_input("key_value_lengths", trt.int32, (1,))
+        # 0..R-1 for the cache rows attention reads; R is bucketed by the runtime.
+        key_positions = network.add_input("key_positions", trt.int32, (-1,))
     else:
         attention_mask = network.add_input("attention_mask", trt.float32, (-1, -1))
 
@@ -332,14 +356,18 @@ def build_dual_profile_decoder_engine(
         cache_shape = (-1, kv_attention_size)
     else:
         cache_shape = (max_cache_length, kv_attention_size)
+    packed_cache = bool(weights.get("_fp8_kv_cache", False))
+    if packed_cache and (native_kv_cache or single_forward):
+        raise ValueError("Packed Llama KV requires the prepared dual-profile cache layout")
+    cache_dtype = trt.DataType.FP8 if packed_cache else work_trt_dtype
     cache_k_inputs: list[trt.ITensor] = []
     cache_v_inputs: list[trt.ITensor] = []
-    for i in range(num_layers):
+    for i in range(0 if single_forward else num_layers):
         ck = network.add_input(
-            graph_ops.layer_tensor_name("cache_k", i), work_trt_dtype, cache_shape
+            graph_ops.layer_tensor_name("cache_k", i), cache_dtype, cache_shape
         )
         cv = network.add_input(
-            graph_ops.layer_tensor_name("cache_v", i), work_trt_dtype, cache_shape
+            graph_ops.layer_tensor_name("cache_v", i), cache_dtype, cache_shape
         )
         cache_k_inputs.append(ck)
         cache_v_inputs.append(cv)
@@ -356,7 +384,16 @@ def build_dual_profile_decoder_engine(
         opt_cache_rows = max_cache_length
         prof.set_shape("token_id", (min_sq,), (opt_sq,), (max_sq,))
         prof.set_shape("position_id", (min_sq,), (opt_sq,), (max_sq,))
-        if not native_kv_cache:
+        if native_kv_cache:
+            prof.set_shape(
+                "key_positions",
+                (1,),
+                (min(NATIVE_KV_ACTIVE_KEY_ROWS_OPTIMUM, max_cache_length),),
+                (max_cache_length,),
+            )
+        if single_forward:
+            prof.set_shape("attention_mask", (min_sq, min_sq), (opt_sq, opt_sq), (max_sq, max_sq))
+        elif not native_kv_cache:
             prof.set_shape(
                 "attention_mask",
                 (min_sq, (1 if runtime_sized_kv_cache else max_cache_length) + min_sq),
@@ -540,6 +577,7 @@ def build_dual_profile_decoder_engine(
             cache_write_indices,
             key_value_lengths,
             max_cache_length,
+            key_positions=key_positions,
         )
 
     present_k_outs: list[trt.ITensor] = []
@@ -630,7 +668,18 @@ def build_dual_profile_decoder_engine(
                 sequence_length=None,
             )
 
-        if native_kv_cache:
+        from .prepared_quantization import quantize_cache_value
+        if not packed_cache and f"{prefix}.kv_k_scale" in weights:
+            k = quantize_cache_value(network, k, weights[f"{prefix}.kv_k_scale"])
+            v = quantize_cache_value(network, v, weights[f"{prefix}.kv_v_scale"])
+
+        if single_forward:
+            context = graph_ops.add_attention_from_rows(
+                network, q, k, v, num_heads=num_heads, head_dim=head_dim,
+                num_kv_heads=num_kv_heads, q_seq=None, kv_seq=None,
+                causal=False, mask=mask_4d, scale=attn_scale, tag=f"{prefix}.attn",
+            )
+        elif native_kv_cache:
             assert cache_write_indices is not None
             assert native_attention_masks is not None
             native_attention = graph_ops.add_native_kv_cache_attention_from_rows(
@@ -642,6 +691,7 @@ def build_dual_profile_decoder_engine(
                 cache_v_inputs[layer_idx],
                 cache_write_indices,
                 native_attention_masks,
+                key_positions=key_positions,
                 num_heads=num_heads,
                 num_kv_heads=num_kv_heads,
                 head_dim=head_dim,
@@ -655,11 +705,23 @@ def build_dual_profile_decoder_engine(
         else:
             # Fixed-Sq contract: export only this step's raw K/V and materialize
             # cache + update with concatenation for attention.
-            present_k_outs.append(k)
-            present_v_outs.append(v)
-            all_k_cat = network.add_concatenation([cache_k_inputs[layer_idx], k])
+            past_k, past_v = cache_k_inputs[layer_idx], cache_v_inputs[layer_idx]
+            if packed_cache:
+                from .prepared_quantization import packed_cache_rows
+
+                present_k, past_k, k = packed_cache_rows(
+                    network, k, past_k, weights[f"{prefix}.kv_k_scale"]
+                )
+                present_v, past_v, v = packed_cache_rows(
+                    network, v, past_v, weights[f"{prefix}.kv_v_scale"]
+                )
+            else:
+                present_k, present_v = k, v
+            present_k_outs.append(present_k)
+            present_v_outs.append(present_v)
+            all_k_cat = network.add_concatenation([past_k, k])
             all_k_cat.axis = 0
-            all_v_cat = network.add_concatenation([cache_v_inputs[layer_idx], v])
+            all_v_cat = network.add_concatenation([past_v, v])
             all_v_cat.axis = 0
             context = graph_ops.add_attention_from_rows(
                 network,
@@ -768,24 +830,26 @@ def build_dual_profile_decoder_engine(
             work_np_dtype,
         )
 
-    # Only the LAST prompt token's logits matter for the next-token sample,
+    # Generation uses only the LAST prompt token's logits for its next-token sample,
     # so slice hidden_state from (Sq, hidden) to (1, hidden) before the LM
     # head. This keeps the output contract identical to the single-token
     # engine (logits shape = (1, vocab)) under both profiles and avoids
     # computing (Sq - 1) redundant vocab-sized matmul rows during prefill.
-    shape_t = network.add_shape(hidden_state).get_output(0)  # [2] int64
-    one_hidden = graph_ops.add_constant(
-        network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64
-    )
-    start_sub = network.add_elementwise(shape_t, one_hidden, trt.ElementWiseOperation.SUB)
-    start_t = start_sub.get_output(0)  # [Sq - 1, 0]
-    size_t = graph_ops.add_constant(
-        network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64
-    )
-    slicer = network.add_slice(hidden_state, start=(0, 0), shape=(0, 0), stride=(1, 1))
-    slicer.set_input(1, start_t)
-    slicer.set_input(2, size_t)
-    last_hidden = slicer.get_output(0)
+    last_hidden = hidden_state
+    if not single_forward:
+        shape_t = network.add_shape(hidden_state).get_output(0)  # [2] int64
+        one_hidden = graph_ops.add_constant(
+            network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64
+        )
+        start_sub = network.add_elementwise(shape_t, one_hidden, trt.ElementWiseOperation.SUB)
+        start_t = start_sub.get_output(0)  # [Sq - 1, 0]
+        size_t = graph_ops.add_constant(
+            network, (2,), np.array([1, hidden], dtype=np.int64), dtype=np.int64
+        )
+        slicer = network.add_slice(hidden_state, start=(0, 0), shape=(0, 0), stride=(1, 1))
+        slicer.set_input(1, start_t)
+        slicer.set_input(2, size_t)
+        last_hidden = slicer.get_output(0)
 
     out_vocab = weights["w_out"].shape[1] if isinstance(weights["w_out"], np.ndarray) else vocab
     logits = graph_ops.add_matmul_rhs_constant(
@@ -803,7 +867,7 @@ def build_dual_profile_decoder_engine(
     logits.name = "logits"
     network.mark_output(logits)
 
-    for i in range(num_layers):
+    for i in range(0 if single_forward else num_layers):
         pk = present_k_outs[i]
         pv = present_v_outs[i]
         pk.name = graph_ops.layer_tensor_name("present_k", i)

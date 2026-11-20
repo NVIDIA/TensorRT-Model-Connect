@@ -1,0 +1,2 @@
+# Official numerical reference, isolated from the builder's pinned Transformers dependency.
+transformers @ git+https://github.com/huggingface/transformers.git@335dd96bddf68a9f8758ec9dd7b5cdcae8133c94

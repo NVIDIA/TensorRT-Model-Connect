@@ -39,9 +39,8 @@ def build(
     *, model: str, output: Path, revision: str | None = None,
     task: str = "text_generation", precision: str | None = None, backend: str = "trt",
     max_sequence_length: int | None = None, tensor_parallel_size: int = 1,
-    verbose: bool = False,
+    verbose: bool = False, quantization: str | None = None,
     fp32_layers: list[int] | tuple[int, ...] = (),
-    quantization: str | None = None,
     execution_variant: str | None = None, companion: list[str] | tuple[str, ...] = (),
 ) -> int:
     """Run the declared owner command; help never imports this handler."""
@@ -54,9 +53,8 @@ def build(
         model_dir=model_dir, output_path=output, family="qwen3_5",
         task=task, precision=precision, backend=backend,
         max_sequence_length=max_sequence_length, tensor_parallel_size=tensor_parallel_size,
-        verbose=verbose,
+        verbose=verbose, quantization=quantization,
         fp32_layers=tuple(fp32_layers),
-        quantization=quantization,
     )
     if execution is not None:
         request = with_execution(request, execution)

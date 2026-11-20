@@ -68,6 +68,8 @@ class Adapter:
         if not archives:
             raise FileNotFoundError(f"no .nemo archive in {spec.model}")
         self.model = ASRModel.restore_from(str(archives[0]), map_location="cpu").eval().to(spec.device)
+        for module in (self.model.encoder, self.model.transf_decoder):
+            host.maybe_compile(module, spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         audio = self.host.load_audio(str(self.host.required(request, "audio_path")), SAMPLE_RATE)

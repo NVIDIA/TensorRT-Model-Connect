@@ -112,6 +112,11 @@ def build(request, writer, native, *, draft_dir: Path | None = None,
         Exception: Common input/publication error, or native build error with
             Edge cause after a failed preparation. Cancellation never retries.
     """
+    # Edge does not expose the native family's exact chunk-size contract.
+    # An explicit choice (including zero) must not be silently discarded.
+    if getattr(request, "prefill_chunk_len", None) is not None:
+        native(request, writer)
+        return
     raw = json.loads((Path(request.model_dir) / "config.json").read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("checkpoint config.json must contain an object")
@@ -187,9 +192,20 @@ def build_paired(request, writer, execution) -> None:
         limit = request.max_sequence_length or min(base["max_position_embeddings"], 256)
         if limit <= 4:
             raise ValueError("MTP capacity must exceed its four verification positions")
+        if request.mtp_seq_len not in (None, 4):
+            raise ValueError("The MTP variant requires four verification positions")
 
         def native_mtp(original_request, original_writer):
-            raise NotImplementedError("Native Qwen3.6/3.8 does not implement the requested MTP variant")
+            from dataclasses import replace
+            from ..model import _build_native
+
+            # Preserve the source's quantized arithmetic even when the public
+            # request inferred its format. Never replace MTP with base decoding.
+            source_format = edge_llm.prepared_checkpoint_quantization(
+                Path(original_request.model_dir), raw)
+            native_request = replace(
+                original_request, quantization=source_format, mtp_seq_len=4)
+            _build_native(native_request, original_writer, require_mtp=True)
 
         build(request, writer, native_mtp, execution_variant="mtp")
         return
@@ -243,11 +259,18 @@ def build_paired(request, writer, execution) -> None:
         raise ValueError("This Qwen3.8 paired execution profile requires unquantized draft weights")
 
     def native_pair(original_request, original_writer):
-        # A failure must never replace the requested pair with base-only decoding.
-        raise NotImplementedError(
-            f"Native Qwen3.8 does not implement the requested {variant} variant; "
-            "the qualified Edge route requires Linux x86_64, SM120 and FP16"
-        )
+        from dataclasses import replace
+        from ..model import _build_native
+
+        # Admission established a mixed-NVFP4 target or the documented DFlash2
+        # AWQ target. A generic mixed-format probe may return None; do not erase
+        # the admitted format or replace the requested pair with base decoding.
+        source_format = edge_llm.prepared_checkpoint_quantization(
+            Path(original_request.model_dir), raw) or "nvfp4"
+        options = {"draft_dir": draft_dir}
+        if variant == "dflash":
+            options["draft_variant"] = variant
+        _build_native(replace(original_request, quantization=source_format), original_writer, **options)
 
     if variant == "dspark":
         build(request, writer, native_pair, draft_dir=draft_dir)

@@ -24,6 +24,7 @@ from .parallel import ParallelConfig
 from .parallel import normalize_parallel_config
 from .dual_profile_decoder_tp_builder import build_dual_profile_tp_decoder_engine
 from .standard_decoder_builder import build_standard_decoder_engine
+from .support import LEGACY_TEXT_MODEL_TYPES as _SUPPORTED_MODEL_TYPES
 
 
 if TYPE_CHECKING:
@@ -221,7 +222,7 @@ class _GemmaModel:
         quant_ctx=None,
         verbose: bool = False,
         parallel_config=None,
-    ) -> bytes:
+    ) -> memoryview | bytes:
         activation = _checkpoint_gated_activation(config)
         parallel = normalize_parallel_config(parallel_config)
         if parallel.enabled:
@@ -296,9 +297,6 @@ _GEMMA3_MODEL_TYPES = frozenset({"gemma3", "gemma3_text"})
 # on one prompt by 7%, which is luck rather than headroom, so fp16 is refused
 # for the generation rather than per width. Gemma 2 peaks at 4060 and keeps it.
 _FP16_UNSAFE_MODEL_TYPES = _GEMMA3_MODEL_TYPES
-
-
-_SUPPORTED_MODEL_TYPES = frozenset({"gemma", "gemma2"}) | _GEMMA3_MODEL_TYPES
 
 
 def _positive_int(value: object, name: str) -> int:
@@ -451,11 +449,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if request.context_parallel_size != 1:
         raise ValueError("this family does not support context parallelism")
 
+    model_dir = Path(request.model_dir)
+    config = ModelConfig.from_dir(model_dir)
+    if config.model_type in {"gemma4", "gemma4_text", "gemma4_unified", "gemma4_unified_text"}:
+        from .gemma4_text import build as build_gemma4
+
+        build_gemma4(request, writer, config)
+        return
+
     if request.task != "text_generation":
         raise ValueError("gemma supports only task=text_generation")
 
-    model_dir = Path(request.model_dir)
-    config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower() not in _SUPPORTED_MODEL_TYPES:
         raise ValueError(f"Gemma does not support model_type={config.model_type!r}")
     precision = str(request.precision).lower()
@@ -508,7 +512,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     weights = model.load_weights(
         str(model_dir), config, precision=precision, quant_ctx=quant_ctx
     )
+    # A 27B checkpoint's host weights plus TensorRT's device copy exceed a 128 GB unified-memory GPU.
+    from .weight_spill import spilled
 
+    with spilled(weights, request.output_path):
+        _write_engines(request, writer, model, config, weights, model_dir, max_sequence_length, precision,
+                       quant_ctx, parallel)
+
+
+def _write_engines(request, writer, model, config, weights, model_dir, max_sequence_length, precision,
+                   quant_ctx, parallel) -> None:
+    """Build the decoder engines into the bundle (the spill, if any, stays in effect throughout)."""
     writer.set_header(family="gemma", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):

@@ -7,6 +7,9 @@
       exclude:                         # a reason is required; exclusions remain in the run audit
         - {profile: "flux-2-dev*", reason: "does not fit in 80 GB"}
       max_checkpoint_gib: 30           # optional: also exclude larger checkpoints (unknown sizes are kept)
+
+A profile that AIPerf cannot qualify as cataloged states ``exclude: <reason>`` in its own definition
+(families/<family>/tests/aiperf/<profile>.yaml), which every machine's list then excludes.
 """
 
 from __future__ import annotations
@@ -28,11 +31,12 @@ class Profile:
     task: str
     checkpoint: str
     revision: str | None
+    excluded: str | None = None  # the profile definition's own ``exclude`` reason
 
 
 def catalog(repository: Path) -> list[Profile]:
-    """Ready catalog profiles (the qualification scope) with their Task and checkpoint."""
-    from .models import catalog_profiles
+    """Ready catalog profiles (the qualification scope) with their Task, checkpoint and own exclusion."""
+    from .models import catalog_profiles, profile_override
 
     from trtmc_benchmark.catalog import ManifestCatalog
 
@@ -40,7 +44,11 @@ def catalog(repository: Path) -> list[Profile]:
     profiles = []
     for entry in catalog_profiles(repository):
         model = resolver.resolve(entry.name)
-        profiles.append(Profile(entry.name, model.task, model.hf_id, model.hf_revision or None))
+        try:
+            reason = str(profile_override(entry.name, model.family, repository).get("exclude") or "").strip()
+        except ConfigError:  # an unreadable definition: reported when the profile resolves
+            reason = ""
+        profiles.append(Profile(entry.name, model.task, model.hf_id, model.hf_revision or None, reason or None))
     return profiles
 
 
@@ -109,6 +117,8 @@ def select(config: Mapping[str, Any], profiles: Sequence[Profile],
 
 def _exclusion(profile: Profile, include: Any, rules: Sequence[Mapping[str, Any]], limit: float | None,
                size_gib: Callable[[Profile], float | None]) -> str | None:
+    if profile.excluded:  # the profile's own reason, whatever a machine's list includes
+        return profile.excluded
     if include != "all" and not any(fnmatch.fnmatchcase(profile.name, pattern) for pattern in include):
         return "not in models.include"
     for rule in rules:

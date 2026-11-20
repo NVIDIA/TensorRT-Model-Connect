@@ -550,6 +550,7 @@ def build_dual_profile_tp_decoder_engine(
             num_kv_heads=num_kv_heads,
             q_seq=None, kv_seq=None, causal=False, mask=mask_4d,
             scale=attn_scale, logit_softcap=attn_logit_softcap,
+            fp32_scores=quant_ctx is not None,
             tag=f"{prefix}.attn")
 
         attn_out = matmul(context, attention_size, hidden,

@@ -3,3 +3,6 @@
 
 # A TinyStories model: last-word prediction on TinyStories stories.
 absolute: [tinystories]
+
+reference:
+  mode: eager  # torch.compile: Dynamo cannot trace the MoE experts' torch._grouped_mm

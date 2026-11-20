@@ -25,8 +25,8 @@ class Adapter:
 
         self.spec = spec
         self.processor = GlmAsrProcessor.from_pretrained(spec.model, **spec.pretrained_kwargs())
-        self.model = GlmAsrForConditionalGeneration.from_pretrained(
-            spec.model, dtype=spec.dtype, **spec.pretrained_kwargs()).to(spec.device).eval()
+        self.model = host.maybe_compile(GlmAsrForConditionalGeneration.from_pretrained(
+            spec.model, dtype=spec.dtype, **spec.pretrained_kwargs()).to(spec.device).eval(), spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         audio = self.host.load_audio(str(self.host.required(request, "audio_path")), SAMPLE_RATE)

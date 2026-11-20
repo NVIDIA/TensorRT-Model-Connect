@@ -56,6 +56,44 @@ capacity. As in the reference encoder, the complete schema is retained and the
 state is truncated to the remaining capacity. An oversized schema is rejected.
 `--max-state-tokens` can impose an additional state limit at inference time.
 
+## FP8 build
+
+`--quantization fp8` quantizes the BF16 backbone projections to FP8 at build
+time: DeltaNet `in_proj_qkv`, `in_proj_z` and `out_proj`, full-attention `q_proj`,
+`k_proj`, `v_proj` and `o_proj`, and every MLP projection. FP8 weights are not
+stored; the static activation scales of both pinned checkpoints are in
+`fp8_activation_scales.json` (calibrated with `calibrate_fp8_scales.py`). The
+embeddings, norms, DeltaNet `in_proj_a`/`in_proj_b`, `conv1d` and recurrence,
+attention, vision encoder and joint schema head stay BF16, as does the last
+layer's `down_proj` (an activation outlier). Another checkpoint raises until it
+is calibrated. Measured with TensorRT 11.4 at batch 1, the backbone is 1.09x to
+1.17x (Clef-Flash) and 1.18x to 1.25x (Clef) faster from 256 to 8,192 tokens,
+the bundle is 36% and 44% smaller, and 797 and 801 of 807 held-out decisions
+select the same option as the BF16 reference (806 for the BF16 engine). FP8
+probabilities differ from the reference by up to 0.077, more than the BF16 E2E
+gate allows, so the E2E cases cover only BF16 bundles.
+
+### NVFP4
+
+NVFP4 was not tried (#2010). Clef has no decode step: a request is one
+full-sequence forward at batch 1, so the run is not bound by weight reads.
+
+| Item (Clef-Flash, B200, TensorRT 11.4, 256 tokens) | Value |
+|---|---|
+| BF16 backbone | 15.61 ms |
+| FP8 backbone | 13.85 ms (1.13x), 1.8 ms saved |
+| Weight bytes removed by FP8 | about 7 GB, about 1 ms to read at 7 TB/s |
+| Upper bound for NVFP4 over FP8 | about 0.5 ms (3%) |
+| FP8 vs BF16, all inputs (256 to 8,192 tokens, B200 and B300) | 1.09x to 1.17x (Clef-Flash), 1.18x to 1.25x (Clef) |
+
+The DeltaNet recurrence, attention and element-wise kernels keep the rest of
+the time. At 8,192 tokens the GEMMs are compute bound and FP4 GEMMs could help
+more, but in the dense and hybrid families where NVFP4 was measured its KL
+divergence was 3x to 9x that of FP8, and the joint schema head turns small
+hidden-state errors into option-probability changes, which are already up to
+0.077 with FP8. Worth a measurement only if long inputs (several thousand
+tokens) are the main use.
+
 ## Images and video
 
 The CLI accepts image filenames in `images` and ordered arrays of frame
@@ -150,10 +188,12 @@ The following historical measurements describe the 27B qualification in
 On GB300 with TensorRT 11.1.0.106, all seven E2E cases passed against the pinned
 original implementation. This includes the two model-card text examples,
 alternative answers, multilingual input, a receipt image, and video frames.
-The largest absolute option-probability difference is 0.002188; the BF16 gate
-uses `atol=0.002, rtol=0.01` for probabilities and `atol=0.125, rtol=0.015` for
-logits. A 16,384-token request also passes those gates. Reusing one native Task
-across text, image, video, and maximum-length requests preserves repeatability.
+The largest absolute option-probability difference is 0.002188. The BF16 gate
+now uses `atol=0.015, rtol=0.01` for probabilities, because the BF16 reference
+is itself up to 0.006 from its FP32 forward (0.016 on the video cases), and
+`atol=0.125, rtol=0.015` for logits. A 16,384-token request also passes those
+gates. Reusing one native Task across text, image, video, and maximum-length
+requests preserves repeatability.
 
 Measured warm median Task latency is 41.5 ms for invoice, 42.3 ms for outage,
 42.7 ms for receipt, and 45.4 ms for video (five warmups and 30 samples each).

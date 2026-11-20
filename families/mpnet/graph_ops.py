@@ -144,6 +144,7 @@ def add_activation(
 ) -> trt.ITensor:
     """Dispatch activation by name: 'silu', 'gelu_new', 'gelu', 'relu', 'relu2'/'squared_relu'."""
     if activation_type == "gelu":
+        # Transformers' "gelu" is the exact erf form; "gelu_new" is the tanh approximation.
         return network.add_activation(inp, trt.ActivationType.GELU_ERF).get_output(0)
     elif activation_type == "gelu_new":
         return add_gelu_new(network, inp, dtype=dtype)

@@ -1,0 +1,34 @@
+{
+  "name": "embeddinggemma2-text-fp32",
+  "hf_id": "google/embeddinggemma-2",
+  "hf_revision": "914f7f89142e33e77833254d9c9b90c3cef7303b",
+  "family": "embeddinggemma2",
+  "task": "embedding",
+  "precision": "fp32",
+  "bundle": "embeddinggemma2-text-fp32.bundle",
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 256,
+  "testcases": [
+    {
+      "name": "embeddinggemma2-text-fp32-default",
+      "premerge": false,
+      "reference_precision": "fp32",
+      "prompt": "Where is the Eiffel Tower?",
+      "role": "default"
+    },
+    {
+      "name": "embeddinggemma2-text-fp32-query",
+      "premerge": false,
+      "reference_precision": "fp32",
+      "prompt": "Where is the Eiffel Tower?",
+      "role": "query"
+    },
+    {
+      "name": "embeddinggemma2-text-fp32-document",
+      "premerge": false,
+      "reference_precision": "fp32",
+      "prompt": "Where is the Eiffel Tower?",
+      "role": "document"
+    }
+  ]
+}

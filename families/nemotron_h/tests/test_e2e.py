@@ -231,7 +231,7 @@ def _run_native(
 
     completed = subprocess.run(
         command,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
         timeout=600,
@@ -239,6 +239,9 @@ def _run_native(
     )
     record_evidence("commands", {"argv": getattr(completed, "args", None)})
     record_evidence("native", {"stdout": getattr(completed, "stdout", None), "stderr": getattr(completed, "stderr", None)})
+    # Preserve real builder/runtime diagnostics before raising on failure.
+    # This does not relax exit-code or quality requirements.
+    completed.check_returncode()
     if tp_size == 1:
         return json.loads(completed.stdout)
 
@@ -385,10 +388,13 @@ def _hf_reference(
         assert quant["quant_algo"] in {"NVFP4", "MIXED_PRECISION"}
         mixed = quant["quant_algo"] == "MIXED_PRECISION"
         layers = quant.get("quantized_layers", {})
+        packed_algorithms = {"NVFP4", "W4A16_NVFP4"}
         if mixed:
+            # Both declared FP4 formats use the same packed weight decode. The
+            # BF16 oracle does not emulate activation or KV quantization rounding.
             assert layers and all(
                 policy["quant_algo"] == "FP8"
-                or (policy["quant_algo"] == "W4A16_NVFP4" and policy["group_size"] == 16)
+                or (policy["quant_algo"] in packed_algorithms and policy["group_size"] == 16)
                 for policy in layers.values()
             )
         else:
@@ -409,7 +415,7 @@ def _hf_reference(
             assert quantized == {key + ".weight" for key in layers}
             assert all(layers[key.removesuffix(".weight")]["quant_algo"] == "FP8" for key in fp8)
             assert all(
-                layers[key.removesuffix(".weight")]["quant_algo"] == "W4A16_NVFP4"
+                layers[key.removesuffix(".weight")]["quant_algo"] in packed_algorithms
                 for key in packed
             )
         else:

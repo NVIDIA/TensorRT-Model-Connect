@@ -65,7 +65,8 @@ def load_draft(path: Path, embedding: np.ndarray):
 def build_speculative(*, model_dir: Path, draft_dir: Path, output: Path,
                       max_sequence_length: int = 2048, max_query: int = 64,
                       draft_depth: int = 4, spec_dec: str = "eagle3", verbose: bool = False,
-                      execution_profiles: str = "single", prefill_query: int = 64) -> int:
+                      execution_profiles: str = "single", prefill_query: int = 64,
+                      _writer: BundleWriter | None = None) -> int:
     from .graph import build_draft, build_target
 
     if spec_dec != "eagle3":
@@ -108,7 +109,10 @@ def build_speculative(*, model_dir: Path, draft_dir: Path, output: Path,
         max_sequence_length, draft_max, 3 * config.hidden_size,
         execution_profiles=draft_profiles,
     )
-    writer = BundleWriter(output)
+    # The standalone command owns publication. An adapter fallback writes into
+    # its caller's unpublished writer and must not finish or abort it here.
+    owns_writer = _writer is None
+    writer = BundleWriter(output) if owns_writer else _writer
     runtime_metadata = _runtime_config(model_dir, config)
     try:
         writer.set_header(family="llama", task="text_generation", backend="trt")
@@ -140,8 +144,10 @@ def build_speculative(*, model_dir: Path, draft_dir: Path, output: Path,
         template = _chat_template(model_dir)
         if template is not None:
             writer.add_bytes("chat_template.jinja", template)
-        writer.finish()
+        if owns_writer:
+            writer.finish()
     except BaseException:
-        writer.abort()
+        if owns_writer:
+            writer.abort()
         raise
     return 0

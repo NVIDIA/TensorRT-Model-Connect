@@ -1,0 +1,7 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Qualified as dinov3-convnext-tiny-pretrain-lvd1689m, but checked against this FP8 profile's own E2E criteria (tests/thresholds).
+benchmarks:
+  coco_feature_parity:
+    gate: {profile: dinov3-convnext-tiny-pretrain-lvd1689m-fp8}

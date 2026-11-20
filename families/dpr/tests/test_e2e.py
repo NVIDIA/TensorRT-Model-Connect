@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from tools.e2e_evidence import evidence_stage, record_evidence
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -16,7 +17,7 @@ import numpy as np
 from tensorrt_model_connect import BuildRequest, build
 
 FAMILY = "dpr"
-TASKS = frozenset({"encoding"})
+TASKS = frozenset({"text_to_pooled_features"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
@@ -248,7 +249,7 @@ def _native(
     case: dict,
     tmp_path: Path,
 ):
-    assert manifest["task"] == "encoding"
+    assert manifest["task"] == "text_to_pooled_features"
     return _run_json(
         binary, runtime_root, bundle, manifest, case, "encode", "--text", _case_text(case)
     )
@@ -269,7 +270,7 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     encoded = {key: value.to(device) for key, value in encoded.items()}
     with torch.no_grad():
         outputs = model(**encoded)
-    assert task == "encoding"
+    assert task == "text_to_pooled_features"
     return {"values": outputs.last_hidden_state[0, 0].float().cpu().numpy()}
 
 
@@ -278,11 +279,43 @@ def _assert_parity(actual, expected, manifest: dict, case: dict, thresholds: dic
     configured = thresholds.get(
         "contract_cosine_threshold", thresholds.get("cls_embedding_cosine", 0.8)
     )
+    assert actual["pooling"] == "cls" and actual["normalization"] == "none"
+    assert all(math.isfinite(value) for value in actual["values"])
     assert _cosine(actual["values"], expected["values"]) >= max(float(configured), 0.8)
 
 
 def test_dpr_cases_keep_the_encoder_only_cls_contract() -> None:
-    assert all(manifest["task"] == "encoding" for _path, manifest, _case in CASES.values())
+    assert all(manifest["task"] == "text_to_pooled_features" for _path, manifest, _case in CASES.values())
+
+
+def _assert_sdk_consumers(runtime_root: Path, bundle: Path, case: dict, expected_dim: int) -> None:
+    native_build = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = ":".join(
+        value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value
+    )
+    outputs = []
+    for language in ("c", "cpp"):
+        consumer = native_build / f"test_dpr_sdk_{language}"
+        assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
+        completed = subprocess.run(
+            [str(consumer), str(bundle), str(runtime_root), _case_text(case)],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=600,
+        )
+        payloads = [line for line in completed.stdout.splitlines() if line.startswith("{")]
+        assert len(payloads) == 1, f"SDK {language} consumer must return one result"
+        actual = json.loads(payloads[0])
+        record_evidence(f"sdk_{language}", actual)
+        assert actual["task"] == "text_to_pooled_features"
+        assert actual["pooling"] == "cls" and actual["normalization"] == "none"
+        assert actual["dim"] == len(actual["values"]) == expected_dim
+        assert all(math.isfinite(value) for value in actual["values"])
+        outputs.append(actual)
+    assert outputs[0] == outputs[1]
 
 
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
@@ -302,3 +335,6 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     record_evidence("reference", expected)
     with evidence_stage("compare"):
         _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+    if int(manifest["tensor_parallel_size"]) == 1:
+        with evidence_stage("sdk"):
+            _assert_sdk_consumers(runtime_root, bundle, case, int(actual["dim"]))

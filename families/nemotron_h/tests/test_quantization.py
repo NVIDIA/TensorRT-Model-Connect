@@ -150,6 +150,7 @@ def test_calibrate_reads_quantized_projections_bit_exact(
     tensors = _write_checkpoint(tmp_path, fmt=fmt)
     ctx = _calibrate(tmp_path, fmt)
 
+    assert ctx.has_nvfp4_weights == (fmt == "nvfp4")
     # layer 0 mixer is left unquantized and attention is never quantized
     assert set(ctx.scales) == {
         "layer.1.w_up",

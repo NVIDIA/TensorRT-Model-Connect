@@ -68,6 +68,10 @@ RuntimeConfig parse_config(const std::vector<char>& data) {
 } // namespace
 
 ITask* create(const FamilyContext& context) {
+    const auto& task = context.reader.info().task;
+    if (task != internal::IImageStateToActionChunk::kTask)
+        throw std::runtime_error("LeRobot ACT bundle declares task '" + task +
+                                 "'; rebuild it for image_state_to_action_chunk");
     auto config = parse_config(require_section(context.reader, "runtime.json"));
     const auto plan = require_section(context.reader, "engine.plan");
     auto engine = context.backend.create_module(plan.data(), plan.size(), {});

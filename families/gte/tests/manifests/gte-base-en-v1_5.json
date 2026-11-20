@@ -1,0 +1,25 @@
+{
+  "name": "gte-base-en-v1_5",
+  "hf_id": "Alibaba-NLP/gte-base-en-v1.5",
+  "hf_revision": "a829fd0e060bb84554da0dfd354d0de0f7712b7f",
+  "hf_dependencies": [
+    {
+      "repo_id": "Alibaba-NLP/new-impl"
+    }
+  ],
+  "bundle": "gte-base-en-v1_5.bundle",
+  "family": "gte",
+  "task": "text_to_embedding",
+  "precision": "fp32",
+  "max_sequence_length": 512,
+  "testcases": [
+    {
+      "name": "gte-base-en-v1_5",
+      "premerge": true,
+      "query": "What is the capital of France?",
+      "document": "The capital of France is Paris.",
+      "negative_document": "Photosynthesis converts light into chemical energy."
+    }
+  ],
+  "tensor_parallel_size": 1
+}

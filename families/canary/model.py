@@ -46,6 +46,7 @@ from . import graph_ops
 from . import graph_blocks
 from .parallel import normalize_parallel_config
 from .decoder_tp_builder import build_canary_tp_decoder_engine
+from .quantization import calibrate_canary, configure_quantized_build
 
 
 _CANARY_V2_LANGUAGES = [
@@ -430,8 +431,21 @@ def _rel_shift(network, x, H, S, dtype=np.float32):
 
 
 def _add_rel_pos_attention(
-    network, hs, weights, pfx, hidden, H, D, S, rel_pe_proj, eps, enc_mask=None, dtype=np.float32
+    network,
+    hs,
+    weights,
+    pfx,
+    hidden,
+    H,
+    D,
+    S,
+    rel_pe_proj,
+    eps,
+    enc_mask=None,
+    dtype=np.float32,
+    quant_ctx=None,
 ):
+    matmul = graph_blocks.make_matmul_fn(network, dtype, quant_ctx)
     normed = graph_ops.add_layer_norm(
         network,
         hs,
@@ -443,27 +457,21 @@ def _add_rel_pos_attention(
     )
     q = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, hidden, weights[f"{pfx}.w_q"], dtype=dtype
-        ),
+        matmul(normed, hidden, hidden, weights[f"{pfx}.w_q"], f"{pfx}.w_q"),
         hidden,
         weights[f"{pfx}.b_q"],
         dtype=dtype,
     )
     k = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, hidden, weights[f"{pfx}.w_k"], dtype=dtype
-        ),
+        matmul(normed, hidden, hidden, weights[f"{pfx}.w_k"], f"{pfx}.w_k"),
         hidden,
         weights[f"{pfx}.b_k"],
         dtype=dtype,
     )
     v = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, hidden, weights[f"{pfx}.w_v"], dtype=dtype
-        ),
+        matmul(normed, hidden, hidden, weights[f"{pfx}.w_v"], f"{pfx}.w_v"),
         hidden,
         weights[f"{pfx}.b_v"],
         dtype=dtype,
@@ -526,9 +534,7 @@ def _add_rel_pos_attention(
     af.reshape_dims = (-1, hidden)
     return graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, af.get_output(0), hidden, hidden, weights[f"{pfx}.w_o"], dtype=dtype
-        ),
+        matmul(af.get_output(0), hidden, hidden, weights[f"{pfx}.w_o"], f"{pfx}.w_o"),
         hidden,
         weights[f"{pfx}.b_o"],
         dtype=dtype,
@@ -676,15 +682,14 @@ def _add_conv_module(
     return r4.get_output(0)
 
 
-def _add_half_ffn(network, hs, weights, pfx, hidden, ffn, eps, dtype=np.float32):
+def _add_half_ffn(network, hs, weights, pfx, hidden, ffn, eps, dtype=np.float32, quant_ctx=None):
+    matmul = graph_blocks.make_matmul_fn(network, dtype, quant_ctx)
     normed = graph_ops.add_layer_norm(
         network, hs, hidden, weights[f"{pfx}.norm"], weights[f"{pfx}.norm_b"], eps, dtype=dtype
     )
     fc1 = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, ffn, weights[f"{pfx}.w1"], dtype=dtype
-        ),
+        matmul(normed, hidden, ffn, weights[f"{pfx}.w1"], f"{pfx}.w1"),
         ffn,
         weights[f"{pfx}.b1"],
         dtype=dtype,
@@ -692,9 +697,7 @@ def _add_half_ffn(network, hs, weights, pfx, hidden, ffn, eps, dtype=np.float32)
     act = graph_ops.add_activation(network, fc1, "silu", dtype=dtype)
     fc2 = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, act, ffn, hidden, weights[f"{pfx}.w2"], dtype=dtype
-        ),
+        matmul(act, ffn, hidden, weights[f"{pfx}.w2"], f"{pfx}.w2"),
         hidden,
         weights[f"{pfx}.b2"],
         dtype=dtype,
@@ -721,11 +724,26 @@ def _add_conformer_block(
     conv_context_size="symmetric",
     valid_mask=None,
     dtype=np.float32,
+    quant_ctx=None,
 ):
-    ffn1 = _add_half_ffn(network, hs, weights, f"{pfx}.ff1", hidden, ffn, eps, dtype=dtype)
+    ffn1 = _add_half_ffn(
+        network, hs, weights, f"{pfx}.ff1", hidden, ffn, eps, dtype=dtype, quant_ctx=quant_ctx
+    )
     hs = network.add_elementwise(hs, ffn1, trt.ElementWiseOperation.SUM).get_output(0)
     attn = _add_rel_pos_attention(
-        network, hs, weights, pfx, hidden, H, D, S, rpe, eps, enc_mask, dtype=dtype
+        network,
+        hs,
+        weights,
+        pfx,
+        hidden,
+        H,
+        D,
+        S,
+        rpe,
+        eps,
+        enc_mask,
+        dtype=dtype,
+        quant_ctx=quant_ctx,
     )
     hs = network.add_elementwise(hs, attn, trt.ElementWiseOperation.SUM).get_output(0)
     conv = _add_conv_module(
@@ -743,7 +761,9 @@ def _add_conformer_block(
         dtype=dtype,
     )
     hs = network.add_elementwise(hs, conv, trt.ElementWiseOperation.SUM).get_output(0)
-    ffn2 = _add_half_ffn(network, hs, weights, f"{pfx}.ff2", hidden, ffn, eps, dtype=dtype)
+    ffn2 = _add_half_ffn(
+        network, hs, weights, f"{pfx}.ff2", hidden, ffn, eps, dtype=dtype, quant_ctx=quant_ctx
+    )
     hs = network.add_elementwise(hs, ffn2, trt.ElementWiseOperation.SUM).get_output(0)
     return graph_ops.add_layer_norm(
         network,
@@ -812,7 +832,9 @@ def _add_decoder_layer(
     maxcache,
     maxsrc,
     dtype=np.float32,
+    quant_ctx=None,
 ):
+    matmul = graph_blocks.make_matmul_fn(network, dtype, quant_ctx)
     aw = maxcache + 1
     # Self-attention
     n = graph_ops.add_layer_norm(
@@ -826,21 +848,21 @@ def _add_decoder_layer(
     )
     q = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(network, n, hsz, hsz, weights[f"{pfx}.w_q"], dtype=dtype),
+        matmul(n, hsz, hsz, weights[f"{pfx}.w_q"], f"{pfx}.w_q"),
         hsz,
         weights[f"{pfx}.q_bias"],
         dtype=dtype,
     )
     k = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(network, n, hsz, hsz, weights[f"{pfx}.w_k"], dtype=dtype),
+        matmul(n, hsz, hsz, weights[f"{pfx}.w_k"], f"{pfx}.w_k"),
         hsz,
         weights[f"{pfx}.k_bias"],
         dtype=dtype,
     )
     v = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(network, n, hsz, hsz, weights[f"{pfx}.w_v"], dtype=dtype),
+        matmul(n, hsz, hsz, weights[f"{pfx}.w_v"], f"{pfx}.w_v"),
         hsz,
         weights[f"{pfx}.v_bias"],
         dtype=dtype,
@@ -867,9 +889,7 @@ def _add_decoder_layer(
     )
     sa = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, cf, hsz, hsz, weights[f"{pfx}.w_o"], dtype=dtype
-        ),
+        matmul(cf, hsz, hsz, weights[f"{pfx}.w_o"], f"{pfx}.w_o"),
         hsz,
         weights[f"{pfx}.o_bias"],
         dtype=dtype,
@@ -887,27 +907,21 @@ def _add_decoder_layer(
     )
     cq = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, cn, hsz, hsz, weights[f"{pfx}.xw_q"], dtype=dtype
-        ),
+        matmul(cn, hsz, hsz, weights[f"{pfx}.xw_q"], f"{pfx}.xw_q"),
         hsz,
         weights[f"{pfx}.xb_q"],
         dtype=dtype,
     )
     ck = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, cross_k, hsz, hsz, weights[f"{pfx}.xw_k"], dtype=dtype
-        ),
+        matmul(cross_k, hsz, hsz, weights[f"{pfx}.xw_k"], f"{pfx}.xw_k"),
         hsz,
         weights[f"{pfx}.xb_k"],
         dtype=dtype,
     )
     cv = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, cross_v, hsz, hsz, weights[f"{pfx}.xw_v"], dtype=dtype
-        ),
+        matmul(cross_v, hsz, hsz, weights[f"{pfx}.xw_v"], f"{pfx}.xw_v"),
         hsz,
         weights[f"{pfx}.xb_v"],
         dtype=dtype,
@@ -918,9 +932,7 @@ def _add_decoder_layer(
     )
     ca = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, ccf, hsz, hsz, weights[f"{pfx}.xw_o"], dtype=dtype
-        ),
+        matmul(ccf, hsz, hsz, weights[f"{pfx}.xw_o"], f"{pfx}.xw_o"),
         hsz,
         weights[f"{pfx}.xb_o"],
         dtype=dtype,
@@ -937,7 +949,14 @@ def _add_decoder_layer(
         dtype=dtype,
     )
     mlp = graph_blocks.add_gelu_fc_mlp(
-        network, fn, weights=weights, prefix=pfx, hidden_size=hsz, mlp_size=ffn, dtype=dtype
+        network,
+        fn,
+        weights=weights,
+        prefix=pfx,
+        hidden_size=hsz,
+        mlp_size=ffn,
+        dtype=dtype,
+        quant_ctx=quant_ctx,
     )
     out = network.add_elementwise(pca, mlp, trt.ElementWiseOperation.SUM).get_output(0)
     return {"hidden": out, "present_k": pk, "present_v": pv}
@@ -1249,6 +1268,7 @@ class _CanaryModel:
         net = b.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         tc = b.create_builder_config()
         tc.builder_optimization_level = 1
+        configure_quantized_build(tc, quant_ctx)
 
         tid = net.add_input("token_id", trt.int32, (-1,))
         pid = net.add_input("position_id", trt.int32, (-1,))
@@ -1384,6 +1404,7 @@ class _CanaryModel:
                 maxcache=max_cache_length,
                 maxsrc=es,
                 dtype=layer_np_dtype,
+                quant_ctx=quant_ctx,
             )
             hs = r["hidden"]
             pko.append(r["present_k"])
@@ -1442,6 +1463,7 @@ class _CanaryModel:
         *,
         precision: str = "fp32",
         verbose: bool = False,
+        quant_ctx=None,
     ) -> bytes | None:
         return _build_encoder(
             config,
@@ -1449,6 +1471,7 @@ class _CanaryModel:
             precision=precision,
             verbose=verbose,
             fp32_layers=config.raw.get("_fp32_layers", ()),
+            quant_ctx=quant_ctx,
         )
 
     def get_audio_config(self, config: ModelConfig) -> dict | None:
@@ -1547,6 +1570,7 @@ def _build_encoder(
     precision="fp32",
     verbose=False,
     fp32_layers=(),
+    quant_ctx=None,
 ):
     el = weights["_enc_layers"]
     eh = weights["_enc_heads"]
@@ -1573,6 +1597,7 @@ def _build_encoder(
     tc = b.create_builder_config()
     tc.builder_optimization_level = 1
     tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
+    configure_quantized_build(tc, quant_ctx)
 
     eps = graph_ops.add_constant(
         net, (1, 1), np.array([1e-5], dtype=work_np_dtype), dtype=work_np_dtype
@@ -1684,6 +1709,7 @@ def _build_encoder(
             conv_context_size=conv_context_size,
             valid_mask=layer_valid_mask,
             dtype=layer_np_dtype,
+            quant_ctx=quant_ctx,
         )
 
     output_layer = net.add_shuffle(hs)
@@ -1765,8 +1791,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config = ModelConfig.from_dir(model_dir)
     if str(config.model_type).lower() not in {"canary", "canary_asr", "enc_dec_multi_task"}:
         raise ValueError(f"Canary does not support model_type={config.model_type!r}")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Canary does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(f"Canary does not support quantization={request.quantization!r}")
+    quantized = request.quantization == "fp8"
+    if quantized:
+        if request.precision != "fp16":
+            raise ValueError("Canary fp8 builds require precision fp16")
+        if request.fp32_layers:
+            raise ValueError("Canary fp8 builds do not support fp32_layers")
+        if int(request.tensor_parallel_size) != 1:
+            raise ValueError("Canary fp8 builds do not support tensor parallelism")
     parallel = ParallelConfig(tp_size=int(request.tensor_parallel_size))
     parallel.validate()
     model = _CanaryModel()
@@ -1790,6 +1824,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             if filename != "tokenizer.json"
             if (tokenizer_dir / filename).is_file()
         }
+    quant_ctx = calibrate_canary(weights, graph_ops, "fp8") if quantized else None
     max_length = int(request.max_sequence_length or 256)
     writer.set_header(family="canary", task=request.task, backend=request.backend)
     if parallel.enabled:
@@ -1814,13 +1849,18 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
                 weights,
                 max_length,
                 precision=request.precision,
-                quant_ctx=None,
+                quant_ctx=quant_ctx,
                 verbose=request.verbose,
                 parallel_config=parallel,
             ),
         )
     encoder = model.build_vision_engine(
-        str(model_dir), config, weights, precision=request.precision, verbose=request.verbose
+        str(model_dir),
+        config,
+        weights,
+        precision=request.precision,
+        verbose=request.verbose,
+        quant_ctx=quant_ctx,
     )
     if encoder is None:
         raise RuntimeError("Canary encoder build returned no engine")

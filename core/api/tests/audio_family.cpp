@@ -41,9 +41,11 @@ class AudioFixture final : public IModel,
                            public ITextAudioTokenHistoryToAudio,
                            public IBatchTextAudioTokenHistoryToAudio,
                            public ITextToSpeech,
+                           public IAudioCodebookTokensToAudio,
                            public ISpeechTranscription,
                            public ISpeechTranslation,
                            public IAudioLanguageIdentification,
+                           public IAudioToClassScores,
                            public ISpeechToSpeechResponse,
                            public IBatchSpeechTranscription,
                            public IBatchSpeechTranslation,
@@ -66,6 +68,8 @@ class AudioFixture final : public IModel,
             return {bind<IBatchTextToAudio>(*this, fields_for(IBatchTextToAudio::kTask))};
         if (mode_ == "batch_speech_only")
             return {bind<IBatchTextToSpeech>(*this, fields_for(IBatchTextToSpeech::kTask))};
+        if (mode_ == "codec_only")
+            return {bind<IAudioCodebookTokensToAudio>(*this)};
         return {
             bind<ITextToAudio>(*this, fields_for(ITextToAudio::kTask)),
             bind<ITextAudioTokenHistoryToAudio>(*this,
@@ -77,6 +81,7 @@ class AudioFixture final : public IModel,
             bind<ISpeechTranslation>(*this, fields_for(ISpeechTranslation::kTask)),
             bind<IAudioLanguageIdentification>(*this,
                                                fields_for(IAudioLanguageIdentification::kTask)),
+            bind<IAudioToClassScores>(*this, fields_for(IAudioToClassScores::kTask)),
             bind<ISpeechToSpeechResponse>(*this, fields_for(ISpeechToSpeechResponse::kTask)),
             bind<IBatchSpeechTranscription>(*this, fields_for(IBatchSpeechTranscription::kTask)),
             bind<IBatchSpeechTranslation>(*this, fields_for(IBatchSpeechTranslation::kTask)),
@@ -93,7 +98,7 @@ class AudioFixture final : public IModel,
             (mode_ == "batch_audio_only" && task != IBatchTextToAudio::kTask) ||
             (mode_ == "batch_speech_only" && task != IBatchTextToSpeech::kTask))
             throw UnsupportedTask("audio fixture Task is disabled");
-        if (task == IAudioLanguageIdentification::kTask)
+        if (task == IAudioLanguageIdentification::kTask || task == IAudioToClassScores::kTask)
             return {};
         if (task == ITextAudioTokenHistoryToAudio::kTask ||
             task == IBatchTextAudioTokenHistoryToAudio::kTask) {
@@ -158,6 +163,21 @@ class AudioFixture final : public IModel,
                           options.normalize ? 0.25F : 0.0F},
                          options);
     }
+    AudioResult run(const AudioCodebookTokensToAudioRequest& input, ConfigView config) override {
+        validate_config({}, config);
+        for (const auto token : input.codes.tokens)
+            if (token < 0 || token > 255)
+                throw std::invalid_argument("fixture codec token out of range");
+        AudioResult result;
+        result.samples.assign(input.codes.tokens.begin(), input.codes.tokens.end());
+        // Expose both dimensions separately so the codec fixture detects a transpose.
+        result.setup_ms = static_cast<double>(input.codes.codebooks);
+        result.inference_ms = static_cast<double>(input.codes.frames);
+        result.sample_rate = 24000;
+        result.channels = 1;
+        return result;
+    }
+
     AudioResult run(const TextAudioTokenHistoryToAudioRequest& input, ConfigView config) override {
         validate_history(input.history);
         const auto options = history_options(config, ITextAudioTokenHistoryToAudio::kTask);
@@ -203,6 +223,17 @@ class AudioFixture final : public IModel,
             {0.75F, 0.25F}, {"en", "fr"}, ScoreKind::Probability, "fixture_languages"};
         if (mode_ == "bad_labels")
             result.labels.clear();
+        return result;
+    }
+    LabelScoresResult run(const AudioToClassScoresRequest& input, ConfigView config) override {
+        (void)resolve_audio(input.audio);
+        (void)parse(config, IAudioToClassScores::kTask);
+        // Sound events, not languages, and multi-label: raw logits that do not
+        // sum to one, over a vocabulary the family names itself.
+        LabelScoresResult result{
+            {1.5F, -0.25F, -3.0F}, {"Speech", "Music", "Silence"}, ScoreKind::Logit, ""};
+        if (mode_ == "bad_labels")
+            result.labels[1].clear();
         return result;
     }
     AudioResult run(const SpeechToSpeechResponseRequest& input, ConfigView config) override {

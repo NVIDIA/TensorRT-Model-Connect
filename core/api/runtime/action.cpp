@@ -70,6 +70,36 @@ void timing(double milliseconds) {
     output_check(std::isfinite(milliseconds) && milliseconds >= 0,
                  "action inference timing is invalid");
 }
+// Owns only the converted array; every pointer inside still borrows caller storage. `view`
+// points into `images`, so a copy would dangle: it is move-only, and moving a vector keeps
+// its buffer.
+struct MultiImageObservation {
+    MultiImageObservation() = default;
+    MultiImageObservation(const MultiImageObservation&) = delete;
+    MultiImageObservation& operator=(const MultiImageObservation&) = delete;
+    MultiImageObservation(MultiImageObservation&&) noexcept = default;
+    MultiImageObservation& operator=(MultiImageObservation&&) noexcept = default;
+
+    std::vector<internal::NamedImage> images;
+    internal::ImagesStateTextObservation view;
+};
+MultiImageObservation multi_image_observation(const trtmc_images_state_text_observation_v1& input) {
+    MultiImageObservation converted;
+    const auto wire = checked_span(input.images, input.image_count);
+    require(!wire.empty(), "multi-image action observation requires at least one image");
+    converted.images.reserve(wire.size());
+    for (const auto& entry : wire) {
+        const auto name = string_view(entry.name);
+        require(!name.empty(), "action observation image name must not be empty");
+        for (const auto& previous : converted.images)
+            require(previous.name != name, "action observation image names must be unique");
+        converted.images.push_back({name, image_input(entry.image)});
+    }
+    converted.view = {{converted.images.data(), converted.images.size()},
+                      checked_span(input.state, input.state_count),
+                      string_view(input.text)};
+    return converted;
+}
 struct ActionChunkStorage final : ResultStorage {
     explicit ActionChunkStorage(internal::ImageStateActionChunkResult result)
         : actions(std::move(result.actions)) {
@@ -79,6 +109,16 @@ struct ActionChunkStorage final : ResultStorage {
     }
     ActionSequenceStorage actions;
     trtmc_image_state_action_chunk_view_v1 view{};
+};
+struct MultiImageActionChunkStorage final : ResultStorage {
+    explicit MultiImageActionChunkStorage(internal::ImagesStateTextActionChunkResult result)
+        : actions(std::move(result.actions)) {
+        output_check(actions.view.values.rows > 0, "action chunk must contain at least one step");
+        timing(result.inference_ms);
+        view = {actions.view, result.within_training_bounds ? 1U : 0U, result.inference_ms};
+    }
+    ActionSequenceStorage actions;
+    trtmc_images_state_text_action_chunk_view_v1 view{};
 };
 struct ActionStepStorage final : ResultStorage {
     explicit ActionStepStorage(internal::ActionStepResult result)
@@ -101,6 +141,28 @@ trtmc_status TRTMC_CALL result_view(const trtmc_result* result, View* output,
         *output = require_result<Storage>(result).view;
     });
 }
+// Independent chunk prediction shared by every stateless chunk Task: it neither
+// consumes nor replaces a live queue, and overlapping calls return BUSY.
+template <class Interface, class Storage, class Request>
+void run_chunk(trtmc_model* model, const Request& request, const trtmc_config_view_v1* config,
+               trtmc_result** output) {
+    const ConvertedConfig options(config);
+    const auto owner = model_owner(model);
+    const ActionCall call(owner.get());
+    auto lock = lock_model(owner);
+    const auto operation = action_chunk_operation(owner);
+    std::unique_lock<std::mutex> queue_lock;
+    if (operation) {
+        queue_lock = std::unique_lock<std::mutex>(*operation, std::try_to_lock);
+        if (!queue_lock.owns_lock())
+            throw ApiFailure{TRTMC_BUSY, "another action session operation is active"};
+        lock.unlock();
+    }
+    const auto key = internal::contract_key<Interface>();
+    auto& family = *static_cast<Interface*>(task_implementation(owner, key));
+    validate_task_config(owner, key, options.view());
+    *output = make_result<Storage>(family.run(request, options.view()));
+}
 trtmc_status TRTMC_CALL predict(trtmc_model* model,
                                 const trtmc_image_state_to_action_chunk_request_v1* input,
                                 const trtmc_config_view_v1* config, trtmc_result** output,
@@ -110,23 +172,21 @@ trtmc_status TRTMC_CALL predict(trtmc_model* model,
     return guarded(error, [&] {
         require(input && output, "action chunk request and output are required");
         const internal::ImageStateToActionChunkRequest request{observation(input->observation)};
-        const ConvertedConfig options(config);
-        const auto owner = model_owner(model);
-        const ActionCall call(owner.get());
-        auto lock = lock_model(owner);
-        const auto operation = action_chunk_operation(owner);
-        std::unique_lock<std::mutex> queue_lock;
-        if (operation) {
-            queue_lock = std::unique_lock<std::mutex>(*operation, std::try_to_lock);
-            if (!queue_lock.owns_lock())
-                throw ApiFailure{TRTMC_BUSY, "another action session operation is active"};
-            lock.unlock();
-        }
-        const auto key = internal::contract_key<internal::IImageStateToActionChunk>();
-        auto& family =
-            *static_cast<internal::IImageStateToActionChunk*>(task_implementation(owner, key));
-        validate_task_config(owner, key, options.view());
-        *output = make_result<ActionChunkStorage>(family.run(request, options.view()));
+        run_chunk<internal::IImageStateToActionChunk, ActionChunkStorage>(model, request, config,
+                                                                          output);
+    });
+}
+trtmc_status TRTMC_CALL predict_multi_image(
+    trtmc_model* model, const trtmc_images_state_text_to_action_chunk_request_v1* input,
+    const trtmc_config_view_v1* config, trtmc_result** output, trtmc_error** error) noexcept {
+    if (output)
+        *output = nullptr;
+    return guarded(error, [&] {
+        require(input && output, "multi-image action chunk request and output are required");
+        const auto converted = multi_image_observation(input->observation);
+        const internal::ImagesStateTextToActionChunkRequest request{converted.view};
+        run_chunk<internal::IImagesStateTextToActionChunk, MultiImageActionChunkStorage>(
+            model, request, config, output);
     });
 }
 trtmc_status TRTMC_CALL create(trtmc_model* model, const trtmc_config_view_v1* config,
@@ -196,14 +256,20 @@ const trtmc_image_state_to_action_chunk_api_v1 chunk_api = {
     {1, 0, sizeof(trtmc_image_state_to_action_chunk_api_v1)},
     predict,
     result_view<ActionChunkStorage, trtmc_image_state_action_chunk_view_v1>};
+const trtmc_images_state_text_to_action_chunk_api_v1 multi_image_chunk_api = {
+    {1, 0, sizeof(trtmc_images_state_text_to_action_chunk_api_v1)},
+    predict_multi_image,
+    result_view<MultiImageActionChunkStorage, trtmc_images_state_text_action_chunk_view_v1>};
 const trtmc_image_state_action_queue_api_v1 queue_api = {
     {1, 0, sizeof(trtmc_image_state_action_queue_api_v1)},     create, act,
     result_view<ActionStepStorage, trtmc_action_step_view_v1>, reset,  release};
 static_assert(offsetof(trtmc_image_state_to_action_chunk_api_v1, header) == 0);
 static_assert(offsetof(trtmc_image_state_action_queue_api_v1, header) == 0);
+static_assert(offsetof(trtmc_images_state_text_to_action_chunk_api_v1, header) == 0);
 const TaskBinding bindings[] = {
     {internal::IImageStateToActionChunk::kTask, 1, 0, &chunk_api.header},
-    {internal::IImageStateActionQueue::kTask, 1, 0, &queue_api.header}};
+    {internal::IImageStateActionQueue::kTask, 1, 0, &queue_api.header},
+    {internal::IImagesStateTextToActionChunk::kTask, 1, 0, &multi_image_chunk_api.header}};
 } // namespace
 Span<const TaskBinding> action_task_bindings() noexcept {
     return bindings;

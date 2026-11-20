@@ -219,7 +219,12 @@ def add_attention_block(
             cos_half_tensor, sin_half_tensor, position_id,
             rope_dim, interleaved_rope)
 
-    # Save present K/V (before concatenation, this is the raw projection output)
+    from .prepared_quantization import quantize_cache_value
+    if f"{prefix}.kv_k_scale" in weights:
+        k = quantize_cache_value(network, k, weights[f"{prefix}.kv_k_scale"])
+        v = quantize_cache_value(network, v, weights[f"{prefix}.kv_v_scale"])
+
+    # Save present K/V (after source cache quantization, before concatenation)
     present_k = k
     present_v = v
 

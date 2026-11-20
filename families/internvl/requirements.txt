@@ -2,3 +2,4 @@
 # SPDX-License-Identifier: Apache-2.0
 
 Pillow
+torch>=2.10.0

@@ -33,6 +33,7 @@ from .weights import (
     _target_np_dtype,
 )
 from .config import ModelConfig
+from .quantization import check_not_quantized, configure_fp8_build, create_quant_context
 
 
 if TYPE_CHECKING:
@@ -234,8 +235,16 @@ class _TimmInceptionModel:
 
         return weights
 
-    def _conv(self, network, x, weights, prefix, dtype, *, stride=1, padding=(0, 0)):
+    def _conv(
+        self, network, x, weights, prefix, dtype, *, stride=1, padding=(0, 0), quant_ctx=None
+    ):
         """One ConvNormAct: convolution, folded batch norm, ReLU."""
+        if quant_ctx is not None and quant_ctx.should_quantize(prefix):
+            # The FP8 convolution carries the batch norm folded into its weight and bias.
+            layer = quant_ctx.convolution(network, x, prefix)
+            layer.stride_nd = (stride, stride)
+            layer.padding_nd = padding
+            return graph_ops.add_relu(network, layer.get_output(0))
         w = weights[f"{prefix}.conv.weight"]
         out = graph_ops.add_conv2d(
             network,
@@ -260,9 +269,18 @@ class _TimmInceptionModel:
         )
         return graph_ops.add_relu(network, out)
 
-    def _block(self, network, x, weights, top, kind, dtype):
+    def _block(self, network, x, weights, top, kind, dtype, quant_ctx=None):
         """Build one Inception block. Branch wiring differs per topology."""
-        c = self._conv
+
+        def c(*args, **options):
+            return self._conv(*args, quant_ctx=quant_ctx, **options)
+
+        # The pooling branch of a quantized block reads the same FP8 input as its
+        # convolutions, so the block input is needed only in FP8.
+        first = {"inception_b": "branch3x3", "inception_d": "branch3x3_1"}.get(kind, "branch1x1")
+        pooled = x
+        if quant_ctx is not None and quant_ctx.should_quantize(f"{top}.{first}"):
+            pooled = quant_ctx.dequantized_input(network, x, f"{top}.{first}")
 
         if kind == "inception_a":
             b1 = c(network, x, weights, f"{top}.branch1x1", dtype)
@@ -271,7 +289,7 @@ class _TimmInceptionModel:
             b3 = c(network, x, weights, f"{top}.branch3x3dbl_1", dtype)
             b3 = c(network, b3, weights, f"{top}.branch3x3dbl_2", dtype, padding=(1, 1))
             b3 = c(network, b3, weights, f"{top}.branch3x3dbl_3", dtype, padding=(1, 1))
-            bp = graph_ops.add_avg_pool2d(network, x, 3, 1, 1)
+            bp = graph_ops.add_avg_pool2d(network, pooled, 3, 1, 1)
             bp = c(network, bp, weights, f"{top}.branch_pool", dtype)
             return graph_ops.add_concat(network, [b1, b5, b3, bp])
 
@@ -280,7 +298,7 @@ class _TimmInceptionModel:
             bd = c(network, x, weights, f"{top}.branch3x3dbl_1", dtype)
             bd = c(network, bd, weights, f"{top}.branch3x3dbl_2", dtype, padding=(1, 1))
             bd = c(network, bd, weights, f"{top}.branch3x3dbl_3", dtype, stride=2)
-            bp = graph_ops.add_max_pool2d(network, x, 3, 2, 0)
+            bp = graph_ops.add_max_pool2d(network, pooled, 3, 2, 0)
             return graph_ops.add_concat(network, [b3, bd, bp])
 
         if kind == "inception_c":
@@ -293,7 +311,7 @@ class _TimmInceptionModel:
             bd = c(network, bd, weights, f"{top}.branch7x7dbl_3", dtype, padding=(0, 3))
             bd = c(network, bd, weights, f"{top}.branch7x7dbl_4", dtype, padding=(3, 0))
             bd = c(network, bd, weights, f"{top}.branch7x7dbl_5", dtype, padding=(0, 3))
-            bp = graph_ops.add_avg_pool2d(network, x, 3, 1, 1)
+            bp = graph_ops.add_avg_pool2d(network, pooled, 3, 1, 1)
             bp = c(network, bp, weights, f"{top}.branch_pool", dtype)
             return graph_ops.add_concat(network, [b1, b7, bd, bp])
 
@@ -304,7 +322,7 @@ class _TimmInceptionModel:
             b7 = c(network, b7, weights, f"{top}.branch7x7x3_2", dtype, padding=(0, 3))
             b7 = c(network, b7, weights, f"{top}.branch7x7x3_3", dtype, padding=(3, 0))
             b7 = c(network, b7, weights, f"{top}.branch7x7x3_4", dtype, stride=2)
-            bp = graph_ops.add_max_pool2d(network, x, 3, 2, 0)
+            bp = graph_ops.add_max_pool2d(network, pooled, 3, 2, 0)
             return graph_ops.add_concat(network, [b3, b7, bp])
 
         # inception_e: two branches split into an asymmetric pair and rejoin.
@@ -326,7 +344,7 @@ class _TimmInceptionModel:
                 c(network, bd, weights, f"{top}.branch3x3dbl_3b", dtype, padding=(1, 0)),
             ],
         )
-        bp = graph_ops.add_avg_pool2d(network, x, 3, 1, 1)
+        bp = graph_ops.add_avg_pool2d(network, pooled, 3, 1, 1)
         bp = c(network, bp, weights, f"{top}.branch_pool", dtype)
         return graph_ops.add_concat(network, [b1, b3, bd, bp])
 
@@ -337,6 +355,7 @@ class _TimmInceptionModel:
         *,
         precision: str,
         verbose: bool = False,
+        quant_ctx=None,
     ) -> bytes:
         if precision == "fp16":
             work_np_dtype, work_trt_dtype = np.float16, trt.float16
@@ -365,11 +384,13 @@ class _TimmInceptionModel:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
-        trt_config.builder_optimization_level = 1
+        # Level 3 builds a faster engine than level 1, at the cost of a longer build.
+        trt_config.builder_optimization_level = 3
         trt_config.avg_timing_iterations = 8
         trt_config.max_aux_streams = 0
         trt_config.set_flag(trt.BuilderFlag.DISABLE_TIMING_CACHE)
         trt_config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
+        configure_fp8_build(trt_config, quant_ctx)
 
         pixel_values = network.add_input("pixel_values", trt.float32, (1, 3, image_h, image_w))
         hidden = pixel_values
@@ -392,7 +413,7 @@ class _TimmInceptionModel:
 
         for block in blocks:
             hidden = self._block(
-                network, hidden, weights, block["prefix"], block["kind"], work_np_dtype
+                network, hidden, weights, block["prefix"], block["kind"], work_np_dtype, quant_ctx
             )
 
         # The pooled map is 8x8 for the standard 299x299 input.
@@ -465,8 +486,10 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         raise NotImplementedError("timm_inception does not support context parallelism")
     if request.task != "image_to_class_scores":
         raise ValueError("timm_inception supports only task=image_to_class_scores")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("timm_inception does not support quantization")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(
+            f"timm_inception supports quantization fp8 or none, got {request.quantization!r}"
+        )
     if request.fp32_layers:
         raise NotImplementedError("timm_inception does not support mixed-precision layers")
     if request.mtp_seq_len is not None:
@@ -479,13 +502,26 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     if config.architecture != _ARCHITECTURE:
         raise ValueError(f"timm Inception does not support architecture={config.architecture!r}")
     precision = str(request.precision).lower()
+    quantization = None if request.quantization in {None, "none"} else str(request.quantization)
+    if quantization is not None:
+        check_not_quantized(model_dir, config.raw, _open_safetensors(model_dir).keys())
     model = _TimmInceptionModel()
     weights = model.load_weights(str(model_dir), config, precision=precision)
+    quant_ctx = None
+    if quantization is not None:
+        quant_ctx = create_quant_context(
+            config.raw["_timm_inception_config"],
+            _open_safetensors(model_dir),
+            quantization,
+            precision=precision,
+            bn_eps=_BN_EPS,
+        )
     plan = model.build_engine(
         config,
         weights,
         precision=precision,
         verbose=bool(request.verbose),
+        quant_ctx=quant_ctx,
     )
     runtime_source = model.get_bundle_config_overrides(config)
     writer.set_header(family="timm_inception", task=request.task, backend=request.backend)

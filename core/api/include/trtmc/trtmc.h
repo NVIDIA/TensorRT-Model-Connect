@@ -14,6 +14,7 @@
 #include "trtmc/language.h"
 #include "trtmc/numeric.h"
 #include "trtmc/perception.h"
+#include "trtmc/point_cloud.h"
 #include "trtmc/recurrent.h"
 #include "trtmc/speech.h"
 #include "trtmc/stream.h"

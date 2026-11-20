@@ -44,7 +44,7 @@ def aiperf_command(arguments: argparse.Namespace) -> tuple[list[str], dict[str, 
     if arguments.rerun:
         command.append("--rerun")
     roots = ("apps/aiperf_qual", "apps/perf_serving", "core/builder", "apps/benchmark", ".")
-    return command, {"PYTHONPATH": ":".join(str(REPOSITORY / root) for root in roots)}
+    return command, {"PYTHONPATH": os.pathsep.join(str(REPOSITORY / root) for root in roots)}
 
 
 def main(argv: Sequence[str] | None = None) -> int:

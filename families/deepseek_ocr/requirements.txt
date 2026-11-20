@@ -1,10 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-Pillow
+Pillow==13.0.0
 # Required by the checkpoint's trust_remote_code reference.
 addict==2.4.0
 easydict==1.13
 einops==0.8.1
 scipy
 transformers==4.46.3
+# Imported by the family tests (torch, numpy and TensorRT come from the base image).
+ml_dtypes==0.6.0
+safetensors==0.8.0

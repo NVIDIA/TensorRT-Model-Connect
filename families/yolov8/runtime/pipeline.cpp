@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -74,8 +75,27 @@ Yolov8ObjectDetectionPipeline::Yolov8ObjectDetectionPipeline(
         throw std::runtime_error("Yolov8ObjectDetectionPipeline: invalid model");
 }
 
-ObjectDetectionResult Yolov8ObjectDetectionPipeline::detect(const float* pixels, int32_t height,
-                                                            int32_t width) {
+internal::DetectedBoxesResult
+Yolov8ObjectDetectionPipeline::run(const internal::ImageToBoxesRequest& request,
+                                   internal::ConfigView config) {
+    if (!config.empty())
+        throw internal::ConfigError("YOLOv8 has no runtime configuration");
+    const auto& image = request.image;
+    constexpr auto kInt32Max = static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max());
+    if (image.format != internal::ImageFormat::Float32 || image.channels != 3 ||
+        image.data == nullptr || image.height == 0 || image.width == 0 ||
+        image.height > kInt32Max || image.width > kInt32Max ||
+        static_cast<std::uint64_t>(image.height) >
+            std::numeric_limits<std::size_t>::max() / image.width / 3U / sizeof(float) ||
+        image.byte_size !=
+            static_cast<std::size_t>(image.height) * image.width * 3U * sizeof(float))
+        throw std::invalid_argument("YOLOv8 requires one contiguous float32 RGB image");
+    return detect(static_cast<const float*>(image.data), static_cast<std::int32_t>(image.height),
+                  static_cast<std::int32_t>(image.width));
+}
+
+internal::DetectedBoxesResult Yolov8ObjectDetectionPipeline::detect(const float* pixels,
+                                                                    int32_t height, int32_t width) {
     Yolov8Letterbox letterbox;
     auto values = preprocess_yolov8_image(pixels, height, width, preprocess_config_, letterbox);
     Tensor input;
@@ -126,7 +146,7 @@ ObjectDetectionResult Yolov8ObjectDetectionPipeline::detect(const float* pixels,
         candidates.push_back(box);
     }
 
-    ObjectDetectionResult result;
+    internal::DetectedBoxesResult result;
     result.image_height = height;
     result.image_width = width;
     result.boxes = suppress_yolov8_boxes(std::move(candidates), iou_threshold_,

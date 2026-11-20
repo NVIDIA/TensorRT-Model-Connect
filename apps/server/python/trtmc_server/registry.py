@@ -33,6 +33,9 @@ class ModelSpec:
         object.__setattr__(self, "bundle", Path(self.bundle))
 
 
+# Text-to-video, and video that starts from an initial image (input_reference).
+VIDEO_CAPABILITIES = frozenset({"video_generation", "initial_image_video_generation"})
+
 class ModelRegistry:
     def __init__(
         self,
@@ -139,7 +142,7 @@ class ModelRegistry:
         return capability in metadata.get("capabilities", [])
 
     def video_geometry(self, model: str) -> dict[str, int]:
-        if not self.supports(model, "video_generation"):
+        if not any(self.supports(model, capability) for capability in VIDEO_CAPABILITIES):
             raise ValueError("model does not support video generation")
         return self._checked_video_geometry(self._metadata[model])
 
@@ -195,7 +198,7 @@ class ModelRegistry:
         capabilities = metadata.get("capabilities")
         if (not isinstance(capabilities, list) or not capabilities or
                 not all(isinstance(value, str) for value in capabilities) or
-                not {"text_generation", "embeddings", "reranking", "audio_transcription", "object_detection", "vision_language_generation", "image_generation", "image_edit", "video_generation"}.intersection(capabilities)):
+                not {"text_generation", "embeddings", "reranking", "audio_transcription", "object_detection", "vision_language_generation", "image_generation", "image_edit", *VIDEO_CAPABILITIES}.intersection(capabilities)):
             raise WorkerProtocolError("worker does not advertise a supported capability")
-        if "video_generation" in capabilities:
+        if VIDEO_CAPABILITIES.intersection(capabilities):
             ModelRegistry._checked_video_geometry(metadata)

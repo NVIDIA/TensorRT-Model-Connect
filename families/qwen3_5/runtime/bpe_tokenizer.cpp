@@ -209,9 +209,9 @@ inline bool is_digit(char32_t cp) {
 
 inline bool is_whitespace(char32_t cp) {
     return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r' || cp == 0x0B || cp == 0x0C // VT, FF
-           || cp == 0xA0                   // non-breaking space
-           || cp == 0x2000 || cp == 0x200A // en space through hair space
-           || cp == 0x3000;                // ideographic space
+           || cp == 0x85 || cp == 0xA0 || cp == 0x1680 ||
+           (cp >= 0x2000 && cp <= 0x200A) // en quad through hair space
+           || cp == 0x2028 || cp == 0x2029 || cp == 0x202F || cp == 0x205F || cp == 0x3000;
 }
 
 // BLOOM punctuation set: .,!?...
@@ -315,30 +315,20 @@ inline void scan_all_whitespace(const char*& p, const char* end) {
 }
 
 // Qwen3 regex branch: \s*[\r\n]+
-// Consume any leading whitespace up to the first newline, then consume the
-// contiguous newline run itself, but stop before whitespace that follows the
-// last newline.
+// Greedy whitespace ends at the last newline, including intervening spaces/tabs.
+// Leave any whitespace after that newline for the next regex branch.
 inline void scan_qwen3_newline_chunk(char32_t first_cp, const char*& p, const char* end) {
-    bool saw_newline = is_newline(first_cp);
-    while (p < end) {
-        const char* peek = p;
-        char32_t nc = read_utf8(peek, end);
-        if (!saw_newline) {
-            if (is_newline(nc)) {
-                saw_newline = true;
-                p = peek;
-                continue;
-            }
-            if (is_whitespace(nc)) {
-                p = peek;
-                continue;
-            }
+    const char* last_newline = is_newline(first_cp) ? p : nullptr;
+    const char* scan = p;
+    while (scan < end) {
+        const auto cp = read_utf8(scan, end);
+        if (!is_whitespace(cp))
             break;
-        }
-        if (!is_newline(nc))
-            break;
-        p = peek;
+        if (is_newline(cp))
+            last_newline = scan;
     }
+    if (last_newline)
+        p = last_newline;
 }
 
 inline void scan_bloom_words(const char*& p, const char* end) {
@@ -370,32 +360,45 @@ inline void emit_whitespace_leave_last(const char*& p, const char* end, const ch
 
 // ── Contraction matching ──
 
-inline bool is_two_char_contraction(char c1, char c2) {
+inline bool is_two_char_contraction(char32_t c1, char32_t c2) {
     return (c1 == 'r' && c2 == 'e') || (c1 == 'v' && c2 == 'e') || (c1 == 'l' && c2 == 'l');
 }
 
-// Returns length of contraction suffix after apostrophe ('s 't 'm 'd 're 've 'll)
-inline int match_contraction_suffix(const char* p, const char* end) {
+inline char32_t contraction_case(char32_t cp, bool ignore_case) {
+    if (!ignore_case)
+        return cp;
+    if (cp >= 'A' && cp <= 'Z')
+        return cp + ('a' - 'A');
+    // Long s is the only non-ASCII case-fold equivalent in these suffixes.
+    return cp == 0x17F ? 's' : cp;
+}
+
+// Returns the UTF-8 byte length of a contraction suffix after the apostrophe.
+inline int match_contraction_suffix(const char* p, const char* end, bool ignore_case) {
     if (p >= end)
         return 0;
-    char c = *p;
+    const char* next = p;
+    const auto c = contraction_case(read_utf8(next, end), ignore_case);
     if (c == 's' || c == 't' || c == 'm' || c == 'd')
-        return 1;
-    if (p + 1 < end && is_two_char_contraction(c, p[1]))
-        return 2;
+        return static_cast<int>(next - p);
+    if (next < end &&
+        is_two_char_contraction(c, contraction_case(read_utf8(next, end), ignore_case)))
+        return static_cast<int>(next - p);
     return 0;
 }
 
 // ── GPT-2/Qwen3 pre-tokenize dispatch helpers ──
 
-// Handle apostrophe: either contraction or "other" chars run
+// Qwen3 uses case-insensitive contractions, then the optional letter prefix.
 inline bool try_contraction(char32_t cp, const char*& p, const char* end, const char* start,
-                            std::vector<std::string>& result) {
+                            Variant variant, std::vector<std::string>& result) {
     if (cp != '\'')
         return false;
-    int suffix = match_contraction_suffix(p, end);
+    int suffix = match_contraction_suffix(p, end, variant == Variant::kQwen3);
     if (suffix > 0) {
         p += suffix;
+    } else if (variant == Variant::kQwen3) {
+        return false;
     } else {
         scan_others(p, end);
     }
@@ -429,6 +432,11 @@ inline bool try_prefix_run(char32_t cp, const char*& p, const char* end, const c
         return true;
     }
     if (!is_whitespace(next_cp)) {
+        // Only a literal space may prefix the punctuation branch of the Qwen regex.
+        if (variant == Variant::kQwen3 && cp != ' ') {
+            p = after_prefix;
+            return false;
+        }
         scan_others(p, end);
         if (variant == Variant::kQwen3)
             scan_newlines(p, end);
@@ -519,7 +527,7 @@ std::vector<std::string> pre_tokenize(const std::string& text, Variant variant,
         const char* start = p;
         char32_t cp = read_utf8(p, end);
 
-        if (try_contraction(cp, p, end, start, result))
+        if (try_contraction(cp, p, end, start, variant, result))
             continue;
         if (try_prefix_run(cp, p, end, start, variant, result))
             continue;

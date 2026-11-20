@@ -1,0 +1,20 @@
+{
+  "name": "bert-base-uncased-fp8",
+  "hf_id": "google-bert/bert-base-uncased",
+  "hf_revision": "86b5e0934494bd15c9632b12f734a8a67f723594",
+  "bundle": "bert-base-uncased-fp8.bundle",
+  "family": "bert",
+  "task": "encoding",
+  "precision": "fp16",
+  "quantization": "fp8",
+  "testcases": [
+    {
+      "name": "bert-base-uncased-fp8",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is Paris."
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 128
+}

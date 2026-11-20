@@ -81,10 +81,19 @@ def test_cross_qo_fp8_layer_names_are_exact() -> None:
     profile = SimpleNamespace(num_layers=2)
     assert dit._cross_qo_fp8_layer_names(profile) == (
         "blocks.0.attn2.to_q",
-        "blocks.0.attn2.to_out.0",
         "blocks.1.attn2.to_q",
-        "blocks.1.attn2.to_out.0",
     )
+
+
+def test_cross_attention_output_projection_is_not_fp8() -> None:
+    # TensorRT 11.4 cannot compile an FP8 Quantize after the fused cross-attention.
+    profile, weights, scales = _cross_qo_fp8_fixture()
+    assert not any("attn2.to_out.0" in name for name in dit._cross_qo_fp8_layer_names(profile))
+
+    with_out = dict(scales)
+    with_out["blocks.0.attn2.to_out.0"] = {"input_scale": 8.0 / 448.0}
+    with pytest.raises(ValueError, match="unexpected="):
+        dit._validated_cross_qo_fp8_scales(weights, profile, with_out)
 
 
 def test_cross_qo_fp8_scales_require_all_and_only_qualified_projections() -> None:

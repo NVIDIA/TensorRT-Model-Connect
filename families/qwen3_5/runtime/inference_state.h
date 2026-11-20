@@ -28,6 +28,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <stdexcept>
 
 namespace trtmc {
 
@@ -68,6 +69,20 @@ class Qwen35InferenceState {
     // Mark the transition from prompt prefill to autoregressive decoding.
     // State types that do not distinguish the phases can ignore this.
     virtual void mark_prefill_complete() {}
+
+    // Bind a multi-row prefill context (a second profile of the decoder
+    // engine) to the same caches and recurrent state as bind_to().
+    virtual void bind_prefill(ITrtModule& module) {
+        (void)module;
+        throw std::runtime_error("this Qwen3.5 state does not support batched prefill");
+    }
+
+    // Commit the `rows` tokens a bind_prefill() context just processed.
+    virtual void commit_prefill(ITrtModule& module, int32_t rows) {
+        (void)module;
+        (void)rows;
+        throw std::runtime_error("this Qwen3.5 state does not support batched prefill");
+    }
 
     // --- Queries ---
 

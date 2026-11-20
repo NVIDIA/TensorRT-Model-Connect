@@ -127,51 +127,31 @@ def device_memory_bytes() -> int:
     return properties.totalGlobalMem
 
 
-def validate_execution_capacity(request, config: dict, target: dict, weight_format: str) -> None:
-    """Reject the recorded 3.5-14B build OOM without rejecting larger GPUs.
+def validate_execution_capacity(
+    request, config: dict, target: dict, weight_format: str, *, release: str
+) -> None:
+    """Warn through dispatch before repeating an impossible ONNX allocation.
 
-    The pinned ONNX builder requires this single allocation for the recorded
-    FP16/context384 profile. It is only a necessary lower bound, not a promise
-    that the remaining build allocations fit. Quality-only failures are not
-    part of execution admission.
+    A single allocation exceeding total device memory cannot fit. These are
+    measurements for specific builder profiles, not a general memory estimate.
     """
-    minimum = {80: 49_913_047_296, 86: 52_849_060_096}.get(target.get("sm"))
-    if (minimum is not None and target.get("tensorrt_version") == "11.1.0.106"
-            and weight_format == "fp16"
-            and config.get("model_type") == "qwen3"
-            and config.get("num_hidden_layers") == 40
-            and config.get("hidden_size") == 5120
-            and request.max_sequence_length == 384
-            and device_memory_bytes() < minimum):
-        raise UnavailableEdgeConfiguration(
-            "InternVL3.5-14B Edge 0.11 FP16/context384 is unavailable on this GPU: "
-            f"the recorded ONNX build requires a {minimum:,}-byte allocation. "
-            "The recorded 40 GiB SM80 and 48 GiB SM86 builds both exhausted memory."
-        )
-
-
-def validate_native_capacity(request, raw: dict) -> None:
-    """Avoid the recorded native OOM even when the optional Edge SDK is absent."""
-    config = raw.get("text_config", raw.get("llm_config", raw))
     if not (
-        candidate(request, raw) and config.get("model_type") == "qwen3"
+        weight_format == "fp16" and config.get("model_type") == "qwen3"
         and config.get("num_hidden_layers") == 40 and config.get("hidden_size") == 5120
-        and request.max_sequence_length == 384
-        and edge_llm.request_weight_format(request, raw) == "fp16"
     ):
         return
-    target = edge_llm.local_target()
-    # TP1's native factory retains independent prefill and decode engines.
-    # The recorded decode plan is 29.54 GB and the next weight allocation is
-    # 29.54 GB: neither available 40/48 GiB device can hold this pair. This is
-    # an admission estimate, not an observed native SM86 execution result.
-    if (target.get("tensorrt_version") == "11.1.0.106"
-            and target.get("sm") in {80, 86}
-            and device_memory_bytes() <= 48 * 1024 ** 3):
+    profile = (release, target.get("tensorrt_version"), request.max_sequence_length, target.get("sm"))
+    minimum = {
+        ("0.11.0", "11.1.0.106", 384, 80): 49_913_047_296,
+        ("0.11.0", "11.1.0.106", 384, 86): 52_849_060_096,
+    }.get(profile)
+    if (profile == ("0.12.0", "11.4.0.106", 4096, 80)
+            and target.get("arch") == "x86_64" and target.get("cuda_version") == "13.4"):
+        minimum = 45_718_743_296
+    if minimum is not None and device_memory_bytes() < minimum:
         raise UnavailableEdgeConfiguration(
-            "InternVL3.5-14B native FP16/context384 is unavailable on this GPU: "
-            "the recorded runtime exhausted memory while loading two resident "
-            "roughly 29.5 GB decoder plans. A 40/48 GiB device cannot hold this pair."
+            f"InternVL3.5-14B Edge {release} FP16/context{request.max_sequence_length} "
+            f"is unavailable on this GPU: the recorded ONNX build requires a {minimum:,}-byte allocation."
         )
 
 
@@ -199,7 +179,6 @@ def build(request, writer, native) -> None:
     if not isinstance(config, dict):
         raise ValueError("checkpoint text_config must contain an object")
     def run_native():
-        validate_native_capacity(request, raw)
         native(request, writer)
 
     if not candidate(request, raw):
@@ -224,36 +203,43 @@ def build(request, writer, native) -> None:
         try:
             target = edge_llm.local_target()
             weight_format = edge_llm.request_weight_format(request, raw)
-            edge_llm.int4_plugin_version(request, config, target, weight_format)
-            key = (target["os"], target["arch"], target["sm"], weight_format)
-            adapter = EDGE_DISPATCH.get(key)
-            # Original Qwen2-backed 14B uses its recorded SM120 profile.
-            # Qwen3-backed InternVL3.5 uses the native SM80 ONNX profile.
-            profile_sm = (
-                120 if config.get("model_type") == "qwen2" and config["hidden_size"] == 5120 else 80
-            )
-            larger_memory_retry = (
-                config.get("model_type") == "qwen3"
-                and config.get("num_hidden_layers") == 40
-                and config.get("hidden_size") == 5120
-                and target["sm"] == 86
-                and weight_format == "fp16"
-            )
-            awq_sm120_control = (
-                weight_format == "int4_awq" and target["sm"] == 120
-                and config.get("model_type") == "qwen2"
-                and config.get("hidden_size") == 1536
-                and config.get("num_hidden_layers") == 28
-            )
-            if target["sm"] != profile_sm and not (larger_memory_retry or awq_sm120_control):
-                adapter = None
+            release = edge_llm.selected_release()
+            modern = release == "0.12.0"
+            if modern:
+                # The installed native SDK validates its own architecture and GPU
+                # targets. Historical 0.11 ONNX allocation limits do not apply.
+                adapter = edge_llm.prepare if target["os"] == "linux" else None
+            else:
+                edge_llm.int4_plugin_version(request, config, target, weight_format)
+                key = (target["os"], target["arch"], target["sm"], weight_format)
+                adapter = EDGE_DISPATCH.get(key)
+                # Original Qwen2-backed 14B uses its recorded SM120 profile.
+                # Qwen3-backed InternVL3.5 uses the native SM80 ONNX profile.
+                profile_sm = (
+                    120 if config.get("model_type") == "qwen2" and config["hidden_size"] == 5120 else 80
+                )
+                larger_memory_retry = (
+                    config.get("model_type") == "qwen3"
+                    and config.get("num_hidden_layers") == 40
+                    and config.get("hidden_size") == 5120
+                    and target["sm"] == 86
+                    and weight_format == "fp16"
+                )
+                awq_sm120_control = (
+                    weight_format == "int4_awq" and target["sm"] == 120
+                    and config.get("model_type") == "qwen2"
+                    and config.get("hidden_size") == 1536
+                    and config.get("num_hidden_layers") == 28
+                )
+                if target["sm"] != profile_sm and not (larger_memory_retry or awq_sm120_control):
+                    adapter = None
             if adapter is None and (
                 weight_format == "int4_awq"
                 or getattr(request, "int4_gemm_plugin_version", None) is not None
             ):
                 raise UnavailableEdgeConfiguration("No Edge INT4 route is mapped for this target")
             if adapter is not None:
-                validate_execution_capacity(request, config, target, weight_format)
+                validate_execution_capacity(request, config, target, weight_format, release=release or "0.11.0")
                 # This is an Edge profile restriction, not a native build limit.
                 capacity = config.get("max_position_embeddings")
                 if type(capacity) is not int or capacity <= 0:
@@ -263,11 +249,15 @@ def build(request, writer, native) -> None:
                 if request.max_sequence_length and request.max_sequence_length > capacity:
                     raise ValueError("max_sequence_length exceeds checkpoint context capacity")
                 files, marker = adapter(request, raw, target, Path(directory), log_path)
-        except UnavailableEdgeConfiguration:
-            # Do not silently rerun a recorded failing configuration via fallback.
-            log_path.unlink(missing_ok=True)
-            raise
         except Exception as error:
+            if getattr(request, "int4_gemm_plugin_version", None) is not None:
+                # An explicitly requested Edge plugin cannot be substituted by
+                # a native implementation of a different backend control.
+                with log_path.open("a", encoding="utf-8") as log:
+                    traceback.print_exception(error, file=log)
+                raise UnavailableEdgeConfiguration(
+                    f"Cannot honor the explicit Edge INT4 plugin selection; diagnostics: {log_path}"
+                ) from error
             failure = error
             with log_path.open("a", encoding="utf-8") as log:
                 traceback.print_exception(error, file=log)

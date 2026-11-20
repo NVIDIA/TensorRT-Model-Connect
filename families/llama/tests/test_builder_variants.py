@@ -145,6 +145,83 @@ def test_embed_input() -> None:
     assert "logits" in outputs
 
 
+@pytest.mark.parametrize("precision", ["fp32", "fp16"])
+def test_single_forward_graph_matches_bidirectional_reference(
+    tmp_path, record_property, monkeypatch, precision,
+):
+    import torch
+    from transformers import LlamaConfig, LlamaForCausalLM
+    from ..checkpoint_mapper import load_standard_weights
+    from ..dual_profile_decoder_builder import build_dual_profile_decoder_engine
+    from ..model import _build_engine
+
+    # A reproducible local checkpoint keeps graph coverage independent of model downloads.
+    torch.manual_seed(0)
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
+    hf_config = LlamaConfig(
+        vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=2,
+        num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=16,
+        rms_norm_eps=1e-5, rope_theta=10000.0, tie_word_embeddings=False,
+    )
+    hf_config._attn_implementation = "eager"
+    reference = LlamaForCausalLM(hf_config).float().eval()
+    reference.save_pretrained(tmp_path)
+    config = ModelConfig.from_dir(tmp_path)
+    weights = load_standard_weights(tmp_path, config)
+    with pytest.raises(ValueError, match="single forward pass does not support ALiBi"):
+        build_dual_profile_decoder_engine(
+            config, weights, 16, single_forward=True, profile_mode="prefill", position_type="alibi",
+        )
+    plan = _build_engine(config, weights, 16, precision=precision, verbose=False, single_forward=True)
+    inputs, outputs = _io_names(plan)
+    assert inputs == {"token_id", "position_id", "attention_mask"}
+    assert outputs == {"logits"}  # No cache inputs or outputs.
+    engine = _deserialize(plan)
+    assert engine.num_optimization_profiles == 1
+    context = engine.create_execution_context()
+    record_property("checkpoint", "generated LlamaForCausalLM, torch seed 0")
+    record_property("config", hf_config.to_json_string())
+    record_property("precision", precision)
+    record_property("torch_version", torch.__version__)
+    record_property("output_shape", [4, config.vocab_size])
+
+    stream = torch.cuda.Stream()
+    actual_rows, expected_rows = [], []
+    with torch.inference_mode(), torch.cuda.stream(stream):
+        reference = reference.cuda()
+        for ids in ([2, 5, 7, 11], [2, 5, 7, 13], [2, 5], [2, 5, 7, 11]):
+            length = len(ids)
+            tensors = {
+                "token_id": torch.tensor(ids, device="cuda", dtype=torch.int32),
+                "position_id": torch.arange(length, device="cuda", dtype=torch.int32),
+                "attention_mask": torch.zeros((length, length), device="cuda", dtype=torch.float32),
+            }
+            for name, tensor in tensors.items():
+                assert context.set_input_shape(name, tuple(tensor.shape))
+            assert tuple(context.get_tensor_shape("logits")) == (length, config.vocab_size)
+            tensors["logits"] = torch.empty(
+                (length, config.vocab_size), device="cuda", dtype=torch.float32,
+            )
+            for name, tensor in tensors.items():
+                assert context.set_tensor_address(name, tensor.data_ptr())
+            assert context.execute_async_v3(stream.cuda_stream)
+            expected = reference(
+                input_ids=tensors["token_id"][None].long(),
+                position_ids=tensors["position_id"][None].long(),
+                attention_mask=tensors["attention_mask"][None, None],
+                use_cache=False, is_causal=False,
+            ).logits[0]
+            stream.synchronize()
+            actual_rows.append(tensors["logits"].cpu().numpy().copy())
+            expected_rows.append(expected.cpu().numpy())
+            atol, rtol = (0.002, 0.002) if precision == "fp32" else (0.1, 0.02)
+            np.testing.assert_allclose(actual_rows[-1], expected_rows[-1], atol=atol, rtol=rtol)
+    # Changing only a future token must affect the first row in both implementations.
+    for rows in (actual_rows, expected_rows):
+        assert not np.allclose(rows[0][0], rows[1][0], atol=1e-5, rtol=0)
+    np.testing.assert_array_equal(actual_rows[0], actual_rows[-1])
+
+
 def _edge_cli_source(tmp_path):
     import json
 
@@ -168,6 +245,7 @@ def test_edge_cli_uses_ordinary_family_build(tmp_path, monkeypatch, precision):
 
     def paired(request, writer, execution):
         assert isinstance(request, LlamaBuildRequest)
+        assert request.edge_builder_python == tmp_path / "edge-python"
         assert request.execution is execution
         assert execution.variant == "eagle3"
         assert [(item.role, item.model_dir) for item in execution.checkpoints] == [("draft", draft)]
@@ -179,6 +257,7 @@ def test_edge_cli_uses_ordinary_family_build(tmp_path, monkeypatch, precision):
     options = ["--precision", precision] if precision else []
     assert build_cli.main(["llama",
         "build", str(source), *options, "-o", str(output),
+        "--edge-builder-python", str(tmp_path / "edge-python"),
         "--execution-variant", "eagle3", "--companion", f"draft={draft}",
     ]) == 0
     assert len(seen) == 1
@@ -286,6 +365,110 @@ def test_edge_pair_requires_draft_and_rechecks_local_inputs(tmp_path):
             build_paired(request, None, execution)
 
 
+@pytest.mark.parametrize("weight_format", ["FP8", "NVFP4"])
+def test_prepared_linear_retains_source_bytes_and_activation_scales(tmp_path, weight_format):
+    import json
+    import numpy as np
+    import torch
+    from safetensors.torch import save_file
+    from families.llama import checkpoint_mapper as mapper
+    from families.llama.prepared_quantization import PreparedLinear, checkpoint_format
+
+    (tmp_path / "hf_quant_config.json").write_text(json.dumps(
+        {"producer": {"name": "modelopt"},
+         "quantization": {"quant_algo": weight_format, "group_size": 16}}))
+    prefix = "model.layers.0.self_attn.k_proj"
+    if weight_format == "FP8":
+        raw = torch.ones(8, 16).to(torch.float8_e4m3fn)
+        scales = torch.tensor([0.25])
+    else:
+        raw = torch.full((8, 8), 0x32, dtype=torch.uint8)
+        scales = torch.ones(8, 1).to(torch.float8_e4m3fn)
+    tensors = {prefix + ".weight": raw, prefix + ".weight_scale": scales,
+               prefix + ".input_scale": torch.tensor([0.125])}
+    if weight_format == "NVFP4":
+        tensors[prefix + ".weight_scale_2"] = torch.tensor([0.5])
+    save_file(tensors, str(tmp_path / "model.safetensors"))
+    readers = mapper._open_safetensors(tmp_path)
+    value = mapper._load_tensor(readers, prefix + ".weight")
+    assert isinstance(value, PreparedLinear) and value.shape == (8, 16)
+    np.testing.assert_array_equal(value.packed, raw.view(torch.uint8).numpy())
+    np.testing.assert_array_equal(value.input_scale, [0.125])
+    transposed = mapper._transpose_2d(value, prefix, precision="fp16")
+    assert transposed.shape == (16, 8) and transposed.packed is value.packed
+    assert checkpoint_format(tmp_path) == weight_format.lower()
+    with pytest.raises(ValueError, match="already transposed"):
+        transposed.transpose()
+    # Installed builders do not require Torch merely to read prepared sources.
+    import subprocess
+    import sys
+    code = """
+import builtins
+import sys
+from pathlib import Path
+original_import = builtins.__import__
+def no_torch(name, *args, **kwargs):
+    if name == "torch" or name.startswith("torch."):
+        raise AssertionError("Prepared native source reading imported Torch")
+    return original_import(name, *args, **kwargs)
+builtins.__import__ = no_torch
+from families.llama import checkpoint_mapper as mapper
+readers = mapper._open_safetensors(Path(sys.argv[1]))
+weight = mapper._load_tensor(readers, "model.layers.0.self_attn.k_proj.weight")
+assert weight.shape == (8, 16)
+assert "torch" not in sys.modules
+"""
+    from pathlib import Path
+    subprocess.run([sys.executable, "-c", code, str(tmp_path)], check=True,
+                   cwd=Path(__file__).resolve().parents[3])
+    del tensors[prefix + ".input_scale"]
+    with pytest.raises(KeyError):
+        PreparedLinear.from_tensor(value.packed, prefix + ".weight", tensors.__getitem__)
+
+
+def test_edge_eagle3_falls_back_to_native_with_original_pair(tmp_path, monkeypatch):
+    import json
+    from dataclasses import replace
+    from unittest.mock import Mock
+    from families.llama.build_request import BuildRequest
+    from families.llama.edge_llm import dispatch
+    from families.llama.edge_llm.config import BuildExecutionInputs, NamedCheckpoint
+    from families.llama.speculative import build as speculative
+
+    source, draft = _edge_cli_source(tmp_path)
+    base = dict(model_type="llama", architectures=["LlamaForCausalLM"],
+                num_hidden_layers=32, hidden_size=4096, intermediate_size=14336,
+                num_attention_heads=32, num_key_value_heads=8, vocab_size=128256,
+                max_position_embeddings=131072, torch_dtype="bfloat16")
+    (source / "config.json").write_text(json.dumps(base))
+    (draft / "config.json").write_text(json.dumps(
+        dict(base, num_hidden_layers=1, draft_vocab_size=32000, max_position_embeddings=2048)))
+    request = BuildRequest(source, tmp_path / "out", "llama", "text_generation",
+                           "fp16", max_sequence_length=256)
+    writer, build_native = Mock(), Mock()
+    monkeypatch.setattr(speculative, "build_speculative", build_native)
+
+    def unavailable(original, output, native, *, draft_dir):
+        assert draft_dir == draft
+        native(original, output)
+
+    route = Mock(side_effect=unavailable)
+    monkeypatch.setattr(dispatch, "build", route)
+    execution = BuildExecutionInputs("eagle3", (NamedCheckpoint("draft", draft),))
+    for quantization in ("fp8", "nvfp4", "int4_awq"):
+        with pytest.raises(ValueError, match="EAGLE3.*quantization"):
+            dispatch.build_paired(replace(request, quantization=quantization), writer, execution)
+    route.assert_not_called()
+    build_native.assert_not_called()
+    dispatch.build_paired(request, writer, execution)
+    build_native.assert_called_once_with(
+        model_dir=source, draft_dir=draft, output=request.output_path,
+        max_sequence_length=256, max_query=64, draft_depth=6, verbose=False,
+        _writer=writer)
+    writer.finish.assert_not_called()
+    writer.abort.assert_not_called()
+
+
 @pytest.mark.parametrize("weight_format", ["fp16", "fp8", "nvfp4"])
 @pytest.mark.parametrize("mode", ["absent", "success", "corrupt", "failure", "cancel", "device_failure"])
 def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, caplog, mode, weight_format):
@@ -378,30 +561,64 @@ def test_edge_optional_package_and_output_local_staging(tmp_path, monkeypatch, c
         # An installed wheel supplies Python tooling, never the native C++ SDK.
         from types import SimpleNamespace
 
-        package = {"python": "/sdk/private/python"}
+        # An externally installed 0.12 native SDK declares its release but
+        # cannot attest a source commit. An absent field is not an attestation.
+        if weight_format == "fp16":
+            target.update(cuda_version="13.3", tensorrt_version="11.4.0.106")
+            (prefix / "plugin.so").touch()
+            (prefix / "python").touch()
+            for version, (schema, key, pin, _) in builder._RELEASES.items():
+                metadata = dict(version=version, schema_version=schema, arch=target["arch"],
+                                cuda_version=target["cuda_version"], architectures=[target["sm"]],
+                                tensorrt_version=target["tensorrt_version"],
+                                plugin="plugin.so", python="python")
+                for value in (pin, None, "unknown"):
+                    manifest.write_text(json.dumps({**metadata, key: value}))
+                    if value == pin or (version == "0.12.0" and value is None):
+                        assert builder.installed_package(target)[key] == value
+                    else:
+                        with pytest.raises(ValueError, match="source revision"):
+                            builder.installed_package(target)
+                manifest.write_text(json.dumps(metadata))
+                with pytest.raises(ValueError, match="source revision"):
+                    builder.installed_package(target)
+
         platform = {"tensorrt_version": "11.1.0.106"}
-        responses = iter([
-            '["0.11.0", "11.1.0.106"]',
-            '["0.10.1", "11.1.0.106"]',
-            '["0.11.0", "11.0.0.114"]',
-            "not JSON",
-        ])
-        def probe(command, **kwargs):
-            assert command[0] == builder.sys.executable
-            assert command[1:3] == ["-I", "-c"]
-            assert kwargs == dict(check=True, capture_output=True, text=True, timeout=30)
-            return SimpleNamespace(stdout=next(responses))
+        for release in ("0.11.0", "0.12.0"):
+            package = {"version": release}
+            if release == "0.11.0":
+                package["python"] = "/sdk/private/python"
+            responses = iter([
+                f'["{release}", "11.1.0.106"]',
+                '["0.10.1", "11.1.0.106"]',
+                f'["{release}", "11.0.0.114"]',
+                "not JSON",
+            ])
 
-        monkeypatch.setattr(builder.subprocess, "run", probe)
-        assert builder.builder_python(package, platform) == builder.sys.executable
-        for _ in range(3):
-            assert builder.builder_python(package, platform) == package["python"]
+            def probe(command, **kwargs):
+                assert command[:3] == [builder.sys.executable, "-I", "-c"]
+                assert ("5.17.0" in command[3]) == (release == "0.12.0")
+                assert kwargs == dict(check=True, capture_output=True, text=True, timeout=30)
+                return SimpleNamespace(stdout=next(responses))
 
-        def unavailable(*args, **kwargs):
-            raise builder.subprocess.TimeoutExpired("python", 30)
+            monkeypatch.setattr(builder.subprocess, "run", probe)
+            assert builder.builder_python(package, platform) == builder.sys.executable
 
-        monkeypatch.setattr(builder.subprocess, "run", unavailable)
-        assert builder.builder_python(package, platform) == package["python"]
+            def check_incompatible_tool():
+                if release == "0.11.0":
+                    assert builder.builder_python(package, platform) == package["python"]
+                else:
+                    with pytest.raises(ValueError, match="--edge-builder-python"):
+                        builder.builder_python(package, platform)
+
+            for _ in range(3):
+                check_incompatible_tool()
+
+            def unavailable(*args, **kwargs):
+                raise builder.subprocess.TimeoutExpired("python", 30)
+
+            monkeypatch.setattr(builder.subprocess, "run", unavailable)
+            check_incompatible_tool()
 
 
 def test_edge_windows_nonmatch_does_not_probe_compiler(tmp_path, monkeypatch, caplog):

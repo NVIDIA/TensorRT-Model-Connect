@@ -5,3 +5,6 @@
 candidate:
   build: {name: deepseek-v2-tiny-qual, max_sequence_length: 512}
 absolute: [mmlu]
+
+reference:
+  mode: eager  # torch.compile: Dynamo cannot trace the MoE experts' torch._grouped_mm

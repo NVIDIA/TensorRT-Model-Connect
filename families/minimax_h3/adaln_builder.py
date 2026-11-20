@@ -63,6 +63,10 @@ def build_adaln_precompute_engine(
     )
     # Match PyTorch's default FP32 matmul policy used by the reference.
     config.clear_flag(trt.BuilderFlag.TF32)
+    # Timing picks between FP32 GEMM tactics whose reduction orders differ, and
+    # the modulation differences grow into a different video over the
+    # denoising steps. Time one tactic so every build selects the same kernels.
+    config.max_num_tactics = 1
 
     features = network.add_input(
         "timestep_features",

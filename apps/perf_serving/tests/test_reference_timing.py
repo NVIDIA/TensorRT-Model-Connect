@@ -25,7 +25,7 @@ class Adapter:
 
 def backend(adapter):
     instance = object.__new__(ReferenceBackend)
-    instance._adapter = adapter
+    instance._adapter, instance._spec = adapter, common.ReferenceSpec(operation="classify", model="m")
     return instance
 
 

@@ -11,6 +11,7 @@ import tensorrt as trt
 from . import graph_ops
 from .checkpoint import WeightDict, _transpose_2d
 from .model_config import ModelConfig
+from .quantization import calibrate_parakeet, reject_prequantized
 from .fastconformer import _build_encoder, _compute_enc_seq_len, _compute_causal_enc_seq_len, _relative_pe, _to_np
 
 
@@ -360,10 +361,14 @@ def _build_mel_filterbank(weights: WeightDict, *, verbose: bool = False) -> byte
     return header.tobytes() + filters_flat.tobytes()
 
 
-def _load_weights(model_dir: str, config: ModelConfig, *, precision: str = "fp32") -> tuple[WeightDict, dict]:
+def _load_weights(
+    model_dir: str, config: ModelConfig, *, precision: str = "fp32", quantization: str | None = None
+) -> tuple[WeightDict, dict]:
     del precision
     w = WeightDict()
     sd, ncfg = _load_hf_as_nemo(model_dir)
+    if quantization is not None:
+        reject_prequantized(sd)
 
     ec = ncfg.get("encoder", {})
     defaults = ncfg.get("model_defaults", {})
@@ -595,14 +600,28 @@ def _load_weights(model_dir: str, config: ModelConfig, *, precision: str = "fp32
     return w, {**frontend, **runtime}
 
 
-def compile_engines(model_dir: Path, *, precision: str, verbose: bool):
+def compile_engines(
+    model_dir: Path, *, precision: str, verbose: bool, quantization: str | None = None
+):
     config = ModelConfig.from_dir(model_dir)
-    weights, runtime = _load_weights(str(model_dir), config, precision=precision)
+    # ``quantization`` is passed on only when set, so unquantized builds call the
+    # loader and the graph builders exactly as before.
+    quant_kwargs = {} if quantization is None else {"quantization": quantization}
+    weights, runtime = _load_weights(str(model_dir), config, precision=precision, **quant_kwargs)
+    encoder_kwargs = {}
+    if quantization is not None:
+        from .config import ParakeetTDTConfig
+
+        encoder_kwargs["quant_ctx"] = calibrate_parakeet(
+            weights, graph_ops, quantization, ParakeetTDTConfig.from_dir(model_dir)
+        )
     mel = _build_mel_filterbank(weights, verbose=verbose)
     if mel is None:
         raise RuntimeError("Parakeet TDT requires a mel filterbank")
     plans = {
-        "encoder.plan": _build_encoder(config, weights, precision=precision, verbose=verbose),
+        "encoder.plan": _build_encoder(
+            config, weights, precision=precision, verbose=verbose, **encoder_kwargs
+        ),
         "predictor.plan": _build_predictor(weights, precision=precision, verbose=verbose),
         "joint.plan": _build_joint(weights, precision=precision, verbose=verbose),
         "mel_filterbank": mel,

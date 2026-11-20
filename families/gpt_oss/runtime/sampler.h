@@ -21,12 +21,13 @@ struct GptOssSamplingParams {
     float min_p{0.0f}; // 0.0 = disabled; filters tokens below min_p * max_prob
     int32_t seed{-1};  // -1 = deterministic (argmax)
     int32_t eos_token_id{-1};
+    std::vector<int32_t> eos_token_ids;
 };
 
 /// Token selection result.
 struct GptOssSampleResult {
     int32_t token_id{0};
-    bool is_eos{false}; // true if token_id matches eos_token_id
+    bool is_eos{false};
 };
 
 /// gpt_oss-owned sampler interface.
@@ -48,8 +49,9 @@ class GptOssISampler {
 /// Forward-declared here; defined in sampler.cpp alongside the factory.
 struct TextGenerationConfig; // defined in trtmc/task.h
 
-GptOssSamplingParams gpt_oss_sampling_params_from_config(const TextGenerationConfig& cfg,
-                                                         int32_t default_eos = -1);
+GptOssSamplingParams
+gpt_oss_sampling_params_from_config(const TextGenerationConfig& cfg, int32_t default_eos = -1,
+                                    const std::vector<int32_t>& default_eos_ids = {});
 
 /// Create the exact host sampler selected by the request.
 std::unique_ptr<GptOssISampler> create_gpt_oss_sampler(const GptOssSamplingParams& params);

@@ -25,7 +25,11 @@ from .model_config import (
 )
 
 
-_PRECISION = "mixed_bf16_fp32"
+_PRECISION = "fp16"
+# Compute type of the GEMM, convolution and attention paths per precision. Both keep layer
+# norms, softmax-sensitive reductions and the runtime float outputs in FP32, and both keep the
+# BF16 runtime interface tensors (FPN levels 0 and 1, box maps, memory features).
+_HALF_TYPES = {"fp16": "float16", "mixed_bf16_fp32": "bfloat16"}
 _PUBLIC_CORE_VARIANT = "public_sam2_1_small_with_synthetic_bbox_v1"
 _DEFAULT_WORKSPACE_BYTES = 8 << 30
 _GENERIC_EMBED_CANDIDATES = (
@@ -123,9 +127,13 @@ class _Sam2Model:
     default_build_precision = _PRECISION
 
     @staticmethod
-    def _require_precision(precision: str) -> None:
-        if precision != _PRECISION:
-            raise ValueError(f"SAM2 supports only {_PRECISION!r} precision, got {precision!r}")
+    def _require_precision(precision: str) -> Any:
+        if precision not in _HALF_TYPES:
+            raise ValueError(
+                f"SAM2 supports only {', '.join(map(repr, _HALF_TYPES))} precision, "
+                f"got {precision!r}"
+            )
+        return getattr(trt, _HALF_TYPES[precision])
 
     def load_weights(
         self, model_dir: str, _config: Any, *, precision: str = _PRECISION
@@ -160,12 +168,15 @@ class _Sam2Model:
         precision: str = _PRECISION,
         verbose: bool = False,
     ) -> bytes:
-        self._require_precision(precision)
+        half = self._require_precision(precision)
         from .image_builder import populate_image_network
+
+        def populate(trt: Any, network: Any, source: Checkpoint) -> Any:
+            return populate_image_network(trt, network, source, half)
 
         return _serialize(
             _checkpoint(weights),
-            populate_image_network,
+            populate,
             expected_inputs=1,
             expected_outputs=9,
             section="engine_plan",
@@ -181,7 +192,7 @@ class _Sam2Model:
         precision: str = _PRECISION,
         verbose: bool = False,
     ) -> dict[str, bytes]:
-        self._require_precision(precision)
+        half = self._require_precision(precision)
         from .tracker_builder import populate_tracker_network
 
         checkpoint = _checkpoint(weights)
@@ -191,7 +202,7 @@ class _Sam2Model:
             def populate(
                 trt: Any, network: Any, source: Checkpoint, h: int = history_frames
             ) -> Any:
-                return populate_tracker_network(trt, network, source, h)
+                return populate_tracker_network(trt, network, source, h, half)
 
             plans[section] = _serialize(
                 checkpoint,

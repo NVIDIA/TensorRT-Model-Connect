@@ -14,9 +14,10 @@ from pathlib import Path
 import pytest
 import numpy as np
 from tensorrt_model_connect import BuildRequest, build
+from families.modernbert.config import ModelConfig, resolve_attention_contract
 
 FAMILY = "modernbert"
-TASKS = frozenset({"encoding"})
+TASKS = frozenset({"text_to_pooled_features"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 THRESHOLD_ROOT = TEST_ROOT / "thresholds"
@@ -155,14 +156,11 @@ def _run_json(
     command: str,
     *arguments: str,
 ) -> dict:
-    invocation = [
-        str(binary),
-        command,
-        str(bundle),
-        "--runtime-root",
-        str(runtime_root),
-        *arguments,
-    ]
+    invocation = (
+        [str(binary), command, str(bundle), "--runtime-root", str(runtime_root), *arguments]
+        if command
+        else [str(binary), str(bundle), str(runtime_root), *arguments]
+    )
     if int(manifest["tensor_parallel_size"]) > 1:
         mpirun = shutil.which("mpirun")
         assert mpirun, "selected multi-GPU E2E requires mpirun"
@@ -248,10 +246,21 @@ def _native(
     case: dict,
     tmp_path: Path,
 ):
-    manifest["task"]
-    return _run_json(
+    native_build = _required_path(os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR")
+    cli = _run_json(
         binary, runtime_root, bundle, manifest, case, "encode", "--text", _case_text(case)
     )
+    for language in ("c", "cpp"):
+        consumer = _required_path(
+            str(native_build / f"test_modernbert_sdk_{language}"),
+            f"ModernBERT public {language} consumer",
+        )
+        result = _run_json(consumer, runtime_root, bundle, manifest, case, "", _case_text(case))
+        record_evidence("native", {"consumer": language, "result": result})
+        assert result["task"] == manifest["task"]
+        assert result["pooling"] == "cls" and result["normalization"] == "none"
+        np.testing.assert_allclose(result["values"], cli["values"], rtol=1e-6, atol=1e-7)
+    return cli
 
 
 def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: Path):
@@ -260,8 +269,18 @@ def _official_reference(model_dir: Path, manifest: dict, case: dict, tmp_path: P
     from transformers import AutoModel, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(model_dir, trust_remote_code=True)
+    encoded = tokenizer(_case_text(case), return_tensors="pt", truncation=False)
+    if case.get("exercise_local_window"):
+        contract = resolve_attention_contract(ModelConfig.from_dir(model_dir))
+        assert any(layer in {"sliding_attention", "local_attention"} for layer in contract.layer_types)
+        length = int(encoded["input_ids"].shape[-1])
+        assert length > 2 * contract.sliding_window + 1, (
+            "local-window E2E input must span both sides of the local window"
+        )
+        assert length <= manifest["max_sequence_length"], (
+            "local-window E2E input exceeds the native profile"
+        )
     device = torch.device("cuda")
-    encoded = tokenizer(_case_text(case), return_tensors="pt", truncation=True)
     model = (
         AutoModel.from_pretrained(
             model_dir, trust_remote_code=True, torch_dtype=_torch_dtype(case["reference_precision"])

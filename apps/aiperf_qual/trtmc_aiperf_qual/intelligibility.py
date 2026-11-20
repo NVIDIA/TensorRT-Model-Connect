@@ -6,10 +6,10 @@ Text-to-speech models that sample (Bark, MagpieTTS) produce a different waveform
 of random numbers, so per-sample parity with the native model cannot judge them. Both sides speak
 the same sentences; an ASR model transcribes both, and TRTMC's corpus word error rate against the text
 is judged against the native model's by the paired bootstrap (``noninferiority``, the check's gate).
-Every TRTMC output must also be valid audio (``tts-validity``): finite and not silent, and over the suite
-TRTMC's durations match the native model's (the median per-sentence ratio within VALID_DURATION_RATIO: a
-sampling model's single utterance may run to its length limit on either side). Voice identity and prosody are
-not covered.
+Every TRTMC output must also be valid audio (``tts-validity``): finite and not silent unless the native model
+is silent for the same request, and over the suite TRTMC's durations match the native model's (the median
+per-sentence ratio within VALID_DURATION_RATIO: a sampling model's single utterance may run to its length limit
+on either side). Voice identity and prosody are not covered.
 """
 
 from __future__ import annotations
@@ -70,7 +70,7 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
 
     suite = build_suite(model_suite(check["suite"], model), environment)
     reuse = bool(check.get("reuse_outputs"))
-    native, _, _ = generate_native(environment, model, suite, python, out, "tts", reuse=reuse)
+    native, *_ = generate_native(environment, model, suite, python, out, "tts", reuse=reuse)
     audio = {side: [_audio(workdir, record) for workdir, record in outputs] for side, outputs in (
         ("candidate", generate(environment, model, "trtmc", out / "tts-candidate", suite, reuse=reuse)), ("native", native))}
     heard = {}
@@ -99,19 +99,22 @@ def run(environment: Environment, model: dict[str, Any], check: Mapping[str, Any
 def validity(problems: list[dict[str, Any]], candidate: list[Mapping[str, Any] | None],
              native: list[Mapping[str, Any] | None]) -> dict[str, Any]:
     """Every TRTMC output is finite and not silent; the median of TRTMC's per-sentence duration ratios to the
-    native outputs lies within VALID_DURATION_RATIO (outliers are reported, not failed: sampling). Without a
-    sentence both sides voiced, the check has no duration evidence: an error."""
+    native outputs lies within VALID_DURATION_RATIO (outliers are reported, not failed: sampling). A sentence
+    silent on both sides is the model's own output for that request, not a conversion defect: it is reported,
+    not failed. Without a sentence both sides voiced (silent sentences give no duration ratio), the check has no
+    duration evidence: an error."""
     low, high = VALID_DURATION_RATIO
-    failures, ratios = [], []
+    failures, ratios, shared_silence = [], [], []
     for problem, mine, theirs in zip(problems, candidate, native):
         reason = ("no audio" if not mine else "non-finite samples" if not mine["finite"]
+                  else "empty audio" if not mine.get("seconds")
                   else f"silent ({mine['dbfs']:.1f} dBFS)" if mine["dbfs"] < SILENCE_DBFS else None)
-        if reason:
+        if reason and _silent(mine) and _silent(theirs):
+            shared_silence.append(problem["sample_id"])
+        elif reason:
             failure = {"sample_id": problem["sample_id"], "explanation": reason}
             if theirs:
                 failure["native_audio"] = {key: theirs.get(key) for key in ("finite", "dbfs", "seconds")}
-                if theirs.get("finite") and theirs.get("dbfs") is not None and theirs["dbfs"] < SILENCE_DBFS:
-                    failure["explanation"] += f"; native also silent ({theirs['dbfs']:.1f} dBFS)"
             failures.append(failure)
         elif theirs and theirs.get("seconds"):
             ratios.append(mine["seconds"] / theirs["seconds"])
@@ -123,6 +126,9 @@ def validity(problems: list[dict[str, Any]], candidate: list[Mapping[str, Any] |
         reasons.append(f"median duration ratio {median:.2f} outside {low}..{high}")
     notes = [f"median duration ratio {median:.2f}; {outside} of {len(ratios)} sentences beyond {low}..{high} "
              "(sampling)"] if median is not None else []
+    if shared_silence:
+        notes.append(f"{len(shared_silence)} of {count} sentences silent on both sides (the model's own output): "
+                     + ", ".join(shared_silence[:10]))
     error = None if reasons or ratios else "no sentence with both TRTMC and native audio to compare durations"
     return {"suite": "tts-validity", "source": "task", "benchmark": "audio validity (finite, not silent, duration)",
             "samples": count, "expected_samples": count, "passed": count - len(failures), "required_passes": count,
@@ -130,3 +136,9 @@ def validity(problems: list[dict[str, Any]], candidate: list[Mapping[str, Any] |
             "failures": failures[:10], "reasons": reasons, "notes": notes,
             "metrics": {"median_duration_ratio": median} if median is not None else {},
             "gate": {"min_dbfs": SILENCE_DBFS, "median_duration_ratio": list(VALID_DURATION_RATIO)}}
+
+
+def _silent(audio: Mapping[str, Any] | None) -> bool:
+    """Finite audio with samples, quieter than SILENCE_DBFS (empty audio is not silence)."""
+    return bool(audio and audio.get("finite") and audio.get("seconds") and audio.get("dbfs") is not None
+                and audio["dbfs"] < SILENCE_DBFS)

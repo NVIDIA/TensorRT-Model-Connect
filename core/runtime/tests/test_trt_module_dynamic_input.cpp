@@ -15,6 +15,27 @@
 #include <memory>
 #include <stdexcept>
 
+namespace trtmc {
+
+class TrtModuleImplTestPeer {
+  public:
+    static DType from_trt_dtype(nvinfer1::DataType dtype) {
+        return TrtModuleImpl::from_trt_dtype(dtype);
+    }
+    static void validate_io_tensor_format(nvinfer1::DataType dtype, nvinfer1::TensorFormat format) {
+        TrtModuleImpl::validate_io_tensor_format(dtype, format);
+    }
+    static bool has_no_bindings_or_buffers(const TrtModuleImpl& module) {
+        return module.initial_external_bindings_.empty() && module.buffers_.empty();
+    }
+    static std::size_t allocation_bytes(const nvinfer1::Dims& dims, DType dtype) {
+        std::vector<int64_t> shape;
+        return TrtModuleImpl::compute_alloc_bytes(dims, dtype, shape);
+    }
+};
+
+} // namespace trtmc
+
 namespace {
 
 int failures = 0;
@@ -26,18 +47,54 @@ void check(bool condition, const char* name) {
     }
 }
 
-trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity(bool dynamic) {
+void test_fp8_tensor_storage_and_mapping() {
+    const auto dtype = trtmc::TrtModuleImplTestPeer::from_trt_dtype(nvinfer1::DataType::kFP8);
+    check(dtype == trtmc::DType::kFloat8E4M3, "TensorRT FP8 maps to E4M3, not float32");
+    check(trtmc::dtype_size(dtype) == 1, "E4M3 elements occupy one byte");
+    uint8_t values[] = {0x00, 0x38, 0xb8, 0x7e, 0xfe, 0x01};
+    const trtmc::Tensor tensor{values, {2, 3}, dtype};
+    check(tensor.numel() == 6 && tensor.nbytes() == sizeof(values),
+          "FP8 host tensor sizes use byte storage");
+    check(trtmc::TrtModuleImplTestPeer::allocation_bytes(nvinfer1::Dims{2, {2, 3}}, dtype) ==
+              sizeof(values),
+          "FP8 engine buffer allocation uses byte storage");
+    check(trtmc::TrtModuleImplTestPeer::from_trt_dtype(nvinfer1::DataType::kINT8) ==
+              trtmc::DType::kInt8,
+          "signed integer storage remains distinct from E4M3");
+    trtmc::TrtModuleImplTestPeer::validate_io_tensor_format(nvinfer1::DataType::kFP8,
+                                                            nvinfer1::TensorFormat::kLINEAR);
+    for (const auto format : {nvinfer1::TensorFormat::kHWC16, nvinfer1::TensorFormat::kCHW32}) {
+        bool rejected = false;
+        try {
+            trtmc::TrtModuleImplTestPeer::validate_io_tensor_format(nvinfer1::DataType::kFP8,
+                                                                    format);
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        check(rejected, "FP8 vectorized I/O is rejected before byte-buffer allocation");
+    }
+}
+
+trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity(bool dynamic,
+                                                          bool vectorized_fp8 = false) {
     static trtmc::TrtLogger logger;
     auto builder = trtmc::TrtUniquePtr<nvinfer1::IBuilder>(nvinfer1::createInferBuilder(logger));
     if (!builder)
         return nullptr;
     auto network = trtmc::TrtUniquePtr<nvinfer1::INetworkDefinition>(builder->createNetworkV2(0));
     auto config = trtmc::TrtUniquePtr<nvinfer1::IBuilderConfig>(builder->createBuilderConfig());
-    auto* input = network->addInput("input", nvinfer1::DataType::kFLOAT,
-                                    nvinfer1::Dims{1, {dynamic ? -1 : 4}});
+    const auto dtype = vectorized_fp8 ? nvinfer1::DataType::kFP8 : nvinfer1::DataType::kFLOAT;
+    const auto dims =
+        vectorized_fp8 ? nvinfer1::Dims{4, {1, 4, 1, 1}} : nvinfer1::Dims{1, {dynamic ? -1 : 4}};
+    auto* input = network->addInput("input", dtype, dims);
     auto* identity = network->addIdentity(*input);
     identity->getOutput(0)->setName("output");
     network->markOutput(*identity->getOutput(0));
+    if (vectorized_fp8) {
+        const auto formats = 1U << static_cast<unsigned>(nvinfer1::TensorFormat::kHWC16);
+        input->setAllowedFormats(formats);
+        identity->getOutput(0)->setAllowedFormats(formats);
+    }
 
     if (dynamic) {
         auto* profile = builder->createOptimizationProfile();
@@ -54,6 +111,56 @@ trtmc::TrtUniquePtr<nvinfer1::ICudaEngine> build_identity(bool dynamic) {
     auto runtime = trtmc::TrtUniquePtr<nvinfer1::IRuntime>(nvinfer1::createInferRuntime(logger));
     return trtmc::TrtUniquePtr<nvinfer1::ICudaEngine>(
         runtime->deserializeCudaEngine(plan->data(), plan->size()));
+}
+
+void check_vectorized_fp8_rejected(nvinfer1::ICudaEngine& engine, cudaStream_t stream,
+                                   void* external, bool prebind) {
+    std::vector<trtmc::ModuleExternalBinding> bindings;
+    if (prebind)
+        bindings.push_back({"input", external, 16});
+    auto* context = engine.createExecutionContext();
+    check(context != nullptr, "FP8 fixture creates a valid context before rejection");
+    if (!context)
+        return;
+    trtmc::TrtModuleImpl module(&engine, context, stream, 0, nullptr, bindings);
+    check(!module.ok(), "constructor rejects non-linear FP8 I/O");
+    check(trtmc::TrtModuleImplTestPeer::has_no_bindings_or_buffers(module),
+          "constructor rejects FP8 format before prebinding or buffer allocation");
+    check(module.device_ptr("input") == nullptr && module.device_ptr("output") == nullptr,
+          "rejected FP8 module exposes no device buffers");
+}
+
+void test_constructor_rejects_vectorized_fp8(cudaStream_t stream) {
+    // The storage checks above run everywhere. This real-engine fixture needs
+    // FP8 tactics (compute capability 8.9 or newer), not merely byte storage.
+    int device = 0;
+    cudaDeviceProp properties{};
+    if (cudaGetDevice(&device) != cudaSuccess ||
+        cudaGetDeviceProperties(&properties, device) != cudaSuccess) {
+        check(false, "FP8 fixture can query the current CUDA device");
+        return;
+    }
+    if (properties.major * 10 + properties.minor < 89) {
+        std::cout << "SKIP: FP8 engine fixture requires FP8-capable TensorRT tactics\n";
+        return;
+    }
+    auto engine = build_identity(false, true);
+    check(engine != nullptr, "vectorized FP8 engine fixture builds");
+    if (!engine)
+        return;
+    for (const auto* name : {"input", "output"}) {
+        check(engine->getTensorDataType(name) == nvinfer1::DataType::kFP8 &&
+                  engine->getTensorFormat(name) == nvinfer1::TensorFormat::kHWC16,
+              "fixture really exposes vectorized FP8 I/O");
+    }
+    void* external = nullptr;
+    if (cudaMalloc(&external, 16) != cudaSuccess) {
+        check(false, "FP8 fixture can allocate a correctly padded external buffer");
+        return;
+    }
+    for (bool prebind : {false, true})
+        check_vectorized_fp8_rejected(*engine, stream, external, prebind);
+    cudaFree(external);
 }
 
 void test_first_forward_allocates_unbound_dynamic_input(nvinfer1::ICudaEngine& engine,
@@ -177,6 +284,9 @@ void test_short_external_static_upload_preserves_its_tail(nvinfer1::ICudaEngine&
 } // namespace
 
 int main() {
+    test_fp8_tensor_storage_and_mapping();
+    if (failures)
+        return failures;
     int device_count = 0;
     if (cudaGetDeviceCount(&device_count) != cudaSuccess || device_count == 0)
         return 77;
@@ -187,6 +297,7 @@ int main() {
     cudaStream_t stream = nullptr;
     if (cudaStreamCreate(&stream) != cudaSuccess)
         return 1;
+    test_constructor_rejects_vectorized_fp8(stream);
     test_first_forward_allocates_unbound_dynamic_input(*engine, stream);
     test_external_dynamic_input_stays_external(*engine, stream);
     test_backend_managed_graph_does_not_enable_nested_capture(*engine, stream);

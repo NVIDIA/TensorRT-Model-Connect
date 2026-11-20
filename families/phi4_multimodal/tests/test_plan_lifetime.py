@@ -10,7 +10,13 @@ from types import SimpleNamespace
 import pytest
 
 
-def test_each_plan_is_staged_and_released_before_the_next_build(tmp_path, monkeypatch):
+@pytest.mark.parametrize("algorithm,group,request_quant", [
+    (None, None, None), ("FP8", None, "fp8"), ("NVFP4", 16, "nvfp4"),
+    ("W4A16_AWQ", 128, "int4_awq"),
+])
+def test_each_plan_is_staged_and_released_before_the_next_build(
+    tmp_path, monkeypatch, algorithm, group, request_quant
+):
     pytest.importorskip("tensorrt")
     from families.phi4_multimodal import model
     from families.phi4_multimodal.edge_llm import dispatch
@@ -41,7 +47,8 @@ def test_each_plan_is_staged_and_released_before_the_next_build(tmp_path, monkey
             return {}
 
         @staticmethod
-        def build_engine(config, *_args, **_kwargs):
+        def build_engine(config, *_args, **kwargs):
+            assert (kwargs["quant_ctx"] is not None) == (algorithm is not None)
             return next_plan(config.raw["_decoder_engine_role"])
 
         @staticmethod
@@ -59,10 +66,18 @@ def test_each_plan_is_staged_and_released_before_the_next_build(tmp_path, monkey
         "model_type": "phi4mm", "hidden_size": 4, "num_hidden_layers": 1,
         "vocab_size": 8, "num_attention_heads": 1, "num_key_value_heads": 1,
     }))
+    if algorithm:
+        config = json.loads((tmp_path / "config.json").read_text())
+        config["quantization_config"] = {"quant_method": "modelopt", "quant_algo": algorithm}
+        (tmp_path / "config.json").write_text(json.dumps(config))
+        (tmp_path / "hf_quant_config.json").write_text(json.dumps({
+            "producer": {"name": "modelopt"},
+            "quantization": {"quant_algo": algorithm, "group_size": group},
+        }))
     request = SimpleNamespace(
         mtp_seq_len=None, dynamic_kv_cache=False, image_height=None, image_width=None,
-        video_num_frames=None, max_batch_size=1, context_parallel_size=1,
-        task="vision_language_generation", tensor_parallel_size=1, quantization=None,
+        video_num_frames=None, max_batch_size=2 if algorithm else 1, context_parallel_size=1,
+        task="vision_language_generation", tensor_parallel_size=1, quantization=request_quant,
         fp32_layers=(), model_dir=tmp_path, precision="fp16", max_sequence_length=768,
         verbose=False, backend="tensorrt",
     )

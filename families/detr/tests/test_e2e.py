@@ -15,7 +15,7 @@ import pytest
 from tensorrt_model_connect import BuildRequest, build
 
 FAMILY = "detr"
-TASKS = frozenset({"object_detection"})
+TASKS = frozenset({"image_to_boxes"})
 TEST_ROOT = Path(__file__).resolve().parent
 MANIFEST_ROOT = TEST_ROOT / "manifests"
 
@@ -288,7 +288,52 @@ def _assert_parity(actual: dict, expected: list[dict]) -> None:
         matched.add(best_match)
 
 
+def _sdk_detections(runtime_root: Path, bundle: Path, image: Path, tmp_path: Path) -> list[dict]:
+    """Run the public C and C++ consumers on the reference's own decoded pixels."""
+    import numpy as np
+    from PIL import Image
+
+    native_build = _required_path(
+        os.environ.get("TRTMC_NATIVE_BUILD_DIR"), "TRTMC_NATIVE_BUILD_DIR"
+    )
+    pixels = np.asarray(Image.open(image).convert("RGB"), dtype=np.float32) / np.float32(255.0)
+    raw = tmp_path / "sdk-input.rgb.f32"
+    np.ascontiguousarray(pixels).tofile(raw)
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = os.pathsep.join(
+        value for value in (str(runtime_root), env.get("LD_LIBRARY_PATH", "")) if value
+    )
+    outputs = []
+    for language in ("c", "cpp"):
+        consumer = native_build / f"test_detr_sdk_{language}"
+        assert consumer.is_file(), f"build the family-owned SDK consumer: {consumer.name}"
+        completed = subprocess.run(
+            [
+                str(consumer),
+                str(bundle),
+                str(runtime_root),
+                str(raw),
+                str(pixels.shape[0]),
+                str(pixels.shape[1]),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=600,
+        )
+        payloads = [line for line in completed.stdout.splitlines() if line.startswith("{")]
+        assert len(payloads) == 1, f"the {language} consumer must print one result"
+        result = json.loads(payloads[0])
+        assert result["task"] == "image_to_boxes"
+        assert (result["image_height"], result["image_width"]) == pixels.shape[:2]
+        outputs.append(result)
+    assert outputs[0] == outputs[1], "the C and C++ SDK consumers disagree"
+    return outputs
+
+
 def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
+    """Verify end-to-end detection output against official PyTorch reference and SDK consumers."""
     _, manifest, case = CASES[case_name]
     model_dir = _model_dir(manifest)
     binary, runtime_root = _runtime()
@@ -297,6 +342,8 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     actual = _native(binary, runtime_root, bundle, case)
     expected = _official_reference(model_dir, case)
     _assert_parity(actual, expected)
+    for sdk in _sdk_detections(runtime_root, bundle, _asset(case["test_image"]), tmp_path):
+        _assert_parity(sdk, expected)
 
     # The same bundle must accept images outside the original single fixture's
     # aspect ratio, with the official resize and unchanged parity criteria.
@@ -311,5 +358,7 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
             path = tmp_path / f"{name}.png"
             variant.save(path)
             variant_case = {**case, "test_image": str(path)}
-            _assert_parity(_native(binary, runtime_root, bundle, variant_case),
-                           _official_reference(model_dir, variant_case))
+            _assert_parity(
+                _native(binary, runtime_root, bundle, variant_case),
+                _official_reference(model_dir, variant_case),
+            )

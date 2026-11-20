@@ -1,0 +1,20 @@
+{
+  "name": "deberta-base-fp8",
+  "hf_id": "microsoft/deberta-base",
+  "hf_revision": "0d1b43ccf21b5acd9f4e5f7b077fa698f05cf195",
+  "bundle": "deberta-base-fp8.bundle",
+  "family": "deberta",
+  "task": "text_to_pooled_features",
+  "precision": "fp16",
+  "quantization": "fp8",
+  "testcases": [
+    {
+      "name": "deberta-base-fp8",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is Paris."
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 256
+}

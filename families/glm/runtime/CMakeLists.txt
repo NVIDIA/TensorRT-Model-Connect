@@ -35,3 +35,20 @@ set_target_properties(trtmc_model_glm PROPERTIES
 install(TARGETS trtmc_model_glm
   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_glm_pipeline
+    ${PROJECT_SOURCE_DIR}/families/glm/tests/cpp/test_glm_pipeline.cpp
+  )
+  target_include_directories(test_glm_pipeline PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_glm_pipeline SYSTEM PRIVATE ${TRTMC_CUDA_INCLUDE_DIR})
+  target_link_libraries(test_glm_pipeline PRIVATE
+    trtmc_model_glm trtmc_core ${TRTMC_CUDART_LIBRARY}
+  )
+  target_compile_options(test_glm_pipeline PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME test_glm_pipeline COMMAND test_glm_pipeline)
+  set_tests_properties(test_glm_pipeline PROPERTIES SKIP_RETURN_CODE 77 LABELS gpu)
+endif()

@@ -59,10 +59,24 @@ from .checkpoint_mapper import (
 )
 from . import graph_ops
 from . import graph_blocks
+from . import quantization
 
 
 def _disable_tf32(builder_config) -> None:
     builder_config.clear_flag(trt.BuilderFlag.TF32)
+
+
+def _projection_weight(quant, name: str, weight_out_in: np.ndarray, label: str) -> np.ndarray:
+    """Transposed fp32 weight, or a shape-only placeholder when the projection is quantized.
+
+    A quantized projection is quantized right here, while its fp32 tensor is in memory,
+    and the engine reads the FP8 copy from ``quant``.
+    """
+    if quant is not None and quant.wants(name):
+        quant.quantize_projection(name, weight_out_in)
+        out_features, in_features = weight_out_in.shape
+        return np.broadcast_to(np.zeros((), dtype=np.float32), (in_features, out_features))
+    return _transpose_2d(weight_out_in, label)
 
 
 def _parse_layer_types(pattern: str) -> list[str]:
@@ -484,8 +498,11 @@ class VoiceChatThinkerBuilder:
         self,
         model_dir: str,
         config: ModelConfig,
+        quant=None,
     ) -> WeightDict:
         readers = _open_safetensors(Path(model_dir))
+        if quant is not None:
+            quantization.reject_quantized_checkpoint(readers.tensor_map)
 
         hidden = config.hidden_size
         vocab = config.vocab_size
@@ -539,7 +556,9 @@ class VoiceChatThinkerBuilder:
             if lt == "mamba2":
                 # in_proj: [proj_size, hidden] where proj_size = d_inner + conv_dim + mamba_num_heads
                 in_proj_raw = _load_tensor(readers, f"{hf_prefix}.mixer.in_proj.weight")
-                weights[f"{prefix}.mamba_in_proj"] = _transpose_2d(in_proj_raw, "mamba_in_proj")
+                weights[f"{prefix}.mamba_in_proj"] = _projection_weight(
+                    quant, f"{prefix}.mamba_in_proj", in_proj_raw, "mamba_in_proj"
+                )
 
                 # conv1d: [conv_dim, 1, d_conv] -> [conv_dim, d_conv]
                 conv1d_w = _load_tensor(readers, f"{hf_prefix}.mixer.conv1d.weight")
@@ -552,7 +571,9 @@ class VoiceChatThinkerBuilder:
 
                 # out_proj: [hidden, d_inner]
                 out_proj_raw = _load_tensor(readers, f"{hf_prefix}.mixer.out_proj.weight")
-                weights[f"{prefix}.mamba_out_proj"] = _transpose_2d(out_proj_raw, "mamba_out_proj")
+                weights[f"{prefix}.mamba_out_proj"] = _projection_weight(
+                    quant, f"{prefix}.mamba_out_proj", out_proj_raw, "mamba_out_proj"
+                )
 
                 # A_log: [mamba_num_heads]
                 A_log = _load_tensor(readers, f"{hf_prefix}.mixer.A_log")
@@ -582,8 +603,12 @@ class VoiceChatThinkerBuilder:
                 # MLP: up_proj -> relu2 -> down_proj (NO gate_proj)
                 up_raw = _load_tensor(readers, f"{hf_prefix}.mixer.up_proj.weight")
                 down_raw = _load_tensor(readers, f"{hf_prefix}.mixer.down_proj.weight")
-                weights[f"{prefix}.w_up"] = _transpose_2d(up_raw, "up_proj")
-                weights[f"{prefix}.w_down"] = _transpose_2d(down_raw, "down_proj")
+                weights[f"{prefix}.w_up"] = _projection_weight(
+                    quant, f"{prefix}.w_up", up_raw, "up_proj"
+                )
+                weights[f"{prefix}.w_down"] = _projection_weight(
+                    quant, f"{prefix}.w_down", down_raw, "down_proj"
+                )
 
             elif lt == "attention":
                 # Attention: q/k/v/o projections (no bias, no RoPE)
@@ -592,9 +617,9 @@ class VoiceChatThinkerBuilder:
                 v_raw = _load_tensor(readers, f"{hf_prefix}.mixer.v_proj.weight")
                 o_raw = _load_tensor(readers, f"{hf_prefix}.mixer.o_proj.weight")
 
-                q_t = _transpose_2d(q_raw, "q_proj")
-                k_t = _transpose_2d(k_raw, "k_proj")
-                v_t = _transpose_2d(v_raw, "v_proj")
+                q_t = _projection_weight(quant, f"{prefix}.w_q", q_raw, "q_proj")
+                k_t = _projection_weight(quant, f"{prefix}.w_k", k_raw, "k_proj")
+                v_t = _projection_weight(quant, f"{prefix}.w_v", v_raw, "v_proj")
                 o_t = _transpose_2d(o_raw, "o_proj")
 
                 # Compact GQA/MQA K/V
@@ -654,8 +679,12 @@ class VoiceChatThinkerBuilder:
         max_cache_length: int,
         *,
         verbose: bool = False,
+        quant=None,
     ) -> bytes:
-        """Build hybrid TRT engine with heterogeneous layer stack."""
+        """Build hybrid TRT engine with heterogeneous layer stack.
+
+        ``quant`` (optional) is the FP8 context from ``quantization.create_fp8_context``.
+        """
         hidden = config.hidden_size
         vocab = config.vocab_size
         num_layers = config.num_hidden_layers
@@ -687,6 +716,7 @@ class VoiceChatThinkerBuilder:
         trt_config = builder.create_builder_config()
         trt_config.builder_optimization_level = 1
         _disable_tf32(trt_config)
+        quantization.configure_fp8_build(trt_config, quant)
 
         # --- Inputs ---
         # VoiceChat uses frame-aligned additive fusion. Prompt steps select a
@@ -808,6 +838,7 @@ class VoiceChatThinkerBuilder:
                     mamba_num_heads=mamba_num_heads,
                     mamba_head_dim=mamba_head_dim,
                     n_groups=n_groups,
+                    quant=quant,
                 )
                 hidden_state = result["hidden"]
                 present_conv_outputs.append(result["present_conv"])
@@ -823,6 +854,7 @@ class VoiceChatThinkerBuilder:
                     prefix=prefix,
                     hidden_size=hidden,
                     mlp_size=mlp_size,
+                    quant=quant,
                 )
                 hidden_state = result["hidden"]
 
@@ -845,6 +877,7 @@ class VoiceChatThinkerBuilder:
                     head_dim=head_dim,
                     max_cache_length=max_cache_length,
                     eps_tensor=layer_eps,
+                    quant=quant,
                 )
                 # add_attention_block does NOT apply residual
                 residual = network.add_elementwise(
@@ -941,6 +974,7 @@ def _add_mamba2_layer(
     mamba_head_dim: int,
     n_groups: int,
     dtype: np.dtype = np.float32,
+    quant=None,
 ) -> dict[str, trt.ITensor]:
     """Add one Mamba-2 SSD layer (single-step decode).
 
@@ -960,8 +994,8 @@ def _add_mamba2_layer(
 
     # ===== 2. Input projection =====
     proj_dim = d_inner + conv_dim + mamba_num_heads
-    projected = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, proj_dim, weights[f"{prefix}.mamba_in_proj"], dtype=dtype
+    projected = graph_ops.add_projection(
+        network, quant, normed, hidden_size, proj_dim, weights, f"{prefix}.mamba_in_proj", dtype
     )  # [1, proj_dim]
 
     # Split: gate [d_inner], hidden_B_C [conv_dim], dt [nheads]
@@ -1196,13 +1230,15 @@ def _add_mamba2_layer(
     gated_tensor = gated.get_output(0)
 
     # ===== 8. Output projection + residual =====
-    out = graph_ops.add_matmul_rhs_constant(
+    out = graph_ops.add_projection(
         network,
+        quant,
         gated_tensor,
         d_inner,
         hidden_size,
-        weights[f"{prefix}.mamba_out_proj"],
-        dtype=dtype,
+        weights,
+        f"{prefix}.mamba_out_proj",
+        dtype,
     )
 
     residual = network.add_elementwise(hidden, out, trt.ElementWiseOperation.SUM)
@@ -1224,18 +1260,19 @@ def _add_mlp_layer(
     hidden_size: int,
     mlp_size: int,
     dtype: np.dtype = np.float32,
+    quant=None,
 ) -> dict[str, trt.ITensor]:
     """Add MLP layer: RMSNorm -> up -> relu2 -> down -> residual."""
     normed = graph_ops.add_rms_norm(
         network, hidden, hidden_size, weights[f"{prefix}.input_norm"], eps_tensor, dtype=dtype
     )
 
-    up = graph_ops.add_matmul_rhs_constant(
-        network, normed, hidden_size, mlp_size, weights[f"{prefix}.w_up"], dtype=dtype
+    up = graph_ops.add_projection(
+        network, quant, normed, hidden_size, mlp_size, weights, f"{prefix}.w_up", dtype
     )
     activated = graph_ops.add_activation(network, up, "relu2")
-    down = graph_ops.add_matmul_rhs_constant(
-        network, activated, mlp_size, hidden_size, weights[f"{prefix}.w_down"], dtype=dtype
+    down = graph_ops.add_projection(
+        network, quant, activated, mlp_size, hidden_size, weights, f"{prefix}.w_down", dtype
     )
 
     residual = network.add_elementwise(hidden, down, trt.ElementWiseOperation.SUM)
@@ -1249,6 +1286,7 @@ def build_thinker_engine(
     max_cache_length: int,
     *,
     verbose: bool = False,
+    quant=None,
 ) -> bytes:
     """Build the strongly typed VoiceChat AddFusion + Nemotron-H engine."""
     return VoiceChatThinkerBuilder().build_engine(
@@ -1256,4 +1294,5 @@ def build_thinker_engine(
         weights,
         max_cache_length,
         verbose=verbose,
+        quant=quant,
     )

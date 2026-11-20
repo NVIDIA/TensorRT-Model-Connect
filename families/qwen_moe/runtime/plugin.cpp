@@ -11,6 +11,7 @@
 #include "families/qwen_moe/runtime/tensor_names.h"
 #include "trtmc/runtime/family_factory.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <memory>
 #include <nlohmann/json.hpp>
@@ -189,9 +190,22 @@ DecoderModules load_modules(const FamilyContext& context, const RuntimeConfig& c
         !dual.prefill->ok()) {
         throw std::runtime_error("qwen_moe dual-profile engine did not create both contexts");
     }
+    dual.prefill->set_timing_label("qwen_moe prefill");
+    dual.decode->set_timing_label("qwen_moe decoder");
     modules.prefill = std::move(dual.prefill);
     modules.decode = std::move(dual.decode);
     return modules;
+}
+
+// Largest prompt chunk the prefill context accepts: the max of its token_id
+// profile, capped by the cache.
+std::int32_t prefill_chunk_rows(const ITrtModule& prefill, const RuntimeConfig& config) {
+    const auto max_shape =
+        prefill.input_profile_shape("token_id", prefill.profile_idx(), ProfileShapeSelector::kMax);
+    if (max_shape.size() != 1 || max_shape[0] <= 0)
+        throw std::runtime_error("qwen_moe prefill engine has an invalid token_id profile");
+    return static_cast<std::int32_t>(
+        std::min<std::int64_t>(max_shape[0], static_cast<std::int64_t>(config.max_cache_length)));
 }
 
 } // namespace
@@ -217,7 +231,8 @@ ITask* create(const FamilyContext& context) {
     text_config.id_eos = config.eos_token_id;
     text_config.chat_template_format =
         qwen_moe_detect_chat_template_format(chat_template(context.reader));
-    text_config.prefill_max_length = config.max_cache_length;
+    text_config.prefill_max_length =
+        modules.prefill ? prefill_chunk_rows(*modules.prefill, config) : config.max_cache_length;
     text_config.num_layers = config.num_layers;
 
     return new QwenMoeTextGenerationPipeline(

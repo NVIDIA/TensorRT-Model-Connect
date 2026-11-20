@@ -27,8 +27,9 @@ class Adapter:
         self.spec = spec
         options = {"trust_remote_code": True, **({"revision": spec.revision} if spec.revision else {})}
         self.tokenizer = AutoTokenizer.from_pretrained(spec.model, **options)
-        self.model = AutoModel.from_pretrained(spec.model, use_safetensors=True, torch_dtype=spec.dtype,
-                                               attn_implementation="eager", **options).to(spec.device).eval()
+        self.model = host.maybe_compile(AutoModel.from_pretrained(
+            spec.model, use_safetensors=True, torch_dtype=spec.dtype, attn_implementation="eager",
+            **options).to(spec.device).eval(), spec)
         self.scratch = tempfile.TemporaryDirectory(prefix="deepseek-ocr-")
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:

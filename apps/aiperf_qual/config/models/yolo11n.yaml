@@ -2,5 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 reference:
+  mode: eager  # torch.compile: the detection model recompiles past Dynamo's limit
   adapter: families/yolo11/tests/reference/adapter.py  # the family-owned PyTorch reference
   requirements: families/yolo11/tests/requirements.txt  # the family's dependencies, layered on the serving interpreter

@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The Transformers reference postprocessor imports cv2. Keep it in this family:
+# opencv-python-headless 4.13 requires NumPy 2, which families pinned to NumPy 1 reject.
+opencv-python-headless==4.13.0.92

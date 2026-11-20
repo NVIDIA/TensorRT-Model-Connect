@@ -196,6 +196,11 @@ class NemotronHQuantContext:
     graph_ops: Any
     keep_alive: list = None  # type: ignore[assignment]
 
+    @property
+    def has_nvfp4_weights(self) -> bool:
+        """Whether this graph contains NVFP4 projections."""
+        return any(isinstance(entry.weight, _NVFP4Weight) for entry in self.scales.values())
+
     def __post_init__(self):
         """Create the list that keeps weight buffers alive during the build."""
         if self.keep_alive is None:

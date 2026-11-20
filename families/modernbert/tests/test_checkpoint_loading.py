@@ -16,8 +16,8 @@ from families.modernbert.config import ModelConfig
 from families.modernbert.weights import WeightDict, _has_tensor, _load_tensor, _open_safetensors
 
 
-@pytest.fixture(scope="module")
-def load_weights():
+@pytest.fixture(scope="module", params=[0, 1], ids=["normal", "optimized"])
+def load_weights(request):
     # Note (Jiaxin Deng): Compile the loader alone to avoid TensorRT graph imports in CPU tests.
     path = Path(__file__).resolve().parents[1] / "model.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -40,7 +40,12 @@ def load_weights():
         "_load_tensor": _load_tensor,
         "_open_safetensors": _open_safetensors,
     }
-    exec(compile(ast.Module(body=[loader], type_ignores=[]), str(path), "exec"), namespace)
+    exec(
+        compile(
+            ast.Module(body=[loader], type_ignores=[]), str(path), "exec", optimize=request.param
+        ),
+        namespace,
+    )
     return namespace["load_weights"]
 
 
@@ -136,4 +141,23 @@ def test_missing_bare_projection_is_not_silently_accepted(tmp_path, load_weights
     _save_checkpoint(tmp_path, tensors, sharded)
 
     with pytest.raises(KeyError, match=r"Tensor not found: layers\.1\.attn\.Wqkv\.weight"):
+        load_weights(None, str(tmp_path), config)
+
+
+@pytest.mark.parametrize("root", ["", "model."], ids=["bare", "wrapped"])
+@pytest.mark.parametrize(
+    "name,shape,message",
+    [
+        ("embeddings.tok_embeddings.weight", (7, 4), r"Embedding shape \(7, 4\) != \(8, 4\)"),
+        ("layers.0.attn.Wqkv.weight", (9, 4), r"QKV weight shape \(9, 4\) != \(12, 4\)"),
+        ("layers.0.mlp.Wi.weight", (10, 4), r"MLP input weight shape \(10, 4\) != \(12, 4\)"),
+    ],
+    ids=["embedding", "fused-qkv", "mlp-input"],
+)
+def test_malformed_checkpoint_shape_is_rejected(tmp_path, load_weights, root, name, shape, message):
+    config, tensors, _ = _checkpoint(root, np.float32, False)
+    tensors[root + name] = np.zeros(shape, dtype=np.float32)
+    _save_checkpoint(tmp_path, tensors, False)
+
+    with pytest.raises(ValueError, match=message):
         load_weights(None, str(tmp_path), config)

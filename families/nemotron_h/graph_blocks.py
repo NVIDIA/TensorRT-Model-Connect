@@ -50,7 +50,7 @@ def make_matmul_fn(network, dtype, quant_ctx):
 
         def matmul(lhs, lhs_w, rhs_w, rhs_weights, weight_name):
             return graph_ops.add_matmul_rhs_constant(
-                network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype
+                network, lhs, lhs_w, rhs_w, rhs_weights, dtype=dtype, rank=2
             )
 
         return matmul
@@ -119,6 +119,23 @@ def apply_norm(
         return graph_ops.add_rms_norm(network, inp, hidden_size, gamma, eps_tensor, dtype=dtype)
 
 
+def _fp8_cache_qdq(network, current, cached, scale: float):
+    """Store E4M3 bytes; consume their scaled values in native attention."""
+    scale_tensor = graph_ops.add_constant(
+        network, (), np.asarray(scale, dtype=np.float32), dtype=np.float32
+    )
+    # Wire after Q/DQ construction: conditional MoE predecessors do not expose
+    # their rank to TensorRT's quantizer constructor before graph build.
+    seed_dtype = np.float32 if current.dtype == trt.float32 else np.float16
+    seed = graph_ops.add_constant(network, (1, 1), np.zeros((1, 1), seed_dtype), dtype=seed_dtype)
+    quantize = network.add_quantize(seed, scale_tensor, trt.fp8)
+    quantized = quantize.get_output(0)
+    current_dq = network.add_dequantize(quantized, scale_tensor, current.dtype).get_output(0)
+    cached_dq = network.add_dequantize(cached, scale_tensor, current.dtype).get_output(0)
+    quantize.set_input(0, current)
+    return quantized, current_dq, cached_dq
+
+
 def add_attention_block(
     network: trt.INetworkDefinition,
     hidden: trt.ITensor,
@@ -136,6 +153,7 @@ def add_attention_block(
     max_cache_length: int,
     eps_tensor: trt.ITensor,
     kv_attention_size: int | None = None,
+    fp8_kv_scales: tuple[float, float, float] | None = None,
     num_kv_heads: int | None = None,
     attention_scale: float | None = None,
     eps: float | None = None,
@@ -149,8 +167,13 @@ def add_attention_block(
     sin_half_tensor: trt.ITensor | None = None,
     rotary_embedding_dim: int = 0,
     interleaved_rope: bool = False,
+    decompose_attention: bool = False,
+    sequence_length: int | None = 1,
 ) -> dict[str, trt.ITensor]:
     """Pre-norm -> QKV -> RoPE -> cache concat -> attention -> output proj.
+
+    ``sequence_length`` is the query row count, or None for ``S`` runtime rows
+    (the mask then covers the cache plus the rows).
 
     Returns {"normed": ..., "attn_out": ..., "present_k": ..., "present_v": ...}.
     Does NOT apply residual -- callers compose the residual pattern.
@@ -162,7 +185,8 @@ def add_attention_block(
     native IAttention.
     """
     matmul = _make_matmul_fn(network, dtype, quant_ctx)
-    attention_window = max_cache_length + 1
+    if sequence_length is None and alibi_slopes_tensor is not None:
+        raise NotImplementedError("ALiBi attention runs one row per launch")
     if num_kv_heads is None:
         num_kv_heads = num_heads
     if kv_attention_size is None:
@@ -184,34 +208,45 @@ def add_attention_block(
     v = matmul(normed, hidden_size, kv_attention_size, weights[f"{prefix}.w_v"], f"{_lp}.w_v")
     q_bias = weights.get(f"{prefix}.q_bias")
     if q_bias is not None:
-        q = graph_ops.add_bias_sum(network, q, attention_size, q_bias, dtype=dtype)
+        q = graph_ops.add_bias_sum(network, q, attention_size, q_bias, dtype=dtype, rank=2)
     k_bias = weights.get(f"{prefix}.k_bias")
     if k_bias is not None:
-        k = graph_ops.add_bias_sum(network, k, kv_attention_size, k_bias, dtype=dtype)
+        k = graph_ops.add_bias_sum(network, k, kv_attention_size, k_bias, dtype=dtype, rank=2)
     v_bias = weights.get(f"{prefix}.v_bias")
     if v_bias is not None:
-        v = graph_ops.add_bias_sum(network, v, kv_attention_size, v_bias, dtype=dtype)
+        v = graph_ops.add_bias_sum(network, v, kv_attention_size, v_bias, dtype=dtype, rank=2)
     q_norm = weights.get(f"{prefix}.q_norm")
     if q_norm is not None:
         q = graph_ops.add_rms_norm_per_head(
-            network, q, num_heads, head_dim, q_norm, eps_tensor, dtype=dtype
+            network, q, num_heads, head_dim, q_norm, eps_tensor, dtype=dtype,
+            sequence_length=sequence_length,
         )
     k_norm = weights.get(f"{prefix}.k_norm")
     if k_norm is not None:
         k = graph_ops.add_rms_norm_per_head(
-            network, k, num_kv_heads, head_dim, k_norm, eps_tensor, dtype=dtype
+            network, k, num_kv_heads, head_dim, k_norm, eps_tensor, dtype=dtype,
+            sequence_length=sequence_length,
         )
     present_k = k
     present_v = v
+    if fp8_kv_scales is not None:
+        # This recurrent graph executes one-token attention for both prompt and
+        # decode, with unquantized Q and source-scaled FP8 K/V (as in Edge decode).
+        # q_scale is retained with the checkpoint but is only used by Edge's
+        # quantized block-prefill kernel, not its single-token decode path.
+        _, k_scale, v_scale = fp8_kv_scales
+        present_k, k, cache_k = _fp8_cache_qdq(network, k, cache_k, k_scale)
+        present_v, v, cache_v = _fp8_cache_qdq(network, v, cache_v, v_scale)
     k_reshape = network.add_shuffle(k)
-    k_reshape.reshape_dims = (1, kv_attention_size)
+    rows = -1 if sequence_length is None else sequence_length
+    k_reshape.reshape_dims = (rows, kv_attention_size)
     v_reshape = network.add_shuffle(v)
-    v_reshape.reshape_dims = (1, kv_attention_size)
+    v_reshape.reshape_dims = (rows, kv_attention_size)
     all_k = network.add_concatenation([cache_k, k_reshape.get_output(0)])
     all_k.axis = 0
     all_v = network.add_concatenation([cache_v, v_reshape.get_output(0)])
     all_v.axis = 0
-    kv_seq = attention_window
+    kv_seq = None if sequence_length is None else max_cache_length + sequence_length
     if alibi_slopes_tensor is not None:
         if alibi_indices_tensor is None:
             raise ValueError("ALiBi attention requires cache position indices")
@@ -233,14 +268,15 @@ def add_attention_block(
         num_heads=num_heads,
         head_dim=head_dim,
         num_kv_heads=num_kv_heads,
-        q_seq=1,
+        q_seq=sequence_length,
         kv_seq=kv_seq,
         causal=False,
         mask=mask_4d,
         scale=attention_scale,
+        decompose_attention=decompose_attention,
     )
     attn_out = matmul(context, attention_size, hidden_size, weights[f"{prefix}.w_o"], f"{_lp}.w_o")
     o_bias = weights.get(f"{prefix}.o_bias")
     if o_bias is not None:
-        attn_out = graph_ops.add_bias_sum(network, attn_out, hidden_size, o_bias, dtype=dtype)
+        attn_out = graph_ops.add_bias_sum(network, attn_out, hidden_size, o_bias, dtype=dtype, rank=2)
     return {"normed": normed, "attn_out": attn_out, "present_k": present_k, "present_v": present_v}

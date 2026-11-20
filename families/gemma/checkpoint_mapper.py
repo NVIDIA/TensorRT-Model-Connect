@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 
 # Register NumPy bfloat16 support required by safetensors.
-import ml_dtypes  # noqa: F401
+import ml_dtypes
 
 from safetensors import safe_open
 
@@ -237,13 +237,43 @@ class _ReaderCollection(list):
         self.tensor_map = tensor_map
 
 
+class _NumpyReader:
+    """Validated source access including NumPy-unexposed FP8 scale storage."""
+
+    def __init__(self, path: Path):
+        import json
+
+        self.path = path
+        self.reader = safe_open(str(path), framework="numpy")
+        with path.open("rb") as source:
+            length = int.from_bytes(source.read(8), "little")
+            self.header = json.loads(source.read(length))
+        self.data_offset = 8 + length
+
+    def keys(self):
+        return self.reader.keys()
+
+    def get_slice(self, name):
+        """Preserve metadata-only shape queries without loading tensor storage."""
+        return self.reader.get_slice(name)
+
+    def get_tensor(self, name):
+        tensor = self.header[name]
+        if tensor["dtype"] != "F8_E4M3":
+            return self.reader.get_tensor(name)
+        # safe_open already checked dtype, shape, offsets and bounds.
+        return np.memmap(self.path, mode="r", dtype=ml_dtypes.float8_e4m3fn,
+                         shape=tuple(tensor["shape"]),
+                         offset=self.data_offset + tensor["data_offsets"][0])
+
+
 def _open_safetensors(model_dir: Path) -> _ReaderCollection:
     """Open the checkpoint's required NumPy safetensors readers."""
     import json
 
     single = model_dir / "model.safetensors"
     if single.is_file():
-        return _ReaderCollection([safe_open(str(single), framework="numpy")])
+        return _ReaderCollection([_NumpyReader(single)])
 
     index_path = model_dir / "model.safetensors.index.json"
     if index_path.is_file():
@@ -253,7 +283,7 @@ def _open_safetensors(model_dir: Path) -> _ReaderCollection:
             raise ValueError("model.safetensors.index.json has no weight_map")
         shard_files = sorted(set(str(value) for value in weight_map.values()))
         readers_by_file = {
-            shard: safe_open(str(model_dir / shard), framework="numpy") for shard in shard_files
+            shard: _NumpyReader(model_dir / shard) for shard in shard_files
         }
         return _ReaderCollection(
             [readers_by_file[shard] for shard in shard_files],
@@ -264,7 +294,7 @@ def _open_safetensors(model_dir: Path) -> _ReaderCollection:
 
     diff_single = model_dir / "diffusion_pytorch_model.safetensors"
     if diff_single.is_file():
-        return _ReaderCollection([safe_open(str(diff_single), framework="numpy")])
+        return _ReaderCollection([_NumpyReader(diff_single)])
 
     diff_index = model_dir / "diffusion_pytorch_model.safetensors.index.json"
     if diff_index.is_file():
@@ -274,7 +304,7 @@ def _open_safetensors(model_dir: Path) -> _ReaderCollection:
             raise ValueError("diffusion safetensors index has no weight_map")
         shard_files = sorted(set(str(value) for value in weight_map.values()))
         readers_by_file = {
-            shard: safe_open(str(model_dir / shard), framework="numpy") for shard in shard_files
+            shard: _NumpyReader(model_dir / shard) for shard in shard_files
         }
         return _ReaderCollection(
             [readers_by_file[shard] for shard in shard_files],

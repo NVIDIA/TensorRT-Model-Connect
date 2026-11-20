@@ -58,6 +58,8 @@ from .utils import (
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .config import ModelConfig
     from .checkpoint_mapper import WeightDict
     from typing import Any as QuantContext
@@ -126,10 +128,12 @@ def _gelu_fc_mlp(
 # ---------------------------------------------------------------------------
 
 
-def _supports_config(config: "ModelConfig", weights: "WeightDict") -> None:
+def _supports_config(
+    config: "ModelConfig", weights: "WeightDict", *, custom_mlp: bool = False
+) -> None:
     """Reject configs the dual-profile builder cannot handle."""
     model_type = getattr(config, "model_type", "").lower()
-    if "moe" in model_type or "mamba" in model_type or "rwkv" in model_type:
+    if ("moe" in model_type and not custom_mlp) or "mamba" in model_type or "rwkv" in model_type:
         raise NotImplementedError(
             f"dual_profile_decoder_builder does not support model_type={model_type!r}")
     if "embedding" not in weights:
@@ -162,6 +166,7 @@ def build_dual_profile_decoder_engine(
     scale_attn_weights: bool = True,
     verbose: bool = False,
     profile_mode: str = "dual_profile",
+    mlp_block: Callable[[trt.INetworkDefinition, trt.ITensor, str], trt.ITensor] | None = None,
 ) -> bytes:
     """Build a prefill/decode-capable dynamic-Sq decoder engine.
 
@@ -180,8 +185,13 @@ def build_dual_profile_decoder_engine(
     * ``"prefill"``: one prefill profile only. This is used by split-engine
       bundles, where decode is served by a separate fixed-Sq=1 engine.
 
+    ``mlp_block`` (optional) replaces every layer's dense MLP, for example with
+    a family's mixture-of-experts block. It is called with the network, the
+    post-attention-norm hidden states (Sq, hidden) and the layer's weight
+    prefix, and returns the MLP output (Sq, hidden).
+
     """
-    _supports_config(config, weights)
+    _supports_config(config, weights, custom_mlp=mlp_block is not None)
     if profile_mode not in ("dual_profile", "prefill"):
         raise ValueError(
             "profile_mode must be 'dual_profile' or 'prefill', "
@@ -476,8 +486,10 @@ def build_dual_profile_decoder_engine(
                 weights.get(f"{prefix}.post_attn_norm_beta"),
                 eps_tensor, norm_type, work_np_dtype)
 
-        # MLP — SwiGLU (Llama-style) or GeluFC (GPT-2-style).
-        if mlp_type == "gelu_fc":
+        # MLP — a family-supplied block, SwiGLU (Llama-style) or GeluFC (GPT-2-style).
+        if mlp_block is not None:
+            mlp_out = mlp_block(network, norm2, prefix)
+        elif mlp_type == "gelu_fc":
             mlp_out = _gelu_fc_mlp(
                 network, norm2,
                 matmul=matmul, weights=weights, prefix=prefix,

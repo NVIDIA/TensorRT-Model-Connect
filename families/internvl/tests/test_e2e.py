@@ -456,6 +456,7 @@ def test_2b_comparator_accepts_ned_or_word_agreement() -> None:
 def test_reference_routes_keep_8b_on_golden_and_2b_on_hf() -> None:
     expected_backends = {
         "internvl3-2b": "hf_transformers",
+        "internvl3-2b-fp8": "hf_transformers",
         "internvl3-2b-tp2": "hf_transformers",
         "internvl3-8b": "golden_snapshot",
         "internvl3-8b-tp4": "golden_snapshot",
@@ -500,7 +501,14 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
     _, manifest, case = CASES[case_name]
     record_evidence("inputs", {"manifest": manifest, "case": CASES[case_name][-1]})
     model_dir = _model_dir(manifest)
-    record_evidence("checkpoint", {"model_dir": str(model_dir), "hf_id": manifest.get("hf_id"), "hf_revision": manifest.get("hf_revision")})
+    record_evidence(
+        "checkpoint",
+        {
+            "model_dir": str(model_dir),
+            "hf_id": manifest.get("hf_id"),
+            "hf_revision": manifest.get("hf_revision"),
+        },
+    )
     binary, runtime_root = _runtime(manifest)
     bundle = tmp_path / manifest["bundle"]
     with evidence_stage("build"):
@@ -519,4 +527,6 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path) -> None:
         expected = _reference(model_dir, manifest, case, tmp_path)
     record_evidence("reference", expected)
     with evidence_stage("compare"):
-        _assert_parity(actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name)))
+        _assert_parity(
+            actual, expected, manifest, case, record_evidence("thresholds", _thresholds(case_name))
+        )

@@ -32,7 +32,7 @@ Hold these inputs constant across comparisons:
 ## Choose the measurement layer
 
 - Use `trtmc-bench` for repeatable public task latency and throughput. See the
-  [Benchmarking Reference](/reference/benchmarking).
+  [Benchmarking Reference](./benchmarking.md).
 - Use Nsight Systems around the same CLI or benchmark worker to study process,
   CPU, CUDA API, and kernel timelines.
 - Use Nsight Compute only after narrowing the question to a specific kernel.

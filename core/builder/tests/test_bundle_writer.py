@@ -50,6 +50,22 @@ def test_writer_streams_sections_and_emits_only_the_fixed_header(tmp_path: Path)
     assert payload == b'engine-bytes{"size":7}tokens'
 
 
+def test_writer_accepts_a_memoryview_section_and_rejects_other_types(tmp_path: Path) -> None:
+    destination = tmp_path / "model.bundle"
+    writer = BundleWriter(destination)
+    writer.set_header(family="gpt_neo", task="text_generation", backend="trt")
+    # A serialized plan is exposed as a memoryview so a large plan is never copied into bytes.
+    writer.add_bytes("engine.plan", memoryview(bytearray(b"plan-bytes")))
+    with pytest.raises(TypeError, match="bytes or a memoryview"):
+        writer.add_bytes("other.plan", "plan-bytes")
+
+    writer.finish()
+
+    header, payload = _read_bundle(destination)
+    assert header["sections"] == {"engine.plan": {"offset": 0, "length": 10}}
+    assert payload == b"plan-bytes"
+
+
 def test_writer_rejects_duplicate_and_empty_section_names(tmp_path: Path) -> None:
     writer = BundleWriter(tmp_path / "model.bundle")
     writer.add_bytes("engine.plan", b"one")

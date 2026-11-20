@@ -28,13 +28,21 @@ def _decoder_build_options(config: ModelConfig) -> dict:
     return decoder_options
 
 
-def _decode_attention_backend(config: ModelConfig) -> str:
-    backend = str(_decoder_build_options(config).get("decode_attention", "native"))
+def _attention_backend(config: ModelConfig, key: str) -> str:
+    backend = str(_decoder_build_options(config).get(key, "native"))
     if backend not in {"native", "decomposed"}:
         raise ValueError(
-            f"qwen_vl_decoder.decode_attention must be 'native' or 'decomposed', got {backend!r}"
+            f"qwen_vl_decoder.{key} must be 'native' or 'decomposed', got {backend!r}"
         )
     return backend
+
+
+def _decode_attention_backend(config: ModelConfig) -> str:
+    return _attention_backend(config, "decode_attention")
+
+
+def _prefill_attention_backend(config: ModelConfig) -> str:
+    return _attention_backend(config, "prefill_attention")
 
 
 def _decoder_profile_options(config: ModelConfig) -> tuple[int, int | None, int | None]:
@@ -98,6 +106,7 @@ def build_standard_decoder_engine(
         raise NotImplementedError("Qwen-VL split decoder does not expose debug hidden states")
 
     decode_attention = _decode_attention_backend(config)
+    prefill_attention = _prefill_attention_backend(config)
     opt_prefill_length, max_prefill_length, workspace = _decoder_profile_options(config)
     return build_dual_profile_decoder_engine(
         config,
@@ -118,6 +127,9 @@ def build_standard_decoder_engine(
         opt_prefill_length=opt_prefill_length,
         max_prefill_length=max_prefill_length,
         builder_workspace_bytes=workspace,
-        force_decomposed_attention=role == "decode" and decode_attention == "decomposed",
+        force_decomposed_attention=(
+            (role == "decode" and decode_attention == "decomposed")
+            or (role == "prefill" and prefill_attention == "decomposed")
+        ),
         profile_mode=role,
     )

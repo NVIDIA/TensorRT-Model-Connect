@@ -46,6 +46,8 @@ from . import graph_ops
 from . import graph_blocks
 from .parallel import normalize_parallel_config
 from .default_decoder import _apply_norm, _mark_debug_output
+from .default_dual_profile_decoder import build_dual_profile_decoder_engine
+from .utils import decode_builder_optimization_level
 
 
 if TYPE_CHECKING:
@@ -58,8 +60,14 @@ class _PhiMoEModel:
         self,
         model_dir: str,
         config: ModelConfig,
+        quant_ctx=None,
     ) -> WeightDict:
-        """Load Phi-MoE weights: standard attention + per-expert MLP weights."""
+        """Load Phi-MoE weights: standard attention + per-expert MLP weights.
+
+        Weights owned by ``quant_ctx`` are not loaded: the engine consumes the FP8 bytes the
+        context quantized itself, so the weight dict keeps a shape-only placeholder for the
+        attention projections and nothing for the routed experts.
+        """
         model_dir_path = Path(model_dir)
         readers = _open_safetensors(model_dir_path)
 
@@ -103,26 +111,27 @@ class _PhiMoEModel:
                     readers, post_norm_bias_key
                 ).astype(np.float32)
 
-            # Q/K/V/O projections (separate, not fused) with biases
-            q_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.q_proj.weight")
-            k_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.k_proj.weight")
-            v_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.v_proj.weight")
-            o_raw = _load_tensor(readers, f"{hf_prefix}.self_attn.o_proj.weight")
+            # Q/K/V/O projections (separate, not fused) with biases, transposed
+            # [out, in] -> [in, out]. A projection owned by quant_ctx is a shape-only
+            # placeholder: the engine reads its FP8 bytes from quant_ctx.
+            for stem, hf_stem in (
+                ("w_q", "q_proj"),
+                ("w_k", "k_proj"),
+                ("w_v", "v_proj"),
+                ("w_o", "o_proj"),
+            ):
+                name = f"{prefix}.{stem}"
+                if quant_ctx is not None and quant_ctx.should_quantize(name):
+                    entry = quant_ctx.scales[name]
+                    shape = (entry.weight.in_features, entry.weight.out_features)
+                    weights[name] = np.broadcast_to(np.zeros((), dtype=np.float32), shape)
+                else:
+                    raw = _load_tensor(readers, f"{hf_prefix}.self_attn.{hf_stem}.weight")
+                    weights[name] = _transpose_2d(raw, hf_stem)
+                    del raw
 
             if attention_size == 0:
-                attention_size = q_raw.shape[0]
-
-            # Transpose [out, in] -> [in, out]
-            q_t = _transpose_2d(q_raw, "q_proj")
-            k_t = _transpose_2d(k_raw, "k_proj")
-            v_t = _transpose_2d(v_raw, "v_proj")
-            o_t = _transpose_2d(o_raw, "o_proj")
-            del q_raw, k_raw, v_raw, o_raw
-
-            weights[f"{prefix}.w_q"] = q_t
-            weights[f"{prefix}.w_k"] = k_t
-            weights[f"{prefix}.w_v"] = v_t
-            weights[f"{prefix}.w_o"] = o_t
+                attention_size = weights[f"{prefix}.w_q"].shape[1]
 
             # Attention biases
             for proj, tag in [
@@ -142,8 +151,11 @@ class _PhiMoEModel:
             weights[f"{prefix}.router"] = _transpose_2d(router_raw, "router")
             del router_raw
 
-            # Per-expert weights
-            for e in range(num_experts):
+            # Per-expert weights; quantized experts are stacked in quant_ctx instead.
+            quantized_experts = quant_ctx is not None and quant_ctx.should_quantize(
+                f"{prefix}.experts.w_gate"
+            )
+            for e in range(0 if quantized_experts else num_experts):
                 exp_prefix = f"{hf_prefix}.block_sparse_moe.experts.{e}"
                 # w1 = gate projection [intermediate, hidden]
                 w1_raw = _load_tensor(readers, f"{exp_prefix}.w1.weight")
@@ -248,7 +260,13 @@ class _PhiMoEModel:
         builder = trt.Builder(logger)
         network = builder.create_network(1 << int(trt.NetworkDefinitionCreationFlag.STRONGLY_TYPED))
         trt_config = builder.create_builder_config()
-        trt_config.builder_optimization_level = 1
+        trt_config.builder_optimization_level = decode_builder_optimization_level(
+            quant_ctx is not None
+        )
+        if quant_ctx is not None:
+            from .quantization import configure_fp8_build
+
+            configure_fp8_build(trt_config, quant_ctx)
 
         # -----------------------------------------------------------
         # Inputs
@@ -344,6 +362,7 @@ class _PhiMoEModel:
                 norm_type=norm_type,
                 dtype=work_np_dtype,
                 work_trt_dtype=work_trt_dtype,
+                quant_ctx=quant_ctx,
             )
 
             hidden_state = result["hidden"]
@@ -420,33 +439,76 @@ class _PhiMoEModel:
 
         return bytes(plan)
 
+    def build_prefill_engine(
+        self,
+        config: ModelConfig,
+        weights: WeightDict,
+        max_cache_length: int,
+        *,
+        precision: str = "fp32",
+        quant_ctx=None,
+        verbose: bool = False,
+    ) -> bytes:
+        """Build the batched prefill engine of a split bundle.
 
-def _add_swiglu_expert(
-    network: trt.INetworkDefinition,
-    inp: trt.ITensor,
-    hidden_size: int,
-    intermediate_size: int,
-    w_gate: np.ndarray,
-    w_up: np.ndarray,
-    w_down: np.ndarray,
-    dtype: np.dtype = np.float32,
-) -> trt.ITensor:
-    """Compute a single SwiGLU expert: down(silu(gate(x)) * up(x))."""
-    gate = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_gate, dtype=dtype
-    )
-    up = graph_ops.add_matmul_rhs_constant(
-        network, inp, hidden_size, intermediate_size, w_up, dtype=dtype
-    )
+        The whole prompt runs in one pass (dynamic Sq up to ``max_cache_length``);
+        decode is served by the single-token engine from ``build_engine``.
+        """
+        if precision == "fp16":
+            work_np_dtype, work_trt_dtype = np.float16, trt.float16
+        elif precision == "fp32":
+            work_np_dtype, work_trt_dtype = np.float32, trt.float32
+        else:
+            raise ValueError(f"Unsupported Phi-MoE precision: {precision}")
+        num_experts: int = weights["_num_experts"]
+        top_k: int = weights["_num_experts_per_tok"]
+        jitter_eps = config.raw.get("router_jitter_noise", 0.01)
 
-    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
-    swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
-    gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+        def moe_block(
+            network: trt.INetworkDefinition, inp: trt.ITensor, prefix: str
+        ) -> trt.ITensor:
+            return _add_prefill_moe_block(
+                network,
+                inp,
+                weights,
+                prefix,
+                config.hidden_size,
+                num_experts,
+                top_k,
+                jitter_eps,
+                work_np_dtype,
+                work_trt_dtype,
+                quant_ctx=quant_ctx,
+            )
 
-    down = graph_ops.add_matmul_rhs_constant(
-        network, gated.get_output(0), intermediate_size, hidden_size, w_down, dtype=dtype
+        return build_dual_profile_decoder_engine(
+            config,
+            weights,
+            max_cache_length,
+            precision=precision,
+            quant_ctx=quant_ctx,
+            norm_type="layernorm",
+            position_type="rope",
+            verbose=verbose,
+            profile_mode="prefill",
+            mlp_block=moe_block,
+        )
+
+
+def _expert_stack(
+    weights: WeightDict,
+    prefix: str,
+    name: str,
+    num_experts: int,
+    dtype: np.dtype,
+) -> np.ndarray:
+    """Stack one projection of every expert: ``[num_experts, in, out]`` in the compute dtype."""
+    return np.stack(
+        [
+            np.asarray(weights[f"{prefix}.expert.{e}.{name}"], dtype=dtype)
+            for e in range(num_experts)
+        ]
     )
-    return down
 
 
 def _sparsemixer_weight(
@@ -458,7 +520,7 @@ def _sparsemixer_weight(
     dtype: np.dtype = np.float32,
     work_trt_dtype=None,
 ) -> tuple[trt.ITensor, trt.ITensor]:
-    """Compute one expert selection via SparseMixer (inference mode).
+    """Compute one expert selection per row via SparseMixer (inference mode).
 
     Replicates the HF ``sparsemixer()`` function for a single expert:
       1. max_val, max_ind = max(scores)
@@ -472,26 +534,26 @@ def _sparsemixer_weight(
     carries the unmasked router logits.
 
     Args:
-        scores: [1, num_experts] router logits (may contain -inf for
-                previously selected experts).
+        scores: [rows, num_experts] router logits (may contain -inf for
+                previously selected experts), one row per token.
         num_experts: Number of experts.
         jitter_eps: Router jitter epsilon from config.
         original_scores: Original unmasked router logits for factor/threshold.
                 If None, uses scores (first expert selection).
 
     Returns:
-        (weight, index) where weight uses the graph compute dtype and index is
-        [1, 1] int32.
+        (weight, index) per row, both [rows, 1]: weight uses the graph compute
+        dtype and index is int32.
     """
     if original_scores is None:
         original_scores = scores
     if work_trt_dtype is None:
         work_trt_dtype = trt.float32
 
-    # max_val [1, 1], max_ind [1, 1]  — from (potentially masked) scores
+    # max_val [rows, 1], max_ind [rows, 1]  — from (potentially masked) scores
     topk1 = network.add_topk(scores, trt.TopKOperation.MAX, 1, 1 << 1)
-    max_val = topk1.get_output(0)  # [1, 1]
-    max_ind = topk1.get_output(1)  # [1, 1]
+    max_val = topk1.get_output(0)  # [rows, 1]
+    max_ind = topk1.get_output(1)  # [rows, 1]
 
     # factor = clamp(|original_scores|, min=max_val)
     # HF uses original (unmasked) scores for abs(), not the masked scores.
@@ -529,70 +591,48 @@ def _sparsemixer_weight(
     # softmax over masked logits
     sm = network.add_softmax(masked.get_output(0))
     sm.axes = 1 << 1
-    sm_out = sm.get_output(0)  # [1, num_experts]
+    sm_out = sm.get_output(0)  # [rows, num_experts]
 
-    # Gather the weight at max_ind: reshape max_ind to scalar
-    idx_flat = network.add_shuffle(max_ind)
-    idx_flat.reshape_dims = (1,)
-    weight = network.add_gather(sm_out, idx_flat.get_output(0), 1)
-    # weight shape: [1, 1]
+    # Each row's weight at its own max_ind: [rows, 1]
+    weight = network.add_gather_v2(sm_out, max_ind, trt.GatherMode.ELEMENT)
+    weight.axis = 1
 
     return weight.get_output(0), max_ind
 
 
-def _add_moe_block(
+def _add_sparsemixer_top2(
     network: trt.INetworkDefinition,
     inp: trt.ITensor,
     weights: WeightDict,
     prefix: str,
     hidden_size: int,
     num_experts: int,
-    moe_intermediate: int,
-    top_k: int,
-    jitter_eps: float = 0.01,
-    dtype: np.dtype = np.float32,
-    work_trt_dtype=None,
-) -> trt.ITensor:
-    """Add Mixture of Experts block with SparseMixer routing (top-2).
+    jitter_eps: float,
+    dtype: np.dtype,
+    work_trt_dtype,
+) -> tuple[trt.ITensor, trt.ITensor]:
+    """Route every row (token): returns ``(top_indices, top_weights)``, both ``[rows, 2]``.
 
-    Dense implementation: computes all expert outputs, then selects top-2
-    via SparseMixer routing weights. The SparseMixer algorithm computes
-    each expert's weight from an independent softmax (weights do NOT
-    sum to 1.0).
-
-    Steps:
-      1. Router logits: inp @ router_weight -> [1, num_experts]
-      2. SparseMixer expert 1: masked softmax -> weight_1, index_1
-      3. Scatter -inf at index_1, SparseMixer expert 2 -> weight_2, index_2
-      4. Compute all expert SwiGLU outputs -> [num_experts, hidden]
-      5. Gather selected experts and apply weights
-      6. Weighted sum -> [1, hidden]
+    ``top_indices`` is int32; ``top_weights`` uses the graph compute dtype.
     """
-    if work_trt_dtype is None:
-        work_trt_dtype = trt.float32
-
     # 1. Router logits
     router_logits = graph_ops.add_matmul_rhs_constant(
         network, inp, hidden_size, num_experts, weights[f"{prefix}.router"], dtype=dtype
-    )  # [1, num_experts]
+    )  # [rows, num_experts]
 
     # 2. SparseMixer expert 1 selection
     weight_1, idx_1 = _sparsemixer_weight(
         network, router_logits, num_experts, jitter_eps, dtype=dtype, work_trt_dtype=work_trt_dtype
     )
-    # weight_1: [1, 1], idx_1: [1, 1]
+    # weight_1: [rows, 1], idx_1: [rows, 1]
 
-    # 3. Mask out expert 1 for second selection
-    # Create one-hot of idx_1: [1, num_experts]
-    idx_1_flat = network.add_shuffle(idx_1)
-    idx_1_flat.reshape_dims = (1,)
+    # 3. Mask out each row's expert 1 for second selection
+    # One-hot of idx_1: [rows, num_experts]
     range_const = graph_ops.add_constant(
         network, (1, num_experts), np.arange(num_experts, dtype=dtype).reshape(1, -1), dtype=dtype
     )
-    idx_1_broadcast = network.add_shuffle(idx_1_flat.get_output(0))
-    idx_1_broadcast.reshape_dims = (1, 1)
     # Cast idx to float for comparison
-    idx_1_f = network.add_cast(idx_1_broadcast.get_output(0), work_trt_dtype)
+    idx_1_f = network.add_cast(idx_1, work_trt_dtype)
     # one_hot_mask: 1 where expert == idx_1, 0 elsewhere
     eq = network.add_elementwise(range_const, idx_1_f.get_output(0), trt.ElementWiseOperation.EQUAL)
     eq_f = network.add_cast(eq.get_output(0), work_trt_dtype)
@@ -619,49 +659,186 @@ def _add_moe_block(
         work_trt_dtype=work_trt_dtype,
     )
 
-    # 5. Compute ALL expert outputs and stack
-    expert_outputs = []
-    for e in range(num_experts):
-        exp_out = _add_swiglu_expert(
-            network,
-            inp,
-            hidden_size,
-            moe_intermediate,
-            weights[f"{prefix}.expert.{e}.w_gate"],
-            weights[f"{prefix}.expert.{e}.w_up"],
-            weights[f"{prefix}.expert.{e}.w_down"],
-            dtype=dtype,
-        )  # [1, hidden_size]
-        expert_outputs.append(exp_out)
+    top_indices = network.add_concatenation([idx_1, idx_2])
+    top_indices.axis = 1
+    top_weights = network.add_concatenation([weight_1, weight_2])
+    top_weights.axis = 1
+    return top_indices.get_output(0), top_weights.get_output(0)
 
-    # Stack: [num_experts, hidden_size]
-    stacked = network.add_concatenation(expert_outputs)
-    stacked.axis = 0
-    stacked_out = stacked.get_output(0)  # [num_experts, hidden_size]
 
-    # 6. Gather expert 1 output and scale
-    idx_1_scalar = network.add_shuffle(idx_1)
-    idx_1_scalar.reshape_dims = (1,)
-    expert_1_out = network.add_gather(stacked_out, idx_1_scalar.get_output(0), 0)
-    # expert_1_out: [1, hidden_size]
-    scaled_1 = network.add_elementwise(
-        expert_1_out.get_output(0), weight_1, trt.ElementWiseOperation.PROD
+def _add_moe_block(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    hidden_size: int,
+    num_experts: int,
+    moe_intermediate: int,
+    top_k: int,
+    jitter_eps: float = 0.01,
+    dtype: np.dtype = np.float32,
+    work_trt_dtype=None,
+    quant_ctx=None,
+    weight_name: str = "",
+) -> trt.ITensor:
+    """Add Mixture of Experts block with SparseMixer routing (top-2).
+
+    With ``quant_ctx`` owning this layer's experts the two gathered experts come from the FP8
+    grid route of ``quantization.py`` (stored as FP8 in the plan, dequantized to the compute
+    type) instead of an fp16 constant; everything else is unchanged.
+
+    Only the two experts chosen by the router are evaluated: their gate, up and
+    down weights are gathered from the stacked expert constants by the router
+    indices and run as batched matmuls. The SparseMixer algorithm computes each
+    expert's weight from an independent softmax (weights do NOT sum to 1.0).
+
+    Steps:
+      1. Router logits: inp @ router_weight -> [1, num_experts]
+      2. SparseMixer expert 1: masked softmax -> weight_1, index_1
+      3. Scatter -inf at index_1, SparseMixer expert 2 -> weight_2, index_2
+      4. Gather the selected experts' weights -> [1, 2, in, out] per projection
+      5. Batched SwiGLU over the two experts -> [1, 2, 1, hidden]
+      6. Weighted sum over the two experts -> [1, hidden]
+    """
+    if top_k != 2:
+        raise NotImplementedError("Phi-MoE routing selects exactly two experts per token")
+    if work_trt_dtype is None:
+        work_trt_dtype = trt.float32
+
+    # 1-3. Router logits and SparseMixer selection of two experts: [1, 2]
+    top_indices, top_weights = _add_sparsemixer_top2(
+        network, inp, weights, prefix, hidden_size, num_experts, jitter_eps, dtype, work_trt_dtype
     )
 
-    # Gather expert 2 output and scale
-    idx_2_scalar = network.add_shuffle(idx_2)
-    idx_2_scalar.reshape_dims = (1,)
-    expert_2_out = network.add_gather(stacked_out, idx_2_scalar.get_output(0), 0)
-    scaled_2 = network.add_elementwise(
-        expert_2_out.get_output(0), weight_2, trt.ElementWiseOperation.PROD
+    # 4. Gather the selected experts' weights: [1, 2, in, out]
+    fp8_gather = (
+        quant_ctx.expert_gatherer(network, weight_name, top_indices, inp.dtype)
+        if quant_ctx is not None and quant_ctx.should_quantize(f"{weight_name}.experts.w_gate")
+        else None
     )
 
-    # Sum: weighted expert 1 + weighted expert 2
-    moe_out = network.add_elementwise(
-        scaled_1.get_output(0), scaled_2.get_output(0), trt.ElementWiseOperation.SUM
-    )
+    def gathered(name: str) -> trt.ITensor:
+        if fp8_gather is not None:
+            return fp8_gather(name)  # [1, 2, in, out], FP8 grid route, dequantized to fp16
+        stack = _expert_stack(weights, prefix, name, num_experts, dtype)
+        const = graph_ops.add_constant(network, stack.shape, stack, dtype=dtype)
+        return network.add_gather(const, top_indices, 0).get_output(0)  # [1, 2, in, out]
 
+    def reshape(tensor: trt.ITensor, dims: tuple[int, ...]) -> trt.ITensor:
+        shuffle = network.add_shuffle(tensor)
+        shuffle.reshape_dims = dims
+        return shuffle.get_output(0)
+
+    def batched_matmul(lhs: trt.ITensor, rhs: trt.ITensor) -> trt.ITensor:
+        return network.add_matrix_multiply(
+            lhs, trt.MatrixOperation.NONE, rhs, trt.MatrixOperation.NONE
+        ).get_output(0)
+
+    # 5. SwiGLU on both experts: [1, 1, 1, hidden] @ [1, 2, hidden, inter] -> [1, 2, 1, inter]
+    rows = reshape(inp, (1, 1, 1, hidden_size))
+    gate = batched_matmul(rows, gathered("w_gate"))
+    up = batched_matmul(rows, gathered("w_up"))
+    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
+    swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+    down = batched_matmul(gated.get_output(0), gathered("w_down"))  # [1, 2, 1, hidden]
+
+    # 6. Weighted sum over the two experts
+    per_expert = reshape(down, (1, top_k, hidden_size))
+    scaled = network.add_elementwise(
+        per_expert,
+        reshape(top_weights, (1, top_k, 1)),
+        trt.ElementWiseOperation.PROD,
+    )
+    moe_out = network.add_reduce(
+        scaled.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=False
+    )
     return moe_out.get_output(0)  # [1, hidden_size]
+
+
+def _add_prefill_moe_block(
+    network: trt.INetworkDefinition,
+    inp: trt.ITensor,
+    weights: WeightDict,
+    prefix: str,
+    hidden_size: int,
+    num_experts: int,
+    top_k: int,
+    jitter_eps: float,
+    dtype: np.dtype,
+    work_trt_dtype,
+    quant_ctx=None,
+) -> trt.ITensor:
+    """Add the Mixture of Experts block of the batched prefill engine (top-2).
+
+    A prompt's tokens route to most experts, so every expert runs on every token
+    as one batched matmul per projection over the stacked expert constants (each
+    expert weight is read once per prefill). Each token then keeps the outputs of
+    its own two routed experts, weighted as in ``_add_moe_block``.
+
+    Steps:
+      1. Router logits and SparseMixer selection of two experts -> [Sq, 2]
+      2. Batched SwiGLU of every expert on every token -> [num_experts, Sq, hidden]
+      3. Gather each token's two routed outputs -> [Sq, 2, hidden]
+      4. Weighted sum over the two experts -> [Sq, hidden]
+    """
+    if top_k != 2:
+        raise NotImplementedError("Phi-MoE routing selects exactly two experts per token")
+
+    # 1. Router logits and SparseMixer selection of two experts: [Sq, 2]
+    top_indices, top_weights = _add_sparsemixer_top2(
+        network, inp, weights, prefix, hidden_size, num_experts, jitter_eps, dtype, work_trt_dtype
+    )
+
+    fp8_stacked = (
+        quant_ctx.expert_stacker(network, prefix, top_indices, inp.dtype)
+        if quant_ctx is not None and quant_ctx.should_quantize(f"{prefix}.experts.w_gate")
+        else None
+    )
+
+    def stacked(name: str) -> trt.ITensor:
+        if fp8_stacked is not None:
+            return fp8_stacked(name)  # [E, in, out], FP8 constant dequantized to fp16
+        stack = _expert_stack(weights, prefix, name, num_experts, dtype)
+        return graph_ops.add_constant(network, stack.shape, stack, dtype=dtype)  # [E, in, out]
+
+    def reshape(tensor: trt.ITensor, dims: tuple[int, ...]) -> trt.ITensor:
+        shuffle = network.add_shuffle(tensor)
+        shuffle.reshape_dims = dims
+        return shuffle.get_output(0)
+
+    def batched_matmul(lhs: trt.ITensor, rhs: trt.ITensor) -> trt.ITensor:
+        return network.add_matrix_multiply(
+            lhs, trt.MatrixOperation.NONE, rhs, trt.MatrixOperation.NONE
+        ).get_output(0)
+
+    # 2. SwiGLU of every expert: [1, Sq, hidden] @ [E, hidden, inter] -> [E, Sq, inter]
+    tokens = reshape(inp, (1, -1, hidden_size))
+    gate = batched_matmul(tokens, stacked("w_gate"))
+    up = batched_matmul(tokens, stacked("w_up"))
+    sigmoid = network.add_activation(gate, trt.ActivationType.SIGMOID)
+    swish = network.add_elementwise(gate, sigmoid.get_output(0), trt.ElementWiseOperation.PROD)
+    gated = network.add_elementwise(swish.get_output(0), up, trt.ElementWiseOperation.PROD)
+    down = batched_matmul(gated.get_output(0), stacked("w_down"))  # [E, Sq, hidden]
+
+    # 3. Each token's two routed outputs: [Sq, E, hidden] gathered by [Sq, 2, 1] -> [Sq, 2, hidden]
+    per_token = network.add_shuffle(down)
+    per_token.first_transpose = (1, 0, 2)
+    routed = network.add_gather_v2(
+        per_token.get_output(0), reshape(top_indices, (-1, top_k, 1)), trt.GatherMode.ND
+    )
+    routed.num_elementwise_dims = 1
+
+    # 4. Weighted sum over the two experts
+    scaled = network.add_elementwise(
+        routed.get_output(0),
+        reshape(top_weights, (-1, top_k, 1)),
+        trt.ElementWiseOperation.PROD,
+    )
+    moe_out = network.add_reduce(
+        scaled.get_output(0), trt.ReduceOperation.SUM, 1 << 1, keep_dims=False
+    )
+    return moe_out.get_output(0)  # [Sq, hidden_size]
 
 
 def _add_moe_decoder_layer(
@@ -691,6 +868,7 @@ def _add_moe_decoder_layer(
     norm_type: str = "layernorm",
     dtype: np.dtype = np.float32,
     work_trt_dtype=None,
+    quant_ctx=None,
 ) -> dict[str, trt.ITensor]:
     """Add one decoder layer with MoE MLP. Attention is standard."""
 
@@ -718,6 +896,8 @@ def _add_moe_decoder_layer(
         sin_half_tensor=sin_half_tensor,
         rotary_embedding_dim=head_dim,
         dtype=dtype,
+        quant_ctx=quant_ctx,
+        layer_prefix=prefix,
     )
     attn_out = attn["attn_out"]
 
@@ -749,6 +929,8 @@ def _add_moe_decoder_layer(
         jitter_eps=jitter_eps,
         dtype=dtype,
         work_trt_dtype=work_trt_dtype,
+        quant_ctx=quant_ctx,
+        weight_name=prefix,
     )
 
     # Residual connection
@@ -853,8 +1035,13 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     )
     if max_sequence_length > config.max_position_embeddings:
         raise ValueError("Phi-MoE max_sequence_length exceeds checkpoint context capacity")
-    if request.quantization not in {None, "none"}:
-        raise NotImplementedError("Phi-MoE quantization requires a family-owned qualified path")
+    if request.quantization not in {None, "none", "fp8"}:
+        raise NotImplementedError(f"Phi-MoE does not support quantization={request.quantization!r}")
+    quantized = request.quantization == "fp8"
+    if quantized and precision != "fp16":
+        raise NotImplementedError("Phi-MoE fp8 quantization requires precision fp16")
+    if quantized and request.tensor_parallel_size != 1:
+        raise NotImplementedError("Phi-MoE fp8 quantization does not support tensor parallelism")
     if request.fp32_layers:
         raise NotImplementedError("Phi-MoE does not expose mixed-precision layer selection")
     if request.mtp_seq_len is not None:
@@ -866,8 +1053,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_model_dir"] = str(model_dir)
     config.raw["_resolved_build_precision"] = precision
     config.raw["_parallel_build_enabled"] = parallel.enabled
-    config.raw["_quantized_build_requested"] = False
-    weights = model.load_weights(str(model_dir), config)
+    config.raw["_quantized_build_requested"] = quantized
+    quant_ctx = None
+    if quantized:
+        from .quantization import calibrate_phi_moe
+
+        quant_ctx = calibrate_phi_moe(model_dir, config, graph_ops, request.quantization)
+    # ``quant_ctx`` is passed on only for FP8 builds, so unquantized builds call the loader
+    # exactly as before.
+    load_options = {"quant_ctx": quant_ctx} if quantized else {}
+    weights = model.load_weights(str(model_dir), config, **load_options)
     writer.set_header(family="phi_moe", task=request.task, backend=request.backend)
     if parallel.enabled:
         for rank in range(parallel.tp_size):
@@ -889,13 +1084,27 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
             weights,
             max_sequence_length,
             precision=precision,
-            quant_ctx=None,
+            quant_ctx=quant_ctx,
             verbose=bool(request.verbose),
             debug_layer_outputs=False,
             parallel_config=parallel,
         )
         writer.add_bytes("engine.plan", plan)
-        layout = "single"
+        del plan
+        # The prompt runs through a batched prefill engine instead of one decode
+        # step per prompt token.
+        writer.add_bytes(
+            "prefill.plan",
+            model.build_prefill_engine(
+                config,
+                weights,
+                max_sequence_length,
+                precision=precision,
+                quant_ctx=quant_ctx,
+                verbose=bool(request.verbose),
+            ),
+        )
+        layout = "split"
     writer.add_json(
         "runtime.json",
         _runtime_config(

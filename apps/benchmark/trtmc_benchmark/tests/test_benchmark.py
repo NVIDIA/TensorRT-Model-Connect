@@ -40,6 +40,8 @@ def test_catalog_reads_family_owned_manifests_without_a_registry() -> None:
     distilgpt2 = next(entry for entry in entries if entry.name == "distilgpt2")
     assert distilgpt2.operation == "generate"
     assert distilgpt2.status == "ready"
+    # Every family manifest validates against its family's build declaration.
+    assert [(entry.name, entry.reason) for entry in entries if entry.status == "invalid"] == []
 
 
 def test_case_resolves_current_task_and_manifest_fields(tmp_path: Path) -> None:
@@ -49,6 +51,15 @@ def test_case_resolves_current_task_and_manifest_fields(tmp_path: Path) -> None:
     assert case.request["prompt"] == "Hello, I'm a language model"
     assert case.request["max_new_tokens"] == 12
     assert case.measurement.timing_scope == "public_task_call_wall"
+
+
+@pytest.mark.parametrize("profile", ["nemotron-omni-nvfp4-text-image", "qwen35-moe-gptq-edge"])
+def test_vision_language_catalog_case_carries_its_prompt_and_image(profile: str, tmp_path: Path) -> None:
+    # AIPerf qualification prepares these bundles from the catalog case; without a prompt and an image the case
+    # does not resolve and the build fails before it starts.
+    case = resolve_case(ManifestCatalog(REPO / "families").resolve(profile), tmp_path / "model.bundle")
+    assert case.request["prompt"]
+    assert Path(case.request["image_path"]).is_file()
 
 
 def test_forecast_case_uses_public_forecast_request(tmp_path: Path) -> None:

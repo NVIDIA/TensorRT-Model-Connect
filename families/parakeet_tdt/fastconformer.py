@@ -7,12 +7,24 @@ import sys
 import numpy as np
 import tensorrt as trt
 from . import graph_ops
+from .quantization import configure_fp8_build
 
 
 def _to_np(t) -> np.ndarray:
     if hasattr(t, "numpy"):
         return t.detach().cpu().numpy().astype(np.float32)
     return np.asarray(t, dtype=np.float32)
+
+
+def _project(network, x, in_features, out_features, weights, key, dtype, quant_ctx):
+    """Weight matmul ``x @ weights[key]``; FP8 Q/DQ when ``quant_ctx`` quantizes ``key``."""
+    if quant_ctx is None:
+        return graph_ops.add_matmul_rhs_constant(
+            network, x, in_features, out_features, weights[key], dtype=dtype
+        )
+    return quant_ctx.maybe_quantized_matmul(
+        network, x, in_features, out_features, weights[key], key, dtype=dtype
+    )
 
 
 def _relative_pe(seq_len: int, d_model: int, max_len: int = 5000) -> np.ndarray:
@@ -146,7 +158,19 @@ def _rel_shift(network, x, H, S, dtype=np.float32):
 
 
 def _add_rel_pos_attention(
-    network, hs, weights, pfx, hidden, H, D, S, rel_pe_proj, eps, enc_mask=None, dtype=np.float32
+    network,
+    hs,
+    weights,
+    pfx,
+    hidden,
+    H,
+    D,
+    S,
+    rel_pe_proj,
+    eps,
+    enc_mask=None,
+    dtype=np.float32,
+    quant_ctx=None,
 ):
     normed = graph_ops.add_layer_norm(
         network,
@@ -159,27 +183,21 @@ def _add_rel_pos_attention(
     )
     q = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, hidden, weights[f"{pfx}.w_q"], dtype=dtype
-        ),
+        _project(network, normed, hidden, hidden, weights, f"{pfx}.w_q", dtype, quant_ctx),
         hidden,
         weights[f"{pfx}.b_q"],
         dtype=dtype,
     )
     k = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, hidden, weights[f"{pfx}.w_k"], dtype=dtype
-        ),
+        _project(network, normed, hidden, hidden, weights, f"{pfx}.w_k", dtype, quant_ctx),
         hidden,
         weights[f"{pfx}.b_k"],
         dtype=dtype,
     )
     v = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, hidden, weights[f"{pfx}.w_v"], dtype=dtype
-        ),
+        _project(network, normed, hidden, hidden, weights, f"{pfx}.w_v", dtype, quant_ctx),
         hidden,
         weights[f"{pfx}.b_v"],
         dtype=dtype,
@@ -240,8 +258,8 @@ def _add_rel_pos_attention(
     af.reshape_dims = (S, hidden)
     return graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, af.get_output(0), hidden, hidden, weights[f"{pfx}.w_o"], dtype=dtype
+        _project(
+            network, af.get_output(0), hidden, hidden, weights, f"{pfx}.w_o", dtype, quant_ctx
         ),
         hidden,
         weights[f"{pfx}.b_o"],
@@ -320,6 +338,7 @@ def _add_conv_module(
     conv_norm_type="batch_norm",
     conv_context_size="symmetric",
     dtype=np.float32,
+    time_keep=None,
 ):
     normed = graph_ops.add_layer_norm(
         network,
@@ -349,6 +368,10 @@ def _add_conv_module(
     ).get_output(0)
     gate = network.add_activation(xb, trt.ActivationType.SIGMOID).get_output(0)
     x = network.add_elementwise(xa, gate, trt.ElementWiseOperation.PROD).get_output(0)
+    if time_keep is not None:
+        # The reference zeroes padded frames before the depthwise convolution; without it the padding's
+        # values leak into the last valid frames, a kernel's half-width further at every layer.
+        x = network.add_elementwise(x, time_keep, trt.ElementWiseOperation.PROD).get_output(0)
     if conv_context_size == "causal":
         x = _add_causal_depthwise_conv1d(network, x, weights, pfx, hidden, kern, dtype=dtype)
     else:
@@ -381,15 +404,13 @@ def _add_conv_module(
     return r4.get_output(0)
 
 
-def _add_half_ffn(network, hs, weights, pfx, hidden, ffn, eps, dtype=np.float32):
+def _add_half_ffn(network, hs, weights, pfx, hidden, ffn, eps, dtype=np.float32, quant_ctx=None):
     normed = graph_ops.add_layer_norm(
         network, hs, hidden, weights[f"{pfx}.norm"], weights[f"{pfx}.norm_b"], eps, dtype=dtype
     )
     fc1 = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, normed, hidden, ffn, weights[f"{pfx}.w1"], dtype=dtype
-        ),
+        _project(network, normed, hidden, ffn, weights, f"{pfx}.w1", dtype, quant_ctx),
         ffn,
         weights[f"{pfx}.b1"],
         dtype=dtype,
@@ -397,9 +418,7 @@ def _add_half_ffn(network, hs, weights, pfx, hidden, ffn, eps, dtype=np.float32)
     act = graph_ops.add_activation(network, fc1, "silu", dtype=dtype)
     fc2 = graph_ops.add_bias_sum(
         network,
-        graph_ops.add_matmul_rhs_constant(
-            network, act, ffn, hidden, weights[f"{pfx}.w2"], dtype=dtype
-        ),
+        _project(network, act, ffn, hidden, weights, f"{pfx}.w2", dtype, quant_ctx),
         hidden,
         weights[f"{pfx}.b2"],
         dtype=dtype,
@@ -425,11 +444,27 @@ def _add_conformer_block(
     conv_norm_type="batch_norm",
     conv_context_size="symmetric",
     dtype=np.float32,
+    quant_ctx=None,
+    time_keep=None,
 ):
-    ffn1 = _add_half_ffn(network, hs, weights, f"{pfx}.ff1", hidden, ffn, eps, dtype=dtype)
+    ffn1 = _add_half_ffn(
+        network, hs, weights, f"{pfx}.ff1", hidden, ffn, eps, dtype=dtype, quant_ctx=quant_ctx
+    )
     hs = network.add_elementwise(hs, ffn1, trt.ElementWiseOperation.SUM).get_output(0)
     attn = _add_rel_pos_attention(
-        network, hs, weights, pfx, hidden, H, D, S, rpe, eps, enc_mask, dtype=dtype
+        network,
+        hs,
+        weights,
+        pfx,
+        hidden,
+        H,
+        D,
+        S,
+        rpe,
+        eps,
+        enc_mask,
+        dtype=dtype,
+        quant_ctx=quant_ctx,
     )
     hs = network.add_elementwise(hs, attn, trt.ElementWiseOperation.SUM).get_output(0)
     conv = _add_conv_module(
@@ -444,9 +479,12 @@ def _add_conformer_block(
         conv_norm_type=conv_norm_type,
         conv_context_size=conv_context_size,
         dtype=dtype,
+        time_keep=time_keep,
     )
     hs = network.add_elementwise(hs, conv, trt.ElementWiseOperation.SUM).get_output(0)
-    ffn2 = _add_half_ffn(network, hs, weights, f"{pfx}.ff2", hidden, ffn, eps, dtype=dtype)
+    ffn2 = _add_half_ffn(
+        network, hs, weights, f"{pfx}.ff2", hidden, ffn, eps, dtype=dtype, quant_ctx=quant_ctx
+    )
     hs = network.add_elementwise(hs, ffn2, trt.ElementWiseOperation.SUM).get_output(0)
     return graph_ops.add_layer_norm(
         network,
@@ -459,7 +497,22 @@ def _add_conformer_block(
     )
 
 
-def _build_encoder(config, weights, *, precision="fp32", verbose=False):
+def _frame_keep(network, enc_mask, enc_seq, dtype):
+    """[1, 1, enc_seq] multiplier: 1 for a frame whose mask row admits a key, 0 for a padded frame."""
+    rows = enc_mask  # a [1, 1, keys] mask marks the frames themselves
+    if enc_mask.shape[1] != 1:  # a [1, rows, keys] mask: a padded frame's row admits no key
+        rows = network.add_reduce(enc_mask, trt.ReduceOperation.MAX, 1 << 2, True).get_output(0)
+    threshold = network.add_constant((1, 1, 1), np.array([[[-1.0]]], dtype=np.float32)).get_output(0)
+    if rows.dtype != trt.float32:
+        rows = network.add_cast(rows, trt.float32).get_output(0)
+    valid = network.add_elementwise(rows, threshold, trt.ElementWiseOperation.GREATER).get_output(0)
+    keep = network.add_cast(valid, dtype).get_output(0)
+    shape = network.add_shuffle(keep)
+    shape.reshape_dims = (1, 1, enc_seq)
+    return shape.get_output(0)
+
+
+def _build_encoder(config, weights, *, precision="fp32", verbose=False, quant_ctx=None):
     el = weights["_enc_layers"]
     eh = weights["_enc_heads"]
     h = weights["_hidden"]
@@ -487,6 +540,7 @@ def _build_encoder(config, weights, *, precision="fp32", verbose=False):
     tc = b.create_builder_config()
     tc.builder_optimization_level = 1
     tc.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 2 << 30)
+    configure_fp8_build(tc, quant_ctx)
 
     eps = graph_ops.add_constant(
         net, (1, 1), np.array([1e-5], dtype=work_np_dtype), dtype=work_np_dtype
@@ -502,6 +556,7 @@ def _build_encoder(config, weights, *, precision="fp32", verbose=False):
         mel = net.add_cast(mel, work_trt_dtype).get_output(0)
         enc_mask = net.add_cast(enc_mask, work_trt_dtype).get_output(0)
 
+    time_keep = _frame_keep(net, enc_mask, es, work_trt_dtype)
     hs = _build_subsampling(net, mel, weights, sc, h, mb, ml, dtype=work_np_dtype)
     for li in range(el):
         pfx = f"el.{li}"
@@ -525,6 +580,8 @@ def _build_encoder(config, weights, *, precision="fp32", verbose=False):
             conv_norm_type=conv_norm_type,
             conv_context_size=conv_context_size,
             dtype=work_np_dtype,
+            quant_ctx=quant_ctx,
+            time_keep=time_keep,
         )
 
     output = hs

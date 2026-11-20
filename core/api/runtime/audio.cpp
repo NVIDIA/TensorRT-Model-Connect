@@ -62,6 +62,27 @@ token_history(const trtmc_semantic_acoustic_history_view_v1& input) {
     return {checked_span(input.semantic_tokens.data, input.semantic_tokens.size),
             codebook_history(input.coarse_tokens), codebook_history(input.fine_tokens)};
 }
+trtmc_status TRTMC_CALL codec_audio_run(
+    trtmc_model* model, const trtmc_audio_codebook_tokens_to_audio_request_v1* input,
+    const trtmc_config_view_v1* config, trtmc_result** output, trtmc_error** error) noexcept {
+    if (output)
+        *output = nullptr;
+    return guarded(error, [&] {
+        require(input && output, "codec token request and output are required");
+        require(input->codes.codebooks > 0 && input->codes.frames > 0,
+                "codec token dimensions must be positive");
+        const internal::AudioCodebookTokensToAudioRequest request{codebook_history(input->codes)};
+        const ConvertedConfig options(config);
+        std::lock_guard<std::mutex> lock(model_mutex(model));
+        auto& family = require_interface<internal::IAudioCodebookTokensToAudio>(
+            model, internal::IAudioCodebookTokensToAudio::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::IAudioCodebookTokensToAudio>(),
+                             options.view());
+        *output = make_result<AudioResultStorage>(family.run(request, options.view()));
+    });
+}
+
 trtmc_status TRTMC_CALL history_audio_run(
     trtmc_model* model, const trtmc_text_audio_token_history_to_audio_request_v1* input,
     const trtmc_config_view_v1* config, trtmc_result** output, trtmc_error** error) noexcept {
@@ -210,6 +231,37 @@ extern "C" trtmc_status TRTMC_CALL language_identification_run(
             if (label.empty())
                 throw ApiFailure{TRTMC_INTERNAL_ERROR,
                                  "language identification returned an empty language label"};
+        *output = make_result<LabelScoresStorage>(std::move(result));
+    });
+}
+
+extern "C" trtmc_status TRTMC_CALL audio_to_class_scores_run(
+    trtmc_model* model, const trtmc_audio_to_class_scores_request_v1* input,
+    const trtmc_config_view_v1* config, trtmc_result** output, trtmc_error** error) noexcept {
+    if (output)
+        *output = nullptr;
+    return guarded(error, [&] {
+        require(input && output, "audio class-scores request and result output are required");
+        const internal::AudioToClassScoresRequest request{audio_view(input->audio)};
+        const ConvertedConfig options(config);
+
+        std::lock_guard<std::mutex> lock(model_mutex(model));
+        auto& task = require_interface<internal::IAudioToClassScores>(
+            model, internal::IAudioToClassScores::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::IAudioToClassScores>(),
+                             options.view());
+        auto result = task.run(request, options.view());
+        if (result.scores.empty())
+            throw ApiFailure{TRTMC_INTERNAL_ERROR, "audio class scores are empty"};
+        if (!result.labels.empty() && result.labels.size() != result.scores.size())
+            throw ApiFailure{TRTMC_INTERNAL_ERROR,
+                             "audio class scores need one label per score when labelled"};
+        if (result.vocabulary_id.empty())
+            for (const auto& label : result.labels)
+                if (label.empty())
+                    throw ApiFailure{TRTMC_INTERNAL_ERROR,
+                                     "audio class scores without a vocabulary need named labels"};
         *output = make_result<LabelScoresStorage>(std::move(result));
     });
 }
@@ -488,8 +540,12 @@ const trtmc_speech_translation_api_v1 translation_api{
     {1, 0, sizeof(translation_api)}, speech_translation_run, text_result_view};
 const trtmc_audio_language_identification_api_v1 language_api{
     {1, 0, sizeof(language_api)}, language_identification_run, label_scores_result_view};
+const trtmc_audio_to_class_scores_api_v1 audio_class_scores_api{
+    {1, 0, sizeof(audio_class_scores_api)}, audio_to_class_scores_run, label_scores_result_view};
 const trtmc_speech_to_speech_response_api_v1 response_api{
     {1, 0, sizeof(response_api)}, speech_response_run, audio_result_view};
+const trtmc_audio_codebook_tokens_to_audio_api_v1 codec_audio_api{
+    {1, 0, sizeof(codec_audio_api)}, codec_audio_run, audio_result_view};
 const trtmc_batch_speech_transcription_api_v1 batch_transcription_api{
     {1, 0, sizeof(batch_transcription_api)},
     batch_transcription_run,
@@ -525,9 +581,11 @@ const TaskBinding bindings[] = {
     {internal::ITextAudioTokenHistoryToAudio::kTask, 1, 0, &history_audio_api.header},
     {internal::ITextToAudio::kTask, 1, 0, &text_audio_api.header},
     {internal::ITextToSpeech::kTask, 1, 0, &text_speech_api.header},
+    {internal::IAudioCodebookTokensToAudio::kTask, 1, 0, &codec_audio_api.header},
     {internal::ISpeechTranscription::kTask, 1, 0, &transcription_api.header},
     {internal::ISpeechTranslation::kTask, 1, 0, &translation_api.header},
     {internal::IAudioLanguageIdentification::kTask, 1, 0, &language_api.header},
+    {internal::IAudioToClassScores::kTask, 1, 0, &audio_class_scores_api.header},
     {internal::ISpeechToSpeechResponse::kTask, 1, 0, &response_api.header},
     {internal::IBatchSpeechTranscription::kTask, 1, 0, &batch_transcription_api.header},
     {internal::IBatchSpeechTranslation::kTask, 1, 0, &batch_translation_api.header},

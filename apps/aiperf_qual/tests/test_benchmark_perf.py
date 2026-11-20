@@ -126,6 +126,25 @@ def test_offline_rejudge_removes_native_floor_without_changing_scores(tmp_path, 
     assert json.loads((tmp_path / "report.original.json").read_text())["accuracy"] == quality
 
 
+@pytest.mark.parametrize("performance_source", ["quality", None])
+def test_rejudge_decides_an_inconclusive_task_check_on_its_regression(tmp_path, performance_source):
+    from trtmc_aiperf_qual.cli import rejudge_reports
+
+    test = {"outcome": "inconclusive", "regression_points": 0.418, "margin_points": 2.0}
+    quality = [{"suite": "tts-intelligibility", "source": "task", "status": "inconclusive", "samples": 200,
+                "expected_samples": 200, "gate": {"margin": 2.0, "relative_margin": 0.1},
+                "metrics": {"native_score": 10.79, "trtmc_score": 11.2, "test": test}}]
+    if performance_source:
+        report = {**capture(tmp_path, [row(0, 40)], [row(0, 20)], quality), "provenance": {}}
+    else:  # the general branch: a fixed-request result
+        report = {"model": "m", "task": "text_to_audio", "accuracy": quality, "performance": [], "provenance": {}}
+    (tmp_path / "report.json").write_text(json.dumps(report))
+    (tmp_path / "model.json").write_text(json.dumps({"absolute": [], "supplementary": []}))
+    rejudge_reports([tmp_path])
+    entry = json.loads((tmp_path / "report.json").read_text())["accuracy"][0]
+    assert entry["status"] == "pass" and entry["metrics"]["test"] == test
+
+
 def test_partial_failed_workload_reports_coverage_and_available_timings(tmp_path):
     report = capture(tmp_path, [row(0, 40), row(1, None, status=500)], [row(0, 20), row(1, 200)])
     perf, = report["performance"]

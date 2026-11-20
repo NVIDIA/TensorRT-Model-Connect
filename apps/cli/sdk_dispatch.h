@@ -9,6 +9,7 @@
 #include "cli/io.h"
 #include "trtmc/core.hpp"
 #include "trtmc/image.hpp"
+#include "trtmc/scores.hpp"
 #include "trtmc/text.hpp"
 
 #include <filesystem>
@@ -38,6 +39,7 @@ void require_finite(const std::vector<float>&, const std::string&);
 void write_json(std::ostream&, const nlohmann::json&);
 nlohmann::json text_json(const TextContinuationResult&);
 nlohmann::json text_json(const TextResultView&);
+nlohmann::json label_scores_json(const LabelScoresResult&);
 nlohmann::json write_image(const ImageResultView&, const std::string&);
 Config task_config(const Command&, const std::vector<ConfigField>&,
                    std::initializer_list<std::string_view> input_options);

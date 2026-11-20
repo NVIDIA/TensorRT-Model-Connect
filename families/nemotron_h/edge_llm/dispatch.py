@@ -119,35 +119,56 @@ def build(request, writer, native) -> None:
 
 
 def build_speculative(request, writer, draft: Path, variant: str) -> None:
-    """Preserve a paired request on failure; never replace it with a base-only build."""
+    """Offload the complete pair, or warn and retry the same native pair once."""
+    from ..paired import build as native_paired
+
     raw = json.loads((Path(request.model_dir) / "config.json").read_text(encoding="utf-8"))
     if not candidate(request, raw) or source_quantization(request, raw) != "nvfp4":
-        raise ValueError("Nemotron-H paired ONNX requires a compatible NVFP4 target and TP1 text request")
+        raise ValueError("Nemotron-H paired execution requires a compatible NVFP4 target and TP1 text request")
     if edge_llm.sequence_length(request, raw) > raw["max_position_embeddings"]:
         raise ValueError("Nemotron-H max_sequence_length exceeds checkpoint context capacity")
+    if not edge_llm.package_present():
+        native_paired(request, writer, draft, variant)
+        return
     descriptor, name = tempfile.mkstemp(prefix=f".{request.output_path.name}.edge-onnx-", suffix=".log",
                                         dir=request.output_path.parent)
     os.close(descriptor)
     log_path = Path(name)
+    failure = None
     with tempfile.TemporaryDirectory(prefix=f"trtmc-nemotron-h-{variant}-", dir=request.output_path.parent) as directory:
         try:
             target = edge_llm.local_target()
             key = (target["os"], target["arch"], target["sm"], "nvfp4")
-            if key not in EDGE_DISPATCH or not platform_matches(raw, target):
-                raise ValueError("Nemotron-H paired ONNX is unavailable on this native platform")
-            files, marker = edge_llm.prepare_paired(request, raw, target, Path(directory), log_path, draft, variant)
+            use_edge = key in EDGE_DISPATCH and platform_matches(raw, target)
+            if use_edge:
+                files, marker = edge_llm.prepare_paired(request, raw, target, Path(directory), log_path, draft, variant)
         except Exception as error:
+            failure = error
             with log_path.open("a", encoding="utf-8") as log:
                 traceback.print_exception(error, file=log)
             _LOG.warning("Nemotron-H paired Edge ONNX build failed: %s. Diagnostics: %s. "
-                         "Native paired execution is unavailable; refusing base-only fallback.", error, log_path)
-            raise NotImplementedError("Native Nemotron-H paired fallback is unavailable") from error
-        edge_llm.publish(request, writer, files, marker)
-        log_path.unlink()
+                         "Retrying the unchanged native pair once.", error, log_path, exc_info=True)
+        except BaseException:
+            log_path.unlink(missing_ok=True)
+            raise
+        else:
+            if use_edge:
+                # Publication failure is not a preparation failure; never retry
+                # after writing any part of an Edge bundle.
+                edge_llm.publish(request, writer, files, marker)
+                log_path.unlink()
+                return
+            log_path.unlink()
+    try:
+        native_paired(request, writer, draft, variant)
+    except Exception as error:
+        if failure is not None:
+            raise error from failure
+        raise
 
 
 def build_paired(request, writer, execution) -> None:
-    """Keep the complete speculative pair owned by the family ONNX adapter."""
+    """Keep the complete speculative pair and backend selection family-owned."""
     execution.validate_local()
     if execution.variant not in {"dflash", "dspark", "dspark_tree"} or tuple(
         x.role for x in execution.checkpoints

@@ -328,6 +328,15 @@ void test_optional_image_geometry(const std::filesystem::path& root,
         require(std::string(error.what()) == "SDK image binding cannot serve a video bundle",
                 "valid multi-frame metadata selects video before the SDK compatibility guard");
     }
+    // A family whose SDK Tasks are video takes the existing runtime for an image_generation
+    // video bundle; this fixture then lacks the existing image interface the runtime needs.
+    try {
+        invoke(write_bundle(root, "image_generation", "video_fixture", &video), options, {});
+        throw std::runtime_error("a fixture without an image interface served a video bundle");
+    } catch (const std::invalid_argument& error) {
+        require(std::string(error.what()) == "bundle does not implement image generation",
+                "SDK video Tasks route an image_generation video bundle to the existing runtime");
+    }
     std::filesystem::remove(png);
 }
 void test_audio_task_new_token_field(const std::filesystem::path& root,

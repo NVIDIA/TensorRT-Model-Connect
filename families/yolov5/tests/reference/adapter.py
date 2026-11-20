@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""YOLOv5 eager PyTorch reference for the detect serving benchmark."""
+"""YOLOv5 PyTorch reference (eager, or torch.compile in compile mode) for the detect serving benchmark."""
 
 from __future__ import annotations
 
@@ -57,7 +57,8 @@ class Adapter:
         if spec.precision not in DTYPES:
             raise self.host.Error(f"YOLOv5 reference runs at fp16 or fp32, not {spec.precision}")
         self.spec = spec
-        self.model = load_model(_model_directory(spec)).to(device="cuda", dtype=spec.dtype)
+        self.model = host.maybe_compile(load_model(_model_directory(spec)).to(device="cuda", dtype=spec.dtype),
+                                        spec)
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
         from families.yolov5.tests.reference.model import detections

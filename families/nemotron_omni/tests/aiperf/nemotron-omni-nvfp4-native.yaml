@@ -1,0 +1,4 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+exclude: the family's native reference is a pinned vLLM 0.20 snapshot of six requests; AIPerf has no vLLM native backend (its own torch pin needs an isolated environment) and no audio-video gold benchmark yet

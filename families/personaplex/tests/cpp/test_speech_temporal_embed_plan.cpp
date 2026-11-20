@@ -64,6 +64,49 @@ void test_dual_stream_embed_sums_text_moshi_and_user_streams() {
     check_close(out[1], 4.0F + 13.0F + 25.0F + 31.0F + 45.0F, 1e-6F, "dual stream embed value 1");
 }
 
+void test_round_to_half_matches_ieee_half_rounding() {
+    check(trtmc::personaplex_round_to_half(1.0F + 0x1.0p-11F) == 1.0F, "tie rounds to even (down)");
+    check(trtmc::personaplex_round_to_half(1.0F + 0x1.8p-10F) == 1.0F + 0x1.0p-9F,
+          "tie rounds to even (up)");
+    check(trtmc::personaplex_round_to_half(1.0F + 0x1.0p-10F) == 1.0F + 0x1.0p-10F,
+          "half values are exact");
+    check(trtmc::personaplex_round_to_half(65519.0F) == 65504.0F, "largest finite half");
+    check(std::isinf(trtmc::personaplex_round_to_half(65520.0F)), "overflow rounds to infinity");
+    check(trtmc::personaplex_round_to_half(0x1.0p-25F) == 0.0F,
+          "subnormal tie rounds to even zero");
+    check(trtmc::personaplex_round_to_half(0x1.8p-24F) == 0x1.0p-23F,
+          "subnormal tie rounds to even");
+    check(trtmc::personaplex_round_to_half(-0x1.0p-24F) == -0x1.0p-24F,
+          "smallest subnormal keeps sign");
+    check(trtmc::personaplex_round_to_half(0.1F) == 0.0999755859375F,
+          "0.1 rounds to its half value");
+}
+
+void test_half_embed_sums_audio_then_text_with_half_adds() {
+    auto cfg = make_test_config();
+    cfg.temporal_embed_half = true;
+    // 2048 + 1 + 1 in Half: each add rounds (2048 + 1 -> 2048), so the order matters.
+    cfg.audio_embeddings = {2048.0F, 2048.0F, 1.0F, 1.0F, 0.0F, 0.0F,
+                            1.0F,    1.0F,    0.0F, 0.0F, 0.0F, 0.0F};
+    cfg.temporal_text_embedding = {0.0F, 0.0F, 1.0F, 1.0F, 0.0F, 0.0F, 0.0F, 0.0F};
+    const int32_t moshi_tokens[] = {0};
+    const int32_t user_tokens[] = {0};
+    float out[2] = {0.0F, 0.0F};
+    trtmc::compute_dual_stream_summed_embed(cfg, 2, 1, moshi_tokens, user_tokens, 1, out);
+    check(out[0] == 2048.0F && out[1] == 2048.0F, "Half adds round after every row");
+
+    cfg.temporal_embed_half = false;
+    trtmc::compute_dual_stream_summed_embed(cfg, 2, 1, moshi_tokens, user_tokens, 1, out);
+    check(out[0] == 2050.0F, "FP32 path keeps the exact sum");
+
+    // Audio first, text last: 2048 + -2048 + 1 = 1; text first in Half would give 0.
+    cfg.temporal_embed_half = true;
+    cfg.audio_embeddings[6] = -2048.0F;
+    cfg.audio_embeddings[7] = -2048.0F;
+    trtmc::compute_dual_stream_summed_embed(cfg, 2, 1, moshi_tokens, user_tokens, 1, out);
+    check(out[0] == 1.0F && out[1] == 1.0F, "Half sum adds the text embedding last");
+}
+
 void test_temporal_embed_clamps_tokens_to_vocab() {
     auto cfg = make_test_config();
     float out[2] = {0.0F, 0.0F};
@@ -94,6 +137,8 @@ void test_hidden_helpers_pad_or_truncate_logits() {
 
 int main() {
     test_dual_stream_embed_sums_text_moshi_and_user_streams();
+    test_round_to_half_matches_ieee_half_rounding();
+    test_half_embed_sums_audio_then_text_with_half_adds();
     test_temporal_embed_clamps_tokens_to_vocab();
     test_hidden_helpers_pad_or_truncate_logits();
 

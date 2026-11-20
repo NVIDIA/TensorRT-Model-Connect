@@ -60,7 +60,10 @@ def _install_utils3d_shim(torch) -> None:
 
 
 class OfficialReference:
-    def __init__(self, source_root: Path, checkpoint: Path):
+    def __init__(self, source_root: Path, checkpoint: Path, *, precision: str = "fp32"):
+        if precision not in {"fp32", "fp16"}:
+            raise ValueError("the qualified MoGe reference supports fp32 or fp16")
+        self.precision = precision
         import torch
 
         _install_utils3d_shim(torch)
@@ -89,7 +92,9 @@ class OfficialReference:
         tensor = self.torch.from_numpy(pixels).permute(2, 0, 1).to(self.device)
         options = {
             "num_tokens": num_tokens,
-            "use_fp16": False,
+            # The official inference path autocasts the forward pass to FP16
+            # and retains FP32 geometry recovery; keep its precision boundaries.
+            "use_fp16": self.precision == "fp16",
             "force_projection": True,
             "apply_mask": True,
         }

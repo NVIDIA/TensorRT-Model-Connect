@@ -1,0 +1,20 @@
+{
+  "name": "roberta-base-fp8",
+  "hf_id": "FacebookAI/roberta-base",
+  "hf_revision": "e2da8e2f811d1448a5b465c236feacd80ffbac7b",
+  "bundle": "roberta-base-fp8.bundle",
+  "family": "roberta",
+  "task": "encoding",
+  "precision": "fp16",
+  "quantization": "fp8",
+  "testcases": [
+    {
+      "name": "roberta-base-fp8",
+      "premerge": true,
+      "reference_precision": "fp32",
+      "prompt": "The capital of France is Paris."
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 512
+}

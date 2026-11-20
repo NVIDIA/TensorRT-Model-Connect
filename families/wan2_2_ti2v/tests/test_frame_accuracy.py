@@ -9,7 +9,7 @@ import numpy as np
 from PIL import Image
 import pytest
 
-from .frame_accuracy import compare_png_sequences
+from .frame_accuracy import active_transition_fraction, compare_png_sequences
 
 
 _REFERENCE_NAMES = [f"frame_{index:04d}.png" for index in range(3)]
@@ -128,3 +128,16 @@ def test_empty_sequences_are_rejected(tmp_path: Path, empty_reference: bool) -> 
 
     with pytest.raises(ValueError, match=f"{label} frame list is empty"):
         compare_png_sequences([] if empty_reference else references, actuals if empty_reference else [])
+
+
+def test_active_transitions_count_the_frames_that_change(tmp_path: Path) -> None:
+    frames = _write_frames(tmp_path / "native", _NATIVE_NAMES)
+    assert active_transition_fraction(frames) == 1.0
+
+    still = np.full((2, 3, 3), 20, dtype=np.uint8)  # frame 0's pixels
+    Image.fromarray(still).save(frames[1])
+    assert active_transition_fraction(frames) == 0.5
+    Image.fromarray(still).save(frames[2])
+    assert active_transition_fraction(frames) == 0.0
+    with pytest.raises(ValueError, match="at least two frames"):
+        active_transition_fraction(frames[:1])

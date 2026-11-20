@@ -42,7 +42,7 @@ void write_bundle(const std::filesystem::path& path, const std::string& mode) {
 }
 
 void test_stateless(const trtmc::Model& model, trtmc::AudioView audio) {
-    check(model.tasks().size() == 13, "all stateless audio contracts are discoverable");
+    check(model.tasks().size() == 14, "all stateless audio contracts are discoverable");
     auto generated = model.task<trtmc::TextToAudio>().run({"wind"}, {{"preset", "calm"}});
     check(generated.channels() == 2 && generated.sample_rate() == 24000 &&
               generated.frame_count() == 2,
@@ -75,6 +75,11 @@ void test_stateless(const trtmc::Model& model, trtmc::AudioView audio) {
     check(translated.text() == "translate:fr->de!", "speech translation keeps both language roles");
     check(model.task<trtmc::SpeechTranslation>().run({audio}).text() == "translate:auto->en!",
           "speech translation family defaults work when languages omitted");
+    auto events = model.task<trtmc::AudioToClassScores>().run({audio});
+    const std::vector<std::string_view> event_labels{"Speech", "Music", "Silence"};
+    check(events.labels() == event_labels && events.scores()[0] == 1.5F &&
+              events.kind() == TRTMC_SCORE_LOGIT && events.vocabulary_id().empty(),
+          "audio class scores stay raw multi-label logits over named sound events");
     auto language = model.task<trtmc::AudioLanguageIdentification>().run({audio});
     check(language.labels() == std::vector<std::string_view>{"en", "fr"} &&
               language.scores()[0] == 0.75F && language.kind() == TRTMC_SCORE_PROBABILITY &&
@@ -101,6 +106,45 @@ void test_stateless(const trtmc::Model& model, trtmc::AudioView audio) {
     check(rejects([&] { (void)model.task<trtmc::SpeechTranscription>().run({explicit_rate}); },
                   TRTMC_INVALID_ARGUMENT),
           "explicit zero rate is not an omitted rate");
+}
+
+void test_codec(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
+    using namespace trtmc;
+    const auto path = root / "codec.bundle";
+    write_bundle(path, "codec_only");
+    auto model = Model::load(path.string(), options);
+    auto task = model.task<AudioCodebookTokensToAudio>();
+    std::int32_t values[]{11, 12, 21, 22, 31, 32};
+    const AudioCodebookTokensToAudioRequest request{{{values, 6}, 3, 2}};
+    auto result = task.run(request);
+    check(result.sample_rate() == 24000 && result.channels() == 1 && result.setup_ms() == 3 &&
+              result.inference_ms() == 2 &&
+              std::vector<float>(result.samples().begin(), result.samples().end()) ==
+                  std::vector<float>{11, 12, 21, 22, 31, 32},
+          "codec Task preserves codebook-major order and actual output rate");
+    check(!model.supports<TextToAudio>() && !model.supports<TextToSpeech>(),
+          "codec-only binding does not imply text generation");
+    check(task.config_fields().empty(), "codec options are explicitly declared by the family");
+    check(rejects([&] { task.run(request, {{"normalize", true}}); }, TRTMC_INVALID_CONFIG),
+          "undeclared codec option rejected");
+    auto bad = request;
+    bad.codes.frames = 3;
+    check(rejects([&] { task.run(bad); }, TRTMC_INVALID_ARGUMENT),
+          "codec shape/count mismatch rejected");
+    bad.codes = {{}, 3, 0};
+    check(rejects([&] { task.run(bad); }, TRTMC_INVALID_ARGUMENT), "empty codec frames rejected");
+    bad.codes = {{values, 6}, UINT64_MAX / 2 + 4, 2};
+    check(rejects([&] { task.run(bad); }, TRTMC_INVALID_ARGUMENT), "codec shape overflow rejected");
+    values[0] = -1;
+    check(rejects([&] { task.run(request); }, TRTMC_INVALID_ARGUMENT),
+          "codec vocabulary remains family-owned");
+    values[0] = 11;
+    auto retained =
+        Model::load(path.string(), options).task<AudioCodebookTokensToAudio>().run(request);
+    auto moved = std::move(retained);
+    check(moved.samples()[5] == 32 && retained.samples().empty(),
+          "codec result owns PCM across moves");
+    std::filesystem::remove(path);
 }
 
 void test_history(const std::string& path, const trtmc::LoadOptions& options) {
@@ -443,6 +487,7 @@ int main(int argc, char** argv) {
     test_mixed(full.string(), options, audio);
     test_generated_batches(full.string(), options);
     test_generated_modes(root, options);
+    test_codec(root, options);
     const auto limited = trtmc::Model::load(restricted.string(), options);
     check(limited.supports<trtmc::SpeechTranscription>() &&
               !limited.supports<trtmc::SpeechTranslation>() &&
@@ -481,6 +526,14 @@ int main(int argc, char** argv) {
               },
               TRTMC_INTERNAL_ERROR),
           "language identification cannot return unlabeled ordinal scores");
+    check(rejects(
+              [&] {
+                  (void)trtmc::Model::load(bad_labels.string(), options)
+                      .task<trtmc::AudioToClassScores>()
+                      .run({audio});
+              },
+              TRTMC_INTERNAL_ERROR),
+          "audio class scores without a vocabulary cannot leave a class unnamed");
     auto retained = [&] {
         const auto temporary = trtmc::Model::load(full.string(), options);
         return temporary.task<trtmc::TextToAudio>().run({"wind"});

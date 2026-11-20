@@ -5,11 +5,12 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any, Mapping
 
-from ..base import BackendUnavailable, Invocation
-from .common import MODES, NativeHost, ReferenceSpec
+from ..base import BackendError, BackendUnavailable, Invocation
+from .common import MODES, NativeHost, ReferenceSpec, strict_recompiles
 
 # Operations whose references need upstream checkouts (PersonaPlex, MoGe, LeRobot,
 # Fast-FoundationStereo, Boltz, ...) are served only by the TRTMC backend for now.
@@ -76,6 +77,8 @@ class ReferenceBackend:
             from ...platform import apply_deterministic_numerics
 
             self._numerics = {"deterministic": True, **apply_deterministic_numerics()}
+        if spec.mode == "compile":
+            strict_recompiles()
         self._adapter = adapter_cls(spec, NativeHost()) if spec.adapter else adapter_cls(spec)
 
     def describe(self) -> Mapping[str, Any]:
@@ -89,11 +92,16 @@ class ReferenceBackend:
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Invocation:
         """Timed like the TRTMC public Task call: input preparation, model call, and output decoding.
         As on the TRTMC side, decoding the input files happens before the timer and writing the output
-        evidence (arrays, sha256) after it; the adapter's model-only time stays in ``model_only_ms``."""
+        evidence (arrays, sha256) after it; the adapter's model-only time stays in ``model_only_ms``.
+
+        A compile reference that fails, or whose compiled modules never ran, stops serving
+        (``BackendUnavailable``): its later answers would not all come from compiled code. Its answers report
+        ``compiled_graphs`` and ``graph_breaks`` so far."""
         import time
 
-        from .common import preload_inputs, release_inputs, synchronize, write_artifacts
+        from .common import compile_counts, preload_inputs, release_inputs, synchronize, write_artifacts
 
+        compiled = self._spec.mode == "compile"
         preload_inputs(request)
         try:
             synchronize()
@@ -101,10 +109,23 @@ class ReferenceBackend:
             invocation = self._adapter.invoke(request, artifact_base)
             synchronize()
             total_ms = (time.perf_counter() - started) * 1000.0
+        except BackendError:  # the request's own fault, in any mode
+            raise
+        except Exception as error:
+            if compiled:  # the traceback to the server log; the error's first line to the client
+                logging.getLogger(__name__).exception("the torch.compile reference failed")
+                first_line = next(iter(str(error).strip().splitlines()), "")
+                raise BackendUnavailable(f"torch.compile reference failed: {type(error).__name__}: {first_line}"[:500]) \
+                    from error
+            raise
         finally:
             release_inputs()
-        return Invocation(write_artifacts(invocation.observation), total_ms,
-                          {**dict(invocation.extra or {}), "model_only_ms": invocation.model_call_ms})
+        extra = {**dict(invocation.extra or {}), "model_only_ms": invocation.model_call_ms}
+        if compiled:
+            extra.update(compile_counts())
+            if not extra["compiled_graphs"]:
+                raise BackendUnavailable("torch.compile reference compiled no graph: its compiled modules did not run")
+        return Invocation(write_artifacts(invocation.observation), total_ms, extra)
 
     def close(self) -> None:
         close = getattr(self._adapter, "close", None)

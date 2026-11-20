@@ -24,6 +24,7 @@ class BuildRequest:
     tensor_parallel_size: int = 1
     fp32_layers: tuple[int, ...] = ()
     verbose: bool = False
+    quantization: str | None = None
 
     def __post_init__(self) -> None:
         if self.max_sequence_length is not None and (
@@ -36,6 +37,8 @@ class BuildRequest:
             raise ValueError("fp32_layers must contain non-negative indices")
         if self.backend not in {"trt", "trt_rtx"}:
             raise ValueError("backend must be 'trt' or 'trt_rtx'")
+        if self.quantization not in {None, "fp8"}:
+            raise ValueError("quantization must be 'fp8' or None")
 
 
 def coerce_request(request: object) -> BuildRequest:
@@ -49,15 +52,15 @@ def coerce_request(request: object) -> BuildRequest:
             raise NotImplementedError(f"bert does not support {name}")
     if getattr(request, "context_parallel_size", 1) != 1:
         raise ValueError("this family does not support context parallelism")
-    if getattr(request, "quantization", None) is not None:
-        raise ValueError("BERT does not support quantization")
     fields = BuildRequest.__dataclass_fields__
     legacy = {"family", "output_path", "graph_transform", "dynamic_kv_cache", "image_height",
-              "image_width", "video_num_frames", "max_batch_size", "context_parallel_size", "quantization",
+              "image_width", "video_num_frames", "max_batch_size", "context_parallel_size",
               "mtp_seq_len"}
     if unknown := set(vars(request)) - set(fields) - legacy:
         raise ValueError(f"unknown BERT build inputs: {sorted(unknown)}")
-    return BuildRequest(**{name: getattr(request, name) for name in fields})
+    values = {name: getattr(request, name) for name in fields if name != "quantization"}
+    quantization = getattr(request, "quantization", None)
+    return BuildRequest(**values, quantization=None if quantization == "none" else quantization)
 
 
 def build_bundle(request: BuildRequest, output: Path, *, transform: GraphTransform | None = None) -> None:
@@ -78,8 +81,10 @@ def build_bundle(request: BuildRequest, output: Path, *, transform: GraphTransfo
 def build(*, model: str, output: Path, revision: str | None = None,
           task: str = "encoding", precision: str = "fp32", backend: str = "trt",
           max_sequence_length: int | None = None, tensor_parallel_size: int = 1,
-          fp32_layers: list[int] | tuple[int, ...] = (), verbose: bool = False) -> int:
+          fp32_layers: list[int] | tuple[int, ...] = (), verbose: bool = False,
+          quantization: str | None = None) -> int:
     request = BuildRequest(resolve_model(model, revision), task, precision, backend,
-                           max_sequence_length, tensor_parallel_size, tuple(fp32_layers), verbose)
+                           max_sequence_length, tensor_parallel_size, tuple(fp32_layers), verbose,
+                           None if quantization == "none" else quantization)
     build_bundle(request, output)
     return 0

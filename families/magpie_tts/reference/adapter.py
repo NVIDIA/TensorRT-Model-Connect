@@ -53,6 +53,7 @@ class Adapter:
         archive = hf_hub_download(spec.model, ARCHIVE, revision=spec.revision)
         self.torch = torch
         self.model = MagpieTTSModel.restore_from(restore_path=archive).eval().to(spec.device)
+        host.maybe_compile(self.model, spec)  # its forward is the decoder step do_tts runs per audio frame
         self.default_steps = self.model.inference_parameters.max_decoder_steps
 
     def invoke(self, request: Mapping[str, Any], artifact_base: Path) -> Any:
