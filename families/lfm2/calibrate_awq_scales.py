@@ -59,11 +59,13 @@ def _check_block_amax(name: str, weight: np.ndarray, smooth: np.ndarray, amax) -
         raise RuntimeError(f"{name}: recomputed block amax differs by {float(error.max()):.3g}")
 
 
-def awq_config():
-    """ModelOpt ``INT4_AWQ_CFG`` with the depthwise short convolution left unquantized."""
-    import modelopt.torch.quantization as mtq
+def awq_config(base: dict | None = None) -> dict:
+    """``base`` (ModelOpt ``INT4_AWQ_CFG`` by default) with the depthwise short convolution left unquantized."""
+    if base is None:
+        import modelopt.torch.quantization as mtq
 
-    config = copy.deepcopy(mtq.INT4_AWQ_CFG)
+        base = mtq.INT4_AWQ_CFG
+    config = copy.deepcopy(base)
     pattern = "*conv.conv.*"
     if isinstance(config["quant_cfg"], list):  # ModelOpt 0.48 and later
         config["quant_cfg"].append({"quantizer_name": pattern, "enable": False})

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from pathlib import Path
@@ -728,16 +729,26 @@ def test_awq_calibration_tool_detects_block_amax_drift() -> None:
         calibrate_awq_scales._check_block_amax("w", weight, smooth, torch.from_numpy(amax * 0.9))
 
 
-def test_awq_calibration_config_leaves_the_short_convolution_unquantized() -> None:
-    """The ModelOpt recipe is INT4_AWQ_CFG plus a rule that skips the depthwise convolution."""
-    pytest.importorskip("modelopt.torch.quantization")
-    config = calibrate_awq_scales.awq_config()
-    assert config["algorithm"]["method"] == "awq_lite"
+@pytest.mark.parametrize(
+    "quant_cfg",
+    [
+        pytest.param([{"quantizer_name": "*weight_quantizer", "enable": True}], id="list"),
+        pytest.param({"*weight_quantizer": {"enable": True}}, id="dict"),
+    ],
+)
+def test_awq_calibration_config_leaves_the_short_convolution_unquantized(quant_cfg) -> None:
+    """The recipe keeps the base AWQ algorithm and adds a rule that skips the depthwise convolution."""
+    # Both quant_cfg layouts ModelOpt has used: a rule list (0.48 and later) and a pattern dict.
+    base = {"quant_cfg": quant_cfg, "algorithm": {"method": "awq_lite"}}
+    original = copy.deepcopy(base)
+    config = calibrate_awq_scales.awq_config(base)
+    assert config["algorithm"] == {"method": "awq_lite"}
     rules = config["quant_cfg"]
     if isinstance(rules, list):
-        assert {"quantizer_name": "*conv.conv.*", "enable": False} in rules
+        assert rules == [*quant_cfg, {"quantizer_name": "*conv.conv.*", "enable": False}]
     else:
-        assert rules["*conv.conv.*"] == {"enable": False}
+        assert rules == {**quant_cfg, "*conv.conv.*": {"enable": False}}
+    assert base == original
 
 
 def test_committed_awq_scales_are_complete() -> None:
