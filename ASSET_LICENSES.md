@@ -27,6 +27,7 @@ The following paths contain byte-identical copies of an original photograph
 provided by the project maintainer who took the photograph and authorized its
 inclusion and redistribution in this repository under the Apache License 2.0:
 
+- `families/idefics3/tests/data/test_img.jpeg`
 - `families/detr/tests/data/test_img.jpeg`
 - `families/dinov3/tests/data/test_img.jpeg`
 - `families/internvl/tests/data/test_img.jpeg`
@@ -34,13 +35,16 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 - `families/locateanything/tests/data/test_img.jpeg`
 - `families/moge/tests/data/test_img.jpeg`
 - `families/molmo2/tests/data/test_img.jpeg`
+- `families/paligemma/tests/data/test_img.jpeg`
 - `families/phi4_multimodal/tests/data/test_img.jpeg`
 - `families/qwen_image/tests/data/test_img.jpeg`
 - `families/qwen_vl/tests/data/test_img.jpeg`
 - `families/qwen3_vl_moe/tests/data/test_img.jpeg`
+- `families/rt_detr/tests/data/test_img.jpeg`
 - `families/sam/tests/data/test_img.jpeg`
 - `families/sam3/tests/data/test_img.jpeg`
 - `families/segformer/tests/data/test_img.jpeg`
+- `families/smolvlm/tests/data/test_img.jpeg`
 - `families/timm_densenet/tests/data/test_img.jpeg`
 - `families/timm_efficientnet/tests/data/test_img.jpeg`
 - `families/timm_inception/tests/data/test_img.jpeg`

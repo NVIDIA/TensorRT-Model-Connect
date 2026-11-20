@@ -1,0 +1,23 @@
+{
+  "name": "uni3d-b",
+  "bundle": "uni3d-b.bundle",
+  "family": "uni3d",
+  "task": "points_to_embedding",
+  "precision": "fp16",
+  "external_files": [
+    {
+      "path": "model.pt",
+      "url": "https://huggingface.co/BAAI/Uni3D/resolve/3d8233b76aa350d72f6213ecd2123c2026b42355/modelzoo/uni3d-b/model.pt"
+    }
+  ],
+  "testcases": [
+    {
+      "name": "uni3d-b-synthetic-10000",
+      "premerge": true,
+      "num_points": 10000,
+      "seed": 0
+    }
+  ],
+  "tensor_parallel_size": 1,
+  "max_sequence_length": 1
+}

@@ -16,9 +16,11 @@ The CI and development Docker images include the native OpenCV core and imgproc
 development packages. For a host build, install them before CMake configuration,
 for example `libopencv-core-dev libopencv-imgproc-dev` on Ubuntu.
 The family target is omitted when these optional dependencies are absent.
-The CI image also installs `opencv-python-headless` inside its Python virtual
-environment for the Transformers reference postprocessor. The native development
-packages alone do not provide that environment's `cv2` module.
+The Transformers reference postprocessor also needs the Python `cv2` module,
+which the native development packages do not provide. This family's
+`requirements.txt` declares `opencv-python-headless` for it; the shared CI image
+does not install it, because OpenCV 4.13 requires NumPy 2 and several families
+pin NumPy 1.
 
 ```bash
 PYTHONPATH=core/builder:. python3 -m tensorrt_model_connect build \
