@@ -95,6 +95,7 @@ const TASKS = {
   batch_text_to_image: ['Batch text to image', 'Computer Vision', 'text-to-image', 'generate-image-batch'],
 
   text_to_audio: ['Text to audio', 'Audio', null, 'generate-audio'],
+  audio_codebook_tokens_to_audio: ['Audio codebook tokens to audio', 'Audio', null, null],
   text_audio_token_history_to_audio: ['Text and audio-token history to audio', 'Audio', null, null],
   batch_text_audio_token_history_to_audio: ['Batch text and audio-token history to audio', 'Audio', null, null],
   text_to_speech: ['Text to speech', 'Audio', 'text-to-speech', 'generate-audio'],
