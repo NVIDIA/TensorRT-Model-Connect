@@ -158,7 +158,7 @@ The copied configuration's publisher, revision and license are recorded in
 entry in `website/data/hf-model-metadata.json`, as required by the contributor
 guide; that inventory does not control support ownership or qualification.
 
-## Current-main integration recheck
+## Recorded integration recheck at b1db0296
 
 After merging NVIDIA `main` at `b1db0296`, the same strict three-case E2E was
 rerun at `c76e393b544c9fbb560034fd0630d7bdf714a610`: 3 passed, 11 unselected
@@ -169,3 +169,11 @@ inventory's 15 tests and full website build passed on Linux with Node 22.23.2.
 The metadata conflict resolution retained every upstream checkpoint plus this
 pinned 1B entry. The final evidence-only documentation update changes no tested
 runtime, builder, test or snapshot record.
+
+## Conflict-resolution integration at 65281216
+
+The later merge at `a9c5e1e0` retains all 152 canonical metadata records plus
+this checkpoint, and preserves upstream packed-KV initialization and dtype
+validation alongside the prefill-mask guard and opt-in ID trace.
+The H200 results above remain evidence for `c76e393b`; this merge does not add
+a GPU result. Current-head target-hardware validation remains outstanding.
