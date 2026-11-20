@@ -28,12 +28,6 @@ else()
   set(_fetch GIT_REPOSITORY "@_edge_repository@" GIT_TAG "@_edge_revision@"
     GIT_SUBMODULES_RECURSE TRUE UPDATE_DISCONNECTED TRUE)
 endif()
-# The 0.12 release selects the architecture-specific instruction set on GB300.
-# Keep the numeric SM for device checks, CuTe asset tags and package metadata.
-set(_sdk_cuda_arch "@TRTMC_EDGELLM_CUDA_ARCHITECTURE@")
-if(_sdk_cuda_arch STREQUAL "103")
-  set(_sdk_cuda_arch "103a")
-endif()
 ExternalProject_Add(native_sdk PREFIX "@_edge_root@/ep"
   SOURCE_DIR "${_source}" BINARY_DIR "@_edge_root@/build" ${_fetch}
   # LIST_SEPARATOR preserves a multi-group value through ExternalProject.
@@ -41,7 +35,7 @@ ExternalProject_Add(native_sdk PREFIX "@_edge_root@/ep"
   CMAKE_ARGS -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON
     "-DCMAKE_INSTALL_PREFIX=@_edge_prefix@" -DCMAKE_INSTALL_LIBDIR=lib
     "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@" "-DCMAKE_CUDA_COMPILER=@CMAKE_CUDA_COMPILER@"
-    "-DCMAKE_CUDA_ARCHITECTURES=${_sdk_cuda_arch}"
+    "-DCMAKE_CUDA_ARCHITECTURES=@EdgeLLM_CUDA_ARCHITECTURE@"
     "-DCUDA_DIR=@CUDAToolkit_LIBRARY_ROOT@" "-DCUDAToolkit_ROOT=@CUDAToolkit_LIBRARY_ROOT@"
     "-DTensorRT_INCLUDE_DIR=@TRTMC_TRT_INCLUDE_DIR@" "-DTensorRT_LIBRARY=@TRTMC_TRT_LIBRARY@"
     "-DTRT_PACKAGE_DIR=@TRTMC_EDGELLM_TRT_ROOT@" "-DENABLE_CUTE_DSL=@_edge_groups_arg@"

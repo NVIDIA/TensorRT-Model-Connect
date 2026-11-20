@@ -165,3 +165,5 @@ For a native GB300 build, specify the numeric GPU architecture `103`. The
 0.12 provider uses the upstream `103a` compiler target for its SDK kernels;
 the installed receipt and CuTe asset tag still identify SM103. The reduced SDK build includes the
 CTM decode kernels required by the upstream attention plugin on this GPU.
+Model Connect also uses `103a` when device-linking the SDK into a consumer;
+using `103` there can leave runtime CUDA kernels unavailable.

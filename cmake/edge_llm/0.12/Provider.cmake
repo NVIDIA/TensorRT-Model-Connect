@@ -39,6 +39,13 @@ if(NOT TRTMC_EDGELLM_CUDA_ARCHITECTURE MATCHES "^[0-9]+$")
   message(FATAL_ERROR "Set TRTMC_EDGELLM_CUDA_ARCHITECTURE to one local GPU architecture")
 endif()
 _edgellm_check_gpu("${TRTMC_EDGELLM_CUDA_ARCHITECTURE}")
+
+# The SDK's relocatable device code and its consumers must use the same
+# compiler target. Keep the numeric GPU identity for checks and receipts.
+set(EdgeLLM_CUDA_ARCHITECTURE "${TRTMC_EDGELLM_CUDA_ARCHITECTURE}")
+if(EdgeLLM_CUDA_ARCHITECTURE STREQUAL "103")
+  set(EdgeLLM_CUDA_ARCHITECTURE "103a")
+endif()
 _edgellm_trt_version("${TRTMC_TRT_INCLUDE_DIR}" _edge_trt_version)
 _edgellm_check_trt_library("${TRTMC_TRT_LIBRARY}" "${_edge_trt_version}")
 if(TRTMC_EDGELLM_TRT_ROOT AND NOT TENSORRT_ROOT)
