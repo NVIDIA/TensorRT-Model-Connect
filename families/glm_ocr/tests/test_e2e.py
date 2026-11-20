@@ -218,6 +218,18 @@ def _eos_token_ids(model_dir: Path) -> frozenset[int]:
     return frozenset([int(eos)] if isinstance(eos, int) else [int(token) for token in eos])
 
 
+_COMPLETE_STOPS = ("end-of-sequence token", "max_new_tokens")
+
+
+def _stop_reason(token_ids: list[int], eos_ids: frozenset[int], max_new_tokens: int) -> str:
+    """How the generation ended, as its tokens show; only the reasons in ``_COMPLETE_STOPS`` are complete."""
+    if token_ids and token_ids[-1] in eos_ids:
+        return "end-of-sequence token"
+    if len(token_ids) == max_new_tokens:
+        return "max_new_tokens"
+    return f"no end-of-sequence token after {len(token_ids)} of {max_new_tokens} tokens"
+
+
 @lru_cache(maxsize=2)
 def _official(model_dir: str, dtype_name: str):
     import torch
@@ -298,14 +310,13 @@ def test_official_checkpoint_e2e(case_name: str, tmp_path: Path, tmp_path_factor
     native_ids = [int(token) for token in payload["token_ids"]]
     native_text = payload["text"]
     max_new_tokens = int(case["max_new_tokens"])
-    ended_at_eos = bool(native_ids) and native_ids[-1] in _eos_token_ids(model_dir)
-    record_evidence("native", {"text": native_text, "token_ids": native_ids,
-                               "stop": "end-of-sequence token" if ended_at_eos else "max_new_tokens"})
+    stop = _stop_reason(native_ids, _eos_token_ids(model_dir), max_new_tokens)
+    record_evidence("native", {"text": native_text, "token_ids": native_ids, "stop": stop})
     assert 0 < len(native_ids) <= max_new_tokens
     # A complete generation ends with one of the checkpoint's end-of-sequence tokens (the runtime
     # returns it) or fills max_new_tokens; a shorter run without one is truncated, and the bf16
     # comparison below only scores the tokens that were produced.
-    assert ended_at_eos or len(native_ids) == max_new_tokens, (
+    assert stop in _COMPLETE_STOPS, (
         f"{FAMILY} {case_name}: generation stopped after {len(native_ids)} of {max_new_tokens} tokens "
         f"without an end-of-sequence token")
 
