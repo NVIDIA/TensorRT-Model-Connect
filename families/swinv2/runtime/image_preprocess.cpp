@@ -61,10 +61,7 @@ std::vector<PillowSpan> make_pillow_plan(std::int32_t input_size, std::int32_t o
     std::vector<PillowSpan> plan(static_cast<std::size_t>(output_size));
     for (std::int32_t output_index = 0; output_index < output_size; ++output_index) {
         const double center = (static_cast<double>(output_index) + 0.5) * scale;
-        const auto first =
-            std::max<std::int32_t>(0, static_cast<std::int32_t>(center - support + 0.5));
-        const auto end =
-            std::min<std::int32_t>(input_size, static_cast<std::int32_t>(center + support + 0.5));
+        const auto [first, end] = detail::pillow_tap_range(center, support, input_size);
         if (end <= first)
             throw std::runtime_error("swinv2 Pillow resize produced empty support");
 
@@ -87,13 +84,14 @@ std::vector<PillowSpan> make_pillow_plan(std::int32_t input_size, std::int32_t o
     return plan;
 }
 
-std::uint8_t apply_pillow_span(const std::uint8_t* source, std::int32_t stride,
+std::uint8_t apply_pillow_span(const std::uint8_t* source, std::int32_t pixels_per_tap,
                                const PillowSpan& span) {
     std::int64_t sum = kPillowRounding;
     for (std::size_t index = 0; index < span.weights.size(); ++index) {
-        sum += static_cast<std::int64_t>(
-                   source[(span.first + static_cast<std::int32_t>(index)) * stride]) *
-               span.weights[index];
+        const auto tap = span.first + static_cast<std::int32_t>(index);
+        sum +=
+            static_cast<std::int64_t>(source[detail::pillow_tap_byte_offset(tap, pixels_per_tap)]) *
+            span.weights[index];
     }
     if (sum <= 0)
         return 0;
@@ -112,7 +110,7 @@ std::vector<std::uint8_t> horizontal_pass(const std::vector<std::uint8_t>& image
             for (std::int32_t channel = 0; channel < 3; ++channel) {
                 const auto source_offset = static_cast<std::size_t>(y) * input_w * 3U + channel;
                 const auto target = (static_cast<std::size_t>(y) * output_w + x) * 3U + channel;
-                output[target] = apply_pillow_span(image.data() + source_offset, 3, span);
+                output[target] = apply_pillow_span(image.data() + source_offset, 1, span);
             }
         }
     }
@@ -131,7 +129,7 @@ std::vector<std::uint8_t> vertical_pass(const std::vector<std::uint8_t>& image,
             for (std::int32_t channel = 0; channel < 3; ++channel) {
                 const auto source_offset = static_cast<std::size_t>(x) * 3U + channel;
                 const auto target = (static_cast<std::size_t>(y) * width + x) * 3U + channel;
-                output[target] = apply_pillow_span(image.data() + source_offset, width * 3, span);
+                output[target] = apply_pillow_span(image.data() + source_offset, width, span);
             }
         }
     }
@@ -152,7 +150,7 @@ std::vector<std::uint8_t> resize_pillow(const float* source, std::int32_t input_
     });
 
     const bool horizontal_first =
-        !((input_h - output_h) > 0 && (input_h - output_h) > (input_w - output_w) * 2);
+        !detail::pillow_vertical_pass_first(input_h, input_w, output_h, output_w);
     if (horizontal_first) {
         if (input_w != output_w)
             image = horizontal_pass(image, input_h, input_w, output_w);
@@ -179,6 +177,34 @@ void validate(const PreprocessConfig& config) {
 }
 
 } // namespace
+
+namespace detail {
+
+// Index arithmetic runs in 64 bits: an image's byte offsets, a tap bound before
+// its clamp and twice a size difference all leave int32 while every dimension
+// still fits it.
+
+TapRange pillow_tap_range(double center, double support, std::int32_t input_size) {
+    // Pillow truncates each bound after adding 0.5, then clamps it to the input.
+    const auto first =
+        std::clamp<std::int64_t>(static_cast<std::int64_t>(center - support + 0.5), 0, input_size);
+    const auto end =
+        std::clamp<std::int64_t>(static_cast<std::int64_t>(center + support + 0.5), 0, input_size);
+    return {static_cast<std::int32_t>(first), static_cast<std::int32_t>(end)};
+}
+
+std::size_t pillow_tap_byte_offset(std::int32_t tap, std::int32_t pixels_per_tap) {
+    return static_cast<std::size_t>(tap) * static_cast<std::size_t>(pixels_per_tap) * 3U;
+}
+
+bool pillow_vertical_pass_first(std::int32_t input_h, std::int32_t input_w, std::int32_t output_h,
+                                std::int32_t output_w) {
+    const auto rows_lost = static_cast<std::int64_t>(input_h) - output_h;
+    const auto columns_lost = static_cast<std::int64_t>(input_w) - output_w;
+    return rows_lost > 0 && rows_lost > columns_lost * 2;
+}
+
+} // namespace detail
 
 std::vector<float> preprocess_image(const float* image_pixels, std::int32_t image_height,
                                     std::int32_t image_width, const PreprocessConfig& config) {

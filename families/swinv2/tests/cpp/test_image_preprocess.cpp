@@ -126,6 +126,38 @@ void test_a_wide_image_is_squashed_not_cropped() {
           "the boundary lands at a quarter of the output width");
 }
 
+void test_index_arithmetic_beyond_int32() {
+    // Byte offsets and the pass-order comparison pass INT32_MAX at image sizes
+    // far too large to allocate here, so the seams are checked directly.
+    using trtmc::swinv2::detail::pillow_tap_byte_offset;
+    using trtmc::swinv2::detail::pillow_tap_range;
+    using trtmc::swinv2::detail::pillow_vertical_pass_first;
+
+    // Row 999 of a 1000000-pixel-wide image; row 1 of an 800000000-pixel-wide
+    // image, whose row stride alone passes INT32_MAX; column 800000000 of a row.
+    check(pillow_tap_byte_offset(999, 1'000'000) == std::size_t{2'997'000'000},
+          "a row offset above INT32_MAX is exact");
+    check(pillow_tap_byte_offset(1, 800'000'000) == std::size_t{2'400'000'000},
+          "a row stride above INT32_MAX is exact");
+    check(pillow_tap_byte_offset(800'000'000, 1) == std::size_t{2'400'000'000},
+          "a column offset above INT32_MAX is exact");
+
+    // The height loses 44 rows and the width nearly 2^31 columns, so the
+    // horizontal pass runs first; twice the column loss is beyond int32.
+    check(!pillow_vertical_pass_first(300, 2'000'000'000, 256, 256),
+          "the pass order compares losses beyond int32");
+    check(pillow_vertical_pass_first(11, 7, 2, 6) && !pillow_vertical_pass_first(7, 11, 4, 6),
+          "the pass order of the Pillow cases above is kept");
+
+    // The last taps of an axis near INT32_MAX: the upper bound passes
+    // INT32_MAX before it is clamped to the input.
+    const auto edge = pillow_tap_range(2'147'483'000.0, 16'777'216.0, 2'147'483'647);
+    check(edge.first == 2'130'705'784 && edge.end == 2'147'483'647,
+          "a tap range near INT32_MAX is clamped, not wrapped");
+    const auto small = pillow_tap_range(1.5, 2.0, 7);
+    check(small.first == 0 && small.end == 4, "a tap range rounds like Pillow");
+}
+
 void test_rescale_and_normalisation_follow_the_reference() {
     // The reference rescales a byte in double, rounds to float32, then
     // normalizes per channel in float32.
@@ -168,6 +200,7 @@ void test_invalid_input_is_refused() {
 int main() {
     test_bicubic_matches_pillow_byte_for_byte();
     test_a_wide_image_is_squashed_not_cropped();
+    test_index_arithmetic_beyond_int32();
     test_rescale_and_normalisation_follow_the_reference();
     test_invalid_input_is_refused();
     if (g_failures != 0) {
