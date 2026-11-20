@@ -69,7 +69,20 @@ There is no new runtime dependency. This covers the checkpoint's top-level NFC
 configuration, not arbitrary normalizer sequences, newer Unicode normalization
 versions, invalid UTF-8, or all tokenizer behavior. Rebuild the ModernBERT runtime
 library to apply the correction to existing bundles; engine formats are unchanged.
-CPU tokenizer checks do not establish GPU embedding or performance qualification.
+The pinned Granite revision `2ab6fa8ea2d674564defd37171ae19079b864b33`
+passed five FP32 TP1 checkpoint E2Es at `442afa78`: the original short input,
+local-window input, NFC/NFD pair and Arabic punctuation with non-ASCII numbers.
+The tests build real engines, compare the CLI CLS vector to the official FP32
+reference, and compare both public C/C++ SDK consumers to the CLI. All retained
+the 0.995 cosine gate; observed maximum absolute error was at most 2.87e-6.
+The paired NFC/NFD native vectors were identical.
+
+Validation used one H200, driver 595.71.05, CUDA 13.4.3, TensorRT 11.4.0.106,
+PyTorch 2.12.0+cu130, Transformers 5.2.0 and Tokenizers 0.22.2 on Linux x86_64.
+Run `families/modernbert/tests/test_e2e.py` with `--e2e-model modernbert` and
+explicit `--e2e-testcase` selectors for these five Granite cases, plus the
+runtime paths described above. Other checkpoints, precisions, TP4, platforms,
+longer inputs, concurrency and performance remain unqualified by this run.
 
 ## FP8 (`quantization=fp8`)
 
