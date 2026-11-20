@@ -15,6 +15,9 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 constexpr std::int64_t kZeroCrossings = 32;
 constexpr double kKaiserBeta = 8.6;
+// Kernel samples per zero crossing when taps are interpolated instead of tabulated
+// per phase; the linear interpolation error is about 6e-9 of the kernel peak.
+constexpr std::int64_t kKernelOversampling = 8192;
 
 double bessel_i0(double x) {
     double sum = 1.0;
@@ -49,7 +52,7 @@ std::vector<float> downmix(const float* interleaved, std::size_t frames, std::ui
 }
 
 std::vector<float> resample(const std::vector<float>& input, std::int32_t from_rate,
-                            std::int32_t to_rate) {
+                            std::int32_t to_rate, std::size_t max_table_coefficients) {
     if (from_rate <= 0 || to_rate <= 0)
         throw std::invalid_argument("VibeVoice-ASR sample rates must be positive");
     if (from_rate == to_rate || input.empty())
@@ -71,8 +74,51 @@ std::vector<float> resample(const std::vector<float>& input, std::int32_t from_r
             bessel_i0(kKaiserBeta * std::sqrt(std::max(0.0, 1.0 - ratio * ratio)));
         return sinc * window / norm * static_cast<double>(up) / static_cast<double>(spacing);
     };
-    // One tap table per output phase: offsets phase + up * m within the window.
+    // Input j contributes to output centre c = n * down + phase with offset c - j * up.
     const std::int64_t taps = 2 * (half_width / up) + 2;
+    std::vector<float> output(static_cast<std::size_t>(outputs));
+    if (static_cast<std::uint64_t>(up) * static_cast<std::uint64_t>(taps) >
+        max_table_coefficients) {
+        // Too many phases to tabulate (coprime rates): interpolate the kernel,
+        // sampled kKernelOversampling times per zero crossing, at |offset| / spacing.
+        // The work is about 2 * kZeroCrossings multiply-adds per sample of the
+        // higher of the two rates, and the table has a fixed size.
+        const std::int64_t samples = kZeroCrossings * kKernelOversampling;
+        std::vector<double> kernel(static_cast<std::size_t>(samples) + 2, 0.0);
+        for (std::int64_t i = 0; i <= samples; ++i) {
+            // The tap() kernel at x = i / kKernelOversampling zero crossings.
+            const double x = static_cast<double>(i) / static_cast<double>(kKernelOversampling);
+            const double sinc = i == 0 ? 1.0 : std::sin(kPi * x) / (kPi * x);
+            const double ratio = x / static_cast<double>(kZeroCrossings);
+            const double window =
+                bessel_i0(kKaiserBeta * std::sqrt(std::max(0.0, 1.0 - ratio * ratio)));
+            kernel[static_cast<std::size_t>(i)] =
+                sinc * window / norm * static_cast<double>(up) / static_cast<double>(spacing);
+        }
+        const double step = static_cast<double>(kKernelOversampling) / static_cast<double>(spacing);
+        for (std::int64_t k = 0; k < outputs; ++k) {
+            const std::int64_t centre = k * down;
+            const std::int64_t base = centre / up;
+            const std::int64_t phase = centre % up;
+            const std::int64_t lowest = -((half_width - phase) / up);
+            double sum = 0.0;
+            for (std::int64_t t = 0; t < taps; ++t) {
+                const std::int64_t j = base + lowest + t;
+                const std::int64_t offset = phase - up * (lowest + t);
+                if (j < 0 || j >= count || offset < -half_width || offset > half_width)
+                    continue;
+                const double position = static_cast<double>(offset < 0 ? -offset : offset) * step;
+                const auto index = static_cast<std::size_t>(position);
+                const double fraction = position - static_cast<double>(index);
+                const double weight =
+                    kernel[index] + fraction * (kernel[index + 1] - kernel[index]);
+                sum += weight * input[static_cast<std::size_t>(j)];
+            }
+            output[static_cast<std::size_t>(k)] = static_cast<float>(sum);
+        }
+        return output;
+    }
+    // One tap table per output phase: offsets phase + up * m within the window.
     std::vector<double> table(static_cast<std::size_t>(up * taps), 0.0);
     std::vector<std::int64_t> first(static_cast<std::size_t>(up), 0);
     for (std::int64_t phase = 0; phase < up; ++phase) {
@@ -85,7 +131,6 @@ std::vector<float> resample(const std::vector<float>& input, std::int32_t from_r
                 table[static_cast<std::size_t>(phase * taps + t)] = tap(offset);
         }
     }
-    std::vector<float> output(static_cast<std::size_t>(outputs));
     for (std::int64_t k = 0; k < outputs; ++k) {
         const std::int64_t centre = k * down;
         const std::int64_t base = centre / up;

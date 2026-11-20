@@ -191,8 +191,9 @@ std::vector<std::int32_t> VibeVoiceAsrModel::generate(const Prompt& prompt,
     const std::int32_t text_mask = 0;
     while (next != config_.token_ids.eos) {
         generated.push_back(next);
-        if (static_cast<std::int64_t>(generated.size()) >= max_new_tokens ||
-            position >= config_.max_sequence_length)
+        // Prompt plus output stays within max_sequence_length (HF max_length).
+        if (generation_complete(length, static_cast<std::int64_t>(generated.size()), max_new_tokens,
+                                config_.max_sequence_length))
             break;
         logits = forward(*decode_, &next, zero_row_.data(), &text_mask, 1, position);
         ++position;
@@ -221,8 +222,11 @@ TextResult VibeVoiceAsrModel::run(const internal::SpeechTranscriptionRequest& re
     const auto samples = prepare_audio(request.audio);
     const auto prompt = build_prompt(*tokenizer_, config_, samples.size(), context);
     if (static_cast<std::int64_t>(prompt.ids.size()) >= config_.max_sequence_length)
-        throw std::invalid_argument("VibeVoice-ASR audio of " + std::to_string(samples.size()) +
-                                    " samples needs a longer bundle max_sequence_length");
+        throw std::invalid_argument("VibeVoice-ASR prompt of " + std::to_string(prompt.ids.size()) +
+                                    " tokens (audio of " + std::to_string(samples.size()) +
+                                    " samples) needs a bundle max_sequence_length above " +
+                                    std::to_string(prompt.ids.size()) + "; this bundle has " +
+                                    std::to_string(config_.max_sequence_length));
     result.setup_ms = elapsed_ms(setup_start);
 
     const auto encode_start = Clock::now();

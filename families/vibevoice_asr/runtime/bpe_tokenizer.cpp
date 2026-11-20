@@ -10,11 +10,15 @@
 #include <climits>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 #include <list>
 #include <nlohmann/json.hpp>
 #include <queue>
 #include <stdexcept>
 #include <string>
+#include <unicode/normalizer2.h>
+#include <unicode/uchar.h>
+#include <unicode/unistr.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -86,20 +90,22 @@ inline char32_t read_utf8(const char*& p, const char* end) {
         ++p;
         return c;
     }
-    if ((c & 0xE0) == 0xC0 && p + 1 < end) {
+    // Check the bytes left before forming p + n: a pointer past the end is undefined.
+    const auto left = end - p;
+    if ((c & 0xE0) == 0xC0 && left >= 2) {
         char32_t cp =
             (static_cast<char32_t>(c & 0x1F) << 6) | (static_cast<unsigned char>(p[1]) & 0x3F);
         p += 2;
         return cp;
     }
-    if ((c & 0xF0) == 0xE0 && p + 2 < end) {
+    if ((c & 0xF0) == 0xE0 && left >= 3) {
         char32_t cp = (static_cast<char32_t>(c & 0x0F) << 12) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[1]) & 0x3F) << 6) |
                       (static_cast<unsigned char>(p[2]) & 0x3F);
         p += 3;
         return cp;
     }
-    if ((c & 0xF8) == 0xF0 && p + 3 < end) {
+    if ((c & 0xF8) == 0xF0 && left >= 4) {
         char32_t cp = (static_cast<char32_t>(c & 0x07) << 18) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[1]) & 0x3F) << 12) |
                       (static_cast<char32_t>(static_cast<unsigned char>(p[2]) & 0x3F) << 6) |
@@ -164,47 +170,15 @@ enum class Variant { kLlama, kQwen3, kBloom, kDeepSeek, kClip };
 
 // ── Character classification ──
 
-struct UnicodeRange {
-    char32_t lo, hi;
-};
-
-constexpr UnicodeRange kLetterRanges[] = {
-    {'A', 'Z'},         {'a', 'z'},       {0xB5, 0xB5},   // µ (micro sign, treated as letter)
-    {0xC0, 0xD6},       {0xD8, 0xF6},     {0xF8, 0x1BA},  // Latin-1 + Extended A/B
-    {0x1BC, 0x1BF},     {0x1C4, 0x293},   {0x295, 0x2AF}, // Latin Extended B cont.
-    {0x370, 0x373},     {0x376, 0x377},   {0x37B, 0x37D},   {0x37F, 0x37F}, // Greek
-    {0x386, 0x386},     {0x388, 0x38A},   {0x38C, 0x38C},   {0x38E, 0x3A1},
-    {0x3A3, 0x3F5},     {0x3F7, 0x481},   {0x48A, 0x52F},   // Greek + Cyrillic
-    {0x531, 0x556},     {0x559, 0x559},                     // Armenian
-    {0x560, 0x588},                                         // Armenian lowercase
-    {0x600, 0x6FF},                                         // Arabic
-    {0x900, 0x97F},                                         // Devanagari
-    {0xE00, 0xE7F},                                         // Thai
-    {0x10A0, 0x10C5},                                       // Georgian
-    {0x13A0, 0x13F5},                                       // Cherokee
-    {0x1C90, 0x1CBA},   {0x1CBD, 0x1CBF},                   // Georgian Extended
-    {0x1D00, 0x1D2B},   {0x1D6B, 0x1D77}, {0x1D79, 0x1D9A}, // Phonetic Extensions
-    {0x1E00, 0x1F15},   {0x1F18, 0x1F1D}, {0x1F20, 0x1F45}, // Latin Ext. Additional + Greek Ext.
-    {0x2C00, 0x2C5F},                                       // Glagolitic
-    {0x3040, 0x309F},                                       // Hiragana
-    {0x30A0, 0x30FF},                                       // Katakana
-    {0x3400, 0x4DBF},                                       // CJK Extension A
-    {0x4E00, 0x9FFF},                                       // CJK Unified Ideographs
-    {0xAC00, 0xD7AF},                                       // Hangul Syllables
-    {0xFB00, 0xFDFF},   // Alphabetic Presentation Forms + Arabic Forms
-    {0x10000, 0x1007F}, // Linear B Syllabary
-};
-
+// \p{L} and \p{N} as the declared Split pattern means them: ICU's general category,
+// so every script's letters and every decimal digit, letter number and other number
+// (Arabic-Indic and Devanagari digits, superscripts, fractions) are classified.
 inline bool is_letter(char32_t cp) {
-    for (const auto& r : kLetterRanges) {
-        if (cp >= r.lo && cp <= r.hi)
-            return true;
-    }
-    return false;
+    return (U_GET_GC_MASK(static_cast<UChar32>(cp)) & U_GC_L_MASK) != 0;
 }
 
 inline bool is_digit(char32_t cp) {
-    return (cp >= '0' && cp <= '9');
+    return (U_GET_GC_MASK(static_cast<UChar32>(cp)) & U_GC_N_MASK) != 0;
 }
 
 inline bool is_whitespace(char32_t cp) {
@@ -607,9 +581,12 @@ class BpeTokenizer final : public ITokenizer {
   public:
     static std::unique_ptr<BpeTokenizer> Create(const char* tokenizer_json_data,
                                                 std::size_t tokenizer_json_size,
-                                                bool add_special_tokens = false) {
+                                                bool add_special_tokens, std::int32_t vocab_limit) {
+        if (vocab_limit <= 0)
+            throw std::invalid_argument("the tokenizer needs the decoder vocabulary size");
         auto tokenizer = std::unique_ptr<BpeTokenizer>(new BpeTokenizer());
         tokenizer->mAddSpecialTokens = add_special_tokens;
+        tokenizer->mVocabLimit = vocab_limit;
         tokenizer->parse_tokenizer_json(tokenizer_json_data, tokenizer_json_size);
         return tokenizer;
     }
@@ -629,6 +606,11 @@ class BpeTokenizer final : public ITokenizer {
         std::vector<int32_t> result;
         if (text.empty())
             return result;
+        // Text in, as the reference takes a Python str: invalid UTF-8 is rejected rather
+        // than tokenized byte by byte or replaced by NFC, and ICU takes int32 lengths.
+        if (text.size() > static_cast<std::size_t>(std::numeric_limits<std::int32_t>::max()) ||
+            utf8_lossy(text) != text)
+            throw std::invalid_argument("tokenizer input must be valid UTF-8 below 2 GiB");
 
         if (mAddSpecialTokens) {
             for (int32_t bos_id : mPostBosIds)
@@ -655,13 +637,13 @@ class BpeTokenizer final : public ITokenizer {
         std::string joined = join_vocab_tokens(ids);
         switch (mDecoderType) {
         case DecoderType::kByteLevel:
-            return byte_decode(joined);
+            return utf8_lossy(byte_decode(joined));
         case DecoderType::kMetaspace:
             return decode_metaspace(joined);
         case DecoderType::kSequence:
             return decode_sequence(joined);
         }
-        return byte_decode(joined);
+        return utf8_lossy(byte_decode(joined));
     }
 
     int32_t id_for_token(std::string_view token) const override {
@@ -681,7 +663,28 @@ class BpeTokenizer final : public ITokenizer {
 
     enum class DecoderType { kByteLevel, kMetaspace, kSequence };
 
-    std::string normalize_text(const std::string& text) const {
+    // Unicode NFC, the normalizer the Qwen2.5 tokenizer.json declares.
+    static std::string nfc(const std::string& text) {
+        UErrorCode status = U_ZERO_ERROR;
+        const auto* normalizer = icu::Normalizer2::getNFCInstance(status);
+        if (U_FAILURE(status))
+            throw std::runtime_error("cannot initialize NFC normalization");
+        const auto source =
+            icu::UnicodeString::fromUTF8(icu::StringPiece(text.data(), text.size()));
+        if (normalizer->isNormalized(source, status) && U_SUCCESS(status))
+            return text;
+        status = U_ZERO_ERROR;
+        icu::UnicodeString normalized;
+        normalizer->normalize(source, normalized, status);
+        if (U_FAILURE(status))
+            throw std::runtime_error("cannot NFC-normalize tokenizer input");
+        std::string result;
+        normalized.toUTF8String(result);
+        return result;
+    }
+
+    std::string normalize_text(const std::string& input) const {
+        const std::string text = mNormalizeNfc ? nfc(input) : input;
         if (!mNormalizeLowercase && !mNormalizeWhitespace) {
             return text;
         }
@@ -1001,6 +1004,72 @@ class BpeTokenizer final : public ITokenizer {
         return result;
     }
 
+    // The ByteLevel decoder's String::from_utf8_lossy over all token bytes: well-formed
+    // sequences (so a character split across tokens) stay, and each maximal subpart
+    // of an ill-formed sequence, such as the first bytes of a character cut off by
+    // max_output_tokens, becomes one U+FFFD.
+    static std::string utf8_lossy(const std::string& bytes) {
+        static const char kReplacement[] = "\xEF\xBF\xBD";
+        const auto* data = reinterpret_cast<const unsigned char*>(bytes.data());
+        const std::size_t size = bytes.size();
+        std::string result;
+        result.reserve(size);
+        std::size_t i = 0;
+        while (i < size) {
+            const unsigned char lead = data[i];
+            if (lead < 0x80) {
+                result.push_back(static_cast<char>(lead));
+                ++i;
+                continue;
+            }
+            // Well-formed UTF-8 (Unicode table 3-7): continuation count and the
+            // allowed range of the first continuation byte.
+            std::size_t continuations = 0;
+            unsigned char low = 0x80;
+            unsigned char high = 0xBF;
+            if (lead >= 0xC2 && lead <= 0xDF) {
+                continuations = 1;
+            } else if (lead == 0xE0) {
+                continuations = 2;
+                low = 0xA0;
+            } else if ((lead >= 0xE1 && lead <= 0xEC) || lead == 0xEE || lead == 0xEF) {
+                continuations = 2;
+            } else if (lead == 0xED) {
+                continuations = 2;
+                high = 0x9F;
+            } else if (lead == 0xF0) {
+                continuations = 3;
+                low = 0x90;
+            } else if (lead >= 0xF1 && lead <= 0xF3) {
+                continuations = 3;
+            } else if (lead == 0xF4) {
+                continuations = 3;
+                high = 0x8F;
+            } else {
+                result += kReplacement;
+                ++i;
+                continue;
+            }
+            std::size_t next = i + 1;
+            bool complete = true;
+            for (std::size_t k = 0; k < continuations; ++k, ++next) {
+                const unsigned char lower = k == 0 ? low : 0x80;
+                const unsigned char upper = k == 0 ? high : 0xBF;
+                if (next >= size || data[next] < lower || data[next] > upper) {
+                    complete = false;
+                    break;
+                }
+            }
+            if (complete) {
+                result.append(bytes, i, continuations + 1);
+            } else {
+                result += kReplacement; // the maximal subpart [i, next)
+            }
+            i = next;
+        }
+        return result;
+    }
+
     static std::string byte_decode(const std::string& text) {
         const auto& tables = byte_tables();
         std::string result;
@@ -1139,17 +1208,32 @@ class BpeTokenizer final : public ITokenizer {
     void parse_added_tokens(const nlohmann::json& j) {
         if (!j.contains("added_tokens"))
             return;
-        for (auto& tok : j["added_tokens"]) {
-            std::string content = tok["content"].get<std::string>();
-            int32_t id = tok["id"].get<int32_t>();
+        const auto& tokens = j.at("added_tokens");
+        if (!tokens.is_array())
+            throw std::invalid_argument("tokenizer.json added_tokens must be a list");
+        for (const auto& tok : tokens) {
+            // Checked access: a token without a string content or an integer id
+            // rejects the bundle instead of reading a missing field.
+            const auto content_field = tok.is_object() ? tok.find("content") : tok.end();
+            const auto id_field = tok.is_object() ? tok.find("id") : tok.end();
+            if (content_field == tok.end() || !content_field->is_string() ||
+                id_field == tok.end() || !id_field->is_number_integer())
+                throw std::invalid_argument(
+                    "tokenizer.json added token needs a string content and an integer id");
+            const std::string content = content_field->get<std::string>();
+            const std::int64_t raw_id = id_field->get<std::int64_t>();
+            // Bounded before the vocabulary grows: one stray id must not size it.
+            if (raw_id < 0 || raw_id >= mVocabLimit)
+                throw std::invalid_argument(
+                    "tokenizer.json added token " + content + " has id " + std::to_string(raw_id) +
+                    ", outside the decoder vocabulary of " + std::to_string(mVocabLimit));
+            const auto id = static_cast<int32_t>(raw_id);
 
-            if (id >= 0 && static_cast<size_t>(id) >= mVocab.size()) {
+            if (static_cast<size_t>(id) >= mVocab.size()) {
                 mVocab.resize(static_cast<size_t>(id) + 1);
             }
-            if (id >= 0) {
-                mVocab[id] = content;
-                mTokenToId[content] = id;
-            }
+            mVocab[id] = content;
+            mTokenToId[content] = id;
 
             if (tok.value("special", false)) {
                 mSpecialTokens[content] = id;
@@ -1430,6 +1514,10 @@ class BpeTokenizer final : public ITokenizer {
             mNormalizeLowercase = true;
             return;
         }
+        if (type == "NFC") {
+            mNormalizeNfc = true;
+            return;
+        }
         if (type == "Replace" && normalizer.contains("pattern") &&
             normalizer["pattern"].contains("Regex") &&
             normalizer["pattern"]["Regex"].get<std::string>() == "\\s+" &&
@@ -1541,6 +1629,9 @@ class BpeTokenizer final : public ITokenizer {
     bool mByteFallback = false;
     bool mNormalizeLowercase = false;
     bool mNormalizeWhitespace = false;
+    bool mNormalizeNfc = false;
+    // Added-token ids must lie below this: the decoder's vocabulary.
+    std::int64_t mVocabLimit = 0;
     std::string mEndOfWordSuffix;
 
     // Post-processor: BOS/EOS token IDs to add when add_special_tokens=true
@@ -1566,8 +1657,9 @@ class BpeTokenizer final : public ITokenizer {
 
 std::unique_ptr<ITokenizer> CreateBpeTokenizer(const char* tokenizer_json_data,
                                                std::size_t tokenizer_json_size,
-                                               bool add_special_tokens) {
-    return BpeTokenizer::Create(tokenizer_json_data, tokenizer_json_size, add_special_tokens);
+                                               bool add_special_tokens, std::int32_t vocab_limit) {
+    return BpeTokenizer::Create(tokenizer_json_data, tokenizer_json_size, add_special_tokens,
+                                vocab_limit);
 }
 
 } // namespace trtmc::vibevoice_asr

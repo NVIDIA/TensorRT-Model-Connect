@@ -31,4 +31,10 @@ std::int32_t argmax(const float* logits, std::int32_t count) {
     return best;
 }
 
+bool generation_complete(std::int64_t prompt_tokens, std::int64_t generated_tokens,
+                         std::int64_t max_new_tokens, std::int64_t max_sequence_length) {
+    return generated_tokens >= max_new_tokens ||
+           prompt_tokens + generated_tokens >= max_sequence_length;
+}
+
 } // namespace trtmc::vibevoice_asr

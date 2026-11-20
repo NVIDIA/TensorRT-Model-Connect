@@ -22,8 +22,11 @@ class ITokenizer {
     virtual std::string token_for_id(std::int32_t id) const = 0;
 };
 
+// `vocab_limit` is the decoder's vocabulary size: every added-token id must lie
+// below it, so a malformed tokenizer.json is rejected before it can size the
+// vocabulary.
 std::unique_ptr<ITokenizer> CreateBpeTokenizer(const char* tokenizer_json_data,
                                                std::size_t tokenizer_json_size,
-                                               bool add_special_tokens = false);
+                                               bool add_special_tokens, std::int32_t vocab_limit);
 
 } // namespace trtmc::vibevoice_asr

@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# The tokenizer applies the declared NFC normalizer and Unicode letter and number
+# classes with ICU.
+find_package(ICU REQUIRED COMPONENTS uc)
+
 add_library(trtmc_model_vibevoice_asr SHARED
   audio_frontend.cpp
   bpe_tokenizer.cpp
@@ -19,6 +23,7 @@ target_include_directories(trtmc_model_vibevoice_asr SYSTEM PRIVATE ${TRTMC_CUDA
 target_link_libraries(trtmc_model_vibevoice_asr PRIVATE
   trtmc_core
   nlohmann_json::nlohmann_json
+  ICU::uc
   ${TRTMC_CUDART_LIBRARY}
 )
 target_compile_options(trtmc_model_vibevoice_asr PRIVATE
@@ -46,7 +51,7 @@ if(TRTMC_BUILD_TESTS)
     ${PROJECT_SOURCE_DIR}
     ${PROJECT_SOURCE_DIR}/core/runtime/include
   )
-  target_link_libraries(test_vibevoice_asr_host PRIVATE nlohmann_json::nlohmann_json)
+  target_link_libraries(test_vibevoice_asr_host PRIVATE nlohmann_json::nlohmann_json ICU::uc)
   target_compile_options(test_vibevoice_asr_host PRIVATE -Wall -Wextra -Wpedantic)
   add_test(NAME vibevoice_asr_host COMMAND test_vibevoice_asr_host)
 endif()

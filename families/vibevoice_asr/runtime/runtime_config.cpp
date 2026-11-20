@@ -4,6 +4,7 @@
  */
 #include "families/vibevoice_asr/runtime/runtime_config.h"
 
+#include <cmath>
 #include <limits>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
@@ -27,6 +28,33 @@ std::int32_t token_id(const nlohmann::json& ids, const char* name, std::int32_t 
         throw std::invalid_argument(std::string("VibeVoice-ASR token id out of vocabulary: ") +
                                     name);
     return id;
+}
+
+// Probe ids are JSON integers in [0, vocab): a float such as 117.9 is rejected,
+// not truncated to 117.
+std::vector<std::int32_t> probe_ids(const nlohmann::json& ids, std::int32_t vocab) {
+    if (!ids.is_array() || ids.empty())
+        throw std::invalid_argument("VibeVoice-ASR tokenizer check needs a list of ids");
+    std::vector<std::int32_t> result;
+    for (const auto& id : ids) {
+        if (!id.is_number_integer() || id.get<std::int64_t>() < 0 ||
+            id.get<std::int64_t>() >= vocab)
+            throw std::invalid_argument(
+                "VibeVoice-ASR tokenizer check id is not a vocabulary id: " + id.dump());
+        result.push_back(id.get<std::int32_t>());
+    }
+    return result;
+}
+
+// normalize_loudness divides float(10^(target / 20)) by (rms + float(eps)) in
+// float. For silent input (rms 0) that gain must be finite, which needs a normal,
+// positive float eps; target and eps must be finite.
+bool finite_silence_gain(double target_dbfs, double eps) {
+    if (!std::isfinite(target_dbfs) || !std::isfinite(eps))
+        return false;
+    const float eps_float = static_cast<float>(eps);
+    const float amplitude = static_cast<float>(std::pow(10.0, target_dbfs / 20.0));
+    return eps_float >= std::numeric_limits<float>::min() && std::isfinite(amplitude / eps_float);
 }
 
 } // namespace
@@ -61,12 +89,13 @@ RuntimeConfig parse_runtime_config(const std::string& json_text) {
     for (const auto& check : raw.at("tokenizer_checks")) {
         TokenizerCheck item;
         item.text = check.at("text").get<std::string>();
-        item.ids = check.at("ids").get<std::vector<std::int32_t>>();
-        if (item.text.empty() || item.ids.empty())
+        item.ids = probe_ids(check.at("ids"), config.vocab_size);
+        if (item.text.empty())
             throw std::invalid_argument("VibeVoice-ASR tokenizer check is empty");
         config.tokenizer_checks.push_back(std::move(item));
     }
-    if (config.tokenizer_checks.empty() || !(config.normalize_eps > 0.0) ||
+    if (config.tokenizer_checks.empty() ||
+        !finite_silence_gain(config.normalize_target_dbfs, config.normalize_eps) ||
         config.normalize_target_dbfs >= 0.0 || config.system_prompt.empty() ||
         config.transcription_keys.empty() || config.max_prefill_rows > config.max_sequence_length)
         throw std::invalid_argument("VibeVoice-ASR runtime.json is inconsistent");

@@ -60,6 +60,17 @@ nlohmann::json complete_objects(const std::string& text) {
     return objects;
 }
 
+// The segment list (or single segment) in `body`, which must start as a JSON
+// document; a list whose end is missing keeps its complete objects.
+nlohmann::json parse_segments(const std::string& body) {
+    if (body.empty() || (body.front() != '[' && body.front() != '{'))
+        return nlohmann::json(nlohmann::json::value_t::discarded);
+    auto segments = nlohmann::json::parse(body, nullptr, false);
+    if (segments.is_discarded() && body.front() == '[')
+        segments = complete_objects(body);
+    return segments;
+}
+
 // A timestamp under its key or the alias the official post-processing accepts.
 // Absent: nullopt in `value`; present but not a number: `valid` is false.
 struct Timestamp {
@@ -88,20 +99,20 @@ ParsedTranscript parse_transcript(const std::string& decoded) {
         text = strip(std::string_view(text).substr(role.size()));
     ParsedTranscript result;
     result.text = text;
-    // A ```json fence around the list, as the official post-processing accepts.
-    std::string body = text;
-    constexpr std::string_view fence = "```json";
-    if (const auto open = body.find(fence); open != std::string::npos) {
-        const auto start = open + fence.size();
-        const auto close = body.find("```", start);
-        body = strip(std::string_view(body).substr(
-            start, close == std::string::npos ? std::string::npos : close - start));
+    // Output that starts as a JSON document is parsed as it is, so a fence marker
+    // inside a segment's text stays content. Otherwise, or when that yields no
+    // segment, a ```json fence around the list, as the official post-processing
+    // accepts.
+    auto segments = parse_segments(text);
+    if (!segments.is_object() && !(segments.is_array() && !segments.empty())) {
+        constexpr std::string_view fence = "```json";
+        if (const auto open = text.find(fence); open != std::string::npos) {
+            const auto start = open + fence.size();
+            const auto close = text.find("```", start);
+            segments = parse_segments(strip(std::string_view(text).substr(
+                start, close == std::string::npos ? std::string::npos : close - start)));
+        }
     }
-    if (body.empty() || (body.front() != '[' && body.front() != '{'))
-        return result;
-    auto segments = nlohmann::json::parse(body, nullptr, false);
-    if (segments.is_discarded() && body.front() == '[')
-        segments = complete_objects(body);
     if (segments.is_object())
         segments = nlohmann::json::array({segments});
     if (!segments.is_array() || segments.empty())

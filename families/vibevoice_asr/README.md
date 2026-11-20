@@ -20,16 +20,35 @@ it once with
 
 - Input: interleaved PCM at any sample rate (default 24 kHz), downmixed to mono,
   resampled to 24 kHz and loudness-normalized like the official processor. Audio
-  of any length up to the bundle's `max_sequence_length` (default 65,536 tokens,
-  about 60 minutes; a multiple of 512) is encoded exactly. A partial last frame
-  is padded per strided layer, as the original code does; the transformers
-  implementation pads the waveform instead, so its last frame can differ.
+  of any length is encoded exactly within the sequence budget below. A partial
+  last frame is padded per strided layer, as the original code does; the
+  transformers implementation pads the waveform instead, so its last frame can
+  differ.
+- Sequence budget: the bundle's `max_sequence_length` (default 65,536 tokens; a
+  multiple of 512) holds the whole sequence: about 60 tokens of system and user
+  text plus `context_info`, one speech token per 3,200 samples at 24 kHz (7.5 per
+  second, 27,000 for 60 minutes), and the generated transcript. A request whose
+  prompt does not fit is rejected before encoding, with its length in tokens;
+  generation stops at the end of text, at `max_output_tokens`, or when prompt
+  and output fill the sequence. Size the bundle for the prompt plus the
+  transcript you expect: 60 minutes leave about 38,000 output tokens at the
+  default, and the LibriSpeech test clip needs about 4.3 output tokens per second
+  of speech, JSON included.
 - Output: `text` is the segment contents joined by spaces; `segments` carry the
   start and end seconds of each segment. Speaker ids have no field in the shared
-  result: `raw_output=true` returns the model's JSON segment list instead.
-- Config: `max_output_tokens` (default: until end of text or a full cache),
+  result: `raw_output=true` returns the model's JSON segment list instead. When
+  generation stops at `max_output_tokens` or the sequence limit before the model
+  closes the list, the transcript is partial: `raw_output=true` returns the
+  decoded prefix as it is, which is not valid JSON (a character cut off at the
+  end becomes U+FFFD), and the default output keeps the segments that were
+  complete (with none, `text` is that prefix).
+- Config: `max_output_tokens` (default: until end of text or a full sequence),
   `context_info` (hotwords or background text, as the official `context_info`),
   `raw_output`. `source_language` and `--kv-cache-size` are rejected.
+- Tokenization follows the bundle's `tokenizer.json`, including its NFC
+  normalizer and the Unicode letter and number classes of its Split pattern,
+  which the runtime takes from the installed ICU library; text that is not
+  valid UTF-8 is rejected.
 - The acoustic latent is the sigma-VAE mean. The official model adds random
   noise to it on every call, and so does the transformers implementation; the
   E2E reference removes the noise with `vae_std = 0`.

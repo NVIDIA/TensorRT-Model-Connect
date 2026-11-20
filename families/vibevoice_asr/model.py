@@ -159,6 +159,8 @@ def tokenizer_checks(tokenizer_json: bytes) -> list[dict]:
         f"\n{user_suffix('12.34')}{im_end}\n",
         f"\n{user_suffix('5.07', 'Hotwords: NVIDIA, TensorRT, VibeVoice')}{im_end}\n",
         f"\n{user_suffix('61.80', '会议记录：张三、李四 — café naïve')}{im_end}\n",
+        # NFC (e + U+0301) and \p{N} beyond ASCII: Arabic-Indic digits, a superscript.
+        f"\n{user_suffix('3.20', 'Cafe\u0301 \u0661\u0662\u0663 x\u00b2')}{im_end}\n",
     )
     return [
         {"text": text, "ids": tokenizer.encode(text, add_special_tokens=False).ids}

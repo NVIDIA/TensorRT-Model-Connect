@@ -60,9 +60,12 @@ std::string utf8(std::uint32_t code_point) {
     return text;
 }
 
-// A byte-level BPE with one token per byte (no merges) and the special
-// tokens the prompt uses; enough to check the prompt layout.
-std::string byte_tokenizer_json() {
+// A byte-level BPE with one token per byte and the special tokens the prompt
+// uses; enough to check the prompt layout. `merges` adds merged tokens (ids
+// from 262) so a test can see where the pre-tokenizer splits.
+std::string
+byte_tokenizer_json(const nlohmann::json& normalizer = nullptr,
+                    const std::vector<std::pair<std::string, std::string>>& merges = {}) {
     nlohmann::json vocab = nlohmann::json::object();
     std::vector<int> printable;
     for (int b = '!'; b <= '~'; ++b)
@@ -90,11 +93,16 @@ std::string byte_tokenizer_json() {
                          {"rstrip", false},
                          {"normalized", false}});
     }
+    nlohmann::json merge_rules = nlohmann::json::array();
+    for (const auto& [left, right] : merges) {
+        vocab[left + right] = id++;
+        merge_rules.push_back({left, right});
+    }
     const std::string regex = "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| "
                               "?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
     nlohmann::json tokenizer = {
         {"added_tokens", added},
-        {"normalizer", nullptr},
+        {"normalizer", normalizer},
         {"pre_tokenizer",
          {{"type", "Sequence"},
           {"pretokenizers",
@@ -112,8 +120,15 @@ std::string byte_tokenizer_json() {
           {"add_prefix_space", false},
           {"trim_offsets", false},
           {"use_regex", false}}},
-        {"model", {{"type", "BPE"}, {"vocab", vocab}, {"merges", nlohmann::json::array()}}}};
+        {"model", {{"type", "BPE"}, {"vocab", vocab}, {"merges", merge_rules}}}};
     return tokenizer.dump();
+}
+
+std::vector<std::int32_t> bytes_of(const std::string& text) {
+    std::vector<std::int32_t> ids;
+    for (const unsigned char byte : text)
+        ids.push_back(byte);
+    return ids;
 }
 
 nlohmann::json runtime_json() {
@@ -171,24 +186,70 @@ void test_resample() {
     for (std::size_t i = 2400; i + 2400 < out.size(); ++i)
         worst = std::max(worst, std::fabs(out[i] - 0.5 * std::sin(2.0 * pi * 440.0 * i / 24000.0)));
     check(worst < 1e-3, "16 kHz to 24 kHz tone error " + std::to_string(worst));
+
+    // Common rates keep the exact phase table: the default equals an unbounded table.
+    check(out == resample(tone, 16000, 24000, std::numeric_limits<std::size_t>::max()),
+          "16 kHz keeps the exact phase table");
+    // 192001 Hz is coprime with 24 kHz: 24000 output phases, whose exact table would
+    // hold about 12 million coefficients (94 MiB). The default takes the bounded,
+    // interpolated path and keeps the tone and the ceiling length.
+    const int odd_rate = 192001;
+    std::vector<float> odd(static_cast<std::size_t>(odd_rate / 5));
+    for (std::size_t i = 0; i < odd.size(); ++i)
+        odd[i] = static_cast<float>(0.5 * std::sin(2.0 * pi * 440.0 * i / odd_rate));
+    const auto odd_out = resample(odd, odd_rate, 24000);
+    check(odd_out == resample(odd, odd_rate, 24000, 0), "192001 Hz takes the bounded path");
+    check(odd_out.size() == (odd.size() * 24000 + odd_rate - 1) / odd_rate,
+          "resampled length is ceil(n * 24000 / 192001)");
+    double odd_worst = 0.0;
+    for (std::size_t i = 600; i + 600 < odd_out.size(); ++i)
+        odd_worst = std::max(
+            odd_worst, std::fabs(odd_out[i] - 0.5 * std::sin(2.0 * pi * 440.0 * i / 24000.0)));
+    check(odd_worst < 1e-3, "192001 Hz to 24 kHz tone error " + std::to_string(odd_worst));
+    // A larger coprime rate: an exact phase table would hold 128 million coefficients.
+    const std::vector<float> extreme(4000, 0.25F);
+    check(resample(extreme, 2000003, 24000).size() == (4000U * 24000U + 2000003U - 1U) / 2000003U,
+          "resampled length is ceil(n * 24000 / 2000003)");
+    // The interpolated kernel agrees with the exact phase table (44101 Hz: 24000 phases).
+    std::vector<float> signal(4410);
+    for (std::size_t i = 0; i < signal.size(); ++i)
+        signal[i] = static_cast<float>(0.4 * std::sin(0.37 * i) + 0.3 * std::cos(0.011 * i * i));
+    const auto exact = resample(signal, 44101, 24000, std::numeric_limits<std::size_t>::max());
+    const auto interpolated = resample(signal, 44101, 24000, 0);
+    double difference = 0.0;
+    for (std::size_t i = 0; i < exact.size(); ++i)
+        difference =
+            std::max(difference, static_cast<double>(std::fabs(exact[i] - interpolated[i])));
+    check(exact.size() == interpolated.size() && difference < 1e-6,
+          "interpolated and exact taps differ by " + std::to_string(difference));
+    check(resample(tone, 16000, 24000, 0).size() == out.size(), "both paths give the same length");
 }
 
 void test_normalize() {
     std::vector<float> quiet(1000);
     for (std::size_t i = 0; i < quiet.size(); ++i)
-        quiet[i] = 0.01F * static_cast<float>((i % 7) - 3);
+        quiet[i] = 0.01F * static_cast<float>(static_cast<int>(i % 7) - 3);
     normalize_loudness(quiet, -25.0, 1e-6);
     double energy = 0.0;
     for (float value : quiet)
         energy += static_cast<double>(value) * value;
     const double rms = std::sqrt(energy / quiet.size());
     check(std::fabs(rms - std::pow(10.0, -25.0 / 20.0)) < 1e-5, "RMS normalised to -25 dBFS");
+    check(quiet[0] < 0.0F && quiet[6] > 0.0F, "normalization keeps the sign of each sample");
     // RMS 0.01 scales the impulse to 5.6, above the clipping limit.
     std::vector<float> impulse(10000, 0.0F);
     impulse[50] = 1.0F;
     normalize_loudness(impulse, -25.0, 1e-6);
     const float peak = *std::max_element(impulse.begin(), impulse.end());
     check(peak <= 1.0F && peak > 0.999F, "the clipping guard divides by the peak");
+    // Silence stays finite zeros for the bundle's eps and the smallest eps runtime.json accepts.
+    for (const double eps : {1e-6, static_cast<double>(std::numeric_limits<float>::min())}) {
+        std::vector<float> silence(64, 0.0F);
+        normalize_loudness(silence, -25.0, eps);
+        check(
+            std::all_of(silence.begin(), silence.end(), [](float value) { return value == 0.0F; }),
+            "silence stays zero with eps " + std::to_string(eps));
+    }
 }
 
 void test_chunks_and_argmax() {
@@ -205,6 +266,15 @@ void test_chunks_and_argmax() {
     check_throws([] { plan_encoder_chunks(0, 450, 60); }, "an empty chunk plan");
     const float tied[] = {0.5F, 2.0F, 1.0F, 2.0F};
     check(argmax(tied, 4) == 1, "argmax keeps the lowest index of a tie");
+    // A prompt of max_sequence_length - 2 tokens leaves room for two output tokens.
+    const std::int64_t unlimited = std::numeric_limits<std::int64_t>::max();
+    std::int64_t generated = 0;
+    do
+        ++generated;
+    while (!generation_complete(4094, generated, unlimited, 4096));
+    check(generated == 2, "prompt plus output stays within max_sequence_length");
+    check(generation_complete(10, 3, 3, 4096), "max_new_tokens stops generation");
+    check(!generation_complete(10, 2, 3, 4096), "generation continues below both limits");
 }
 
 void test_transcript() {
@@ -234,6 +304,11 @@ void test_transcript() {
         parse_transcript("assistant\n```json\n[{\"Start\":0,\"End\":1,\"Content\":\"a\"}]\n```\n");
     check(fenced.structured && fenced.segments.size() == 1 && fenced.text == "a",
           "a fenced list is parsed");
+    const auto inner_fence =
+        parse_transcript("[{\"Start\":0,\"End\":1,\"Content\":\"say ```json now\"}]");
+    check(inner_fence.structured && inner_fence.segments.size() == 1 &&
+              inner_fence.text == "say ```json now",
+          "a fence marker inside a segment is content");
     const auto single = parse_transcript("{\"Start\":0.5,\"End\":1,\"Content\":\"b\"}");
     check(single.structured && single.segments.size() == 1 &&
               single.segments[0].start_seconds == 0.5,
@@ -253,11 +328,88 @@ void test_runtime_config() {
     auto unchecked = runtime_json();
     unchecked["tokenizer_checks"] = nlohmann::json::array();
     check_throws([&] { parse_runtime_config(unchecked.dump()); }, "missing tokenizer checks");
+    // Probe ids are integers in [0, vocab_size): no truncation of 117.9 to 117.
+    for (const auto& ids :
+         {nlohmann::json{117.9}, nlohmann::json{-1}, nlohmann::json{262}, nlohmann::json{"117"}}) {
+        auto probe = runtime_json();
+        probe["tokenizer_checks"][0]["ids"] = ids;
+        check_throws([&] { parse_runtime_config(probe.dump()); },
+                     "a tokenizer check id of " + ids.dump());
+    }
+    // eps must keep the float gain of silent input finite: 1e-300 is 0 as a float,
+    // 1e-40 is subnormal and overflows the gain.
+    for (const char* eps : {"1e-300", "1e-40"}) {
+        auto tiny = runtime_json();
+        tiny["normalize_eps"] = std::strtod(eps, nullptr);
+        check_throws([&] { parse_runtime_config(tiny.dump()); },
+                     std::string("normalize_eps ") + eps);
+    }
+    auto smallest = runtime_json();
+    smallest["normalize_eps"] = static_cast<double>(std::numeric_limits<float>::min());
+    check(parse_runtime_config(smallest.dump()).normalize_eps > 0.0,
+          "the smallest normal float eps is accepted");
+}
+
+void test_tokenizer() {
+    constexpr std::int32_t kVocab = 264; // bytes, specials and two merged tokens
+    // Unicode NFC, the normalizer Qwen2.5's tokenizer.json declares: e + U+0301 is U+00E9.
+    const auto nfc_json = byte_tokenizer_json({{"type", "NFC"}});
+    const auto nfc = CreateBpeTokenizer(nfc_json.data(), nfc_json.size(), false, kVocab);
+    check(nfc->encode("Cafe\xCC\x81") == bytes_of("Caf\xC3\xA9"), "NFC composes e + U+0301");
+    check(nfc->encode("Caf\xC3\xA9") == bytes_of("Caf\xC3\xA9"), "NFC keeps a composed character");
+    // \p{N} digits are their own pre-tokens: the merges a+U+0661 (bytes D9 A1) and
+    // U+0661+U+0662 must not apply across those boundaries.
+    const std::string arabic_one = "\xD9\xA1"; // U+0661 ARABIC-INDIC DIGIT ONE
+    const std::string arabic_two = "\xD9\xA2"; // U+0662 ARABIC-INDIC DIGIT TWO
+    const auto split_json =
+        byte_tokenizer_json(nullptr, {{"a", utf8(0xD9)}, {utf8(0xA1), utf8(0xD9)}});
+    const auto split = CreateBpeTokenizer(split_json.data(), split_json.size(), false, kVocab);
+    check(split->encode("a" + arabic_one) == bytes_of("a" + arabic_one),
+          "a letter and an Arabic-Indic digit are separate pre-tokens");
+    check(split->encode(arabic_one + arabic_two) == bytes_of(arabic_one + arabic_two),
+          "each Arabic-Indic digit is its own pre-token");
+    // Text that is not UTF-8 is rejected, with or without NFC (which would otherwise
+    // replace the bytes depending on the rest of the text).
+    for (const char* text : {"a\xF0\x9F", "\xE4\xB8",
+                             "a\xFF"
+                             "b",
+                             "a\xFF"
+                             "b e\xCC\x81"}) {
+        check_throws([&] { split->encode(text); }, "encoding invalid UTF-8");
+        check_throws([&] { nfc->encode(text); }, "encoding invalid UTF-8 with NFC");
+    }
+    // ByteLevel decoding joins all bytes, then replaces what is not UTF-8 (U+FFFD).
+    const std::string replacement = "\xEF\xBF\xBD";
+    check(split->decode({0xC3, 0xA9}) == "\xC3\xA9", "a character split over two tokens");
+    check(split->decode({0x61, 0xC3}) == "a" + replacement, "a cut-off last character");
+    check(split->decode({0xE4, 0xB8}) == replacement, "one replacement per maximal subpart");
+    check(split->decode({0x61, 0xFF, 0x62}) == "a" + replacement + "b", "an invalid byte");
+    check(split->decode({0xC0, 0x80}) == replacement + replacement, "an overlong encoding");
+    // An added token without an integer id or a string content is rejected, not read.
+    for (const char* field : {"id", "content"}) {
+        auto broken = nlohmann::json::parse(byte_tokenizer_json());
+        broken["added_tokens"][0].erase(field);
+        const auto text = broken.dump();
+        check_throws([&] { CreateBpeTokenizer(text.data(), text.size(), false, kVocab); },
+                     std::string("an added token without ") + field);
+    }
+    // Added-token ids are bounded by the decoder vocabulary before the vocabulary grows.
+    for (const std::int64_t id :
+         {std::int64_t{kVocab}, std::int64_t{2147483647}, std::int64_t{-1}}) {
+        auto stray = nlohmann::json::parse(byte_tokenizer_json());
+        stray["added_tokens"][0]["id"] = id;
+        const auto text = stray.dump();
+        check_throws([&] { CreateBpeTokenizer(text.data(), text.size(), false, kVocab); },
+                     "an added token id of " + std::to_string(id));
+    }
+    const auto json = byte_tokenizer_json();
+    check_throws([&] { CreateBpeTokenizer(json.data(), json.size(), false, 0); },
+                 "a tokenizer without a decoder vocabulary");
 }
 
 void test_prompt() {
     const auto json = byte_tokenizer_json();
-    const auto tokenizer = CreateBpeTokenizer(json.data(), json.size(), false);
+    const auto tokenizer = CreateBpeTokenizer(json.data(), json.size(), false, 262);
     check(tokenizer != nullptr, "the byte tokenizer loads");
     if (!tokenizer)
         return;
@@ -313,6 +465,7 @@ int main() {
     test_transcript();
     test_runtime_config();
     test_prompt();
+    test_tokenizer();
     if (failures != 0) {
         std::cerr << failures << " VibeVoice-ASR host check(s) failed\n";
         return EXIT_FAILURE;

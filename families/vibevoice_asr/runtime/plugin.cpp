@@ -43,7 +43,8 @@ extern "C" trtmc::ITask* trtmc_create_family(const trtmc::FamilyContext& context
     const auto runtime = require_section(context.reader, "runtime.json");
     auto config = parse_runtime_config(std::string(runtime.begin(), runtime.end()));
     const auto tokenizer_json = require_section(context.reader, "tokenizer.json");
-    auto tokenizer = CreateBpeTokenizer(tokenizer_json.data(), tokenizer_json.size(), false);
+    auto tokenizer =
+        CreateBpeTokenizer(tokenizer_json.data(), tokenizer_json.size(), false, config.vocab_size);
     if (!tokenizer)
         throw std::invalid_argument("VibeVoice-ASR could not load its tokenizer");
     const auto& ids = config.token_ids;

@@ -8,6 +8,7 @@
 #include <charconv>
 #include <cstddef>
 #include <stdexcept>
+#include <string>
 #include <system_error>
 #include <utility>
 
@@ -100,7 +101,9 @@ Prompt build_prompt(const ITokenizer& tokenizer, const RuntimeConfig& config, st
     const auto rows = (samples + static_cast<std::size_t>(config.hop_length) - 1) /
                       static_cast<std::size_t>(config.hop_length);
     if (rows > static_cast<std::size_t>(config.max_sequence_length))
-        throw std::invalid_argument("VibeVoice-ASR audio exceeds the bundle's sequence length");
+        throw std::invalid_argument("VibeVoice-ASR audio needs " + std::to_string(rows) +
+                                    " speech tokens; the bundle's max_sequence_length is " +
+                                    std::to_string(config.max_sequence_length));
     Prompt prompt;
     // Special tokens split the text, so encoding the turns piecewise around the
     // speech span yields the ids of the reference's single-string encode.
