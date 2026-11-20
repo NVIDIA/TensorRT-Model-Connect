@@ -8,36 +8,47 @@ import Link from '@docusaurus/Link';
 import Layout from '@theme/Layout';
 import {usePluginData} from '@docusaurus/useGlobalData';
 import RecipePageLayout from './RecipePageLayout';
+import {FamilyParameters} from './ParameterDetails';
+import styles from './styles.module.css';
 
 function parallelLabel(profile) {
   if (profile.parallelMode === 'single_device') return 'single device';
   return `${profile.parallelMode === 'tensor_parallel' ? 'TP' : 'CP'}${profile.parallelSize}`;
 }
 
-export default function ModelFamilyRecipePage({familySlug}) {
+export default function ModelFamilyRecipePage({familySlug, details}) {
   const {familyRecipes, taskRecipes} = usePluginData('model-support-inventory');
-  const family = familyRecipes.find((candidate) => candidate.slug === familySlug);
-  if (!family) {
+  const entry = familyRecipes.find((candidate) => candidate.slug === familySlug);
+  if (!entry) {
     return (
       <Layout title="Model family not found">
         <main className="container margin-vert--lg"><h1>Model family not found</h1></main>
       </Layout>
     );
   }
+  const family = {...entry, details: details || entry.details};
   const taskBySlug = new Map(taskRecipes.map((task) => [task.slug, task]));
   return (
     <RecipePageLayout
       title={`${family.family} model recipes`}
       description={`Family-owned recipes for ${family.family}.`}
     >
-      <article>
-        <p><Link to="/models-recipes/model-recipes">← All model recipe tasks</Link></p>
+      <article className={styles.page}>
+        <p><Link to="/models-recipes/overview">← Supported models</Link></p>
         <h1><code>{family.family}</code></h1>
         <p>
-          This directory owns its Python builder, native runtime DSO, bundle section semantics,
-          and tests. It has no source dependency on another family.
+          Explore this family's checkpoint recipes, build parameters, configuration schemas,
+          and runtime commands. The information below comes from the current family source.
         </p>
+        <nav aria-label="Family page sections" className={styles.sectionLinks}>
+          <a href="#checkpoint-recipes">Checkpoint recipes</a>
+          <a href="#cli-parameters">CLI parameters</a>
+          <a href="#build-parameters">Build request</a>
+          <a href="#configuration-schema">Configuration schemas</a>
+          <a href="#configuration-constraints">Restrictions</a>
+        </nav>
         <h2>Task interfaces</h2>
+        {!family.taskSlugs.length && <p>No task interfaces are declared by an E2E manifest in this family.</p>}
         <ul>
           {family.taskSlugs.map((slug) => (
             <li key={slug}>
@@ -47,7 +58,11 @@ export default function ModelFamilyRecipePage({familySlug}) {
             </li>
           ))}
         </ul>
-        <h2>Owned recipes</h2>
+        <h2 id="checkpoint-recipes">Checkpoint recipes</h2>
+        <p>Select a recipe to inspect its exact checkpoint revision, build settings, test cases, and configuration check results.
+          {' '}A declared recipe is not evidence of a successful GPU run.</p>
+        {!family.profiles.length && <p>This family has no E2E checkpoint manifest in the current checkout.</p>}
+        {family.profiles.length > 0 && <div className={styles.tableScroll}>
         <table>
           <thead>
             <tr>
@@ -55,21 +70,23 @@ export default function ModelFamilyRecipePage({familySlug}) {
               <th>Checkpoint</th>
               <th>Task interfaces (primary first)</th>
               <th>Build</th>
-              <th>Manifest</th>
+              <th>Build input checks</th>
             </tr>
           </thead>
           <tbody>
             {family.profiles.map((profile) => (
               <tr key={profile.sourcePath}>
-                <td><code>{profile.profile}</code></td>
-                <td><code>{profile.hfId}</code></td>
+                <td><Link to={profile.url}><code>{profile.profile}</code></Link></td>
+                <td><Link to={profile.url}><code>{profile.hfId}</code></Link></td>
                 <td>{profile.tasks.map((task) => <div key={task}><code>{task}</code></div>)}</td>
                 <td>{profile.precision}; {parallelLabel(profile)}</td>
-                <td><code>{profile.sourcePath}</code></td>
+                <td>{family.details?.profileChecks?.[profile.sourcePath]?.status || 'not-checked'}</td>
               </tr>
             ))}
           </tbody>
         </table>
+        </div>}
+        <FamilyParameters family={family} />
       </article>
     </RecipePageLayout>
   );
