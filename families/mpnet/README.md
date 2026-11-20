@@ -18,6 +18,25 @@ framing through the native tokenizer factory. The tables are generated from
 version installed. Accent data preserves removed starter boundaries for
 canonical ordering; Hangul decomposes algorithmically. The runtime does not
 depend on Python or `tokenizers`.
+Unicode-derived mapping data retains the upstream copyright and permission
+notice in [UNICODE_LICENSE.txt](UNICODE_LICENSE.txt).
+
+## Scoped checkpoint validation
+
+At `11315b08`, the pinned all-mpnet-base-v2 revision
+`e8c3b32edf5434bc2275fc9bab85f82640a19130` passed its original input and the
+Unicode clean-text E2E. The real FP16 TensorRT CLI was compared to the official
+FP32 CLS reference, retaining the 0.999 cosine gate. Observed cosine values were
+0.999988 and 0.999994, respectively. Public C/C++ consumers also passed task,
+dimension, finiteness and C/C++ agreement checks; those consumer checks do not
+compare their vectors numerically to the CLI or reference.
+
+Validation used one H200, driver 595.71.05, CUDA 13.4.3, TensorRT 11.4.0.106,
+PyTorch 2.12.0+cu130, Transformers 5.2.0 and Tokenizers 0.22.2 on Linux x86_64.
+Run `families/mpnet/tests/test_e2e.py` with `--e2e-testcase
+all-mpnet-base-v2,all-mpnet-base-v2-unicode-clean-text` and the required native
+runtime paths. This does not qualify other precisions, quantization, TP4,
+checkpoints, platforms, long inputs, concurrency or performance.
 
 ## Quantization
 
