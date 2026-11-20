@@ -184,6 +184,9 @@ golden data.
 ## LibriSpeech accuracy fixture
 
 `families/whisper/tests/data/librispeech-test-clean-6930-75918-0003.wav` and
+`families/mimi/tests/data/librispeech-test-clean-6930-75918-0003.wav`
+are unmodified copies of utterance `6930-75918-0003` from the LibriSpeech `test-clean` split,
+distributed by OpenSLR as SLR12 under the Creative Commons Attribution 4.0
 `families/wav2vec2_bert/tests/data/librispeech-test-clean-6930-75918-0003.wav`
 are PCM WAV conversions of utterance `6930-75918-0003` from the LibriSpeech
 `test-clean` split, which OpenSLR distributes as FLAC in SLR12 under the
