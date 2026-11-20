@@ -27,16 +27,22 @@ python -m tensorrt_model_connect build /path/to/Cosmos3-Edge \
   --precision fp16 --max-sequence-length 1024 -o cosmos3-edge.bundle
 ```
 
-The family selects optional Edge-LLM 0.11.0 complete-network offload for FP16 on
-Linux when a matching native SDK is discoverable through `CMAKE_PREFIX_PATH` or
-the Python installation prefix. Provision the SDK using Model Connect's existing
-optional Edge CMake dependency. The pin is
-`95515c2f87fba8982db5a519f9022277667b3cc9`.
+The family selects the optional native Edge SDK at MC build time. The default
+remains 0.11; to use the official 0.12 SDK, configure MC with
+`TRTMC_ENABLE_EDGELLM=ON` and `TRTMC_EDGELLM_RELEASE=0.12.0`. Use a local SDK
+built for the worker's GPU, CUDA and TensorRT. Compatible Python tools can
+come from the official wheel or source. To name an isolated interpreter:
 
-Python builder tools can come from a compatible wheel or source installation.
-The adapter probes the current Python interpreter for Edge 0.11.0 and the SDK's
-TensorRT version; otherwise it uses the SDK-provisioned interpreter. A wheel does
-not replace the native SDK. Builds never install packages or cross-compile.
+```sh
+trtmc cosmos3_edge build "$MODEL_DIR" --task image_video_text_to_text \
+  --precision fp16 --max-sequence-length 1024 \
+  --edge-builder-python "$EDGE_PYTHON" -o cosmos3-edge.bundle
+```
+
+The family verifies the installed builder before invoking it. A Python wheel
+does not replace the native SDK; a build does not install packages. The 0.12
+adapter requests the LLM and visual components, reads reasoning shards in
+place, and packages only the indexed shards plus the root checkpoint metadata.
 
 Absent or incompatible offload support uses the native family implementation.
 An Edge preparation failure emits a warning with a persistent diagnostic log,
@@ -84,7 +90,30 @@ The independent oracle is Transformers FP32 with eager attention and TF32
 disabled, using the same checkpoint, prompt, pixels, frame selection and timestamps.
 The unchanged normalized text edit-distance limit is **0.15**.
 
-The initial local validation used TensorRT 11.1 / CUDA 13.3 on SM80, capacity 1024,
+### 0.12 opt-in results
+
+The original checkpoint, batch 1, TP1 and capacity 1024 were tested with
+TensorRT 11.4 on SM80. Both routes built and ran all five requests.
+
+| FP16 route | Two chat-text cases | Image | Timestamped video | Image and video |
+| --- | --- | --- | --- | --- |
+| Edge 0.12 | Exact tokens | Exact tokens | NED 0.7726 (fails) | NED 0.9058 (fails) |
+| Native fallback | Exact tokens | Exact tokens | NED 0.6893 (fails) | NED 0.8363 (fails) |
+
+The native retry followed a real SDK compatibility warning and kept the original
+FP16 request. An independent HF FP16 eager control produced the same token IDs
+as HF FP32 on all five requests. Lowering the HF precision alone therefore did
+not reproduce either backend's video output. Video and mixed requests remain
+available but are not quality-qualified. These measurements do not establish a
+root cause or qualify other capacities or platforms.
+
+The separate 24-token raw continuation probe below also ran on both 0.12
+validation bundles. Both returned the same tokens but missed HF FP32 (NED 0.69).
+This is distinct from the two passing chat-formatted prompts.
+
+### Historical 0.11 results
+
+The historical 0.11 local validation used TensorRT 11.1 / CUDA 13.3 on SM80, capacity 1024,
 batch 1, greedy decoding, chat templating enabled, thinking disabled. This is scoped evidence, not a claim
 that every target GPU, sequence length or sampling configuration has passed.
 
