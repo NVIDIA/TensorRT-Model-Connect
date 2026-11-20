@@ -39,7 +39,7 @@ inline trt_edgellm::rt::LLMGenerationRequest make_request(const std::string& pro
     request.applyChatTemplate = config.use_chat_template;
     request.enableThinking = config.enable_thinking;
     request.temperature = config.temperature;
-    request.topK = config.top_k;
+    request.topK = edge_top_k(config);
     request.topP = config.top_p;
     request.maxGenerateLength = config.max_new_tokens > 0 ? config.max_new_tokens : default_length;
     if (config.seed >= 0)

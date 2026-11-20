@@ -44,9 +44,15 @@ inline bool sampling_uses_vanilla(const std::string& variant) {
     return variant == "eagle3" || variant == "dflash" || variant == "jetspec";
 }
 
+/// Model Connect's default top-k does not cap an active nucleus; Edge uses zero for no cap.
+inline int edge_top_k(const TextGenerationConfig& config) {
+    const bool nucleus = config.top_p > 0.0F && config.top_p < 1.0F - 1e-6F;
+    return config.top_k == 1 && nucleus ? 0 : config.top_k;
+}
+
 /// Reject invalid sampling settings and controls with no equivalent Edge request API.
 inline void validate_generation(const TextGenerationConfig& c, bool allow_sampling = false) {
-    if (!allow_sampling && c.temperature > 0 && c.top_k != 1)
+    if (!allow_sampling && c.temperature > 0 && edge_top_k(c) != 1)
         throw std::invalid_argument(
             "This Gemma4 Edge execution variant supports only greedy generation");
     if (!std::isfinite(c.temperature) || c.temperature < 0 || !std::isfinite(c.top_p) ||

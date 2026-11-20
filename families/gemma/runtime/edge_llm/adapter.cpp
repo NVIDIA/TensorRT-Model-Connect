@@ -328,11 +328,10 @@ class EdgeTask final : public ITextGeneration,
 
     /// Invoke Edge once; failures propagate without attempting native inference.
     TextResult generate(const std::string& prompt, const TextGenerationConfig& config) override {
-        if (sampled_vanilla_ && config.temperature > 0 && config.top_k != 1)
-            std::cerr
-                << "Warning: Gemma Edge 0.11 uses vanilla fallback for this sampled speculative "
-                   "request; speculative activity is not qualified. Sampling controls "
-                   "are forwarded unchanged.\n";
+        if (sampled_vanilla_ && config.temperature > 0 && edge_top_k(config) != 1)
+            std::cerr << "Warning: Gemma Edge may use non-speculative decoding for this sampled "
+                         "request. Sampling settings are preserved; draft execution is not "
+                         "guaranteed.\n";
         return execute(make_request(prompt, config, default_max_new_tokens(), sampling_));
     }
 
