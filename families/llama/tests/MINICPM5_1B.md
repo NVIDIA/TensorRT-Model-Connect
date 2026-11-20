@@ -32,7 +32,9 @@ threshold is changed. A separate native prefill receipt assertion requires
 16 tokens, including BOS, so the observed 18-token baseline cannot pass merely
 by generating similar text. This assertion retains the subsequent Hugging Face
 generation comparison; it does not turn the case into a KV-contract-only test.
-It checks token count, not equality of every native input ID. Selecting `--e2e-model minicpm5-1b` selects all three cases.
+The current gate checks both the count and every ordered native input ID;
+a same-length ID substitution fails. The earlier count-only H200 run remains
+identified below. Selecting `--e2e-model minicpm5-1b` selects all three cases.
 
 CPU comparison against Hugging Face Tokenizers 0.22.2 found six mismatches out
 of 28 text probes on the initial PR source (f0c70eac). Replacing only the Llama
@@ -177,3 +179,61 @@ this checkpoint, and preserves upstream packed-KV initialization and dtype
 validation alongside the prefill-mask guard and opt-in ID trace.
 The H200 results above remain evidence for `c76e393b`; this merge does not add
 a GPU result. Current-head target-hardware validation remains outstanding.
+
+## Consumer and profile scope after integration
+
+The empty-text behavior is family-wide, not restricted to this checkpoint.
+With special tokens enabled, the old `encode("")` returned `[]` before any
+post-processing; it now returns the configured prefix/suffix framing, such as
+`[BOS]` or `[BOS, EOS]`. The pinned MiniCPM tokenizer returns `[0]`.
+With special tokens disabled or no configured framing, the result remains `[]`.
+Nonempty effective text retains its segmentation and framing path.
+
+The checked-in runtime has two tokenizer encode call sites. The following are
+source-level consequences, not new generation-equivalence measurements:
+
+| Consumer | Empty effective text before / after framing correction |
+| --- | --- |
+| Normal `generate`, through `encode_prompt` in `runtime/pipeline.cpp` | Empty IDs previously returned without generation. Nonempty framing now enters prefill/generation; no-framing empty text still returns without generation. |
+| `speculative::Pipeline::generate`, including auto/EAGLE3/autoregressive modes | Empty IDs previously failed `generate_ids` validation. Nonempty framing can now enter target and, when enabled, draft execution. This behavior has not received checkpoint validation here. |
+| CLI, SDK/server callers using either string-generation implementation | They inherit the corresponding behavior above; callers are not assumed unable to submit raw empty text. |
+| IDs-only generation and internal single-forward | They bypass tokenizer encode. Normal empty IDs still return without generation; speculative empty IDs still reject. Single-forward string generation rejects before encode and empty IDs reject. |
+| E2E | Raw-prompt cases use normal string generation. The historical empty MiniCPM case tests BOS framing; it does not validate speculative empty text or every other postprocessor. |
+
+If a chat template produces nonempty effective text, it does not exercise the
+empty-text branch. This audit does not claim every template or external caller
+is equivalent. Edge-LLM's separate SDK tokenizer/runtime is outside this audit.
+
+For the mask guard, let `C` be the fixed cache capacity. The eligible builder
+outputs and existing alternative routes are:
+
+| Bundle/profile class | Mask profile and effect of the added guard branch |
+| --- | --- |
+| Fixed-cache standard dynamic-sequence prefill, including the prefill profile of a dual-profile engine and split prefill engine | `dual_profile_decoder_builder.py` defines dynamic mask `[-1,-1]`, MIN `[1,C+1]`, OPT `[Sopt,C+Sopt]`, MAX `[Smax,C+Smax]`. The added branch permits a one-token prefill or tail even when the current OPT/buffer shape is not `[1,C+1]`. |
+| Static standard decode, or fixed one-token decode profile | Its current mask already has `[1,C+1]`; the original current-shape check and decoder binding validation remain. |
+| Runtime-sized KV | Its mask MIN is `[1,2]` and existing dynamic binding bypasses the fixed-cache comparison; this is not the newly added branch. |
+| Native/active-prefix KV, cache-free single-forward and speculative engines | They use different mask contracts or bypass `write_decode_mask`; this guard does not qualify those routes. |
+
+This is a profile-based rule, not a checkpoint allowlist. Qualifying fixed-cache
+bundles for non-MiniCPM checkpoints can also reach it. Every non-MiniCPM5-1B
+manifest selection, other precision/profile, speculative path and other
+postprocessor remains outside this PR's recorded checkpoint qualification.
+No claim is made that every existing serialized bundle was inspected or run.
+
+The native KV fixture uses `C=11`, current `[64,75]` / tail `[4,15]`, and valid
+MIN `[1,12]`. Its negative controls reject MIN `[1,11]`, `[2,13]`, `[-1,12]` and
+`[1,12,1]`; the old static decode control remains. More generally, fixed-cache
+inputs with an incorrect current shape must still reject when the mask is
+static or its dynamic MIN differs from the exact rank-two `[1,C+1]` predicate.
+These controls are not proof of all possible bundle contracts. Their current
+CUDA/native-KV execution remains outstanding; the prior H200 result is at c76.
+
+At `ea51a82e`, an isolated CPU harness compiled the actual repository BPE/chat
+sources and the existing tokenizer-special-token, pretokenizer-variant and
+chat-template tests: all three passed. This is not a production DSO build or
+CUDA KV CTest. Compiling the same special-token fixture with canonical
+`65281216` BPE source produced six expected empty-framing assertion failures;
+the branch factory passed. Local production CMake configuration stopped at
+the missing `nlohmann_json` package configuration, so DSO linking remains
+unrun. CUDA KV tests and checkpoint GPU rechecks still require available
+authorized target hardware; Radix authentication is expired.
