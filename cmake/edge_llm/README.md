@@ -5,6 +5,57 @@ nor builds it. Enable it once while installing Model Connect; ordinary model
 builds only use the installed package and never fetch or install dependencies.
 Cross compilation is rejected. Configure and build on the inference GPU host.
 
+## Opt in to Edge-LLM 0.12.0
+
+When Edge is enabled the default release is still **0.11.0** during the family
+migration. A build links **one** release; an engine from a different release
+is not interchangeable. Native-only builds do not provision either SDK.
+
+For 0.12, point CMake at a native installation exporting
+`TensorRTEdgeLLMConfig.cmake`, or let CMake build the official pinned GitHub
+source. Set the architecture to the compute capability of the GPU on the
+build host (for example, 80 for SM80). Supply the same TensorRT SDK to both
+projects and the compatible nlohmann JSON headers described below.
+
+```bash
+cmake -S . -B build-edge012 -DTRTMC_ENABLE_EDGELLM=ON \
+  -DTRTMC_EDGELLM_RELEASE=0.12.0 -DTRTMC_EDGELLM_CUDA_ARCHITECTURE=80 \
+  -DTRTMC_EDGELLM_TRT_ROOT="$TRT_ROOT" -DTRTMC_TRT_INCLUDE_DIR="$TRT_ROOT/include" \
+  -DTRTMC_TRT_LIBRARY="$TRT_ROOT/lib/libnvinfer.so"
+cmake --build build-edge012
+cmake --install build-edge012 --prefix "$PWD/mc-edge012"
+```
+
+Set `CMAKE_PREFIX_PATH` to the upstream SDK prefix before configuring to
+reuse it. Alternatively, `TRTMC_EDGELLM_SOURCE_DIR` accepts a populated
+checkout of the pinned revision and its submodules, including for offline
+builds. With no provided SDK or source, CMake fetches the public revision
+during this opt-in configure. It uses upstream's native build, prebuilt kernel
+selection and CMake exports. An external SDK attests its package version,
+not its source commit or kernel groups. Its receipt records
+a null source revision; the pinned source build records the verified commit.
+The SDK must include its installed license. To request all kernel groups
+(`TRTMC_EDGELLM_ALL_KERNELS=ON`), provision from pinned source.
+`TRTMC_EDGELLM_ONNX=ON` installs the upstream ONNX builder commands only when
+requested; it does not change the native MC graph path or qualify any family.
+
+Keep the **0.12 Python builder separate from the MC environment**. For
+example, when the native SDK uses TensorRT 11.4.0.106:
+
+```bash
+python3 -m venv "$HOME/.venvs/edge012"
+"$HOME/.venvs/edge012/bin/python" -m pip install 'tensorrt==11.4.0.106' 'tensorrt-edgellm[builder]==0.12.0'
+```
+
+The same interpreter can instead install `.[builder]` from the official
+0.12.0 checkout. Ensure its TensorRT Python version matches the C++ SDK. A
+ported family can use the installed interpreter regardless of pip provenance.
+It discovers the native receipt via `CMAKE_PREFIX_PATH` or inside the installed
+MC wheel. Neither installing the Python tools nor selecting the CMake release
+by itself enables an unported family or validates a model.
+
+## Default release: Edge-LLM 0.11.0
+
 ```bash
 cmake -S . -B build \
   -DTRTMC_ENABLE_EDGELLM=ON \

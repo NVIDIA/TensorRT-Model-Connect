@@ -82,7 +82,10 @@ benchmarks:
                    gate: {min_cosine: 0.999, max_relative_l2: 0.02},
                    # A native model that cannot run the candidate's precision (fp16) runs at fp32: TRTMC's half-
                    # precision error is then not shared by the reference, so the tolerance doubles.
-                   mismatched_precision_gate: {min_cosine: 0.998, max_relative_l2: 0.04}}
+                   mismatched_precision_gate: {min_cosine: 0.998, max_relative_l2: 0.04},
+                   # An FP8 candidate carries its quantization error: the families' FP8 E2E cosine (0.99), and the
+                   # relative L2 that cosine allows at equal norms (sqrt(2 * 0.01) ~ 0.14).
+                   quantized_gate: {min_cosine: 0.99, max_relative_l2: 0.15}}
   # SciFact reranking of fixed BM25 top-20 candidates (nDCG@10). Each document keeps its head so that the pair, as
   # the bundle's reranker forms it (`pair_format`, the eagle_vlm runtime's), fits the bundle; both sides get it.
   rerank: {suite: scifact-rerank, suite_definition: scifact-rerank-bm25-300, metric: rerank_ndcg, gate: {margin: 1.0},
@@ -196,9 +199,10 @@ benchmarks:
          min_new_tokens: 64, gate: {margin: 2.0}}
 
 tasks:
-  text_generation:
+  text_generation: &generate_text
     absolute: [mmlu]
     performance: {output_grader: parity_token_exact, output_grader_params: {min_prefix: 8, accept_equal_text: true}}
+  text_continuation: *generate_text  # the Task SDK name of the migrated decoder LMs (qwen3, #1558)
 
   vision_language_generation:
     # OCRBench alone (the owner's choice, October 2026): it caught both VLM conversion defects MMStar caught

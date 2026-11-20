@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Reference processor of the E2E oracle: SmolVLMProcessor imports num2words, and the
+# native image path reproduces Pillow 13 Lanczos resampling. torchvision, which the
+# processor also imports, comes from the base image.
+num2words>=0.5.14,<0.6
+Pillow>=13,<14

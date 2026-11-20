@@ -97,6 +97,26 @@ checkpoint and image hashes; they contain predictions, not model weights.
 The manual commands below remain the direct source-build path and show the
 operations performed by development mode.
 
+## Select native families
+
+CMake configures all discovered families by default. To configure one family,
+pass `-DTRTMC_BUILD_FAMILIES=qwen`; for several families, pass a quoted
+semicolon-separated list. An empty list, `-DTRTMC_BUILD_FAMILIES=""`, configures
+only the shared runtime, backends, applications, and their tests. This lets a
+CLI/backend-only build avoid unselected families' optional native prerequisites.
+Unknown family names fail configuration. Omitting the option or setting it to
+`*` preserves the default of configuring every family.
+
+## Optional Edge-LLM 0.12.0 migration build
+
+The default Edge-enabled source build still uses 0.11.0. To build against the
+0.12.0 C++ SDK, set both `-DTRTMC_ENABLE_EDGELLM=ON` and
+`-DTRTMC_EDGELLM_RELEASE=0.12.0` at configure time. Keep the 0.12 Python
+builder in a separate environment: its Transformers requirement is different
+from Model Connect's shared pin. This option provisions the native SDK; it
+does not port any family adapter. See the [native SDK setup](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/cmake/edge_llm/README.md)
+for provisioning options. Follow each family's instructions for model builds.
+
 ## Optional Edge-LLM Python tools
 
 After preparing the source-build prerequisites below, use CPython 3.12 to

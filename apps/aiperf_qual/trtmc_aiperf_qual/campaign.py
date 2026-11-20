@@ -613,6 +613,7 @@ def run_context(roots: Sequence[Path]) -> str:
         digest = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()[:12] if inputs else ""
         parts.append(f"{root.name}: host {plan.get('host') or '-'}"
                      + (f", assignment {str(plan['assignment'])[:12]}" if plan.get("assignment") else "")
+                     + (f", fragment {plan['fragment']}" if plan.get("fragment") else "")
                      + (f", campaign inputs {digest}" if digest else "")
                      + (f", {day(min(times))} to {day(max(times))}" if times else ""))
     return " · ".join(parts)

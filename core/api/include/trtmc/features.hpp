@@ -97,6 +97,11 @@ struct ImageTextToEmbeddingRequest {
     ImageInput image;
     std::string text;
 };
+struct PointsToEmbeddingRequest {
+    Span<const float> points; // Row-major [num_points, input_dim] float32.
+    uint32_t num_points{0};
+    uint32_t input_dim{3};
+};
 struct TextPairToRelevanceRequest {
     std::string query;
     std::string document;
@@ -445,6 +450,15 @@ inline trtmc_image_text_to_embedding_request_v1
 feature_request(const ImageTextToEmbeddingRequest& input) {
     return {input.image.wire, c_string(input.text)};
 }
+// The wire carries a point count, not a float count; Core sizes the span from
+// num_points * input_dim, so a mismatched caller span must never reach it.
+inline trtmc_points_to_embedding_request_v1 feature_request(const PointsToEmbeddingRequest& input) {
+    if (input.points.size() !=
+        static_cast<uint64_t>(input.num_points) * static_cast<uint64_t>(input.input_dim))
+        throw Error(TRTMC_INVALID_ARGUMENT,
+                    "point-cloud points must hold exactly num_points * input_dim floats");
+    return {input.points.data(), static_cast<uint64_t>(input.num_points), input.input_dim};
+}
 inline trtmc_text_pair_to_relevance_request_v1
 feature_request(const TextPairToRelevanceRequest& input) {
     return {c_string(input.query), c_string(input.document)};
@@ -592,6 +606,12 @@ struct ImageTextToEmbeddingTraits {
     using Result = SemanticEmbeddingResult;
     using Table = trtmc_image_text_to_embedding_api_v1;
 };
+struct PointsToEmbeddingTraits {
+    static constexpr std::string_view kTask = TRTMC_TASK_POINTS_TO_EMBEDDING;
+    using Request = PointsToEmbeddingRequest;
+    using Result = SemanticEmbeddingResult;
+    using Table = trtmc_points_to_embedding_api_v1;
+};
 struct TextPairToRelevanceTraits {
     static constexpr std::string_view kTask = TRTMC_TASK_TEXT_PAIR_TO_RELEVANCE;
     using Request = TextPairToRelevanceRequest;
@@ -642,6 +662,7 @@ using ImageToSpatialFeatures = detail::FeatureTask<detail::ImageToSpatialFeature
 using ImageToPooledFeatures = detail::FeatureTask<detail::ImageToPooledFeaturesTraits>;
 using ImageToEmbedding = detail::FeatureTask<detail::ImageToEmbeddingTraits>;
 using ImageTextToEmbedding = detail::FeatureTask<detail::ImageTextToEmbeddingTraits>;
+using PointsToEmbedding = detail::FeatureTask<detail::PointsToEmbeddingTraits>;
 using TextPairToRelevance = detail::FeatureTask<detail::TextPairToRelevanceTraits>;
 using TextImageToRelevance = detail::FeatureTask<detail::TextImageToRelevanceTraits>;
 using TextImageTextToRelevance = detail::FeatureTask<detail::TextImageTextToRelevanceTraits>;

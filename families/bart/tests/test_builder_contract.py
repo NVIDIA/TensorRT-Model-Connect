@@ -46,7 +46,7 @@ def test_decoder_cross_attention_uses_source_padding_mask(monkeypatch) -> None:
     monkeypatch.setattr(graph_ops, "add_bias_sum", passthrough)
     monkeypatch.setattr(graph_ops, "add_layer_norm_native", passthrough)
     monkeypatch.setattr(graph_ops, "add_activation", passthrough)
-    monkeypatch.setattr(graph_ops, "add_attention_from_rows", capture_attention)
+    monkeypatch.setattr(model, "_add_bart_decoder_attention", capture_attention)
 
     self_attention_mask = object()
     cross_attention_mask = object()

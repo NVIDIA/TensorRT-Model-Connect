@@ -306,6 +306,10 @@ endif()
 # A family owns its target, sources, dependencies, warnings, and installation.
 # The root knows only the directory convention; adding a family never changes
 # a central source or target list.
+set(TRTMC_BUILD_FAMILIES "*" CACHE STRING
+  "Model families to configure (semicolon-separated names; * for all; empty for core only)"
+)
+set(_trtmc_unknown_families ${TRTMC_BUILD_FAMILIES})
 file(GLOB _trtmc_family_runtime_cmake CONFIGURE_DEPENDS
   "${PROJECT_SOURCE_DIR}/families/*/runtime/CMakeLists.txt"
 )
@@ -313,11 +317,20 @@ foreach(_trtmc_runtime_cmake IN LISTS _trtmc_family_runtime_cmake)
   get_filename_component(_trtmc_runtime_dir "${_trtmc_runtime_cmake}" DIRECTORY)
   get_filename_component(_trtmc_family_dir "${_trtmc_runtime_dir}" DIRECTORY)
   get_filename_component(_trtmc_family "${_trtmc_family_dir}" NAME)
+  if(NOT "*" IN_LIST TRTMC_BUILD_FAMILIES AND
+     NOT _trtmc_family IN_LIST TRTMC_BUILD_FAMILIES)
+    continue()
+  endif()
+  list(REMOVE_ITEM _trtmc_unknown_families "${_trtmc_family}")
   add_subdirectory(
     "${_trtmc_runtime_dir}"
     "${CMAKE_BINARY_DIR}/families/${_trtmc_family}"
   )
 endforeach()
+list(REMOVE_ITEM _trtmc_unknown_families "*")
+if(_trtmc_unknown_families)
+  message(FATAL_ERROR "Unknown model families in TRTMC_BUILD_FAMILIES: ${_trtmc_unknown_families}")
+endif()
 
 # Family command descriptions are data: help must not load a model or backend.
 file(GLOB _trtmc_cli_descriptions CONFIGURE_DEPENDS

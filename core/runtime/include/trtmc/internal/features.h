@@ -195,6 +195,14 @@ struct ImageTextToEmbeddingRequest {
     ImageView image;
     std::string_view text;
 };
+// Points are row-major [num_points, input_dim] float32. The family defines the
+// column meaning, owns any normalization or sampling and must reject point
+// counts and input dimensions it does not support.
+struct PointsToEmbeddingRequest {
+    Span<const float> points;
+    uint32_t num_points{0};
+    uint32_t input_dim{3};
+};
 struct TextPairToRelevanceRequest {
     std::string_view query;
     std::string_view document;
@@ -335,6 +343,14 @@ class IImageTextToEmbedding {
     static constexpr std::string_view kTask = "image_text_to_embedding";
     virtual ~IImageTextToEmbedding() = default;
     virtual SemanticEmbeddingResult run(const ImageTextToEmbeddingRequest&, ConfigView) = 0;
+};
+
+class IPointsToEmbedding {
+  public:
+    using TaskInterface = IPointsToEmbedding;
+    static constexpr std::string_view kTask = "points_to_embedding";
+    virtual ~IPointsToEmbedding() = default;
+    virtual SemanticEmbeddingResult run(const PointsToEmbeddingRequest&, ConfigView) = 0;
 };
 
 class ITextPairToRelevance {

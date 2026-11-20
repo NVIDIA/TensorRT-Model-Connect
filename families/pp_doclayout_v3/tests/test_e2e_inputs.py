@@ -47,7 +47,10 @@ def test_manifest_revision_resolves_from_offline_cache(offline_cache):
     (root / "refs").mkdir()
     (root / "refs/main").write_text(other.name)
 
-    assert e2e._model_dir() == pinned
+    assert e2e._model_dir() == (
+        pinned,
+        {"from_override": False, "resolved_revision": e2e.MANIFEST["hf_revision"]},
+    )
 
 
 def test_missing_pinned_checkpoint_fails_without_network(offline_cache):
@@ -58,7 +61,7 @@ def test_missing_pinned_checkpoint_fails_without_network(offline_cache):
 def test_explicit_model_directory_is_preserved(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text("{}")
     monkeypatch.setenv("TRTMC_PP_DOCLAYOUT_V3_MODEL_DIR", str(tmp_path))
-    assert e2e._model_dir() == tmp_path
+    assert e2e._model_dir() == (tmp_path, {"from_override": True, "resolved_revision": None})
 
 
 @pytest.mark.parametrize("kind", ["missing", "file", "directory", "empty"])
@@ -132,7 +135,10 @@ def test_ci_external_files_are_separate_from_the_hub_checkpoint(
     (checkpoint / "config.json").write_text("{}")
     monkeypatch.setenv("TRTMC_PP_DOCLAYOUT_V3_MODEL_DIR", str(staged))
 
-    assert e2e._model_dir() == checkpoint
+    assert e2e._model_dir() == (
+        checkpoint,
+        {"from_override": False, "resolved_revision": e2e.MANIFEST["hf_revision"]},
+    )
     assert e2e._image_path(checkpoint) == document
 
 
@@ -149,7 +155,7 @@ def test_local_checkpoint_with_a_document_preserves_the_override(tmp_path, monke
     (tmp_path / "config.json").write_text("{}")
     document = _document(tmp_path)
     monkeypatch.setenv("TRTMC_PP_DOCLAYOUT_V3_MODEL_DIR", str(tmp_path))
-    assert e2e._model_dir() == tmp_path
+    assert e2e._model_dir() == (tmp_path, {"from_override": True, "resolved_revision": None})
     assert e2e._image_path(tmp_path) == document
 
 
