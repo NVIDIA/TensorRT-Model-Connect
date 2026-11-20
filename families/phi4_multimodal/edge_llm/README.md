@@ -1,5 +1,12 @@
 # Phi4 Multimodal with Edge-LLM
 
+When the installed Model Connect wheel includes a native runner and Edge SDK,
+the family uses that SDK. A different SDK on `CMAKE_PREFIX_PATH` cannot
+override the wheel's native runner. To select another release, install a
+Model Connect wheel built for it, or use a matching standalone Model Connect
+builder and runner in an environment without the wheel. For standalone
+installations, `CMAKE_PREFIX_PATH` selects the SDK as usual.
+
 ## Opt-in Edge 0.12: original checkpoint
 
 Use an MC installation built with `TRTMC_ENABLE_EDGELLM=ON` and

@@ -4,6 +4,10 @@ title: Phi4 Multimodal with Edge-LLM
 
 # Phi4 Multimodal with Edge-LLM
 
+An installed Model Connect wheel uses its own native Edge SDK, not a
+different SDK on `CMAKE_PREFIX_PATH`. To switch releases, use a matching
+wheel or a standalone Model Connect builder and runner together.
+
 ## Opt-in Edge 0.12
 
 Build MC with `TRTMC_ENABLE_EDGELLM=ON` and `TRTMC_EDGELLM_RELEASE=0.12.0`;
