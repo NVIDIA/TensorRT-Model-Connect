@@ -36,6 +36,14 @@ struct MelSpectrogramOptions {
     bool normalize_per_feature{false};
 };
 
+// The power spectrum of a frame whose length is a power of two comes from a
+// radix-2 transform that reads its twiddle factors and its bit-reversed order
+// from tables. The tables belong to whoever transforms: each
+// IncrementalMelSpectrogram builds its own in its constructor and keeps them
+// until it is destroyed, and each call of detail::rfft_power or of an extract
+// function below builds its own and drops them when it returns. Nothing is
+// shared between objects or calls, so separate objects and separate calls may
+// run concurrently; the calls on one IncrementalMelSpectrogram may not.
 namespace detail {
 
 std::vector<float> rfft_power(const std::vector<float>& input);
