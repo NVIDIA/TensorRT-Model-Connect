@@ -253,7 +253,8 @@ ITask* create(const BundleReader& bundle) {
     const auto marker = nlohmann::json::parse(bytes.begin(), bytes.end());
     const auto& revision = marker.at("edge_revision");
 #ifdef TRTMC_INTERNVL_EDGE_012
-    const bool compatible = marker.at("edge_release") == "0.12.0" && (revision.is_null() || revision == kRevision);
+    const bool compatible =
+        marker.at("edge_release") == "0.12.0" && (revision.is_null() || revision == kRevision);
     const bool packed_flow = marker.value("builder_flow", "") == "direct";
 #else
     const bool compatible = revision == kRevision;
@@ -264,8 +265,8 @@ ITask* create(const BundleReader& bundle) {
         marker.at("max_input_length").get<int>() <= 0 ||
         marker.at("max_input_length").get<int>() > marker.at("max_sequence_length").get<int>() ||
         marker.at("max_batch_size") != 1 || marker.at("precision") != "fp16" ||
-        (marker.at("weight_format") != "fp16" && !(marker.at("weight_format") == "int4_awq" &&
-                                                   packed_flow)) ||
+        (marker.at("weight_format") != "fp16" &&
+         !(marker.at("weight_format") == "int4_awq" && packed_flow)) ||
         marker.at("component_weight_formats").at("llm") != marker.at("weight_format") ||
         marker.at("component_weight_formats").at("visual") != "fp16" ||
         marker.at("visual_image_tokens") != 256 || !marker.at("artifacts").is_array())

@@ -102,8 +102,7 @@ int main(int argc, char** argv) {
                 !runner->infer(stream.value))
                 throw std::runtime_error("Edge visual inference failed");
             const auto& output = runner->getOutputEmbedding();
-            if (output.getDataType() != EdgeDataType::kHALF ||
-                output.getShape().volume() <= 0)
+            if (output.getDataType() != EdgeDataType::kHALF || output.getShape().volume() <= 0)
                 throw std::runtime_error("Invalid Edge feature shape or dtype");
             std::vector<uint16_t> features(output.getShape().volume());
             const auto bytes = features.size() * sizeof(uint16_t);
