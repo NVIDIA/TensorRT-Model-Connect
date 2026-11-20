@@ -11,6 +11,7 @@ Qwen3 modes fail closed. Other Qwen variants retain their explicit graph routes.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -41,7 +42,7 @@ def _uses_qualified_qwen3_fp8_path(
     precision: str,
     quant_ctx,
     parallel: ParallelConfig,
-    debug_layer_outputs: bool,
+    debug_layer_outputs: bool | Sequence[int],
 ) -> bool:
     """Recognize the explicit, previously qualified Qwen3 FP8 graph route."""
 
@@ -101,7 +102,7 @@ class _QwenModel:
         quant_ctx=None,
         verbose: bool = False,
         parallel_config=None,
-        debug_layer_outputs: bool = False,
+        debug_layer_outputs: bool | Sequence[int] = False,
     ) -> bytes:
         parallel = normalize_parallel_config(parallel_config)
         config.raw.pop("_native_kv_cache_metadata", None)
@@ -142,8 +143,14 @@ class _QwenModel:
                 verbose=verbose,
                 profile_mode=role,
                 native_kv_cache=True,
+                debug_layer_outputs=debug_layer_outputs,
             )
 
+        if not isinstance(debug_layer_outputs, bool) and debug_layer_outputs:
+            reason = f": {capability.reason}" if capability.applicable else ""
+            raise NotImplementedError(
+                f"Qwen debug layer selection is supported only on the Qwen3 native KV path{reason}"
+            )
         if capability.applicable and not qualified_fp8:
             raise ValueError(
                 f"Qwen3 requires the fixed-capacity native KV path: {capability.reason}"
