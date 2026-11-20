@@ -309,9 +309,13 @@ def test_build_extracts_tokenizer_without_mutating_read_only_snapshot(
     monkeypatch.setattr(model, "_tokenizer_runtime_contract", tokenizer_contract)
     monkeypatch.setattr(model._CanaryModel, "load_weights", load_weights)
     monkeypatch.setattr(model._CanaryModel, "build_engine", lambda *args, **kwargs: b"decoder")
-    monkeypatch.setattr(
-        model._CanaryModel, "build_vision_engine", lambda *args, **kwargs: b"encoder"
-    )
+    encoder_builds = []
+
+    def build_vision_engine(*args, **kwargs):
+        encoder_builds.append(kwargs)
+        return b"encoder"
+
+    monkeypatch.setattr(model._CanaryModel, "build_vision_engine", build_vision_engine)
     monkeypatch.setattr(
         model._CanaryModel,
         "build_extra_engines",
@@ -341,6 +345,8 @@ def test_build_extracts_tokenizer_without_mutating_read_only_snapshot(
     finally:
         snapshot.chmod(0o755)
 
+    # A single-GPU bundle's encoder projects the decoder's cross-attention K/V.
+    assert [build["project_cross_kv"] for build in encoder_builds] == [True]
     assert tokenizer_dirs and not tokenizer_dirs[0].exists()
     assert sections["tokenizer.model"] == tokenizer_bytes
     assert sections["tokenizer.json"] == tokenizer_document
