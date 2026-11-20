@@ -161,9 +161,13 @@ def serving(environment: Environment, model: dict[str, Any], backend: str, out: 
             command.append("--trust-remote-code")
         if deterministic:
             command.append("--deterministic")
-        if reference.get("model"):
+        if reference.get("model_directory"):  # written into the reference environment by reference.prepare
+            if not python:
+                raise ServiceError("a reference model_directory needs the model's reference environment")
+            command += ["--reference-model", str((Path(python).parent.parent / reference["model_directory"]).resolve())]
+        elif reference.get("model"):
             command += ["--reference-model", reference["model"]]
-        if reference.get("revision"):
+        if reference.get("revision") and not reference.get("model_directory"):  # a local directory has none
             command += ["--reference-revision", str(reference["revision"])]
         if reference.get("options"):
             command += ["--reference-options", json.dumps(reference["options"])]

@@ -81,6 +81,31 @@ def test_trtmc_bench_gets_the_qualification_build_time_limit(tmp_path, monkeypat
     assert report.read_text() == "60"  # an environment that states its own limit keeps it
 
 
+def test_a_reference_model_directory_is_loaded_from_the_reference_environment(tmp_path, monkeypatch):
+    from trtmc_aiperf_qual import services
+
+    environment = Environment({"repo": str(tmp_path), "bundle_root": str(tmp_path / "engines"),
+                               "serve_python": "python3", "ports": {"candidate": 9000, "reference": 9100}})
+    model = {"catalog_profile": "p", "candidate": {"bundle": "p/p.bundle", "precision": "fp16"},
+             "reference": {"model_directory": "trtmc-reference/p-int4", "model": "org/other", "revision": "abc"}}
+
+    def refuse(command, **options):
+        raise RuntimeError("not started")
+
+    monkeypatch.setattr(services, "_port_free", lambda port: True)
+    monkeypatch.setattr(services.subprocess, "Popen", refuse)
+    python = tmp_path / "ref-envs/e/bin/python"
+    with pytest.raises(RuntimeError, match="not started"):
+        with services.serving(environment, model, "reference", tmp_path / "out", python=str(python)):
+            pass
+    command = json.loads((tmp_path / "out/command.json").read_text())
+    assert command[command.index("--reference-model") + 1] == str(tmp_path / "ref-envs/e/trtmc-reference/p-int4")
+    assert "--reference-revision" not in command  # the checkpoint's revision does not name a local directory
+    with pytest.raises(services.ServiceError, match="reference environment"):  # nowhere to resolve it
+        with services.serving(environment, model, "reference", tmp_path / "out2"):
+            pass
+
+
 def test_ensure_bundle_records_a_failed_build_under_the_gpu_lock(tmp_path, monkeypatch):
     environment = Environment({"repo": str(tmp_path), "bundle_root": str(tmp_path / "engines"),
                                "gpu_lock": str(tmp_path / "gpu.lock")})
