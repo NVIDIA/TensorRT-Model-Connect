@@ -35,10 +35,11 @@ trtmc gemma build /path/to/Gemma-4-26B-A4B-NVFP4 --precision fp16 \
 
 Here `--precision fp16` selects compute precision; it does not unpack the
 checkpoint into an unquantized model. This pair uses calibrated NVFP4 experts,
-an FP8 target cache, and an FP16 draft cache. Its Edge bundle matched the
-prepared-target FP32 reference on the tested text prompt. The native bundle
-built on a 32 GB GPU, but TensorRT could not allocate its execution context;
-that build is not evidence of native inference or accuracy.
+an FP8 target cache, and an FP16 draft cache. On the tested greedy text prompt, Edge on SM120 and
+native TensorRT on SM103 both matched the prepared-target FP32 tokens. The
+native draft proposed 127 nodes; one token was accepted in one verification
+round. On a 32 GiB SM120 GPU the native engine built, but its execution
+context did not fit. This is a placement limit, not a model-wide restriction.
 
 For the documented Bolt-E4B DFlash pair, 0.12 uses the checkpoint-direct
 builder rather than ONNX. Use `--spec-draft-top-k 1` for chain verification or
@@ -64,10 +65,24 @@ and companion rather than silently substituting ordinary decoding.
 Native FP8 attention keeps calibrated projection storage and uses explicit
 FP32 score, mask and softmax math, without a GPU-specific dispatch rule.
 
+Build success alone does not establish that a bundle fits the GPU or matches
+the reference. See the [0.12 standalone results for QAT, Bolt and prepared
+NVFP4](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/gemma/edge_llm/README.md#standalone-validation-on-012-qat-bolt-and-prepared-nvfp4)
+for the tested devices, inputs and outcomes.
+
+The [original FP16 31B standalone](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/gemma/edge_llm/README.md#original-31b-standalone-on-012)
+matched FP32 on the Edge text request. Its image description missed the 0.15
+limit (NED 0.198), with identical output from the released Edge CLI.
+
+The original 31B [DFlash](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/gemma/edge_llm/README.md#native-original-31b-dflash)
+and [MTP](https://github.com/NVIDIA/TensorRT-Model-Connect/blob/main/families/gemma/edge_llm/README.md#gemma4-mtp-on-012)
+pairs matched the CPU FP32 tokens on both Edge and native TRT for the tested
+greedy request. Each exercised its draft; this is not a speedup measurement.
+
 Previously recorded 0.11 native cases include E2B/E4B/12B and the original or published prepared
 26B/31B variants. Sampled 12B DSpark, EAGLE3 and both DFlash draft architectures
 have actual draft-execution and same-native-target parity evidence. This is
-separate from Edge's sampled EAGLE3/DFlash vanilla-fallback limitation and does
+separate from Edge 0.11's sampled EAGLE3/DFlash vanilla-fallback limitation and does
 not claim a speculative speedup or cross-framework random-number equivalence.
 
 Command-successful accuracy failures remain executable. Consult the

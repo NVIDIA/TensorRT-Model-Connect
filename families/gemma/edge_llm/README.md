@@ -151,7 +151,7 @@ throughput claim. Legacy chain bundles retain their original input contract.
 
 ## Original 31B standalone on 0.12
 
-With the 0.12 SDK selected, `google/gemma-4-31B-it` at revision
+On an earlier 0.12 adapter snapshot, `google/gemma-4-31B-it` at revision
 `842da3794eaa0b77d5f08bae87a17459d91ff475` built through the native TRT
 fallback on ARM SM103 with TensorRT 11.4. The public C++ runtime loaded the
 FP16 bundle without access to the checkpoint. At batch 1, TP1 and context
@@ -159,6 +159,15 @@ FP16 bundle without access to the checkpoint. At batch 1, TP1 and context
 independent FP32 token IDs (NED 0.0; threshold 0.15). This does not qualify
 Edge offload, the prepared NVFP4 checkpoint, or a draft. The earlier
 office-image accuracy failure below was not retested by these two requests.
+
+With Edge 0.12 on SM100 at the same FP16, batch 1, TP1 and context 2048
+settings, the released builder produced the language and vision engines.
+Model Connect ran both requests with the original weights unavailable.
+Text matched the independent FP32 token IDs exactly. The image description
+did not pass: NED **0.198** against the unchanged **0.15** limit. The released
+Edge CLI produced exactly the same image text using the same engines and RGB
+input. The image route remains executable but unqualified on this case; this
+comparison does not establish a TensorRT compiler defect.
 
 ## Original 26B-A4B development results
 
@@ -170,10 +179,47 @@ the FP32 text tokens exactly and passed the beach-image description case
 `JetSpec/jetspec-gemma4-26B-A4B0-it`, native matched FP32 on the named
 greedy text case. The corresponding Edge paired run finished both ONNX
 exports but timed out in the validation harness during engine compilation.
-That run did not test Edge inference or establish a builder defect. None of
+A separate released base-builder run on the saved export reached its four-hour
+limit without returning an engine. Neither timeout tested Edge inference or
+establishes a builder defect. None of
 these results covers the QAT-unquantized or NVFP4 checkpoints.
 
+## Standalone validation on 0.12: QAT, Bolt and prepared NVFP4
+
+These results are for standalone inference at batch 1, TP1, with a 2048-token
+context. They do not cover a draft or qualify other inputs.
+
+| Checkpoint | What was measured |
+| --- | --- |
+| `google/gemma-4-26B-A4B-it-qat-q4_0-unquantized` | With the published unquantized weights and FP16 compute, native TensorRT 11.4 on SM100 matched the independent FP32 text tokens. Image NED was 0.060 (limit 0.15). The Edge ONNX export completed, but the cold build hit a four-hour validation limit during compilation. No Edge inference or accuracy result was obtained. |
+| `nvidia/Nemotron-3.5-Bolt-E4B-BF16` | The same installed Model Connect wheel ran native text, image and audio on SM86 and SM120. All three matched FP32 tokens on SM86. On SM120 text and audio matched exactly; the image description missed the gate (NED 0.560). The Edge image description also missed (0.285), with matching output from the released Edge CLI. Both routes remain executable. |
+| `nvidia/Gemma-4-26B-A4B-NVFP4` | Edge on SM120 and native TRT on SM103 both ran text and image with the published calibration and FP8 target KV. Both matched the FP32 text tokens. The same image missed the 0.15 limit on both routes: Edge NED 0.362, native 0.340. Both remain executable. On 32 GiB SM120 the native engine built, but its execution context did not fit. |
+| `nvidia/Gemma-4-31B-IT-NVFP4` | Edge on SM103 and native TRT on SM100 ran with FP8 target KV. Both matched the prepared-checkpoint FP32 text tokens; both image descriptions missed the 0.15 limit (Edge 0.258, native 0.312). The released Edge CLI returned the same image text as Model Connect on the same engine. On 32 GiB SM120 both engines built, but Edge could not load its base plan and native could not allocate its context. Neither reached a request on that device. |
+
+## Native original 31B DFlash
+
+With `google/gemma-4-31B-it` and `z-lab/gemma-4-31B-it-DFlash` (block size
+16), the native TensorRT 11.4 fallback built both FP16 engines on SM100.
+At TP1, batch 1 and context 1024, the public C++ runtime answered **Paris**
+with the checkpoint weights unavailable. Both generated token IDs matched
+the independent CPU FP32 reference (NED 0; limit 0.15). The draft proposed
+15 tokens; one was accepted in one verification round. Edge offload also
+matched the FP32 tokens on SM100. The released CLI on the same Edge engine
+returned the same text; its profile showed 15 proposals, one acceptance and
+one verification, with both target and draft forward passes.
+
+The original 26B-A4B target with its z-lab DFlash draft also matched FP32 on
+the same greedy text request using native TRT on SM103. The draft proposed
+15 tokens and one was accepted. These are not throughput measurements.
+
 ## Gemma4 MTP on 0.12
+
+With `google/gemma-4-31B-it` and `google/gemma-4-31B-it-assistant`, both
+Edge on SM100 and native TRT on SM103 matched the CPU FP32 token IDs on the
+same greedy text request (FP16, TP1, batch 1, context 1024). The released
+CLI on the same Edge engine proposed three tokens and accepted one. Native
+proposed one token and accepted it. Each used one verification round; the
+matching output does not imply identical proposals or a speedup.
 
 The official paired exporter requires equal token-to-ID mappings. For
 `google/gemma-4-E2B-it`, target revision
@@ -221,6 +267,11 @@ policy. Original-weight 26B/31B variants and their assistants are not establishe
 these smaller-model results.
 
 ## Sampling and capacity
+
+With `--top-p 0.9` and the default top-k, Gemma samples the nucleus from the
+full vocabulary, as on the native route. Use `--top-k N` with (N > 1) to cap
+the candidates before applying top-p. A greedy-only MTP bundle rejects an
+active top-p request rather than silently performing top-1 decoding.
 
 MTP remains restricted to greedy requests. DSpark preserves mapped sampling
 controls. EAGLE3 and DFlash V1 sampled requests complete through Edge 0.11's
