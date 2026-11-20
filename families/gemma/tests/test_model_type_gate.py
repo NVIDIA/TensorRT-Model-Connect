@@ -437,9 +437,11 @@ assert "huggingface_hub" not in sys.modules
     assert "trtmc gemma build" in result.stdout
 
 
+@pytest.mark.parametrize("wheel_active", [False, True], ids=["source", "wheel"])
 @pytest.mark.parametrize("visual_key", ["visual_builder", "onnx_visual_builder"])
-def test_image_only_edge_package_does_not_require_audio_builder(tmp_path, monkeypatch, visual_key):
-    """Published CMake names and earlier media manifests resolve identically."""
+def test_image_only_edge_package_does_not_require_audio_builder(tmp_path, monkeypatch, visual_key, wheel_active):
+    """Resolve both CMake media key names against the active runner installation."""
+    import tensorrt_model_connect
     from families.gemma.edge_llm import builder
 
     target = {"arch": "x86_64", "sm": 120, "cuda_version": "13.3",
@@ -450,16 +452,28 @@ def test_image_only_edge_package_does_not_require_audio_builder(tmp_path, monkey
                "python": "bin/python", "plugin": "lib/plugin.so",
                "onnx_builder": "bin/llm_build", visual_key: "bin/visual_build",
                **{key: value for key, value in target.items() if key != "sm"}}
-    manifest = tmp_path / "share/trtmc/edge-llm.json"
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text(json.dumps(package))
-    for name in ("python", "plugin", "onnx_builder", visual_key):
-        path = tmp_path / package[name]
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(b"fixture")
-    monkeypatch.setattr(builder, "cmake_prefixes", lambda: [tmp_path])
+    site = tmp_path / "site"
+    wheel = site / "tensorrt_model_connect"
+    standalone = tmp_path / "standalone"
+    for prefix in (standalone, wheel):
+        manifest = prefix / "share/trtmc/edge-llm.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(json.dumps(package))
+        for name in ("python", "plugin", "onnx_builder", visual_key):
+            path = prefix / package[name]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"fixture")
+    (wheel / "bin/trtmc").touch()
+    metadata = site / "tensorrt_model_connect-0.dist-info"
+    metadata.mkdir()
+    (metadata / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: tensorrt-model-connect\nVersion: 0\n")
+    monkeypatch.syspath_prepend(str(site))
+    active = wheel if wheel_active else tmp_path / "checkout"
+    monkeypatch.setattr(tensorrt_model_connect, "__file__", str(active / "__init__.py"))
+    monkeypatch.setattr(builder, "cmake_prefixes", lambda: [standalone])
     resolved = builder.installed_package(target, vision=True, audio=False)
-    assert resolved["visual_builder"] == str(tmp_path / "bin/visual_build")
+    assert resolved["visual_builder"] == str((wheel if wheel_active else standalone) / "bin/visual_build")
     assert "audio_builder" not in resolved
     # A checkpoint with an audio tower must still require its actual builder.
     with pytest.raises(KeyError, match="audio_builder"):
@@ -467,6 +481,7 @@ def test_image_only_edge_package_does_not_require_audio_builder(tmp_path, monkey
 
 
 def test_edge_package_rejects_escaping_media_executable(tmp_path, monkeypatch):
+    import tensorrt_model_connect
     from families.gemma.edge_llm import builder
 
     target = {"arch": "x86_64", "sm": 120, "cuda_version": "13.3",
@@ -484,6 +499,7 @@ def test_edge_package_rejects_escaping_media_executable(tmp_path, monkeypatch):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"fixture")
     monkeypatch.setattr(builder, "cmake_prefixes", lambda: [tmp_path])
+    monkeypatch.setattr(tensorrt_model_connect, "__file__", str(tmp_path / "checkout/__init__.py"))
     with pytest.raises(ValueError, match="contained"):
         builder.installed_package(target, vision=True)
 

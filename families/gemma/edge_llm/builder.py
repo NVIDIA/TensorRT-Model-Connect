@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-from importlib.metadata import PackageNotFoundError, distribution
 import sys
 import json
 from dataclasses import replace
@@ -17,6 +16,7 @@ import subprocess
 import tempfile
 import traceback
 
+import tensorrt_model_connect
 from tensorrt_model_connect.build import (
     cmake_prefixes, detect_local_platform, subprocess_environment,
 )
@@ -31,11 +31,8 @@ def local_target() -> dict:
 
 def _package_prefixes(*, report_conflict: bool = False) -> list[Path]:
     """Use the active wheel's SDK with its native runner, or standalone prefixes."""
-    try:
-        package = distribution("tensorrt-model-connect")
-    except PackageNotFoundError:
-        return cmake_prefixes()
-    module_dir = Path(package.locate_file("tensorrt_model_connect"))
+    # The Python entry point runs bin/trtmc next to the imported package.
+    module_dir = Path(tensorrt_model_connect.__file__).resolve().parent
     receipt = module_dir / "share/trtmc/edge-llm.json"
     if (module_dir / "bin/trtmc").is_file() and (receipt.exists() or receipt.is_symlink()):
         if report_conflict:

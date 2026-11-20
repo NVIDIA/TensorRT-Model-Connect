@@ -13,8 +13,9 @@ Provision the [native SDK](../../../cmake/edge_llm/README.md) with
 `TRTMC_EDGELLM_ALL_KERNELS=ON` and `TRTMC_EDGELLM_ONNX=ON`, configure Model
 Connect with `TRTMC_ENABLE_EDGELLM=ON`. A Model Connect wheel built with
 Edge uses the SDK packaged with its runner; no `CMAKE_PREFIX_PATH` is needed.
-For a standalone CMake installation, expose the matching prefix through
-`CMAKE_PREFIX_PATH`. The 0.11 SDK prerequisite also installs the upstream
+When running the builder from a source checkout, set `CMAKE_PREFIX_PATH`
+to the matching standalone installation. An unrelated wheel installed in the
+same Python environment does not override that choice. The 0.11 SDK prerequisite also installs the upstream
 `tensorrt-edgellm[export]` Python dependencies. Pip tools do not replace the
 C++ headers, archives, plugin and native builders required by this adapter.
 
