@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
+from dataclasses import replace
 from pathlib import Path
 import struct
+from tempfile import TemporaryDirectory
 
 import pytest
 
@@ -233,14 +234,40 @@ def compare_bundles(baseline: Path, candidate: Path):
 
 
 @pytest.mark.gpu
-def test_saved_weightless_bundles_preserve_native_kv_outputs():
-    baseline = os.environ.get("TRTMC_QWEN_BASELINE_BUNDLE")
-    candidate = os.environ.get("TRTMC_QWEN_CANDIDATE_BUNDLE")
-    if not baseline and not candidate:
-        pytest.skip("provide ordinary and weightless Qwen3 bundles for real saved-plan parity")
-    assert baseline and candidate, "both bundle paths are required"
-    report = compare_bundles(Path(baseline), Path(candidate))
-    assert report["passed"], json.dumps(report, indent=2)
+def test_saved_weightless_bundles_preserve_native_kv_outputs(tmp_path, monkeypatch):
+    from huggingface_hub import snapshot_download
+    from tensorrt_model_connect import BuildRequest, build
+    from families.qwen import model
+
+    manifest = json.loads((Path(__file__).parent / "manifests" / "qwen3-0.6b-native-l0.json").read_text())
+    checkpoint = Path(snapshot_download(manifest["hf_id"], revision=manifest["hf_revision"], local_files_only=True))
+    observed_networks = []
+    worker_results = []
+    build_workers = model._build_weightless_native_engines
+
+    def observe_workers(*args, **kwargs):
+        # Both workers must finish with a nonempty, fully refitted weight catalog.
+        plans = build_workers(*args, **kwargs)
+        worker_results.append(tuple(len(plan) for plan in plans))
+        return plans
+
+    monkeypatch.setattr(model, "_build_weightless_native_engines", observe_workers)
+    with TemporaryDirectory(dir=tmp_path) as directory:
+        baseline = Path(directory) / "ordinary.bundle"
+        candidate = Path(directory) / "weightless.bundle"
+        request = BuildRequest(
+            model_dir=checkpoint, output_path=candidate, family=manifest["family"],
+            task=manifest["task"], precision=manifest["precision"], max_sequence_length=16384,
+        )
+        # A read-only graph transform selects ordinary materialized constants.
+        build(replace(request, output_path=baseline,
+                      graph_transform=lambda network, index: observed_networks.append(index)))
+        assert observed_networks == [0, 1] and not worker_results
+        build(request)
+        assert len(worker_results) == 1 and len(worker_results[0]) == 2 and all(worker_results[0])
+        report = compare_bundles(baseline, candidate)
+        assert len(report["cases"]) == 12
+        assert report["passed"], json.dumps(report, indent=2)
 
 
 def main():

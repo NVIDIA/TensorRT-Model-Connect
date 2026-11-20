@@ -31,3 +31,13 @@ The benchmark records complete build time in `benchmark.json`. Two repetitions
 run in baseline, candidate, candidate, baseline order. The parity check loads
 the saved bundles and compares full logits and KV cache contents exactly for
 prefill, decode, and continuation with populated caches.
+
+
+The GPU test also builds both bundles from the pinned checkpoint already
+present in the Hugging Face cache. It uses a read-only graph transform for the
+ordinary reference and the default family build for the weightless candidate.
+Run it with:
+
+```bash
+python -m pytest -q families/qwen/tests/test_weightless_build.py
+```
