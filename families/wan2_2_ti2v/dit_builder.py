@@ -109,7 +109,10 @@ def _cross_qo_linear(
     name: str,
     scales: dict[str, dict[str, float]] | None,
     weight_refs: list[np.ndarray],
+    nvfp4_scales: dict[str, float] | None = None,
 ):
+    if nvfp4_scales is not None:
+        return _nvfp4_linear(network, tensor, weights, name, nvfp4_scales, weight_refs)
     if scales is None:
         return op.linear(
             network,
@@ -124,6 +127,24 @@ def _cross_qo_linear(
         weights[f"{name}.bias"],
         input_scale=scales[name]["input_scale"],
         weight_scale=scales[name]["weight_scale"],
+        weight_refs=weight_refs,
+    )
+
+
+def _nvfp4_linear(
+    network,
+    tensor,
+    weights: dict[str, np.ndarray],
+    name: str,
+    nvfp4_scales: dict[str, float],
+    weight_refs: list[np.ndarray],
+):
+    return op.linear_nvfp4(
+        network,
+        tensor,
+        weights[f"{name}.weight"],
+        weights[f"{name}.bias"],
+        input_scale=nvfp4_scales[name],
         weight_refs=weight_refs,
     )
 
@@ -298,14 +319,27 @@ def build_dit_engine(
     profile: Wan22TI2VConfig = WAN22_TI2V_5B,
     ffn_fp8_scales: dict | None = None,
     cross_qo_fp8_scales: dict | None = None,
+    nvfp4_scales: dict | None = None,
     verbose: bool = False,
 ) -> bytes:
-    """Build a DiT plan for an explicitly qualified profile."""
+    """Build a DiT plan for an explicitly qualified profile.
+
+    ``nvfp4_scales`` (``{layer: input_scale}``, see ``quantization.py``) builds the NVFP4
+    recipe; it cannot be combined with the FP8 scale maps.
+    """
 
     if profile not in SUPPORTED_GENERATION_PROFILES:
         raise ValueError("Wan2.2 DiT profile is not one of the qualified generation profiles")
     if cross_qo_fp8_scales is not None and ffn_fp8_scales is None:
         raise ValueError("Wan2.2 cross-Q FP8 requires the complete FFN FP8 scale map")
+    if nvfp4_scales is not None:
+        if ffn_fp8_scales is not None or cross_qo_fp8_scales is not None:
+            raise ValueError("Wan2.2 NVFP4 cannot be combined with FP8 scale maps")
+        if profile != WAN22_TI2V_5B:
+            raise ValueError("Wan2.2 NVFP4 supports only the 1280x704, 121-frame profile")
+        from .quantization import validated_nvfp4_scales
+
+        nvfp4_scales = validated_nvfp4_scales(nvfp4_scales, profile)
     weights = _numpy_state(model_dir)
     ffn_fp8_scales = _validated_ffn_fp8_scales(weights, profile, ffn_fp8_scales)
     cross_qo_fp8_scales = _validated_cross_qo_fp8_scales(
@@ -313,7 +347,7 @@ def build_dit_engine(
         profile,
         cross_qo_fp8_scales,
     )
-    # TensorRT consumes raw pointers for explicit FP8 constants. Keep their
+    # TensorRT consumes raw pointers for explicit FP8 and FP4 constants. Keep their
     # NumPy owners alive until build_serialized_network() has returned.
     fp8_weight_refs: list[np.ndarray] = []
     logger = trt.Logger(trt.Logger.VERBOSE if verbose else trt.Logger.WARNING)
@@ -508,6 +542,7 @@ def build_dit_engine(
             cross_q_name,
             cross_qo_fp8_scales,
             fp8_weight_refs,
+            nvfp4_scales,
         )
         ck = op.linear(
             network,
@@ -556,7 +591,11 @@ def build_dit_engine(
         normalized = op.layer_norm(network, hidden, profile.dim, profile.eps)
         ffn_input = op.adaptive_norm(network, normalized, shift_ff, scale_ff)
         ffn_up_name = f"{prefix}.ffn.net.0.proj"
-        if ffn_fp8_scales is None:
+        if nvfp4_scales is not None:
+            ffn = _nvfp4_linear(
+                network, ffn_input, weights, ffn_up_name, nvfp4_scales, fp8_weight_refs
+            )
+        elif ffn_fp8_scales is None:
             ffn = op.linear(
                 network,
                 ffn_input,
@@ -575,7 +614,9 @@ def build_dit_engine(
             )
         ffn = op.gelu_tanh(network, ffn)
         ffn_down_name = f"{prefix}.ffn.net.2"
-        if ffn_fp8_scales is None:
+        if nvfp4_scales is not None:
+            ffn = _nvfp4_linear(network, ffn, weights, ffn_down_name, nvfp4_scales, fp8_weight_refs)
+        elif ffn_fp8_scales is None:
             ffn = op.linear(
                 network,
                 ffn,
@@ -622,7 +663,8 @@ def build_dit_engine(
         f"patches={profile.num_patches}, "
         f"latent={profile.latent_frames}x{profile.latent_height}x{profile.latent_width}, "
         f"ffn_fp8={'enabled' if ffn_fp8_scales is not None else 'disabled'}, "
-        f"cross_qo_fp8={'enabled' if cross_qo_fp8_scales is not None else 'disabled'}",
+        f"cross_qo_fp8={'enabled' if cross_qo_fp8_scales is not None else 'disabled'}, "
+        f"nvfp4={'enabled' if nvfp4_scales is not None else 'disabled'}",
         file=sys.stderr,
     )
     plan = builder.build_serialized_network(network, build_config)
