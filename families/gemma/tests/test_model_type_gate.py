@@ -470,7 +470,7 @@ def test_image_only_edge_package_does_not_require_audio_builder(tmp_path, monkey
         "Metadata-Version: 2.1\nName: tensorrt-model-connect\nVersion: 0\n")
     monkeypatch.syspath_prepend(str(site))
     active = wheel if wheel_active else tmp_path / "checkout"
-    monkeypatch.setattr(tensorrt_model_connect, "__file__", str(active / "__init__.py"))
+    monkeypatch.setattr(tensorrt_model_connect.__spec__, "origin", str(active / "__init__.py"))
     monkeypatch.setattr(builder, "cmake_prefixes", lambda: [standalone])
     resolved = builder.installed_package(target, vision=True, audio=False)
     assert resolved["visual_builder"] == str((wheel if wheel_active else standalone) / "bin/visual_build")
@@ -499,7 +499,7 @@ def test_edge_package_rejects_escaping_media_executable(tmp_path, monkeypatch):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(b"fixture")
     monkeypatch.setattr(builder, "cmake_prefixes", lambda: [tmp_path])
-    monkeypatch.setattr(tensorrt_model_connect, "__file__", str(tmp_path / "checkout/__init__.py"))
+    monkeypatch.setattr(tensorrt_model_connect.__spec__, "origin", str(tmp_path / "checkout/__init__.py"))
     with pytest.raises(ValueError, match="contained"):
         builder.installed_package(target, vision=True)
 
