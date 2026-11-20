@@ -30,6 +30,7 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 - `families/idefics3/tests/data/test_img.jpeg`
 - `families/detr/tests/data/test_img.jpeg`
 - `families/dinov3/tests/data/test_img.jpeg`
+- `families/gemma3n/tests/data/test_img.jpeg`
 - `families/internvl/tests/data/test_img.jpeg`
 - `families/lance/tests/data/test_img.jpeg`
 - `families/locateanything/tests/data/test_img.jpeg`
@@ -54,6 +55,10 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 - `families/timm_resnet/tests/data/test_img.jpeg`
 - `families/timm_vgg/tests/data/test_img.jpeg`
 - `families/timm_vit/tests/data/test_img.jpeg`
+
+`families/gemma3n/tests/data/test_img_car.jpeg` is a byte-identical copy of
+`families/timm_resnet/tests/data/test_img_car.jpeg`, a crop of the same
+photograph, and is distributed under the same terms.
 
 `families/timm_resnet/tests/data/test_img_car.jpeg` is a crop of the same
 photograph (columns 260 to 639, rows 60 to 381, saved again as JPEG) and is
