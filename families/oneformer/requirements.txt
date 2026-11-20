@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# The build tokenizes the task prompt with the checkpoint's CLIP tokenizer; the
+# E2E oracle runs the official OneFormer processor (fast, torchvision) and model.
+transformers==5.2.0
+# torchvision 0.27 pairs with the pinned torch 2.12; numpy stays in the base
+# image's range.
+torchvision==0.27.0
+numpy>=1.24,<2.5
+Pillow
+# The reference OneFormerForUniversalSegmentation constructor builds the training
+# loss, which requires scipy.
+scipy==1.15.3

@@ -77,7 +77,7 @@ def _load_vision_adapted_weight(
 
 
 if TYPE_CHECKING:
-    from tensorrt_model_connect.build import BuildRequest
+    from .edge_llm.cli import Phi4BuildRequest
     from tensorrt_model_connect.bundle_writer import BundleWriter
 
 
@@ -342,12 +342,12 @@ def _generation_eos_ids(model_dir: Path, config: ModelConfig) -> list[int]:
     return list(dict.fromkeys(values))
 
 
-def build(request: "BuildRequest", writer: "BundleWriter") -> None:
+def build(request: "Phi4BuildRequest", writer: "BundleWriter") -> None:
     """Own native request handling and optional complete-network dispatch."""
     if request.mtp_seq_len is not None:
         raise NotImplementedError("Phi-4 Multimodal does not support MTP speculative decoding")
 
-    def native(request: "BuildRequest", writer: "BundleWriter") -> None:
+    def native(request: "Phi4BuildRequest", writer: "BundleWriter") -> None:
         """Build one Phi-4 Multimodal vision-language bundle."""
         if request.dynamic_kv_cache:
             raise NotImplementedError("phi4_multimodal does not support dynamic_kv_cache")

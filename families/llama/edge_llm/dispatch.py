@@ -61,7 +61,7 @@ def candidate(request, raw: dict) -> bool:
         and request.backend == "trt"
         and request.task == "text_generation"
         and request.precision.lower() == "fp16"
-        and request.quantization in {None, "none"}
+        and request.quantization in {None, "none", "fp8", "nvfp4"}
         and request.max_batch_size
         == request.tensor_parallel_size
         == request.context_parallel_size
@@ -128,7 +128,11 @@ def build(request, writer, native, *, draft_dir: Path | None = None) -> None:
             packed = weight_format != "fp16"
             if target["sm"] != (120 if draft_dir is not None or packed else 80):
                 adapter = None
-            if packed and (draft_dir is not None or raw.get("hidden_size") != 4096):
+            small_calibrated_fp8 = (
+                weight_format == "fp8" and raw.get("hidden_size") == 2048
+                and (raw.get("quantization_config") or {}).get("quant_method") == "compressed-tensors"
+            )
+            if packed and (draft_dir is not None or (raw.get("hidden_size") != 4096 and not small_calibrated_fp8)):
                 adapter = None
             if adapter is not None:
                 if draft_dir is None:
@@ -171,6 +175,8 @@ def build_paired(request, writer, execution) -> None:
     execution.validate_local()
     if execution.variant != "eagle3" or tuple(x.role for x in execution.checkpoints) != ("draft",):
         raise ValueError("Llama paired execution requires variant=eagle3 and one draft checkpoint")
+    if request.quantization not in {None, "none"}:
+        raise ValueError("Llama EAGLE3 does not support quantization; use original FP16 checkpoints")
     draft_dir = execution.checkpoints[0].model_dir
     base = json.loads((request.model_dir / "config.json").read_text())
     if not isinstance(base, dict):

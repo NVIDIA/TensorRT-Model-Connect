@@ -63,6 +63,7 @@ class _Wan22TI2VModel:
         precision: str = "bf16",
         verbose: bool = False,
         fp8_scales: dict | None = None,
+        nvfp4_scales: dict | None = None,
     ) -> dict:
         from .trt_builder import build_wan22_components
 
@@ -73,6 +74,7 @@ class _Wan22TI2VModel:
             precision=precision,
             verbose=verbose,
             fp8_scales=fp8_scales,
+            nvfp4_scales=nvfp4_scales,
         )
 
     def get_diffusion_config(self, config) -> dict:
@@ -149,12 +151,17 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     model_dir = Path(request.model_dir)
     model = _Wan22TI2VModel()
     weights = model.load_weights(str(model_dir), config)
+    fp8_scales = nvfp4_scales = None
     if request.quantization in {None, "none"}:
-        fp8_scales = None
+        pass
     elif request.quantization == "fp8":
         from .fp8_profile import load_precomputed_fp8_scales
 
         fp8_scales = load_precomputed_fp8_scales(config)
+    elif request.quantization == "nvfp4":
+        from .quantization import load_precomputed_nvfp4_scales
+
+        nvfp4_scales = load_precomputed_nvfp4_scales(config)
     else:
         raise NotImplementedError(
             f"Wan2.2 TI2V does not support quantization={request.quantization!r}"
@@ -166,6 +173,7 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
         precision=request.precision,
         verbose=request.verbose,
         fp8_scales=fp8_scales,
+        nvfp4_scales=nvfp4_scales,
     )
     text_encoders = components["text_encoders"]
     if len(text_encoders) != 1:

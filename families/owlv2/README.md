@@ -7,6 +7,20 @@ holds two engines: an image engine (CLIP ViT-B/16 at 960 x 960, 3601 tokens,
 plus the box and class heads) that runs once per image, and a text engine (12
 layers, 16 tokens) that runs once per query phrase.
 
+## Precision
+
+fp16 engines keep fp16 weights and activations but accumulate every matmul and
+convolution in fp32: the operands are cast to fp32 and the result back to fp16,
+which is TensorRT's documented request for wider accumulation
+(`graph._widen_accumulation`). Without it TensorRT may pick fp16-accumulating
+kernels, and which kernel wins depends on build-time timing. The class head
+multiplies each logit by a scale of about 31, so detection scores then moved by
+0.02 to 0.105 against PyTorch fp32 between builds of one revision, and one build
+replaced a detection with its neighbouring patch. With fp32 accumulation the worst
+score delta on the E2E case is 0.008 in every build, the same as PyTorch fp16 on
+the GPU. On GB300 the image engine takes the same time within noise (2.17 ms
+before, 2.18 to 2.20 ms after) and its plan grows from 185 to 188 MB.
+
 ## Quantization
 
 `quantization=fp8` quantizes the text tower only: q/k/v/`out_proj`, `fc1` and

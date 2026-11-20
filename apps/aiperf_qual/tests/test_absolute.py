@@ -135,6 +135,18 @@ def test_benchmarks_take_the_route_and_gate_of_the_catalog_request():
         _absolute(["hellaswag"], DEFINITIONS, {}, quantized=False)
 
 
+def test_a_quantized_parity_gate_replaces_the_mismatched_precision_tolerance():
+    parity = {"encoder_parity": {"suite": "encoder-parity", "metric": "vector_parity",
+                                 "gate": {"min_cosine": 0.999, "max_relative_l2": 0.02},
+                                 "mismatched_precision_gate": {"min_cosine": 0.998, "max_relative_l2": 0.04},
+                                 "quantized_gate": {"min_cosine": 0.99, "max_relative_l2": 0.15}}}
+    fp8, = _absolute(["encoder_parity"], parity, {}, quantized=True)
+    assert fp8["gate"] == {"min_cosine": 0.99, "max_relative_l2": 0.15} and "mismatched_precision_gate" not in fp8
+    fp16, = _absolute(["encoder_parity"], parity, {}, quantized=False)
+    assert fp16["gate"] == {"min_cosine": 0.999, "max_relative_l2": 0.02}
+    assert fp16["mismatched_precision_gate"] == {"min_cosine": 0.998, "max_relative_l2": 0.04}
+
+
 def test_workload_perf_compares_problems_answered_with_the_same_length():
     raw = [{"metadata": {"session_num": index},
             "responses": [{"text": '{"usage": {"prompt_tokens": 500, "completion_tokens": %d}, '

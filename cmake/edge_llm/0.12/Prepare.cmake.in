@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+cmake_minimum_required(VERSION 3.20)
+project(trtmc_edge_sdk_bootstrap NONE)
+include(ExternalProject)
+find_package(Git REQUIRED)
+set(_source "@_edge_root@/source")
+if(NOT "@TRTMC_EDGELLM_SOURCE_DIR@" STREQUAL "")
+  set(_source "@TRTMC_EDGELLM_SOURCE_DIR@")
+  execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${_source}" rev-parse HEAD
+    OUTPUT_VARIABLE _revision OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+  if(NOT _revision STREQUAL "@_edge_revision@")
+    message(FATAL_ERROR "TRTMC_EDGELLM_SOURCE_DIR must be the official @_edge_version@ revision")
+  endif()
+  execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${_source}" submodule status --recursive
+    OUTPUT_VARIABLE _modules COMMAND_ERROR_IS_FATAL ANY)
+  if(_modules MATCHES "(^|\n)[+U-]")
+    message(FATAL_ERROR "Edge-LLM submodules do not match the pinned SDK revision")
+  endif()
+  execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${_source}" status --porcelain
+    --untracked-files=no --ignore-submodules=untracked
+    OUTPUT_VARIABLE _changes OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+  if(NOT _changes STREQUAL "")
+    message(FATAL_ERROR "The supplied Edge-LLM checkout or its submodules have tracked modifications")
+  endif()
+  set(_fetch DOWNLOAD_COMMAND ${CMAKE_COMMAND} -E true UPDATE_COMMAND ${CMAKE_COMMAND} -E true)
+else()
+  set(_fetch GIT_REPOSITORY "@_edge_repository@" GIT_TAG "@_edge_revision@"
+    GIT_SUBMODULES_RECURSE TRUE UPDATE_DISCONNECTED TRUE)
+endif()
+ExternalProject_Add(native_sdk PREFIX "@_edge_root@/ep"
+  SOURCE_DIR "${_source}" BINARY_DIR "@_edge_root@/build" ${_fetch}
+  # LIST_SEPARATOR preserves a multi-group value through ExternalProject.
+  LIST_SEPARATOR "|"
+  CMAKE_ARGS -DCMAKE_BUILD_TYPE=Release -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+    "-DCMAKE_INSTALL_PREFIX=@_edge_prefix@" -DCMAKE_INSTALL_LIBDIR=lib
+    "-DCMAKE_CXX_COMPILER=@CMAKE_CXX_COMPILER@" "-DCMAKE_CUDA_COMPILER=@CMAKE_CUDA_COMPILER@"
+    "-DCMAKE_CUDA_ARCHITECTURES=@EdgeLLM_CUDA_ARCHITECTURE@"
+    "-DCUDA_DIR=@CUDAToolkit_LIBRARY_ROOT@" "-DCUDAToolkit_ROOT=@CUDAToolkit_LIBRARY_ROOT@"
+    "-DTensorRT_INCLUDE_DIR=@TRTMC_TRT_INCLUDE_DIR@" "-DTensorRT_LIBRARY=@TRTMC_TRT_LIBRARY@"
+    "-DTRT_PACKAGE_DIR=@TRTMC_EDGELLM_TRT_ROOT@" "-DENABLE_CUTE_DSL=@_edge_groups_arg@"
+    "-DCUTE_DSL_ARTIFACT_TAG=sm_@TRTMC_EDGELLM_CUDA_ARCHITECTURE@" -DBUILD_UNIT_TESTS=OFF
+  BUILD_COMMAND "${CMAKE_COMMAND}" --build <BINARY_DIR> --config Release --parallel "@TRTMC_EDGELLM_JOBS@"
+  INSTALL_COMMAND "${CMAKE_COMMAND}" --install <BINARY_DIR> --config Release
+  LOG_DOWNLOAD ON LOG_CONFIGURE ON LOG_BUILD ON LOG_INSTALL ON LOG_OUTPUT_ON_FAILURE ON)

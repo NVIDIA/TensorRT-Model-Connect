@@ -1,0 +1,20 @@
+{
+  "name": "rtdetr-r101vd-coco-o365",
+  "hf_id": "PekingU/rtdetr_r101vd_coco_o365",
+  "hf_revision": "ff44b69152a72cc752677665fb4539507d56a99d",
+  "bundle": "rtdetr-r101vd-coco-o365.bundle",
+  "family": "rt_detr",
+  "task": "object_detection",
+  "precision": "fp32",
+  "image_height": 640,
+  "image_width": 640,
+  "testcases": [
+    {
+      "name": "rtdetr-r101vd-coco-o365",
+      "premerge": true,
+      "test_image": "data/test_img.jpeg",
+      "score_threshold": 0.3
+    }
+  ],
+  "tensor_parallel_size": 1
+}

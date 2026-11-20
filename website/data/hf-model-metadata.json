@@ -748,6 +748,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "facebook/hubert-large-ls960-ft",
+      "revision": "ece5fabbf034c1073acae96d5401b25be96709d8",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "hubert",
+      "architectures": [
+        "HubertForCTC"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "facebook/nllb-200-distilled-600M",
       "revision": "f8d333a098d19b4fd9a8b18f94170487ad3f821d",
       "revision_source": "resolved",
@@ -880,6 +891,17 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "google/paligemma-3b-pt-224",
+      "revision": "35e4f46485b4d07967e7e9935bc3786aad50687c",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "paligemma",
+      "architectures": [
+        "PaliGemmaForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "google/timesfm-2.0-500m-pytorch",
       "revision": "dc2443792ce5516872b89b37cf1bc058c3bf0c10",
       "revision_source": "resolved",
@@ -995,6 +1017,17 @@
       "model_type": null,
       "architectures": [],
       "architecture_source": null
+    },
+    {
+      "hf_id": "lodestones/Chroma1-HD",
+      "revision": "0e0c60ece1e82b17cb7f77342d765ba5024c40c0",
+      "revision_source": "resolved",
+      "metadata_file": "model_index.json",
+      "model_type": null,
+      "architectures": [
+        "ChromaPipeline"
+      ],
+      "architecture_source": "model_index._class_name"
     },
     {
       "hf_id": "microsoft/Phi-3-mini-4k-instruct",
@@ -1330,6 +1363,28 @@
       "architecture_source": "config.architectures"
     },
     {
+      "hf_id": "patrickvonplaten/wavlm-libri-clean-100h-base-plus",
+      "revision": "02c289c4471cd1ba4b0ff3e7c304afe395c5026a",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "wavlm",
+      "architectures": [
+        "WavLMForCTC"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "patrickvonplaten/wavlm-libri-clean-100h-large",
+      "revision": "e70e3a062ec399c46008ee55d1fb52c7ba338d5c",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "wavlm",
+      "architectures": [
+        "WavLMForCTC"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
       "hf_id": "sentence-transformers/all-MiniLM-L6-v2",
       "revision": "1110a243fdf4706b3f48f1d95db1a4f5529b4d41",
       "revision_source": "resolved",
@@ -1403,6 +1458,17 @@
       "model_type": "bark",
       "architectures": [
         "BarkModel"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "swiss-ai/Apertus-8B-Instruct-2509",
+      "revision": "b946d40447b2b597999b9c86d44bee0b452c919f",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "apertus",
+      "architectures": [
+        "ApertusForCausalLM"
       ],
       "architecture_source": "config.architectures"
     },
@@ -1568,6 +1634,28 @@
       "model_type": "table-transformer",
       "architectures": [
         "TableTransformerForObjectDetection"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "lightonai/LightOnOCR-2-1B",
+      "revision": "be7c41313c30e940fe5571de59e5fabc779e00c8",
+      "revision_source": "resolved",
+      "metadata_file": "config.json",
+      "model_type": "mistral3",
+      "architectures": [
+        "LightOnOCRForConditionalGeneration"
+      ],
+      "architecture_source": "config.architectures"
+    },
+    {
+      "hf_id": "HuggingFaceTB/SmolVLM2-500M-Video-Instruct",
+      "revision": "7b375e1b73b11138ff12fe22c8f2822d8fe03467",
+      "revision_source": "declared",
+      "metadata_file": "config.json",
+      "model_type": "smolvlm",
+      "architectures": [
+        "SmolVLMForConditionalGeneration"
       ],
       "architecture_source": "config.architectures"
     }
