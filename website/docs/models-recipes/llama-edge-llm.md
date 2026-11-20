@@ -11,6 +11,10 @@ source.
 Use the normal family build command; a matching native SDK and supported
 configuration select Edge without a shared backend selector.
 
+An installed Model Connect wheel uses its own native Edge SDK, not a
+different SDK on `CMAKE_PREFIX_PATH`. To switch releases, use a matching
+wheel or a standalone Model Connect builder and runner together.
+
 ```sh
 trtmc llama build /path/to/Llama-3.1-8B-Instruct --precision fp16 -o llama.bundle
 trtmc llama build /path/to/Llama-3.1-8B-Instruct --precision fp16 \

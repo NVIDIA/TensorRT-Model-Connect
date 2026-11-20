@@ -1,5 +1,12 @@
 # Llama Edge-LLM execution
 
+When the installed Model Connect wheel includes a native runner and Edge SDK,
+the family uses that SDK. A different SDK on `CMAKE_PREFIX_PATH` cannot
+override the wheel's native runner. To select another release, install a
+Model Connect wheel built for it, or use a matching standalone Model Connect
+builder and runner in an environment without the wheel. For standalone
+installations, `CMAKE_PREFIX_PATH` selects the SDK as usual.
+
 This family owns complete-network offload. The C++ adapter links one native
 Edge SDK at build time, and reads bundles for that release. Model builds do
 not download dependencies or select a second runtime. Native TensorRT remains
