@@ -346,8 +346,20 @@ jobs:
             expected_title="PR #$PR_NUMBER · community CI · head $HEAD_SHA · merge $merge_sha"
           fi
           deadline=$((SECONDS + 18000))
+          visibility_retries=0
+          run_visible=false
           while [ "$SECONDS" -lt "$deadline" ]; do
-            run="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$PIPELINE_RUN_ID")"
+            if ! run="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$PIPELINE_RUN_ID" 2>&1)"; then
+              if [ "$run_visible" = false ] && [[ "$run" == *"HTTP 404"* ]] && [ "$visibility_retries" -lt 3 ]; then
+                visibility_retries=$((visibility_retries + 1))
+                echo "Dispatched workflow run is not visible yet; retrying."
+                sleep 5
+                continue
+              fi
+              printf '%s\n' "$run" >&2
+              exit 1
+            fi
+            run_visible=true
             if [ "$(jq -r '.status' <<< "$run")" = completed ]; then
               # GitHub may return a placeholder title while a newly dispatched
               # run is initializing. Verify identity before publishing its result.
