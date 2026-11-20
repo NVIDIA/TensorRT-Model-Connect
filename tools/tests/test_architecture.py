@@ -559,6 +559,10 @@ def test_shared_python_and_native_trees_are_closed_minimal_sets() -> None:
     expected_cmake = {
         "cmake/trtmcConfig.cmake.in",
         "cmake/edge_llm/EdgeLLM.cmake",
+        "cmake/edge_llm/0.12/NOTICE",
+        "cmake/edge_llm/0.12/Provider.cmake",
+        "cmake/edge_llm/0.12/Prepare.cmake.in",
+        "cmake/edge_llm/0.12/InstalledSDK.cmake",
         "cmake/edge_llm/CheckNative.cmake",
         "cmake/edge_llm/EdgeLLMConfig.cmake.in",
         "cmake/edge_llm/Install.cmake.in",

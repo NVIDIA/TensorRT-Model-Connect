@@ -119,10 +119,13 @@ def test_family_cli_default_change_invalidates_managed_bundle(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize(
-    "change", ["manifest", "options", "source", "checkpoint", "bundle", "bundle_preserved_mtime"]
+    "change",
+    ["manifest", "options", "source", "data", "checkpoint", "bundle", "bundle_preserved_mtime"],
 )
 def test_changed_inputs_cannot_reuse_managed_bundle(tmp_path, monkeypatch, change):
     builder, case, source, checkpoint, calls = _cache_fixture(tmp_path, monkeypatch)
+    scales = source.parent / "fp8_activation_scales.json"
+    scales.write_text('{"layer": 0.5}')
     builder.prepare([case], allow_build=True, rebuild=False, dry_run=False)
     if change == "manifest":
         case.model.manifest_path.write_text('{"name":"example","precision":"fp32"}')
@@ -130,6 +133,9 @@ def test_changed_inputs_cannot_reuse_managed_bundle(tmp_path, monkeypatch, chang
         case = replace(case, model=replace(case.model, build_settings={"max_sequence_length": 128}))
     elif change == "source":
         source.write_text("BUILD_VERSION = 2\n")
+    elif change == "data":
+        # A family data file the build reads, such as an FP8 scale table.
+        scales.write_text('{"layer": null}')
     elif change == "checkpoint":
         checkpoint = checkpoint.parent / ("b" * 40)
         checkpoint.mkdir()
@@ -150,6 +156,17 @@ def test_changed_inputs_cannot_reuse_managed_bundle(tmp_path, monkeypatch, chang
     _, rebuilt = builder.prepare([case], allow_build=True, rebuild=False, dry_run=False)
     assert rebuilt[0].status == "built"
     assert len(calls) == 2
+
+
+def test_family_tests_and_docs_do_not_invalidate_managed_bundle(tmp_path, monkeypatch):
+    builder, case, source, _, calls = _cache_fixture(tmp_path, monkeypatch)
+    builder.prepare([case], allow_build=True, rebuild=False, dry_run=False)
+    (source.parent / "README.md").write_text("notes\n")
+    (source.parent / "tests").mkdir()
+    (source.parent / "tests" / "thresholds.json").write_text("{}")
+    _, reused = builder.prepare([case], allow_build=False, rebuild=False, dry_run=False)
+    assert reused[0].status == "reused"
+    assert len(calls) == 1
 
 
 def test_unreceipted_managed_bundle_does_not_silently_pass_no_build(tmp_path, monkeypatch):
