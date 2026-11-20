@@ -1808,6 +1808,31 @@ def test_a_few_outliers_within_the_outlier_gate_pass_a_parity_entry():
     assert judged({})["status"] == "pass" and "outliers" not in judged({})
 
 
+def test_one_gripper_sign_change_is_a_tolerated_action_outlier_only_with_the_arm_in_tolerance():
+    gate = {"max_abs_error": 0.05, "gripper_component": -1,
+            "outliers": {"max_fraction": 0.02, "gate": {"max_gripper_sign_changes": 1}}}
+    item = {"suite": "action-chunk-parity", "metric": "action_parity", "gate": gate}
+    problems = [{"sample_id": f"frame{index}"} for index in range(50)]  # 2% of 50: one outlier allowed
+
+    def chunk(*actions):  # steps of [arm, gripper], as both sides report them
+        return {"action_dim": 2, "actions": list(actions)}
+
+    native = {"observations": {"greedy": {i: chunk(0.1, 1.0, 0.2, 1.0) for i in range(50)}}, "exit": {}}
+
+    def judged(changed):
+        outputs = {i: chunk(0.1, 1.0, 0.2, 1.0) for i in range(50)}
+        outputs.update(changed)
+        return absolute.judge_parity(item, problems, {"observations": {"greedy": outputs}, "exit": {}}, native)
+
+    flip = chunk(0.1, 1.0, 0.2, -1.0)
+    entry = judged({3: flip})
+    assert entry["status"] == "pass" and entry["outliers"][0]["sample_id"] == "frame3"
+    assert judged({3: flip, 4: flip})["status"] == "fail"  # more outliers than allowed
+    assert judged({3: chunk(0.1, -1.0, 0.2, -1.0)})["status"] == "fail"  # two sign changes
+    assert judged({3: chunk(0.2, 1.0, 0.2, -1.0)})["status"] == "fail"  # the arm out of tolerance too
+    assert judged({3: chunk(0.2, 1.0, 0.2, 1.0)})["status"] == "fail"  # an arm error is never an outlier
+
+
 def test_a_harmony_answer_is_graded_on_its_final_channel_only():
     import asyncio
     from types import SimpleNamespace

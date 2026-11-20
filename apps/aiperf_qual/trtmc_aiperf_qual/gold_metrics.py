@@ -431,11 +431,19 @@ def geometry_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, An
     return ok, f"mask IoU {iou:.4f}, median relative depth error {relative:.4f}"
 
 
+def _sign(value: float) -> int:
+    return (value > 0) - (value < 0)
+
+
 def action_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,
                   gate: Mapping[str, Any]) -> tuple[bool | None, str]:
     """A robot action chunk (``actions``, row-major [step, component]) against the native one: equal shape,
     finite values, and the largest absolute error at most ``max_error_of_range`` of the native chunk's range, or
-    at most ``max_abs_error`` (robot units) when the gate states that instead."""
+    at most ``max_abs_error`` (robot units) when the gate states that instead.
+
+    With ``gripper_component`` (an index into the native ``action_dim`` components, -1 for the last), that bound
+    covers the other (arm) components, and the gripper is compared by sign, the open or close command the robot
+    executes: at most ``max_gripper_sign_changes`` steps (default 0) may command the other direction."""
     mine = [float(value) for value in (candidate or {}).get("actions") or []]
     theirs = [float(value) for value in (native or {}).get("actions") or []]
     if not mine or not theirs:
@@ -444,11 +452,21 @@ def action_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any]
         return False, f"shape differs: {len(mine)} vs {len(theirs)} values"
     if not all(math.isfinite(value) for value in mine):
         return False, "non-finite actions"
+    label, changes, note = "max abs error", 0, ""
+    if gate.get("gripper_component") is not None:
+        dim = int((native or {}).get("action_dim") or 0)
+        if dim < 2 or len(theirs) % dim:
+            return None, f"no action_dim to find the gripper in ({dim} for {len(theirs)} values)"
+        column = int(gate["gripper_component"]) % dim
+        changes = sum(_sign(a) != _sign(b) for a, b in zip(mine[column::dim], theirs[column::dim]))
+        mine, theirs = ([value for index, value in enumerate(side) if index % dim != column] for side in (mine, theirs))
+        label, note = "arm max abs error", f", gripper sign changes {changes}"
     span = (max(theirs) - min(theirs)) or 1.0
     error = max(abs(a - b) for a, b in zip(mine, theirs))
     limit = (float(gate["max_abs_error"]) if "max_abs_error" in gate
              else float(gate.get("max_error_of_range", 1e-3)) * span)
-    return error <= limit, f"max abs error {error:.3g} (limit {limit:.3g}, range {span:.3g})"
+    ok = error <= limit and changes <= int(gate.get("max_gripper_sign_changes", 0))
+    return ok, f"{label} {error:.3g} (limit {limit:.3g}, range {span:.3g}){note}"
 
 
 def pose_parity(candidate: Mapping[str, Any] | None, native: Mapping[str, Any] | None,

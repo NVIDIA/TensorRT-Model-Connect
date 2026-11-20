@@ -71,7 +71,10 @@ the ordinary parity decision still requires every selected sample to pass, unles
 `outliers` (`max_fraction` of the samples, each within `outliers.gate` merged over the gate): then that many
 single-sample outliers pass and are listed in every report, while a missing answer or a larger error still
 fails. A profile's family file declares it (DINOv3; camembert-base, roberta-large and fnet-base for
-encoder-parity); the shared Task defaults do not.
+encoder-parity; the GR00T FP8 and pi0.5 bf16 and FP8 action chunks); the shared Task defaults do not.
+`action_parity` with `gripper_component` bounds the arm components by the gate's error and compares the
+gripper by sign (`max_gripper_sign_changes` steps may differ, default 0), the open or close command a
+LIBERO robot executes.
 DINOv3 uses 50 seeded COCO val2017 images, complete hidden and pooled features, and its existing
 family E2E criteria. Accuracy and task-call P50 come from the same extraction requests.
 
