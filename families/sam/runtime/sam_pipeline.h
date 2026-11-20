@@ -33,6 +33,12 @@ class SamPipeline final : public ISegmentation, public IPointPromptedSegmentatio
                                                 bool is_foreground = true) override;
 
   private:
+    // Page-locked staging for the encoder's pixel_values (3 x image_size x
+    // image_size floats), which the preprocess writes in place so the upload
+    // is a direct DMA instead of a pageable copy. Declared before the modules
+    // so it outlives any copy they still have in flight. One buffer per
+    // pipeline: a pipeline serves one request at a time, as its modules do.
+    std::unique_ptr<float, void (*)(float*)> pixel_values_{nullptr, nullptr};
     std::unique_ptr<ITrtModule> image_encoder_;
     std::unique_ptr<ITrtModule> mask_decoder_;
     SamConfig config_;
