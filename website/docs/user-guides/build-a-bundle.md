@@ -41,3 +41,6 @@ proves artifact construction only; it does not prove Task correctness or
 parity.
 
 Next, [inspect the bundle](inspect-a-bundle.md), then run its declared Task.
+
+Qwen exposes [`trtmc qwen build ... --strip-weights`](../features/weightless-builds.md)
+for stripped plans with shared in-bundle refit weights.

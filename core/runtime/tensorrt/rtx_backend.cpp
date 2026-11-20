@@ -134,6 +134,9 @@ class RtxBackend final : public IBackend {
     BackendDualProfileModules
     create_dual_profile_modules(const void* plan_data, size_t plan_size,
                                 const ModuleCreateOptions& options) override {
+        if (options.refit_weights || options.requires_refit)
+            throw std::invalid_argument(
+                "[trtmc] refit weights are not supported by backend=trt_rtx");
         auto engine = deserialize_engine(*runtime_, plan_data, plan_size);
         const auto stream_setup = resolve_stream(options.stream);
         if (engine->getNbOptimizationProfiles() < 2)
@@ -151,6 +154,9 @@ class RtxBackend final : public IBackend {
     std::unique_ptr<ITrtModule>
     create_module_impl(const void* plan_data, size_t plan_size, const ModuleCreateOptions& options,
                        const std::vector<ModuleExternalBinding>& external_bindings) {
+        if (options.refit_weights || options.requires_refit)
+            throw std::invalid_argument(
+                "[trtmc] refit weights are not supported by backend=trt_rtx");
         auto engine = deserialize_engine(*runtime_, plan_data, plan_size);
         return create_context_module(engine, resolve_stream(options.stream), options, 0,
                                      external_bindings);
