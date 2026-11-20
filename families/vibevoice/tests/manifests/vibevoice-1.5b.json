@@ -1,0 +1,44 @@
+{
+  "name": "vibevoice-1.5b",
+  "hf_id": "microsoft/VibeVoice-1.5B",
+  "hf_revision": "c00898d257e6b46004e3e2866a47534085fb685a",
+  "hf_dependencies": [
+    {
+      "repo_id": "Qwen/Qwen2.5-1.5B",
+      "revision": "8faed761d45a263340a0528343f099c05c9a4323"
+    },
+    {
+      "repo_id": "openai/whisper-large-v3-turbo",
+      "revision": "41f01f3fe87f28c78e2fbf8b568835947dd65ed9"
+    }
+  ],
+  "bundle": "vibevoice-1.5b.bundle",
+  "family": "vibevoice",
+  "task": "text_to_speech",
+  "precision": "bf16",
+  "max_sequence_length": 4096,
+  "tensor_parallel_size": 1,
+  "testcases": [
+    {
+      "name": "vibevoice-1.5b-single",
+      "premerge": true,
+      "text": "Hello! This is a short test of a new speech model. The weather today is sunny and warm.",
+      "seed": 42,
+      "max_new_tokens": 400
+    },
+    {
+      "name": "vibevoice-1.5b-dialogue",
+      "text": "Speaker 1: Welcome back to the show. Today we are talking about the weather.\nSpeaker 2: Thanks for having me. It has been raining all week here.",
+      "seed": 7,
+      "max_new_tokens": 700
+    },
+    {
+      "name": "vibevoice-1.5b-voice-clone",
+      "voice_text": "Speaker 1: This is the voice I would like you to use for the next sentence.",
+      "voice_seed": 3,
+      "text": "Speaker 1: Now I am speaking with the same voice as before. Can you hear it?",
+      "seed": 11,
+      "max_new_tokens": 500
+    }
+  ]
+}
