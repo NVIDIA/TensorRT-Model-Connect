@@ -664,6 +664,11 @@ def test_a_quantized_profile_is_qualified_as_its_models_highest_precision_profil
     assert qualified_as("y-nvfp4", entries) == "y-fp8"  # the highest precision there is, quantized too
     entries["m-int4-awq"] = entry("m-int4-awq", precision="fp16", quantization="int4_awq")
     assert qualified_as("m-int4-awq", entries) == "m-bf16"  # both name parts name the quantization
+    from trtmc_aiperf_qual.models import highest_precision_sibling
+
+    # An unquantized precision variant is not qualified as its sibling, but can take its sibling's configuration.
+    assert highest_precision_sibling("m", entries) == "m-bf16"
+    assert highest_precision_sibling("m-bf16", entries) == "m-bf16"  # nothing ranks higher
 
 
 def test_only_the_profiles_own_suffix_marks_an_l0_or_regression_variant():

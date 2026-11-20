@@ -47,6 +47,7 @@ def test_vision_loader_keeps_the_indexed_reader_collection(monkeypatch, tmp_path
     monkeypatch.setattr(builder, "package_present", lambda: True)
     monkeypatch.setattr(builder, "builder_python", lambda *_a, **_k: "/python")
     monkeypatch.setattr(builder, "installed_package", lambda *_a, **_k: {
+        "version": "0.11.0", "revision": "95515c2f87fba8982db5a519f9022277667b3cc9",
         "python": "/python", "plugin": "/sdk/plugin.so", "all_native_kernels": True,
         "onnx_builder": "/sdk/llm", "onnx_visual_builder": "/sdk/visual",
     })

@@ -6,7 +6,11 @@
 
 #include "families/hunyuan/runtime/edge_llm/contract.h"
 
+#ifdef TRTMC_HUNYUAN_EDGE_012
+#include <tensorrt_edgellm/runtime/llmRuntimeUtils.h>
+#else
 #include <edgellm/cpp/runtime/llmRuntimeUtils.h>
+#endif
 #include <nlohmann/json.hpp>
 
 namespace trtmc::hunyuan::edge_llm {

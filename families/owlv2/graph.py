@@ -64,11 +64,34 @@ def add_layer_norm(network, inp, gamma, beta, eps):
     return _restore_dtype(network, affine, original)
 
 
+def _widen_accumulation(network, operands, accumulate):
+    """Run ``accumulate(operands)`` with fp32 accumulation when the operands are fp16.
+
+    Left alone, TensorRT accumulates an fp16 matmul or convolution in "the input type
+    or a wider type, at the whim of the optimizer", and the kernel it times fastest
+    changes from build to build. Measured on this model: the fp16-accumulating kernels
+    leave 5x (768-term sums) to 10x (3072-term sums) the error of rounding the exact
+    result to fp16, and the class head's logit scale of about 31 turns that into
+    detection-score swings of up to 0.1 between two builds of the same revision.
+
+    Casting every operand to fp32 and the result back to fp16 is TensorRT's
+    documented request for fp32 accumulation. A matmul fuses it into one kernel that
+    still reads fp16; the patch convolution runs as TF32, which holds fp16 values
+    exactly. Measured on the image engine: the same time within noise and 3 MB more
+    plan.
+    """
+    if any(operand.dtype != trt.float16 for operand in operands):
+        return accumulate(operands)
+    widened = [network.add_cast(operand, trt.float32).get_output(0) for operand in operands]
+    return network.add_cast(accumulate(widened), trt.float16).get_output(0)
+
+
 def add_linear(network, inp, weight, bias=None, dtype=np.float32, *, matmul=None):
     """y = x @ W^T + b, matching torch.nn.Linear's weight layout.
 
     ``matmul`` (``(network, input) -> output``) replaces the matrix product, which is how
     a quantized projection takes its place; the bias is added the same way either way.
+    An fp16 product accumulates in fp32; see :func:`_widen_accumulation`.
     """
     rank = len(inp.shape)
     if matmul is not None:
@@ -77,9 +100,9 @@ def add_linear(network, inp, weight, bias=None, dtype=np.float32, *, matmul=None
         weight = np.ascontiguousarray(np.asarray(weight, dtype=dtype))
         shape = (1,) * (rank - 2) + tuple(weight.shape)
         constant = add_constant(network, shape, weight.reshape(shape), dtype=dtype)
-        out = network.add_matrix_multiply(
-            inp, trt.MatrixOperation.NONE, constant,
-            trt.MatrixOperation.TRANSPOSE).get_output(0)
+        out = _widen_accumulation(network, (inp, constant), lambda operands: (
+            network.add_matrix_multiply(operands[0], trt.MatrixOperation.NONE, operands[1],
+                                        trt.MatrixOperation.TRANSPOSE).get_output(0)))
     if bias is None:
         return out
     bias_shape = (1,) * (rank - 1) + (-1,)
@@ -101,14 +124,25 @@ def add_projection(network, inp, weights, name, dtype=np.float32, *, quant=None)
 
 
 def add_conv2d(network, inp, weight, bias=None, stride=(1, 1), dtype=np.float32):
+    """A 2-D convolution. The kernel is a tensor input so that an fp16 convolution
+    can accumulate in fp32, like :func:`add_linear`."""
     weight = np.ascontiguousarray(np.asarray(weight, dtype=dtype))
     out_channels, _, kernel_h, kernel_w = weight.shape
-    layer = network.add_convolution_nd(
-        inp, int(out_channels), (int(kernel_h), int(kernel_w)), trt.Weights(weight),
-        trt.Weights(np.ascontiguousarray(np.asarray(bias, dtype=dtype)))
-        if bias is not None else trt.Weights())
-    layer.stride_nd = tuple(int(v) for v in stride)
-    return layer.get_output(0)
+
+    def convolve(operands):
+        layer = network.add_convolution_nd(operands[0], int(out_channels),
+                                           (int(kernel_h), int(kernel_w)), trt.Weights())
+        layer.set_input(1, operands[1])
+        layer.stride_nd = tuple(int(v) for v in stride)
+        return layer.get_output(0)
+
+    kernel = add_constant(network, weight.shape, weight, dtype=dtype)
+    out = _widen_accumulation(network, (inp, kernel), convolve)
+    if bias is None:
+        return out
+    bias = np.asarray(bias, dtype=dtype).reshape(1, -1, 1, 1)
+    return network.add_elementwise(out, add_constant(network, bias.shape, bias, dtype=dtype),
+                                   trt.ElementWiseOperation.SUM).get_output(0)
 
 
 def add_quick_gelu(network, inp, dtype=np.float32):

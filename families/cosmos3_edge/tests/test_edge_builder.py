@@ -85,7 +85,10 @@ def test_cancelled_build_is_not_retried(request_, monkeypatch):
         dispatch.build(request_, Writer(), lambda *a: pytest.fail("native retry"), 128)
 
 
-def test_nested_checkpoint_packaged_without_copying_shards(request_, monkeypatch, tmp_path):
+@pytest.mark.parametrize(("version", "module"), [
+    ("0.11.0", "experimental.builder.cli"), ("0.12.0", "tensorrt_edgellm.builder.cli"),
+])
+def test_nested_checkpoint_packaged_without_copying_shards(request_, monkeypatch, tmp_path, version, module):
     root = request_.model_dir
     shard = root / "transformer/part.safetensors"
     shard.parent.mkdir()
@@ -95,8 +98,12 @@ def test_nested_checkpoint_packaged_without_copying_shards(request_, monkeypatch
     ignored = root / "vae/policy.safetensors"
     ignored.parent.mkdir()
     ignored.write_bytes(b"not part of reasoning")
-    monkeypatch.setattr(builder, "installed_package", lambda t: {"python": "/sdk/python", "plugin": "/sdk/plugin"})
-    monkeypatch.setattr(builder, "builder_python", lambda p, t: p["python"])
+    monkeypatch.setattr(builder, "installed_package", lambda t: {
+        "version": version, "revision": "95515c2f87fba8982db5a519f9022277667b3cc9",
+        "release_revision": None,
+        "python": "/sdk/python", "plugin": "/sdk/plugin",
+    })
+    monkeypatch.setattr(builder, "builder_python", lambda p, t, requested=None: p["python"])
     commands = []
     def run(command, **kwargs):
         commands.append(command)
@@ -111,6 +118,8 @@ def test_nested_checkpoint_packaged_without_copying_shards(request_, monkeypatch
     staging.mkdir()
     files, marker = builder.prepare(request_, {"sm": 89}, staging, tmp_path / "build.log", 128)
     command = commands[0]
+    assert command[command.index("-c") + 1] == f"from {module} import main; main()"
+    assert marker["edge_release"] == version
     assert command[command.index("--model-dir") + 1] == str(root.resolve())
     assert command[command.index("--components") + 1] == "llm,visual"
     assert command[command.index("--externalize-weights") + 1] == "all"
@@ -125,5 +134,5 @@ def test_nested_checkpoint_packaged_without_copying_shards(request_, monkeypatch
 def test_wheel_or_source_python_uses_same_sdk_contract(monkeypatch, compatible):
     monkeypatch.setattr(builder.subprocess, "run", lambda *a, **k: SimpleNamespace(
         stdout=json.dumps(["0.11.0" if compatible else "0.10.0", "11.1.0.106"])))
-    selected = builder.builder_python({"python": "/sdk/python"}, {"tensorrt_version": "11.1.0.106"})
+    selected = builder.builder_python({"version": "0.11.0", "python": "/sdk/python"}, {"tensorrt_version": "11.1.0.106"})
     assert selected == (builder.sys.executable if compatible else "/sdk/python")

@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+add_library(trtmc_model_mt5 SHARED
+  kv_cache.cpp
+  plugin.cpp
+  plugin_helpers.cpp
+  unigram_tokenizer.cpp
+)
+
+target_include_directories(trtmc_model_mt5
+  PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+)
+target_include_directories(trtmc_model_mt5 SYSTEM PRIVATE
+  ${TRTMC_CUDA_INCLUDE_DIR}
+)
+target_link_libraries(trtmc_model_mt5 PRIVATE
+  trtmc_core
+  nlohmann_json::nlohmann_json
+  ${TRTMC_CUDART_LIBRARY}
+  ${CMAKE_DL_LIBS}
+)
+target_compile_options(trtmc_model_mt5 PRIVATE
+  "$<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wextra;-Wpedantic>"
+  "$<$<COMPILE_LANGUAGE:CUDA>:-Wall;-Wextra>"
+)
+set_target_properties(trtmc_model_mt5 PROPERTIES
+  LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
+  BUILD_RPATH "\$ORIGIN"
+  INSTALL_RPATH "\$ORIGIN"
+)
+install(TARGETS trtmc_model_mt5
+  LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+)
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_mt5_runtime_config
+    ${PROJECT_SOURCE_DIR}/families/mt5/tests/cpp/test_mt5_runtime_config.cpp
+  )
+  target_include_directories(test_mt5_runtime_config PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_link_libraries(test_mt5_runtime_config PRIVATE trtmc_model_mt5)
+  target_compile_options(test_mt5_runtime_config PRIVATE -Wall -Wextra -Wpedantic)
+  add_test(NAME mt5_runtime_config COMMAND test_mt5_runtime_config)
+
+  # CPU CUDA stubs live in the test, so allocation failures can be injected
+  # without a GPU or cudart.
+  add_executable(test_mt5_cross_kv_alloc
+    ${PROJECT_SOURCE_DIR}/families/mt5/tests/cpp/test_mt5_cross_kv_alloc.cpp
+  )
+  target_include_directories(test_mt5_cross_kv_alloc PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/core/runtime/include
+  )
+  target_include_directories(test_mt5_cross_kv_alloc SYSTEM PRIVATE
+    ${TRTMC_CUDA_INCLUDE_DIR}
+  )
+  target_compile_options(test_mt5_cross_kv_alloc PRIVATE
+    -Wall -Wextra -Wpedantic
+  )
+  add_test(NAME mt5_cross_kv_alloc COMMAND test_mt5_cross_kv_alloc)
+endif()
+
+if(TRTMC_BUILD_TESTS)
+  add_executable(test_mt5_tokenizer ${PROJECT_SOURCE_DIR}/families/mt5/tests/cpp/test_tokenizer.cpp)
+  target_include_directories(test_mt5_tokenizer PRIVATE ${PROJECT_SOURCE_DIR})
+  target_link_libraries(test_mt5_tokenizer PRIVATE trtmc_model_mt5 nlohmann_json::nlohmann_json)
+  set_target_properties(test_mt5_tokenizer PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+endif()

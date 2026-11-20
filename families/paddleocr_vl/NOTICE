@@ -1,0 +1,11 @@
+PaddleOCR-VL vision position tables
+
+The learned-position interpolation and axial rotary calculations in
+vision_positions.py follow the definitions and floating-point evaluation order
+in Hugging Face Transformers 5.20.0:
+https://github.com/huggingface/transformers/blob/v5.20.0/src/transformers/vision_utils.py
+https://github.com/huggingface/transformers/blob/v5.20.0/src/transformers/models/paddleocr_vl/modeling_paddleocr_vl.py
+
+Copyright 2026 The HuggingFace Inc. team. All rights reserved.
+Licensed under the Apache License, Version 2.0:
+https://www.apache.org/licenses/LICENSE-2.0

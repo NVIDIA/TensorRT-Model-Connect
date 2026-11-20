@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Qualified as rwkv-169m (LAMBADA), whose passages need a 256-token bundle; the catalog's FP8 bundle is 32.
+candidate:
+  build: {name: rwkv-169m-fp8-qual, max_sequence_length: 256}
