@@ -10,8 +10,15 @@ Qwen3 modes fail closed. Other Qwen variants retain their explicit graph routes.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+from dataclasses import asdict
 import json
 from pathlib import Path
+import site
+import subprocess
+import sys
+import tempfile
+import time
 from typing import TYPE_CHECKING
 
 from .config import ModelConfig
@@ -228,6 +235,125 @@ def _runtime_config(model_dir: Path, config: ModelConfig, model: _QwenModel, **u
     return runtime
 
 
+def _current_cuda_device() -> int:
+    from cuda.bindings import runtime as cudart
+
+    status, device = cudart.cudaGetDevice()
+    if status != cudart.cudaError_t.cudaSuccess:
+        raise RuntimeError(f"Cannot identify the CUDA device for Qwen build workers: {status}")
+    return int(device)
+
+
+def _stop_build_workers(workers) -> None:
+    for process in workers.values():
+        if process.poll() is None:
+            process.terminate()
+    for process in workers.values():
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+        finally:
+            if process.stdin is not None:
+                process.stdin.close()
+
+
+# Start Python in isolated mode before importing from either a checkout or a wheel.
+# In particular, a local checkpoint can also be the caller's working directory.
+_WORKER_MAIN = """\
+import json
+import runpy
+import sys
+sys.path[:0] = json.loads(sys.argv.pop(1))
+runpy.run_module(sys.argv.pop(1), run_name="__main__", alter_sys=True)
+"""
+
+
+def _worker_command() -> list[str]:
+    roots = [str(Path(__file__).resolve().parents[2])]
+    # A --user install can supply dependencies. Add its known package directory
+    # after isolated startup, without executing usercustomize or .pth files.
+    user_site = site.getusersitepackages()
+    if site.ENABLE_USER_SITE and user_site in sys.path and user_site not in roots:
+        roots.append(user_site)
+    return [sys.executable, "-I", "-c", _WORKER_MAIN, json.dumps(roots), "families.qwen.build_worker"]
+
+
+def _build_weightless_native_engines(
+    model_dir: Path, config: ModelConfig, max_sequence_length: int, *,
+    output_dir: Path, verbose: bool,
+) -> tuple[bytes, bytes]:
+    """Build the selected Qwen topology's two unchanged roles in isolated workers."""
+    device = _current_cuda_device()
+    interpreter = _worker_command()
+    roles = ("prefill", "decode")
+    with tempfile.TemporaryDirectory(prefix="trtmc-qwen-build-", dir=output_dir) as temporary, ExitStack() as resources:
+        directory = Path(temporary)
+        config_path = directory / "config.json"
+        config_path.write_text(json.dumps(asdict(config)), encoding="utf-8")
+        workers = {}
+        try:
+            for role in roles:
+                command = [
+                    *interpreter,
+                    "--model-dir", str(model_dir.resolve()), "--config", str(config_path),
+                    "--role", role, "--max-sequence-length", str(max_sequence_length),
+                    "--cuda-device", str(device), "--plan", str(directory / f"{role}.plan"),
+                    "--metadata", str(directory / f"{role}.json"), "--watch-parent",
+                ]
+                if verbose:
+                    command.append("--verbose")
+                log = resources.enter_context((directory / f"{role}.log").open("wb"))
+                workers[role] = subprocess.Popen(
+                    command, stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
+            pending = set(roles)
+            while pending:
+                for role in roles:
+                    if role not in pending:
+                        continue
+                    status = workers[role].poll()
+                    if status is None:
+                        continue
+                    if status != 0:
+                        raise RuntimeError(f"Qwen {role} build worker exited with status {status}")
+                    pending.remove(role)
+                    # Forward the compiler diagnostics without adding build-mode output.
+                    sys.stderr.write((directory / f"{role}.log").read_text(encoding="utf-8", errors="replace"))
+                if pending:
+                    time.sleep(0.05)
+            metadata = []
+            for role in roles:
+                receipt = json.loads((directory / f"{role}.json").read_text(encoding="utf-8"))
+                size = (directory / f"{role}.plan").stat().st_size
+                if receipt.get("role") != role or receipt.get("plan_bytes") != size or size <= 0:
+                    raise RuntimeError(f"Qwen {role} build worker returned an incomplete plan")
+                native = receipt.get("native_kv_cache_metadata")
+                if (not isinstance(native, dict) or native.get("native_kv_cache") is not True
+                        or type(native.get("native_kv_contract_version")) is not int
+                        or native["native_kv_contract_version"] != 1):
+                    raise RuntimeError(f"Qwen {role} build worker returned invalid native KV metadata")
+                metadata.append(native)
+            if metadata[0] != metadata[1]:
+                raise RuntimeError("Qwen prefill and decode build workers returned different native KV metadata")
+            plans = tuple((directory / f"{role}.plan").read_bytes() for role in roles)
+            config.raw["_native_kv_cache_metadata"] = metadata[0]
+            return plans
+        except BaseException as error:
+            _stop_build_workers(workers)
+            logs = "\n".join(
+                f"--- Qwen {role} worker ---\n" + (directory / f"{role}.log").read_text(
+                    encoding="utf-8", errors="replace")
+                for role in roles if (directory / f"{role}.log").is_file()
+            )
+            if not isinstance(error, Exception):
+                error.add_note(logs)
+                raise
+            raise RuntimeError(f"Qwen parallel build failed: {error}\n{logs}") from error
+        finally:
+            _stop_build_workers(workers)
+
+
 def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     """Build one Qwen bundle through family-owned code."""
     if request.task == "embedding":
@@ -299,6 +425,21 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
     config.raw["_resolved_build_precision"] = precision
     config.raw["_parallel_build_enabled"] = parallel.enabled
     config.raw["_quantized_build_requested"] = quantized
+    use_weightless_workers = (
+        request.backend == "trt"
+        and model_type == "qwen3"
+        and precision == "bf16"
+        and (config.hidden_size, config.intermediate_size, config.num_hidden_layers,
+             config.num_attention_heads, config.num_key_value_heads, config.head_dim, config.vocab_size)
+        == (1024, 3072, 28, 16, 8, 128, 151936)
+        and not parallel.enabled
+        and not quantized
+        and request.graph_transform is None
+        and native_kv_build_capability(
+            config, precision=precision, max_cache_length=max_sequence_length,
+            parallel_enabled=False, quantized=False, debug_layer_outputs=False,
+        ).eligible
+    )
     quant_ctx = None
     if quantized:
         from . import graph_ops
@@ -306,9 +447,16 @@ def build(request: "BuildRequest", writer: "BundleWriter") -> None:
 
         config.raw["_decoder_engine_layout"] = "dual_profile"
         quant_ctx = calibrate_qwen_fp8(model_dir, config, graph_ops)
-    weights = model.load_weights(str(model_dir), config, precision=precision)
+    weights = None if use_weightless_workers else model.load_weights(str(model_dir), config, precision=precision)
     writer.set_header(family="qwen", task=request.task, backend=request.backend)
-    if quantized and parallel.enabled:
+    if use_weightless_workers:
+        prefill, decode = _build_weightless_native_engines(
+            model_dir, config, max_sequence_length,
+            output_dir=Path(request.output_path).parent, verbose=bool(request.verbose))
+        writer.add_bytes("engine.plan", decode)
+        writer.add_bytes("prefill.plan", prefill)
+        layout = "split"
+    elif quantized and parallel.enabled:
         for rank in range(parallel.tp_size):
             plan = model.build_engine(
                 config,
