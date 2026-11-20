@@ -47,5 +47,36 @@ class DeviceBuffer {
     void* ptr_{nullptr};
 };
 
+// Owns one page-locked host allocation: memory a stream can copy into without
+// staging, so a download can be queued behind an engine instead of waited for.
+class PinnedHostBuffer {
+  public:
+    PinnedHostBuffer() = default;
+
+    ~PinnedHostBuffer() { release(); }
+
+    PinnedHostBuffer(const PinnedHostBuffer&) = delete;
+    PinnedHostBuffer& operator=(const PinnedHostBuffer&) = delete;
+
+    cudaError_t allocate(std::size_t bytes) {
+        release();
+        const cudaError_t status = cudaMallocHost(&ptr_, bytes);
+        if (status != cudaSuccess)
+            ptr_ = nullptr;
+        return status;
+    }
+
+    void* get() const { return ptr_; }
+
+  private:
+    void release() {
+        if (ptr_ != nullptr)
+            cudaFreeHost(ptr_);
+        ptr_ = nullptr;
+    }
+
+    void* ptr_{nullptr};
+};
+
 } // namespace whisper
 } // namespace trtmc

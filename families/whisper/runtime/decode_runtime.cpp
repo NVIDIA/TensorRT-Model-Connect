@@ -7,16 +7,21 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <numeric>
 
 namespace trtmc {
 
-int32_t whisper_select_argmax_token(const std::vector<float>& logits) {
-    if (logits.empty()) {
+int32_t whisper_select_argmax_token(const float* logits, std::size_t count) {
+    if (logits == nullptr || count == 0) {
         return 0;
     }
-    const auto it = std::max_element(logits.begin(), logits.end());
-    return static_cast<int32_t>(std::distance(logits.begin(), it));
+    const float* it = std::max_element(logits, logits + count);
+    return static_cast<int32_t>(std::distance(logits, it));
+}
+
+int32_t whisper_select_argmax_token(const std::vector<float>& logits) {
+    return whisper_select_argmax_token(logits.data(), logits.size());
 }
 
 int32_t whisper_sample_token_topk(const std::vector<float>& logits, float temperature,

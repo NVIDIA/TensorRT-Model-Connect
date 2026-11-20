@@ -48,12 +48,22 @@ class WhisperPipeline final : public ITranscription {
     TextResult transcribe(const float* audio_data, int32_t num_samples,
                           const TranscriptionConfig& config = {}) override;
 
+    // Makes each decode step queue its logits download and its cache-row
+    // copies behind the engine on the decoder's stream and wait once, instead
+    // of issuing them after the wait. Throws when the decoder or the state
+    // cannot run such a step, or when the logits buffer cannot be allocated.
+    void queue_decode_step_copies();
+
+    // Whether the decode steps queue their copies behind the engine.
+    bool decode_steps_queue_copies() const { return step_logits_count_ != 0; }
+
   private:
     void run_encoder(const float* mel_data, int32_t mel_bins, int32_t mel_length);
     void setup_cross_attention(int32_t actual_enc_seq_len);
     std::vector<int32_t> run_decoder(const std::vector<int32_t>& initial_tokens,
                                      int32_t max_new_tokens);
     void run_decoder_step(int32_t token_id, std::vector<float>& logits);
+    void run_queued_decoder_step(int32_t token_id);
 
     std::unique_ptr<ITrtModule> encoder_;
     std::unique_ptr<ITrtModule> decoder_;
@@ -74,10 +84,21 @@ class WhisperPipeline final : public ITranscription {
     std::shared_ptr<ITokenizer> tokenizer_;
     std::string model_id_;
 
+    // Whether the encoder engine projects each decoder layer's cross-attention
+    // K/V (a single-GPU bundle): the decoder then reads the encoder's outputs
+    // in place, and the raw-state buffers below stay empty.
+    bool cross_kv_projected_{false};
     std::vector<std::vector<uint8_t>> cross_k_host_;
     std::vector<whisper::DeviceBuffer> cross_k_ptrs_;
     std::vector<whisper::DeviceBuffer> cross_v_ptrs_;
     std::size_t cross_kv_bytes_{0};
+
+    // Where a decode step that queues its copies leaves its logits: a
+    // page-locked buffer of step_logits_count_ floats, allocated once by
+    // queue_decode_step_copies(). Zero floats: the steps wait for the engine
+    // before their copies and download into the decoder's own staging.
+    whisper::PinnedHostBuffer step_logits_;
+    std::size_t step_logits_count_{0};
 };
 
 } // namespace trtmc

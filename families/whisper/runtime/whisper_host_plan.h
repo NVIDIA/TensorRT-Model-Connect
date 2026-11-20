@@ -79,6 +79,29 @@ inline std::vector<float> build_whisper_encoder_mask_values(int32_t enc_seq, int
     return mask;
 }
 
+// The encoder input only an engine that projects the decoder's cross-attention
+// K/V has ([positions, 1], FP32).
+inline constexpr const char* kWhisperEncoderPaddedRows = "encoder_padded_rows";
+
+// Values of the encoder_padded_rows input of an encoder engine that projects
+// the decoder's cross-attention K/V: 1 for the encoder positions past the
+// request's audio, 0 for every other position. The engine reads a row marked 1
+// as a zero state (what zeroing the encoder output did before the projections
+// moved into the engine) and leaves the others unchanged, so all zeros change
+// nothing. actual_enc <= 0 means the audio fills the window.
+inline std::vector<float> build_whisper_encoder_padded_rows(int32_t enc_seq, int32_t actual_enc) {
+    if (enc_seq <= 0) {
+        return {};
+    }
+
+    std::vector<float> padded(static_cast<std::size_t>(enc_seq), 0.0F);
+    if (actual_enc <= 0 || actual_enc >= enc_seq) {
+        return padded;
+    }
+    std::fill(padded.begin() + actual_enc, padded.end(), 1.0F);
+    return padded;
+}
+
 inline std::vector<int32_t> make_whisper_initial_decoder_tokens(const WhisperConfig& cfg) {
     if (!cfg.decoder_start_token_ids.empty()) {
         return cfg.decoder_start_token_ids;

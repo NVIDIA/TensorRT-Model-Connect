@@ -11,6 +11,7 @@
 #include "families/whisper/runtime/whisper_cross_kv_apply.h"
 #include "families/whisper/runtime/whisper_cross_kv_plan.h"
 #include "families/whisper/runtime/whisper_decode_policy.h"
+#include "families/whisper/runtime/whisper_decode_step.h"
 #include "families/whisper/runtime/whisper_host_plan.h"
 #include "families/whisper/runtime/whisper_mel_spectrogram.h"
 #include "plugin_helpers.h"
@@ -48,7 +49,19 @@ WhisperPipeline::WhisperPipeline(
     if (!state_ || !state_->ok())
         throw std::runtime_error("WhisperPipeline: invalid inference state");
 
-    // Allocate cross-attention K/V device buffers
+    // A single-GPU bundle's encoder engine outputs each decoder layer's
+    // projected cross-attention K/V, which the decoder reads in place.
+    cross_kv_projected_ = decoder_->input_rank("cross_k_0") == whisper_cross_input_rank(1);
+    if (cross_kv_projected_) {
+        const std::string mismatch = whisper_projected_cross_kv_mismatch(
+            *encoder_, *decoder_, num_decoder_layers_, kWhisperEncoderPaddedRows);
+        if (!mismatch.empty())
+            throw std::runtime_error("WhisperPipeline: " + mismatch);
+        return;
+    }
+
+    // Tensor-parallel bundle: allocate a device copy of the raw encoder states
+    // per layer K and V
     cross_kv_bytes_ = static_cast<std::size_t>(whisper_config_.max_source_positions) *
                       static_cast<std::size_t>(hidden_size_) * sizeof(float);
 
@@ -78,6 +91,19 @@ WhisperPipeline::WhisperPipeline(
                       std::move(model_id_str)) {}
 
 WhisperPipeline::~WhisperPipeline() = default;
+
+void WhisperPipeline::queue_decode_step_copies() {
+    // Until the buffer is held again the steps wait for the engine first.
+    step_logits_count_ = 0;
+    const std::string refusal = whisper_queued_step_refusal(*decoder_, *state_, DType::kFloat32);
+    if (!refusal.empty())
+        throw std::runtime_error("WhisperPipeline: decode steps cannot queue their copies: " +
+                                 refusal);
+    const std::size_t count = whisper_logits_count(*decoder_);
+    if (step_logits_.allocate(count * sizeof(float)) != cudaSuccess)
+        throw std::runtime_error("WhisperPipeline: unable to allocate the logits buffer");
+    step_logits_count_ = count;
+}
 
 TextResult WhisperPipeline::transcribe(const float* audio_data, int32_t num_samples,
                                        const TranscriptionConfig& config) {
@@ -123,7 +149,7 @@ TextResult WhisperPipeline::transcribe(const float* audio_data, int32_t num_samp
     }
 
     // Step 3: Set up cross-attention K/V
-    std::cerr << "[whisper] Computing cross-attention K/V ..." << std::endl;
+    std::cerr << "[whisper] Setting up cross-attention K/V ..." << std::endl;
     setup_cross_attention(actual_enc_seq_len);
 
     // Step 4: Run decoder
@@ -178,12 +204,34 @@ void WhisperPipeline::run_encoder(const float* mel_data, int32_t mel_bins, int32
         inputs["encoder_mask"] = mask_tensor;
     }
 
+    // An encoder that projects the cross-attention K/V zeroes the states past
+    // a short request's valid length itself, from this input
+    std::vector<float> padded_rows;
+    if (encoder_->has_input(kWhisperEncoderPaddedRows)) {
+        padded_rows = build_whisper_encoder_padded_rows(
+            enc_seq, compute_whisper_actual_encoder_length(mel_length, expected_length, enc_seq));
+
+        Tensor padded_tensor;
+        padded_tensor.data = padded_rows.data();
+        padded_tensor.shape = {static_cast<int64_t>(padded_rows.size()), 1};
+        padded_tensor.dtype = DType::kFloat32;
+        inputs[kWhisperEncoderPaddedRows] = padded_tensor;
+    }
+
     // Run encoder (we need the output to stay on device, so use forward_async + sync)
     encoder_->forward_async(inputs);
     encoder_->sync();
 }
 
 void WhisperPipeline::setup_cross_attention(int32_t actual_enc_seq_len) {
+    if (cross_kv_projected_) {
+        // The encoder engine projected every layer's K and V for this request
+        // (and zeroed the states past a short request, run_encoder): the
+        // decoder reads its output buffers in place.
+        bind_whisper_projected_cross_kv(*encoder_, *decoder_, num_decoder_layers_);
+        return;
+    }
+
     // Get encoder output device pointer
     void* enc_output_device = encoder_->device_ptr("encoder_output");
 
@@ -227,13 +275,29 @@ std::vector<int32_t> WhisperPipeline::run_decoder(const std::vector<int32_t>& in
 
     const int32_t eot_id = whisper_config_.eot_token_id;
 
-    auto result = run_whisper_decode_loop(
-        initial_tokens, max_new_tokens, eot_id,
-        [this](int32_t token, std::vector<float>& logits, std::string&) {
-            run_decoder_step(token, logits);
-            return true;
-        },
-        [](const std::vector<float>& logits) { return whisper_select_argmax_token(logits); });
+    WhisperDecodeLoopResult result;
+    if (step_logits_count_ != 0) {
+        // Each step leaves its logits in the page-locked buffer; the selection
+        // reads them there.
+        result = run_whisper_decode_loop_over<WhisperLogitsView>(
+            initial_tokens, max_new_tokens, eot_id,
+            [this](int32_t token, WhisperLogitsView& logits, std::string&) {
+                run_queued_decoder_step(token);
+                logits = {static_cast<const float*>(step_logits_.get()), step_logits_count_};
+                return true;
+            },
+            [](const WhisperLogitsView& logits) {
+                return whisper_select_argmax_token(logits.data, logits.size);
+            });
+    } else {
+        result = run_whisper_decode_loop(
+            initial_tokens, max_new_tokens, eot_id,
+            [this](int32_t token, std::vector<float>& logits, std::string&) {
+                run_decoder_step(token, logits);
+                return true;
+            },
+            [](const std::vector<float>& logits) { return whisper_select_argmax_token(logits); });
+    }
 
     if (result.prefill_failed) {
         std::cerr << "[whisper] Prefill step failed: " << result.error << std::endl;
@@ -267,6 +331,29 @@ void WhisperPipeline::run_decoder_step(int32_t token_id, std::vector<float>& log
     std::memcpy(logits.data(), logits_tensor.data, num_logits * sizeof(float));
 
     state_->advance();
+}
+
+void WhisperPipeline::run_queued_decoder_step(int32_t token_id) {
+    Tensor token_tensor;
+    token_tensor.data = &token_id;
+    token_tensor.shape = {1};
+    token_tensor.dtype = DType::kInt32;
+
+    TensorMap inputs;
+    inputs["token_id"] = token_tensor;
+    state_->prepare_step(inputs);
+
+    // The logits download and the state's cache-row copies go on the decoder's
+    // stream behind the engine; one wait covers the engine and the copies.
+    const bool queued = run_whisper_queued_decode_step(
+        *decoder_, *state_, inputs, [this](const void* device_logits) {
+            return device_logits != nullptr &&
+                   cudaMemcpyAsync(step_logits_.get(), device_logits,
+                                   step_logits_count_ * sizeof(float), cudaMemcpyDeviceToHost,
+                                   decoder_->stream()) == cudaSuccess;
+        });
+    if (!queued)
+        throw std::runtime_error("WhisperPipeline: unable to queue the logits download");
 }
 
 } // namespace trtmc
