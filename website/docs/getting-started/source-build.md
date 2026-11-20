@@ -119,7 +119,8 @@ for provisioning options. Follow each family's instructions for model builds.
 
 On GB300, pass `-DCMAKE_CUDA_ARCHITECTURES=103` for a native build. Model
 Connect records SM103 and selects the upstream `103a` compiler target when
-it builds the optional 0.12 SDK kernels.
+it builds the optional 0.12 SDK kernels. The reduced SDK build includes the
+CTM decode kernels required by the upstream attention plugin on this GPU.
 
 ## Optional Edge-LLM Python tools
 
