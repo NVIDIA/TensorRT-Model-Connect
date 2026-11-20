@@ -12,6 +12,7 @@
 #include "families/canary/runtime/canary_mel_spectrogram.h"
 #include "families/canary/runtime/canary_request.h"
 #include "families/canary/runtime/canary_segment_utils.h"
+#include "families/canary/runtime/canary_stage_timing.h"
 #include "families/canary/runtime/decode_runtime.h"
 #include "families/canary/runtime/resampler.h"
 #include "families/canary/runtime/tokenizer.h"
@@ -156,8 +157,7 @@ void append_canary_transcription_segment(TextResult& combined, TextResult segmen
         combined.token_ids.insert(combined.token_ids.end(), segment.token_ids.begin(),
                                   segment.token_ids.end());
     }
-    combined.prefill_ms += segment.prefill_ms;
-    combined.decode_ms += segment.decode_ms;
+    add_canary_stage_times(combined, segment);
 }
 
 int32_t canary_module_batch_capacity(const ITrtModule& module, const std::string& input_name) {
@@ -753,20 +753,31 @@ void CanaryPipeline::transcribe_batch_group(const CanaryBatchWorkGroup& group,
     for (std::size_t chunk_start = 0; chunk_start < indices.size(); chunk_start += chunk_capacity) {
         const std::size_t chunk_end = std::min(chunk_start + chunk_capacity, indices.size());
 
+        CanaryStageTimes times;
+        const auto setup_started = CanaryStageClock::now();
         auto futures = launch_canary_batch_preparation(
             indices, chunk_start, chunk_end, work, requests, mel_fb_.get(), mel_n_fft_,
             mel_win_length_, mel_hop_length_, mel_chunk_length_, mel_sampling_rate_, mel_preemph_,
             mel_normalize_per_feature_, canary_config_);
         auto chunk = collect_canary_prepared_batch_chunk(futures, indices, chunk_start, work,
                                                          segment_results);
-        if (chunk.valid_indices.empty())
+        times.setup_ms = canary_stage_elapsed_ms(setup_started);
+        if (chunk.valid_indices.empty()) {
+            share_canary_chunk_stage_times(times, indices, chunk_start, chunk_end,
+                                           chunk.valid_indices, segment_results);
             continue;
+        }
 
+        const auto encoder_started = CanaryStageClock::now();
         run_encoder_batch(chunk.mel_batch, chunk.mel_bins, chunk.mel_frames, chunk.valid_frames);
-        auto output_ids = run_decoder_batch(chunk.prompts, chunk.output_limits, beam_size,
-                                            group.length_penalty, chunk.actual_encoder_lengths);
+        times.prefill_ms = canary_stage_elapsed_ms(encoder_started);
+        auto output_ids =
+            run_decoder_batch(chunk.prompts, chunk.output_limits, beam_size, group.length_penalty,
+                              chunk.actual_encoder_lengths, times);
         store_canary_batch_decodes(output_ids, chunk.valid_indices, tokenizer_.get(),
                                    canary_config_.eot_token_id, segment_results);
+        share_canary_chunk_stage_times(times, indices, chunk_start, chunk_end, chunk.valid_indices,
+                                       segment_results);
     }
 }
 
@@ -775,6 +786,9 @@ TextResult CanaryPipeline::transcribe_segment(const float* audio_data, int32_t n
                                               const std::vector<int32_t>& initial_tokens,
                                               int32_t max_output_tokens, int32_t beam_size,
                                               float length_penalty) {
+    CanaryStageTimes times;
+    const auto setup_started = CanaryStageClock::now();
+
     // Step 0: Resample if needed
     const float* samples_ptr = audio_data;
     int32_t samples_count = num_samples;
@@ -800,14 +814,18 @@ TextResult CanaryPipeline::transcribe_segment(const float* audio_data, int32_t n
             mel_fb_->n_mel_bins, mel_n_fft_, mel_win_length_, mel_hop_length_, mel_chunk_length_,
             mel_sampling_rate_, mel_preemph_, mel_normalize_per_feature_);
     }
+    times.setup_ms = canary_stage_elapsed_ms(setup_started);
     if (mel.data.empty()) {
-        return TextResult{"[mel extraction failed]", {}};
+        TextResult failed{"[mel extraction failed]", {}};
+        failed.setup_ms = times.setup_ms;
+        return failed;
     }
 
     // Step 2: Run encoder. The mel is chunk-padded, so mel.n_frames is the full
     // (padded) length; mel.valid_frames is the real audio length, used to mask
     // the padded tail in self-attention and to zero-pad the cross-attention K/V.
     const int32_t valid_mel_frames = mel.valid_frames > 0 ? mel.valid_frames : mel.n_frames;
+    const auto prefill_started = CanaryStageClock::now();
     std::cerr << "[canary] Running encoder ..." << std::endl;
     run_encoder(mel.data.data(), mel.n_mels, mel.n_frames, valid_mel_frames);
 
@@ -823,13 +841,19 @@ TextResult CanaryPipeline::transcribe_segment(const float* audio_data, int32_t n
     // Step 3: Set up cross-attention K/V
     std::cerr << "[canary] Computing cross-attention K/V ..." << std::endl;
     setup_cross_attention(actual_enc_seq_len);
+    times.prefill_ms = canary_stage_elapsed_ms(prefill_started);
 
     // Step 4: Run decoder
+    const auto decode_started = CanaryStageClock::now();
     std::cerr << "[canary] Running decoder ..." << std::endl;
     auto output_ids = run_decoder(initial_tokens, max_output_tokens, beam_size, length_penalty);
+    times.decode_ms = canary_stage_elapsed_ms(decode_started);
 
     // Step 5: Decode token IDs
     TextResult out;
+    out.setup_ms = times.setup_ms;
+    out.prefill_ms = times.prefill_ms;
+    out.decode_ms = times.decode_ms;
     out.token_ids = std::move(output_ids);
     if (tokenizer_ && !out.token_ids.empty()) {
         out.text = decode_canary_tokens(*tokenizer_, out.token_ids, canary_config_.eot_token_id);
@@ -959,22 +983,27 @@ std::vector<int32_t> CanaryPipeline::run_decoder(const std::vector<int32_t>& ini
     return result.output_ids;
 }
 
-std::vector<std::vector<int32_t>>
-CanaryPipeline::run_decoder_batch(const std::vector<std::vector<int32_t>>& initial_tokens,
-                                  const std::vector<int32_t>& max_new_tokens, int32_t beam_size,
-                                  float length_penalty,
-                                  const std::vector<int32_t>& actual_enc_seq_lens) {
+std::vector<std::vector<int32_t>> CanaryPipeline::run_decoder_batch(
+    const std::vector<std::vector<int32_t>>& initial_tokens,
+    const std::vector<int32_t>& max_new_tokens, int32_t beam_size, float length_penalty,
+    const std::vector<int32_t>& actual_enc_seq_lens, CanaryStageTimes& times) {
     if (initial_tokens.empty() || initial_tokens.size() != max_new_tokens.size() ||
         initial_tokens.size() != actual_enc_seq_lens.size()) {
         throw std::invalid_argument("Canary decoder batch has inconsistent inputs");
     }
     std::vector<int32_t> identity(initial_tokens.size());
     std::iota(identity.begin(), identity.end(), 0);
+    const auto cross_attention_started = CanaryStageClock::now();
     setup_cross_attention(actual_enc_seq_lens, identity);
-    if (beam_size <= 1)
-        return run_greedy_decoder_batch(initial_tokens, max_new_tokens);
-    return run_beam_decoder_batch(initial_tokens, max_new_tokens, beam_size, length_penalty,
-                                  actual_enc_seq_lens);
+    times.prefill_ms += canary_stage_elapsed_ms(cross_attention_started);
+
+    const auto decode_started = CanaryStageClock::now();
+    auto output_ids = beam_size <= 1
+                          ? run_greedy_decoder_batch(initial_tokens, max_new_tokens)
+                          : run_beam_decoder_batch(initial_tokens, max_new_tokens, beam_size,
+                                                   length_penalty, actual_enc_seq_lens);
+    times.decode_ms = canary_stage_elapsed_ms(decode_started);
+    return output_ids;
 }
 
 std::vector<std::vector<int32_t>>
