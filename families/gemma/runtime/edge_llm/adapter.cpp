@@ -11,9 +11,15 @@
 #include <cstdlib>
 #include <cuda_runtime_api.h>
 #include <dlfcn.h>
+#ifdef TRTMC_GEMMA_EDGE_012
+#include <tensorrt_edgellm/common/trtInterop.h>
+#include <tensorrt_edgellm/runtime/llmInferenceRuntime.h>
+#include <tensorrt_edgellm/runtime/streaming.h>
+#else
 #include <edgellm/cpp/common/logger.h>
 #include <edgellm/cpp/runtime/llmInferenceRuntime.h>
 #include <edgellm/cpp/runtime/streaming.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -80,17 +86,29 @@ class Artifacts {
                 !bundle.find_section(name))
                 throw std::runtime_error("Invalid Gemma4 Edge artifact: " + name);
         }
-        std::vector<std::string> required_files{
-            "edge_llm/engine/tokenizer.json", "edge_llm/engine/tokenizer_config.json",
-            "edge_llm/engine/chat_template.jinja", "edge_llm/engine/embedding.safetensors"};
+        const bool direct = marker.value("builder_flow", "") == "checkpoint_direct";
+        std::vector<std::string> required_files{"edge_llm/engine/tokenizer.json",
+                                                "edge_llm/engine/tokenizer_config.json",
+                                                "edge_llm/engine/chat_template.jinja"};
+        if (direct) {
+            required_files.emplace_back("edge_llm/checkpoint/config.json");
+            required_files.emplace_back("edge_llm/checkpoint/draft/config.json");
+            required_files.emplace_back("edge_llm/engine/multistage_config.json");
+        } else
+            required_files.emplace_back("edge_llm/engine/embedding.safetensors");
         auto require = [&](const char* name) {
             required_files.push_back(std::string("edge_llm/engine/") + name);
         };
+        if (marker.value("ple", false) && !direct) {
+#ifdef TRTMC_GEMMA_EDGE_012
+            required_files.emplace_back("edge_llm/checkpoint/model.safetensors");
+#else
+            require("ple_embedding.safetensors");
+#endif
+        }
         if (marker.at("execution_variant") == "autoregressive") {
             require("llm.engine");
             require("config.json");
-            if (marker.value("ple", false))
-                require("ple_embedding.safetensors");
             if (marker.value("vision", false)) {
                 require("visual/visual.engine");
                 require("visual/config.json");
@@ -134,6 +152,7 @@ class Artifacts {
     ~Artifacts() { cleanup(); }
     Artifacts(const Artifacts&) = delete;
     Artifacts& operator=(const Artifacts&) = delete;
+    std::string checkpoint() const { return (root_ / "edge_llm/checkpoint").string(); }
     std::string engine() const { return (root_ / "edge_llm/engine").string(); }
 
   private:
@@ -156,9 +175,15 @@ struct CloseLibrary {
 std::unique_ptr<void, CloseLibrary> load_plugin() {
     // Edge INFO goes to stdout. Keep the public CLI result channel machine-readable;
     // upstream warnings and errors continue to stderr.
+#ifdef TRTMC_GEMMA_EDGE_012
+    using LogSeverity = trt_edgellm::logger::Severity;
+    auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::TrtLogger::instance());
+#else
+    using LogSeverity = nvinfer1::ILogger::Severity;
+    auto* logger = static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger);
+#endif
     static std::once_flag logging;
-    std::call_once(logging,
-                   [] { trt_edgellm::gLogger.setLevel(nvinfer1::ILogger::Severity::kWARNING); });
+    std::call_once(logging, [] { trt_edgellm::gLogger.setLevel(LogSeverity::kWARNING); });
     Dl_info location{};
     if (!dladdr(reinterpret_cast<void*>(&create), &location) || !location.dli_fname)
         throw std::runtime_error("Cannot locate Gemma4 family library");
@@ -171,7 +196,7 @@ std::unique_ptr<void, CloseLibrary> load_plugin() {
                                  std::string(dlerror()));
     using Initialize = bool (*)(void*, const char*);
     auto initialize = reinterpret_cast<Initialize>(dlsym(plugin.get(), "initEdgellmPlugins"));
-    if (!initialize || !initialize(static_cast<nvinfer1::ILogger*>(&trt_edgellm::gLogger), ""))
+    if (!initialize || !initialize(logger, ""))
         throw std::runtime_error("Cannot initialize Gemma4 Edge plugin");
     return plugin;
 }
@@ -196,23 +221,42 @@ make_runtime(const Artifacts& artifacts, cudaStream_t stream, const nlohmann::js
     const bool dspark = marker.at("execution_variant") == "dspark";
     const bool eagle3 = marker.at("execution_variant") == "eagle3";
     const bool dflash = marker.at("execution_variant") == "dflash";
+    const bool jetspec = marker.at("execution_variant") == "jetspec";
     const bool media = marker.value("vision", false) || marker.value("audio", false);
     if (standalone)
         return std::make_unique<trt_edgellm::rt::LLMInferenceRuntime>(
             artifacts.engine(), media ? artifacts.engine() : "",
             std::unordered_map<std::string, std::string>{}, stream,
-            trt_edgellm::rt::ContextCacheConfig{});
+            trt_edgellm::rt::ContextCacheConfig{}, artifacts.checkpoint());
     trt_edgellm::rt::SpecDecodeDraftingConfig drafting{};
-    drafting.draftingTopK = eagle3 ? 10 : 1;
-    drafting.draftingStep = eagle3 ? 6 : (dspark || dflash) ? 1 : 3;
-    drafting.verifySize = dflash   ? marker.at("verify_size").get<int>()
-                          : eagle3 ? 60
-                          : dspark ? 8
-                                   : 4;
+    const bool direct = marker.value("builder_flow", "") == "checkpoint_direct";
+    const int top_k = direct ? marker.at("draft_top_k").get<int>() : jetspec ? 7 : eagle3 ? 10 : 1;
+    const int verify = (dflash || jetspec) ? marker.at("verify_size").get<int>()
+                       : eagle3            ? 60
+                       : dspark            ? 8
+                                           : 4;
+#ifdef TRTMC_GEMMA_EDGE_012
+    drafting.draftTopK = top_k;
+    drafting.verifyTokens = verify;
+    if (jetspec)
+        drafting.proposalTokens = 15;
+#else
+    drafting.draftingTopK = top_k;
+    drafting.verifySize = verify;
+#endif
+    if (!jetspec)
+        drafting.draftingStep = eagle3 ? 6 : (dspark || dflash) ? 1 : 3;
     drafting.dsparkSchedulerMode = trt_edgellm::rt::DSparkSchedulerMode::kOff;
+#ifdef TRTMC_GEMMA_EDGE_012
+    if (direct)
+        return std::make_unique<trt_edgellm::rt::LLMInferenceRuntime>(
+            artifacts.engine(), "", std::unordered_map<std::string, std::string>{}, drafting,
+            stream, trt_edgellm::rt::ContextCacheConfig{}, artifacts.checkpoint(),
+            artifacts.checkpoint() + "/draft");
+#endif
     return std::make_unique<trt_edgellm::rt::LLMInferenceRuntime>(
         artifacts.engine(), "", std::unordered_map<std::string, std::string>{}, drafting, stream,
-        trt_edgellm::rt::ContextCacheConfig{});
+        trt_edgellm::rt::ContextCacheConfig{}, artifacts.checkpoint());
 }
 
 /// Thin persistent Edge API adapter; serialization prevents concurrent use of Edge request state.
@@ -232,7 +276,8 @@ class EdgeTask final : public ITextGeneration,
           sampled_vanilla_(
               sampling_uses_vanilla(marker.at("execution_variant").get<std::string>())),
           headroom_(marker.at("execution_variant") == "autoregressive" ? 1
-                    : marker.at("execution_variant") == "dflash"
+                    : (marker.at("execution_variant") == "dflash" ||
+                       marker.at("execution_variant") == "jetspec")
                         ? marker.at("verify_size").get<int>()
                     : marker.at("execution_variant") == "eagle3" ? 60
                     : marker.at("execution_variant") == "dspark" ? 8
@@ -357,22 +402,42 @@ class EdgeTask final : public ITextGeneration,
 ITask* create(const BundleReader& bundle) {
     const auto bytes = bundle.read_section("edge_llm.json");
     const auto marker = nlohmann::json::parse(bytes.begin(), bytes.end());
-    if (marker.at("version") != 1 || marker.at("edge_revision") != kRevision ||
+    const auto& revision = marker.at("edge_revision");
+#ifdef TRTMC_GEMMA_EDGE_012
+    const bool compatible = marker.value("edge_release", "") == "0.12.0" &&
+                            (revision.is_null() || revision == kRevision);
+#else
+    const bool compatible =
+        revision == kRevision && marker.value("builder_flow", "") != "checkpoint_direct";
+#endif
+    if (marker.at("version") != 1 || !compatible ||
         marker.at("max_sequence_length").get<int>() <= 2 ||
         marker.at("max_input_length").get<int>() <= 0 ||
         marker.at("max_input_length").get<int>() > marker.at("max_sequence_length").get<int>() ||
         marker.at("max_batch_size") != 1 || marker.at("precision") != "fp16" ||
         !marker.at("artifacts").is_array())
         throw std::runtime_error("Invalid Gemma4 Edge bundle contract");
+    const bool direct =
+        marker.value("builder_flow", "") == "checkpoint_direct" &&
+        marker.value("edge_release", "") == "0.12.0" &&
+        marker.value("execution_variant", "") == "dflash" &&
+        marker.value("draft_block_size", 0) == 8 &&
+        ((marker.value("draft_top_k", 0) == 1 && marker.value("verify_size", 0) == 8) ||
+         (marker.value("draft_top_k", 0) == 4 && marker.value("verify_size", 0) == 16));
     if ((marker.value("execution_variant", "") != "mtp" &&
          marker.value("execution_variant", "") != "dspark" &&
          marker.value("execution_variant", "") != "eagle3" &&
          marker.value("execution_variant", "") != "dflash" &&
+         marker.value("execution_variant", "") != "jetspec" &&
          marker.value("execution_variant", "") != "autoregressive") ||
-        marker.value("builder_flow", "") != "onnx")
-        throw std::runtime_error(
-            "Gemma4 requires an autoregressive, MTP, DSpark, EAGLE3 or DFlash ONNX contract");
-    if (marker.at("execution_variant") == "dflash" &&
+        (marker.value("builder_flow", "") != "onnx" && !direct))
+        throw std::runtime_error("Gemma4 requires an autoregressive, MTP, DSpark, EAGLE3, DFlash "
+                                 "or JetSpec ONNX contract");
+    if (marker.at("execution_variant") == "jetspec" &&
+        (marker.value("edge_release", "") != "0.12.0" || marker.value("draft_top_k", 0) != 7 ||
+         marker.value("verify_size", 0) != 128 || marker.value("proposal_tokens", 0) != 15))
+        throw std::runtime_error("Invalid Gemma4 JetSpec release or verification tree");
+    if (marker.at("execution_variant") == "dflash" && !direct &&
         (marker.value("verify_size", 0) != 7 && marker.value("verify_size", 0) != 16))
         throw std::runtime_error("Invalid Gemma4 DFlash block-size contract");
     const auto primary = marker.value("task", "text_generation");

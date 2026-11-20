@@ -215,7 +215,7 @@ def test_untyped_execution_fails_before_side_effects(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("model_type", ["gemma4", "gemma4_unified"])
-@pytest.mark.parametrize("variant", [None, "mtp", "dspark", "eagle3", "dflash"])
+@pytest.mark.parametrize("variant", [None, "mtp", "dspark", "eagle3", "dflash", "jetspec"])
 @pytest.mark.parametrize("precision", [None, "fp16", "fp32", "bf16"])
 def test_edge_cli_routes_through_the_ordinary_family_entrypoint(
     tmp_path, monkeypatch, variant, precision, model_type
@@ -544,7 +544,9 @@ def test_standalone_packed_export_preserves_quantization_and_native_target(tmp_p
     raw = _packed_gemma_fixture(source, dense=dense)
     before = {path.name: path.read_bytes() for path in source.iterdir()}
     staging = tmp_path / "staging"
-    package = {"python": "/sdk/python", "onnx_builder": "/sdk/llm_build",
+    from families.gemma.edge_llm.builder import EDGE_REVISION
+    package = {"version": "0.11.0", "revision": EDGE_REVISION,
+               "python": "/sdk/python", "onnx_builder": "/sdk/llm_build",
                "plugin": "/sdk/plugin.so", "onnx": True, "all_native_kernels": True}
     def installed(target, *, vision, audio):
         assert target == {"sm": 120} and not vision and not audio
@@ -578,7 +580,7 @@ def test_standalone_packed_export_preserves_quantization_and_native_target(tmp_p
 @pytest.mark.parametrize("model_type,moe,variant", [
     ("gemma4", False, "mtp"), ("gemma4", True, "mtp"),
     ("gemma4", False, "dflash"), ("gemma4", True, "dflash"),
-    ("gemma4_unified", False, "dflash"),
+    ("gemma4_unified", False, "dflash"), ("gemma4", True, "jetspec"),
 ])
 def test_original_and_unified_gemma_pair_geometry(tmp_path, model_type, moe, variant):
     """Original dense/MoE targets retain explicit, geometry-matched companions."""
@@ -591,6 +593,8 @@ def test_original_and_unified_gemma_pair_geometry(tmp_path, model_type, moe, var
     draft.mkdir()
     base = {"hidden_size": 16, "num_hidden_layers": 6, "vocab_size": 32,
             "max_position_embeddings": 2048, "enable_moe_block": moe}
+    if variant == "jetspec":
+        base.update(hidden_size=2816, num_hidden_layers=30, num_experts=128, top_k_experts=8)
     raw = {"model_type": model_type, "text_config": base}
     if variant == "mtp":
         companion = {"model_type": model_type + "_assistant", "backbone_hidden_size": 16,
@@ -600,14 +604,69 @@ def test_original_and_unified_gemma_pair_geometry(tmp_path, model_type, moe, var
                      "hidden_size": 16, "num_target_layers": 6, "vocab_size": 32,
                      "max_position_embeddings": 2048, "block_size": 16,
                      "dflash_config": {"target_layer_ids": [1, 4], "mask_token_id": 4}}
+    if variant == "jetspec":
+        companion.update(hidden_size=base["hidden_size"], num_target_layers=base["num_hidden_layers"],
+                         layer_types=["full_attention"] * 5, hidden_act="gelu_pytorch_tanh")
+        companion["dflash_config"]["causal_head"] = True
     (target / "config.json").write_text(json.dumps(raw))
     (draft / "config.json").write_text(json.dumps(companion))
     for directory in (target, draft):
         (directory / "model.safetensors").touch()
     execution = SimpleNamespace(variant=variant,
         checkpoints=(SimpleNamespace(role="draft", model_dir=draft),))
-    request = replace(execution_request(target), max_sequence_length=64)
-    assert validate_pair(request, execution) == (raw, draft, 64)
+    limit = 256 if variant == "jetspec" else 64
+    request = replace(execution_request(target), max_sequence_length=limit)
+    assert validate_pair(request, execution) == (raw, draft, limit)
+    if variant == "jetspec":
+        noncausal = {**companion, "dflash_config": {**companion["dflash_config"], "causal_head": False}}
+        (draft / "config.json").write_text(json.dumps(noncausal))
+        with pytest.raises(ValueError, match="causal block16"):
+            validate_pair(request, execution)
+        (draft / "config.json").write_text(json.dumps({**companion, "quantization_config": {"quant_algo": "NVFP4"}}))
+        with pytest.raises(ValueError, match="unquantized"):
+            validate_pair(request, execution)
+        (draft / "config.json").write_text(json.dumps(companion))
+    if variant == "dflash" and model_type == "gemma4" and not moe:
+        from families.gemma.edge_llm.cli import execution_inputs
+
+        options = ("draft=" + str(draft),)
+        for width in (1, 4):
+            explicit = execution_inputs("dflash", options, width)
+            with pytest.raises(ValueError, match="matched Bolt"):
+                validate_pair(request, explicit)
+        base.update(hidden_size=2560, num_hidden_layers=42, max_position_embeddings=65536)
+        packed = {**companion, "hidden_size": 2560, "num_target_layers": 42, "block_size": 8,
+                  "has_own_lm_head": True, "num_hidden_layers": 5, "hidden_act": "silu",
+                  "sliding_window": 1024, "layer_types": ["sliding_attention"] * 5,
+                  "dflash_config": {"causal": False, "target_layer_ids": [5, 11, 17, 23, 35],
+                                    "mask_token_id": 4},
+                  "quantization_config": {"quant_algo": "W4A16_NVFP4", "group_size": 16}}
+        (target / "config.json").write_text(json.dumps(raw))
+        (draft / "config.json").write_text(json.dumps(packed))
+        for width in (1, 4):
+            explicit = execution_inputs("dflash", options, width)
+            assert explicit.draft_top_k == width
+            assert validate_pair(request, explicit) == (raw, draft, limit)
+        with pytest.raises(ValueError):
+            execution_inputs("dflash", options, 2)
+        with pytest.raises(ValueError):
+            execution_inputs("mtp", options, 4)
+        # The original non-Bolt E4B has the same width and layer count but
+        # a different position capacity; it cannot select the named Bolt mode.
+        base["max_position_embeddings"] = 131072
+        (target / "config.json").write_text(json.dumps(raw))
+        with pytest.raises(ValueError, match="matched Bolt"):
+            validate_pair(request, explicit)
+        # Restore the ordinary draft for the independent negative cases below.
+        base.update(hidden_size=16, num_hidden_layers=6, max_position_embeddings=2048)
+        (target / "config.json").write_text(json.dumps(raw))
+        (draft / "config.json").write_text(json.dumps(companion))
+    if variant == "dflash":
+        causal = {**companion, "dflash_config": {**companion["dflash_config"], "causal_head": True}}
+        (draft / "config.json").write_text(json.dumps(causal))
+        with pytest.raises(ValueError, match="causal JetSpec"):
+            validate_pair(request, execution)
+        (draft / "config.json").write_text(json.dumps(companion))
     if variant == "mtp":
         companion["backbone_hidden_size"] += 1
     else:

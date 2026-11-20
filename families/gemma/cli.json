@@ -111,6 +111,14 @@
           "help": "Self-quantize the BF16 checkpoint's projections to FP8"
         },
         {
+          "name": "edge_builder_python",
+          "flags": [
+            "--edge-builder-python"
+          ],
+          "type": "path",
+          "help": "Absolute Python interpreter for the optional Edge builder"
+        },
+        {
           "name": "execution_variant",
           "flags": [
             "--execution-variant"
@@ -120,9 +128,16 @@
             "mtp",
             "dspark",
             "eagle3",
-            "dflash"
+            "dflash",
+            "jetspec"
           ],
           "help": "Explicit paired execution mode; no automatic draft discovery"
+        },
+        {
+          "name": "spec_draft_top_k",
+          "flags": ["--spec-draft-top-k"],
+          "type": "int",
+          "help": "Bolt-E4B DFlash candidate width: 1 for chain or 4 for DDTree"
         },
         {
           "name": "companion",

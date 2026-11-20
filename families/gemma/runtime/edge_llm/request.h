@@ -6,7 +6,12 @@
 
 #include "families/gemma/runtime/edge_llm/contract.h"
 
+#ifdef TRTMC_GEMMA_EDGE_012
+#include <tensorrt_edgellm/runtime/llmRuntimeUtils.h>
+#include <tensorrt_edgellm/runtime/streaming.h>
+#else
 #include <edgellm/cpp/runtime/llmRuntimeUtils.h>
+#endif
 
 namespace trtmc::gemma::edge_llm {
 

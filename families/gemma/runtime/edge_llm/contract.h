@@ -13,7 +13,11 @@
 
 namespace trtmc::gemma::edge_llm {
 
+#ifdef TRTMC_GEMMA_EDGE_012
+inline constexpr const char* kRevision = "513dcd18291e587c80928911a480761352f3c2d8";
+#else
 inline constexpr const char* kRevision = "95515c2f87fba8982db5a519f9022277667b3cc9";
+#endif
 
 /// Return whether an artifact is a normalized file below one of the two Edge roots.
 inline bool safe_artifact_path(const std::string& name) {
@@ -32,12 +36,12 @@ inline bool safe_artifact_path(const std::string& name) {
 /// Keep command-successful sampled requests executable, even if speculation falls back.
 inline bool allows_sampling(const std::string& variant) {
     return variant == "autoregressive" || variant == "dspark" || variant == "eagle3" ||
-           variant == "dflash";
+           variant == "dflash" || variant == "jetspec";
 }
 
-/// Edge 0.11 uses vanilla decoding for these sampled speculative requests.
+/// Edge uses vanilla decoding for these sampled speculative requests.
 inline bool sampling_uses_vanilla(const std::string& variant) {
-    return variant == "eagle3" || variant == "dflash";
+    return variant == "eagle3" || variant == "dflash" || variant == "jetspec";
 }
 
 /// Reject invalid sampling settings and controls with no equivalent Edge request API.
