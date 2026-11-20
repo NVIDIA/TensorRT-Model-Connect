@@ -1,0 +1,2 @@
+# The INT4-AWQ native reference (reference/prepare_int4_awq.py) needs only the serving interpreter's packages;
+# this file names its reference environment, which the prepare step writes the quantized checkpoint into.
