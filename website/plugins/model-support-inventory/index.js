@@ -70,6 +70,7 @@ const TASKS = {
   text_to_replaced_token_scores: ['Replaced-token scores', 'Natural Language Processing', null, 'encode'],
   text_prediction_positions_to_token_scores: ['Selected-position token scores', 'Natural Language Processing', null, 'encode'],
   image_to_token_features: ['Image token features', 'Computer Vision', 'image-feature-extraction', 'extract-features'],
+  video_to_token_features: ['Video token features', 'Computer Vision', null, null],
   image_to_spatial_features: ['Spatial image features', 'Computer Vision', 'image-feature-extraction', 'extract-features'],
   spatial_features_to_class_scores: ['Spatial feature class scores', 'Computer Vision', null, null],
   image_to_pooled_features: ['Pooled image features', 'Computer Vision', 'image-feature-extraction', 'extract-features'],

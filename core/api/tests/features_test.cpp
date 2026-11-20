@@ -49,6 +49,56 @@ void rejects(Function function, trtmc_status expected, const char* message) {
     check(rejected, message);
 }
 
+void video_features(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
+    using namespace trtmc;
+    const auto path = root / "features_video_tokens.bundle";
+    bundle(path, "video_tokens");
+    const float first[]{0.25F, 0, 0}, second[]{0.75F, 0, 0};
+    VideoToTokenFeaturesRequest input;
+    input.video.frames = {ImageInput({first, 3}, 1, 1), ImageInput({second, 3}, 1, 1)};
+    input.video.timestamps_seconds = {2.0, 2.5};
+    auto retained = Model::load(path.string(), options).task<VideoToTokenFeatures>().run(input);
+    check(
+        retained.features().rows == 3 && retained.features().columns == 2 &&
+            retained.features().values[2] == 0.25F && retained.features().values[4] == 0.75F &&
+            retained.features().values[3] == 2 && retained.features().values[5] == 2.5F &&
+            retained.tokens().size() == 3 && retained.tokens()[0].role == TRTMC_VIDEO_TOKEN_CLASS &&
+            retained.tokens()[1].frame_begin == 0 && retained.tokens()[1].frame_end == 1 &&
+            retained.tokens()[2].frame_begin == 1 && retained.tokens()[2].frame_end == 2 &&
+            retained.grid_frames() == 2 && retained.source_frame_count() == 2,
+        "video feature values, frame order, times and patch spans reach the correct owned result");
+    const auto model = Model::load(path.string(), options);
+    const auto task = model.task<VideoToTokenFeatures>();
+    check(model.tasks().size() == 1 && !model.supports<ImageToTokenFeatures>(),
+          "video features are advertised independently from image features");
+    rejects([&] { (void)task.run(input, {{"fps", 30.0}}); }, TRTMC_INVALID_CONFIG,
+            "shared video feature runtime does not infer an undeclared frame-rate control");
+    auto invalid = input;
+    invalid.video.timestamps_seconds = {0.0};
+    rejects([&] { (void)task.run(invalid); }, TRTMC_INVALID_ARGUMENT,
+            "video feature timeline length mismatch rejected");
+    invalid.video.timestamps_seconds = {1.0, 0.0};
+    rejects([&] { (void)task.run(invalid); }, TRTMC_INVALID_ARGUMENT,
+            "video feature nonmonotonic time rejected");
+    for (const auto* mode : {"video_bad_span", "video_bad_grid", "video_bad_count"}) {
+        const auto bad = root / (std::string(mode) + ".bundle");
+        bundle(bad, mode);
+        const auto bad_model = Model::load(bad.string(), options);
+        const auto bad_task = bad_model.task<VideoToTokenFeatures>();
+        rejects([&] { (void)bad_task.run(input); }, TRTMC_INTERNAL_ERROR,
+                "invalid family video feature geometry rejected");
+        std::filesystem::remove(bad);
+    }
+    input.video.frames.clear();
+    input.video.timestamps_seconds.clear();
+    auto moved = std::move(retained);
+    check(moved.tokens()[2].grid_frame == 1 && moved.features().values[4] == 0.75F &&
+              retained.tokens().empty(),
+          "video token metadata and features retain ownership after model/input release and result "
+          "move");
+    std::filesystem::remove(path);
+}
+
 void spectral_features(const std::filesystem::path& root, const trtmc::LoadOptions& options) {
     using namespace trtmc;
     const auto path = root / "spectral_frames.bundle";
@@ -575,6 +625,7 @@ int main(int argc, char** argv) {
         const std::filesystem::path root(argv[1]);
         trtmc::LoadOptions options;
         options.runtime_root = root.string();
+        video_features(root, options);
         spectral_features(root, options);
         global_pooled_contracts(root, options);
         for (const std::string mode :

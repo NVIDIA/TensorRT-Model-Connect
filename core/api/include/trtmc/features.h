@@ -9,6 +9,7 @@
 #include "trtmc/image.h"
 #include "trtmc/matrix.h"
 #include "trtmc/scores.h"
+#include "trtmc/video.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -99,6 +100,37 @@ typedef struct {
     uint64_t grid_rows;
     uint64_t grid_columns;
 } trtmc_image_token_features_view_v1;
+enum {
+    TRTMC_VIDEO_TOKEN_PATCH = 1,
+    TRTMC_VIDEO_TOKEN_CLASS = 2,
+    TRTMC_VIDEO_TOKEN_REGISTER = 3,
+    TRTMC_VIDEO_TOKEN_GLOBAL_POOLED = 4
+};
+typedef struct {
+    uint32_t role;
+    uint64_t grid_frame, grid_row, grid_column;
+    /* Patch support [begin,end) in input frame indices, not seconds or a
+     * receptive field. Spatial bounds are normalized original-frame edges. */
+    uint64_t frame_begin, frame_end;
+    float x_min, y_min, x_max, y_max;
+} trtmc_video_feature_token_v1;
+typedef struct {
+    trtmc_f32_matrix_view_v1 features;
+    const trtmc_video_feature_token_v1* tokens;
+    uint64_t token_count;
+    uint64_t grid_frames, grid_rows, grid_columns, source_frame_count;
+} trtmc_video_token_features_view_v1;
+typedef struct {
+    trtmc_video_view_v1 video;
+} trtmc_video_to_token_features_request_v1;
+#define TRTMC_TASK_VIDEO_TO_TOKEN_FEATURES "video_to_token_features"
+typedef struct {
+    trtmc_api_header header;
+    trtmc_status(TRTMC_CALL* run)(trtmc_model*, const trtmc_video_to_token_features_request_v1*,
+                                  const trtmc_config_view_v1*, trtmc_result**, trtmc_error**);
+    trtmc_status(TRTMC_CALL* result_view)(const trtmc_result*, trtmc_video_token_features_view_v1*,
+                                          trtmc_error**);
+} trtmc_video_to_token_features_api_v1;
 typedef struct {
     trtmc_image_token_features_view_v1 tokens;
     trtmc_pooled_features_view_v1 pooled;

@@ -29,6 +29,7 @@ inclusion and redistribution in this repository under the Apache License 2.0:
 
 - `families/idefics3/tests/data/test_img.jpeg`
 - `families/detr/tests/data/test_img.jpeg`
+- `families/vjepa2/tests/data/test_img.jpeg`
 - `families/dinov3/tests/data/test_img.jpeg`
 - `families/gemma3n/tests/data/test_img.jpeg`
 - `families/internvl/tests/data/test_img.jpeg`

@@ -11,6 +11,7 @@
 #include "trtmc/matrix.hpp"
 #include "trtmc/scores.hpp"
 #include "trtmc/text.hpp"
+#include "trtmc/video.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -22,6 +23,7 @@ using FeatureToken = trtmc_feature_token_v1;
 // FeatureToken::input_index uses TRTMC_FEATURE_INPUT_PADDING / SPECIAL or 0/1.
 // Padding rows, when returned by the family, remain visible and are not zeroed.
 using ImageFeatureToken = trtmc_image_feature_token_v1;
+using VideoFeatureToken = trtmc_video_feature_token_v1;
 using SpatialFeatureMapView = trtmc_spatial_feature_map_v1;
 
 struct TextQueryDocumentsToRelevanceRequest {
@@ -80,6 +82,9 @@ struct TextPredictionPositionsToTokenScoresRequest {
 };
 struct ImageToTokenFeaturesRequest {
     ImageInput image;
+};
+struct VideoToTokenFeaturesRequest {
+    VideoInput video;
 };
 struct ImageToTokenAndPooledFeaturesRequest {
     ImageInput image;
@@ -301,6 +306,57 @@ class ImageTokenAndPooledFeaturesResult
     std::string_view normalization() const {
         return detail::string_view(view_.pooled.normalization);
     }
+};
+class VideoTokenFeaturesResult
+    : public detail::FeatureResultOwner<trtmc_video_token_features_view_v1> {
+  public:
+    using FeatureResultOwner::FeatureResultOwner;
+    FloatMatrixView features() const noexcept { return detail::feature_matrix(view_.features); }
+    Span<const VideoFeatureToken> tokens() const noexcept {
+        return {view_.tokens, static_cast<std::size_t>(view_.token_count)};
+    }
+    uint64_t grid_frames() const noexcept { return view_.grid_frames; }
+    uint64_t grid_rows() const noexcept { return view_.grid_rows; }
+    uint64_t grid_columns() const noexcept { return view_.grid_columns; }
+    uint64_t source_frame_count() const noexcept { return view_.source_frame_count; }
+};
+class VideoToTokenFeatures {
+  public:
+    static constexpr std::string_view kTask = TRTMC_TASK_VIDEO_TO_TOKEN_FEATURES;
+    static constexpr uint32_t kMajor = 1, kMinor = 0;
+    static void validate_table(const trtmc_api_header* table) {
+        if (!table || table->major != 1 || table->minor != 0 ||
+            table->byte_size < sizeof(trtmc_video_to_token_features_api_v1))
+            throw Error(TRTMC_VERSION_MISMATCH, "incompatible video feature Task table");
+    }
+    std::vector<ConfigField> config_fields() const {
+        return detail::config_fields(state_, kTask, 1, 0);
+    }
+    VideoTokenFeaturesResult run(const VideoToTokenFeaturesRequest& input,
+                                 const Config& config = {}) const {
+        detail::VideoWireInputs backing;
+        const trtmc_video_to_token_features_request_v1 request{backing.video(input.video)};
+        const auto entries = config.c_entries();
+        const auto options = entries.view();
+        trtmc_result* raw = nullptr;
+        trtmc_error* error = nullptr;
+        auto status = api_->run(state_->handle, &request, &options, &raw, &error);
+        VideoTokenFeaturesResult result(state_, raw);
+        detail::check(state_->api, status, error);
+        error = nullptr;
+        status = api_->result_view(raw, &result.wire_view(), &error);
+        detail::check(state_->api, status, error);
+        return result;
+    }
+
+  private:
+    friend class Model;
+    VideoToTokenFeatures(std::shared_ptr<detail::ModelState> state,
+                         const trtmc_api_header* table) noexcept
+        : state_(std::move(state)),
+          api_(reinterpret_cast<const trtmc_video_to_token_features_api_v1*>(table)) {}
+    std::shared_ptr<detail::ModelState> state_;
+    const trtmc_video_to_token_features_api_v1* api_;
 };
 class SpatialFeaturesResult : public detail::FeatureResultOwner<trtmc_spatial_features_view_v1> {
   public:

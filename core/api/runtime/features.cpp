@@ -14,6 +14,7 @@
 #include <type_traits>
 
 namespace trtmc::api {
+internal::VideoView video_input(const trtmc_video_view_v1&, std::vector<internal::ImageView>&);
 namespace {
 
 void result_require(bool condition, const char* message) {
@@ -188,6 +189,43 @@ struct ImageTokenAndPooledFeaturesStorage final : ResultStorage {
     ImageTokenFeaturesStorage tokens;
     PooledFeaturesStorage pooled;
     trtmc_image_token_and_pooled_features_view_v1 view{};
+};
+struct VideoTokenFeaturesStorage final : ResultStorage {
+    explicit VideoTokenFeaturesStorage(internal::VideoTokenFeaturesResult result)
+        : value(std::move(result)) {
+        const auto matrix = matrix_view(value.features);
+        result_require(matrix.rows == value.tokens.size() && value.source_frame_count > 0,
+                       "video token mapping or source frame count is invalid");
+        tokens.reserve(value.tokens.size());
+        for (const auto& token : value.tokens) {
+            const auto role = static_cast<uint32_t>(token.role);
+            result_require(role >= TRTMC_VIDEO_TOKEN_PATCH &&
+                               role <= TRTMC_VIDEO_TOKEN_GLOBAL_POOLED,
+                           "unknown video feature token role");
+            if (token.role == internal::VideoFeatureTokenRole::Patch) {
+                result_require(token.grid_frame < value.grid_frames &&
+                                   token.grid_row < value.grid_rows &&
+                                   token.grid_column < value.grid_columns &&
+                                   token.frame_begin < token.frame_end &&
+                                   token.frame_end <= value.source_frame_count,
+                               "video patch lies outside its grid or input frame span");
+                result_require(std::isfinite(token.x_min) && std::isfinite(token.y_min) &&
+                                   std::isfinite(token.x_max) && std::isfinite(token.y_max) &&
+                                   token.x_min >= 0 && token.y_min >= 0 && token.x_max <= 1 &&
+                                   token.y_max <= 1 && token.x_min <= token.x_max &&
+                                   token.y_min <= token.y_max,
+                               "video patch has an invalid normalized input footprint");
+            }
+            tokens.push_back({role, token.grid_frame, token.grid_row, token.grid_column,
+                              token.frame_begin, token.frame_end, token.x_min, token.y_min,
+                              token.x_max, token.y_max});
+        }
+        view = {matrix,          tokens.data(),      tokens.size(),           value.grid_frames,
+                value.grid_rows, value.grid_columns, value.source_frame_count};
+    }
+    internal::VideoTokenFeaturesResult value;
+    std::vector<trtmc_video_feature_token_v1> tokens;
+    trtmc_video_token_features_view_v1 view{};
 };
 struct SpatialFeaturesStorage final : ResultStorage {
     explicit SpatialFeaturesStorage(internal::SpatialFeaturesResult result)
@@ -465,6 +503,35 @@ trtmc_status TRTMC_CALL run(trtmc_model* model, const Request* input,
         *out = make_result<Storage>(std::move(result));
     });
 }
+
+trtmc_status TRTMC_CALL video_features_run(trtmc_model* model,
+                                           const trtmc_video_to_token_features_request_v1* input,
+                                           const trtmc_config_view_v1* config,
+                                           trtmc_result** output, trtmc_error** error) noexcept {
+    if (output)
+        *output = nullptr;
+    return guarded(error, [&] {
+        require(input && output, "video feature request and output are required");
+        std::vector<internal::ImageView> frames;
+        const internal::VideoToTokenFeaturesRequest request{video_input(input->video, frames)};
+        const ConvertedConfig options(config);
+        std::lock_guard<std::mutex> lock(model_mutex(model));
+        auto& family = require_interface<internal::IVideoToTokenFeatures>(
+            model, internal::IVideoToTokenFeatures::kTask);
+        validate_task_config(model_owner(model),
+                             internal::contract_key<internal::IVideoToTokenFeatures>(),
+                             options.view());
+        auto result = family.run(request, options.view());
+        result_require(result.source_frame_count == request.video.frames.size(),
+                       "video feature source count differs from the supplied clip");
+        *output = make_result<VideoTokenFeaturesStorage>(std::move(result));
+    });
+}
+const trtmc_video_to_token_features_api_v1 video_to_token_features_api = {
+    {1, 0, sizeof(trtmc_video_to_token_features_api_v1)},
+    video_features_run,
+    result_view<VideoTokenFeaturesStorage, trtmc_video_token_features_view_v1>};
+static_assert(offsetof(trtmc_video_to_token_features_api_v1, header) == 0);
 
 const trtmc_text_to_token_features_api_v1 text_to_token_features_api = {
     {1, 0, sizeof(trtmc_text_to_token_features_api_v1)},
@@ -881,6 +948,7 @@ static_assert(offsetof(trtmc_spatial_features_to_class_scores_api_v1, header) ==
 
 const TaskBinding bindings[] = {
     {internal::ISpatialFeaturesToClassScores::kTask, 1, 0, &spatial_features_api.header},
+    {internal::IVideoToTokenFeatures::kTask, 1, 0, &video_to_token_features_api.header},
     {internal::IBatchImageToTokenFeatures::kTask, 1, 0, &batch_image_to_token_features_api.header},
     {internal::IBatchImageToSpatialFeatures::kTask, 1, 0,
      &batch_image_to_spatial_features_api.header},
