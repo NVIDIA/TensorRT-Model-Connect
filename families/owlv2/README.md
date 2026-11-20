@@ -18,16 +18,19 @@ multiplies each logit by a scale of about 31, so detection scores then moved by
 0.02 to 0.105 against PyTorch fp32 between builds of one revision, and one build
 replaced a detection with its neighbouring patch. With fp32 accumulation the worst
 score delta on the E2E case is 0.008 in every build, the same as PyTorch fp16 on
-the GPU. On GB300 the image engine takes the same time within noise (2.17 ms
-before, 2.18 to 2.20 ms after) and its plan grows from 185 to 188 MB.
+the GPU. On GB300 with TensorRT 11.4 the image engine is 1 to 3% slower (two
+builds each: 1.74 to 1.78 ms before, 1.79 to 1.81 ms after) and its plan grows
+from 176.1 to 179.5 MiB.
 
 ## Quantization
 
 `quantization=fp8` quantizes the text tower only: q/k/v/`out_proj`, `fc1` and
 `fc2` of its 12 layers, per-tensor weight scale amax / 448, static activation
 scales from `fp8_activation_scales.json` (`text_model.encoder.layers.0.mlp.fc2`
-stays fp16 as an outlier). It is a size option: the bundle goes from 299.6 to
-266.2 MiB and the text engine is 1.00x to 1.07x of fp16. The image tower and
+stays fp16 as an outlier). It is a size option: on GB300 with TensorRT 11.4 the
+bundle goes from 303.1 to 269.6 MiB (text engine 122.0 to 88.6 MiB). It does not
+make the text engine faster: FP8 ran at 1.00x to 1.07x the speed of fp16 on B200
+and 0.90x to 0.97x on GB300. The image tower and
 the heads are supported by the code but not enabled: FP8 on the image tower
 moves the detections far from the fp16 engine (logit correlation 0.8875 against
 0.9989 for fp16, both vs PyTorch) for at most 1.1x.
